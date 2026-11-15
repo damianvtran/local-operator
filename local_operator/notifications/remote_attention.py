@@ -269,8 +269,40 @@ def notice_origin(origin: Any) -> tuple[str, bool]:
     )
 
 
+def notice_target(
+    origin: Any, *, self_device_id: str = "", operator_device_id: str = ""
+) -> tuple[str, bool, bool]:
+    """``(target_device, is_agent_child, via_operator_binding)`` for one session.
+
+    :func:`notice_origin` extended by the OPERATOR BINDING (2026-11-15), and,
+    like it, the one reading BOTH legs use (:func:`stamp_rows_for_viewer` with
+    the link's verdict, :func:`notice_forwarding` with the stored proof's) so the
+    tool result and the catalogue cannot disagree.
+
+    * A session with an origin other than this device goes to that origin —
+      unchanged, whatever the binding says (a row co-member X placed here is
+      X's alone).
+    * A session STARTED here (no origin, or this device's own id) goes to the
+      verified operator device when there is one (``network.operator_binding``:
+      the operator's signed onboarding decision, checked against this node's
+      root-owned anchor), else nowhere.
+    * An agent's child goes nowhere new: it reports to that agent.
+    """
+    source, agent_child = notice_origin(origin)
+    if source and source != self_device_id:
+        return source, agent_child, False
+    if agent_child or not operator_device_id:
+        return "", agent_child, False
+    return operator_device_id, False, True
+
+
 def stamp_rows_for_viewer(
-    root: Path, rows: Sequence[dict[str, Any]], viewer_device_id: str
+    root: Path,
+    rows: Sequence[dict[str, Any]],
+    viewer_device_id: str,
+    *,
+    operator_viewer: bool = False,
+    self_device_id: str = "",
 ) -> None:
     """Add ``attention``/``notices`` to the rows whose ORIGIN is the viewer. In place.
 
@@ -282,6 +314,13 @@ def stamp_rows_for_viewer(
     row (``state_many``) and one bounded inbox page per qualifying row; a device
     with no peer-originated sessions pays one dict scan and nothing else.
 
+    ``operator_viewer`` (the relay's :func:`network.operator_binding.is_operator_link`
+    verdict for this link) widens it to sessions STARTED on this device
+    (:func:`notice_target`): their open asks — site cards included — and
+    ``notify`` items reach the operator's device. Their COMPLETIONS do not: the
+    request was "asks and notices", and a long-lived node session finishing a
+    turn is not something the operator asked to be paged for.
+
     Never raises: a listing is not an error path, and a store that cannot be
     read leaves the rows exactly as the build before this one wrote them.
     """
@@ -290,12 +329,18 @@ def stamp_rows_for_viewer(
     # The caller checked the viewer's capability, so this origin collects
     # forwarded items: recorded for the node's ``notify`` sentence (m2).
     record_forwarding_origin(Path(root), viewer_device_id)
-    mine = [
-        row
-        for row in rows
-        if notice_origin(row.get("origin"))[0] == viewer_device_id
-        and str(row.get("session_id") or "")
-    ]
+    operator = viewer_device_id if operator_viewer else ""
+    via_operator: set[str] = set()
+    mine = []
+    for row in rows:
+        target, _agent, bound = notice_target(
+            row.get("origin"), self_device_id=self_device_id, operator_device_id=operator
+        )
+        if target != viewer_device_id or not str(row.get("session_id") or ""):
+            continue
+        mine.append(row)
+        if bound:
+            via_operator.add(str(row["session_id"]))
     if not mine:
         return
     try:
@@ -315,14 +360,19 @@ def stamp_rows_for_viewer(
         logger.debug("remote attention: inbox open failed", exc_info=True)
     for row in mine:
         session_id = str(row["session_id"])
-        if states is None:
+        state: dict[str, Any] = {}
+        if session_id in via_operator:
+            # Notices only (see the docstring): no ``attention``, and no
+            # ``attention_unknown`` either — the origin keeps no done row for a
+            # session it never started, so there is nothing to protect.
+            pass
+        elif states is None:
             # A FAILED READ IS NOT "NOTHING UNSEEN" (review round 2, R2-m2): a
             # row with no ``attention`` is what an acknowledgement looks like,
             # and the origin settles its done row on it — losing the badge of a
             # completion nobody saw. Saying "unknown" makes the origin leave
             # its row alone until a read that could see the store.
             row["attention_unknown"] = True
-            state: dict[str, Any] = {}
         else:
             state = states.get(f"session/{session_id}") or {}
         token = state.get("completion_token")
@@ -1100,43 +1150,105 @@ def notice_forwarding(root: Path, session_id: str, key: str = "") -> tuple[str, 
     A device in no mesh (no trusted network with another active member) gets
     ``NOT_APPLICABLE``: a single-device operator has nowhere else to be told,
     so their result stays byte-for-byte what it was. Never raises.
+
+    THE OPERATOR BINDING (2026-11-15): a session STARTED here is ``FORWARDED``
+    (to the operator's device id) exactly when the catalogue leg would put its
+    notices on that device's link — a stored proof that still verifies against
+    this node's root-owned anchor for an active member
+    (``network.operator_binding.operator_device``), and that device recorded as
+    collecting forwarded items. Otherwise it stays ``LOCAL_ONLY``.
     """
+    verdict, device, _via_operator = _notice_decision(root, session_id, key)
+    return verdict, device
+
+
+def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, str, bool]:
+    """:func:`notice_forwarding` plus whether the target came from the operator binding."""
     try:
         if key and key.startswith(NOT_FORWARDED_PREFIXES):
             # Parks, gates and this module's own rows travel by their own
             # routes (or deliberately not at all); the clause is unchanged.
-            return NOT_APPLICABLE, ""
+            return NOT_APPLICABLE, "", False
         from local_operator.session.placement import read_stamp
 
         stamp = read_stamp(Path(root), session_id)
-        # Decided on the origin exactly as the catalogue leg is (notice_origin),
-        # NOT on placement.mode: a promote_replica stamp is mode="local" yet
-        # its notices are forwarded to the old owner (PR #4029 review R1-1).
         origin_map = stamp.origin if stamp is not None else None
-        origin, agent_child = notice_origin(origin_map)
+        source, agent_child = notice_origin(origin_map)
+        self_id = ""
+        operator = ""
+        if not agent_child:
+            # Only a session with no foreign origin can ride the binding, so the
+            # (cached) proof check runs only for those.
+            self_id = _self_device_id(Path(root))
+            if not source or source == self_id:
+                from local_operator.network.operator_binding import operator_device
+
+                operator, _network = operator_device(Path(root))
+        # Decided exactly as the catalogue leg is (notice_target over
+        # notice_origin), NOT on placement.mode: a promote_replica stamp is
+        # mode="local" yet its notices are forwarded to the old owner (PR #4029
+        # review R1-1).
+        target, agent_child, via_operator = notice_target(
+            origin_map, self_device_id=self_id, operator_device_id=operator
+        )
         if agent_child:
             # Mirrors the drop in stamp_rows_for_viewer: an agent's child
             # reports to that agent, so nothing is put on the wire.
-            return LOCAL_ONLY, origin
-        if origin:
-            if origin not in forwarding_origins(Path(root)):
+            return LOCAL_ONLY, source, False
+        if target and not _is_active_peer(Path(root), target):
+            # PR #4029 review R2-1: an origin (or bound device) that is no longer
+            # an active member of an active, trusted network here has no link
+            # that will carry the item, whatever the collector marker remembers.
+            # Fall through to the honest node-only answer.
+            target = ""
+            via_operator = False
+            source = ""
+        if target:
+            if target not in forwarding_origins(Path(root)):
+                if via_operator:
+                    # Bound, but that device has not read this node's catalogue
+                    # with this build yet: nothing is carrying it today.
+                    return LOCAL_ONLY, "", False
                 # Main's precedence since #4001, kept byte for byte: an origin
                 # that does not collect gets the not-collecting sentence whatever
                 # the attestation (#4001's "brought home" test pins it).
-                return ORIGIN_NOT_COLLECTING, origin
-            if not origin_is_operator_started(origin_map):
+                return ORIGIN_NOT_COLLECTING, target, False
+            if not via_operator and not origin_is_operator_started(origin_map):
                 # Mirrors #4001's default-deny in stamp_rows_for_viewer: notify
                 # items travel only for a stamp attesting ``started_by:
                 # operator`` — the SAME predicate on the SAME mapping.
-                return NOT_OPERATOR_STARTED, origin
-            return FORWARDED, origin
+                return NOT_OPERATOR_STARTED, target, False
+            return FORWARDED, target, via_operator
         if _is_mesh_node(Path(root)):
-            # No usable stamp (started here, or a stamp with no origin): the
+            # Started here (or no origin) and no verified operator device: the
             # forwarding leg drops the row, so the item stays on this node.
-            return LOCAL_ONLY, ""
-        return NOT_APPLICABLE, ""
+            return LOCAL_ONLY, "", False
+        return NOT_APPLICABLE, "", False
     except Exception:  # noqa: BLE001 — a tool result never fails on this
-        return NOT_APPLICABLE, ""
+        return NOT_APPLICABLE, "", False
+
+
+def _self_device_id(root: Path) -> str:
+    """This install's mesh id, or ``""``; never mints one."""
+    from local_operator.network import identity
+
+    try:
+        mine = identity.load(root)
+    except (OSError, ValueError):
+        return ""
+    return mine.device_id if mine is not None else ""
+
+
+def _is_active_peer(root: Path, device_id: str) -> bool:
+    """``device_id`` is an ACTIVE member of an ACTIVE (trusted) network here."""
+    from local_operator.network import store as net_store
+
+    for record in net_store.list_networks(root):
+        if record.trust != "active" or record.is_burned(device_id):
+            continue
+        if any(m.device_id == device_id for m in record.active_members()):
+            return True
+    return False
 
 
 def _is_mesh_node(root: Path) -> bool:
@@ -1175,7 +1287,7 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
     The decision is :func:`notice_forwarding`'s; this only words it.
     """
     try:
-        verdict, origin = notice_forwarding(Path(root), session_id, key)
+        verdict, origin, via_operator = _notice_decision(Path(root), session_id, key)
         if verdict == NOT_APPLICABLE:
             return ""
         here, there = _device_names(Path(root), origin)
@@ -1189,6 +1301,9 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
                 f" sessions the operator started on {there} are forwarded there, and"
                 " this one was moved, forked or placed here otherwise."
             )
+        if verdict == FORWARDED and via_operator:
+            # A session started HERE, bound to the operator's verified device.
+            return f" Posted on {here}; it will be forwarded to {there}, the operator's device."
         if verdict == FORWARDED:
             return (
                 f" Posted on {here}; it will be forwarded to {there}, where this session started."

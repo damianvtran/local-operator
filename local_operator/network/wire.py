@@ -205,6 +205,9 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # Origin-only completion/notice fields on catalogue rows; see
     # REMOTE_ATTENTION_V1 below.
     "remote-attention-v1",
+    # The operator's device presents its signed onboarding decision; see
+    # OPERATOR_BINDING_V1 below.
+    "operator-binding-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
@@ -215,6 +218,12 @@ MESH_NET_V1 = "mesh-net-v1"
 #: always did. Named here so the tuple above, the owner's condition and the tests
 #: read ONE spelling of the string.
 REMOTE_ATTENTION_V1 = "remote-attention-v1"
+#: ``net_operator_binding`` (``network/operator_binding.py``): the operator's Mac
+#: presents the onboarding decision the operator already signed, so a node can
+#: forward asks/notices of sessions STARTED on it to that device. A peer without
+#: it is never sent the op, and a node only treats a link as the operator's while
+#: that link advertises it — an old Mac degrades to "shown on this node only".
+OPERATOR_BINDING_V1 = "operator-binding-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
 #: purposes). The runtime-record half of the same promise lives in
 #: ``session/runtime/types.PEER_JOURNAL_SOURCE_CAPABILITY`` — one string, two

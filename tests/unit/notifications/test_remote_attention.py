@@ -424,22 +424,53 @@ def test_the_node_notify_sentence_promises_only_what_the_origin_collects(
 ) -> None:
     """Review round 1 m2 + QA Q2: "forwarded" only to an origin known to collect."""
     owner = _owner(tmp_path)
+    _join_mesh(owner)
     # Not yet recorded (an older origin, or one that has not read this device
     # since updating): the item stays here, and the model is told so.
     before = ra.forwarded_notice_sentence(owner, SID)
     assert "will be forwarded" not in before
-    assert "stays on this device" in before
-    # Q2: a non-member origin is named in words, never by its raw device id.
-    assert HEAD not in before and "its origin device" in before
+    assert "stays on node-box" in before and "d_head-box" in before
     # The owner's catalogue op records an origin that advertised the capability.
     ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
     assert HEAD in ra.forwarding_origins(owner)
     after = ra.forwarded_notice_sentence(owner, SID)
-    assert "will be forwarded to its origin device" in after
+    assert "will be forwarded to d_head-box" in after
     # A key this module never forwards gets no clause at all.
     assert ra.forwarded_notice_sentence(owner, SID, "gate:approval:w1") == ""
     local = tmp_path / "local"
     assert ra.forwarded_notice_sentence(local, SID) == ""
+
+
+def test_r2_1_an_origin_that_is_no_active_member_is_never_promised(tmp_path: Path) -> None:
+    """PR #4029 R2-1: a collector marker alone never makes "will be forwarded".
+
+    The origin left (removed / burned), or the network is no longer trusted: no
+    link will carry the item, so a mesh node says node-only and a device in no
+    mesh keeps its bare result. The raw device id is never printed (Q2).
+    """
+    from local_operator.network import store as net_store
+
+    owner = _owner(tmp_path)
+    ra.record_forwarding_origin(owner, HEAD)
+    # No network at all here: nothing to forward over, nothing to say.
+    assert ra.notice_forwarding(owner, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(owner, SID) == ""
+    # A mesh node whose OTHER member is not the origin: node-only, honestly.
+    _join_mesh(owner, peers=("d_other",))
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, "")
+    sentence = ra.forwarded_notice_sentence(owner, SID)
+    assert sentence == " Shown on node-box only; it was not forwarded to your other devices."
+    assert HEAD not in sentence
+    # The origin removed (burned) from a network it was in.
+    _join_mesh(owner, peers=(HEAD, "d_other"))
+    record = net_store.load("n_test", owner)
+    record.removed_ids.append(HEAD)
+    net_store.save(record, owner)
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, "")
+    # A disconnected (untrusted) network: no mesh node either.
+    _join_mesh(owner, trust="untrusted")
+    assert ra.notice_forwarding(owner, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(owner, SID) == ""
 
 
 def _join_mesh(

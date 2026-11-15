@@ -575,8 +575,15 @@ The flow keeps the same three calls; only who answers, and where, changes:
    or message for it, and do not ask again for the same site — a second
    `request_access` for a pending origin says it is already asked. The card
    reaches the operator's own device when this session was started from that
-   device; a session started directly on the node shows the card only on the
-   node, where nobody can sign — tell the operator that if it is your case.
+   device. A session started directly on the node reaches it too when the
+   node has verified which linked device is the operator's: the operator's
+   Mac presents the onboarding approval they already signed for this network,
+   and the node checks it against its installed operator anchor. Without that
+   (a network nobody onboarded through a signed card, an older Mac, a node
+   re-anchored to a new key), the card shows only on the node, where nobody
+   can sign — the `notify` result says "Shown on <node> only" in that case;
+   tell the operator. On a node whose user has passwordless sudo this binding
+   is advisory, as site approvals are: root there could replace the anchor.
 3. `await_access` (each call ≤240 s; the request lives ~10 minutes). There is
    no popup on a node: the card is on the operator's device. Do other work
    between calls rather than sitting on it. `allowed` means the operator
