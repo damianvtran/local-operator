@@ -508,7 +508,9 @@ def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
     frame B's links SEAL for the wire is captured (``PeerLink._write``, the last
     step before the codec): no ``net_operator_binding`` frame and none of the
     preimage's bytes (SSH host, credential-ref name) may appear. Before the fix
-    the "newest proof for the network" fallback put them on A's link.
+    the "newest proof for the network" fallback put them on A's link. The same
+    holds when the onboarding runner's already-active path was handed A's id by
+    the SSH node's own ``identity show``: that report alone records nothing.
     """
     import json
     import threading
@@ -549,6 +551,22 @@ def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
         decided_at=decided_at,
         root=server_b.root,
     )
+    # The already-active path of B's onboarding runner, for a node that reports
+    # A's id in ``identity show`` (A IS an active member, so the step is
+    # satisfied) while no invite this approval minted was admitted for A. Before
+    # the fix that self-report alone was recorded, and the link-up hook below then
+    # presented the proof to A. Run through the runner's own recording method.
+    from types import SimpleNamespace
+
+    from local_operator.network.onboard import OnboardRun
+
+    runner: Any = SimpleNamespace(
+        root=server_b.root,
+        approval_id=card["approval_id"],
+        view=SimpleNamespace(what={"network_id": network.network_id}, receipts=[]),
+    )
+    OnboardRun._record_operator_binding_target(runner, member_id=server_a.identity.device_id)
+    assert ob.onboarded_devices(server_b.root) == {}
 
     sealed: list[dict[str, Any]] = []
     real_write = relay.PeerLink._write

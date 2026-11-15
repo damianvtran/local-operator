@@ -89,7 +89,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -406,6 +406,26 @@ def _backfill_one(root: Path | None, record: Mapping[str, Any], network_id: str)
     ):
         return {"result": "skipped", "reason": "not_an_active_member", "device_id": device_id}
     return {"result": "resolved", "device_id": device_id}
+
+
+def admitted_device(
+    root: Path | None, *, receipts: Sequence[Mapping[str, Any]], network_id: str
+) -> str:
+    """The mesh id one onboarding admitted, from Mac-written records only, or ``""``.
+
+    The runner's already-active path (``onboard.OnboardRun._join_already_active``)
+    cannot use the node's ``identity show`` id on its own — a node could name a
+    co-member — so it resolves through :func:`_backfill_one`'s chain (this
+    approval's ``invite`` receipts → ``redeemed_by`` on an ``admitted`` consume →
+    still active, unburned). Unresolvable or ambiguous answers ``""``. Never raises.
+    """
+    try:
+        derived = _backfill_one(root, {"receipts": list(receipts)}, network_id)
+    except Exception:  # noqa: BLE001 — no id is the safe answer
+        return ""
+    if derived.get("result") != "resolved":
+        return ""
+    return str(derived.get("device_id") or "")
 
 
 def backfill(root: Path | None, *, dry_run: bool = False) -> dict[str, Any]:

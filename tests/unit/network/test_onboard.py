@@ -2617,19 +2617,33 @@ def test_the_runner_records_nothing_without_an_authenticated_admission(
     assert operator_binding.onboarded_devices(None) == {}
 
 
-def test_an_already_active_node_is_recorded_for_the_operator_binding(
-    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The re-onboard path: the id both sides just confirmed ACTIVE is the one recorded."""
-    from local_operator.network import operator_binding
+def _already_active_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, members: list[str], redeemed_by: str
+) -> dict[str, Any]:
+    """Run the already-active path; this approval's PRIOR run minted ``inv0001``,
+    which this Mac's relay consumed as ``admitted`` by ``redeemed_by``."""
+    from local_operator.network.types import InviteRecord, MemberRecord
 
-    _install_fakes(monkeypatch)
     token = tmp_path / "invite.token"
     _mint_token(token)
-    network_store.save(_inviter_record(), None)
-    fake = FakeApprovals(_record())
+    inviter = _inviter_record()
+    for device_id in members:
+        inviter.members.append(
+            MemberRecord(device_id=device_id, public_key="pk", name=device_id, lifecycle="active")
+        )
+    inviter.invites.append(
+        InviteRecord(
+            invite_id="inv0001", state="consumed", outcome="admitted", redeemed_by=redeemed_by
+        )
+    )
+    network_store.save(inviter, None)
+    record = _record()
+    record["receipts"] = [
+        {"step": "invite", "ok": True, "detail": "invite inv0001 minted for role drive"}
+    ]
+    fake = FakeApprovals(record)
     monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
-    payload = onboard.execute_approval(
+    return onboard.execute_approval(
         "ap_aaaa1111",
         transport=FakeTransport(
             outputs=HAPPY_OUTPUTS + [("network status", _status_output(_status_row()))]
@@ -2638,8 +2652,49 @@ def test_an_already_active_node_is_recorded_for_the_operator_binding(
         local_cli=["lop"],
         run_local=_happy_run_local(token),
     )
+
+
+def test_an_already_active_node_is_recorded_for_the_operator_binding(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The re-onboard path records the id this approval's admitted invite resolves
+    to (Mac-written ``redeemed_by``), when the node's report agrees with it."""
+    from local_operator.network import operator_binding
+
+    _install_fakes(monkeypatch)
+    payload = _already_active_run(monkeypatch, tmp_path, members=[], redeemed_by="d_node")
     assert payload["state"] == "connected", payload
     assert operator_binding.onboarded_devices(None) == {"ap_aaaa1111": ("n_1", "d_node")}
+
+
+def test_an_already_active_node_naming_a_co_member_records_nothing(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #4030 S1 on the already-active path: the SSH node's ``identity show``
+    says ``d_node`` — an ACTIVE member, so the step is satisfied — but the
+    authenticated admission for this approval went to ``d_other``. The report
+    alone never decides where the proof goes, and a mismatch records nothing."""
+    from local_operator.network import operator_binding
+
+    _install_fakes(monkeypatch)
+    payload = _already_active_run(monkeypatch, tmp_path, members=["d_other"], redeemed_by="d_other")
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert join["data"]["device_id"] == "d_node"
+    assert operator_binding.onboarded_devices(None) == {}
+
+
+def test_an_already_active_node_without_an_admitted_invite_records_nothing(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Before the fix the node's self-reported active id was recorded on its own:
+    with no Mac-written admission tying this approval to it, nothing is."""
+    from local_operator.network import operator_binding
+
+    _install_fakes(monkeypatch)
+    payload = _already_active_run(monkeypatch, tmp_path, members=[], redeemed_by="")
+    assert payload["state"] == "connected", payload
+    assert operator_binding.onboarded_devices(None) == {}
 
 
 def test_a_node_missing_from_the_inviters_table_still_joins(

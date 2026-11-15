@@ -1765,10 +1765,12 @@ class OnboardRun:
         (the node mints it mid-run), so the runner records it here, Mac-local,
         the moment it is known: from the invite's ``redeemed_by`` (written by
         this device's relay from the handshake-authenticated id — never the
-        node's self-report), or, on the already-active path, the id both sides
-        just confirmed active. Exact, ACTIVE member rows only; anything less
-        records nothing, and the node then simply gets no proof. Never raises:
-        a missing record costs forwarding, never the onboarding.
+        node's self-report), or, on the already-active path, the id this
+        approval's own admitted invite chain resolves to, and only when the
+        node's report agrees with it (never the report alone). Exact, ACTIVE
+        member rows only; anything less records nothing, and the node then
+        simply gets no proof. Never raises: a missing record costs forwarding,
+        never the onboarding.
         """
         network_id = str(self.view.what.get("network_id") or "")
         if not network_id:
@@ -1778,10 +1780,30 @@ class OnboardRun:
             from local_operator.network import store as network_store
 
             record = network_store.load(network_id, self.root)
-            device_id = member_id
+            device_id = ""
             if invite_id:
                 invite = record.invite(invite_id)
                 device_id = invite.redeemed_by if invite is not None else ""
+            elif member_id:
+                # The already-active path. ``member_id`` is the node's OWN
+                # ``identity show`` report, and this device's table agreeing it is
+                # active proves only that SOME member has that id — a malicious
+                # or misconfigured node can name a co-member, and recording it
+                # would send this onboarding's SSH host/user/credential ref to
+                # that co-member (exactly the S1 disclosure). So the id is never
+                # taken from the report: it is re-derived from Mac-written records
+                # only — this approval's own ``invite`` receipts → those invites
+                # in this Mac's network record → the ``redeemed_by`` this Mac's
+                # relay wrote from the handshake-authenticated id on an
+                # ``admitted`` consume (the same chain as the backfill,
+                # ``operator_binding.admitted_device``). The report must then
+                # MATCH that id; a node that never redeemed one of this
+                # approval's invites, an ambiguous chain, or a mismatch records
+                # NOTHING — the node stays honestly node-only.
+                derived = operator_binding.admitted_device(
+                    self.root, receipts=list(self.view.receipts), network_id=network_id
+                )
+                device_id = derived if derived == member_id else ""
             if not device_id or not any(m.device_id == device_id for m in record.active_members()):
                 return
             operator_binding.record_onboarded(
