@@ -1,0 +1,110 @@
+{
+  "account_settings_or_commercial_contract_verified": false,
+  "additional_required_flow_inventory": [
+    "LoP Radient recommendations/recs and decisions; no silent disable or unknown-route enable",
+    "all-seven MCP/plugin/search/telemetry services and downstream processors; no real host credentials"
+  ],
+  "canonical_round17_report": {
+    "excerpt": "ARTIFACT-REVIEW-round17-excerpt.md",
+    "original_sha256": "8b098438db2d2d420cad274c4555e9e68a122effafb86a8a779fce8a287bee67",
+    "reviewer": "Independent artifact/science reviewer session429f3e8e5cb2; openai/gpt-6.1-sol",
+    "scope": "b8f4edba877f1d4d36e11a41801f5b51d9966132..003efac080484cc0ecc6d2b409303aa85d85ca7e",
+    "verdict": "CLEAN/TERMINAL; no new R18"
+  },
+  "decision": "Prefer unchanged original corpus through separately reviewed privacy controls and specific notice/privacy-lead disposition; current routing/logging is not qualified. If endpoint/auxiliary policy cannot meet strict controls, propose a versioned synthetic amendment before outcomes, not silent substitution.",
+  "kind": "financial-private-api-dataflow-source-audit",
+  "offline_actual_source_probes": {
+    "actual_provider_keys": [
+      "allow_fallbacks",
+      "max_price",
+      "order"
+    ],
+    "caller_privacy_fields_overwritten": true,
+    "inference_requests": 0,
+    "invalid_token_leaf_rejected": true,
+    "private_document_bodies_read": 0,
+    "projection_sentinel_absent": true,
+    "provider_assignment_source_line": 1001,
+    "raw_error_replaced_with_digest_classification": true,
+    "services_started": 0
+  },
+  "paid_api_or_native_execution_authorized": false,
+  "public_policy_text_receipts": [
+    {
+      "bytes": 16201,
+      "credentials_used": false,
+      "final_url": "https://openrouter.ai/docs/guides/features/zdr.md",
+      "kind": "public_policy_text_only",
+      "sha256": "b86801a2399aad82b78b60790940b09dd345a2c1ce60499fb7b12b02f5a822a8",
+      "url": "https://openrouter.ai/docs/guides/features/zdr.md",
+      "utc": "2026-11-15T12:06:56.564183+00:00"
+    },
+    {
+      "bytes": 3304,
+      "credentials_used": false,
+      "final_url": "https://openrouter.ai/docs/guides/privacy/data-collection.md",
+      "kind": "public_policy_text_only",
+      "sha256": "c698aa48257bb7374dca92e54c75cff7fcbcc17914c163606ee635983bbbc03e",
+      "url": "https://openrouter.ai/docs/guides/privacy/data-collection.md",
+      "utc": "2026-11-15T12:06:56.652227+00:00"
+    },
+    {
+      "bytes": 5294,
+      "credentials_used": false,
+      "final_url": "https://openrouter.ai/docs/guides/features/input-output-logging.md",
+      "kind": "public_policy_text_only",
+      "sha256": "f3b8b0665b1c3f5e824ae1fef121e096bff4ad4ec5e7f1b19242a0518c727089",
+      "url": "https://openrouter.ai/docs/guides/features/input-output-logging.md",
+      "utc": "2026-11-15T12:06:56.800916+00:00"
+    },
+    {
+      "bytes": 65388,
+      "credentials_used": false,
+      "final_url": "https://openrouter.ai/docs/guides/routing/provider-selection.md",
+      "kind": "public_policy_text_only",
+      "sha256": "01cda4cd3cd2731b61182e261e218a0f6b15194c23582dc43b4cecb78100fa40",
+      "url": "https://openrouter.ai/docs/guides/routing/provider-selection.md",
+      "utc": "2026-11-15T12:06:56.893014+00:00"
+    },
+    {
+      "bytes": 3815,
+      "credentials_used": false,
+      "final_url": "https://openrouter.ai/docs/guides/privacy/provider-logging.md",
+      "kind": "public_policy_text_only",
+      "sha256": "8e38d99a946c76498a7ab6c81f675cf990b3dcd005c6cc4daa31bccd5acdc420",
+      "url": "https://openrouter.ai/docs/guides/privacy/provider-logging.md",
+      "utc": "2026-11-15T12:06:56.985175+00:00"
+    },
+    {
+      "bytes": 2951,
+      "credentials_used": false,
+      "final_url": "https://privacy.claude.com/en/articles/7996868-is-my-data-used-for-model-training.md",
+      "kind": "public_policy_text_only",
+      "sha256": "e57d31426f19f38e87997a4fa68c8ffae4c0eac1e06052c49a5c75fd746856f8",
+      "url": "https://privacy.claude.com/en/articles/7996868-is-my-data-used-for-model-training.md",
+      "utc": "2026-11-15T12:06:57.282256+00:00"
+    },
+    {
+      "bytes": 3570,
+      "credentials_used": false,
+      "final_url": "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data.md",
+      "kind": "public_policy_text_only",
+      "sha256": "bbf5923cd85d31fb7aa24b76e8d5b87e250a77e94aebee043240c33563820a01",
+      "url": "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data.md",
+      "utc": "2026-11-15T12:06:57.559703+00:00"
+    }
+  ],
+  "source_base": "003efac080484cc0ecc6d2b409303aa85d85ca7e",
+  "source_sha256": {
+    "experimental/ADAPTERS.md": "258e73a39da5393f62f98de02a64d3f36dcfe967dbd0144d78288d6b4e867d5a",
+    "experimental/coding/adapters.py": "cc8b72786ad073ca80bc755a08f85caf5e23aa328e64bf90952e5474e442d99a",
+    "experimental/coding/codex_bridge.py": "6d553ed359e54f2072249ae6f458fcaea6e33497859d44344453c50666422978",
+    "experimental/coding/driver.py": "d78cd7d78960638749a147a96a401ee0e04ee9e9336f27aeff0d180324e55dd9",
+    "experimental/lop_edge.py": "691a342c522fbc960de666d23cb31cbe2900f2da0ed7e63ad0765e47c82c52b1",
+    "experimental/meter_proxy.py": "e5d5d626e36e89dc7544eac3f826623fbd264e285dc35f2431fdf35540e7cc5a",
+    "experimental/package_egress.py": "2ec3719325e655d80a48ddba322fcfa1cdc32b955200fcb066d4272ba097cb72",
+    "experimental/radient_meter/classifier.py": "e8aebf5e6f86e9532f5e05ae5f0c00eb1971f5b979acde083fbeec1a757d0db7",
+    "publication.py": "a3b8829651ae310679f96cbf8bb9ca0da919c181555b5d4a0897ea4b5e553609"
+  },
+  "utc": "2026-11-15T12:06:57.559733+00:00"
+}
