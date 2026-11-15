@@ -588,7 +588,10 @@ The flow keeps the same three calls; only who answers, and where, changes:
    for it, or removes it (`lop network member rm <network> <device>`) and
    onboards it afresh through a signed card (`lop network approvals request
    --host <host> …`). Re-filing an onboarding for a node that is still a
-   member does not bind it. On a node whose user has passwordless sudo this
+   member does not bind it. A session another agent spawned on the node sends
+   the operator ONLY its site cards (never its other asks or `notify` items),
+   and only over that same verified binding, since its parent agent cannot
+   sign one. On a node whose user has passwordless sudo this
    binding is advisory, as site approvals are: root there could replace the
    anchor.
 3. `await_access` (each call ≤240 s; the request lives ~10 minutes). There is

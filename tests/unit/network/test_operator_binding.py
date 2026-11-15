@@ -639,6 +639,47 @@ def test_agent_children_and_co_member_placed_rows_are_unchanged(rig: Rig) -> Non
     assert "notices" in _listing(rig, CO, origin=placed)
 
 
+@pytest.mark.parametrize("placed_by", ["mac", "node"])
+def test_an_agent_childs_site_card_rides_the_verified_binding_only(
+    rig: Rig, placed_by: str
+) -> None:
+    """Manager rule 2026-11-15: a site card only the operator can sign reaches the
+    bound Mac even from an agent's child (the live repro: placed by an agent on the
+    Mac), over ``is_operator_link`` — never to a co-member, never before binding."""
+    from local_operator.asks import store as ask_store
+    from local_operator.browser_bridge import site_approval
+
+    source = rig.mac_id if placed_by == "mac" else NODE
+    agent = {"kind": ra.AGENT_ORIGIN_KIND, "source_device": source, "source_session_id": "s_p"}
+    _node_started_session(rig.node, origin=agent)
+    now = ask_store.now_ms()
+    ask_store.append_event(
+        ask_store.session_dir(rig.node, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "at": now,
+            "ask_id": "a-site",
+            "expires_at": now + 3_600_000,
+            "questions": [
+                site_approval.site_ask_question(
+                    origin="https://example.com",
+                    node_name="node",
+                    node_device_id=NODE,
+                    entry_id="e-1",
+                )
+            ],
+        },
+    )
+    # Before binding: even the Mac that placed the child gets nothing.
+    assert "notices" not in _listing(rig, rig.mac_id, origin=agent)
+    _bind(rig)
+    keys = [n["key"] for n in _listing(rig, rig.mac_id, origin=agent)["notices"]]
+    assert keys == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    assert "notices" not in _listing(rig, CO, origin=agent)
+    assert ra.notice_forwarding(rig.node, SID)[0] == ra.LOCAL_ONLY
+
+
 def test_only_the_onboarding_kinds_and_approvals_are_proofs(rig: Rig) -> None:
     approved = _onboard(rig)
     for change in ({"kind": "operator_device_pair"}, {"kind": "profile_save"}):
