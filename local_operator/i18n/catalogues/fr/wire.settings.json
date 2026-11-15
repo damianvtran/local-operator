@@ -240,7 +240,7 @@
   "wire.settings.display_nerd_icons.label": "Glyphes Nerd Font",
   "wire.settings.display_notification_session_name.choice.false.description": "garder les noms hors des bannières",
   "wire.settings.display_notification_session_name.choice.true.description": "nommer la session",
-  "wire.settings.display_notification_session_name.help": "Le nom d’une session, sa dernière ligne et les causes d’erreur apparaissent sur les bannières, y compris sur l’écran de verrouillage.",
+  "wire.settings.display_notification_session_name.help": "Le nom d’une session, sa dernière ligne et les causes d’erreur apparaissent sur les bannières, y compris sur l’écran de verrouillage et dans les notifications des téléphones appairés, qui leur parviennent via le service push de Radient.",
   "wire.settings.display_notification_session_name.label": "Noms de session dans les notifications",
   "wire.settings.display_notifications.choice.false.description": "ne jamais notifier",
   "wire.settings.display_notifications.choice.true.description": "notifier quand la fenêtre n’a pas le focus",
