@@ -525,6 +525,9 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # readers on its own journal. Slow by registration — a deep search may
         # take seconds and must not hold the link reader.
         "net_session_peek",
+        # The operator binding (network/operator_binding.py): verify-and-store of
+        # a signed onboarding decision. Inline: one cached ES256 verify.
+        "net_operator_binding",
     }
 )
 
@@ -601,6 +604,8 @@ SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.rollouts",
     # The remote peek: one slow peer op plus its local half, no threads.
     "local_operator.network.peek",
+    # The operator binding: one inline peer op plus a link-up presenter.
+    "local_operator.network.operator_binding",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -8967,11 +8972,22 @@ class RelayServer:
         """
         rows = self.local_session_rows()
         if wire.REMOTE_ATTENTION_V1 in link.capabilities:
+            from local_operator.network.operator_binding import is_operator_link
             from local_operator.notifications.remote_attention import (
                 stamp_rows_for_viewer,
             )
 
-            stamp_rows_for_viewer(self.root, rows, str(link.device_id or ""))
+            # A VERIFIED operator link also collects the notices of sessions
+            # STARTED here (no origin of their own). The verdict is the
+            # operator's signature checked against this device's root-owned
+            # anchor — cached, so one ES256 verify per proof, not per listing.
+            stamp_rows_for_viewer(
+                self.root,
+                rows,
+                str(link.device_id or ""),
+                operator_viewer=is_operator_link(self.root, link),
+                self_device_id=str(self.identity.device_id or ""),
+            )
         return rows
 
     def local_session_rows(self) -> list[dict[str, Any]]:
@@ -13934,6 +13950,7 @@ class RelayServer:
         # rotation all write, so the read is inside the lock: minting from a
         # snapshot would revert whatever they wrote in between.
         resolved = self._require_network(str(frame.get("network") or ""))
+        binding_keep = store.binding_invite_ids(self.root)
         with store.mutate(resolved.network_id, self.root) as record:
             state = store.require_secrets(record.network_id, self.root)
             minted: MintedInvite = mint_invite(
@@ -13960,7 +13977,9 @@ class RelayServer:
             # the same locked write that adds a row drops the ones past their own
             # expiry and the retention window (``store.prune_invites``), so repeated
             # pairing attempts no longer accumulate ``minted`` rows forever.
-            expired = store.prune_invites(record)
+            # ``binding_keep`` (computed before the lock): admitted rows a retained
+            # signed onboarding names stay, so that node stays bindable (#4030).
+            expired = store.prune_invites(record, keep=binding_keep)
             record.invites.append(minted.record)
             store.save(record, self.root)
             path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
