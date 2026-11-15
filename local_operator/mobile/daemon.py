@@ -6326,7 +6326,14 @@ class MobileDaemon:
         # bearer from its launch environment as ``session.runtime.launch`` does
         # (PR #3022 QA round 1, Q1). Lazy for the same import-path reason.
         from local_operator.agent_shell import without_daemon_bearer
+        from local_operator.session.runtime.launch import _prime_login_path
 
+        # This hand-built spawn bypasses ``launch._runtime_env``, so it takes
+        # that builder's PATH prime explicitly: launchd starts this daemon with
+        # a bare PATH, and the child's bash tool must see the operator's login
+        # PATH (Homebrew ``gh`` et al.). Free once the daemon's lineage is
+        # primed; a thread because the first call runs a login shell.
+        await asyncio.to_thread(_prime_login_path)
         env = dict(os.environ)
         without_daemon_bearer(env)
         env["LOP_MOBILE_CHILD_CWD"] = cwd
