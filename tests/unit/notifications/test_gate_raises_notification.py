@@ -452,7 +452,7 @@ async def test_an_agent_spawned_session_still_raises_its_gate_rows(
     ],
 )
 def test_notify_is_mounted_only_for_local_or_attested_operator_sessions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stamp: dict | None, mounted: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stamp: dict[str, Any] | None, mounted: bool
 ) -> None:
     """DEFAULT-DENY on the node (operator rule 2026-11-14): a session another
     device placed here keeps ``notify`` only when its stamp says the operator
