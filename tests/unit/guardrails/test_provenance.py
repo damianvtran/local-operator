@@ -53,6 +53,12 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Synthetic trees are never live process cwd; dedicated worktree-removal
     # controls cover live/unknown inventory without depending on fleet latency.
     monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    # An OWN tree's busy answer bypasses ``_live_cwd_inside`` for a fresh
+    # ``cwd_holders`` scan (PR #3987), so "never a live cwd" must hold at the
+    # inventory too. Without this the real scan ran: on GitHub's Linux runner
+    # one same-uid pid's ``/proc/<pid>/cwd`` reads EACCES, the inventory fails
+    # closed ("busy"), and own cleanups read HIGH (train t6, run 43665122262).
+    monkeypatch.setattr(prov, "_cwd_entries", lambda *, fresh=False: ())
     # Nor do they have a GitHub remote: stub "GitHub, no open PR" so the clean
     # worktree path is reachable. The PR-state controls live in
     # ``test_worktree_remove_and_refusal_scope.py``.

@@ -84,6 +84,7 @@ from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.guardrails import interrupted_worktree_add
+from local_operator.guardrails import spawned as guard_spawned
 from local_operator.harness.approval import (
     APPROVAL_UNAVAILABLE_NOTICE,
     ApprovalUnavailableError,
@@ -4720,6 +4721,12 @@ async def execute_bash(
             # kwargs that really detach on the host, and is exactly
             # `start_new_session=True` on POSIX.
             **spawn_options,
+        )
+        # Which in-process session started this child (review m1, PR #3987):
+        # subagents share the harness pid, so the delete guard needs this
+        # runtime record to tell this session's shell from a sibling's.
+        guard_spawned.record(
+            process.pid, getattr(context, "session_id", None) if context else None, process
         )
     except OSError as exc:
         # A `bash.shell` pointing at a missing or non-executable file made the
