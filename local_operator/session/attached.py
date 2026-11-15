@@ -131,6 +131,7 @@ from local_operator.session.frontend_state import (
     _fold_goal_status,
     _reading_pair,
     effective_identity_for,
+    freeze_new_store_state,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.model_selection import (
@@ -2264,6 +2265,19 @@ class AttachedSession:
                 # Children can persist a roster before the parent's first transcript
                 # row. Absence of that file must not hide independently durable spend.
                 state = await self._restore_cold_details(state)
+            with trace.phase("install_prepare") if trace else contextlib.nullcontext():
+                # THE INSTALL'S STATE-SIZED WORK, PAID OFF THE CALLER'S LOOP. The
+                # desktop opens cold facades on the ONE serving event loop, and on
+                # a 2,000-job roster the store's copy-and-freeze plus the jobs
+                # facade's detached copies held it ~0.5 s + ~0.24 s on the first
+                # stream open after a respawn -- the app's reconnect -- so every
+                # route (``/health`` included) waited (PR #4012, QA round 1, Q1).
+                #
+                # Both are pure functions of ``state``, which is this frame's own
+                # object: nothing else holds it, and nothing is published until
+                # ``_install_frontend`` below, which stays synchronous so the
+                # install itself is still one step on the loop.
+                frozen, detached_jobs = await asyncio.to_thread(_prepare_cold_install, state)
             with trace.phase("install_finalize") if trace else contextlib.nullcontext():
                 # THE ONE INSTALL THAT IS A RESTORE. Everything in ``state`` here was
                 # read out of the durable checkpoint, so the MCP round it carries is
@@ -2279,7 +2293,8 @@ class AttachedSession:
                 # ``restored_spend`` for the exact micro-USD figure long after the cold
                 # open. Freeing it would trade nothing for a missing number.
                 self._cold_selection = None
-                self._install_frontend(state, restored=True)
+                self.jobs.prime(detached_jobs)
+                self._install_frontend(state, restored=True, frozen=frozen)
                 self._finish_sync()
                 # Nothing is queued behind an owner that will never arrive: a cold
                 # viewer is READY, and it is _ensure_bound that supplies the runtime
@@ -7257,7 +7272,12 @@ class AttachedSession:
         # is discarded unrendered at ``agent_end``) and any gap assistant text
         # outright — review round 1, MAJOR-1. ``_is_duplicate``/``_track``
         # below already make re-seeding safe for rows the ledger holds.
-        for data in self.frontend_state.live_events:
+        # ``live_events`` alone, not the ``frontend_state`` clone of every job
+        # and usage row (~0.27 s on the cold open of a 2,000-job session, on the
+        # desktop's serving loop -- PR #4012, QA round 1, Q1).
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        for data in self._frontend_store.live_events_copy():
             event = deserialize_event(data)
             if self._is_duplicate(event):
                 # Already painted is not the same as durable. Rebuild source
@@ -7743,7 +7763,14 @@ class AttachedSession:
         *,
         publish: bool = False,
         restored: bool = False,
+        frozen: FrontendSessionState | None = None,
     ) -> None:
+        """Install ``state`` as this facade's frontend state.
+
+        ``frozen`` is ``freeze_new_store_state(state)`` already paid off the loop
+        (the cold open); used only when this install CREATES the store, because
+        a replace freezes against the existing store's canonical jobs instead.
+        """
         if state.session_id != self._session_id:
             raise ConnectionError("frontend state belongs to another session")
         if self._frontend_store is None or self._frontend_store.state.epoch != state.epoch:
@@ -7754,7 +7781,7 @@ class AttachedSession:
             self._gate_answered_key = None
             self._keep_gate_reply = False
         if self._frontend_store is None:
-            self._frontend_store = FrontendStateStore(state)
+            self._frontend_store = FrontendStateStore(state, frozen=frozen)
         elif publish:
             self._frontend_store.replace_and_notify(state)
         else:
@@ -10137,6 +10164,20 @@ class AttachedSession:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.state
 
+    def frontend_state_reference(self) -> tuple[FrontendStateStore, FrontendSessionState]:
+        """The store and its canonical state object, WITHOUT the clone.
+
+        For the desktop snapshot, which must read state on the serving loop (its
+        sequence watermark is read in the same step) but cannot afford the clone
+        and the serialization there: see :meth:`FrontendStateStore.state_reference`
+        for why the reference is safe to hand to a worker thread. Raises like
+        :attr:`frontend_state` when the store has not synchronized.
+        """
+        store = self._frontend_store
+        if store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return store, store.state_reference()
+
     @property
     def pending_gate(self) -> Any:
         """The pending gate without the full-state clone ``frontend_state`` pays.
@@ -10187,6 +10228,19 @@ class AttachedSession:
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.subscribe(handler)
+
+    def subscribe_frontend_updates(
+        self, handler: Callable[[FrontendUpdate], None]
+    ) -> Callable[[], None]:
+        """``subscribe_frontend`` without the joining snapshot; returns the unsubscribe.
+
+        For a subscriber that paints from its own snapshot and only relays
+        updates (the desktop bridge), so the whole-state clone the joining
+        ``sync`` carries is not built for nothing on the serving loop.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.subscribe_updates(handler)
 
     def _read_state_field(self, name: str) -> Any:
         """One canonical field without the whole-state clone.
@@ -11927,6 +11981,18 @@ class AttachedSession:
             # cancellation. No new socket, create retry, or owner restart occurs.
             self._client = None
         self._dispose_source_domain()
+
+
+def _prepare_cold_install(
+    state: FrontendSessionState,
+) -> tuple[FrontendSessionState, dict[int, tuple[JobState, JobState]]]:
+    """The cold install's state-sized work, for a worker thread (``AttachedSession.cold``).
+
+    The new store's frozen canonical state and the jobs facade's detached
+    copies of the SAME ``state.jobs`` objects ``_apply_frontend_facades`` will
+    hand it, so ``SnapshotJobs.replace`` reuses them by identity.
+    """
+    return freeze_new_store_state(state), SnapshotJobs.detach(state.jobs)
 
 
 def _swallow_future(future: asyncio.Future[Any]) -> None:
