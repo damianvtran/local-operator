@@ -404,7 +404,7 @@
   "wire.settings.network_audit_max_age_days.label": "Plafond d’âge d’audit (jours)",
   "wire.settings.network_audit_max_bytes.help": "Octets par génération, après rotation. 8 MiB de JSONL gzippé représentent environ 55k enregistrements ; le plafond de cinq générations est donc d’environ 40 MiB.",
   "wire.settings.network_audit_max_bytes.label": "Taille d’audit par génération",
-  "wire.settings.network_credentials_github_repositories.help": "entrées owner/repo qu’un token GitHub délégué peut toucher (vide : aucune)",
+  "wire.settings.network_credentials_github_repositories.help": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default.",
   "wire.settings.network_credentials_github_repositories.label": "Dépôts GitHub",
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "Durée maximale pendant laquelle un appareil peut utiliser un login emprunté à son propriétaire avant de redemander, et donc combien de temps le login d’un propriétaire révoqué ou hors ligne continue de fonctionner ailleurs. Jamais plus longtemps que le token lui-même.",

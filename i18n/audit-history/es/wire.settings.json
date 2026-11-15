@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "88bb65bebbd1e02466b24f4f97be8c8eb939cedbafdd33cc883ee3b785978197",
+  "history_sha256": "dce546a6037cffe717ab017692b981933af3ca69e7d7f13fba914e3c42474722",
   "entries": [
     {
       "locale": "es",
@@ -265,6 +265,42 @@
       },
       "status": "passed",
       "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-es-1. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/es/wire.settings/oh3922r1/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 translator-only receipt; independent audit NOT completed. English source author node99 is a different agent (same actual model Sol). Changed keys: 1. Complete carried namespace must be independently audited with unchanged prior coverage derived, not presumed. Source hash pins full current namespace; translated target sha256 b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91. Glossary i18n/glossary.md and i18n/style-guides/es.md. Choices: tú, neutral Spanish; repositorio/dispositivo/ajuste; push and GitHub kept; one/many/other days. Settings help preserves never-set automatic selection versus clearing a previously shared hand-picked list stopping lending, and literal --use-default recovery. Safety copy preserves no widening/borrower authority, retrieval-time revocation rather than immediate deletion. Placeholder/CLDR checks recorded separately; no rendered, pseudo or native audit claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 FINAL translator-only handoff; independent audit pending, no pass claimed. Replaces earlier translator target hashes without removing history. Full carried namespace requires independent audit; changed scope is 68 new GitHub keys or one settings help key only. Read i18n/glossary.md and i18n/style-guides/es.md. Shared wave-2 rule keeps push in Latin in ALL locales, including Chinese/Russian/Vietnamese/Hindi/Urdu; prose inflects around it. GitHub, owner/repo, /settings, command literals unchanged. French vous, Spanish tú, Chinese 你, Russian вы, Vietnamese bạn, Urdu آپ, Hindi आप. French narrow no-break punctuation spacing; Urdu glossary device term ڈیوائس; no manual bidi controls. CLDR days: fr/es one-many-other, ru one-few-many-other, zh-CN/vi other, hi/ur one-other; hi/ur hours upgrade number to lossless plural. Preserved no-widening and owner-only authority, next-credential-fetch timing, never-set versus previously shared list cleared, and literal --use-default remedy. Source hash covers full namespace, final target sha256 b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91. Mechanical execution evidence is separate, not a native semantic audit or rendered/RTL sign-off. Actual model openai/gpt-6.1-sol following quota fallback before translation; independent agent from node99 English author despite same actual model."
     }
   ]
 }

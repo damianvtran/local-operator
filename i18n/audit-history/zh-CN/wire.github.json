@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.github",
+  "history_sha256": "440042b74deb25e121559980df47cb9f90a3e86fe2ea64560505578514b74981",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 translator-only receipt; independent audit NOT completed. English source author node99 is a different agent (same actual model Sol). Changed keys: 68. Complete carried namespace must be independently audited with unchanged prior coverage derived, not presumed. Source hash pins full current namespace; translated target sha256 d199d153d3b959f283eacef782810f93640060453125ce855b5fa0e237b69261. Glossary i18n/glossary.md and i18n/style-guides/zh-CN.md. Choices: 你, compact verb-led Chinese; 仓库/设备/设置; Chinese prose punctuation, literal commands kept; other-only days. Settings help preserves never-set automatic selection versus clearing a previously shared hand-picked list stopping lending, and literal --use-default recovery. Safety copy preserves no widening/borrower authority, retrieval-time revocation rather than immediate deletion. Placeholder/CLDR checks recorded separately; no rendered, pseudo or native audit claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 translator-only receipt; independent audit NOT completed. English source author node99 is a different agent (same actual model Sol). Changed keys: 68. Complete carried namespace must be independently audited with unchanged prior coverage derived, not presumed. Source hash pins full current namespace; translated target sha256 d199d153d3b959f283eacef782810f93640060453125ce855b5fa0e237b69261. Glossary i18n/glossary.md and i18n/style-guides/zh-CN.md. Choices: 你, compact verb-led Chinese; 仓库/设备/设置; Chinese prose punctuation, literal commands kept; other-only days. Settings help preserves never-set automatic selection versus clearing a previously shared hand-picked list stopping lending, and literal --use-default recovery. Safety copy preserves no widening/borrower authority, retrieval-time revocation rather than immediate deletion. Placeholder/CLDR checks recorded separately; no rendered, pseudo or native audit claimed. Translator correction before independent audit: preserve en argument order command, owner in readiness_pointer (initial catalogue check rejected reordering); final target sha256 24376faa6a05610c1bef93c54006ebd95e7ffcb1c6f4e1b9c7740227d149c86a. Prior translator receipt retained, not overwritten."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 FINAL translator-only handoff; independent audit pending, no pass claimed. Replaces earlier translator target hashes without removing history. Full carried namespace requires independent audit; changed scope is 68 new GitHub keys or one settings help key only. Read i18n/glossary.md and i18n/style-guides/zh-CN.md. Shared wave-2 rule keeps push in Latin in ALL locales, including Chinese/Russian/Vietnamese/Hindi/Urdu; prose inflects around it. GitHub, owner/repo, /settings, command literals unchanged. French vous, Spanish tú, Chinese 你, Russian вы, Vietnamese bạn, Urdu آپ, Hindi आप. French narrow no-break punctuation spacing; Urdu glossary device term ڈیوائس; no manual bidi controls. CLDR days: fr/es one-many-other, ru one-few-many-other, zh-CN/vi other, hi/ur one-other; hi/ur hours upgrade number to lossless plural. Preserved no-widening and owner-only authority, next-credential-fetch timing, never-set versus previously shared list cleared, and literal --use-default remedy. Source hash covers full namespace, final target sha256 dc68606f6da5693a3c876b8a43c936f55dcb71ae4d219219cd505adc57993a69. Mechanical execution evidence is separate, not a native semantic audit or rendered/RTL sign-off. Actual model openai/gpt-6.1-sol following quota fallback before translation; independent agent from node99 English author despite same actual model."
+    }
+  ]
+}

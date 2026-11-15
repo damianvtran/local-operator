@@ -404,7 +404,7 @@
   "wire.settings.network_audit_max_age_days.label": "ऑडिट उम्र सीमा (दिन)",
   "wire.settings.network_audit_max_bytes.help": "रोटेशन के बाद प्रति जनरेशन बाइट। 8 MiB gzipped JSONL लगभग 55k रिकॉर्ड होते हैं; इसलिए पाँच जनरेशन की सीमा ~40 MiB बनती है।",
   "wire.settings.network_audit_max_bytes.label": "प्रति जनरेशन ऑडिट आकार",
-  "wire.settings.network_credentials_github_repositories.help": "owner/repo प्रविष्टियाँ जिन तक ब्रोकर किया गया GitHub टोकन पहुँच सकता है (खाली: कोई नहीं)",
+  "wire.settings.network_credentials_github_repositories.help": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।",
   "wire.settings.network_credentials_github_repositories.label": "GitHub रिपॉज़िटरी",
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "कोई डिवाइस मालिक से उधार लिया लॉगिन दोबारा माँगने से पहले अधिकतम कितनी देर इस्तेमाल कर सकता है, और इसी से तय होता है कि रद्द या ऑफ़लाइन मालिक का लॉगिन कहीं और कितनी देर चलता रहता है। टोकन से कभी ज़्यादा नहीं।",
