@@ -6083,6 +6083,16 @@ class AttachedSession:
                 await asyncio.sleep(0)
             if future.done():
                 return future.result()
+            # A remote welcome is historical evidence, not proof that its
+            # forwarding path still answers. A silent, non-EOF pipe cannot
+            # distinguish a wedged link from a busy runtime. Keep that failure
+            # in the ordinary transport lane; local binds retain their existing
+            # classification and a post-welcome runtime frame restores the
+            # evidence needed for the typed busy answer. No probes or retries.
+            if self.runtime_locality == "another-machine" and not bool(
+                getattr(self._client, "received_after_welcome", False)
+            ):
+                raise ConnectionError(_SYNC_UNRESPONSIVE_REASON) from exc
             raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from exc
 
     async def _await_frontend_preemptible(

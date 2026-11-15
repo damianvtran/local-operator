@@ -1175,6 +1175,10 @@ class AttachClient:
         #: supplies no callback still gets the line in the log rather than no line
         #: anywhere.
         self._on_operator_prompt = on_operator_prompt
+        # Observation only, not authority: a welcome can be the last bytes on
+        # a half-dead mesh pipe. Sync-timeout copy needs a subsequent runtime
+        # frame before claiming that the far loop is alive but busy.
+        self.received_after_welcome = False
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         #: Fired when a ``move_pending`` frame arrives: the owner is about to
@@ -1312,6 +1316,7 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        self.received_after_welcome = False
         # THE CAPABILITY IS RESOLVED PER DIAL, from the pid in the record being
         # dialled, because "may I loosen this session's gate" is a property of
         # the pairing (this process, that runtime) and not of this client. A
@@ -1545,6 +1550,8 @@ class AttachClient:
                 except ValueError:
                     continue
                 op = frame.get("op")
+                if isinstance(op, str) and op:
+                    self.received_after_welcome = True
                 if op in ("projection", "welcome"):
                     try:
                         # pid=0 record: the attach screen keys nothing on the

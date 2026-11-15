@@ -1414,6 +1414,7 @@ class RemoteSessionClient(AttachClient):
                 "device cannot be reached from here."
             )
         self._session_id = session_id
+        self.received_after_welcome = False
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in capabilities
@@ -1555,7 +1556,11 @@ class RemoteSessionClient(AttachClient):
         try:
             first = await asyncio.wait_for(reader.readline(), timeout=ACK_TIMEOUT_S)
         except TimeoutError as exc:
-            raise ConnectionError("the remote owner did not send its state") from exc
+            # The relay admitted the owner's pipe. Match the local attach's
+            # late-welcome disposition rather than losing it at the mesh hop.
+            from local_operator.mobile.attach_client import OwnerWelcomeTimeout
+
+            raise OwnerWelcomeTimeout("the remote owner did not send its state") from exc
         except ValueError as exc:
             raise ConnectionError(OVERSIZED_FRAME_REASON) from exc
         if not first:

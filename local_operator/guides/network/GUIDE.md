@@ -683,13 +683,17 @@ acting on one (QA round 5, Q-R5-1):
   answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
   (that runtime may be starting, or wedged), the act as a whole running out of
   `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer (it
-  accepted the connection and did not produce its state in time, or said it could
-  not prepare it). The busy sentence says the act was not delivered and to retry;
-  it is not a link problem, so it does not point at `network doctor`. The peer's own sentence is carried verbatim, and nothing on
-  this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
-  `relay_unavailable` with no local relay) even when the rung that noticed was the
-  bind: the two codes answer "which side of the open died", not "which sentence did
-  I get", because a stopped device and a stopped runtime look identical from here.
+  accepted the connection and did not produce its state in time). The busy
+  sentence says the act was not delivered and to retry; it does not point at
+  `network doctor`. An explicit `bind_failed` keeps the same code but prints the
+  runtime's own refusal/cause, not an invented timed load diagnosis. Only that
+  cause is carried verbatim; this side adds the session/device and the fact that
+  the act was not delivered. A remote pipe that goes silent after its welcome,
+  with no subsequent runtime frame, cannot establish that the runtime is still
+  answering: it takes the link/doctor rung, not the busy sentence. A dial that
+  produced NO stream at all is `peer_unreachable` (or `relay_unavailable` with no
+  local relay) even when the rung that noticed was the bind; a stopped device and
+  a stopped runtime can look identical from here.
 - `session_ambiguous` — the named device ANSWERED and holds SEVERAL conversations
   the target matches (a conversation name is not unique by design): the sentence
   lists the candidate rows with the id each is retypeable as, and NOTHING was sent.

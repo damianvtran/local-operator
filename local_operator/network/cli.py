@@ -7726,22 +7726,15 @@ def _pilot_dial_refusal(
 
 
 def _pilot_runtime_busy(exc: BaseException) -> bool:
-    """True when the runtime was REACHED and is alive, but did not answer in time.
+    """Whether this failure belongs to the runtime-answer lane, not the doctor.
 
-    ONE CLASSIFICATION, THE LADDER'S: the desktop control ladder decides "busy" by
-    ``RuntimeUnresponsiveError`` or the duck-checked ``owner_alive`` mark
-    (``server/routes/desktop_sessions.py::_owner_busy``), and every busy
-    ``ConnectionError`` main defines carries that mark: ``OwnerAckTimeout``, the
-    late welcome (``OwnerWelcomeTimeout``) and the reconnect refusal
-    (``OwnerReconnectingError``). Reading the MARK rather than listing classes is
-    what keeps this verb from drifting when a new busy shape lands; a list here
-    missed the late welcome, which the pilot's own bind raises, and called a busy
-    session a device that "produced no session". The one addition is
-    ``RuntimeBindFailedError`` (the runtime announced it could not prepare this
-    connection), which is deliberately left unmarked so the desktop ladder keeps
-    its existing answer for it. All of these are ``ConnectionError``s, and
-    ``OwnerAckTimeout`` is ALSO a ``TimeoutError``, so this must be asked before
-    either sibling rung.
+    The pilot retains the desktop's ``RuntimeUnresponsiveError`` / ``owner_alive``
+    rule, plus its existing ``RuntimeBindFailedError`` case. The latter is an
+    explicit refusal, NOT evidence of load: its own reason is printed instead of
+    the timed busy sentence. It remains unmarked so the desktop bind-failure
+    ladder is unchanged. ``OwnerAckTimeout`` is also a ``TimeoutError``; ask this
+    predicate before either generic sibling rung. A remote sync timeout without
+    a post-welcome answer stays an ordinary transport error at its source.
     """
     from local_operator.session.attached import (
         RuntimeBindFailedError,
@@ -7753,16 +7746,22 @@ def _pilot_runtime_busy(exc: BaseException) -> bool:
     return bool(getattr(exc, "owner_alive", False))
 
 
-def _pilot_busy_sentence(verb: str, session_id: str, device: str, waited_s: float) -> str:
-    """The refusal for a runtime that is alive and too busy to answer this act.
+def _pilot_busy_sentence(
+    verb: str, session_id: str, device: str, waited_s: float, *, refusal: str = ""
+) -> str:
+    """The runtime-answer lane: its explicit refusal, or the timed busy answer.
 
-    Says the three things the person acts on: the session is still running over
+    The timed branch says the three things the person acts on: it is running over
     there, this act did NOT happen, and the remedy is to retry. It does not send
     them to ``network doctor``: the link worked, the stream opened, and the
     runtime spoke — a link diagnosis would send them after a fault that is not
     there.
     """
     undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    if refusal:
+        # The runtime already supplied the cause and retry remedy. Do not turn
+        # an immediate refusal into an invented one-second load measurement.
+        return f"{session_id} ({device}): {refusal}; {undone}"
     return (
         f"{session_id} is running on {device}, but its runtime was too busy to answer "
         f"within {max(1, int(waited_s))}s, so {undone}; retry when its current work settles"
@@ -8189,9 +8188,17 @@ async def _pilot_act(
             # sibling rung would otherwise claim it — which is how a busy session
             # on a healthy link read as a device that "produced no session".
             if _pilot_runtime_busy(exc):
+                from local_operator.session.attached import RuntimeBindFailedError
+
                 raise MeshRefusal(
                     "session_unreachable",
-                    _pilot_busy_sentence(verb, session_id, device, time.monotonic() - bind_started),
+                    _pilot_busy_sentence(
+                        verb,
+                        session_id,
+                        device,
+                        time.monotonic() - bind_started,
+                        refusal=str(exc) if isinstance(exc, RuntimeBindFailedError) else "",
+                    ),
                 ) from exc
             if isinstance(exc, TimeoutError):
                 raise MeshRefusal(
