@@ -240,6 +240,31 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
     return None
 
 
+def peer_session_holders(session_id: str, root: Path | None = None) -> list[SessionRow]:
+    """EVERY cached remote row for ``session_id``, one per holding device.
+
+    Cache-only, like :func:`peer_session_row`, which answers "is it remote?"
+    with the FIRST match. A caller about to ACT on the answer — the ``send``
+    tool delivering to the holder without an explicit ``peer`` — needs to know
+    whether that first match is the only one: two devices reporting one id
+    (a stale row after a move, or a collision) is ambiguity it must refuse, not
+    a choice it may make. Rows without an owning device are not a holder
+    anyone could be routed to and are skipped.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return []
+    holders: list[SessionRow] = []
+    seen: set[str] = set()
+    for row in cached[1]:
+        device = str(row.owner_device or "")
+        if row.id != session_id or not row.is_remote or not device or device in seen:
+            continue
+        seen.add(device)
+        holders.append(row)
+    return holders
+
+
 def seed_peer_row(root: Path | None, row: SessionRow) -> None:
     """Merge a KNOWINGLY-LIVE peer row into the cache, for resolutions to find.
 

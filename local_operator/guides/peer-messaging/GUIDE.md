@@ -82,6 +82,12 @@ Parameters:
   beside it. An owner on an older build takes it as a turn instead; a turn
   still queued behind its running turn when the wait ends is reported as NOT
   delivered.
+- **`session=<id>` held by another device needs no `peer`.** When the exact id
+  is not on this device and exactly one paired device holds it, the send is
+  delivered there and the receipt opens with `routed to <device>`. Two devices
+  reporting the id is refused with each `peer=<device id>` candidate listed;
+  `target` (even a full id) and `sessions` ops still name the holder and ask
+  for `peer=` explicitly.
 
 Addressing precedence is `pid`, then `session`, then an EXACT `target` match on
 the conversation name, session id or cwd basename, then the `target` substring —
