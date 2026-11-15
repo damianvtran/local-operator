@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "Dùng /move <đường dẫn> để đổi thư mục làm việc, hoặc /move <phiên> --to <thiết bị ngang hàng> để chuyển phiên.",
+  "tui.session_move.to_needs_device": "--to cần một thiết bị: /move --to <thiết bị ngang hàng|local>",
+  "tui.session_move.cannot_wait": "màn hình này không thể chờ — chạy từ shell: `lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to chỉ nhận --keep, --queue và --drop-session-roles, không nhận {flag}",
+  "tui.session_move.cli_unavailable": "không thể khởi chạy CLI ({reason})",
+  "tui.session_move.deadline_exceeded": "hết thời gian chờ, chưa rõ kết quả chuyển; chạy lại `lop sessions move {session} --to {to}` để biết việc chuyển đã đến bước nào",
+  "tui.session_move.cli_no_answer": "CLI đã thoát với mã {code} mà không trả lời"
+}

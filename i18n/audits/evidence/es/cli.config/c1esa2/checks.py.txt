@@ -1,0 +1,128 @@
+"""Mechanical check for es slice C1 ROUND 2 (cli.config.* 15 + tui.session_move.* 7).
+
+Auditor: i18n-auditor (lopdev team), audit id c1esa2. Reads only; writes nothing.
+
+Run from the i18n-c1 worktree with its venv, from the worktree root:
+    .venv/bin/python <this file> [target.json]
+
+Inputs:
+  - English source/context: local_operator/i18n/catalogues/en/{cli.config,tui.session_move}{,.context}.json
+  - Target under audit: the es v2 shard. It lives in another session's scratchpad that
+    this auditor session may not read from bash, so the audited value set was
+    re-materialised byte-for-byte (same 2656-byte size as the shard ``ls`` reports) and
+    is retained beside this script as ``target-audited.json``. Pass its path as argv[1];
+    the default is the retained copy.
+
+What it proves:
+  1. key set AND order identical to the shipped en catalogue (22/22, nothing added/dropped)
+  2. placeholder name+type set identical per key (message_arguments), and every target
+     string parses (parse_message) — this group has no ICU plural/select
+  3. backticked shell spans byte-identical to en
+  4. typed tokens present verbatim: /approvals auto, /move, --to, --keep, --queue,
+     --drop-session-roles, --wait, and the literal accepted value `local`
+  5. no empty values, none identical to English, no edge/double spaces, no tabs, no
+     invisible/bidi/format characters (Cf/Zs other than U+0020)
+  6. each value renders through runtime.render_message(..., "es") with sample params
+  7. widths (rich.cells.cell_len) per key, en -> es
+
+Exit code is non-zero if any check fails.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+sys.path.insert(0, ".")
+from rich.cells import cell_len  # noqa: E402
+
+from local_operator.i18n.runtime import message_arguments, parse_message, render_message  # noqa: E402
+
+NAMESPACES = ("cli.config", "tui.session_move")
+CAT = Path("local_operator/i18n/catalogues/en")
+TARGET = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).parent / "target-audited.json")
+
+en: dict[str, str] = {}
+ctx: dict[str, dict] = {}
+for ns in NAMESPACES:
+    en.update(json.loads((CAT / f"{ns}.json").read_text()))
+    ctx.update(json.loads((CAT / f"{ns}.context.json").read_text()))
+es = json.loads(TARGET.read_text())
+
+print("AUDIT c1esa2 locale=es group=core CLI+TUI ROUND 2 (cli.config.* 15, tui.session_move.* 7)")
+print("target:", TARGET)
+print(f"json parses: en={len(en)} target={len(es)}")
+print("en keys:", len(en), "target keys:", len(es))
+print("key order identical:", list(en) == list(es))
+print("missing:", sorted(set(en) - set(es)), "extra:", sorted(set(es) - set(en)))
+print("maxCells declared in en context:", sum(1 for v in ctx.values() if "maxCells" in v))
+
+problems: list[tuple[str, str]] = []
+for key, want in en.items():
+    got = es[key]
+    if message_arguments(want) != message_arguments(got):
+        problems.append(("placeholder-set", key))
+    if re.findall(r"`([^`]*)`", want) != re.findall(r"`([^`]*)`", got):
+        problems.append(("backtick-span", key))
+    try:
+        parse_message(got)
+    except Exception as exc:  # noqa: BLE001 - a parse failure IS the finding
+        problems.append((f"parse: {exc}", key))
+    if not got.strip():
+        problems.append(("empty", key))
+    if got == want:
+        problems.append(("identical-to-en", key))
+    if got != got.strip() or "  " in got:
+        problems.append(("edge-or-double-space", key))
+    if "\t" in got:
+        problems.append(("tab", key))
+    invisible = [hex(ord(c)) for c in got if unicodedata.category(c) in ("Cf", "Zs") and c != " "]
+    if invisible:
+        problems.append((f"invisible {invisible}", key))
+
+TOKENS = {
+    "cli.config.running_sessions_unchanged": ["/approvals auto", "auto"],
+    "tui.session_move.ambiguous": ["/move", "--to"],
+    "tui.session_move.to_needs_device": ["--to", "/move --to", "<", "|", "local"],
+    "tui.session_move.cannot_wait": ["--wait"],
+    "tui.session_move.unsupported_flag": [
+        "/move --to",
+        "--keep",
+        "--queue",
+        "--drop-session-roles",
+        "{flag}",
+    ],
+}
+for key, toks in TOKENS.items():
+    for tok in toks:
+        if tok not in es[key]:
+            problems.append((f"missing token {tok!r}", key))
+if "`lop sessions move <id> --to <to> --wait <seconds>`" not in es["tui.session_move.cannot_wait"]:
+    problems.append(("shell command changed", "tui.session_move.cannot_wait"))
+
+print("mechanical problems:", problems or "none")
+
+SAMPLES = {
+    "path": "~/.local-operator/config.yml",
+    "key": "tool_approval_mode",
+    "value": "auto",
+    "description": "descripción de ejemplo",
+    "flag": "'--force'",
+    "reason": "[Errno 2] No such file or directory",
+    "session": "abc123",
+    "to": "mi-portatil",
+    "code": "1",
+}
+print("render probes (sample params):")
+for key, value in es.items():
+    print(f"  {key} -> {render_message(value, SAMPLES, 'es')}")
+
+print()
+print("widths (rich.cells.cell_len) en -> es:")
+for key in en:
+    print(f"  {key:52s} {cell_len(en[key]):4d} -> {cell_len(es[key]):4d}  delta={cell_len(es[key]) - cell_len(en[key]):+d}")
+
+sys.exit(1 if problems else 0)

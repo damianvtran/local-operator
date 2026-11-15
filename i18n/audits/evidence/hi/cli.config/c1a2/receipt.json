@@ -1,0 +1,17 @@
+{
+  "audit_id": "c1a2",
+  "locale": "hi",
+  "namespace": "cli.config",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself",
+  "artifacts": {
+    "audit.log": "515f6a69cbeae2416f6d26b8b0ffe4928519f07cf8d65bdc44cca1c397cac48d",
+    "ledger.log": "9b29d55c7b0d632fd62163cb865242d6542100e3dbcdc7ec5a0fcba17d9104d9",
+    "record.json": "9dbc4c48d0a9d67e9e30a43a9bb9c29baea4fdd7e33bc604afab30598c3587f6",
+    "report.md": "42028b9a6fe5a9e47a719f583dae26502b9eaeb81075d9a711032c510c23b595",
+    "reproduction/diff_v1_v2.py.txt": "23a2e72cd305a3b77e4958e84285fc7c32648934cee715795052bc83d3028e11",
+    "reproduction/recount_hi_terms.py.txt": "ffc7dd5a35b9a8e0cbfaf8de1156824091a5940a388d081d903607c9e622edf0",
+    "reproduction/render_realpath.py.txt": "a3c1cfd8035000a254a7c1fff308d6ce33d1d5fab19d9f2a178d9bb16f8b6430",
+    "reproduction/validate_hi_v2.py.txt": "52dec064fc3f0710a457bef1dc7afbc0f61f57d127812c1a78e76a1e3ad8fe9d",
+    "target-candidate.json": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5"
+  }
+}
