@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -35,6 +36,7 @@ from local_operator.mobile.daemon import (
 )
 from local_operator.resume import SessionRow
 from local_operator.session import peer_rows
+from local_operator.session.peer_rows import UnansweredPeer
 
 # -- /api/models ------------------------------------------------------------------
 
@@ -264,7 +266,9 @@ def counted_registry(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     real = agents.AgentRegistry
 
     class Counting(real):  # type: ignore[misc, valid-type]
-        def __init__(self, *args: object, **kwargs: object) -> None:
+        # ``Any`` because this is a pure pass-through to AgentRegistry's real
+        # signature; ``object`` is not assignable to its typed parameters.
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             constructed.append(1)
             super().__init__(*args, **kwargs)
 
@@ -330,7 +334,9 @@ def fake_fanout(monkeypatch: pytest.MonkeyPatch):
             self.gate = threading.Event()
             self.gate.set()
 
-        def __call__(self, root: object, catalog: object) -> tuple[tuple[SessionRow, ...], tuple]:
+        def __call__(
+            self, root: object, catalog: object
+        ) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
             self.reads += 1
             assert self.gate.wait(10), "test fan-out was never released"
             return (SessionRow(id="remote-1", mtime=1.0, name=self.name),), ()
