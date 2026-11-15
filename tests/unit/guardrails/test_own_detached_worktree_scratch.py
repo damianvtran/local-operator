@@ -462,7 +462,46 @@ def _bump_worktree_dir_stamp(wt: Path) -> None:
         conn.close()
 
 
-def test_foreign_match_keeps_own_worktree_nearest_through_git_file(home: Path, repo: Path) -> None:
+def _stamp_mode(monkeypatch: pytest.MonkeyPatch, stamp: str) -> None:
+    """``ctime`` runs the Linux stamp on any host (macOS stamps birth time).
+
+    WHY (train t11, run 43689120825): the pool tests passed on macOS and failed
+    on CI's Ubuntu legs. The ``ctime`` leg reproduces that here, so the next
+    birth-time-only assumption fails locally instead of in a train.
+    """
+    if stamp == "ctime":
+        monkeypatch.setattr(prov, "creation_stamp", lambda st: int(st.st_ctime_ns))
+
+
+def _foreign_pool(home: Path, repo: Path) -> Path:
+    """S2's pool directory, then this session's detached tree ``pool/wt`` inside it.
+
+    WHY the re-record: on Linux ``creation_stamp`` is the dir's ``st_ctime_ns``,
+    and adding ``wt`` to the pool moves the pool's ctime, so S2's row stops
+    matching and the pool reads as no one's — the documented fail-open for
+    foreign rows (``test_ctime_stamp_fails_open_once_the_dir_changes`` pins it).
+    These tests rank the nearest-owner rule, not that stamp limitation, so S2's
+    row is refreshed after the tree exists, as ``_rerecord`` does in
+    ``test_foreign_ledger_and_loop_creations``. The own tree's dir row is then
+    bumped by the caller, leaving only its ``.git`` witness to vouch for it.
+    """
+    _run_recorded(home, "cd ~/local-operator && mkdir .worktrees/pool", sid=S2)
+    wt = _attr3880(home, repo, name="pool/wt")
+    pool = repo / ".worktrees" / "pool"
+    prov.write_records(
+        [(os.path.realpath(pool), "mkdir")],
+        owners=[S2],
+        creator=S2,
+        command="cd ~/local-operator && mkdir .worktrees/pool",
+        state_root=home / ".local-operator",
+    )
+    return wt
+
+
+@pytest.mark.parametrize("stamp", ["native", "ctime"])
+def test_foreign_match_keeps_own_worktree_nearest_through_git_file(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, stamp: str
+) -> None:
     """Nearest owner (#3835) uses the same ``.git`` witness as ``owned_record``.
 
     Another session made the pool directory; this session's detached tree
@@ -470,8 +509,8 @@ def test_foreign_match_keeps_own_worktree_nearest_through_git_file(home: Path, r
     must still be the nearest live owner, or the broader foreign pool row
     makes this session's own file read as another session's work.
     """
-    _run_recorded(home, "cd ~/local-operator && mkdir .worktrees/pool", sid=S2)
-    wt = _attr3880(home, repo, name="pool/wt")
+    _stamp_mode(monkeypatch, stamp)
+    wt = _foreign_pool(home, repo)
     _bump_worktree_dir_stamp(wt)
     assert prov.owned_record(str(wt), S) is not None
     foreign = prov.ForeignCreations(S)
@@ -483,12 +522,13 @@ def test_foreign_match_keeps_own_worktree_nearest_through_git_file(home: Path, r
         foreign.close()
 
 
+@pytest.mark.parametrize("stamp", ["native", "ctime"])
 def test_foreign_match_without_git_file_witness_falls_to_the_foreign_pool(
-    home: Path, repo: Path
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, stamp: str
 ) -> None:
     """Negative control: a new ``.git`` inode generation is no witness."""
-    _run_recorded(home, "cd ~/local-operator && mkdir .worktrees/pool", sid=S2)
-    wt = _attr3880(home, repo, name="pool/wt")
+    _stamp_mode(monkeypatch, stamp)
+    wt = _foreign_pool(home, repo)
     _bump_worktree_dir_stamp(wt)
     gitfile = wt / ".git"
     body = gitfile.read_text()

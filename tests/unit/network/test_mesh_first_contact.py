@@ -296,10 +296,11 @@ def test_the_pairing_ceremony_link_runs_no_link_up_hook(
     ceremony: list[Any] = []
     admit = server_a._admit_link  # noqa: SLF001
 
-    def _admit(link: Any) -> str:
+    def _admit(link: Any, *, outbound: bool = False) -> str:
+        # Forward dial()'s outbound=True so the spy keeps _admit_link's signature.
         if not getattr(link, "link_up_hooks", True):
             ceremony.append(link)
-        return admit(link)
+        return admit(link, outbound=outbound)
 
     monkeypatch.setattr(server_a, "_admit_link", _admit)
     monkeypatch.setattr(

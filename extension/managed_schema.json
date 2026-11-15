@@ -5,6 +5,26 @@
       "title": "Local Operator pairing code",
       "description": "Written only by `lop browser setup --node` on a headless node, removed once paired. Never set this by hand.",
       "type": "string"
+    },
+    "headlessNode": {
+      "title": "Headless mesh node",
+      "description": "Written by `lop browser setup --node`: nobody can click the popup on this machine, so site approvals are decided by the operator's signature instead.",
+      "type": "boolean"
+    },
+    "operatorAnchorPoint": {
+      "title": "Operator anchor public key",
+      "description": "Hex uncompressed P-256 point copied by `lop browser setup --node` from the root-owned operator anchor; site approvals must be signed by it.",
+      "type": "string"
+    },
+    "operatorKeyId": {
+      "title": "Operator anchor key id",
+      "description": "First 32 hex characters of SHA-256 over the anchor point; checked against the point.",
+      "type": "string"
+    },
+    "nodeDeviceId": {
+      "title": "Mesh device id of this node",
+      "description": "Bound into each signed site approval so a decision for one node cannot be replayed on another.",
+      "type": "string"
     }
   }
 }

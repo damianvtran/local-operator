@@ -324,6 +324,7 @@ def fake_proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 _REAL_CWD_ENTRIES = prov._cwd_entries
+_REAL_LIVE_CWD_INSIDE = prov._live_cwd_inside
 
 
 def _add_pid(
@@ -363,8 +364,8 @@ def test_1c_unrelated_unreadable_cwd_no_longer_fails_the_scan(
     wt = _github_default_repos(home, repo)
     _add_pid(fake_proc, 4242, None)  # an Electron zygote: nothing readable
     _deny_cwd(monkeypatch, fake_proc, 4242)
-    assert prov._cwd_entries(fresh=True) == ()
-    assert prov.cwd_holders(os.path.realpath(wt), S) == ()
+    assert prov._cwd_entries(fresh=True) == ((4242, None),)
+    assert prov.cwd_holders(os.path.realpath(wt), S, own=True) == ()
     note = prov.cwd_scan_note(str(wt))
     assert note == (
         "1 same-user process had an unreadable cwd (pid 4242); "
@@ -373,6 +374,41 @@ def test_1c_unrelated_unreadable_cwd_no_longer_fails_the_scan(
     risk, reason = _rank(home, FIELD_1)
     assert risk is Risk.LOW, reason
     assert note in reason
+
+
+def test_overlap_readable_foreign_holder_is_named_before_unrelated_hidden_pid(
+    home: Path, repo: Path, fake_proc: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3987 m1: a hidden background pid must not conceal the definite holder."""
+    wt = _github_default_repos(home, repo)
+    _add_pid(fake_proc, 4242, None)
+    _add_pid(fake_proc, 4343, wt)
+    _deny_cwd(monkeypatch, fake_proc, 4242)
+    monkeypatch.setattr(prov, "_process_table", lambda: {4343: (1, "foreign-shell")})
+    phrase = prov.busy_phrase(str(wt), S)
+    assert "pid 4343 foreign-shell" in phrase
+    assert phrase.index("pid 4343") < phrase.index("pid 4242")
+    assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
+    risk, reason = _rank(home, FIELD_1)
+    assert risk is Risk.HIGH, reason
+    assert "pid 4343 foreign-shell" in reason
+    # Ordinary/unowned removal and interrupted-add cleanup retain #3980's
+    # conservative hidden-pid policy even when own cleanup can ignore it.
+    assert _REAL_LIVE_CWD_INSIDE(os.path.realpath(repo / "elsewhere")) is None
+
+
+def test_overlap_fresh_scan_finds_foreign_holder_after_cached_miss(
+    home: Path, repo: Path, fake_proc: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = _github_default_repos(home, repo)
+    _add_pid(fake_proc, 4242, None)
+    _deny_cwd(monkeypatch, fake_proc, 4242)
+    assert prov.cwd_holders(os.path.realpath(wt), S, own=True) == ()
+    _add_pid(fake_proc, 4343, wt)
+    monkeypatch.setattr(prov, "_process_table", lambda: {4343: (1, "foreign-shell")})
+    assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
+    risk, reason = _rank(home, FIELD_1)
+    assert risk is Risk.HIGH and "pid 4343 foreign-shell" in reason
 
 
 @pytest.mark.parametrize("via", ["fd", "maps"])
@@ -389,7 +425,7 @@ def test_1c_unreadable_cwd_with_evidence_inside_is_a_foreign_holder(
         maps=(inside,) if via == "maps" else (),
     )
     _deny_cwd(monkeypatch, fake_proc, 4343)
-    holders = prov.cwd_holders(os.path.realpath(wt), S)
+    holders = prov.cwd_holders(os.path.realpath(wt), S, own=True)
     assert holders is not None and [h.pid for h in holders] == [4343]
     assert not holders[0].family
     assert prov.cwd_scan_note(str(wt)) == ""  # a holder, not an ignored pid

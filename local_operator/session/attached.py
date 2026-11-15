@@ -89,6 +89,7 @@ from local_operator.mobile.attach_client import (
     STOPPED_REASON,
     AttachClient,
     find_runtime_record,
+    is_bind_failed_reason,
 )
 from local_operator.mobile.types import (
     SLASH_ACTION_RECEIPTS,
@@ -122,6 +123,7 @@ from local_operator.session.frontend_state import (
     FrontendUsage,
     JobState,
     MonitorState,
+    PublicStateView,
     SnapshotJobs,
     SnapshotMcpManager,
     SnapshotMonitorScheduler,
@@ -179,6 +181,22 @@ from local_operator.session.usage_seed import (
 from local_operator.session_lease import SessionLeaseHeldError
 
 logger = logging.getLogger(__name__)
+
+
+def operator_ask_kwargs(method: Any) -> dict[str, Any]:
+    """``{"operator_ask": True}`` when ``method`` takes it, else ``{}``.
+
+    The opt-in that lets ``AttachClient`` present its capability proof on an ask
+    answer (``AttachClient.authority_proof``). Probed rather than always passed
+    so a reduced client double, or a client from before the keyword, is still
+    called with exactly the shape it always took.
+    """
+    try:
+        return (
+            {"operator_ask": True} if "operator_ask" in inspect.signature(method).parameters else {}
+        )
+    except (TypeError, ValueError):
+        return {}
 
 
 def _settings_notice(message: Msg, *, kind: Literal["info", "error"]) -> NoticeEvent:
@@ -654,6 +672,33 @@ class RuntimeUnresponsiveError(ConnectionError):
     #: check over importing the class (the TUI reads it with ``getattr``, the
     #: same shape it already uses for ``actionable``).
     runtime_alive = True
+
+
+class RuntimeBindFailedError(ConnectionError):
+    """The runtime ANSWERED that it could not prepare this connection (``bind_failed``).
+
+    The far side sends ``bind_failed`` before it closes a connection whose
+    canonical state it could not produce in time (``runtime/server.py``
+    ``_announce_bind_failure``): the process is alive and only this connection
+    was dropped, which is what the attach client's canonical reason already says in words.
+    The TYPE is new so a caller that must tell "busy" from "gone" can ask instead
+    of comparing sentences: a remote ``lop network sessions --send`` reported this
+    as a dial that "produced no session" and pointed at ``network doctor`` for a
+    link that was up (the owner's audit showed every stream opened and none
+    refused).
+
+    Deliberately NOT ``runtime_alive``: that marker changes the TUI's notice
+    register (``tui/app.py``), and this class must not move any surface that
+    already handled the plain ``ConnectionError`` it replaces. The text is
+    unchanged, so every existing reader prints exactly what it printed before.
+    """
+
+
+def _sync_disconnect_error(reason: str) -> ConnectionError:
+    """The error a sync wait fails with when its connection closes first."""
+    if is_bind_failed_reason(reason):
+        return RuntimeBindFailedError(reason)
+    return ConnectionError(reason)
 
 
 class OwnerReconnectingError(ConnectionError):
@@ -3732,9 +3777,26 @@ class AttachedSession:
             fields["files"] = files
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
-    async def bind_runtime(self) -> None:
-        """Bind a viewer before an explicitly requested owner control operation."""
-        await self._ensure_bound()
+    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+        """Bind a viewer before an explicitly requested owner control operation.
+
+        ``deadline`` (``time.monotonic()``) replaces the foreground envelope with
+        the CALLER's own. Only a one-shot caller with its own budget passes it:
+        the remote pilot (``network/cli.py``, ``PILOT_BIND_TIMEOUT_S``), which has
+        no "next keystroke rejoins it" and whose failure means the act was not
+        delivered. Everyone else keeps the short foreground default.
+        """
+        if deadline is None:
+            # THE DEFAULT CALL SHAPE IS main's, EXACTLY: ``_ensure_bound()``. The TUI
+            # and every desktop route call ``bind_runtime()`` bare, and the viewers
+            # that specialise this seam (the recovering/racing doubles the sidebar
+            # retry and desktop warm suites drive) take the historical signature.
+            # Forwarding ``deadline=None`` made each of those binds raise
+            # ``TypeError`` instantly, so a retry budget burned in 0 s (#3725 gate
+            # 43112570841). Only a caller with its own budget changes the shape.
+            await self._ensure_bound()
+            return
+        await self._ensure_bound(deadline=deadline)
 
     async def update_desktop_watch(
         self, *, visible: bool, can_notify: bool, timeout: float | None = None
@@ -3948,7 +4010,11 @@ class AttachedSession:
                 and question_index == pending.question_index
             ):
                 return await client.ask_answer(
-                    request_id, value, question_index=question_index, deadline_s=ack_budget
+                    request_id,
+                    value,
+                    question_index=question_index,
+                    deadline_s=ack_budget,
+                    **operator_ask_kwargs(client.ask_answer),
                 )
             raise ValueError("the answer does not match the current question")
 
@@ -4215,17 +4281,24 @@ class AttachedSession:
         method = getattr(client, name)
         if tail:
             return await method(ask_id, *tail)
+        # THIS facade is a person's local surface (the desktop app's backend, the
+        # attached pane, the CLI), so it opts its client into presenting the
+        # operator-capability proof; the runtime then stamps a trusted surface
+        # only if that proof holds (``asks/surfaces``).
+        operator = operator_ask_kwargs(method)
         if name in ("ask_respond", "ask_revise"):
             body = {
                 str(key): [str(item) for item in (values or ())]
                 for key, values in (answers or {}).items()
             }
             if images:
-                return await method(ask_id, body, by=by, images=[dict(i) for i in images])
-            return await method(ask_id, body, by=by)
+                return await method(
+                    ask_id, body, by=by, images=[dict(i) for i in images], **operator
+                )
+            return await method(ask_id, body, by=by, **operator)
         if name == "ask_dismiss" and reason:
-            return await method(ask_id, by=by, reason=reason)
-        return await method(ask_id, by=by)
+            return await method(ask_id, by=by, reason=reason, **operator)
+        return await method(ask_id, by=by, **operator)
 
     def move_will_wait(self) -> bool:
         """Whether :meth:`set_working_directory` is about to make the user wait.
@@ -4744,7 +4817,9 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 — the real prompt reports the failure
             logger.debug("warm engage failed for %s", self._session_id, exc_info=True)
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
         The seam between "looking at a session" and "working in one", and the
@@ -4809,7 +4884,13 @@ class AttachedSession:
                 # ``set_working_directory`` closes by calling this method (agent
                 # review round 1, m4). Best-effort by that method's own contract.
                 self._publish_working_directory(self._cwd)
-            await self._bind_under_lock(foreground=foreground)
+            if deadline is None:
+                # main's call shape, exactly (see ``bind_runtime``): the desktop warm
+                # suites park this seam with a ``(*, foreground)`` double, and an
+                # unconditional ``deadline=None`` made every warm raise TypeError.
+                await self._bind_under_lock(foreground=foreground)
+            else:
+                await self._bind_under_lock(foreground=foreground, deadline=deadline)
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
@@ -4891,7 +4972,7 @@ class AttachedSession:
                 if not self._foreground_waiting:
                     self._foreground_arrived.clear()
 
-    async def _bind_under_lock(self, *, foreground: bool) -> None:
+    async def _bind_under_lock(self, *, foreground: bool, deadline: float | None = None) -> None:
         """The engage/retry body of :meth:`_ensure_bound`, holding ``_bind_lock``.
 
         Split out so the waiter accounting around the acquire reads as one
@@ -5029,6 +5110,16 @@ class AttachedSession:
             return
         sync_timeout = FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
         budget = _FOREGROUND_BIND_BUDGET_S if foreground else _BACKGROUND_BIND_BUDGET_S
+        if deadline is not None:
+            # A CALLER'S OWN DEADLINE IS BOTH THE ENVELOPE AND THE BUDGET. The
+            # 15 s foreground cap exists because the budgets of a WATCHED bind
+            # compose and the runtime keeps running for the next keystroke; a
+            # one-shot pilot act has neither, so the cap silently turned its
+            # 120 s bind budget into 15 s and a busy runtime into an undelivered
+            # message. The deadline is absolute, so the engage above already
+            # spent part of it and the caller's outer bound still fires last.
+            budget = max(0.0, deadline - time.monotonic())
+            sync_timeout = budget
         deadline = time.monotonic() + budget
 
         def _effective_deadline() -> float:
@@ -5681,7 +5772,7 @@ class AttachedSession:
             # reason string is carried into the error so the copy the pump
             # produced actually reaches a surface instead of only a log line.
             if not pending_sync.done():
-                pending_sync.set_exception(ConnectionError(reason))
+                pending_sync.set_exception(_sync_disconnect_error(reason))
             # Closing a failed binding schedules the old pump's final callback.
             # It must not mark a retried/newer binding as recovering.
             if self._client is client:
@@ -7680,7 +7771,12 @@ class AttachedSession:
             return
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
-        state = self._frontend_store.apply_update(update)
+        # The VIEW, not ``apply_update``'s whole-state clone: this runs on the
+        # serve loop once per delta of every attached conversation, and reads a
+        # dozen fields (``jobs`` only when the roster moved). Cloning all of it
+        # measured 13.6 ms p50 / 42.4 ms p95 CPU per delta on a live 346-job
+        # orchestrator, against a 0.7 ms reducer; see ``PublicStateView``.
+        state = self._frontend_store.apply_update_view(update)
         # A per-ROW roster delta moves the roster just as surely as a full
         # replacement does, and the facades are keyed by FIELD name: without
         # this, ``apply_update`` merged the rows into canonical state and the
@@ -7744,7 +7840,7 @@ class AttachedSession:
 
     def _apply_frontend_facades(
         self,
-        state: FrontendSessionState,
+        state: FrontendSessionState | PublicStateView,
         *,
         changed_fields: set[str] | None = None,
         restored: bool = False,
@@ -7816,8 +7912,16 @@ class AttachedSession:
                 fast_mode=bool(selected.fast_mode and selected.supports_fast_mode),
             )
         if changed_fields is None or "jobs" in changed_fields:
-            self.jobs.replace(state.jobs)
-            self._subagent_comms.replace(state.jobs)
+            # Both facades detach on their own and memoise by row identity, so a
+            # delta hands them the canonical rows; a full install's clone has no
+            # canonical rows to give, and pays one detach per row as before.
+            rows = (
+                state.canonical_jobs_for_facades()
+                if isinstance(state, PublicStateView)
+                else state.jobs
+            )
+            self.jobs.replace(rows)
+            self._subagent_comms.replace(rows)
         if changed_fields is None or "wakes" in changed_fields:
             self.wake_scheduler.replace(state.wakes)
         if changed_fields is None or "monitors" in changed_fields:
@@ -8426,6 +8530,7 @@ class AttachedSession:
                         pending.request_id,
                         values[0],
                         question_index=pending.question_index,
+                        **operator_ask_kwargs(client.ask_answer),
                     )
                 except OperatorAuthorityRequired:
                     # The approval arm's first clause, one kind over: a refusal is
@@ -10319,7 +10424,7 @@ class AttachedSession:
         else:
             self._switch_on_owner(client, model, announce=True)
 
-    def _consume_settings_result(self, state: FrontendSessionState) -> None:
+    def _consume_settings_result(self, state: FrontendSessionState | PublicStateView) -> None:
         """Render OUR switch outcomes once: a refusal as an error, success silently.
 
         SUCCESS IS SILENT (PR #3697 review R1-M3). The ``selected_model`` repaint

@@ -13,5 +13,7 @@
   "cli.mobile_help.devices_port": "порт мобильного демона (по умолчанию — собственный порт демона)",
   "cli.mobile_help.uninstall": "Удалить LaunchAgent",
   "cli.mobile_help.uninstall_purge": "Также удалить пароль",
-  "cli.mobile_help.serve": "Запустить демон (на переднем плане)"
+  "cli.mobile_help.serve": "Запустить демон (на переднем плане)",
+  "cli.mobile_help.doctor": "Диагностика доступа с телефона, только чтение (можно безопасно передать)",
+  "cli.mobile_help.doctor_json": "Вывести диагностику в формате JSON"
 }

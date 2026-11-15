@@ -204,7 +204,10 @@ def test_origin_not_allowed_on_a_headless_node_sends_nobody_to_a_popup(monkeypat
     )
     text = format_error(error, action="open")
     assert "popup" not in text
-    assert "request_access" not in text
+    # With signed approvals (#3938) the same calls work: request_access raises
+    # the operator's card on THEIR device, await_access waits for it.
+    assert "action='request_access' url=https://example.com/page" in text
+    assert "await_access" in text and "own device" in text
     assert "headless node" in text and "operator" in text
 
 

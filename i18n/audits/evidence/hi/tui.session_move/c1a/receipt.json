@@ -1,0 +1,12 @@
+{
+  "audit_id": "c1a",
+  "locale": "hi",
+  "namespace": "tui.session_move",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself",
+  "artifacts": {
+    "record.json": "18ca1774c20101fce09b2aaa1a0f8f5367df838a3beab511304b57293fe084e5",
+    "report.md": "379112f662733023ea9c711471e6e3e5f597f069db438709b1e6cee5ed6d881b",
+    "audit.log": "a9b19e80550012f637a8f942c9efa85c70bd46f95dbb3b50868f11393794ddfe",
+    "target-candidate.json": "5076ea0da47639c58ce4b4f9311d3d4c4c76c796ab108c83f9256ab0fdc39229"
+  }
+}

@@ -505,7 +505,11 @@ def _keyagent_identity_problems(doc: dict[Any, Any]) -> list[str]:
         for name in sorted(RETIRED_KEYAGENT_SECRETS)
         if f"secrets.{name}" in job_text
     ]
-    assertions = [i for i, s in enumerate(steps) if (s.get("env") or {}).get("EXPECTED_AUTHORITY")]
+    assertions = [
+        i
+        for i, s in enumerate(steps)
+        if (s.get("env") or {}).get("EXPECTED_AUTHORITY") and s.get("name") != _LAUNCHER_ASSERT_STEP
+    ]
     if len(assertions) != 1:
         return [*problems, "no post-sign assertion of the organization Authority"]
     index = assertions[0]
@@ -537,9 +541,46 @@ def _keyagent_assertion_step(doc: dict[Any, Any]) -> dict[Any, Any]:
     (step,) = [
         s
         for s in doc["jobs"]["keyagent-macos"]["steps"]
-        if (s.get("env") or {}).get("EXPECTED_AUTHORITY")
+        if (s.get("env") or {}).get("EXPECTED_AUTHORITY") and s.get("name") != _LAUNCHER_ASSERT_STEP
     ]
     return step
+
+
+# ---------------------------------------------------------------------------
+# The LaunchAgent launcher: signed by the organization in the same job, and
+# shipped inside the macOS wheel. Background Task Management names every Local
+# Operator login item after it, so a launcher signed by anyone else — or not
+# shipped — puts "python3" (or a personal developer name) back in Login Items.
+# ---------------------------------------------------------------------------
+
+_LAUNCHER_SIGN_STEP = "Assemble and sign the LaunchAgent launcher"
+_LAUNCHER_ASSERT_STEP = "Assert the launcher signing identity"
+
+
+def test_the_launcher_is_signed_by_the_organization_and_shipped_in_the_wheel() -> None:
+    steps = _workflow()["jobs"]["keyagent-macos"]["steps"]
+    names = [s.get("name") for s in steps]
+    sign = steps[names.index(_LAUNCHER_SIGN_STEP)]
+    check = steps[names.index(_LAUNCHER_ASSERT_STEP)]
+    wheel = steps[names.index(_KEYAGENT_WHEEL_STEP)]
+    # Same throwaway-keychain identity as the key agent, addressed by hash.
+    assert "packaging/macos/assemble_launcher_bundle.sh" in sign["run"]
+    assert '--identity "$IDENTITY_SHA"' in sign["run"]
+    assert check["env"]["EXPECTED_AUTHORITY"] == KEYAGENT_AUTHORITY
+    assert str(check["env"]["EXPECTED_TEAM"]) == KEYAGENT_TEAM
+    assert check["env"]["EXPECTED_IDENTIFIER"] == "com.local-operator.launcher"
+    assert 'codesign -dv --verbose=4 "$RUNNER_TEMP/Local Operator.lopruntime"' in check["run"]
+    assert 'if values("Authority") != wanted:' in check["run"]
+    # Order: signed, then asserted, then packed — an assertion after the wheel has
+    # already let the wrong identity into the uploaded artefact.
+    assert (
+        names.index(_KEYAGENT_SIGN_STEP)
+        < names.index(_LAUNCHER_SIGN_STEP)
+        < names.index(_LAUNCHER_ASSERT_STEP)
+        < names.index(_KEYAGENT_WHEEL_STEP)
+    )
+    assert '--launcher "$RUNNER_TEMP/Local Operator.lopruntime"' in wheel["run"]
+    assert "Local Operator.lopruntime/Contents/MacOS/Local Operator" in wheel["run"]
 
 
 def test_the_key_agent_is_signed_with_the_organization_identity() -> None:

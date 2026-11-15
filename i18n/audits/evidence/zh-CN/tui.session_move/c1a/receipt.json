@@ -1,0 +1,33 @@
+{
+  "locale": "zh-CN",
+  "namespace": "tui.session_move",
+  "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "model": "deepseek/deepseek-flash",
+    "date": "2026-11-11",
+    "result": "passed",
+    "findings": 2
+  },
+  "status": "passed",
+  "note": "zh-CN C1 /move refusals (7 keys). Evidence: i18n/audits/evidence/zh-CN/tui.session_move/c1a/record.json. Independent auditor deepseek/deepseek-flash; 2 minor (迁移 vs shipped 移动, <设备> vs 对等设备); no blocker/major.",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1a/record.json",
+      "sha256": "ef193fd1c06b6c33f1a23fa8fc18096e0506ebddab7effee37a3580c7dc557c5"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1a/report.md",
+      "sha256": "04ea132d9eecb3d5cc8f4e38b60e0111bcb645b80155e2e7c28d60ed8650f677"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1a/audit.log",
+      "sha256": "605c0c2d273ddbcfd991ab03aa81bb1449f18948e0a171be131b6a80f04b0dde"
+    }
+  ]
+}

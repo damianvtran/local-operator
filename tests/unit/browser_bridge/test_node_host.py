@@ -83,10 +83,19 @@ class FakeNode:
             install_daemon=self._install_daemon,
             enable_linger=self._enable_linger,
             request_codes=self.request_codes,
+            # Never the real /etc anchor: the policy content must not depend on
+            # which machine runs the suite.
+            approval_policy=lambda: dict(self.approval),
             sleep=lambda _s: self._tick(),
             monotonic=lambda: self.clock,
             now=lambda: "2026-11-13T00:00:00Z",
         )
+        self.approval: dict[str, Any] = {
+            "headlessNode": True,
+            "operatorAnchorPoint": "04" + "ab" * 64,
+            "operatorKeyId": "k" * 32,
+            "nodeDeviceId": "d_node",
+        }
         self.clock = 0.0
         self.linger = False
         self.daemon_installed = False
@@ -472,11 +481,13 @@ def test_fresh_node_installs_pairs_and_records(paths: Path) -> None:
     i = next(i for i, c in enumerate(order) if " install " in c and c.endswith(".rpm"))
     assert k < i
     # The code went in as 0640 root:<user's group>, and came OUT again.
-    secret = [w for w in node.policy_writes if "3rdparty" in w["content"]]
+    secret = [w for w in node.policy_writes if _pairing_codes(w["content"])]
     assert secret and secret[0]["mode"] == "0640" and secret[0]["group"] == "ec2-user"
-    assert secret[0]["content"]["3rdparty"]["extensions"]
     final = json.loads(node.policy_path.read_text(encoding="utf-8"))
-    assert "3rdparty" not in final and final["ExtensionInstallForcelist"]
+    assert not _pairing_codes(final) and final["ExtensionInstallForcelist"]
+    # The signed-approval anchor is public material and STAYS in the clean policy.
+    [managed] = final["3rdparty"]["extensions"].values()
+    assert managed == node.approval
     record = json.loads(node.env.record_path.read_text(encoding="utf-8"))
     assert record["authorised_by"] == "Operator (test)"
     assert record["paired"] is True
@@ -499,8 +510,8 @@ def test_pairing_code_is_removed_from_policy_even_when_pairing_times_out(paths: 
     assert _states(outcome)["pairing"] == node_host.STATE_FAILED
     assert f"{node_host.PAIR_WAIT_S:.0f}s" in outcome.steps[-1].detail
     final = json.loads(node.policy_path.read_text(encoding="utf-8"))
-    assert "3rdparty" not in final
-    assert any("3rdparty" in w["content"] for w in node.policy_writes)
+    assert not _pairing_codes(final)
+    assert any(_pairing_codes(w["content"]) for w in node.policy_writes)
 
 
 def test_a_new_extension_version_cycles_the_forcelist_and_re_pairs(paths: Path) -> None:
@@ -982,13 +993,13 @@ def test_pairing_refuses_to_share_the_code_with_a_shared_primary_group(paths: Pa
     outcome = node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
     assert _states(outcome)["pairing"] == node_host.STATE_FAILED
     assert "alice" in outcome.steps[-1].detail
-    assert not any("3rdparty" in w["content"] for w in node.policy_writes)
+    assert not any(_pairing_codes(w["content"]) for w in node.policy_writes)
     # Another account whose PRIMARY gid is the same group counts too.
     node.group_members = ""
     node.extra_passwd = "bob:x:1001:1000::/home/bob:/bin/bash\n"
     outcome = node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
     assert "bob" in outcome.steps[-1].detail
-    assert not any("3rdparty" in w["content"] for w in node.policy_writes)
+    assert not any(_pairing_codes(w["content"]) for w in node.policy_writes)
 
 
 def test_each_step_is_reported_as_it_completes(paths: Path) -> None:
@@ -1088,7 +1099,7 @@ def test_sigterm_mid_pairing_still_removes_the_code(paths: Path) -> None:
 
     def sleep(seconds: float) -> None:
         policy = json.loads(node.policy_path.read_text(encoding="utf-8"))
-        if "3rdparty" in policy:
+        if _pairing_codes(policy):
             os.kill(os.getpid(), signal.SIGTERM)
         tick(seconds)
 
@@ -1097,8 +1108,9 @@ def test_sigterm_mid_pairing_still_removes_the_code(paths: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
     assert excinfo.value.code == 128 + signal.SIGTERM
-    assert any("3rdparty" in w["content"] for w in node.policy_writes)
-    assert "3rdparty" not in json.loads(node.policy_path.read_text(encoding="utf-8"))
+    assert any(_pairing_codes(w["content"]) for w in node.policy_writes)
+    # The anchor block (#3938) stays; only the CODE must be gone.
+    assert not _pairing_codes(json.loads(node.policy_path.read_text(encoding="utf-8")))
     # The previous handler is back once setup returns.
     assert signal.getsignal(signal.SIGTERM) == before
 
@@ -1221,11 +1233,47 @@ def test_cli_uninstall_rows_say_remove_and_name_what_is_kept(
     assert "Kept:" in out
 
 
-def test_paired_line_says_no_site_opens_yet(
+def test_paired_line_says_how_a_site_gets_approved(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
 ) -> None:
-    """U1: success read as "ready", but no site can be approved on a node yet."""
+    """U1: success read as "ready" without saying how a site gets approved on a
+    node; with signed approvals (#3938) the line names the operator's device."""
     node = FakeNode(paths, provisioned=True)
     monkeypatch.setattr(node_host, "default_env", lambda: node.env)
     _code, out = _cli(monkeypatch, capsys, ["setup", "--node", "--dry-run"])
-    assert "no site can be opened" in out.splitlines()[-1]
+    assert "signs on their own device" in out.splitlines()[-1]
+
+
+def _pairing_codes(policy: dict[str, Any]) -> list[str]:
+    extensions = (policy.get("3rdparty") or {}).get("extensions", {})
+    return [
+        str(values[node_host.MANAGED_PAIRING_KEY])
+        for values in extensions.values()
+        if values.get(node_host.MANAGED_PAIRING_KEY)
+    ]
+
+
+def test_a_changed_anchor_is_re_derived_into_the_policy(paths: Path) -> None:
+    """One root writer: setup re-reads the anchor at each write, so a rotated
+    /etc anchor (or one installed after the first run) cannot leave the
+    extension verifying against a stale key."""
+    node = FakeNode(paths, provisioned=True)
+    first = node_host.setup(node_host.Options(authorised_by="x"), node.env)
+    assert _states(first)["policy"] == node_host.STATE_IN_PLACE
+    node.approval = {"headlessNode": True}  # the anchor became unusable
+    again = node_host.setup(node_host.Options(authorised_by="x"), node.env)
+    assert _states(again)["policy"] == node_host.STATE_APPLIED
+    final = json.loads(node.policy_path.read_text(encoding="utf-8"))
+    [managed] = final["3rdparty"]["extensions"].values()
+    assert managed == {"headlessNode": True}
+
+
+def test_render_policy_merges_the_approval_block_with_a_pairing_code(tmp_path: Path) -> None:
+    policy = node_host.render_policy(
+        "abc", tmp_path / "update.xml", "CODE", approval={"headlessNode": True}
+    )
+    assert policy["3rdparty"]["extensions"]["abc"] == {
+        "headlessNode": True,
+        node_host.MANAGED_PAIRING_KEY: "CODE",
+    }
+    assert "3rdparty" not in node_host.render_policy("abc", tmp_path / "update.xml")

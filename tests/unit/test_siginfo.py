@@ -162,6 +162,55 @@ def test_a_platform_this_module_cannot_verify_arms_nothing(monkeypatch: pytest.M
     assert siginfo.take(signal.SIGTERM) is None
 
 
+@pytest.fixture
+def _fake_supported_platform(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A darwin-shaped host whose libc must never be asked for ``sigaction``.
+
+    Returns the list of libc lookups so a test can assert none happened.
+    """
+    lookups: list[str] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(siginfo, "_struct_type", lambda: object())
+    monkeypatch.setattr(siginfo, "_libc", lambda: lookups.append("libc") or object())
+    return lookups
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "Off", "0", "false", "FALSE", "no", " no "])
+def test_the_env_switch_off_disarms_the_sensor(
+    monkeypatch: pytest.MonkeyPatch, _fake_supported_platform: list[str], value: str
+) -> None:
+    """Off values make every caller take the existing 'unsupported' path, touching no libc."""
+    monkeypatch.setenv(siginfo.SENSOR_ENV, value)
+    assert siginfo.supported() is False
+    assert siginfo.arm(signal.SIGTERM) is False
+    assert siginfo.armed(signal.SIGTERM) is False
+    assert _fake_supported_platform == [], "libc/sigaction was reached with the sensor off"
+
+
+@pytest.mark.parametrize("value", [None, "", "on", "1", "true", "maybe"])
+def test_the_env_switch_default_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, _fake_supported_platform: list[str], value: str | None
+) -> None:
+    """Unset or any non-off value keeps the sensor eligible to arm."""
+    if value is None:
+        monkeypatch.delenv(siginfo.SENSOR_ENV, raising=False)
+    else:
+        monkeypatch.setenv(siginfo.SENSOR_ENV, value)
+    assert siginfo.supported() is True
+
+
+def test_the_env_switch_is_read_at_call_time(
+    monkeypatch: pytest.MonkeyPatch, _fake_supported_platform: list[str]
+) -> None:
+    """Flipping the variable after import changes the answer both ways."""
+    monkeypatch.delenv(siginfo.SENSOR_ENV, raising=False)
+    assert siginfo.supported() is True
+    monkeypatch.setenv(siginfo.SENSOR_ENV, "off")
+    assert siginfo.supported() is False
+    monkeypatch.setenv(siginfo.SENSOR_ENV, "on")
+    assert siginfo.supported() is True
+
+
 def test_an_unarmed_signal_captures_nothing() -> None:
     """With nothing armed, every reader answers "no capture" — never a placeholder pid."""
     assert siginfo.take(signal.SIGUSR2) is None

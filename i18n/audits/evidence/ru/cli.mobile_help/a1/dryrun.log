@@ -1,0 +1,3 @@
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-ru-cli.mobile_help.json --expected-history-sha 0752bfacd441243b05e3043990c6808f3cff3549ae327b38048723349109cf35 --dry-run
+i18n/audit-history/ru/cli.mobile_help.json
+[exit 0]

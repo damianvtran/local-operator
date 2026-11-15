@@ -450,14 +450,19 @@ daemon still checks the code — no extension id is trusted automatically.
 
 **What it does not change.**
 
-- **No site can be opened yet.** Per-site approvals stay default-deny and are
-  the operator's decision, and on a user's machine they are granted in the
-  extension popup — which nobody can reach in a headless Chrome. This build
-  cannot open sites on a headless node yet (a later update adds operator
-  approval from their own device), so every `open` on a node returns
-  `origin_not_allowed` and `request_access` queues nothing: tell the operator
-  which site you needed and why, and stop the browser part of the task; never
-  work around it.
+- **Per-site approvals stay default-deny** and are the operator's decision,
+  once per site, with no pre-approved loopback. Nobody can click a headless
+  Chrome's popup, so on a node the operator decides on **their own device**
+  and signs the answer with their operator key; the node's extension checks
+  that signature itself before it allows anything — see "Per-site
+  permissions", "On a headless node". Setup copies the operator's public key
+  from the node's root-owned operator anchor
+  (`/etc/local-operator/operators/<uid>.json`) into the extension's managed
+  policy; re-run `lop browser setup --node --repair --authorised-by '<who,
+  when>'` after that anchor changes — or after the operator key file was
+  copied onto (or removed from) the node: setup reads that state only when it
+  runs, and `lop network ready` warns while the node holds the key. Never work
+  around a refusal.
 - **Node-side boundaries are advisory where sudo is passwordless.** On a node
   whose account has NOPASSWD sudo, the policy file's root ownership and the
   unit's limits are audited, not enforced against that account: anything
@@ -558,15 +563,102 @@ independently (Settings → Allowed sites). A separate **Dangerously allow all
 websites** switch in Settings skips the site prompt entirely; it requires an
 explicit confirmation dialog and is off by default.
 
+### On a headless node: the operator decides on their device
+
+A node's Chrome has no screen, so the popup steps above do not apply there.
+The flow keeps the same three calls; only who answers, and where, changes:
+
+1. `open` fails with `origin_not_allowed`, as above.
+2. `request_access` raises a **card for the operator** — a queued ask whose
+   text the harness writes from the origin ("Allow <origin> on <node>?",
+   Deny / Approve). The card IS the notification: do not write your own ask
+   or message for it, and do not ask again for the same site — a second
+   `request_access` for a pending origin says it is already asked. The card
+   reaches the operator's own device when this session was started from that
+   device; a session started directly on the node shows the card only on the
+   node, where nobody can sign — tell the operator that if it is your case.
+3. `await_access` (each call ≤240 s; the request lives ~10 minutes). There is
+   no popup on a node: the card is on the operator's device. Do other work
+   between calls rather than sitting on it. `allowed` means the operator
+   approved **this exact origin** (scheme, host, port) — the only scope a node
+   grants. `denied` is final, and it sticks: the node remembers a signed Deny,
+   and a later `request_access` for that origin answers "the operator denied
+   this site" without raising a card. Do not ask again unless they tell you to.
+4. If `await_access` reports no live request (the card expired unanswered),
+   you may re-raise it with `request_access` one time. If that card also
+   expires, tell the operator in chat which site you need, and stop using it.
+   The tool counts this from the session's own cards: once two cards for an
+   origin have expired unanswered, `request_access` raises no third and says
+   the operator hasn't answered twice. If the operator replies in chat asking
+   for it, you may raise one new card (plus one re-raise): only cards that
+   lapsed after their last chat message count. `cancel_access` withdraws the
+   request and its card together (a withdrawn card does not count as
+   unanswered).
+
+Removing a decision: an approval lasts until someone runs `lop browser sites
+--revoke <origin>` **on the node** (`lop browser sites` lists what that
+browser allows and which sites the operator denied). Revoking a denial lets an
+agent ask about the site again. Both only ever reduce what is allowed, so they
+need no signature. **Lifting a denial is the operator's decision, never
+yours:** run `lop browser sites --revoke <origin>` only when the operator tells
+you to (quote them), then `request_access`; never on your own initiative.
+`--revoke` removes one exact origin; broad grants and the extension's
+all-sites switch are changed only in the extension's Settings page, which a
+node has no screen for.
+
+What can go wrong, and what to say:
+
+- `no_approver` from `request_access` — the node's browser has no operator key
+  to verify against (setup ran without a usable anchor), or this machine
+  holds the operator key's private half (then a signature here would not show
+  a person decided). Do not retry; tell the operator, and carry on without the
+  site. The fix is theirs: `lop browser setup --node --repair --authorised-by
+  '<who, when>'` on the node re-derives the browser's anchor from the installed
+  operator anchor (`/etc/local-operator/operators/<uid>.json`); if the node
+  holds the operator key file, remove it from the node first.
+- An answer from the node's own terminal, or from a paired phone, is refused
+  (`unsigned_decision`): only an answer signed with the operator key itself
+  decides. Approving from Local Operator (the app or `lop`) on their own
+  computer is the path, and the card says so.
+- An operator computer on a build from before signed site approvals cannot
+  answer at all: the node gives a `decide` challenge for a site card only to a
+  client that says it checked the card first (`site_card_verified`), and an
+  old build — or a phone — is told to answer from an up-to-date Local Operator
+  on the operator's computer. That marker is unsigned: it keeps honest old
+  clients from signing a card they never checked; it is not a defence against
+  someone who controls the operator's signing client.
+- The operator's computer refuses to sign a card it cannot rebuild
+  (`site_card_mismatch`): its words or buttons do not match the site its id
+  binds — tampering, or the two machines run different releases. Nothing was
+  approved; if they say both are up to date, raise it as a security problem.
+- The request expired before the answer reached the browser: you learn it from
+  `await_access` reporting no live request — follow step 4.
+
+What is enforced where: the node's browser approves a site only for a
+signature from the operator key over that one request (its entry, origin and
+node), so a signature cannot be forged here or moved to another site. The
+operator's computer, before it signs, rebuilds the card from the site it
+binds — every word, button, description and default — and refuses one that
+differs, or that names the machine differently from how its own mesh knows
+it, so what the operator reads is what the signature approves. Older operator
+builds that lack that check are refused a challenge (above), so they cannot
+sign a node's card. And on a
+node whose user can run `sudo` without a password the whole boundary is
+advisory: whoever holds the node can rewrite the root-owned policy (sudo logs
+it). Never do that, never write to a session's ask log, and never try to
+answer your own card.
+
 Other rules:
 
 - `denied` is final for the task at hand: **do not retry or re-request the
-  same origin** unless the user says they've changed their mind.
+  same origin** unless the user says they've changed their mind (on a node,
+  that is also when you run `--revoke`, above).
 - A redirect INTO a new origin mid-navigation still prompts synchronously at
   that hop (a running command cannot fail early); if a navigation returns
   `origin_denied` after a redirect, explain which hop needed approval.
 - If you know you will visit several sites, `request_access` them and tell
-  the user up front in ONE message so they can approve in a batch.
+  the user up front in ONE message so they can approve in a batch. On a node
+  the cards are the batch: skip the message.
 - Subresources are not gated (this is a navigation gate, not a network filter).
 - `http`/`https` only; the extension refuses `chrome://`, `file://`, etc.
 

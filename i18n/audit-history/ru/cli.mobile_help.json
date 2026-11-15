@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.mobile_help",
+  "history_sha256": "7e40713a5a211ba126a23de772c736418d170fe98bee1a9f67c043cb4e25a26d",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (English drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Whole namespace at the new English hash (2 new keys judged in full, 15 prior keys re-read): independent audit a1 PASSED, 0 blocker / 0 major / 0 minor / 2 nit. RU-H1 nit (mobile_help.doctor). RU-H2 nit (mobile_help.status). Translator and auditor share model anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, no terminal/desktop frame. Evidence: i18n/audits/evidence/ru/cli.mobile_help/a1/record.json",
+      "evidence": "i18n/audits/evidence/ru/cli.mobile_help/a1/record.json",
+      "round": "a1",
+      "keys_audited": 17
+    }
+  ]
+}
