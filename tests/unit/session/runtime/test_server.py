@@ -5243,6 +5243,28 @@ async def test_switching_away_re_announces_a_parked_gate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_queued_ask_claim_is_published_as_queued() -> None:
+    """PR #3934 R1-3/Q1: the record says whether ``pending`` is a QUEUED ask.
+
+    A peer's park detector must tell a blocking gate (a park) from the queue's
+    listing claim (no park) on the same ``"ask"`` word; the record is the only
+    thing that crosses, so the distinction has to be on it.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    try:
+        await _wait_record()
+        runtime.set_record_pending("ask", queued=True)
+        record = registry.scan()[0][0]
+        assert (record.pending, record.pending_queued) == ("ask", True)
+        runtime.set_record_pending("ask")
+        record = registry.scan()[0][0]
+        assert (record.pending, record.pending_queued) == ("ask", False)
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_viewer_watch_rejects_a_non_boolean_and_leaves_state_intact() -> None:
     """A malformed frame must not silently blank the display claim."""
     handle = FakeHandle()

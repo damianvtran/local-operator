@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "शुरू होते समय दिया गया आपका प्रॉम्प्ट नहीं भेजा गया — यह इनपुट फ़ील्ड में है।",
+  "tui.boot_prompt.not_sent_kept_draft": "शुरू होते समय दिया गया आपका प्रॉम्प्ट नहीं भेजा गया: {prompt}"
+}

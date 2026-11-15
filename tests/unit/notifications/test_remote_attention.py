@@ -889,3 +889,381 @@ def test_the_baselines_file_is_owner_only_and_heals_when_corrupt(tmp_path: Path)
 
 def test_the_cleanup_prefixes_match_this_modules_namespaces() -> None:
     assert store_mod.CLEANUP_KEY_PREFIXES == (f"{ra.DONE_PREFIX}:", f"{ra.NOTICE_PREFIX}:")
+
+
+# ---------------------------------------------------------------------------
+# Open queued asks ride the notices block (node-ask-forward, 2026-11-13)
+# ---------------------------------------------------------------------------
+#
+# A queued ask is not a NotificationStore row on the node (the local inbox
+# merges open asks from the ask index), so before this an ask asked by a node
+# session never reached the origin at all. The owner now lists each OPEN ask as
+# a ``remote-ask:<id>`` notice; the origin raises one high row per ask and
+# retires it once a newer listing no longer carries it.
+
+
+def _queue_ask(owner: Path, ask_id: str, question: str, *, at: int | None = None) -> None:
+    from local_operator.asks import store as ask_store
+
+    now = ask_store.now_ms() if at is None else at
+    ask_store.append_event(
+        ask_store.session_dir(owner, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "at": now,
+            "ask_id": ask_id,
+            "expires_at": now + 3_600_000,
+            "questions": [{"id": "q0", "question": question, "options": [{"label": "yes"}]}],
+        },
+    )
+
+
+def _settle_ask(owner: Path, ask_id: str) -> None:
+    from local_operator.asks import store as ask_store
+
+    ask_store.append_event(
+        ask_store.session_dir(owner, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_DISMISSED,
+            "at": ask_store.now_ms(),
+            "ask_id": ask_id,
+            "reason": "answered_in_chat",
+        },
+    )
+
+
+def test_ask_an_open_queued_ask_is_stamped_first_for_the_origin(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    from local_operator.asks import store as ask_store
+
+    asked_at = ask_store.now_ms()
+    _queue_ask(owner, "k7", "Install Chromium on the node?", at=asked_at)
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    blocks = rows[0]["notices"]
+    assert [{k: v for k, v in block.items() if k != "at"} for block in blocks] == [
+        {
+            "key": "remote-ask:k7",
+            "revision": 1,
+            "priority": "high",
+            "title": "Install Chromium on the node?",
+        },
+        {"key": "deploy", "revision": 1, "priority": "high", "title": "Deploy finished"},
+    ]
+    # The ask carries its OWN queue time: the origin drops a timeless notice
+    # (the no-backfill rule), so without it the ask would never be raised.
+    assert blocks[0]["at"] == asked_at
+    # Another member of the mesh still sees nothing (the origin-only rule).
+    other = [_catalog_row(origin="d_other")]
+    ra.stamp_rows_for_viewer(owner, other, HEAD)
+    assert "notices" not in other[0]
+
+
+def test_ask_a_settled_or_lapsed_ask_is_no_longer_stamped(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    _queue_ask(owner, "k7", "Install Chromium on the node?")
+    _settle_ask(owner, "k7")
+    # Queued two hours ago with a one-hour deadline: folds to timed_out.
+    from local_operator.asks import store as ask_store
+
+    _queue_ask(owner, "k8", "Old question?", at=ask_store.now_ms() - 7_200_000)
+    assert ra.open_ask_notices(owner, SID) == []
+
+
+def test_ask_the_wire_list_stays_bounded_with_asks_first(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    for index in range(ra.NOTICES_ON_WIRE + 2):
+        _queue_ask(owner, f"k{index}", f"Question {index}?")
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    keys = [block["key"] for block in rows[0]["notices"]]
+    assert len(keys) == ra.NOTICES_ON_WIRE
+    assert all(key.startswith(ra.ASK_NOTICE_PREFIX) for key in keys)
+
+
+def _ask_claim(
+    ask_id: str = "k7", title: str = "Install Chromium on the node?", *, at: int | None = None
+) -> Any:
+    claim = (f"{ra.ASK_NOTICE_PREFIX}{ask_id}", 1, "high", title)
+    return claim if at is None else (*claim, at)
+
+
+def _asked_at_first_contact(root: Path) -> int:
+    """An ask time the origin both raises and can later settle by absence.
+
+    The no-backfill rule raises only a claim at or after the origin's baseline,
+    and the row keeps that owner time as ``updated_at``, which the absence
+    settle (Q3) requires to be OLDER than the settling listing. ``_timed``'s
+    hour-ahead default would pass the first and never the second, so an ask
+    test states the realistic case: asked at the moment of first contact.
+    """
+    return ra.origin_baseline_ms(root, NODE)
+
+
+def test_ask_the_origin_raises_one_high_row_and_retires_it_on_settle(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    watcher = ra.RemoteAttentionWatcher(root)
+    claim = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    # A second host / restarted watcher: no second row, no second banner.
+    ra.RemoteAttentionWatcher(root).observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, "remote-ask:k7")
+    assert row["session_id"] == SID, "the row deep-links to the remote session"
+    assert row["priority"] == "high" and row["title"] == "Install Chromium on the node?"
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+    # The ask was answered on the node: the next (newer) listing carries no claim.
+    watcher.observe([_row(notices=None)], listed_at_ms=_later())
+    assert _items(root) == [], "a settled ask must leave the origin's inbox"
+    row = NotificationStore(root).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and row["dismissed_at"]
+
+
+def test_ask_absence_settles_nothing_it_cannot_vouch_for(root: Path) -> None:
+    watcher = ra.RemoteAttentionWatcher(root)
+    claim = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    # A listing that started BEFORE the row was written (a stale cache) — Q3.
+    watcher.observe([_row(notices=None)], listed_at_ms=0)
+    # The device did not answer: no row for the session at all.
+    watcher.observe([], [NODE], listed_at_ms=_later())
+    # A list full of OTHER asks may have cut this one off its tail (asks are
+    # stamped first, so only an all-ask full list can hide one; R1-1).
+    full = tuple(
+        (f"remote-ask:o{i}", 1, "high", "Other %d?" % i) for i in range(ra.NOTICES_ON_WIRE)
+    )
+    watcher.observe([_row(notices=full)], listed_at_ms=_later())
+    # The owner could not read its ask log: absence says nothing (R1-2).
+    unknown = _row(notices=None)._replace(remote_asks_unknown=True)
+    watcher.observe([unknown], listed_at_ms=_later())
+    # Unknown listing age.
+    ra.settle_unlisted_ask_items(root, [_row(notices=None)], listed_at_ms=None)
+    ask_rows = [r for r in _items(root) if r["key"].endswith(":remote-ask:k7")]
+    assert len(ask_rows) == 1 and not ask_rows[0]["dismissed_at"]
+
+
+_ASK_K7 = f"{ra.ASK_NOTICE_PREFIX}k7"  # ``_ask_claim``'s default owner key
+
+
+def test_q3_1_an_ask_open_before_first_contact_is_raised_once(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """QA round 3, Q3-1 (row 9b): the ask was queued 1048 ms before the origin
+    first listed the node. No-backfill dropped it for good — the baseline only
+    moves earlier — though it was still waiting on the operator."""
+    assert not (root / ra.BASELINES_FILE).exists(), "this listing IS first contact"
+    asked = now_ms() - 1_048
+    listing = [_row(notices=(_ask_claim(at=asked),))]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, _ASK_K7)
+    assert row["priority"] == "high" and row["created_at"] == asked, "the ask's own time"
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+    # Restart / a second host / reconnect: the same ask is one row, one banner.
+    for _ in range(2):
+        ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    assert [i["id"] for i in _items(root)] == [row["id"]]
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+    # Still retired by the existing settle once a fresh listing drops it.
+    ra.RemoteAttentionWatcher(root).observe([_row(notices=None)], listed_at_ms=_later())
+    assert _items(root) == []
+
+
+def test_q3_1_an_ask_from_an_owner_whose_clock_runs_behind_is_raised(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """Q3-1, skew: contact was made long ago, the ask is new, but the node's
+    clock is a minute behind this device's — its ``created_at`` reads older
+    than the baseline. An open ask is judged by being listed, not by a time
+    taken on another machine's clock."""
+    baseline = ra.origin_baseline_ms(root, NODE)
+    behind = baseline - 60_000
+    ra.RemoteAttentionWatcher(root).observe(
+        [_row(notices=(_ask_claim(at=behind),))], listed_at_ms=_later()
+    )
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, _ASK_K7)
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+
+def test_q3_1_a_plain_notice_from_before_first_contact_is_still_dropped(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """The exemption is the ask namespace's alone: in the SAME first listing a
+    finished ``notify`` older than contact stays backfill (#3902), and so does
+    one with no owner time."""
+    old = now_ms() - 1_048
+    listing = [
+        _row(
+            notices=(
+                _ask_claim(at=old),
+                ("deploy", 1, "high", "Deploy needs sign-off", old),
+                ("legacy", 1, "high", "Older owner", 0),
+            )
+        )
+    ]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    assert [i["key"] for i in _items(root)] == [ra.notice_key(NODE, SID, _ASK_K7)]
+    assert len(_no_banner_threads) == 1
+
+
+def test_q3_1_a_restart_never_revives_or_duplicates_a_read_ask_row(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """Exempt from the time filter is not exempt from dedupe: an ask the
+    operator already read stays one read row across restarts, with no second
+    banner, while the node keeps listing it as open."""
+    listing = [_row(notices=(_ask_claim(at=now_ms() - 1_048),))]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    [row] = _items(root)
+    store = NotificationStore(root)
+    store.apply("read", ids=[(str(row["id"]), int(row["revision"]))], via="test")
+    for _ in range(3):
+        ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    [after] = _items(root)
+    assert after["id"] == row["id"] and after["read"], "not flipped back to unread"
+    assert after["revision"] == row["revision"]
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+
+def test_ask_a_plain_notice_is_never_retired_by_absence(root: Path) -> None:
+    watcher = ra.RemoteAttentionWatcher(root)
+    watcher.observe([_row(notice=("deploy", 1, "normal", "Deploy done"))], listed_at_ms=now_ms())
+    watcher.observe([_row(notices=None)], listed_at_ms=_later())
+    [row] = _items(root)
+    assert not row["dismissed_at"] and not row["read_at"]
+
+
+def test_ask_an_agent_notify_cannot_squat_the_ask_namespace(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    NotificationStore(owner).notify(SID, title="spoof", priority="normal", key="remote-ask:zz")
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert [block["key"] for block in rows[0]["notices"]] == ["deploy"]
+
+
+def test_r1_1_an_answered_ask_retires_under_a_full_list_of_plain_notices(root: Path) -> None:
+    """R1-1: 8 unread notifies on the node must not pin the answered ask forever.
+
+    The owner's notify items are never read on the node, so a busy session's
+    listing is full on every read. Asks are stamped FIRST, so a full list that
+    still carries a non-ask claim proves every open ask fit: the missing one was
+    answered.
+    """
+    watcher = ra.RemoteAttentionWatcher(root)
+    plain = tuple((f"m{i}", 1, "normal", "FYI %d" % i) for i in range(ra.NOTICES_ON_WIRE))
+    ask = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(ask,) + plain[: ra.NOTICES_ON_WIRE - 1])], listed_at_ms=now_ms())
+    watcher.observe([_row(notices=plain)], listed_at_ms=_later())
+    row = NotificationStore(root).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and row["dismissed_at"], "the answered ask still asks on the origin"
+
+
+def test_r1_2_a_failed_ask_read_is_unknown_and_settles_nothing(tmp_path: Path) -> None:
+    """R1-2: an unreadable ask log is NOT "no open asks" (the attention_unknown rule)."""
+    from local_operator.asks import store as ask_store
+
+    owner = _owner(tmp_path)
+    # A directory where the log should be: ``read_bytes`` raises an OSError.
+    ask_store.asks_log_path(ask_store.session_dir(owner, SID)).mkdir(parents=True)
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert rows[0].get("asks_unknown") is True
+    assert [block["key"] for block in rows[0]["notices"]] == ["deploy"]
+    # The origin's parse carries the flag onto the row the settle reads.
+    parsed = PeerRow.from_json({**rows[0], "state": "live"}, device_id=NODE)
+    assert parsed.asks_unknown is True
+
+    head = tmp_path / "head"
+    watcher = ra.RemoteAttentionWatcher(head)
+    claim = _ask_claim(at=_asked_at_first_contact(head))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
+    unknown = _row(notice=("deploy", 1, "high", "Deploy finished"))._replace(
+        remote_asks_unknown=True
+    )
+    watcher.observe([unknown], listed_at_ms=_later())
+    row = NotificationStore(head).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and not row["dismissed_at"], "a still-open ask was retired"
+
+
+def test_r1_4_the_forwarded_title_is_capped_like_the_local_inbox(tmp_path: Path) -> None:
+    """R1-4/R1-5: the wire title is the inbox's own excerpt, the priority its own."""
+    from local_operator.notifications import items
+
+    owner = _owner(tmp_path)
+    _queue_ask(owner, "k7", "Why? " * 200)
+    blocks = ra.open_ask_notices(owner, SID)
+    # ``None`` means the ask log was unreadable — a distinct failure from an
+    # empty list, so narrow it explicitly rather than let the unpack hide it.
+    assert blocks is not None, "the ask log read as unknown"
+    [block] = blocks
+    assert len(block["title"]) <= 120
+    assert block["title"] == items.excerpt(
+        items.first_question({"questions": [{"question": "Why? " * 200}]}), 120
+    )
+    assert block["priority"] == items.ASK_PRIORITY
+
+
+def _parked(**fields: Any) -> SessionRow:
+    return SessionRow(
+        SID, 0.0, "n", live_state="idle", locality="remote", owner_device=NODE, **fields
+    )
+
+
+def test_q1_a_queued_ask_is_never_a_park_row() -> None:
+    """Q1: a queued ask's ``pending`` is a listing fact, not a park, on EVERY member.
+
+    Before the queue claimed ``pending`` only blocking gates reached
+    ``park_edges``; a queued ask on a session this device did not start (a third
+    device's, or one the node started itself) must not page this device. The
+    origin is told through the forwarded ``remote-ask:`` rows instead.
+    """
+    third_device = _parked(pending="ask", pending_queued=True)
+    forwarded = third_device._replace(remote_notices=(_ask_claim(),))
+    edges, state = peer_rows.park_edges({}, [third_device, forwarded._replace(id="other")])
+    assert edges == () and state == {}
+
+
+def test_r1_3_a_blocking_gate_still_parks_beside_a_queued_ask() -> None:
+    """R1-3: a parked gate keeps its park row even while a queued ask is forwarded."""
+    gate = _parked(pending="ask", remote_notices=(_ask_claim(),))
+    edges, _ = peer_rows.park_edges({}, [gate])
+    assert [edge.kind for edge in edges] == ["ask"]
+    approval = _parked(pending="approval", remote_notices=(_ask_claim(),))
+    edges, _ = peer_rows.park_edges({}, [approval])
+    assert [edge.kind for edge in edges] == ["approval"]
+
+
+def test_q2_the_notify_tool_refuses_a_remote_ask_key() -> None:
+    """Q2: the ask namespace is refused at the tool, not merely kept off the wire."""
+    import json
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    async def door(**_kwargs: Any) -> str:
+        raise AssertionError("a reserved key reached the inbox")
+
+    # ``@_guard`` types the executor as the positional ``ToolExecutor``
+    # callable, so call it positionally with a real ``ToolContext`` — the same
+    # shape the loop uses (and test_notify_title_guard.py's ``_notify``).
+    # ``ToolExecutor`` returns an ``Awaitable``, which ``asyncio.run`` will not
+    # take, so await it inside a coroutine.
+    context = ToolContext(cwd=".", notify_inbox=door)
+
+    async def notify() -> Any:
+        return await builtin.execute_notify(
+            "call-1",
+            {"title": "Answer me?", "key": f"{ra.ASK_NOTICE_PREFIX}zz"},
+            None,
+            None,
+            context,
+        )
+
+    result = asyncio.run(notify())
+    text = json.dumps(getattr(result, "content", str(result)), default=str)
+    assert "reserved" in text and ra.ASK_NOTICE_PREFIX in text

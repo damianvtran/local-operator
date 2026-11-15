@@ -73,6 +73,12 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/network/credentials/github.py::use_default_repositories",
+        "<path>.unlink",
+        "Explicit owner opt-in removes only network/github-designation-delivered.json, "
+        "the fixed device-local clear marker, never a session member; unlink refuses directories.",
+    ),
+    (
         "local_operator/definition_transaction.py::_durable_json",
         "os.replace",
         "Publishes the O_EXCL-created regular JSON temp file; "
@@ -102,6 +108,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/profile_scope.py::save_profile_backup",
         "<path>.unlink",
         "Cleans only this call's mkstemp .json FILE; unlink rejects directories.",
+    ),
+    # ``spawn_stamp`` reads the filesystem clock off a marker it creates with
+    # ``tempfile.mkstemp`` (no ``dir``: the temp dir) and removes it at once;
+    # the path is never caller-supplied and is always that regular FILE.
+    (
+        "local_operator/guardrails/interrupted_worktree_add.py::spawn_stamp",
+        "os.unlink",
+        "Unlinks only the .lop-spawn-stamp-* mkstemp FILE this call just created in the "
+        "temp dir; unlink rejects directories.",
     ),
     # Build output is the one `lop disk reclaim` category the module deletes
     # itself: no tool owns the removal of a `target`/`.next`/`build`/`dist`
@@ -2476,6 +2491,38 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "plist/unit FILEs; state_store.remove()",
     ),
     ("local_operator/browser_bridge/state.py::remove", "<path>.unlink", "bridge state FILE"),
+    # node_host.py (`lop browser setup/uninstall` on a headless mesh node).
+    # Every path it writes or removes is a FILE under `<config>/browser/`,
+    # `~/.config/systemd/user/`, or a mkstemp/mkdtemp in the system temp dir —
+    # none is derived from a session id or the sessions/ tree.
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.replace",
+        "mkstemp temp FILE onto the node record/unit/update manifest/signing key "
+        "(<config>/browser/… or ~/.config/systemd/user/…); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.unlink",
+        "its own mkstemp temp FILE, on a failed write",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_Plan._sudo_install_file",
+        "os.unlink",
+        "its own NamedTemporaryFile in the system temp dir, after `sudo install`",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::setup",
+        "shutil.rmtree",
+        "the run's own tempfile.mkdtemp(prefix='lop-node-ext-') extension unpack "
+        "dirs (plan.scratch), in the system temp dir",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::uninstall._remove_unit",
+        "<path>.unlink",
+        "the node browser's systemd user unit FILE (~/.config/systemd/user/…)",
+    ),
     (
         "local_operator/evaluation/adapters/supervisor.py::discard_rescue",
         "os.unlink",
@@ -3321,6 +3368,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tunnels/state.py::clear",
         "<path>.unlink",
         "Removes only the park FILE tunnel/state.json under the config dir; "
+        "never a directory, never under sessions/",
+    ),
+    # The tunnel remedies' own config-dir files (#3945, 2026-11-14). Both paths
+    # are the tunnel `config.directory()` plus a FIXED basename, exactly like
+    # `state.clear` above — never a session id, never caller input, never under
+    # `sessions/`. `invalidate_refinement` drops the cached inactive-cause FILE
+    # (`inactive-cause.json`) once a connect succeeds or setup runs, so a stale
+    # "suspended"/"billing" cause cannot outlive the state it described.
+    # `_bound_auto_setup_log` rotates `auto-setup.log` -> `.1` before each
+    # post-sign-in spawn (the child writes the file directly, so no logging
+    # handler can rotate it); source and target are both that fixed basename.
+    (
+        "local_operator/tunnels/service.py::invalidate_refinement",
+        "<path>.unlink",
+        "Removes only the inactive-cause.json cache FILE under the tunnel config dir; "
+        "never a directory, never under sessions/",
+    ),
+    (
+        "local_operator/tunnels/install.py::_bound_auto_setup_log",
+        "os.replace",
+        "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
         "never a directory, never under sessions/",
     ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes

@@ -662,7 +662,13 @@ def test_the_owner_states_the_personal_token_cap_on_the_grant(
     )
     before = int(time.time() * 1000)
     grant = owner.broker._grant_from_owner_token(  # noqa: SLF001
-        token="ghp_SYNTHETIC_cap", key=github_mod.GITHUB_KEY, provider="", common={}
+        token="ghp_SYNTHETIC_cap",
+        key=github_mod.GITHUB_KEY,
+        provider="",
+        common={},
+        # Required since #3951 (designated repositories reach the token-arm grant).
+        # One synthetic name: this cell is about the hold cap, not the designation.
+        repositories=["octo/synthetic"],
     )
     after = int(time.time() * 1000)
     assert before + 1_800_000 <= grant.hold_until_ms <= after + 1_800_000

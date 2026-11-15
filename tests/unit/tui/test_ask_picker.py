@@ -8353,3 +8353,54 @@ async def test_ctrl_e_wraps_a_long_command_in_full() -> None:
         for row in layout.command_lines:
             assert any(row.strip() in line for line in rows), (row, rows)
         await _until(pilot, lambda: "^e less" in _painted_footer(app))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (120, 40)])
+@pytest.mark.parametrize("kind", ["site_card", "two_option_closed"])
+async def test_a_short_closed_list_does_not_pin_its_question_to_one_row(
+    size: tuple[int, int], kind: str
+) -> None:
+    """PR #3938 D9: the reserve is capped at the list's own height.
+
+    A 2-option list with free text off needs two lines, never
+    ``QUESTION_LIST_RESERVE`` (4); demanding four pinned the question to
+    ``MIN_QUESTION_ROWS`` at every size, so a consent card showed only its first
+    line. Both options must still be on screen.
+    """
+    from local_operator.browser_bridge import site_approval
+
+    if kind == "site_card":
+        raw = site_approval.site_ask_question(
+            origin="https://portal.acme-research.example",
+            node_name="build-node-07",
+            node_device_id="dev-1",
+            entry_id="e1",
+        )
+        question = AskQuestion(
+            id=raw["id"],
+            question=raw["question"],
+            options=[AskOption(label=option["label"]) for option in raw["options"]],
+        )
+    else:
+        question = AskQuestion(
+            id="ship",
+            question=(
+                "Ship the migration tonight? It rewrites every row in the audit table, "
+                "takes about twenty minutes, and holds a lock on writes while it runs; "
+                "the dashboard shows stale counts until it finishes."
+            ),
+            options=[AskOption(label="Yes"), AskOption(label="No")],
+        )
+    app, _ = await _real_app_card(size, [question])
+    card = AskPickerScreen([question], allow_free_text=False)
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        full = card._question_lines(layout.width, reveal=True)
+        assert len(full) > 1
+        assert len(layout.question) > 1, (size, kind, layout.question)
+        if size == (120, 40):
+            assert len(layout.question) == len(full), (size, kind, layout.question)
+        # Both options are still drawn: the list keeps its own two lines.
+        assert layout.body_line_budget >= 2, (size, kind, layout.body_line_budget)

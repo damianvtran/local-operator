@@ -83,7 +83,11 @@ def _entry_owners() -> dict[str, str]:
         TRANSCRIPT_FILENAME,
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
-    from local_operator.session.runtime.journal import EXIT_RECORD_NAME, RUN_RECORD_NAME
+    from local_operator.session.runtime.journal import (
+        BIND_FAILURES_NAME,
+        EXIT_RECORD_NAME,
+        RUN_RECORD_NAME,
+    )
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
@@ -117,6 +121,7 @@ def _entry_owners() -> dict[str, str]:
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
         EXIT_RECORD_NAME: "session.runtime.journal",
         RUN_RECORD_NAME: "session.runtime.journal",
+        BIND_FAILURES_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
         # The temporary-chat mark travels: a moved temporary chat must still be
@@ -358,6 +363,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "under <config>/guardrails/, never an entry of a session directory: the "
         "creation ledger pins this device's inodes and the lineage registry is written "
         "by this device's spawn sites, so neither may travel with a session copy.",
+    ),
+    "local_operator/tools/diff_archive.py": (
+        1,
+        "``DIFF_ARCHIVE_DIRNAME`` ('diff-archive') is the per-DEVICE full-diff archive "
+        "root, <config>/diff-archive (``config_dir() / DIFF_ARCHIVE_DIRNAME``), a bounded "
+        "LRU spill store shared by every session on this device -- never an entry of a "
+        "session directory, so no session copy carries it.",
     ),
     "local_operator/guardrails/classify.py": (
         6,
@@ -1117,16 +1129,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        4,
+        5,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory; "
-        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER``: per-device files "
-        "under the config root's ``network/`` directory (this device's repository "
-        "narrowing; the marker that a designation, including a cleared one, was "
-        "delivered) — device state that must stay on the device, never a file in a "
-        "session directory, so it never travels with a session",
+        "reply-channel/action-tool precedent), never a file in a session directory. "
+        "``ENUMERATION_CACHE_NAME`` (``github-pushable.json``): the OWNER's cache of "
+        "the repos its own GitHub login can push to, at ``<config>/network/`` "
+        "(``network_root``), keyed by token hash and login hint — DEVICE-LOCAL and "
+        "never copied to a peer: a borrower receives the narrowed list inside the "
+        "grant, never this record, and ``copy_set``/``content_trees`` walk only "
+        "``sessions/<id>/``, so no sync path reaches it; "
+        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER`` are also "
+        "device-local ordering/explicit-clear records beneath ``<config>/network/``, "
+        "outside every session copy tree, and must never travel to peers",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,
@@ -1287,6 +1303,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``run/browser`` and its bridge record ``bridge.json``",
     ),
     "local_operator/browser_bridge/gen_ts.py": (1, "the generated protocol bundle's name"),
+    "local_operator/browser_bridge/node_host.py": (
+        2,
+        "neither is a path: ``EXTENSION_ASSET_PREFIX`` is a GitHub release asset-name "
+        "prefix and ``REFUSE_NO_RECORD`` a refusal code. The module's real paths (the "
+        "node record, profile and extension dirs under ``<config>/browser/``, the "
+        "systemd unit, ``/etc`` repo and policy files) are node-local machine state "
+        "built at runtime or absolute, never an entry of a session directory",
+    ),
     "local_operator/browser_bridge/daemon.py": (
         2,
         "the daemon's pairing record (``browser/pairing.json``) and the pending file beside "

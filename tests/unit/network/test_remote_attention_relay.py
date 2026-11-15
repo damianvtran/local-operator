@@ -140,6 +140,173 @@ def test_the_origin_gets_both_fields_and_its_watcher_raises_the_rows(
     assert notice["created_at"] == notice_block["at"] > 0
 
 
+#: The owner-side key of the forwarded ask, spelled literally so this cell fails
+#: on BEHAVIOUR (no such notice) against a build without the forwarder.
+ASK_KEY = "remote-ask:q7"
+
+
+def _ask_event(owner: relay.RelayServer, kind: str, ask_id: str, **extra: Any) -> None:
+    from local_operator.asks import store as ask_store
+
+    now = ask_store.now_ms()
+    ask_store.append_event(
+        ask_store.session_dir(owner.root, SID),
+        {"v": ask_store.EVENT_SCHEMA, "kind": kind, "at": now, "ask_id": ask_id, **extra},
+    )
+
+
+def test_an_open_queued_ask_crosses_and_its_answer_retires_the_origin_row(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """node-ask-forward (2026-11-13): a node session's queued ask over the wire.
+
+    The ask is NOT a NotificationStore row on the owner, so before this nothing
+    carried it: the origin never learned an agent on the node was waiting.
+    """
+    from local_operator.asks import store as ask_store
+
+    server_a, server_b, _host, _port = pair
+    owner = server_a.identity.device_id
+    head = tmp_path / "head-inbox"
+    # The head first watched the owner BEFORE the ask was queued there, so the
+    # no-backfill rule lets it through (the notice test's own setup).
+    ra.origin_baseline_ms(head, owner)
+    _record, link = _live_link(pair, monkeypatch)
+    _own_session(server_a, server_b.identity.device_id)
+    _ask_event(
+        server_a,
+        ask_store.EVENT_QUEUED,
+        "q7",
+        expires_at=ask_store.now_ms() + 3_600_000,
+        questions=[{"id": "q0", "question": "Install Chromium here?", "options": []}],
+    )
+
+    class _Peer:
+        device_id = owner
+        name = "lop-remote-node-2"
+        network_id = "n_test"
+        reachable = True
+        reason = ""
+
+    def _origin_rows(row: dict[str, Any]) -> Any:
+        class _Catalog:
+            def peers(self) -> list[Any]:
+                return [_Peer()]
+
+            def rows(self) -> list[Any]:
+                return [PeerRow.from_json(row, device_id=owner)]
+
+        return peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+
+    monkeypatch.setattr(ra, "_deliver_async", lambda *_a, **_k: None)
+    watcher = ra.RemoteAttentionWatcher(head)
+    try:
+        row = _catalog_row(link)
+        block = row["notices"][0]
+        assert {k: v for k, v in block.items() if k != "at"} == {
+            "key": ASK_KEY,
+            "revision": 1,
+            "priority": "high",
+            "title": "Install Chromium here?",
+        }
+        # The ask's own queue time rides the block (the no-backfill rule).
+        assert block["at"] > 0
+        watcher.observe(_origin_rows(row), listed_at_ms=ra_now())
+        key = ra.notice_key(owner, SID, ASK_KEY)
+        item = NotificationStore(head).get_by_key(SID, key)
+        assert item is not None and item["priority"] == "high" and not item["dismissed_at"]
+
+        # Answered on the node (any settle; dismissal is the simplest to write).
+        _ask_event(server_a, ask_store.EVENT_DISMISSED, "q7", reason="answered_in_chat")
+        row = _catalog_row(link)
+    finally:
+        link.close("test")
+    assert all(b["key"] != ASK_KEY for b in row.get("notices", []))
+    watcher.observe(_origin_rows(row), listed_at_ms=ra_now() + 1)
+    item = NotificationStore(head).get_by_key(SID, key)
+    assert item is not None and item["dismissed_at"], "the answered ask still asks on the origin"
+
+
+def test_a_queued_ask_claim_crosses_as_queued_and_never_parks_a_member(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3934 Q1: a member that did not start the session is not paged.
+
+    The owner's live record says ``pending="ask"`` for an open QUEUED ask; that
+    reaches every member's listing (the "needs" badge), and before the
+    ``pending_queued`` fact every member's TUI also turned it into a high park
+    row. Over the wire, through the production parse and row builder.
+    """
+    import subprocess
+    import sys
+
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    server_a, server_b, _host, _port = pair
+    owner = server_a.identity.device_id
+    _record, link = _live_link(pair, monkeypatch)
+    # Started by a THIRD device: this viewer (B) is not its origin.
+    _own_session(server_a, "d_someone_else")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+
+    class _Peer:
+        device_id = owner
+        name = "lop-remote-node-2"
+        network_id = "n_test"
+        reachable = True
+        reason = ""
+
+    def _parks(row: dict[str, Any]) -> list[str]:
+        class _Catalog:
+            def peers(self) -> list[Any]:
+                return [_Peer()]
+
+            def rows(self) -> list[Any]:
+                return [PeerRow.from_json(row, device_id=owner)]
+
+        rows = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+        edges, _ = peer_rows.park_edges({}, rows)
+        return [edge.kind for edge in edges]
+
+    def _publish(**fields: Any) -> None:
+        registry.publish(
+            SessionRecord(
+                pid=child.pid,
+                kind="tui",
+                session_id=SID,
+                conversation_name="node work",
+                cwd=str(server_a.root),
+                model_label="test/model",
+                control_port=0,
+                control_key="",
+                **fields,
+            ),
+            server_a.root,
+        )
+
+    try:
+        _publish(pending="ask", pending_queued=True)
+        row = _catalog_row(link)
+        assert row["pending"] == "ask" and row.get("pending_queued") is True
+        assert _parks(row) == [], "a queued ask paged a member that did not start it"
+        # A BLOCKING gate on the same session is still a park everywhere.
+        _publish(pending="ask")
+        row = _catalog_row(link)
+        assert "pending_queued" not in row
+        assert _parks(row) == ["ask"]
+    finally:
+        link.close("test")
+        child.kill()
+        child.wait()
+
+
+def ra_now() -> int:
+    from local_operator.notifications.store import now_ms
+
+    return now_ms()
+
+
 def test_a_non_origin_viewer_gets_neither_field(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
