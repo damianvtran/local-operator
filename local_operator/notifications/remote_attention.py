@@ -73,7 +73,11 @@ A FORWARDED NOTICE MUST BE NEW AND THE OPERATOR'S. Three filters, same date:
 * never from a session another AGENT created on the owner (``origin.kind ==
   "agent"`` on the mesh stamp, :data:`AGENT_ORIGIN_KIND`): a reviewer/QA/probe
   child reports to the agent that spawned it, not to the operator — dropped by
-  the owner in :func:`stamp_rows_for_viewer`;
+  the owner in :func:`stamp_rows_for_viewer`; and, DEFAULT-DENY, a ``notify``
+  item travels only when the stamp positively says the operator started the
+  session (``started_by: operator``, :data:`STARTED_BY_FIELD`) — the origin
+  re-applies this to every listing (``session/peer_rows``), so an owner too old
+  to filter cannot reopen the flood. Open asks are exempt;
 * NO BACKFILL: the owner carries each notice's own ``updated_at`` (``at``, ms)
   and the origin raises only a notice newer than its persisted first-contact
   baseline for that device (:func:`origin_baseline_ms`), writing the row with
@@ -139,8 +143,57 @@ NOT_FORWARDED_PREFIXES: tuple[str, ...] = (
 #: (``lop network sessions --create`` run from an agent's shell, or the
 #: ``sessions spawn peer=`` tool; ``network/cli.py`` sets it). Its notices are
 #: never forwarded: see the module doc, "A FORWARDED NOTICE MUST BE NEW AND THE
-#: OPERATOR'S". Every other kind (``user``, the default, and moves) forwards.
+#: OPERATOR'S".
 AGENT_ORIGIN_KIND = "agent"
+
+#: DEFAULT-DENY ATTESTATION (operator rule, 2026-11-14): "notifications reach the
+#: dashboard ONLY when an agent deliberately calls notify (or asks) ... remote
+#: mesh session turn-ends must not become notifications." ``origin.kind`` cannot
+#: carry that promise: the owner's create op has defaulted a missing kind to
+#: ``user`` since the mesh core, so every session an agent placed on a peer before
+#: #3902 (and every one an older origin places) reads ``user`` — five agent-lane
+#: workers on lop-remote-node-2 reached the inbox that way after v0.103.0. So a
+#: second field, written ONLY by a build that knows who asked
+#: (``relay._ctl_peer_create`` derives it from the attributed ``origin``), says
+#: ``started_by: operator``; its absence — a legacy stamp, an older origin, a move
+#: or a replica — denies. Asks are exempt: a question still waiting on the
+#: operator always travels (:func:`stamp_rows_for_viewer`).
+STARTED_BY_FIELD = "started_by"
+
+#: The ``origin.kind`` values a peer CREATE writes (the owner defaults a missing
+#: kind to ``user``). Only these are subject to the ``started_by`` default-deny on
+#: the node's ``notify`` mount: a ``moved``/``fork`` stamp is a session the
+#: operator carried to this device, and the owner never forwards its items anyway.
+PEER_CREATE_ORIGIN_KINDS: frozenset[str] = frozenset({"user", AGENT_ORIGIN_KIND})
+OPERATOR_STARTED = "operator"
+
+
+def started_by_for_origin(origin_kind: str) -> str:
+    """The ``started_by`` attestation for an ATTRIBUTED create (``user``/``agent``).
+
+    Called only where the caller's identity was actually decided (the origin's
+    control op, after ``network/cli._create_origin`` or the desktop route), never
+    on the owner from a frame that may predate the field.
+    """
+    # Anything but an exact ``user`` — ``agent``, an empty or a future kind —
+    # deliberately maps to ``agent``: default-deny means an attestation is only
+    # ever OPERATOR when the caller was positively identified as the operator.
+    return OPERATOR_STARTED if origin_kind == "user" else AGENT_ORIGIN_KIND
+
+
+def origin_is_operator_started(origin: Any) -> bool:
+    """Whether a mesh stamp's ``origin`` POSITIVELY says the operator started it.
+
+    Default-deny: a missing/odd origin, a missing ``started_by`` (legacy stamps,
+    moves, replicas) or an ``agent`` kind all answer NO. See
+    :data:`STARTED_BY_FIELD` for why ``kind == "user"`` alone is not enough.
+    """
+    if not isinstance(origin, dict):
+        return False
+    if str(origin.get("kind") or "") == AGENT_ORIGIN_KIND:
+        return False
+    return str(origin.get(STARTED_BY_FIELD) or "") == OPERATOR_STARTED
+
 
 #: The OWNER-side key namespace of a forwarded open ask, inside the existing
 #: ``notices`` wire block: ``remote-ask:<ask id>``. Distinct from the store's
@@ -271,7 +324,9 @@ def stamp_rows_for_viewer(
             # the row's revision never changes and re-raising it is a no-op.
             row["asks_unknown"] = True
         notices = list(asks or [])
-        if store is not None:
+        # NOTIFY ITEMS ONLY FOR AN ATTESTED OPERATOR SESSION (default-deny, see
+        # ``STARTED_BY_FIELD``); the open asks above travel either way.
+        if store is not None and origin_is_operator_started(row["origin"]):
             notices += _newest_notices(store, session_id)
         if notices:
             row["notices"] = notices[:NOTICES_ON_WIRE]
@@ -995,7 +1050,9 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
     "Will be forwarded" is said ONLY for an origin recorded as collecting
     forwarded items (:func:`record_forwarding_origin`); any other origin — an
     older build, or one that has not read this device since updating — gets
-    "it stays on <this device>" (review round 1, m2). ``""`` for every session
+    "it stays on <this device>" (review round 1, m2), and so does a session whose
+    stamp lacks the operator attestation (:func:`origin_is_operator_started`, the
+    owner's own forward filter — QA round 2, Q1). ``""`` for every session
     not placed here by another device, and for a ``key`` this module never
     forwards — an ordinary local session's result is unchanged byte for byte.
     """
@@ -1011,7 +1068,20 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
         if not origin:
             return ""
         here, there = _device_names(Path(root), origin)
-        if origin in forwarding_origins(Path(root)):
+        collects = origin in forwarding_origins(Path(root))
+        if collects and not origin_is_operator_started(stamp.origin):
+            # THE SAME PREDICATE AS THE OWNER'S FORWARD FILTER
+            # (:func:`stamp_rows_for_viewer`), or the reply promises what the
+            # filter withholds (QA r2, Q1): a session the operator moved or forked
+            # ONTO this node carries no ``started_by`` attestation (a move is not
+            # a create, and does not prove who asked), so default-deny keeps its
+            # items here. Forwarding across a move is a declared deferral.
+            return (
+                f" Posted on {here}; it stays on {here}, because only notices from"
+                f" sessions the operator started on {there} are forwarded there, and"
+                " this one was moved, forked or placed here otherwise."
+            )
+        if collects:
             return (
                 f" Posted on {here}; it will be forwarded to {there}, where this session started."
             )

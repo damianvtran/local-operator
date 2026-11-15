@@ -69,6 +69,25 @@ def _no_banner_threads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _fresh_origin_memo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test an empty ``record_forwarding_origin`` memo.
+
+    The product remembers ``(str(root), device)`` process-wide so the origins
+    file is written once per origin, not on every catalogue read. In the suite
+    that memo outlives the ``tmp_path`` it names: this repo deletes a PASSING
+    test's ``tmp_path`` (``tmp_path_retention_policy = "failed"``), and the
+    pytest CI runs (8.x) numbers the next directory from the suffixes that still
+    EXIST, so a later parameter gets the earlier one's path back — with no
+    ``remote-attention-origins.json`` in it, yet a memo saying it was written.
+    CI run 43661997364, shards (3.12, 4) and (3.13, 4): ``[origin1-False]``
+    of ``test_default_deny_the_node_reply_matches_the_owner_forward_filter``
+    failed ``assert 'd_head' in {}`` that way. ``monkeypatch`` swaps in a fresh
+    set and restores the module's own afterwards, so no test sees another's.
+    """
+    monkeypatch.setattr(ra, "_recorded_origins", set())
+
+
 def _row(
     *,
     attention: tuple[str, str] | None = None,
@@ -232,7 +251,14 @@ def _owner(tmp_path: Path, *, origin: str = HEAD) -> Path:
             placement=SessionPlacement(
                 mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
             ),
-            origin={"kind": "user", "source_device": origin, "source_session_id": ""},
+            origin={
+                "kind": "user",
+                "source_device": origin,
+                "source_session_id": "",
+                # An ATTESTED operator create (``relay._ctl_peer_create``): only
+                # this forwards ``notify`` items under the default-deny rule.
+                ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED,
+            },
         ),
     )
     AttentionStore(owner / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
@@ -244,7 +270,12 @@ def _catalog_row(origin: str = HEAD) -> dict[str, Any]:
     return {
         "session_id": SID,
         "state": "stored",
-        "origin": {"kind": "user", "source_device": origin, "source_session_id": ""},
+        "origin": {
+            "kind": "user",
+            "source_device": origin,
+            "source_session_id": "",
+            ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED,
+        },
     }
 
 
@@ -1267,3 +1298,163 @@ def test_q2_the_notify_tool_refuses_a_remote_ask_key() -> None:
     result = asyncio.run(notify())
     text = json.dumps(getattr(result, "content", str(result)), default=str)
     assert "reserved" in text and ra.ASK_NOTICE_PREFIX in text
+
+
+# ---------------------------------------------------------------------------
+# Default-deny (operator rule 2026-11-14): only an ATTESTED operator session's
+# ``notify`` items travel; open asks travel from any non-agent session.
+# ---------------------------------------------------------------------------
+
+#: The stamp every session placed on a peer before the attestation carries: the
+#: owner's create op defaulted a missing kind to ``user`` since the mesh core, so
+#: agent-lane workers on lop-remote-node-2 read exactly like this.
+LEGACY_ORIGIN = {"kind": "user", "source_device": HEAD, "source_session_id": ""}
+
+
+def _legacy_owner(tmp_path: Path) -> Path:
+    owner = _owner(tmp_path)
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    import json
+
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"] = dict(LEGACY_ORIGIN)
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+    return owner
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded"),
+    [
+        (LEGACY_ORIGIN, False),
+        ({**LEGACY_ORIGIN, "started_by": "operator"}, True),
+        ({**LEGACY_ORIGIN, "kind": "agent", "started_by": "agent"}, False),
+        # A forged-looking mix still denies: ``agent`` kind wins.
+        ({**LEGACY_ORIGIN, "kind": "agent", "started_by": "operator"}, False),
+        ({**LEGACY_ORIGIN, "kind": "moved"}, False),
+        ({**LEGACY_ORIGIN, "started_by": "someone"}, False),
+    ],
+)
+def test_default_deny_forwards_notify_items_only_for_an_attested_operator_session(
+    tmp_path: Path, origin: dict[str, Any], forwarded: bool
+) -> None:
+    owner = _owner(tmp_path)
+    rows = [{**_catalog_row(), "origin": dict(origin)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    keys = [n["key"] for n in rows[0].get("notices") or ()]
+    assert keys == (["deploy"] if forwarded else []), (origin, keys)
+
+
+def _restamp(owner: Path, origin: dict[str, Any]) -> None:
+    import json
+
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"] = dict(origin)
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded"),
+    [
+        # Moved / forked ONTO this node by the operator: no attestation, so the
+        # owner keeps its items, and the reply must say so (QA r2, Q1).
+        ({"kind": "moved", "source_device": HEAD, "source_session_id": ""}, False),
+        ({"kind": "fork", "source_device": HEAD, "source_session_id": ""}, False),
+        # An attested operator create: promised AND put on the wire.
+        ({**LEGACY_ORIGIN, "started_by": "operator"}, True),
+    ],
+)
+def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
+    tmp_path: Path, origin: dict[str, Any], forwarded: bool
+) -> None:
+    """QA r2 Q1: the node's ``notify`` reply applies the owner's own forward
+    predicate, so "will be forwarded" is said exactly when the item travels."""
+    owner = _owner(tmp_path)
+    _restamp(owner, origin)
+    # The head has read this node, so it IS recorded as collecting forwards:
+    # the old reply said "will be forwarded" here regardless of the stamp.
+    rows = [{**_catalog_row(), "origin": dict(origin)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
+    sentence = ra.forwarded_notice_sentence(owner, SID)
+    keys = [n["key"] for n in rows[0].get("notices") or ()]
+    if forwarded:
+        assert "will be forwarded to its origin device" in sentence, sentence
+        assert keys == ["deploy"]
+    else:
+        assert "will be forwarded" not in sentence, sentence
+        assert "it stays on this device" in sentence and "moved, forked" in sentence
+        assert keys == [], "the head inbox gets nothing from an unattested stamp"
+
+
+def test_a_reused_tmp_path_still_records_its_forwarding_origin(tmp_path: Path) -> None:
+    """Regression for the order-dependent CI failure: a root path handed out
+    again after its directory was deleted (pytest 8 renumbering a passing
+    test's removed ``tmp_path``) still gets its origins file, because no
+    test inherits another test's memo (``_fresh_origin_memo``)."""
+    assert ra._recorded_origins == set()
+    owner = _owner(tmp_path)
+    ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
+
+
+def test_a_session_brought_home_keeps_its_reply_byte_for_byte(tmp_path: Path) -> None:
+    """A session moved HOME (its source device never reads this one, so it is not
+    a recorded forwarding origin): the reply is unchanged from before Q1."""
+    owner = _owner(tmp_path, origin=NODE)
+    _restamp(owner, {"kind": "moved", "source_device": NODE, "source_session_id": ""})
+    assert NODE not in ra.forwarding_origins(owner)
+    assert ra.forwarded_notice_sentence(owner, SID) == (
+        " Posted on this device; it stays on this device, because its origin device,"
+        " where this session started, is not known to collect forwarded notices."
+    )
+
+
+def test_default_deny_a_legacy_sessions_open_ask_still_reaches_the_origin(
+    tmp_path: Path,
+) -> None:
+    """The operator rule allows asks: a question waiting on the operator travels
+    from an unattested session; only its ``notify`` item is withheld."""
+    owner = _legacy_owner(tmp_path)
+    _queue_ask(owner, "k9", "Rotate the node's MCP token?")
+    rows = [{**_catalog_row(), "origin": dict(LEGACY_ORIGIN)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    titles = [n["title"] for n in rows[0]["notices"]]
+    assert titles == ["Rotate the node's MCP token?"], titles
+    assert rows[0]["notices"][0]["key"].startswith(ra.ASK_NOTICE_PREFIX)
+
+
+def test_default_deny_the_origin_drops_a_legacy_owners_notify_but_keeps_its_ask(
+    root: Path,
+) -> None:
+    """An OWNER older than this filter still puts every notice on the wire; the
+    origin re-applies the rule to the row's ``origin`` (``peer_rows``), which is
+    what stops the lop-remote-node-2 rows the moment the head updates."""
+    from types import SimpleNamespace
+
+    from local_operator.session.peer_rows import _attested_notices
+
+    ask = (f"{ra.ASK_NOTICE_PREFIX}k1", 1, "high", "Which branch?", 5)
+    note = ("progress", 1, "normal", "#3842 convergence pushed; six PR commits preserved", 5)
+    legacy = SimpleNamespace(notices=(note, ask), origin=dict(LEGACY_ORIGIN))
+    assert _attested_notices(legacy) == (ask,)
+    attested = SimpleNamespace(
+        notices=(note, ask), origin={**LEGACY_ORIGIN, "started_by": "operator"}
+    )
+    assert _attested_notices(attested) == (note, ask)
+    assert _attested_notices(SimpleNamespace(notices=(note,), origin=None)) == ()
+    assert _attested_notices(SimpleNamespace(notices=None, origin=None)) is None
+
+
+def test_default_deny_the_create_attestation_is_never_defaulted() -> None:
+    """The owner copies ``started_by`` only from a frame that carried one; the
+    origin's control op derives it from the attributed ``origin``."""
+    from local_operator.network.relay import _started_by_claim
+
+    assert _started_by_claim({}) == {}, "a pre-attestation origin stamps nothing"
+    assert _started_by_claim({"origin": "user"}) == {}, "kind alone is not attestation"
+    assert _started_by_claim({"started_by": "operator"}) == {"started_by": "operator"}
+    assert _started_by_claim({"started_by": "agent"}) == {"started_by": "agent"}
+    assert _started_by_claim({"started_by": "root"}) == {}
+    assert ra.started_by_for_origin("user") == ra.OPERATOR_STARTED
+    assert ra.started_by_for_origin("agent") == ra.AGENT_ORIGIN_KIND
