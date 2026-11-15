@@ -69,6 +69,22 @@ DEVICE_B = "device-b"
 TICK_S = 2.0
 
 
+@pytest.fixture(autouse=True)
+def _desktop_notifications_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the suite's notification kill switch for THIS module's worker.
+
+    The worker now asks the desktop banner's own ``notifications_enabled()``
+    before pushing (gating parity), and ``tests/conftest.py`` sets
+    ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` for every test — so with the switch on,
+    every push here would be refused by the parity gate and the module would
+    test nothing. The opt-in is safe: the worker's transport is the in-memory
+    ``ControlPlane`` and nothing in this module posts a desktop banner;
+    ``monkeypatch`` restores the switch after each test. The switch's own refusal
+    is pinned by ``test_the_notification_kill_switch_refuses_the_push``.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+
+
 class Clock:
     """A hand-driven clock, because every bound here is a duration."""
 
@@ -832,7 +848,10 @@ def test_a_heal_mints_a_new_key_on_the_supersede_cursor(harness: Harness) -> Non
     """§3.4: the completion key is the record's content, so a heal is a NEW
     delivery — and §2.1's supersede cursor is the read that sees it."""
     token = str(uuid.uuid4())
-    harness.store.publish("session/healed", token, provisional_anchor(token), "interrupted")
+    # A provisional "error", not "interrupted": the push now gates on the
+    # desktop's BRIDGE_NOTIFIABLE_KINDS (parity), which never banners an
+    # interruption, and these cells pin the heal mechanics, not that gate.
+    harness.store.publish("session/healed", token, provisional_anchor(token), "error")
     assert len(harness.worker.tick()) == 1
     first_key = harness.plane.keys[0]
 
@@ -854,7 +873,10 @@ def test_a_heal_of_a_conversation_already_read_emits_nothing(harness: Harness) -
     """A correction to something the user has already read is not a reason to
     buzz, and the cursor still moves past it."""
     token = str(uuid.uuid4())
-    harness.store.publish("session/healed", token, provisional_anchor(token), "interrupted")
+    # A provisional "error", not "interrupted": the push now gates on the
+    # desktop's BRIDGE_NOTIFIABLE_KINDS (parity), which never banners an
+    # interruption, and these cells pin the heal mechanics, not that gate.
+    harness.store.publish("session/healed", token, provisional_anchor(token), "error")
     harness.worker.tick()
     harness.store.acknowledge("session/healed", token)
 
@@ -1128,7 +1150,10 @@ def test_a_heal_and_a_nudged_ack_in_one_pass_emit_once_each(harness: Harness) ->
     to re-read.
     """
     healed = str(uuid.uuid4())
-    harness.store.publish("session/healed", healed, provisional_anchor(healed), "interrupted")
+    # A provisional "error", not "interrupted": the push now gates on the
+    # desktop's BRIDGE_NOTIFIABLE_KINDS (parity), which never banners an
+    # interruption, and these cells pin the heal mechanics, not that gate.
+    harness.store.publish("session/healed", healed, provisional_anchor(healed), "error")
     other = harness.publish("acked")
     assert len(harness.worker.tick()) == 2
 
@@ -1448,3 +1473,174 @@ def test_the_seen_route_nudges_the_worker_with_the_acting_device() -> None:
     assert badge.status_code == 200
     assert badge.json()["count"] == 0, "the refetch disagrees with the machine"
     assert store.state(f"session/{sid}")["unseen"] is False
+
+
+# -- desktop gating parity (2026-11-14: "notification spam on every task") ------
+#
+# The operator: "only notify under the same circumstances that the UI notifies".
+# The worker now asks the desktop completion banner's OWN three gates
+# (``serving._announce_completion``) on top of the store's ``notify`` flag:
+# ``notifications_enabled()``, ``_session_may_announce`` (the listing's
+# ``is_user_session`` origin rule) and ``BRIDGE_NOTIFIABLE_KINDS``. Every cell
+# below drives the real ``tick`` -> ``_compose`` -> transport path.
+
+
+def _session_dir(harness: Harness, session_id: str, origin: str | None = None) -> Path:
+    from local_operator.resume import mark_session_origin
+
+    directory = harness.root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("")
+    if origin is not None:
+        mark_session_origin(directory, origin)
+    return directory
+
+
+@pytest.mark.parametrize("origin", ["subagent", "agent-shell", "agent-config"])
+def test_a_hidden_agent_session_completion_is_not_pushed(harness: Harness, origin: str) -> None:
+    """Gate (b): a session the listings hide never banners on the desktop, so
+    it never pushes either — the spam was dozens of these per hour."""
+    _session_dir(harness, "delegated", origin)
+    harness.publish("delegated")
+
+    assert harness.worker.tick() == []
+    assert harness.plane.calls == []
+    # Resolved, not deferred: the cursor moves past it.
+    assert harness.cursor()["publication_cursor"] == 1
+
+
+@pytest.mark.parametrize("origin", [None, "fork", "agent-workstream"])
+def test_a_user_session_completion_is_pushed(harness: Harness, origin: str | None) -> None:
+    """The mirror: the operator's own conversation (no marker) and the listed
+    origins still push, exactly as the desktop still banners them."""
+    _session_dir(harness, "mine", origin)
+    harness.publish("mine")
+
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    assert harness.plane.calls[0][1]["type"] == "completion"
+
+
+def test_a_session_with_no_directory_is_pushed(harness: Harness) -> None:
+    """``_session_may_announce``'s own documented answer for a session it
+    cannot put the question to is YES, and the worker follows it."""
+    harness.publish("no-directory-yet")
+
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+
+
+@pytest.mark.parametrize("kind", ["interrupted", "closed"])
+def test_a_kind_the_desktop_never_banners_is_not_pushed(harness: Harness, kind: str) -> None:
+    """Gate (c): only ``BRIDGE_NOTIFIABLE_KINDS`` (complete/error/retired)."""
+    from local_operator.server.utils.desktop_sessions import BRIDGE_NOTIFIABLE_KINDS
+
+    # Every store kind outside the bridge's set: ``PUSH_KINDS`` minus it.
+    assert kind not in BRIDGE_NOTIFIABLE_KINDS
+    harness.publish("other-kind", kind=kind)
+
+    assert harness.worker.tick() == []
+    assert harness.plane.calls == []
+    assert harness.cursor()["publication_cursor"] == 1
+
+
+@pytest.mark.parametrize("kind", ["complete", "error", "retired"])
+def test_every_notifiable_kind_is_pushed(harness: Harness, kind: str) -> None:
+    harness.publish("loud", kind=kind)
+
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+
+
+def test_the_notification_kill_switch_refuses_the_push(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate (a), both tiers: the env switch, then the ``display.notifications``
+    config flag — read through the SAME ``notifications_enabled`` the desktop
+    calls."""
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    harness.publish("switched-off")
+    assert harness.worker.tick() == []
+    assert harness.plane.calls == []
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS")
+    from local_operator.tui import notify as notify_module
+
+    monkeypatch.setattr(notify_module, "settings_get", lambda key, default=None: False)
+    harness.publish("config-off")
+    assert harness.worker.tick() == []
+    assert harness.plane.calls == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["wake-or-monitor-trigger", "no_reply-quiet-end", "proactive-veto"],
+)
+def test_runs_the_store_marks_quiet_still_never_push(harness: Harness, case: str) -> None:
+    """Regression: wake/monitor-only runs, ``no_reply`` quiet ends and the
+    proactive veto all reach the store as ``notify=False``
+    (``Session._completion_notify``); the parity gates sit AFTER that flag and
+    never re-open it, even for a user session with a notifiable kind."""
+    _session_dir(harness, case)
+    harness.publish(case, notify=False)
+
+    assert harness.worker.tick() == []
+    assert harness.plane.calls == []
+
+
+# -- the count: the listing's number, never the lifetime census (2026-11-14) ---
+
+
+def _census_history(harness: Harness, conversations: int) -> None:
+    """Old, never-acked completions: the shape of a long-lived machine's store."""
+    for index in range(conversations):
+        harness.publish(f"history-{index}")
+
+
+def test_an_injected_listing_count_wins_over_the_store_census(tmp_path: Path) -> None:
+    """Pre-fix the body said "47502 conversations need you": the census over
+    every unacked completion ever published. With the listing count injected
+    the body says the badge's number."""
+    harness = Harness(tmp_path, arm=False)
+    _census_history(harness, 40)
+    harness.arm()
+    harness.worker = PushWorker(
+        store=harness.store,
+        transport=harness.plane,
+        config_dir=harness.root,
+        computer=COMPUTER,
+        clock=harness.clock,
+        presence=harness.presence,
+        live_devices=harness.devices,
+        unread_count=lambda: 3,
+    )
+    harness.publish("fresh")
+
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    body = harness.plane.calls[0][1]
+    assert body["count"] == 3
+    assert body[ALERT_FIELD][ALERT_BODY_FIELD] == f"{BODIES['complete']} · 3 conversations need you"
+    # The negative control: the census this replaces really is the big number.
+    assert harness.worker._store_count() == 41
+
+
+def test_a_degraded_listing_count_drops_the_count_term(tmp_path: Path) -> None:
+    """``None`` (the listing could not be read) is not 0 and not the census:
+    the wire carries 0 (agent-server requires a non-negative int and no client
+    reads it) and the banner makes no count claim at all."""
+    harness = Harness(tmp_path, arm=False)
+    _census_history(harness, 5)
+    harness.arm()
+    harness.worker = PushWorker(
+        store=harness.store,
+        transport=harness.plane,
+        config_dir=harness.root,
+        computer=COMPUTER,
+        clock=harness.clock,
+        presence=harness.presence,
+        live_devices=harness.devices,
+        unread_count=lambda: None,
+    )
+    harness.publish("fresh")
+
+    harness.worker.tick()
+    body = harness.plane.calls[0][1]
+    assert body["count"] == 0
+    assert body[ALERT_FIELD][ALERT_BODY_FIELD] == BODIES["complete"]
