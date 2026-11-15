@@ -54,6 +54,10 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # output through the operator, never through the relay.
         "mobile_doctor",
         "operator_setup",
+        # Same class: the relay's `/api/projects*` surface has no per-session
+        # reverse lookup (`GET /v1/desktop/sessions/{id}/projects` lives only in
+        # routes/desktop_projects.py), so a phone told it may ask would 404.
+        "projects_by_session",
     }
 )
 
@@ -1055,6 +1059,16 @@ def static_feature_flags() -> dict[str, Any]:
         # the body would be rejected as an unknown field. Absent ⇒ no
         # "close anyway" affordance anywhere.
         "projects_force_done": 1,
+        # THE REVERSE LOOKUP on the projects surface: `GET
+        # /v1/desktop/sessions/{id}/projects`, the projects one chat is linked
+        # to (work OR coordination membership, `projects_for_session`), as
+        # listing rows in the listing's order — what the chat view's "Linked
+        # projects" canvas tab paints. ITS OWN KEY, not a bump of `projects`,
+        # by the rule above: an older renderer is untouched, and a newer one
+        # against an older backend sees the key absent and hides the tab
+        # rather than calling a route that 404s. Desktop-only
+        # (DESKTOP_ONLY_FEATURES): the phone relay serves no such route.
+        "projects_by_session": 1,
         # TEMPORARY CHATS (``session/temporary.py``): `temporary` on
         # `POST /v1/desktop/sessions` and `POST /api/sessions/start`,
         # `include_temporary` on the session lists, the

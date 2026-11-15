@@ -1,6 +1,6 @@
 """``/v1/desktop/projects*`` — the desktop CRUD, links and milestones surface.
 
-Nine + two + one routes over the project store (:mod:`local_operator.projects`;
+Nine + two + one + one routes over the project store (:mod:`local_operator.projects`;
 request-update is the one that also dials — see below):
 
 - ``GET    /v1/desktop/projects``                        — the listing (summaries)
@@ -15,6 +15,13 @@ request-update is the one that also dials — see below):
 - ``POST   /v1/desktop/projects/{key}/milestones``       — add-or-update one
 - ``DELETE /v1/desktop/projects/{key}/milestones/{name}``— remove one
 - ``POST   /v1/desktop/projects/{key}/request-update``   — ask the linked sessions for an update
+- ``GET    /v1/desktop/sessions/{sid}/projects``         — the projects one session is linked to
+
+The last is the reverse lookup the chat view's linked-projects tab reads. It
+lives HERE, not in ``desktop_sessions``, because it is a projects read (same
+registry adapter, same row serializer, same order) that merely sits under a
+session path; no ``/v1/desktop/sessions/{id}/...`` route elsewhere claims the
+``projects`` segment, so the mount order does not shadow it.
 
 **The store is the only writer.** Every route calls the same
 :class:`~local_operator.projects.ProjectRegistry` methods the ``project`` tool
@@ -62,9 +69,9 @@ read from files, exactly as the tool's view is.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import ValidationError
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -103,6 +110,7 @@ from local_operator.server.models.desktop_projects import (
     ProjectSummary,
     ProjectTimeline,
     ProjectView,
+    SessionProjects,
     linked_session_view,
     project_patched,
     project_summary,
@@ -114,6 +122,14 @@ from local_operator.server.request_update import request_updates
 from local_operator.server.routes.desktop_sessions import errors, reply
 
 router = APIRouter(tags=["Desktop projects"], dependencies=[Depends(require_desktop)])
+
+#: A session id as the store admits it (``projects._SESSION_ID_RE``: twelve
+#: lowercase hex). Declared on the path, the sibling session routes' way
+#: (``desktop_catalogues``, ``desktop_session_files``), so a malformed or
+#: traversal-shaped id is a 422 before any handler runs — and an id the store
+#: could never have linked is refused rather than answered with a misleading
+#: "no projects".
+SessionID = Annotated[str, Path(pattern=r"^[a-f0-9]{12}$")]
 
 
 def _registry(request: Request) -> ProjectRegistry:
@@ -277,6 +293,37 @@ async def projects(request: Request) -> CRUDResponse[Any]:
                 for project in listed
             ]
             return ProjectList(projects=rows, **_page_fields(registry))
+
+        return reply(await asyncio.to_thread(read))
+
+
+@router.get("/v1/desktop/sessions/{session_id}/projects", response_model=CRUDResponse)
+async def session_projects(session_id: SessionID, request: Request) -> CRUDResponse[Any]:
+    """The projects this session is linked to, as listing rows in listing order.
+
+    Membership is either list (``sessions`` or ``coordination_sessions``) —
+    ``projects_for_session``'s reading, the same set the TUI's ◆ marker and a
+    nameless ``/project show`` use — so a chat that only FILED a project still
+    sees it. The registry sorts that set by name; it is re-sorted here with
+    ``_listing_order`` so the tab and the sidebar board agree on order.
+
+    An unknown or never-linked id answers 200 with ``projects: []``: the store
+    keeps no session index to 404 against, and "this chat has no projects" is
+    the truthful answer for both. Gated by the ``projects_by_session``
+    capability.
+    """
+    async with errors(request):
+
+        def read() -> SessionProjects:
+            registry = _registry(request)
+            linked = _listing_order(registry.projects_for_session(session_id))
+            live = _live_counts(registry, linked)
+            window = _window(registry)
+            rows = [
+                project_summary(project, live_sessions=live.get(project.id, 0), window=window)
+                for project in linked
+            ]
+            return SessionProjects(session_id=session_id, projects=rows)
 
         return reply(await asyncio.to_thread(read))
 

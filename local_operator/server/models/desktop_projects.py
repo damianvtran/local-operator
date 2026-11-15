@@ -229,6 +229,26 @@ class LinkedSessionView(BaseModel):
     todos: dict[str, Any] | None = None
 
 
+class SessionProjects(BaseModel):
+    """``GET /v1/desktop/sessions/{session_id}/projects`` — one chat's projects.
+
+    The rows are the LISTING's own ``ProjectSummary`` shape, so the chat view's
+    linked-projects tab and the sidebar board paint one row type and open the
+    same detail view (``GET /v1/desktop/projects/{key}``) from it.
+
+    No page declaration, deliberately: the reverse lookup reads the same
+    recency page the listing does (``projects_for_session`` is page-scoped), so
+    a link owned by a row that aged off the page is absent here exactly as it
+    is absent from the board. An empty ``projects`` means "no linked rows on
+    the page", which for a session that was never linked — or an id the store
+    has never seen — is simply "none"; it is never a 404, because a session is
+    not a project-store object.
+    """
+
+    session_id: str
+    projects: list[ProjectSummary] = Field(default_factory=list)
+
+
 class ProjectList(BaseModel):
     """``GET /v1/desktop/projects`` — the page, plus what the page left out.
 

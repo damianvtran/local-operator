@@ -920,3 +920,94 @@ async def test_a_whole_store_search_does_not_scan_the_disk_for_a_miss(api, monke
     assert missed.json()["result"]["count"] == 0
     assert missed.json()["result"]["truncated"] is False
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/desktop/sessions/{session_id}/projects — the chat view's reverse
+# lookup. Rows must be the listing's own shape and order (the tab opens the
+# same detail view the board does), membership is either link list, and a
+# session the store has never seen is "no projects", not an error.
+# ---------------------------------------------------------------------------
+
+SESSION_B = "0123456789ab"
+
+
+async def test_session_projects_lists_linked_rows_in_listing_order(api) -> None:
+    client, root = api
+    ids: dict[str, str] = {}
+    for name in ("done-one", "active-one", "unlinked-one", "filed-one"):
+        created = await client.post("/v1/desktop/projects", json={"name": name})
+        ids[name] = created.json()["result"]["id"]
+    await client.patch(f"/v1/desktop/projects/{ids['done-one']}", json={"status": "done"})
+    await client.patch(f"/v1/desktop/projects/{ids['active-one']}", json={"status": "active"})
+    for name in ("done-one", "active-one"):
+        linked = await client.post(
+            f"/v1/desktop/projects/{ids[name]}/links", json={"session_id": SESSION_A}
+        )
+        assert linked.status_code == 200
+    # A coordination ("filed by") link is still membership for this read.
+    ProjectRegistry(root).link_session(ids["filed-one"], SESSION_A, role="coordination")
+
+    answer = await client.get(f"/v1/desktop/sessions/{SESSION_A}/projects")
+    assert answer.status_code == 200
+    result = answer.json()["result"]
+    assert result["session_id"] == SESSION_A
+    names = [row["name"] for row in result["projects"]]
+    assert "unlinked-one" not in names
+    # Exactly the listing's order, restricted to the linked rows.
+    listing = await client.get("/v1/desktop/projects")
+    listing_rows = listing.json()["result"]["projects"]
+    expected = [row for row in listing_rows if row["name"] != "unlinked-one"]
+    assert result["projects"] == expected
+    assert names.index("active-one") < names.index("done-one")
+
+
+async def test_session_projects_is_empty_for_unlinked_and_unknown_sessions(api) -> None:
+    client, _root = api
+    created = await client.post("/v1/desktop/projects", json={"name": "alpha"})
+    project_id = created.json()["result"]["id"]
+    await client.post(f"/v1/desktop/projects/{project_id}/links", json={"session_id": SESSION_A})
+
+    for session_id in (SESSION_B, "ffffffffffff"):
+        answer = await client.get(f"/v1/desktop/sessions/{session_id}/projects")
+        assert answer.status_code == 200
+        assert answer.json()["result"] == {"session_id": session_id, "projects": []}
+
+    # Unlinking empties it again: the read is live, not a cached index.
+    await client.delete(f"/v1/desktop/projects/{project_id}/links/{SESSION_A}")
+    after = await client.get(f"/v1/desktop/sessions/{SESSION_A}/projects")
+    assert after.json()["result"]["projects"] == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["nope", "ABCDEF012345", "0123456789abc", "..%2F..%2Fetc", "0123456789a%2F"],
+)
+async def test_session_projects_refuses_malformed_ids(api, bad: str) -> None:
+    client, _root = api
+    refused = await client.get(f"/v1/desktop/sessions/{bad}/projects")
+    # 422 from the path pattern; an encoded slash may instead fail to route
+    # (404). Either way no handler ran and nothing was read for that id.
+    assert refused.status_code in (404, 422)
+    if refused.status_code == 422:
+        assert "result" not in refused.json() or refused.json().get("result") is None
+
+
+async def test_session_projects_requires_the_desktop_token(api) -> None:
+    client, _root = api
+    refused = await client.get(
+        f"/v1/desktop/sessions/{SESSION_A}/projects", headers={"Authorization": "Bearer wrong"}
+    )
+    assert refused.status_code in (401, 403)
+
+
+async def test_the_projects_by_session_capability_is_desktop_only(api) -> None:
+    from local_operator.server.features import DESKTOP_ONLY_FEATURES
+
+    client, _root = api
+    caps = await client.get("/v1/capabilities")
+    features: dict[str, Any] = caps.json()["result"]["features"]
+    assert features["projects_by_session"] == 1
+    assert features["projects"] == 2
+    # The phone relay serves no per-session lookup, so it must not republish it.
+    assert "projects_by_session" in DESKTOP_ONLY_FEATURES
