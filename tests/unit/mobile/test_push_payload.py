@@ -17,6 +17,7 @@ lives in ``test_push_wire_contract.py``.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import re
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from local_operator import resume
 from local_operator.mobile import push_credentials, push_handles, push_payload
 from local_operator.mobile.push_payload import (
     ALERT_BODY_FIELD,
@@ -52,13 +54,16 @@ from local_operator.mobile.push_payload import (
 )
 from local_operator.notifications import compose
 from local_operator.notifications.sound import DEFAULT_SOUND_ID, sound_ids
+from local_operator.redaction_shapes import REDACTION_MARKER
 from local_operator.tui.notify import (
     APP_NAME,
     BACKGROUND_FALLBACK_TITLE,
+    BACKGROUND_SNIPPET_MAX_CHARS,
     BODIES,
     BODY_COMPLETE,
     CONTEXT_MIXED,
     CONTEXTS,
+    MAX_TITLE_CHARS,
     digest_subtitle,
 )
 
@@ -732,6 +737,134 @@ def test_a_secret_straddling_compose_s_clamp_leaves_no_fragment_in_the_emit(
         decoded = raw.decode("utf-8")
         leaked = sorted(fragment for fragment in fragments if fragment in decoded)
         assert not leaked, (shape, field, pad, leaked[:3])
+
+
+#: The four invisible characters security review r3 (S-8) split a token with:
+#: zero-width space, LRM, ARABIC LETTER MARK and RLO.
+_SPLITTERS = ("\u200b", "\u200e", "\u061c", "\u202e")
+
+
+@pytest.mark.parametrize("field", ["title", "body", "failure"])
+@pytest.mark.parametrize("splitter", _SPLITTERS)
+@pytest.mark.parametrize("shape", ["github-pat", "openai-project-key"])
+def test_a_secret_split_by_an_invisible_character_leaves_no_fragment_in_the_emit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str, splitter: str, field: str
+) -> None:
+    """S-8 (security review r3): stripping invisibles AFTER scrubbing rejoined a
+    token the scrubber had seen only in pieces. Each piece here is 7 characters —
+    too short for any shape and below this sweep's 8-character evidence window —
+    so a leak can only appear if something glues the pieces back together after
+    the scrub. Driven through the real ``completion_payload`` → ``emit_body``
+    bytes, at offsets on both sides of compose's 80/120 cuts."""
+    _names_on(monkeypatch)
+    secret = _STRADDLE_SECRETS[shape]
+    split = splitter.join(secret[start : start + 7] for start in range(0, len(secret), 7))
+    fragments = _fragments(secret)
+    for pad in (20, 60, 100):
+        text = ("note " * 40)[: pad - 1] + " " + split + " and the rest of the line"
+        root = tmp_path / f"{field}-{pad}"
+        if field == "title":
+            session, kind = _session(root, assistant="Done.", title=text), "complete"
+        elif field == "body":
+            session, kind = _session(root, assistant=text, title="Deploy"), "complete"
+        else:
+            session, kind = _session(root, assistant="x", title="Deploy"), "error"
+            _incident(session, text)
+        _payload, raw = _emit_bytes(session, kind, previews=True)
+        decoded = raw.decode("utf-8")
+        leaked = sorted(fragment for fragment in fragments if fragment in decoded)
+        assert not leaked, (shape, hex(ord(splitter)), field, pad, leaked[:3])
+
+
+#: The compose MODULE (the package re-exports a ``compose`` function under the
+#: same name), for its private snippet helpers.
+_COMPOSE = importlib.import_module("local_operator.notifications.compose")
+
+
+def _spy_scrub_lengths(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the length of every text compose hands the scrubber."""
+    seen: list[int] = []
+    real = _COMPOSE._scrubbed
+
+    def _spy(text: str) -> str:
+        seen.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(_COMPOSE, "_scrubbed", _spy)
+    return seen
+
+
+def test_the_snippet_scrub_is_bounded_and_matches_the_whole_text_scrub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N-3: a long reply is scrubbed only up to the shown head plus the margin,
+    and the snippet is IDENTICAL to scrubbing everything — including a secret
+    straddling the 120 cut, swept across it like the S-6 sweep."""
+    seen = _spy_scrub_lengths(monkeypatch)
+    secret = _STRADDLE_SECRETS["github-pat"]
+    tail = " and the rest of the line" + " more prose here" * 2000  # ~32 k chars
+    for pad in range(90, 140, 7):
+        raw = ("note " * 40)[: pad - 1] + " " + secret + tail
+        seen.clear()
+        snippet = _COMPOSE._scrubbed_snippet(raw, BACKGROUND_SNIPPET_MAX_CHARS)
+        assert seen and max(seen) < 5_000 < len(raw), (pad, seen)
+        whole_scrub = _COMPOSE._scrubbed(raw)
+        whole = _COMPOSE._keep_markers_whole(
+            resume._condense(whole_scrub, BACKGROUND_SNIPPET_MAX_CHARS),
+            " ".join(whole_scrub.split()),
+        )
+        assert snippet == whole, pad
+        assert not [fragment for fragment in _fragments(secret) if fragment in snippet]
+
+
+def test_the_snippet_scrub_falls_back_to_the_whole_text_when_redaction_eats_the_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded window is only trusted while the shown text sits at least
+    half the margin from its edge. A run of tokens each redacted to a 10-char
+    marker shrinks the window past that, so the whole reply is scrubbed."""
+    seen = _spy_scrub_lengths(monkeypatch)
+    tokens = " ".join(
+        "ghp_" + (_ENTROPY[index % 8 :] + _ENTROPY)[:36] for index in range(300)
+    )  # ~12 k chars that redact to ~3 k
+    raw = "short intro " + tokens
+    snippet = _COMPOSE._scrubbed_snippet(raw, BACKGROUND_SNIPPET_MAX_CHARS)
+    assert len(raw) in seen, seen
+    assert "ghp_" not in snippet
+
+
+@pytest.mark.parametrize("budget_field", ["title", "body"])
+def test_a_cut_inside_a_redaction_marker_drops_the_partial_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget_field: str
+) -> None:
+    """Q-2 (QA r2): the 80/120 cut landing inside the redaction marker must not
+    leave a broken marker such as its first 8 characters; the cut backs up to
+    before the marker. A literal marker prefix the user typed at the cut is left
+    alone (positive control below)."""
+    _names_on(monkeypatch)
+    marker = REDACTION_MARKER
+    secret = _STRADDLE_SECRETS["github-pat"]
+    budget = MAX_TITLE_CHARS if budget_field == "title" else BACKGROUND_SNIPPET_MAX_CHARS
+    hit = 0
+    for pad in range(budget - len(marker) - 2, budget + 2):
+        # Glued with "(" rather than a space: ``_condense`` already backs a cut
+        # up to a nearby space, so only a marker glued to its word reaches the
+        # cut intact — the case that showed the broken marker.
+        text = "x" * pad + "(" + secret + " tail words"
+        root = tmp_path / str(pad)
+        if budget_field == "title":
+            shown = compose("complete", session_dir=_session(root, assistant="ok", title=text))
+            value = shown.title
+        else:
+            shown = compose("complete", session_dir=_session(root, assistant=text, title="T"))
+            value = shown.body.removesuffix("…")
+        start = pad + 1
+        if start < budget < start + len(marker):
+            hit += 1
+        assert not any(value.endswith(marker[:k]) for k in range(1, len(marker))), (pad, value)
+    assert hit, "the sweep never put the cut inside the marker"
+    # Positive control: user text that merely LOOKS like a marker prefix is kept.
+    assert _COMPOSE._marker_safe_cut("a" * 10 + marker[:3], 13) == 13
 
 
 def test_compose_scrubs_before_its_own_clamp(

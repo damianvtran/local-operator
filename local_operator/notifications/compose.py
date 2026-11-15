@@ -33,6 +33,7 @@ the table this module implements literally.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -45,6 +46,7 @@ from local_operator.tui.notify import (
     CONTEXTS,
     MAX_TITLE_CHARS,
     sanitize_text,
+    scrub_banner_text,
     session_names_in_notifications,
 )
 
@@ -317,9 +319,9 @@ def _compose_title(
         # this off is asking for: no statement about their sessions at all.
         return APP_NAME, False
     # Scrubbed BEFORE the clamp: see :func:`_scrubbed`.
-    name = sanitize_text(_scrubbed(session_name), MAX_TITLE_CHARS)
+    name = _clamped_title(_scrubbed(session_name))
     if not name and session_dir is not None:
-        name = sanitize_text(_scrubbed(_stored_title(session_dir)), MAX_TITLE_CHARS)
+        name = _clamped_title(_scrubbed(_stored_title(session_dir)))
     if name:
         return name, True
     if kind in ("ask", "approval"):
@@ -413,20 +415,117 @@ def _scrubbed(text: str) -> str:
     protects the desktop toast, the TUI notifier and the OS fallback that read
     the same composition.
 
-    Imported lazily: ``redaction_shapes`` is a large regex module, and this one
-    is imported by the detached runtime's gate path where most calls never
-    compose a session-derived string. FAILS CLOSED to ``""``: every caller then
+    Invisible format characters are stripped FIRST, via the helper the push
+    layer shares (:func:`~local_operator.tui.notify.scrub_banner_text`): a token
+    split by U+200B or a bidi mark otherwise reads as two short non-matches, and
+    the toast would show it visually whole (security review r3, S-8).
+
+    ``redaction_shapes`` is imported lazily inside that helper: this module is
+    imported by the detached runtime's gate path where most calls never compose
+    a session-derived string. FAILS CLOSED to ``""``: every caller then
     degrades to the house vocabulary, which asserts nothing and leaks nothing.
     """
     if not text:
         return ""
     try:
-        from local_operator.redaction_shapes import scrub_secrets
-
-        return scrub_secrets(text)
+        return scrub_banner_text(text)
     except Exception:  # noqa: BLE001 — chrome; an unscrubbed string must not ship
         logger.debug("notification text scrub failed; dropping the text", exc_info=True)
         return ""
+
+
+#: Raw characters scrubbed past the last one a snippet can show (QA/security
+#: r3, N-3). Scrubbing a whole 64 KB reply took a measured 88 ms median (30 k
+#: chars of technical prose; 189 ms at 60 k) INLINE on the TUI event loop at
+#: turn end, to show 120 of them. The margin is what keeps the bounded scrub
+#: exactly as strong as the whole one for anything that can be SHOWN: a
+#: credential that starts inside the shown text and is shorter than
+#: ``_SCRUB_MARGIN_CHARS // 2`` lies wholly inside the window, so its shape
+#: matches as it would on the full text. :func:`_scrubbed_snippet` re-checks
+#: that after scrubbing and falls back to the whole text when redactions or
+#: whitespace ate the margin. 4 KiB also covers a 4096-bit RSA PEM block
+#: (~3.2 KB) that starts at the cut.
+_SCRUB_MARGIN_CHARS = 4096
+
+
+def _flat_end(text: str, count: int) -> int | None:
+    """Index in ``text`` after which ``" ".join(text.split())`` has ``count`` chars.
+
+    ``None`` when the whole text flattens to fewer: the caller then needs all of
+    it. Walks words, so it stops as soon as the count is reached rather than
+    flattening the whole reply.
+    """
+    seen = 0
+    for word in re.finditer(r"\S+", text):
+        seen += len(word.group()) + (1 if seen else 0)
+        if seen >= count:
+            return word.end()
+    return None
+
+
+def _scrubbed_snippet(raw: str, max_chars: int) -> str:
+    """``raw`` scrubbed and condensed to ``max_chars``, scrubbing only what can show.
+
+    The scrub still runs BEFORE the cut (S-6), and on the RAW text so line
+    structure the shape rules read is intact; only the text no snippet could
+    reach is left out (N-3). ``max_chars + 1`` flattened characters decide
+    whether :func:`~local_operator.resume._condense` cuts at all, so the window
+    reaches that far plus :data:`_SCRUB_MARGIN_CHARS`.
+    """
+    from local_operator.resume import _condense
+
+    end = _flat_end(raw, max_chars + 1)
+    if end is not None and end + _SCRUB_MARGIN_CHARS < len(raw):
+        window = _scrubbed(raw[: end + _SCRUB_MARGIN_CHARS])
+        shown_end = _flat_end(window, max_chars + 1)
+        # Redactions shorten text and pull the shown end toward the window's
+        # edge; once it is within half the margin, a credential that touches
+        # the shown text could be cut by the window. Correct beats fast.
+        if shown_end is None or shown_end > len(window) - _SCRUB_MARGIN_CHARS // 2:
+            window = _scrubbed(raw)
+    else:
+        window = _scrubbed(raw)
+    return _keep_markers_whole(_condense(window, max_chars), " ".join(window.split()))
+
+
+def _clamped_title(scrubbed: str) -> str:
+    """A scrubbed name sanitised and cut at :data:`MAX_TITLE_CHARS`, marker whole."""
+    flat = sanitize_text(scrubbed, len(scrubbed))
+    if len(flat) <= MAX_TITLE_CHARS:
+        return flat
+    return flat[: _marker_safe_cut(flat, MAX_TITLE_CHARS)].rstrip()
+
+
+def _marker_safe_cut(flat: str, cut: int) -> int:
+    """``cut``, moved back to the start of a redaction marker it would split.
+
+    QA r2, Q-2: a cut landing inside ``[redacted]`` left a title ending in
+    ``[redacte``, which reads as a glitch rather than as a deliberate mask. Only
+    a REAL marker occurrence in the uncut text moves the cut, so a literal
+    ``[re`` the user typed is never touched.
+    """
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    for marker in re.finditer(re.escape(REDACTION_MARKER), flat):
+        if marker.start() < cut < marker.end():
+            return marker.start()
+    return cut
+
+
+def _keep_markers_whole(condensed: str, flat: str) -> str:
+    """``_condense``'s output with a split trailing redaction marker dropped (Q-2).
+
+    ``_condense`` returns ``flat`` whole or a PREFIX of it plus one ellipsis, so
+    the prefix's length is the cut in ``flat`` coordinates.
+    """
+    if not condensed.endswith("…") or condensed == flat:
+        return condensed
+    prefix = condensed[:-1]
+    cut = _marker_safe_cut(flat, len(prefix))
+    if cut == len(prefix):
+        return condensed
+    trimmed = flat[:cut].rstrip(" ,.;:")
+    return f"{trimmed}…" if trimmed else ""
 
 
 def _stored_title(session_dir: Path) -> str:
@@ -453,15 +552,11 @@ def _failure(session_dir: Path) -> str:
     read of an already-warm 64 KiB region rather than a second scan strategy.
     """
     try:
-        from local_operator.resume import (
-            PREVIEW_SCAN_BYTES,
-            _condense,
-            session_failure_summary,
-        )
+        from local_operator.resume import PREVIEW_SCAN_BYTES, session_failure_summary
 
         # Read unclamped, scrub, THEN condense — see :func:`_preview`.
         raw = session_failure_summary(session_dir, max_chars=PREVIEW_SCAN_BYTES)
-        return _condense(_scrubbed(raw), BACKGROUND_SNIPPET_MAX_CHARS)
+        return _scrubbed_snippet(raw, BACKGROUND_SNIPPET_MAX_CHARS)
     except Exception:  # noqa: BLE001 — a body is chrome; delivery is not
         logger.debug("notification failure text unavailable for %s", session_dir, exc_info=True)
         return ""
@@ -476,7 +571,7 @@ def _preview(session_dir: Path) -> str:
     something unexpected, a directory that vanished between the two calls.
     """
     try:
-        from local_operator.resume import PREVIEW_SCAN_BYTES, _condense, session_preview
+        from local_operator.resume import PREVIEW_SCAN_BYTES, session_preview
 
         # Read UNCLAMPED, scrub, THEN condense, so :func:`_scrubbed` sees every
         # credential whole (S-6). The reader parses a tail window of
@@ -486,10 +581,11 @@ def _preview(session_dir: Path) -> str:
         # sidecar holds only 200 characters, so it is bypassed for the
         # archive's memoised tail read; a banner for an archived session is
         # rare, and correct beats fast for text that leaves the machine.
-        # ``_condense`` is the reader's own word-boundary ellipsis rule, reused
-        # so the banner cuts exactly where it always did.
+        # :func:`_scrubbed_snippet` scrubs only the head a banner can show plus
+        # a margin (N-3), then condenses with the reader's own word-boundary
+        # ellipsis rule, so the banner cuts exactly where it always did.
         raw = session_preview(session_dir, max_chars=PREVIEW_SCAN_BYTES)
-        return _condense(_scrubbed(raw), BACKGROUND_SNIPPET_MAX_CHARS)
+        return _scrubbed_snippet(raw, BACKGROUND_SNIPPET_MAX_CHARS)
     except Exception:  # noqa: BLE001 — a body is chrome; delivery is not
         logger.debug("notification preview unavailable for %s", session_dir, exc_info=True)
         return ""

@@ -33378,11 +33378,15 @@ class OperatorApp(App[None]):
             # the budgets; this method only forwards what it produced.
             #
             # INLINE, NOT IN A WORKER, and that is measured rather than
-            # assumed: `compose` reads a bounded transcript tail, and over a
-            # 42 MB transcript it runs in 0.19 ms median / 0.31 ms worst of 20
-            # runs on the maintainer's machine. That is two orders of magnitude
-            # under a frame, so posting it to a thread would buy nothing and
-            # cost the turn-end toast a scheduling hop.
+            # assumed: `compose` reads a bounded transcript tail and credential-
+            # scrubs only the head a banner can show plus a 4 KiB margin
+            # (`compose._scrubbed_snippet`). Measured 2026-11-15 with timeit,
+            # 20 runs, on a last reply of technical prose: 8.5 ms median /
+            # 14.6 ms worst at 30 k chars, 6.5 ms / 12.4 ms at 60 k. Scrubbing
+            # the whole reply instead cost 88 ms / 222 ms and 189 ms / 429 ms
+            # (PR #3990 review r3, N-3) — the reason the scrub is bounded rather
+            # than moved to a thread: well under a frame now, and a thread hop
+            # would only delay the turn-end toast.
             composed = self._composed_notification(kind, label)
             body = composed.body if composed is not None else ""
             if kind == "complete":

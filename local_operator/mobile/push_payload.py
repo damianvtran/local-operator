@@ -92,7 +92,6 @@ three ride one ``Idempotency-Key`` header on one route.
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -117,7 +116,13 @@ from local_operator.notifications.sound import (
     configured,
 )
 from local_operator.tui import notify as _notify
-from local_operator.tui.notify import APP_NAME, BODIES, digest_subtitle, sanitize_text
+from local_operator.tui.notify import (
+    APP_NAME,
+    BODIES,
+    digest_subtitle,
+    sanitize_text,
+    scrub_banner_text,
+)
 
 # ``BODY_COMPLETE`` is read as ``_notify.BODY_COMPLETE`` at call time, not
 # imported by value: ``tui.notify._reload_copy`` rebinds it on a live language
@@ -313,22 +318,6 @@ ALERT_TEXT_MAX_CHARS = 200
 #: costs is known exactly.
 _ELLIPSIS = "\u2026"
 
-#: Bidi overrides/isolates and zero-width characters (security review r1, S-3).
-#: ``sanitize_text`` strips only C0/C1 controls, so a model-written session name
-#: carrying U+202E could render reversed or spoofed text on a lock screen. Kept
-#: LOCAL rather than widening ``sanitize_text``: that helper also feeds terminal
-#: titles and argv on the desktop, whose behaviour this PR does not own.
-#: U+200C (ZWNJ) and U+200D (ZWJ) are deliberately KEPT, narrowing the review's
-#: suggested ``\u200b-\u200f``: ZWNJ is orthographic in Urdu, Hindi and Persian
-#: text (two of this product's locales), and ZWJ glues emoji sequences — a
-#: family emoji stripped of it renders as four people. Neither reorders text,
-#: which is the spoofing this guards; LRM/RLM (U+200E/F) can, and go. So does
-#: U+061C ARABIC LETTER MARK (security review r2, S-7): bidi class AL, a strong
-#: right-to-left implicit mark of the same kind as RLM. The tag block
-#: (U+E0000-E007F) is deliberately NOT stripped: subdivision-flag emoji are
-#: built from it.
-_INVISIBLE_FORMAT_CHARS = re.compile("[\u061c\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
-
 
 def _bounded_alert_text(text: str, fallback: str) -> str:
     """``text`` made safe to leave the machine and fit the cloud's 1–200 rule.
@@ -363,14 +352,14 @@ def _bounded_alert_text(text: str, fallback: str) -> str:
     """
     from rich.cells import split_graphemes
 
-    from local_operator.redaction_shapes import scrub_secrets
-
     def _clean(value: str) -> str:
         # Re-sanitised even though compose already did it: this text now leaves
         # the machine, and control characters are never wanted on a lock screen.
-        # Invisible format characters go first so ``sanitize_text`` collapses
-        # any whitespace their removal leaves behind.
-        value = _INVISIBLE_FORMAT_CHARS.sub("", scrub_secrets(value or ""))
+        # ``scrub_banner_text`` strips the invisible format characters BEFORE it
+        # scrubs (security review r3, S-8: the reverse order rejoined a token the
+        # scrubber had only seen in pieces), and both run before
+        # ``sanitize_text`` so it collapses any whitespace the removal leaves.
+        value = scrub_banner_text(value)
         return sanitize_text(value, len(value))
 
     cleaned = _clean(text)
