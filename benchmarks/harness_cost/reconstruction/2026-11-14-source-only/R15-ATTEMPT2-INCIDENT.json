@@ -1,0 +1,26 @@
+{
+  "docker_api_calls": 0,
+  "application_bundle": "/Applications/Docker.app",
+  "authoritative_pid": 75147,
+  "containers": 0,
+  "failure_reason": "RuntimeError: STOP: foreign/unobserved Docker process; uniqueness/time is NOT ownership",
+  "kind": "safe-native-attempt2-incident",
+  "manual_recovery": "independently cleared exact group, one SIGTERM; absence verified; separate receipt, not native clean success",
+  "native_budget_consumed": "2 of 3",
+  "observed_topology": {
+    "causally_admitted": "ticket backend and observed child VM ONLY; not parent/siblings",
+    "group": 75032,
+    "leader": 75032,
+    "sibling_backend": 75149,
+    "ticket_backend": 75147,
+    "ticket_child_vm": 75501,
+    "time_utc": "2026-11-15T08:48:02Z..08:48:05Z"
+  },
+  "original_native_failure_unchanged": true,
+  "pulls": 0,
+  "receipt_sha256": "3244d2bb0e05b80199d997e3d4164108c987b9ba53389a17cbc125a244776832",
+  "resolver_invocations": 0,
+  "source_head": "6de60b316a35dda02a8970b9990c0b2cd1d3ff77",
+  "status": "cleanup-unverified-startup-identity",
+  "ticket_launch_date": 1794732482.3274162
+}

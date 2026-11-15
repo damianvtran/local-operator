@@ -1,0 +1,14 @@
+{
+  "executable_path_available": true,
+  "kind": "NO-LAUNCH-KERNEL-IDENTITY-BINDING",
+  "launch_calls": 0,
+  "microsecond_birth": "1794735619.981211",
+  "native_attempt_consumed": false,
+  "own_pid": 16195,
+  "pgid_matches": true,
+  "pid_matches": true,
+  "proc_bsdinfo_size": 136,
+  "reap_calls": 0,
+  "sid_matches": true,
+  "start_sec_offset": 120
+}

@@ -63,6 +63,21 @@ Use NEW admissions/linux-amd64-02.json and matching exclusive lifecycle/resolver
 namespaces. Attempt 1 and its original admission/receipts are immutable. The old
 GO is closed; independent review and NEW GO are mandatory before native attempt 2.
 
+## R15 prospective direct-session launch — NO native GO
+
+Current product launch is ONLY the signed OUTER backend via
+Popen(start_new_session=True), not NSWorkspace and not the nested UI executable.
+See SESSION-AUTHORITY-AMENDMENT.md. Created SID + reserved/unreaped creator is
+ownership authority; no LS ancestor/group is adopted. Source-only candidate,
+native budget remains 2/3, independent review + NEW GO required for attempt3.
+
+New admission MUST include direct_backend_ui_effects equal to
+acknowledged-unqualified-default-backend. Direct execution has no inherited
+NSWorkspace no-activation/no-prompt flags; actual UI behavior is a native gate.
+Review hashes MUST cover owned_session_launch.py and darwin_process_identity.py
+as well as the four prior files. Backend keeps original HOME/settings; anonymous
+Docker CLI HOME/config stays isolated. No old GO or linux-amd64-01/02 path reuse.
+
 ## R12/R13 unified safety remediation — source/stub proof only, NO GO
 
 A responding engine ALWAYS requires a successful empty foreign-container probe,

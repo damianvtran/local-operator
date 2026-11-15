@@ -1,0 +1,32 @@
+test_slow_signature_proof_checks_resources_without_recursive_observation (test_identity_proof.IdentityProofTests.test_slow_signature_proof_checks_resources_without_recursive_observation) ... FAIL
+
+======================================================================
+FAIL: test_slow_signature_proof_checks_resources_without_recursive_observation (test_identity_proof.IdentityProofTests.test_slow_signature_proof_checks_resources_without_recursive_observation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_identity_proof.py", line 62, in test_slow_signature_proof_checks_resources_without_recursive_observation
+    self.assertTrue(any(at-begin>=0.45 and owner is None for at,phase,owner in checks),'resource guard must run during the >0.5s unproven interval')
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : resource guard must run during the >0.5s unproven interval
+
+----------------------------------------------------------------------
+Ran 1 test in 0.802s
+
+FAILED (failures=1)
+
+Historical in-memory replay of exact committed NativeOps (NO source mutation). Head 6de60b316a35dda02a8970b9990c0b2cd1d3ff77; source SHA256 df22c1ff1f9c24b5433fc8097e6d37981662992d2cdfa10d868082b14342be05; broker factory FAILS unless inert mock is installed.
+test_slow_proof_outside_startup_guard_never_recurses (test_identity_proof.IdentityProofTests.test_slow_proof_outside_startup_guard_never_recurses) ... FAIL
+
+======================================================================
+FAIL: test_slow_proof_outside_startup_guard_never_recurses (test_identity_proof.IdentityProofTests.test_slow_proof_outside_startup_guard_never_recurses)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_identity_proof.py", line 71, in test_slow_proof_outside_startup_guard_never_recurses
+    self.assertGreaterEqual(time.monotonic()-begin,0.60);self.assertEqual(len(processes),1)
+                                                         ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+AssertionError: 2 != 1
+
+----------------------------------------------------------------------
+Ran 1 test in 1.377s
+
+FAILED (failures=1)

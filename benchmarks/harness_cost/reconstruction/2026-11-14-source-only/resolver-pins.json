@@ -15,18 +15,14 @@
   "base_reported_compressed_bytes": 44588823,
   "base_tag_observed": "3.14.0-slim-bookworm",
   "causal_startup": {
-    "activates": false,
-    "allows_substitution": false,
-    "api": "NSWorkspace.openApplicationAtURL:configuration:completionHandler:",
-    "authority": "retained returned NSRunningApplication plus exact new PID and actually observed signed descendant edges",
-    "binding_probe": "R11-BINDING-PROBE.json",
-    "broker": "launch_services_broker.py",
-    "creates_new_instance": true,
-    "launch_bundle": "/Applications/Docker.app",
+    "authority": "Popen(start_new_session=True) created SID, held unreaped creator, kernel birth/path/SID snapshot",
+    "kernel_identity": "darwin_process_identity.py",
+    "launch_executable": "/Applications/Docker.app/Contents/MacOS/com.docker.backend",
+    "launcher": "owned_session_launch.py",
     "native_qualified": false,
+    "source_provenance": "R15-SOURCE-RECEIPTS.jsonl",
     "startup_budget_seconds": 120,
-    "unknown_completion": "UNRESOLVED; bounded cleanup capture; no guessed PID or automatic next attempt",
-    "validation_executable_role": "R10 nested path validates both signed bundles; launch uses outer bundle API, never the UI leaf Popen"
+    "ui_behavior": "UNQUALIFIED; no headless/activation/prompt flags"
   },
   "cleanup_safety": {
     "available_engine": "always successful empty foreign-container probe, including prework/overcap",
@@ -53,7 +49,7 @@
     "minimum_free_gib_at_start": 30,
     "operator_ack_id": "a-7072",
     "optional_digest_pull_requires_new_full_scope_review": true,
-    "optional_pull_review_disposition": "Round12: R13 approved and normal R12 fence fixed; R14 history ordering remediation pending delta review. Optional pull NO; native/runtime GO closed.",
+    "optional_pull_review_disposition": "R15 phase + direct-session candidate requires independent review/current six-file hashes and NEW GO; optional pull NO until explicit new signoff",
     "post_start_mem_total_max_bytes": 4300000000,
     "post_start_ncpu_max": 2,
     "prestart_cap_validation": "SKIPPED-with-operator-ack-NOT-verified",
@@ -71,6 +67,7 @@
   },
   "desktop_layout": {
     "default_executable": "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop",
+    "default_executable_role": "validation only; both bundle layouts remain signed/checked, actual launch is outer backend",
     "explicit_relative_layouts": [
       "Contents/MacOS/Docker",
       "Contents/MacOS/Docker Desktop",
@@ -84,6 +81,7 @@
   "dev_extra_included": false,
   "execution_authorized": false,
   "historical_extras_exactly_known": false,
+  "launch_authority": "owned-posix-session-v1",
   "lop_extras": [
     "server",
     "mcp",
@@ -95,6 +93,15 @@
   ],
   "platform": "linux/amd64",
   "python_declared": "CPython 3.14.0; actual interpreter identity must be checked inside pinned carrier",
+  "r15_topology_admission": {
+    "creator_hold": "do not poll/wait/reap creator until all live owned members retired; default SIGCHLD and single-thread controller",
+    "meaning": "prospective IMPLEMENTED private session, not native qualification or runtime GO",
+    "native_budget_consumed": "2 of 3",
+    "old_go_reusable": false,
+    "ready": true,
+    "technical_choice": "parent accepted independent reviewer cf86bb90bf93 direct signed outer backend; NO ancestor adoption",
+    "ui_behavior": "UNQUALIFIED; direct default executable does not inherit NSWorkspace activation/prompt flags"
+  },
   "resolver_closure_scope": "one Linux/amd64 CPython3.14 LoP functional/runtime+shared service+Harbor+build-backend requirements closure, not all-arm installed environments",
   "safety": {
     "independent_container_alarm_seconds": 840,

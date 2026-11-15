@@ -23,6 +23,8 @@ import subprocess
 import time
 
 from launch_services_broker import CausalLaunch
+from owned_session_launch import OwnedSessionLaunch, KIND as SESSION_KIND
+from darwin_process_identity import DarwinIdentity
 
 HERE = Path(__file__).resolve().parent
 ACK = 'a-7072'
@@ -262,6 +264,8 @@ class NativeOps:
         self.pull_attempted=False;self.pull_complete=False;self.owned_image_id=None;self.foreign_asset_activity=False
         self.broker=None;self.owned_processes={};self.ownership_edges=[];self.verified_process_paths=set();self.startup_deadline=0
         self.startup_active=False;self.startup_guard_running=False
+        self.identity_proof_depth=0;self.ownership_scan_depth=0;self.resource_guard_running=False
+        self.kernel_identity=None;self.identity_proof_errors=[]
         self.daemon_observed_available=False;self.engine_history_unknown=False;self.engine_query_inflight=False;self.cleanup_engine_evidence={};self.ownership_journal_errors=[]
     def now(self): return time.monotonic()
     def sleep(self,seconds): time.sleep(seconds)
@@ -289,8 +293,10 @@ class NativeOps:
                     break
                 except subprocess.TimeoutExpired:
                     require(self.now()<limit,'owned command deadline exhausted')
-                    if getattr(self,'startup_active',False) and not self.startup_guard_running:self.startup_guard()
-                    if self.cleanup_until is None and self.monitor_enabled and not self.monitoring:
+                    if getattr(self,'startup_active',False):
+                        if self.identity_proof_depth or self.ownership_scan_depth or self.startup_guard_running or self.resource_guard_running:self.startup_resource_guard()
+                        else:self.startup_guard()
+                    if self.cleanup_until is None and not getattr(self,'startup_active',False) and self.monitor_enabled and not self.monitoring:
                         self.check_disk()
                         if self.now()>=self.next_rss:
                             self.monitoring=True
@@ -304,6 +310,35 @@ class NativeOps:
             if proc is not None and proc.poll() is None:
                 os.killpg(proc.pid,signal.SIGKILL);proc.communicate(timeout=5)
     def snapshot(self):
+        direct=self.p.get('launch_authority')==SESSION_KIND
+        if direct:
+            if self.kernel_identity is None:self.kernel_identity=DarwinIdentity()
+            _,out,_=self.command(['/bin/ps','-axo','pid=,ppid=,pgid=,rss=,state=,lstart=,comm='])
+            result=[]
+            creator=self.broker.creator.pid if self.broker and getattr(self.broker,'kind',None)==SESSION_KIND and self.broker.creator and not self.broker.released else None
+            for line in out.splitlines():
+                fields=line.split(None,10)
+                if len(fields)!=11:continue
+                row={'pid':int(fields[0]),'ppid':int(fields[1]),'pgid':int(fields[2]),'rss_kib':int(fields[3]),'state':fields[4],'start':' '.join(fields[5:10]),'exe':fields[10]}
+                if row['pid']<=0:continue
+                if row['state'].startswith('Z') and row['pid']!=creator:continue  # No live authority; exact absence is checked after creator reap.
+                if row['pid']==creator and row['state'].startswith('Z'):
+                    row.update(sid=creator,exe=self.broker.executable)  # Held unreaped creator, never a discovered group.
+                    if self.broker.ticket.get('birth'):row['start']=self.broker.ticket['birth']
+                    result.append(row);continue
+                try:row['sid']=os.getsid(row['pid'])
+                except ProcessLookupError:
+                    if row['pid']==creator:row['sid']=creator  # Reserved creator may have just become zombie.
+                    else:continue
+                except PermissionError:row['sid']=None
+                relevant=row['pid']==creator or row['exe'].startswith(self.app_root) or (creator and row['sid']==creator) or row['pid'] in self.owned_processes
+                if relevant:
+                    if row['pid']==creator:identity=self.kernel_identity.record(row['pid'],creator_sid=creator,creator_executable=self.broker.executable)
+                    else:identity=self.kernel_identity.record(row['pid'])
+                    if identity is None:continue
+                    row.update(identity)
+                result.append(row)
+            return result
         _,out,_=self.command(['/bin/ps','-axo','pid=,ppid=,pgid=,rss=,lstart=,comm='])
         result=[]
         for line in out.splitlines():
@@ -316,6 +351,8 @@ class NativeOps:
     def preflight(self):
         validated_registered_root(str(self.root))  # Reject bad roots before any startup/work.
         self.admission_path=validated_admission_path(self.a['_admission_path'],self.root,self.a['attempt_id'])
+        require(self.p.get('r15_topology_admission',{}).get('ready') is True and self.p.get('launch_authority')==SESSION_KIND,'R15 actual ancestor/sibling topology remains unproven without reviewed created-session authority')
+        require(self.a.get('direct_backend_ui_effects')=='acknowledged-unqualified-default-backend','direct backend UI effects must be explicitly acknowledged; no headless/prompt claim')
         self.sample_swap('PRE-startup')  # No Desktop starts when swap evidence fails.
         require(self.a.get('operator_ack_id')==ACK and self.a.get('operator_ack_quote')==ACK_QUOTE,'operator acknowledgement missing')
         require(self.a.get('prestart_cap_validation')=='skipped-with-operator-ack' and 'vm_caps_verified_before_start' not in self.a,'must not fabricate pre-start verification')
@@ -327,7 +364,7 @@ class NativeOps:
         review=self.a['full_scope_review'];head=self.command(['git','-C',str(HERE),'rev-parse','HEAD'])[1].strip()
         require(not self.command(['git','-C',str(HERE),'status','--porcelain'])[1].strip(),'dirty source cannot be admitted under an old reviewed head')
         require(review.get('clean') is True and review.get('source_commit')==head and review['reviewer']!='70ba7562e541','full-scope clean independent current-head review missing')
-        for name in ('lifecycle_proposal.py','RESOLVER-COMMAND.md','resolver-pins.json','launch_services_broker.py'):
+        for name in ('lifecycle_proposal.py','RESOLVER-COMMAND.md','resolver-pins.json','launch_services_broker.py','owned_session_launch.py','darwin_process_identity.py'):
             require(review.get('file_sha256',{}).get(name)==hashlib.sha256((HERE/name).read_bytes()).hexdigest(),'reviewed file hash mismatch')
         self.desktop_layout=validate_desktop_layout(self.desktop,self.command)
         require(self.root.is_dir() and self.a.get('docker_raw_path') and self.raw.is_absolute() and self.raw.name=='Docker.raw','registered root/approved raw path missing')
@@ -336,6 +373,9 @@ class NativeOps:
         self.baseline=initial.st_blocks*512 if initial else 0
         self.raw_identity=(initial.st_dev,initial.st_ino) if initial else None
         require(not Path('/var/run/docker.sock').exists(),'daemon socket target already exists; no foreign/stale engine takeover')
+        if self.p.get('launch_authority')==SESSION_KIND:
+            self.kernel_identity=DarwinIdentity()
+            require(self.kernel_identity.record(os.getpid()) is not None,'read-only kernel identity binding unsupported BEFORE startup')
         self.before=self.snapshot()
         for process in self.before:
             if Path(process['exe']).name in HELPERS:
@@ -363,6 +403,7 @@ class NativeOps:
     def has_cleanup_authority(self):
         # This is retained causal proof, not a substitute timestamp/singleton.
         if self.broker is None or self.broker.ticket is None:return False
+        if getattr(self.broker,'kind',None)==SESSION_KIND:return self.broker.matches(self.broker.ticket)
         ticket=self.broker.ticket;known=self.owned_processes.get(ticket['pid'])
         return bool(known and known['exe']==ticket['executable'] and known['pid'] not in {p['pid'] for p in self.before})
     def ownership_event(self,event):
@@ -375,9 +416,81 @@ class NativeOps:
     def verify_owned_path(self,path):
         p=Path(path);require(p.is_file() and p.resolve(strict=True)==p and path.startswith(self.app_root),'untrusted/escaping owned process path')
         if path not in self.verified_process_paths:
-            self.command(['/usr/bin/codesign','--verify','--strict','-R','=anchor apple generic and certificate leaf[subject.OU] = "9BNSXJN65R"',path])
+            self.identity_proof_depth+=1
+            try:self.command(['/usr/bin/codesign','--verify','--strict','-R','=anchor apple generic and certificate leaf[subject.OU] = "9BNSXJN65R"',path])
+            finally:self.identity_proof_depth-=1
             self.verified_process_paths.add(path)
     def observe_owned(self):
+        require(self.ownership_scan_depth==0,'recursive ownership proof refused')
+        self.ownership_scan_depth+=1
+        try:return self._observe_owned()
+        finally:self.ownership_scan_depth-=1
+    def verify_session_path(self,path):
+        if path.startswith(self.app_root):return self.verify_owned_path(path)
+        # A directly launched backend may run transient Apple platform helpers.
+        # Session ownership is already kernel-proven; qualification is still
+        # bounded/canonical and never admits a foreign-session Apple process.
+        roots=('/usr/bin/','/usr/sbin/','/bin/','/sbin/','/System/Library/','/usr/libexec/')
+        p=Path(path);require(path.startswith(roots) and p.is_file() and p.resolve(strict=True)==p,'unexpected executable in owned session')
+        if path not in self.verified_process_paths:
+            self.identity_proof_depth+=1
+            try:self.command(['/usr/bin/codesign','--verify','--strict','-R','=anchor apple',path])
+            finally:self.identity_proof_depth-=1
+            self.verified_process_paths.add(path)
+    def _observe_owned_session(self):
+        # One process closure supplies SID, microsecond birth, path and parent
+        # edges. Membership is inherited from OUR setsid, never an LS ancestor.
+        rows=self.snapshot();root=self.broker.bind_birth(rows);ticket=self.broker.ticket
+        old={p['pid'] for p in self.before};by_pid={p['pid']:p for p in rows}
+        session=[p for p in rows if p.get('sid')==ticket['sid']]
+        # setsid starts with only OUR child; other sessions cannot join it.
+        # Creator is held unreaped, so its SID/PID cannot be recycled.
+        for pid,known in self.owned_processes.items():
+            current=by_pid.get(pid)
+            if current is None:continue
+            require(current['start']==known['start'],'owned PID birth reused')
+            if not current.get('state','').startswith('Z'):require(current['exe']==known['exe'],'owned PID executable changed')
+            if current.get('sid')!=ticket['sid']:
+                # Escapes have no blanket session authority. Retain only a
+                # presently observed parent edge to a still-owned session member.
+                parent=by_pid.get(current['ppid'])
+                require(parent is not None and parent.get('sid')==ticket['sid'] and parent['pid'] in self.owned_processes,'unobserved session escape; no adoption')
+        events=[]
+        for row in session:
+            known=dict(row)
+            if row['pid'] not in self.owned_processes:
+                known['authority']=SESSION_KIND;self.owned_processes[row['pid']]=known
+                events.append({'event':'created-session-member','process':known})
+        # The created PID/session is unconditional OWNERSHIP, not executable
+        # qualification. A bad signature must abort work, not leak our child.
+        if self.owner is None:self.owner=self.owned_processes[ticket['pid']]
+        for row in session:
+            if row.get('state','').startswith('Z'):continue
+            if self.cleanup_until is None:
+                try:self.verify_session_path(row['exe'])
+                except BaseException as error:
+                    self.identity_proof_errors.append(type(error).__name__+': '+str(error));raise
+        changed=True
+        while changed:
+            changed=False
+            for row in rows:
+                parent=by_pid.get(row['ppid'])
+                if parent is None or parent['pid'] not in self.owned_processes:continue
+                if parent['start']!=self.owned_processes[parent['pid']]['start']:continue
+                if row['pid'] not in self.owned_processes:
+                    if row['pid'] in old or not row['exe'].startswith(self.app_root):continue
+                    self.verify_owned_path(row['exe'])  # Escaped/other-session edge needs signed exact path.
+                    self.owned_processes[row['pid']]=dict(row,authority='observed-parent-edge');changed=True
+                if not any(e['child']['pid']==row['pid'] and e['child']['start']==row['start'] for e in self.ownership_edges):
+                    self.ownership_edges.append({'parent':parent,'child':row})
+        clients={p.pid for p in self.clients if p.poll() is None}
+        unknown=[p for p in self.desktop_records(rows) if p['pid'] not in self.owned_processes and p['pid'] not in clients]
+        require(not unknown,'foreign/unobserved Docker process outside created session')
+        for event in events:self.ownership_event(event)
+        live=[p for p in rows if p['pid'] in self.owned_processes and not p.get('state','').startswith('Z')]
+        return rows,live
+    def _observe_owned(self):
+        if getattr(self.broker,'kind',None)==SESSION_KIND:return self._observe_owned_session()
         require(self.broker is not None and self.broker.ticket is not None,'no causal launch ticket')
         rows=self.snapshot();by_pid={p['pid']:p for p in rows};old={p['pid'] for p in self.before}
         ticket=self.broker.ticket;root=by_pid.get(ticket['pid'])
@@ -407,6 +520,10 @@ class NativeOps:
         live=[by_pid[pid] for pid in self.owned_processes if pid in by_pid]
         return rows,live
     def effective_owner(self,live):
+        if getattr(self.broker,'kind',None)==SESSION_KIND:
+            require(bool(live),'created session has no live backend/helper')
+            original=next((p for p in live if p['pid']==self.broker.ticket['pid']),None)
+            return original or min(live,key=lambda p:p['pid'])  # Role only; authority remains the created SID.
         original=next((p for p in live if p['pid']==self.broker.ticket['pid']),None)
         if original:return original
         # Only an ACTUALLY observed successor may survive reparenting. A new
@@ -418,14 +535,29 @@ class NativeOps:
         previous=self.monitoring;self.monitoring=True;self.startup_guard_running=True
         try:self._startup_guard()
         finally:self.monitoring=previous;self.startup_guard_running=False
-    def _startup_guard(self):
+    def startup_time_guard(self):
         now=datetime.datetime.now(datetime.UTC)
         require(self.now()<self.startup_deadline and self.now()<self.deadline,'startup/work deadline exhausted')
         require(now+datetime.timedelta(seconds=60)<datetime.datetime.fromisoformat(self.a['slot_end_utc']),'slot must retain cleanup reserve')
         require(now<=datetime.datetime.fromisoformat(self.a.get('valid_until_utc',self.a['slot_end_utc'])),'admission expired during startup')
-        self.sample_swap('startup')
-        self.check_disk()
-        if self.broker and self.broker.ticket:
+    def startup_resource_guard(self):
+        self.startup_time_guard()
+        # An already in-flight resource query keeps command's independent
+        # deadline. Never recursively fork another sysctl/ps query from it.
+        if self.resource_guard_running:return
+        self.resource_guard_running=True
+        try:
+            self.sample_swap('startup');self.check_disk()
+            if self.identity_proof_depth or self.ownership_scan_depth:
+                rows=self.snapshot();old={p['pid'] for p in self.before}
+                emerging=[p for p in rows if Path(p['exe']).name in HELPERS and p['pid'] not in old]
+                # Abort-only ceiling, NOT ownership or a qualified VM peak.
+                # No provisional owner goes into vm_helper or cleanup.
+                require(all(p['rss_kib']*1024<=CAP for p in emerging),'new VM RSS exceeds cap while identity proof is pending')
+        finally:self.resource_guard_running=False
+    def _startup_guard(self):
+        self.startup_resource_guard()
+        if self.broker and self.broker.ticket and not self.identity_proof_depth and not self.ownership_scan_depth:
             rows,live=self.observe_owned();owner=self.effective_owner(live)
             helpers=[p for p in rows if Path(p['exe']).name in HELPERS and p['pid'] not in {x['pid'] for x in self.before}]
             require(all(p['pid'] in self.owned_processes for p in helpers),'unowned/unknown new VM helper during startup')
@@ -440,7 +572,10 @@ class NativeOps:
         valid_remaining=(datetime.datetime.fromisoformat(self.a.get('valid_until_utc',self.a['slot_end_utc']))-now).total_seconds()
         self.startup_deadline=min(self.now()+120,self.deadline,self.now()+slot_remaining,self.now()+valid_remaining)
         expected=DOCKER_BUNDLE/'Contents/MacOS'/self.desktop_layout['bundles'][0]['entrypoint']
-        self.broker=CausalLaunch(DOCKER_BUNDLE,expected,{p['pid'] for p in self.before},self.startup_event)
+        if self.p.get('launch_authority')==SESSION_KIND:
+            require(expected==DOCKER_BUNDLE/'Contents/MacOS/com.docker.backend','only signed OUTER backend launch is admitted')
+            self.broker=OwnedSessionLaunch(DOCKER_BUNDLE,expected,{p['pid'] for p in self.before},self.startup_event,log_path=self.directory/'backend-launch.log')
+        else:self.broker=CausalLaunch(DOCKER_BUNDLE,expected,{p['pid'] for p in self.before},self.startup_event)  # Historical adapter fixtures only; preflight refuses this mode.
         try:
             self.startup_guard();self.broker.begin()
             while not self.broker.done:
@@ -480,7 +615,9 @@ class NativeOps:
         while True:
             self.startup_guard();remaining=self.startup_deadline-self.now()
             code,out,err=self.query_engine_info(timeout=min(10,remaining))
-            self.startup_event({'event':'first-api-readiness-info','exit':code,'stderr':err[:300]})
+            caps=json.loads(out) if code==0 else {}
+            self.startup_event({'event':'first-api-readiness-info','exit':code,'stderr':err[:300],
+                                'observed_caps':{'MemTotal':caps.get('MemTotal'),'NCPU':caps.get('NCPU')} if code==0 else None})
             if code==0:
                 info=json.loads(out);verify_caps(info)  # Abort over-cap BEFORE other APIs/work.
                 self.startup_guard()
@@ -497,6 +634,7 @@ class NativeOps:
         if self.broker.ticket:
             self.observe_owned()  # Capture a late authoritative callback before teardown.
     def quit_broker_owned(self,owner):
+        require(self.cleanup_until is not None and self.now()<self.cleanup_until,'owned cleanup budget exhausted before termination')
         require(not self.foreign_asset_activity,'foreign asset activity; no Desktop quit')
         rows,live=self.observe_owned()
         # Every RESPONDING engine must pass the foreign-work fence, including
@@ -521,18 +659,54 @@ class NativeOps:
             graceful_error=type(error).__name__+': '+str(error)
             self.ownership_journal_errors.append({'event':'causal-terminate-refused','error':graceful_error})
         for known in reversed(live):
+            require(self.now()<self.cleanup_until,'owned cleanup budget exhausted before next signal')
             current=next((p for p in self.snapshot() if p['pid']==known['pid']),None)
             if current is not None:
                 require((current['start'],current['exe'])==(known['start'],known['exe']),'owned cleanup PID changed')
+                if getattr(self.broker,'kind',None)==SESSION_KIND:
+                    require(self.broker.matches(self.broker.ticket),'session creator reservation lost before cleanup')
+                    if current.get('state','').startswith('Z'):continue
+                    if current.get('sid')!=self.broker.ticket['sid']:
+                        _,proven=self.observe_owned()
+                        require(any(p['pid']==current['pid'] and p['start']==current['start'] for p in proven),'session escape lost observed ancestry before signal')
                 os.kill(known['pid'],signal.SIGTERM)
         while self.now()<self.cleanup_until:
             rows,live=self.observe_owned()
             if not live:
+                if getattr(self.broker,'kind',None)==SESSION_KIND:
+                    self.broker.release_creator(min(5,self.cleanup_until-self.now()))
+                    # Reservation now ends. Only read absence; never infer/adopt
+                    # a reused SID or signal another process after this point.
+                    while True:
+                        present=[]
+                        for pid in self.owned_processes:
+                            try:os.kill(pid,0);present.append(pid)
+                            except ProcessLookupError:continue
+                        if not present:break
+                        require(self.now()<self.cleanup_until,'owned PIDs/zombies remain after creator reap; no late adoption')
+                        self.broker.pump(min(0.5,self.cleanup_until-self.now()))
+                    final=self.snapshot()
+                    require(not self.desktop_records(final),'unattributed Desktop survived own-session shutdown; no late kill')
+                    for process in final:
+                        if Path(process['exe']).name in HELPERS:
+                            code,out,_=self.command(['/usr/sbin/lsof','-a','-p',str(process['pid']),'-Fn'],check=False,timeout=3)
+                            require(code==0 and ('n'+str(self.raw)) not in out.splitlines(),'VM/raw shutdown association unverified; never kill unknown helper')
                 require(graceful_error is None,'graceful termination failed; exact-PID recovery verified but original cleanup remains unverified')
                 return
             self.broker.pump(min(0.5,self.cleanup_until-self.now()))
         raise RuntimeError('proven owned processes remain; cleanup budget exhausted')
     def vm_helper(self,owner):
+        if getattr(self.broker,'kind',None)==SESSION_KIND:
+            rows,live=self.observe_owned();candidates=[]
+            for process in live:
+                if Path(process['exe']).name not in HELPERS:continue
+                code,out,_=self.command(['/usr/sbin/lsof','-a','-p',str(process['pid']),'-Fn'],check=False,timeout=3)
+                if code==0 and ('n'+str(self.raw)) in out.splitlines():candidates.append(process)
+            require(len(candidates)==1,'created-session VM/raw ownership unidentifiable or ambiguous')
+            helper=dict(candidates[0],rss_bytes=candidates[0]['rss_kib']*1024,measurement='one-created-session-helper-RSS-not-footprint')
+            self.helpers[(helper['pid'],helper['start'],helper['exe'])]=helper
+            self.monitor_enabled=True;self.next_rss=self.now()+10
+            return helper
         rows=self.snapshot();holders=set()
         if self.broker is not None:
             rows,live=self.observe_owned();owner=self.effective_owner(live)
@@ -822,8 +996,10 @@ class NativeOps:
         try:self.sample_swap('final')
         except BaseException as error:final_swap_error=type(error).__name__+': '+str(error);value['status']='swap-final-unverified-or-over-limit'
         value.update(asset_ownership=self.asset_receipt,final_swap_error=final_swap_error,desktop_layout=getattr(self,'desktop_layout',None),
-                     causal_launch={'dispatched':self.broker.dispatched,'ticket':self.broker.ticket,'error':self.broker.error,'done':self.broker.done,'observed_edges':self.ownership_edges} if self.broker else None)
-        value.update(cleanup_engine_evidence=self.cleanup_engine_evidence,ownership_journal_errors=self.ownership_journal_errors)
+                     causal_launch={'authority':getattr(self.broker,'kind','historical-nsworkspace'),'dispatched':self.broker.dispatched,'ticket':self.broker.ticket,'error':self.broker.error,'done':self.broker.done,'observed_edges':self.ownership_edges} if self.broker else None)
+        value['owned_process_identities']=list(self.owned_processes.values())
+        value.update(cleanup_engine_evidence=self.cleanup_engine_evidence,ownership_journal_errors=self.ownership_journal_errors,identity_proof_errors=self.identity_proof_errors)
+        if self.identity_proof_errors:value['status']='identity-proof-unverified'
         if self.ownership_journal_errors:value['status']='cleanup-unverified'
         fs=os.statvfs(self.root)
         if self.startup_uncertain:value['status']='cleanup-unverified-startup-identity'
@@ -834,6 +1010,7 @@ class NativeOps:
         require(not breached,'final disk fence crossed; retained failed receipt')
         require(final_swap_error is None,'final swap gate failed; retained failed receipt')
         require(not self.ownership_journal_errors,'ownership journal/termination error; teardown attempted, receipt remains unverified')
+        require(not self.identity_proof_errors,'executable qualification failed; own-session cleanup attempted without claiming qualification')
 
 
 def main():
