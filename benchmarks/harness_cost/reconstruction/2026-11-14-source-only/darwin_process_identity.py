@@ -38,19 +38,23 @@ class DarwinIdentity:
                     'start':str(value.start_sec)+'.'+str(value.start_usec).zfill(6),'exe':creator_executable,'state':'Z'}
         if first.status==5 and creator_sid is not None:
             second=self.bsd(pid)
-            if second is None or (first.start_sec,first.start_usec)!=(second.start_sec,second.start_usec):raise RuntimeError('held creator birth unavailable')
+            if second is None or second.status!=5 or (first.pid,first.start_sec,first.start_usec)!=(second.pid,second.start_sec,second.start_usec):raise RuntimeError('held creator birth/zombie identity unavailable')
             return held_zombie(second)
         path=self.path(pid)
         try:sid=os.getsid(pid)
         except ProcessLookupError:
             second=self.bsd(pid)
-            if creator_sid is not None and second is not None and second.status==5 and (first.start_sec,first.start_usec)==(second.start_sec,second.start_usec):return held_zombie(second)
+            if creator_sid is not None and second is not None and second.status==5 and (first.pid,first.start_sec,first.start_usec)==(second.pid,second.start_sec,second.start_usec):return held_zombie(second)
             raise
         second=self.bsd(pid);path2=self.path(pid)
-        if creator_sid is not None and second is not None and second.status==5 and (first.start_sec,first.start_usec)==(second.start_sec,second.start_usec):return held_zombie(second)
-        fields=('pid','ppid','pgid','uid','start_sec','start_usec','status')
+        if creator_sid is not None and second is not None and second.status==5 and (first.pid,first.start_sec,first.start_usec)==(second.pid,second.start_sec,second.start_usec):return held_zombie(second)
+        # Scheduler state/flags may change between reads of the SAME process.
+        # Compare stable identity, but keep exit/zombie transitions explicit.
+        fields=('pid','ppid','pgid','uid','start_sec','start_usec')
         if second is None or any(getattr(first,k)!=getattr(second,k) for k in fields) or path!=path2:
             raise RuntimeError('process identity changed during snapshot closure')
+        if (first.status==5)!=(second.status==5):raise RuntimeError('process exited during snapshot closure')
+        if os.getsid(pid)!=sid:raise RuntimeError('process session changed during snapshot closure')
         if not path:raise RuntimeError('live process executable identity unavailable')
         return {'pid':pid,'ppid':int(first.ppid),'pgid':int(first.pgid),'sid':sid,'uid':int(first.uid),
-                'start':str(first.start_sec)+'.'+str(first.start_usec).zfill(6),'exe':path,'state':'Z' if first.status==5 else 'live'}
+                'start':str(first.start_sec)+'.'+str(first.start_usec).zfill(6),'exe':path,'state':'Z' if second.status==5 else 'live'}

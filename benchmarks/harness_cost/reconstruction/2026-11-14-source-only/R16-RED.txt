@@ -1,0 +1,98 @@
+test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) ...
+  test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(2, 3)) ... ERROR
+  test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(3, 2)) ... ERROR
+  test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(2, 4)) ... ERROR
+  test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(4, 3)) ... ERROR
+
+======================================================================
+ERROR: test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(2, 3))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_scheduler_identity.py", line 36, in test_scheduler_changes_populate_actual_adapter_identity_not_replacement
+    with mock.patch.object(target.os,'getsid',return_value=75032):actual,live=ops.observe_owned()
+                                                                              ~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 426, in observe_owned
+    try:return self._observe_owned()
+               ~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 493, in _observe_owned
+    if getattr(self.broker,'kind',None)==SESSION_KIND:return self._observe_owned_session()
+                                                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 443, in _observe_owned_session
+    rows=self.snapshot();root=self.broker.bind_birth(rows);ticket=self.broker.ticket
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 336, in snapshot
+    if row['pid']==creator:identity=self.kernel_identity.record(row['pid'],creator_sid=creator,creator_executable=self.broker.executable)
+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/darwin_process_identity.py", line 53, in record
+    raise RuntimeError('process identity changed during snapshot closure')
+RuntimeError: process identity changed during snapshot closure
+
+======================================================================
+ERROR: test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(3, 2))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_scheduler_identity.py", line 36, in test_scheduler_changes_populate_actual_adapter_identity_not_replacement
+    with mock.patch.object(target.os,'getsid',return_value=75032):actual,live=ops.observe_owned()
+                                                                              ~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 426, in observe_owned
+    try:return self._observe_owned()
+               ~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 493, in _observe_owned
+    if getattr(self.broker,'kind',None)==SESSION_KIND:return self._observe_owned_session()
+                                                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 443, in _observe_owned_session
+    rows=self.snapshot();root=self.broker.bind_birth(rows);ticket=self.broker.ticket
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 336, in snapshot
+    if row['pid']==creator:identity=self.kernel_identity.record(row['pid'],creator_sid=creator,creator_executable=self.broker.executable)
+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/darwin_process_identity.py", line 53, in record
+    raise RuntimeError('process identity changed during snapshot closure')
+RuntimeError: process identity changed during snapshot closure
+
+======================================================================
+ERROR: test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(2, 4))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_scheduler_identity.py", line 36, in test_scheduler_changes_populate_actual_adapter_identity_not_replacement
+    with mock.patch.object(target.os,'getsid',return_value=75032):actual,live=ops.observe_owned()
+                                                                              ~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 426, in observe_owned
+    try:return self._observe_owned()
+               ~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 493, in _observe_owned
+    if getattr(self.broker,'kind',None)==SESSION_KIND:return self._observe_owned_session()
+                                                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 443, in _observe_owned_session
+    rows=self.snapshot();root=self.broker.bind_birth(rows);ticket=self.broker.ticket
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 336, in snapshot
+    if row['pid']==creator:identity=self.kernel_identity.record(row['pid'],creator_sid=creator,creator_executable=self.broker.executable)
+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/darwin_process_identity.py", line 53, in record
+    raise RuntimeError('process identity changed during snapshot closure')
+RuntimeError: process identity changed during snapshot closure
+
+======================================================================
+ERROR: test_scheduler_changes_populate_actual_adapter_identity_not_replacement (test_scheduler_identity.SchedulerIdentityTests.test_scheduler_changes_populate_actual_adapter_identity_not_replacement) (statuses=(4, 3))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_scheduler_identity.py", line 36, in test_scheduler_changes_populate_actual_adapter_identity_not_replacement
+    with mock.patch.object(target.os,'getsid',return_value=75032):actual,live=ops.observe_owned()
+                                                                              ~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 426, in observe_owned
+    try:return self._observe_owned()
+               ~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 493, in _observe_owned
+    if getattr(self.broker,'kind',None)==SESSION_KIND:return self._observe_owned_session()
+                                                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 443, in _observe_owned_session
+    rows=self.snapshot();root=self.broker.bind_birth(rows);ticket=self.broker.ticket
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 336, in snapshot
+    if row['pid']==creator:identity=self.kernel_identity.record(row['pid'],creator_sid=creator,creator_executable=self.broker.executable)
+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/darwin_process_identity.py", line 53, in record
+    raise RuntimeError('process identity changed during snapshot closure')
+RuntimeError: process identity changed during snapshot closure
+
+----------------------------------------------------------------------
+Ran 1 test in 0.012s
+
+FAILED (errors=4)
