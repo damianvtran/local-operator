@@ -40,8 +40,10 @@ from local_operator.server.utils import desktop_sessions as module
 from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import (
     FrontendSessionState,
+    FrontendSync,
     FrontendUsage,
     JobState,
+    sync_wire_payload,
 )
 
 #: The roster size the guard builds. Measured on the dev host (2026-11-15): a
@@ -163,13 +165,31 @@ async def test_a_large_snapshot_does_not_hold_the_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_the_off_loop_frame_is_the_frame_state_builds(tmp_path: Path) -> None:
-    """Moving the build changed where it runs, not a byte of what it serves."""
+async def test_the_off_loop_frame_is_the_frame_the_cloning_build_served(tmp_path: Path) -> None:
+    """Serializing the canonical reference serves the bytes the old clone-first build did.
+
+    The pre-fix ``state()`` dumped ``frontend_state`` (a deep clone); the fix dumps
+    the canonical object itself, because a dump does not mutate. This pins that
+    the two dumps are identical on a roster with usage and descendant usage --
+    the shapes that carry the frozen-row serializers.
+    """
     bridge = _bridge(tmp_path, _large_state("s1", str(tmp_path)))
 
     snapshot = await bridge.snapshot()
 
-    assert snapshot["payload"]["frontend"] == bridge.state()
+    # Built AFTER the snapshot, from the attention that snapshot refreshed, the
+    # way the pre-fix ``state()`` built it: the clone, then the dump.
+    clone = bridge.remote.frontend_state.model_copy(update={"attention": bridge.attention})
+    expected = sync_wire_payload(
+        FrontendSync(
+            epoch=clone.epoch,
+            sequence=clone.sequence,
+            snapshot=clone,
+            live_cursor=clone.history_cursor,
+        )
+    )
+    assert snapshot["payload"]["frontend"] == expected
+    assert bridge.state() == expected
 
 
 class _HeldBuild:

@@ -430,17 +430,14 @@ def _snapshot_pool() -> concurrent.futures.ThreadPoolExecutor:
 class _WireCapture:
     """Everything a snapshot frame's ``frontend`` is built from, read on the loop.
 
-    ``reference`` is the store's canonical (never-mutated) state object and
-    ``public`` the store's clone of it (``FrontendStateStore.public_state_from``);
-    a test double without a store hands over its already caller-owned
-    ``frontend_state`` with ``public=None``. ``attention`` is a private copy, so
-    a receipt landing on the loop mid-build cannot change the dict a worker is
-    serializing.
+    ``reference`` is the store's canonical (never-mutated) state object; a test
+    double without a store hands over its already caller-owned
+    ``frontend_state``. ``attention`` is a private copy, so a receipt landing on
+    the loop mid-build cannot change the dict a worker is serializing.
     """
 
     reference: Any
     attention: dict[str, Any]
-    public: Callable[[Any], Any] | None
 
 
 def _wire_state_of(capture: _WireCapture) -> dict[str, Any]:
@@ -451,8 +448,16 @@ def _wire_state_of(capture: _WireCapture) -> dict[str, Any]:
     spelling of the build, used inline by ``state()`` and off-loop by the
     snapshot, so the two can never serve different bytes.
     """
-    base = capture.public(capture.reference) if capture.public is not None else capture.reference
-    state = base.model_copy(update={"attention": capture.attention})
+    # THE REFERENCE IS SERIALIZED AS IS, NOT CLONED FIRST. ``state()`` used to go
+    # through ``frontend_state`` -- a deep clone of every job so a caller may
+    # mutate its copy -- and then only DUMP it. A dump does not mutate, and the
+    # canonical object never changes after install, so the clone bought nothing
+    # here; dropping it measured 599 -> 343 ms per build and 454 -> 145 GC
+    # collections on a 2,000-job roster (GC passes hold the GIL whatever thread
+    # triggers them, which is what still reached ``/health`` from the worker).
+    # The bytes are identical: ``test_desktop_snapshot_off_loop`` compares the
+    # two builds. ``model_copy`` is shallow and builds a new object.
+    state = capture.reference.model_copy(update={"attention": capture.attention})
     return sync_wire_payload(
         FrontendSync(
             epoch=state.epoch,
@@ -460,6 +465,17 @@ def _wire_state_of(capture: _WireCapture) -> dict[str, Any]:
             snapshot=state,
             live_cursor=state.history_cursor,
         )
+    )
+
+
+def _wire_entries(entries: Sequence[Any]) -> list[dict[str, Any]]:
+    """A local journal page's rows as wire dicts (``history``); thread-safe.
+
+    Reads only the page's rows, which the page cache shares read-only, and
+    builds new dicts.
+    """
+    return visible_transcript_rows(
+        [{**json.loads(row.to_json()), "ts_source": "entry"} for row in entries]
     )
 
 
@@ -3725,14 +3741,12 @@ class DesktopSessionBridge:
         remote = self.remote
         assert remote is not None
         reader: Any = getattr(remote, "frontend_state_reference", None)
-        public: Callable[[Any], Any] | None
         if reader is not None:
-            store, reference = reader()
-            public = store.public_state_from
+            _store, reference = reader()
         else:
             # A remote with no store accessor (test doubles) already hands out a
             # caller-owned clone; serialize that as before.
-            reference, public = remote.frontend_state, None
+            reference = remote.frontend_state
         # A PEER'S ATTENTION IS THE OWNER'S, NOT THIS DEVICE'S LAST READ. The
         # override below publishes the RECEIPT state, and for a remote conversation
         # the author of that state is the peer's runtime: this bridge's own
@@ -3748,7 +3762,7 @@ class DesktopSessionBridge:
             if self.remote_row is not None
             else self.attention
         )
-        return _WireCapture(reference=reference, attention=attention, public=public)
+        return _WireCapture(reference=reference, attention=attention)
 
     async def _wire_state_off_loop(self, capture: _WireCapture) -> dict[str, Any]:
         """:func:`_wire_state_of` on the snapshot pool, coalesced per state.
@@ -3765,7 +3779,6 @@ class DesktopSessionBridge:
             inflight is not None
             and not inflight[1].done()
             and inflight[0].reference is capture.reference
-            and inflight[0].public == capture.public
             and inflight[0].attention == capture.attention
         ):
             future = inflight[1]
@@ -4385,9 +4398,10 @@ class DesktopSessionBridge:
             # reason a LOCAL page needs no negotiation to be honest. Stamped here
             # rather than left to a model default so the wire says so on every row
             # a consumer might branch on.
-            "entries": visible_transcript_rows(
-                [{**json.loads(row.to_json()), "ts_source": "entry"} for row in page.entries]
-            ),
+            # Encoded in a thread: a page of fat rows (whole tool results) is
+            # tens of ms of JSON round trip, and the snapshot asks for one on
+            # every open (serve stall, 2026-11-15 real-path sampler).
+            "entries": await asyncio.to_thread(_wire_entries, page.entries),
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,

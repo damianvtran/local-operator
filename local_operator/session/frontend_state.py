@@ -6800,27 +6800,18 @@ class FrontendStateStore:
         so ``/health`` timed out and the watchdog restarted ``lop serve``.
 
         WHY HANDING OUT THE OWNING OBJECT IS SAFE HERE, when ``read_field``
-        refuses anything but scalars: the caller does not keep or mutate it, it
-        passes it straight to :meth:`public_state_from` (on a worker thread) and
-        serializes that clone. Every write to this store INSTALLS A NEW OBJECT
-        (``_install``; ``_fold_live_event`` and the other shallow arms copy the
-        lists they change) and nothing assigns into ``self._state`` in place, so
-        the object returned here never changes after it is read. Taken under
+        refuses anything but scalars: the one caller (the desktop snapshot,
+        ``server/utils/desktop_sessions._wire_state_of``) only SERIALIZES it, on
+        a worker thread, and never keeps or mutates it. Every write to this
+        store INSTALLS A NEW OBJECT (``_install``; ``_fold_live_event`` and the
+        other shallow arms copy the lists they change) and nothing assigns into
+        ``self._state`` in place, so the object returned here never changes after
+        it is read. Taken under
         ``_publish_lock`` for the same reason :meth:`_join` takes its reference
         there: one consistent object, never a field-by-field mix of two states.
         """
         with self._publish_lock:
             return self._state
-
-    def public_state_from(self, reference: FrontendSessionState) -> FrontendSessionState:
-        """:meth:`state`'s caller-owned clone, of a reference taken earlier.
-
-        Pairs with :meth:`state_reference`: the reference is read on the owning
-        loop (O(1)) and THIS, the part proportional to the roster, runs wherever
-        the caller can afford it. Same clone as :meth:`state`, so the wire bytes
-        a reader gets are unchanged by where it was built.
-        """
-        return self._public_state(reference)
 
     def running_task_count(self) -> int:
         """Running, un-queued ``task`` children, without cloning the state.
