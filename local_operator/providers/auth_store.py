@@ -2210,6 +2210,38 @@ class AuthStore:
             return creds
         return [c for c in creds if c.disabled_cause is None]
 
+    def credential_identity_digest(self) -> tuple[tuple[Any, ...], ...] | None:
+        """Which credentials exist and whether each can authorize, and nothing else.
+
+        WHY: the phone relay memoises its model sheet under a key that must
+        move on a login, a logout or a disable, and must NOT move on the writes
+        that share this database without changing who is logged in -- refresh
+        leases, blocks, token refreshes (``updated_at``, ``data``). Measured on
+        the operator's machine: ``auth.db-wal`` is rewritten several times a
+        minute by those writes alone, so a key built from file stats rebuilt
+        the sheet on nearly every open (PR #4020 agent review, R1).
+
+        ``login_incarnation`` is minted per login, so re-logging the same
+        identity still moves the digest. Secrets (``data``) are never selected.
+
+        ``None`` means "could not tell" (an unreadable database, or a stale
+        immutable read-only handle), which a caller must treat as "changed";
+        ``()`` is a genuinely empty or absent store. Works on a read-only store.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None if self.read_only_unavailable() else ()
+        if self._read_only and self.read_only_sidecar_present():
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT provider, credential_type, identity_key, disabled_cause,"
+                " login_incarnation FROM auth_credentials ORDER BY id"
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        return tuple(tuple(row) for row in rows)
+
     def retained_radient_login_ids(self) -> tuple[int, ...]:
         """Safe status references, never a route back into credential selection.
 
