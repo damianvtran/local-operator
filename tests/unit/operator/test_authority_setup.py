@@ -246,6 +246,38 @@ def test_os_prompt_reason_follows_the_purpose(monkeypatch: pytest.MonkeyPatch) -
     assert elevate.confirm_card_copy(purpose=elevate.PURPOSE_SETUP)[0] == "Turn on phone approvals"
 
 
+def test_the_card_and_launcher_refuse_a_purpose_outside_the_shared_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #3949/#3950 reconcile keeps ONE closed purpose set for prompt, card and launcher.
+
+    #3950 used to carry its own parallel set; after the rebase every caller uses
+    #3949's ``PURPOSE_*``. A stale spelling (the old ``"phone_approvals"``) must fail
+    loudly everywhere, never fall back to the confirm card or reach a launcher on a
+    platform whose launcher shows no sentence (Linux/Windows).
+    """
+    # The confirm card is #3949's, unchanged; setup carries #3950's title and body.
+    confirm = elevate.confirm_card_copy(windows=False, purpose=elevate.PURPOSE_CONFIRM)
+    assert confirm[0] == "Confirm this phone on this computer"
+    setup = elevate.confirm_card_copy(windows=False, purpose=elevate.PURPOSE_SETUP)
+    assert setup[1] == "Let phones approve requests on this computer."
+    assert setup[2] == confirm[2]  # the gesture names the OS step, not the action
+    assert elevate.confirm_card_copy(windows=False, purpose=elevate.PURPOSE_REMOVE)[1] == ""
+    with pytest.raises(ValueError):
+        elevate.confirm_card_copy(windows=False, purpose="phone_approvals")
+
+    def no_launch(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an unknown purpose reached a launcher")
+
+    # A host that WOULD launch (sudo present), so only the purpose check stands between
+    # the stale spelling and a real prompt.
+    monkeypatch.setattr(elevate.sys, "platform", "linux")
+    monkeypatch.setattr(elevate.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(elevate.subprocess, "run", no_launch)
+    with pytest.raises(ValueError):
+        elevate.run_elevated([["true"]], windows=False, purpose="phone_approvals")
+
+
 def test_a_translated_reason_is_escaped_for_applescript(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(elevate, "_purpose_prompt", lambda purpose: 'say "hi" \\ end')
     script = elevate._macos_prompt([["true"]], elevate.PURPOSE_SETUP)[2]
