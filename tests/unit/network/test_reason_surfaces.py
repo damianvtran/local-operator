@@ -82,6 +82,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the stored refusal code, mapped to approval_copy's sentence before any surface",
     ),
+    # node_take preserves the owner's refusal token in its machine result; it
+    # does not print it. B1 calls this helper only from the custody contract tests.
+    ("local_operator/network/credentials/renewal.py", "node_take", "reason"): (
+        1,
+        "owner refusal token forwarded in the machine result, not rendered",
+    ),
     # Exact executed-step discriminator for retaining signed intent; compared
     # internally, never rendered as a reason or substituted for signature proof.
     ("local_operator/network/approvals.py", "_sweep_namespace", "detail"): (
