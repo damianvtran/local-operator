@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "Your startup prompt wasn't sent — it's in the composer.",
+  "tui.boot_prompt.not_sent_kept_draft": "Your startup prompt wasn't sent: {prompt}"
+}
