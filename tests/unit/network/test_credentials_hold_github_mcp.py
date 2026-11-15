@@ -194,8 +194,15 @@ def test_github_and_mcp_are_served_through_the_hold_and_refused_after_it(held: A
     assert gh.held_until_ms <= held.gh.token_expires_at_ms
 
     # Past the hold: refused, and the belt DELETEd the App token at the HOLD end.
+    # EACH GRANT HAS ITS OWN HOLD END, stamped when it arrived (owner_now + HOLD_S,
+    # capped by this device's receipt): the fixture fetches MCP after GitHub, so the
+    # MCP hold ends later by however long that took. Waiting on GitHub's end alone
+    # asserted MCP refused while it was still legitimately held whenever a loaded
+    # runner spent >200 ms between the two fetches (merge-train run 43689107052).
+    # So wait past the LATER of the two deadlines the serves above reported.
+    hold_end_ms = max(gh.held_until_ms, mcp.held_until_ms)
     assert net_fixtures.wait_for(
-        lambda: time.time() * 1000 > gh.held_until_ms + 200, timeout_s=HOLD_S + 5
+        lambda: time.time() * 1000 > hold_end_ms + 200, timeout_s=HOLD_S + 5
     )
     for key, provider in ((github_mod.GITHUB_KEY, github_mod.GITHUB_KEY), (MCP_KEY, "mcp-oauth")):
         after = client.request_grant_sync(key, provider=provider)
