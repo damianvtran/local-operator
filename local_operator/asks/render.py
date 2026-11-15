@@ -810,6 +810,37 @@ def relay_receipt(
     )
 
 
+#: A NODE session's forwarded card that this device's inbox has retired: the
+#: node's listing stopped carrying the ask, so it was answered, declined or
+#: lapsed there (``remote_attention.resurface_forwarded_ask``'s ``settled``).
+RELAY_REMOTE_SETTLED = (
+    "that card from {device} has expired or was already answered on its own "
+    "session — there is nothing left to re-surface; do not relay it."
+)
+
+#: The forwarded card is still open on the node, but the operator dismissed its
+#: inbox row here; a relay never re-raises what a person put away.
+RELAY_REMOTE_PUT_AWAY = (
+    "the operator dismissed that card from {device} in their inbox — a relay does "
+    "not re-raise a card a person put away; it is still open on its own session "
+    "there."
+)
+
+#: The receipt of a REMOTE relay. Unlike :data:`RELAY_RECEIPT` there is no relay
+#: row: the sentence must say where the answer goes and that it never comes
+#: back here, or a coordinator waits on (or treats as consent) an answer it
+#: will never be handed.
+RELAY_REMOTE_RECEIPT = (
+    "Re-surfaced card {origin_ask} from session {origin_session} on {device} in "
+    "the operator's inbox — the one existing card, unread again; no relay row was "
+    "created here. It is answered there: the desktop app or lop on the operator's "
+    "computer (a browser site card cannot be signed from the phone). The answer "
+    "goes to the ORIGINAL session on {device}; this session will NOT receive it as "
+    "an ask answer, holds no copy, and cannot withdraw it. A RE-SURFACE IS NOT "
+    "CONSENT: do not wait on it or run anything the card was meant to authorise."
+)
+
+
 def relay_refused_by_origin(origin_session: str, origin_ask: str, copy: str) -> str:
     """The origin's refusal, labelled so the human knows which ask refused (#2520).
 

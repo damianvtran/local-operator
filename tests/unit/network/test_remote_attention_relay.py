@@ -623,3 +623,106 @@ def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
     for secret in ("secret-node.test", "ssh-secret-ref", "SHA256:fixture", *CARD_SECRETS):
         assert secret not in wire_text
     assert ob.load_stored(server_a.root, network.network_id, server_b.identity.device_id) is None
+
+
+def test_a_head_relay_of_a_forwarded_node_site_card_resurfaces_it_and_the_node_answer_retires_it(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E2E 44ab2361d833 (lop-remote-node-2, cards a-1f70/a-4452, 2026-11-15).
+
+    A head-node coordinator's ``ask(relay='<node session>/<ask>')`` was refused
+    with "names no ask in the original session's log" although the card's
+    ``remote-notice:`` row sat in the head's inbox. Over two real relays: the
+    node's SITE card (``site_approval``'s own builder) crosses the catalogue, the
+    head's watcher raises it, the relay re-surfaces that one row (unread, one new
+    revision, no relay row in the coordinator's log), the node's own answer —
+    the record ``Session.site_decide`` writes once the signed decision applied —
+    settles the ask there, and the next listing retires the head's row; a relay
+    after that is refused as expired/answered. The head's root is device B's
+    real one, so its network record (A an active member) is the attestation.
+    """
+    from local_operator.asks import render
+    from local_operator.asks import store as ask_store
+    from local_operator.asks.queue import AskQueue
+    from local_operator.browser_bridge.site_approval import site_ask_question
+
+    server_a, server_b, _host, _port = pair
+    owner = server_a.identity.device_id
+    head = server_b.root
+    ask_id = "a-4452"
+    key = ra.notice_key(owner, SID, f"{ra.ASK_NOTICE_PREFIX}{ask_id}")
+    ra.origin_baseline_ms(head, owner)
+    _record, link = _live_link(pair, monkeypatch)
+    _own_session(server_a, server_b.identity.device_id)
+    question = site_ask_question(
+        origin="https://example.com",
+        node_name="lop-remote-node-2",
+        node_device_id=owner,
+        entry_id="entry-1",
+    )
+    _ask_event(
+        server_a,
+        ask_store.EVENT_QUEUED,
+        ask_id,
+        expires_at=ask_store.now_ms() + 3_600_000,
+        questions=[question],
+    )
+
+    class _Peer:
+        device_id = owner
+        name = "lop-remote-node-2"
+        network_id = "n_test"
+        reachable = True
+        reason = ""
+
+    def _origin_rows(row: dict[str, Any]) -> Any:
+        class _Catalog:
+            def peers(self) -> list[Any]:
+                return [_Peer()]
+
+            def rows(self) -> list[Any]:
+                return [PeerRow.from_json(row, device_id=owner)]
+
+        return peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+
+    banners: list[int] = []
+    monkeypatch.setattr(
+        ra, "_deliver_async", lambda _r, outcome, **_k: banners.append(outcome.revision)
+    )
+    coordinator = AskQueue(None, config_dir=head, session_id="c0decafe0001")
+    watcher = ra.RemoteAttentionWatcher(head)
+    try:
+        # BEFORE the forward: nothing in the head's inbox, so the old sentence.
+        assert coordinator.enqueue_relay(f"{SID}/{ask_id}") == {
+            "ok": False,
+            "error": render.RELAY_ORIGIN_UNKNOWN,
+        }
+        watcher.observe(_origin_rows(_catalog_row(link)), listed_at_ms=ra_now())
+        raised = NotificationStore(head).get_by_key(SID, key)
+        assert raised is not None and not raised["dismissed_at"]
+
+        relayed = coordinator.enqueue_relay(f"{SID}/{ask_id}")
+        assert relayed["ok"], relayed
+        assert "ORIGINAL session" in relayed["text"]
+        resurfaced = NotificationStore(head).get_by_key(SID, key)
+        assert resurfaced is not None and not resurfaced["read"]
+        assert resurfaced["id"] == raised["id"]
+        assert resurfaced["revision"] == raised["revision"] + 1
+        assert resurfaced["title"] == raised["title"]
+        assert banners[-1] == resurfaced["revision"]
+        assert ask_store.read_events(ask_store.session_dir(head, "c0decafe0001")) == []
+
+        # The node's answer, recorded where ``Session.site_decide`` records it.
+        node_queue = AskQueue(None, config_dir=server_a.root, session_id=SID)
+        answered = node_queue.respond(ask_id, {"site-access": ["deny"]}, by="operator")
+        assert answered.get("ok"), answered
+        assert node_queue.find(ask_id)["status"] == ask_store.STATUS_ANSWERED
+        row = _catalog_row(link)
+    finally:
+        link.close("test")
+    assert all(b["key"] != f"{ra.ASK_NOTICE_PREFIX}{ask_id}" for b in row.get("notices", []))
+    watcher.observe(_origin_rows(row), listed_at_ms=ra_now() + 1)
+    retired = NotificationStore(head).get_by_key(SID, key)
+    assert retired is not None and retired["dismissed_via"] == "remote-attention"
+    after = coordinator.enqueue_relay(f"{SID}/{ask_id}")
+    assert after["ok"] is False and "expired or was already answered" in after["error"]

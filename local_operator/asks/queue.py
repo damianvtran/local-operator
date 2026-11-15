@@ -687,7 +687,10 @@ class AskQueue:
             None,
         )
         if origin is None:
-            return {"ok": False, "error": render.RELAY_ORIGIN_UNKNOWN}
+            # No local log holds it: the ref may name a NODE session's card this
+            # device's inbox carries as a forwarded row. Decided only on a local
+            # miss, so a local relay never reaches this branch.
+            return self._relay_remote(origin_session, origin_ask)
         if origin.get("relay"):
             return {"ok": False, "error": render.RELAY_OF_RELAY}
         origin_status = str(origin.get("status") or "")
@@ -780,6 +783,75 @@ class AskQueue:
                     "origin_status": origin_status,
                 },
                 "reach": self._reach(),
+            },
+        }
+
+    def _relay_remote(self, origin_session: str, origin_ask: str) -> dict[str, Any]:
+        """Re-surface a NODE session's forwarded card instead of pointing at it.
+
+        WHY NO RELAY ROW. A local relay is a pointer whose status, questions and
+        answer are DERIVED from the origin's log on every fold
+        (:meth:`_apply_relay_derivation`) and whose answer is written into that
+        log (:meth:`_relay_respond`). For a node session none of that is
+        reachable from here without a live attach:
+
+        * this device holds only the forwarded inbox row — the first question's
+          120-char title, a "runs on" body and the key
+          (``notifications/remote_attention.raise_notice_item``), and the
+          catalogue block it came from is ``(key, revision, priority, title,
+          at)`` (``network/projection._notices_block``) — no question ids,
+          options, ``site`` block, digest or deadline, so a pointer would have
+          nothing to render and ``respond``'s complete-map contract nothing to
+          check against;
+        * the only answer path is the async attach to the node's runtime
+          (``session/attached.AttachedSession.respond_ask``/``bridge_decide``,
+          reached from ``server/routes/desktop_sessions`` and the phone daemon),
+          while ``respond`` here is a synchronous log write and the fold runs on
+          every read.
+
+        So the relay raises THE ONE EXISTING CARD again
+        (``remote_attention.resurface_forwarded_ask``): nothing is minted,
+        copied or reworded, the operator answers on the existing path (the
+        operator's signature stays on ``bridge_decide`` for a site card), and
+        that one answer settles the node's ask and — through the watcher's
+        retire-on-absence — the inbox row.
+
+        THE TRADE-OFF, stated to the model in the receipt and the ask tool's
+        notes: there is no row in this session, so this session never receives
+        the answer, cannot withdraw the relay (``ask_withdraw`` has nothing to
+        settle), and neither :data:`policy.RELAY_CAP` nor the held-check
+        (``RELAY_ALREADY_HELD``) applies — both count rows this session holds.
+        A repeat relay re-raises again; the store's per-row banner cooldown
+        bounds what a loop can do. A SECRET question cannot be detected from the
+        row and need not be: the answer is typed only on the node's own card,
+        which is exactly the boundary ``RELAY_SECRET_ORIGIN`` protects.
+        """
+        from local_operator.notifications import remote_attention
+
+        verdict, device = remote_attention.resurface_forwarded_ask(
+            self._config_dir, origin_session, origin_ask
+        )
+        if verdict == remote_attention.RESURFACE_SETTLED:
+            return {"ok": False, "error": render.RELAY_REMOTE_SETTLED.format(device=device)}
+        if verdict == remote_attention.RESURFACE_PUT_AWAY:
+            return {"ok": False, "error": render.RELAY_REMOTE_PUT_AWAY.format(device=device)}
+        if verdict != remote_attention.RESURFACED:
+            return {"ok": False, "error": render.RELAY_ORIGIN_UNKNOWN}
+        return {
+            "ok": True,
+            "text": render.RELAY_REMOTE_RECEIPT.format(
+                origin_ask=origin_ask, origin_session=origin_session, device=device
+            ),
+            "details": {
+                # No ``ask_id``: nothing was queued here, and a surface that keyed
+                # a card on one would show a row this log does not hold.
+                "status": "resurfaced",
+                "relay": {
+                    "session_id": origin_session,
+                    "ask_id": origin_ask,
+                    "device": device,
+                    "remote": True,
+                },
             },
         }
 

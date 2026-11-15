@@ -1516,6 +1516,116 @@ def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, s
         return NOT_APPLICABLE, "", False
 
 
+#: Verdicts of :func:`resurface_forwarded_ask`. Words, not booleans, because the
+#: relay that asks answers its model a different sentence for each: a wrong id,
+#: a card the node already settled, and a card the operator put away are three
+#: different next steps.
+RESURFACED = "resurfaced"
+RESURFACE_UNKNOWN = "unknown"
+RESURFACE_SETTLED = "settled"
+RESURFACE_PUT_AWAY = "put_away"
+
+#: The ``dismissed_via`` :func:`settle_unlisted_ask_items` writes: the node's
+#: listing stopped carrying the ask, i.e. it was answered, declined, dismissed or
+#: lapsed THERE. Any other dismissal of a forwarded ask row is a person's.
+_RETIRED_VIA = "remote-attention"
+
+
+def resurface_forwarded_ask(root: Path, session_id: str, ask_id: str) -> tuple[str, str]:
+    """Raise a NODE session's forwarded ask card again in THIS device's inbox.
+
+    ``(verdict, device label)``. The ``ask`` tool's ``relay`` reaches here when
+    ``<session_id>/<ask_id>`` names no ask in a local session's log
+    (``asks.queue.AskQueue.enqueue_relay``): a head-node coordinator pointing at
+    a card a node session forwarded (E2E session 44ab2361d833 on
+    lop-remote-node-2, cards a-1f70/a-4452, 2026-11-15, refused with "names no
+    ask in the original session's log").
+
+    THE ONE CARD, NEVER A SECOND. This device holds only the forwarded row —
+    the first question's 120-char title, a "runs on" body and the key
+    (:func:`raise_notice_item`) — so it could not render, let alone answer, a
+    copy; the answer stays on the existing path (open the row → the node's
+    session → ``ask_respond``, or the operator-signed ``bridge_decide`` for a
+    site card). Re-surfacing is the store's own :meth:`NotificationStore.notify`
+    with the row's own title, body, priority, key and owner anchor, so nothing
+    the operator reads is altered; only a writer ``episode`` changes, which is
+    what makes the write a new unread revision the banner ladder may claim. The
+    owner anchor (``rev:<N>``) is kept so the watcher's revision short-circuit
+    still reads this row as current and never flips it back, and the node's
+    answer still retires it through :func:`settle_unlisted_ask_items`.
+
+    ATTESTED ROWS ONLY. A row resolves only under the key of an ACTIVE member
+    of an ACTIVE (trusted) network here — the same members whose catalogue the
+    watcher reads — so a row left by a removed or burned device, or a key no
+    member could have written, answers ``unknown``: what this inbox would not
+    raise today a relay may not raise either.
+
+    A ROW A PERSON PUT AWAY STAYS AWAY (``put_away``): the store's collapse rule
+    keeps an operator dismissal through a same-priority update, and
+    :meth:`NotificationStore.reopen` refuses one by design. A row this module
+    retired (``settled``) means the node no longer holds the ask. Repeat
+    re-surfaces are allowed — each is one new revision, and the store's per-row
+    ``BANNER_COOLDOWN_MS`` bounds the banners a loop of relays could raise.
+    Never raises (``unknown`` on any failure).
+    """
+    if not session_id or not ask_id:
+        return RESURFACE_UNKNOWN, ""
+    try:
+        from local_operator.network import store as net_store
+        from local_operator.notifications.store import NotificationStore
+
+        candidates: list[tuple[str, str]] = []
+        for record in net_store.list_networks(root):
+            if record.trust != "active":
+                continue
+            for member in record.active_members():
+                device_id = str(member.device_id or "")
+                if not device_id or device_id == record.self_device_id:
+                    continue
+                if record.is_burned(device_id):
+                    continue
+                candidates.append((device_id, str(member.name or "") or device_id))
+        if not candidates:
+            return RESURFACE_UNKNOWN, ""
+        store = NotificationStore(root)
+        owner_key = f"{ASK_NOTICE_PREFIX}{ask_id}"
+        for device_id, label in candidates:
+            item = store.get_by_key(session_id, notice_key(device_id, session_id, owner_key))
+            if item is None:
+                continue
+            if item.get("dismissed_at") is not None:
+                if str(item.get("dismissed_via") or "") == _RETIRED_VIA:
+                    return RESURFACE_SETTLED, label
+                return RESURFACE_PUT_AWAY, label
+            anchor = str(item.get("anchor_id") or "")
+            outcome = store.notify(
+                session_id,
+                title=str(item.get("title") or ""),
+                body_md=str(item.get("body_md") or ""),
+                priority=str(item.get("priority") or "normal"),
+                key=str(item.get("key") or ""),
+                anchor_id=anchor,
+                episode=f"{anchor}:resurfaced:{int(item.get('revision') or 0)}",
+            )
+            if outcome.action != "updated":
+                # A dismissal that landed between the read and the write
+                # (``absorbed``); the store kept the person's choice.
+                return RESURFACE_PUT_AWAY, label
+            if outcome.priority == "high":
+                _deliver_async(
+                    root,
+                    outcome,
+                    session_id=session_id,
+                    title=str(item.get("title") or ""),
+                    body=str(item.get("body_md") or ""),
+                )
+            return RESURFACED, label
+        return RESURFACE_UNKNOWN, ""
+    except Exception:  # noqa: BLE001 — a relay that cannot read the inbox resolves nothing
+        logger.debug("remote attention: resurface failed for %s", session_id, exc_info=True)
+        return RESURFACE_UNKNOWN, ""
+
+
 def _self_device_id(root: Path) -> str:
     """This install's mesh id, or ``""``; never mints one."""
     from local_operator.network import identity
