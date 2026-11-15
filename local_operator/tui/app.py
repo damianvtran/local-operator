@@ -13031,7 +13031,7 @@ class OperatorApp(App[None]):
         if loaded and self._welcome is not None:
             self._welcome.refresh_info()
 
-    async def _construct_session(self) -> Any:
+    async def _construct_session(self, factory: Callable[[], Awaitable[Any]] | None = None) -> Any:
         """Apply the factory's import policy and await it. RAISES; adopts nothing.
 
         Split from :meth:`_adopt_session` because the two halves want to happen
@@ -13046,9 +13046,15 @@ class OperatorApp(App[None]):
         # itself never raises, but the import that reaches it and the thread hop
         # around it can, and anything that escapes the boot worker leaves the
         # user with a splash and no explanation.
+        #
+        # The factory is read before the warm-up's await, never after it: a
+        # `/resume` landing during the warm rebinds `_session_factory`, and
+        # reading it late would build the resumed session a second time (see
+        # `_boot_session`). Boot passes the factory it snapshotted.
+        build = factory if factory is not None else self._session_factory
         if self._warm_factory_imports:
             await self._warm_session_imports()
-        return await self._session_factory()
+        return await build()
 
     def _adopt_session(
         self, session: Any, *, replay_history: bool = True, reuse_controller: bool = False
@@ -14614,10 +14620,30 @@ class OperatorApp(App[None]):
         # that opens her conversation never ran and they met an empty chat.
         # Rebinding the factory HERE, before construction, makes the first
         # thing on screen her conversation, exactly as the setup exit does.
-        await self._route_first_run_boot()
+        #
+        # The factory is read HERE, before the first await, and not when
+        # `_construct_session` finally calls it (QA Q12 on #3787). `/resume`
+        # rebinds `_session_factory` to the session it opens and then reloads
+        # through it; a resume dispatched while boot was still awaiting the
+        # route below (which can wait out the launch hook's aida task) or the
+        # import warm-up made boot call the RESUME factory too. That built the
+        # resumed session twice: the first-adopted copy was replaced and never
+        # disposed, and when the second build lost the transcript lease the
+        # first already held, the user read `session failed to start` over a
+        # conversation that was working. Boot builds the session it was
+        # launched for; a resume that lands first makes it step aside through
+        # the adoption-epoch fence below, exactly as one landing mid-build does.
+        # The fence's own snapshot moves up with the factory for the same
+        # reason: taken after the route, it already counted a resume that
+        # landed during it, and boot then adopted over the resumed session.
+        factory = self._session_factory
         navigation_generation = self._sidebar_navigation.generation
         adoption_epoch = self._adoption_epoch
-        built = asyncio.ensure_future(self._construct_session())
+        if await self._route_first_run_boot():
+            # The route's own rebind IS boot's decision (her conversation on a
+            # first attended run), so it replaces the snapshot.
+            factory = self._session_factory
+        built = asyncio.ensure_future(self._construct_session(factory))
         try:
             session = await built
         except asyncio.CancelledError:
@@ -55154,7 +55180,7 @@ class OperatorApp(App[None]):
             AIDA_NO_PROVIDER_CUE, "warning", headline=f"{name} — connect a provider"
         )
 
-    async def _route_first_run_boot(self) -> None:
+    async def _route_first_run_boot(self) -> bool:
         """Open her conversation on a fresh install's first ATTENDED boot.
 
         Cheap in the steady state: one ledger read answers "settled" and
@@ -55187,7 +55213,7 @@ class OperatorApp(App[None]):
 
             root = config_dir()
             if onboarding.greeting_settled(root):
-                return
+                return False
             # `fresh_install`, not `first_run_pending`: the latter is exactly
             # "not settled AND fresh", and the ledger half was answered on the
             # line above, so calling it here only re-read the same file.
@@ -55196,11 +55222,14 @@ class OperatorApp(App[None]):
             # routes, and `cadence_allowed` reads the ledger itself.
             if not await asyncio.to_thread(onboarding.fresh_install, root):
                 await asyncio.to_thread(onboarding.cadence_allowed, root)
-                return
+                return False
         except Exception:  # noqa: BLE001 — a predicate, never a boot dependency
             logger.warning("aida: first-run boot predicate failed", exc_info=True)
-            return
-        await self._open_aida_first_run(self._notice)
+            return False
+        # True only when it rebound `_session_factory` to her conversation:
+        # `_boot_session` snapshots the factory before awaiting this, and the
+        # return value is how it tells this route's rebind from a `/resume`'s.
+        return await self._open_aida_first_run(self._notice)
 
     async def _open_aida_first_run(self, notice: NoticeFn) -> bool:
         """R26: on a fresh install, bind the post-setup rebuild to her session.
