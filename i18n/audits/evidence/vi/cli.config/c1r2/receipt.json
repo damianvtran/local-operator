@@ -1,0 +1,19 @@
+{
+  "audit_id": "c1r2",
+  "locale": "vi",
+  "namespace": "cli.config",
+  "audit_date": "2026-11-11",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c04c7cb774d2",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "session header of this auditing session (deepseek/deepseek-flash); no model-fallback notice appeared in this transcript"
+  },
+  "companions": {
+    "record.json": "b34c8f1e67a7007464b5e2863e27c44146750d95015a7cea319b6791d53b3349",
+    "report.md": "d8760013304f5183e8bdea2bf1d08514b54e1da3d58d02f3b2f05c6f300385e7",
+    "audit.log": "b423071f53ad15ecce217b516097d565f2ebf2314b17ad801b9c5de9c3eab790",
+    "ledger-row.json": "9284f87a4e0680f1e00f4d653f42cc9b8fa6edb3486e459d23b867383808a8cb"
+  }
+}

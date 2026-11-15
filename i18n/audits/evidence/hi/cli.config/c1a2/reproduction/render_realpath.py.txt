@@ -1,0 +1,87 @@
+"""Production-path render of the 22 hi candidate messages.
+
+Installs the candidate into a private copy of the catalogue tree, then renders
+through local_operator.i18n.messages.render (the call path the CLI/TUI use), with
+realistic parameter values, and reports the rendered strings.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+WORKTREE = Path.home() / "local-operator" / ".worktrees" / "i18n-c1"
+sys.path.insert(0, str(WORKTREE))
+
+from local_operator.i18n import catalogues, messages  # noqa: E402
+
+CAND = json.loads((HERE / "hi.v2.json").read_text(encoding="utf-8"))
+CATROOT = HERE / "catroot"
+
+PARAMS = {
+    "cli.config.created": {"path": "~/.local-operator/config.yml"},
+    "cli.config.opened": {"path": "~/.local-operator/config.yml"},
+    "cli.config.cleared": {"key": "display.terminal_title"},
+    "cli.config.updated": {"key": "model_effort", "value": "auto"},
+    "cli.config.running_sessions_unchanged": {},
+    "cli.config.list_title": {},
+    "cli.config.list_description": {"description": "बातचीत अपने-आप सहेजी जाए या नहीं"},
+    "cli.config.list_unrecognised": {},
+    "cli.config.list_desc_hosting": {},
+    "cli.config.list_desc_model_name": {},
+    "cli.config.list_desc_conversation_length": {},
+    "cli.config.list_desc_detail_length": {},
+    "cli.config.list_desc_max_learnings_history": {},
+    "cli.config.list_desc_classification_notice": {},
+    "cli.config.list_desc_auto_save_conversation": {},
+    "tui.session_move.ambiguous": {},
+    "tui.session_move.to_needs_device": {},
+    "tui.session_move.cannot_wait": {},
+    "tui.session_move.unsupported_flag": {"flag": "'--force'"},
+    "tui.session_move.cli_unavailable": {"reason": "[Errno 2] No such file or directory"},
+    "tui.session_move.deadline_exceeded": {"session": "3ef6295a5545", "to": "studio-mac"},
+    "tui.session_move.cli_no_answer": {"code": "2"},
+}
+
+# a couple of value shapes the sidecar promises for {value}
+EXTRA_UPDATED = [
+    ("bool", {"key": "display.nerd_icons", "value": "True"}),
+    ("list", {"key": "providers.openrouter.models", "value": "['a', 'b']"}),
+    ("number", {"key": "conversation_history.max_messages", "value": "50"}),
+]
+
+cli_keys = {k: v for k, v in CAND.items() if k.startswith("cli.config.")}
+mv_keys = {k: v for k, v in CAND.items() if k.startswith("tui.session_move.")}
+(CATROOT / "hi" / "cli.config.json").write_text(json.dumps(cli_keys, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+(CATROOT / "hi" / "tui.session_move.json").write_text(json.dumps(mv_keys, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+orig = catalogues.catalogue_root()
+catalogues._CATALOGUES = CATROOT
+failures: list[str] = []
+try:
+    for code, params in PARAMS.items():
+        text = messages.render(code, params, locale="hi")
+        record = messages.render_record(code, params, locale="hi")
+        status = "OK" if text != code else "CODE-ONLY"
+        if text == code or record.source_locale != "hi":
+            failures.append(f"{code}: render degraded (text==code={text == code}, provenance={record.source_locale})")
+        print(f"[{status}] {code} -> {text}")
+    print("\n-- {value} shapes for cli.config.updated --")
+    for label, params in EXTRA_UPDATED:
+        print(f"[{label}] {messages.render('cli.config.updated', params, locale='hi')}")
+    print("\n-- ASCII/Latin residue per rendered string --")
+    import re
+
+    for code, params in PARAMS.items():
+        text = messages.render(code, params, locale="hi")
+        latin = re.findall(r"[A-Za-z][A-Za-z0-9_,.'()\[/<>|=-]*", text)
+        print(f"{code}: {latin}")
+finally:
+    catalogues._CATALOGUES = orig
+    for name in ("cli.config.json", "tui.session_move.json"):
+        (CATROOT / "hi" / name).unlink(missing_ok=True)
+
+print("\nFAILURES:", failures if failures else "none")
+raise SystemExit(1 if failures else 0)

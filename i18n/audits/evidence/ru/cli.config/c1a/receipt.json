@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "audit_id": "c1a",
+  "locale": "ru",
+  "namespace": "cli.config",
+  "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+  "target_sha256": null,
+  "target_sha256_note": "not measurable yet: the ru catalogue is not in the tree; see projected_target_catalogue in record.json",
+  "hashes": {
+    "audit.log": "279876e819e1db81ad6b8a9aee49de2a775621422d0d9b7ebed1eb9282b93c30",
+    "record.json": "0bc92d41cf1ab48a29759f11ea5ceaf4912cf7be1ae3dc6abac9c5beadacbba7",
+    "report.md": "ed11f38e2019b876051cdbd874a383e9887a409b09c0696fd3470bbc7a736003",
+    "row-cli.config.json": "add74084c6745e1b4f9a0511f466adfb58292466e1c29f9b5666bf9d3f1b935e",
+    "slice-report.md": "f4ad38093e779751de20a7fbe5f8acc315236f524c0a9bcdd2b95940c117bb1d"
+  },
+  "ledger_shard": {
+    "path": "i18n/audit-history/ru/cli.config.json",
+    "sha256": "14876b63f9ffe437c0e52626126962ce6beb7671f98163a4fde26527083be094"
+  }
+}

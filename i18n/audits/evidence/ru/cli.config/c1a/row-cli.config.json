@@ -1,0 +1,19 @@
+{
+  "locale": "ru",
+  "namespace": "cli.config",
+  "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (session e45ca4d0d71c; independent)",
+    "model": "deepseek/deepseek-flash",
+    "date": "2026-11-11",
+    "result": "passed",
+    "findings": 7
+  },
+  "status": "passed",
+  "note": "ru C1-A independent audit PASS: 15 keys, 0 blocker/major (4 minor, 4 nit in the PR thread); ICU/placeholder/backtick parity run with the repo runtime. Evidence: i18n/audits/evidence/ru/cli.config/c1a/record.json. Binds this EN source; target hash at catalogue landing."
+}

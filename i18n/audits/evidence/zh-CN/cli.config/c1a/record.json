@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.config",
+  "audit_date": "2026-11-11",
+  "key_count": 15,
+  "scope": "slice C1 / core English paths — new-key group; translation not yet in a shipped catalogue (pre-landing audit)",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "session": "0ebc670d4b12",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "served model reported by the harness for this session; no fallback pin disclosed"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "guides": [
+    "i18n/style-guides/zh-CN.md",
+    "i18n/glossary.md"
+  ],
+  "audited_revision": {
+    "head": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+    "branch": "i18n/c1-core-english-paths"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.config.json",
+      "sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.config.context.json",
+      "sha256": "9831a776d2f179969666f2271f9bc53ae7de8a18b8567732ba81bc8e2ca90e78"
+    },
+    "target": {
+      "path": "<c1-prep>/zh-CN.json (translation under audit; not in the tree)",
+      "sha256": "de5dce9d9752a66038baeee6579debd7fb1f5be3ecadf124cb4fda9a2e9d8574"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.config/c1a/report.md",
+      "sha256": "e89f69ed074411a62afaff905e224c9d20097c63c9a5c523accf31845e79abfe"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.config/c1a/audit.log",
+      "sha256": "605c0c2d273ddbcfd991ab03aa81bb1449f18948e0a171be131b6a80f04b0dde"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "M3",
+      "M4",
+      "M5",
+      "M6",
+      "N1",
+      "N2"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 4,
+      "nit": 2
+    }
+  },
+  "audit_notes_not_execution_log": "Bundle prose (report.md) records judgement and reasoning; audit.log is the actual command transcript and is the only execution evidence. Findings carry no line-level claim beyond the keys quoted.",
+  "execution_log": {
+    "path": "i18n/audits/evidence/zh-CN/cli.config/c1a/audit.log",
+    "sha256": "605c0c2d273ddbcfd991ab03aa81bb1449f18948e0a171be131b6a80f04b0dde"
+  },
+  "durability_notes": "Prepared for the landing commit: the zh-CN catalogues for these namespaces do not exist yet, so this record and the ledger row must be committed together with them."
+}

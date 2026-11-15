@@ -1,8 +1,10 @@
 """SDK input guards: real paths, byte compatibility, and exact owned-site coverage.
 
 Goldens came from the unkeyed source through these same constructors/public SDK
-calls, not from the new catalogue. Extraction does not authorize translation or
-change approval policy. Filesystem and runtime/isolation mechanics are excluded.
+calls, not from the new catalogue. They pin the ENGLISH bytes (an unset or
+English language must stay byte-identical) and the exact owned-site coverage;
+the localized half is ``test_real_guards_render_the_active_locale``. Filesystem
+and runtime/isolation mechanics are excluded.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator import sdk
-from local_operator.i18n import catalogues, messages, resolve
+from local_operator.i18n import catalogues, messages, text
 from local_operator.i18n.keys import wire_errors_sdk_spec
 from local_operator.session.spec import (
     ApprovalPolicy,
@@ -105,6 +107,17 @@ def _cases(tmp_path):
     }
 
 
+@pytest.fixture
+def pin_language():
+    """Move the process's ACTIVE locale (the autouse fixture restores English)."""
+
+    def pin(locale: str) -> None:
+        text.set_active_locale(locale)
+        assert text.active_locale() == locale
+
+    return pin
+
+
 def _refuse(call):
     with pytest.raises(SessionSpecError) as caught:
         result = call()
@@ -119,12 +132,9 @@ def _refuse(call):
 
 @pytest.mark.parametrize("case", sorted(_EXPECTED))
 def test_real_guards_preserve_english_bytes_and_missing_namespace_fallback(
-    case, tmp_path, monkeypatch
+    case, tmp_path, monkeypatch, pin_language
 ):
-    def forbidden(*args, **kwargs):
-        pytest.fail("source-only spec diagnostics must never resolve configured language")
-
-    monkeypatch.setattr(resolve, "resolve_language", forbidden)
+    pin_language("en")
     original = messages.render
     calls = []
 
@@ -156,7 +166,11 @@ def test_real_guards_preserve_english_bytes_and_missing_namespace_fallback(
 
 
 @pytest.mark.parametrize("case", sorted(_EXPECTED))
-def test_real_guards_consume_the_keyed_render_not_a_parallel_literal(case, tmp_path, monkeypatch):
+def test_real_guards_consume_the_keyed_render_not_a_parallel_literal(
+    case, tmp_path, monkeypatch, pin_language
+):
+    pin_language("en")
+
     def marker(code, params, *, locale=None):
         assert locale == "en"
         assert code == "wire.errors.sdk_spec." + case
@@ -165,6 +179,61 @@ def test_real_guards_consume_the_keyed_render_not_a_parallel_literal(case, tmp_p
     monkeypatch.setattr(messages, "render", marker)
     error = _refuse(_cases(tmp_path)[case])
     assert error.args == ("source-marker:wire.errors.sdk_spec." + case,)
+
+
+@pytest.mark.parametrize("locale", ["fr", "es"])
+@pytest.mark.parametrize("case", sorted(_EXPECTED))
+def test_real_guards_render_the_active_locale(case, locale, tmp_path, monkeypatch, pin_language):
+    """Every owned refusal paints the selected language, with the code unchanged.
+
+    The operator contract is that a selected language leaves no English in the
+    interface, so the spec/SDK guards follow the active locale instead of the
+    old ``locale="en"`` pin. The stable machine identity (exception type, one
+    string argument, catalogue id) must not move with the language.
+    """
+    pin_language(locale)
+    original = messages.render
+    seen = []
+
+    def observe(code, params, *, locale=None):
+        text = original(code, params, locale=locale)
+        seen.append((code, params, locale, text))
+        return text
+
+    monkeypatch.setattr(messages, "render", observe)
+    error = _refuse(_cases(tmp_path)[case])
+    assert len(seen) == 1
+    code, params, rendered_locale, text = seen[0]
+    # Code and params are locale-independent; only the sentence moves.
+    assert code == "wire.errors.sdk_spec." + case
+    assert rendered_locale == locale
+    assert error.args == (text,)
+    catalogue = catalogues.load_catalogue(locale, "wire.errors.sdk_spec")
+    assert catalogue[code]  # the translated source exists for this locale
+    assert text != _EXPECTED[case], "the English literal must be gone"
+    assert text == original(code, params, locale=locale)
+    # Same envelope identity the HTTP plane would carry for this message.
+    assert messages.envelope(code, params, locale="en")["code"] == code
+
+
+def test_real_guards_never_read_configuration_to_pick_a_language(
+    tmp_path, monkeypatch, pin_language
+):
+    """The language is the process's active locale, never an ambient config read.
+
+    The pre-root refusals fire before the SDK isolates the caller's roots; a
+    config read there would observe a directory the caller never declared.
+    """
+    from local_operator.i18n import resolve
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("spec diagnostics must not resolve configured language")
+
+    monkeypatch.setattr(resolve, "resolve_language", forbidden)
+    monkeypatch.setattr(resolve, "config_value", forbidden)
+    pin_language("fr")
+    error = _refuse(_cases(tmp_path)["mode_invalid"])
+    assert str(error) != _EXPECTED["mode_invalid"]
 
 
 def _owned_raise_keys(source):
