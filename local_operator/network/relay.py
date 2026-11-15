@@ -8336,6 +8336,16 @@ class RelayServer:
             # see that memory batches are being turned away and why. The cause is the
             # refusal code where the audit vocabulary knows it (``bad_memory`` is
             # registered for exactly this path); anything else is a policy answer.
+            from local_operator.mcp.redaction import values as redaction_values
+            from local_operator.redaction_shapes import scrub_secrets
+
+            # This handler already passed the authorizer. An op-only "policy"
+            # row hid runtime-dial failures as if membership had been denied.
+            # Persist the actual code and one-line peer-safe explanation instead.
+            # Scrub known in-memory values and credential shapes BEFORE the audit
+            # writer truncates it; a cut credential must not evade redaction.
+            # Neither scrubber retrieves credentials or reads a secret store.
+            reason = " ".join(scrub_secrets(refusal.sentence, redaction_values()).split())
             self.audit.record(
                 AuditEvent(
                     event="authorisation_refused",
@@ -8348,7 +8358,11 @@ class RelayServer:
                     # ``granted`` is real on every production path; the getattr keeps
                     # the refusal-shape unit tests (which pass None to prove the
                     # branch reads neither the link nor the grant) honest.
-                    detail={"op": getattr(granted, "action", "")},
+                    detail={
+                        "op": getattr(granted, "action", ""),
+                        "refusal_code": refusal.code,
+                        "reason": reason,
+                    },
                 )
             )
             return wire.error_from(refusal, req)
