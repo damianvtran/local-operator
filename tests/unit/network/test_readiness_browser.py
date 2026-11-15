@@ -46,6 +46,16 @@ def test_ok_names_chrome_extension_and_pairing() -> None:
     assert row["remedies"] == []
 
 
+def test_a_node_that_holds_its_operator_key_warns() -> None:  # PR #3938 review R2-3
+    """Usable browser, but no person can approve a new site: the node could sign
+    its own approvals, so the row says so and names the remedy."""
+    row = _row({**NODE_OK, "operator_key_held_locally": True})
+    assert row["state"] == "warn"
+    assert "holds the operator key's private half" in row["detail"]
+    assert "--authorised-by" in row["remedies"][0]
+    assert _row({**NODE_OK, "operator_key_held_locally": False})["state"] == "ok"
+
+
 def test_not_installed_warns_with_the_authorised_setup_remedy() -> None:
     row = _row({"host": "none"})
     assert row["state"] == "warn"
