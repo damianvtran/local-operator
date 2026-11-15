@@ -451,6 +451,132 @@ async def test_http_sse_cancellation_closes_owner_stream(
 
 
 @pytest.mark.asyncio
+async def test_new_http_subscriber_rechecks_revoked_shared_view(
+    peer_pair: Any, monkeypatch: Any
+) -> None:
+    import uuid
+
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.analytics import get_recorder
+    from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
+    from local_operator.mobile.daemon import MobileDaemon, build_app
+    from local_operator.mobile.remote_sessions import RemoteViews
+    from tests.unit.network.test_relay_e2e import _pair_settled
+    from tests.unit.network.test_remote_viewer import _wait
+    from tests.unit.network.test_session_plane import (
+        _serve_real_sessions,
+        _start_real_session,
+    )
+
+    server_a, server_b, _host, _port = peer_pair
+    server_b.bind()
+    server_b.bind_control()
+    server_b.start()
+    record, _host, _port = _pair_settled(
+        peer_pair,
+        monkeypatch,
+        role="read",
+        settings=relay.NetworkSettings(port=server_b.settings.port, listen_address="127.0.0.1"),
+    )
+    await asyncio.to_thread(seed, server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    served = _serve_real_sessions(monkeypatch, server_a.root)
+    owner = await asyncio.to_thread(
+        _start_real_session, server_a.root, "mobile-peer-history", str(server_a.root)
+    )
+    served["mobile-peer-history"] = owner
+    pool = RemoteViews()
+    monkeypatch.setattr("local_operator.mobile.remote_sessions.RemoteViews", lambda: pool)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    app = build_app(MobileDaemon(port=0, password="test-only"))
+    path = "/api/sessions/mobile-peer-history/events"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(b"cookie", f"{COOKIE_NAME}={sign_cookie('test-only')}".encode())],
+        "server": ("localhost", 80),
+        "client": ("synthetic", 1),
+    }
+    seeded = asyncio.Event()
+    held = asyncio.Event()
+    frames: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    async def send(frame: MutableMapping[str, Any]) -> None:
+        frames.append(dict(frame))
+        if frame["type"] == "http.response.body" and b"event: projection" in frame["body"]:
+            seeded.set()
+            await held.wait()
+
+    subscriber = asyncio.create_task(app(scope, receive, send))
+    view = None
+    upstream: Any = None
+    try:
+        await asyncio.wait_for(seeded.wait(), 15)
+        assert frames[0]["status"] == 200
+        view = next(iter(pool.views.values()))
+        upstream = view.client
+        assert upstream is not None and upstream.connected and view.readers == 1
+        # This is the receiver's actual local grant mutation, not a simulated
+        # denied read. Keep A's HTTP subscription alive to expose cached reuse.
+        with store.mutate(record.network_id, server_a.root) as current:
+            relay.set_member_capabilities(
+                current, device_id=server_b.identity.device_id, revoke=("view",)
+            )
+            store.save(current, server_a.root)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost"
+        ) as client:
+            assert (await client.get(path)).status_code == 401
+            await client.post("/login", data={"password": "test-only"})
+            history = await client.get("/api/sessions/mobile-peer-history/history")
+            prompt = await client.post(
+                "/api/sessions/mobile-peer-history/command",
+                json={"op": "prompt", "command_id": str(uuid.uuid4()), "text": "denied"},
+            )
+            assert history.status_code == prompt.status_code == 403
+            assert history.json()["code"] == prompt.json()["code"] == "remote_forbidden"
+            # Stop at HTTP headers on the buggy path so a wrongly admitted SSE
+            # cannot hang the regression waiting for its never-ending response.
+            second: list[dict[str, Any]] = []
+
+            async def second_send(frame: MutableMapping[str, Any]) -> None:
+                second.append(dict(frame))
+                if frame["type"] == "http.response.start" and frame["status"] == 200:
+                    raise asyncio.CancelledError
+
+            try:
+                await app(scope, receive, second_send)
+            except asyncio.CancelledError:
+                pass
+            assert second[0]["status"] == 403, second
+            body = b"".join(frame.get("body", b"") for frame in second)
+            assert b"remote_forbidden" in body and b"event: projection" not in body
+        assert view.readers == 1 and len(view.queues) == 1
+        assert view.client is upstream and upstream.connected
+    finally:
+        subscriber.cancel()
+        await asyncio.gather(subscriber, return_exceptions=True)
+        assert not pool.views
+        if view is not None:
+            assert view.readers == 0 and not view.queues and view.client is None
+        # Capability-only revocation has a pre-existing owner-stream close gap;
+        # the new HTTP reference must still unwind without retaining a client.
+        await asyncio.to_thread(owner.stop)
+        await asyncio.to_thread(get_recorder().close)
+        assert await _wait(lambda: upstream is None or not upstream.connected)
+
+
+@pytest.mark.asyncio
 async def test_view_grant_does_not_admit_mobile_prompt(peer_pair: Any, monkeypatch: Any) -> None:
     import uuid
 

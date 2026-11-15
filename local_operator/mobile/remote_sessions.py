@@ -351,6 +351,12 @@ class RemoteView:
             await self._connect()
 
     async def _connect(self) -> None:
+        # Each newly admitted HTTP reader must cross owner authorization before
+        # it can receive a cached frame. A shared live connection proves only
+        # that an earlier reader was admitted, not that view is still granted.
+        # Keep this inside the per-view lock and tentative-reference lifetime:
+        # denial/cancellation drops only this acquire, leaving existing readers.
+        result = await asyncio.to_thread(mesh_read, self.root, self.row, "projection")
         if self.client is not None and self.client.connected:
             return
         self.close()
@@ -360,7 +366,6 @@ class RemoteView:
         # Negotiate the complete owner-side mobile schema even for a LIVE
         # runtime. Otherwise an old peer could appear to open successfully but
         # fail history/media only after the user scrolls or opens an attachment.
-        result = await asyncio.to_thread(mesh_read, self.root, self.row, "projection")
         self.publish(result["projection"])
         owner = await asyncio.to_thread(
             remote_owner_for,

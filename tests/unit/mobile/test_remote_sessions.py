@@ -121,6 +121,57 @@ def test_http_remote_history_forwards_exact_cursors(tmp_path: Path, monkeypatch:
     assert calls == [{"before_id": None, "after_id": "previous", "limit": 3}]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_existing_first", [False, True])
+async def test_cancelled_shared_authorization_unwinds_tentative_reference(
+    tmp_path: Path, monkeypatch: Any, release_existing_first: bool
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    row = SessionRow(id="remote-chat", mtime=0.0, name="synthetic", owner_device="peer-b")
+    pool = remote.RemoteViews()
+    view = remote.RemoteView(tmp_path, row)
+    upstream = SimpleNamespace(connected=True, close=Mock())
+    view.client = upstream
+    view.frame = {"session_id": row.id, "transcript": []}
+    existing: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    view.queues.add(existing)
+    view.readers = 1
+    pool.views[(row.owner_device, row.id)] = view
+    checking = asyncio.Event()
+
+    async def pending_read(function: Any, *args: Any) -> Any:
+        assert function is remote.mesh_read
+        assert args == (tmp_path, row, "projection")
+        checking.set()
+        await asyncio.Future()
+
+    # Hold precisely the new authorization await, not a wall-clock approximation
+    # or a real worker thread that would outlive cancellation of its awaiter.
+    monkeypatch.setattr(remote.asyncio, "to_thread", pending_read)
+    joining = asyncio.create_task(pool.acquire(tmp_path, row))
+    try:
+        await asyncio.wait_for(checking.wait(), 5)
+        assert view.readers == 2 and len(view.queues) == 1
+        if release_existing_first:
+            pool.release(view, existing)
+            assert view.readers == 1 and view.client is upstream
+            upstream.close.assert_not_called()
+    finally:
+        joining.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await joining
+    if not release_existing_first:
+        assert view.readers == 1 and view.client is upstream
+        assert view.queues == {existing}
+        upstream.close.assert_not_called()
+        pool.release(view, existing)
+    assert not pool.views and not view.queues and view.readers == 0
+    assert view.client is None
+    upstream.close.assert_called_once()
+
+
 def test_unknown_mobile_purpose_refuses_not_legacy_page(tmp_path: Path) -> None:
     build_history(tmp_path)
     with pytest.raises(MeshRefusal):
