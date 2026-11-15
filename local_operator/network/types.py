@@ -405,6 +405,11 @@ NET_OPS: tuple[str, ...] = (
     # row (``admin``, the same decision ``net_definitions`` records above) and
     # its own audit event, rather than a section inside that bundle.
     "net_mcp_defs",
+    # THE OPERATOR BINDING (operator_binding.py): the operator's device presents
+    # an onboarding decision the operator already signed; this device verifies it
+    # against its root-owned anchor and stores it. Self-authenticating — the
+    # signature, not the sender's role, is the authority — so it rides ``list``.
+    "net_operator_binding",
     # USER SKILLS (skillsync.py): one skill directory per apply, packaged with
     # the hub's untrusted-safe bundle. Its own op for the reasons mcpdefs gives
     # (different payload, size class and apply semantics) and its own
@@ -736,6 +741,11 @@ OP_CAPABILITY: dict[str, str | None] = {
     # those files is readable only to root or to the daemon, so a member that
     # may look at this device's catalogue may look at its readiness too.
     "net_readiness": "list",
+    # ``list``, the least authority there is: the frame's authority is the
+    # operator's ES256 signature verified against this device's ROOT-OWNED anchor
+    # (``network/operator_binding.py``), never the sender's role, and the only
+    # write is a 0600 cache of that self-verifying proof, re-verified on use.
+    "net_operator_binding": "list",
     # ``admin``, the same decision as ``net_definitions`` and for the same
     # reason: installing a server writes DURABLE, install-wide state that can
     # spawn commands for every FUTURE session, which is broader than any one

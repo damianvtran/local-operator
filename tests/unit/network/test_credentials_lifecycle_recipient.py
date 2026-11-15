@@ -473,6 +473,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # fields on the existing catalogue answer (``RelayServer._rows_for_viewer``),
         # so advertising it promises an owner whose ``net_catalog`` handler stamps them.
         wire.REMOTE_ATTENTION_V1: "net_catalog",
+        # Advertising the binding promises verification/storage of the signed
+        # onboarding proof through this dedicated peer op, not just a wire feature.
+        wire.OPERATOR_BINDING_V1: "net_operator_binding",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.

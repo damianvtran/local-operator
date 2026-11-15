@@ -81,7 +81,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_hex
-from typing import Any, Callable, Iterator, TextIO
+from typing import Any, Callable, Collection, Iterator, TextIO
 
 from local_operator.network.identity import ensure_network_root, network_root
 from local_operator.network.types import (
@@ -987,7 +987,9 @@ def prune(record: NetworkRecord, *, now: float | None = None) -> dict[str, int]:
     }
 
 
-def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[InviteRecord]:
+def prune_invites(
+    record: NetworkRecord, *, now: float | None = None, keep: Collection[str] = ()
+) -> list[InviteRecord]:
     """Drop the invite entries that are dead and past retention; return the dropped.
 
     THE INVITE HALF OF :func:`prune`, split out because it is the half a live relay
@@ -1010,13 +1012,22 @@ def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[In
     refuses ``not invite.is_fresh(now)``), so a row dropped here is one no
     redemption could have accepted. A redeemed entry is kept for the window after
     its redemption as well, so a ceremony in flight never loses its row.
+
+    ``keep`` (PR #4030 review R2-M1): invite ids a RETAINED signed onboarding
+    approval names (:func:`binding_invite_ids`). Such a row, once consumed as
+    ``admitted`` by a device still an active, unburned member here, is the only
+    Mac-written link from that onboarding to the node's handshake-authenticated
+    mesh id (``operator_binding._backfill_one``); dropping it 24 h after
+    redemption left every older node unbindable. Bounded: the approvals'
+    own prune ages the naming approvals out, and the row then goes here.
     """
     moment = time.time() if now is None else now
     kept: list[InviteRecord] = []
     dropped: list[InviteRecord] = []
     for invite in record.invites:
         if (
-            invite.is_fresh(moment)
+            (keep and invite.invite_id in keep and _admitted_active(record, invite))
+            or invite.is_fresh(moment)
             or moment - invite.minted_at <= INVITE_PRUNE_AGE_S
             or (
                 invite.redeemed_at is not None and moment - invite.redeemed_at <= INVITE_PRUNE_AGE_S
@@ -1027,6 +1038,29 @@ def prune_invites(record: NetworkRecord, *, now: float | None = None) -> list[In
             dropped.append(invite)
     record.invites = kept
     return dropped
+
+
+def _admitted_active(record: NetworkRecord, invite: InviteRecord) -> bool:
+    """The invite admitted a device that is still an active, unburned member (S5)."""
+    if invite.state != "consumed" or invite.outcome != "admitted" or not invite.redeemed_by:
+        return False
+    if record.is_burned(invite.redeemed_by):
+        return False
+    return any(m.device_id == invite.redeemed_by for m in record.active_members())
+
+
+def binding_invite_ids(root: Path | None = None) -> frozenset[str]:
+    """Invite ids :func:`prune_invites` must keep for the operator binding. Never raises.
+
+    Read from the approvals store only (no network record), so every minting
+    caller can compute it BEFORE taking :func:`mutate`'s lock.
+    """
+    try:
+        from local_operator.network.operator_binding import retained_invite_ids
+
+        return retained_invite_ids(root)
+    except Exception:  # noqa: BLE001 — a failed read keeps nothing extra, prunes as before
+        return frozenset()
 
 
 def forget_invite_tokens(dropped: list[InviteRecord], root: Path | None = None) -> None:
@@ -1054,10 +1088,11 @@ def sweep_invites(root: Path | None = None, *, now: float | None = None) -> int:
     races the relay's own writers.
     """
     total = 0
+    keep = binding_invite_ids(root)
     for listed in list_networks(root):
         try:
             with mutate(listed.network_id, root) as record:
-                dropped = prune_invites(record, now=now)
+                dropped = prune_invites(record, now=now, keep=keep)
                 if dropped:
                     save(record, root)
         except FileNotFoundError:
