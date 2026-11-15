@@ -319,6 +319,10 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "operator_device_id",
         "revoked_at",
         "sound_cached",
+        # Per-device push preferences (Settings → Notifications). Absent on
+        # every row an earlier build wrote, and absent means "all on" — see
+        # :data:`PREFERENCE_KEYS`.
+        "preferences",
     }
 )
 _RECORD_FIELDS = _REQUIRED_RECORD_FIELDS | _OPTIONAL_RECORD_FIELDS
@@ -344,6 +348,9 @@ _REGISTER_FIELDS = frozenset(
         "operator_cert",
         "operator_link_sig",
         "operator_link_at",
+        # Per-device push preferences (Settings → Notifications); see
+        # :data:`PREFERENCE_KEYS`.
+        "preferences",
     }
 )
 
@@ -379,6 +386,37 @@ def link_message(
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     parts = (str(at), operator_device_id, install_id, platform, digest)
     return LINK_LABEL + b"\n" + "\n".join(parts).encode("ascii")
+
+
+#: The per-device push preference switches, and the ONLY keys a ``preferences``
+#: object may carry (register body and stored row alike).
+#:
+#: Why they exist, in the operator's words: "there should be notification
+#: preferences in the settings, I have no way to turn off notifications or turn
+#: off certain types of notifications so now I just have to deal with
+#: notification spam until this setting is available". iOS cannot filter a
+#: remote push on the device, so the filter has to live where the emit is
+#: DECIDED — this daemon's push worker (``push_worker._preference_gate``).
+#:
+#: - ``enabled`` — the master switch: ``False`` silences every push type for
+#:   that device, the silent attention correction included.
+#: - ``completions`` — run endings: ``complete`` and ``retired``, and also
+#:   ``interrupted`` and ``closed`` (a run that stopped without an error is
+#:   the same "your run is done" signal to the reader, so it rides this switch
+#:   rather than growing a fourth one the app does not render). Since #3989
+#:   (the push worker's ``_desktop_would_announce`` gates on
+#:   ``desktop_sessions.BRIDGE_NOTIFIABLE_KINDS``) ``interrupted`` and ``closed``
+#:   are no longer push candidates at all; they stay mapped here so a kind the
+#:   worker starts pushing again lands on a defined switch.
+#: - ``errors`` — runs that ended in ``error``.
+#:
+#: A missing ``preferences`` object, or a missing key inside one, means
+#: ``True``: a phone that never sent preferences, and every row an earlier
+#: build wrote, keeps exactly the behaviour it had. The app only sends the
+#: field to a daemon advertising the ``push_preferences`` capability, because
+#: this register body refuses unknown fields and an older daemon would refuse
+#: the whole registration.
+PREFERENCE_KEYS = ("enabled", "completions", "errors")
 
 
 class PushDeviceRefusal(Exception):
@@ -682,6 +720,14 @@ def register(
             record["name"] = fields["name"]
         else:
             record.pop("name", None)
+        # DECLARATIVE like ``name``: a re-register REPLACES the stored switches,
+        # and a body without ``preferences`` clears them back to absent (= all
+        # on). The app sends its whole Settings state on every register, so
+        # the latest register is the device's current choice.
+        if fields["preferences"] is not None:
+            record["preferences"] = fields["preferences"]
+        else:
+            record.pop("preferences", None)
         # The re-register clears the credential LAPSE and nothing else: this is
         # ADR §3.1's "expired_at does NOT refuse", implemented where it matters.
         # The two refusal markers are untouched — a row that reaches here has
@@ -928,6 +974,36 @@ def _checked_sound_cache(stems: object) -> list[str]:
     return cached
 
 
+def resolved_preferences(record: Mapping[str, Any]) -> dict[str, bool]:
+    """One row's three push switches, with absence resolved to ``True``.
+
+    A row written before preferences existed carries no ``preferences`` key,
+    and a stored object may name only some keys; both mean "on" (see
+    :data:`PREFERENCE_KEYS`), so every reader resolves through here rather
+    than spelling the default twice.
+    """
+    stored = record.get("preferences")
+    stored = stored if isinstance(stored, Mapping) else {}
+    return {key: bool(stored.get(key, True)) for key in PREFERENCE_KEYS}
+
+
+def device_preferences(config_dir: Path) -> dict[str, dict[str, bool]]:
+    """READ-ONLY ``{device_id: resolved preferences}`` for the emit gate.
+
+    A sibling of :func:`credential_facts` rather than more fields on it: those
+    facts feed the credential report block the cloud decodes strictly, and the
+    preferences must never reach any cloud body (the cloud's register and emit
+    bodies are ``extra="forbid"``). A duplicate ``device_id`` (only a foreign
+    file can hold one) keeps its first row, as :func:`_by_id` does.
+    """
+    with _LOCK:
+        records = _load(config_dir)
+    preferences: dict[str, dict[str, bool]] = {}
+    for record in records:
+        preferences.setdefault(record["device_id"], resolved_preferences(record))
+    return preferences
+
+
 def credential_facts(config_dir: Path, *, now: float | None = None) -> list[dict[str, Any]]:
     """READ-ONLY per-device credential facts — the emit path's only input.
 
@@ -1080,6 +1156,10 @@ def list_devices(config_dir: Path, *, now: float | None = None) -> dict[str, Any
             entry["last_authenticated_at"] = record["last_authenticated_at"]
         if "operator_device_id" in record:
             entry["operator_device_id"] = record["operator_device_id"]
+        # Always rendered, RESOLVED: unlike a credential fact, "absent" has a
+        # defined answer here (all on), so the resolved switches are the truth
+        # rather than an invented value.
+        entry["preferences"] = resolved_preferences(record)
         devices.append(entry)
     return {"devices": devices, "precedence": PRECEDENCE}
 
@@ -1266,6 +1346,9 @@ def _checked_registration(
         name = _bounded(name.strip(), "name")
     else:
         raise PushDeviceRefusal("name must be a string when provided")
+    preferences = body.get("preferences")
+    if preferences is not None:
+        preferences = _checked_preferences(preferences)
     return {
         "platform": platform,
         "environment": environment,
@@ -1280,6 +1363,7 @@ def _checked_registration(
             config_dir=config_dir,
             now=time.time() if now is None else now,
         ),
+        "preferences": preferences,
     }
 
 
@@ -1381,6 +1465,27 @@ def _checked_operator_link(
     ):
         raise PushDeviceRefusal("operator_link_sig is not this device's signature")
     return device_id
+
+
+def _checked_preferences(value: object) -> dict[str, bool]:
+    """The register body's ``preferences``: an object of known bool switches.
+
+    Strict like the body around it: a non-object, an unknown key (echoed
+    BOUNDED, the same rule as the body's own unknown-field refusal) or a
+    non-bool value refuses the whole register. A key the app left out is
+    stored resolved to ``True``, so the row always holds all three switches
+    and a reader never re-derives the default.
+    """
+    if not isinstance(value, dict):
+        raise PushDeviceRefusal("preferences must be an object when provided")
+    unknown = sorted(str(key) for key in set(value) - set(PREFERENCE_KEYS))
+    if unknown:
+        names = ", ".join(unknown)[:MAX_FIELD_CHARS]
+        raise PushDeviceRefusal(f"unknown preferences field(s): {names}")
+    for key, flag in value.items():
+        if not isinstance(flag, bool):
+            raise PushDeviceRefusal(f"preferences.{key} must be true or false")
+    return {key: value.get(key, True) for key in PREFERENCE_KEYS}
 
 
 def _install_id(value: object) -> str:
@@ -1617,6 +1722,17 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
             f"push device registry record {index} has an invalid sound_cached;"
             " refusing to rewrite it"
         )
+    if "preferences" in entry:
+        stored = entry["preferences"]
+        if (
+            not isinstance(stored, dict)
+            or set(stored) - set(PREFERENCE_KEYS)
+            or not all(isinstance(flag, bool) for flag in stored.values())
+        ):
+            raise PushRegistryCorrupt(
+                f"push device registry record {index} has invalid preferences;"
+                " refusing to rewrite it"
+            )
     if "credential_live" in entry and not isinstance(entry["credential_live"], bool):
         raise PushRegistryCorrupt(
             f"push device registry record {index} has an invalid credential_live;"
