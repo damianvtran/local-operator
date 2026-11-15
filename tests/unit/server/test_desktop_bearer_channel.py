@@ -315,13 +315,12 @@ def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
     the launch an operator would and reads it with ``ps eww``.
     """
 
+    import json
     import socket
     import subprocess
     import time
     import urllib.error
     import urllib.request
-
-    import json
 
     # Port selection: the child binds ``--port 0`` ITSELF and reports the port it
     # actually got in its serve record. The previous shape bound port 0 here,
