@@ -148,6 +148,63 @@ async def _max_loop_lag(work: Any) -> tuple[Any, float]:
     return result, worst
 
 
+async def _max_loop_cpu(work: Any) -> tuple[Any, float, float]:
+    """Run ``work`` with GC paused; return the worst tick in wall time AND loop-thread CPU.
+
+    WHY CPU AND NOT WALL TIME, for the cold open (CI train t8, PR #4012). The
+    cold open's guard read 775/841 ms on the shared 3.12/3.13 runners against
+    33-96 ms on the dev host. Reproduced on one core shared with a CPU burner
+    and split with a per-callback timer plus ``gc.callbacks``: the largest
+    stalls were full gen-2 collections (130-360 ms each, collecting nothing)
+    that the WORKER's roster allocations trigger, and pydantic-core calls in
+    the worker that hold the GIL for their whole run -- neither is work the
+    loop does, and both scale with the runner's speed and the worker
+    process's heap, not with the code under test. The one state-sized step
+    still on the loop (the checkpoint's ``model_validate`` in
+    ``_restore_cold_details``) moved to a thread in the same commit: the loop
+    thread's worst CPU stretch went from 57-72 ms to ~41 ms.
+
+    So this measures what the guard claims: CPU the LOOP THREAD burned between
+    two ticks (``time.thread_time`` read on the loop's own thread), which
+    excludes time spent descheduled or waiting for the GIL. GC is paused for
+    the window so a collection the generational threshold happens to trip on
+    the loop thread is not charged to whichever callback tripped it; it is
+    re-enabled and run before returning. The pre-fix code (05c4e2502) still
+    fails this at ~880 ms: its clone, freeze and serialization are CPU on the
+    loop thread.
+    """
+    stop = asyncio.Event()
+    worst_wall = 0.0
+    worst_cpu = 0.0
+
+    async def ticker() -> None:
+        nonlocal worst_wall, worst_cpu
+        last_wall = time.perf_counter()
+        last_cpu = time.thread_time()
+        while not stop.is_set():
+            await asyncio.sleep(TICK_S)
+            now_wall = time.perf_counter()
+            now_cpu = time.thread_time()
+            worst_wall = max(worst_wall, now_wall - last_wall - TICK_S)
+            worst_cpu = max(worst_cpu, now_cpu - last_cpu)
+            last_wall, last_cpu = now_wall, now_cpu
+
+    was_enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    try:
+        result = await work
+    finally:
+        stop.set()
+        await task
+        if was_enabled:
+            gc.enable()
+        gc.collect()
+    return result, worst_wall, worst_cpu
+
+
 @pytest.mark.asyncio
 async def test_a_large_snapshot_does_not_hold_the_event_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -377,6 +434,19 @@ async def test_a_cold_open_of_a_large_session_does_not_hold_the_event_loop(
     pool = module.DesktopSessions(root)
     gc.collect()
 
+    # The checkpoint's validation by THREAD, the deterministic half for the step
+    # the CPU bound below is too coarse to single out (CI train t8): the roster
+    # only rides the durable checkpoint, so a 2,000-job payload is that call.
+    validated_on: list[str] = []
+    validate = FrontendSessionState.model_validate.__func__  # type: ignore[attr-defined]
+
+    def recorded_validate(cls: Any, obj: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(obj, dict) and len(obj.get("jobs") or ()) == ROSTER:
+            validated_on.append(threading.current_thread().name)
+        return validate(cls, obj, *args, **kwargs)
+
+    monkeypatch.setattr(FrontendSessionState, "model_validate", classmethod(recorded_validate))
+
     async def cold_open() -> int:
         async with pool.session("c01d00000001", read=True, allow_draft=True) as bridge:
             sub = bridge.subscribe()
@@ -390,15 +460,20 @@ async def test_a_cold_open_of_a_large_session_does_not_hold_the_event_loop(
         raise AssertionError("the stream ended without a snapshot")
 
     try:
-        jobs, lag = await _max_loop_lag(cold_open())
+        jobs, wall, cpu = await _max_loop_cpu(cold_open())
     finally:
         await pool.close()
 
     assert jobs == ROSTER, "the guard must measure a cold open that restored the roster"
-    assert lag < MAX_LAG_S, (
-        f"the cold open held the event loop for {lag * 1000:.0f} ms; the cold install's "
-        "freeze, the jobs facade copies and the joining clones must stay off the loop "
-        "(PR #4012, QA round 1, Q1)"
+    assert validated_on and threading.main_thread().name not in validated_on, (
+        f"the durable checkpoint was validated on {validated_on}; a 2,000-job "
+        "model_validate must not run on the serving loop's thread"
+    )
+    assert cpu < MAX_LAG_S, (
+        f"the cold open ran {cpu * 1000:.0f} ms of CPU on the event loop's thread between "
+        f"two ticks (worst wall-clock tick {wall * 1000:.0f} ms); the checkpoint's "
+        "validation, the cold install's freeze, the jobs facade copies and the joining "
+        "clones must stay off the loop (PR #4012, QA round 1, Q1; CI train t8)"
     )
 
 

@@ -3098,10 +3098,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        # ``_join`` rather than ``subscribe``: both entry points (``subscribe``
-        # and ``subscribe_threadsafe``) admit their callback through this one
-        # private method, so the closure that removes it is qualified here.
-        "local_operator/session/frontend_state.py::FrontendStateStore._join.unsubscribe",
+        # ``_register`` rather than ``subscribe``: every entry point admits its
+        # callback through this one private method (it takes the state reference
+        # under the same lock as the append), so the closure that removes it is
+        # qualified here. The receiver is ``self._subscribers``, a
+        # ``list[Callable]``; ``.remove(callback)`` drops a listener, never a path.
+        "local_operator/session/frontend_state.py::FrontendStateStore._register.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
     ),

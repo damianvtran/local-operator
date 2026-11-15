@@ -2358,7 +2358,15 @@ class AttachedSession:
             raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
             if not isinstance(raw, dict):
                 raise ValueError(f"checkpoint 'state' is {type(raw).__name__}, not a mapping")
-            durable = FrontendSessionState.model_validate(raw)
+            # OFF THE LOOP, like the install's freeze in ``cold``: validating a
+            # 2,000-job checkpoint was the largest state-sized step a cold open
+            # still ran on the desktop's serving loop (PR #4012, CI train t8:
+            # the loop thread's worst CPU stretch fell from 57-72 ms to ~41 ms
+            # with GC paused, and with GC running each collection its
+            # allocations trigger landed on the loop too). ``raw`` is this
+            # facade's own parsed row and validation only reads it, so a
+            # worker may.
+            durable = await asyncio.to_thread(FrontendSessionState.model_validate, raw)
         except Exception as error:  # noqa: BLE001 — a bad row must not stop the open
             # LOUDLY. Falling back leaves exactly the pre-fix experience — an
             # empty roster and no todos — and at DEBUG that is indistinguishable
