@@ -698,13 +698,16 @@ COPY_CEILING_LINES: tuple[str, str] = (
 COPY_CEILING_SENTENCE = " ".join(COPY_CEILING_LINES)
 
 
-def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: bool) -> list[str]:
+def render_copy_revoke_notice(
+    peer_name: str, key: str, *, copied: bool, wiped: bool, unacknowledged: bool = False
+) -> list[str]:
     """What a revoke says about the COPY half, per state (§4.3, "which happened"), as lines.
 
     ``copied`` — the owner's ack ledger holds a row for this member's copy of ``key``;
-    ``wiped`` — that row has since been confirmed deleted. Both come from the same ledger
-    the owner's listing reads, so the receipt and the listing cannot disagree about whether
-    a copy is outstanding.
+    ``wiped`` — that row has since been confirmed deleted. ``unacknowledged``
+    means a durable dispatch without a confirming ACK; it is never promoted to
+    ``copied``. Both receipt and wipe selection use the same conservative open-copy
+    union, so losing a delivery ACK cannot make a known send disappear.
 
     A RECEIPT SAYS WHAT THE LEDGER HOLDS, NEVER WHAT THE WORLD HOLDS (design review round 1,
     D1). A row is written from the member's REPLY — the channel the removal path itself
@@ -719,16 +722,22 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
     (:func:`render_key_name`) and any other key as typed.
     """
     name = render_key_name(key)
-    if not copied:
+    if not copied and not unacknowledged:
         return [
             f"no copy of '{name}' is recorded on {peer_name}, so there is no wipe to send",
             "a copy whose confirmation never arrived is not tracked here",
         ]
     if wiped:
         return [f"the copy of '{name}' on {peer_name} was already wiped"]
+    pending = (
+        [f"a copy of '{name}' was sent to {peer_name} but its delivery was never acknowledged"]
+        if unacknowledged
+        else []
+    )
     return [
+        *pending,
         f"a wipe notice for '{name}' is queued for {peer_name}: the copy is deleted on "
-        "its next contact"
+        "its next contact",
     ]
 
 
@@ -790,9 +799,11 @@ def render_removal_endings(
     # copy the member confirmed: it says which of the open ones that is.
     pending = min(max(0, unacknowledged), unconfirmed)
     if pending == 1:
-        lines.append("1 of them was sent but its delivery was never acknowledged")
+        lines.append(f"1 copy on {peer_name} was sent but its delivery was never acknowledged")
     elif pending > 1:
-        lines.append(f"{pending} of them were sent but their delivery was never acknowledged")
+        lines.append(
+            f"{pending} copies on {peer_name} were sent but their delivery was never acknowledged"
+        )
     lines.extend(COPY_CEILING_LINES)
     return lines
 
