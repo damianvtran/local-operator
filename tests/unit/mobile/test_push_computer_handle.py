@@ -116,9 +116,7 @@ def test_refusal_during_binding_read_does_not_expose_a_handle(monkeypatch) -> No
         assert disarmed.wait(5), "register forward did not disarm during config read"
         return HANDLE, 17
 
-    transport = RadientPushTransport(
-        tunnel_id=HANDLE, credential_id=17, tunnel_key=read_binding
-    )
+    transport = RadientPushTransport(tunnel_id=HANDLE, credential_id=17, tunnel_key=read_binding)
     original_disarm = transport._disarm
 
     def note_disarm(failure: Exception) -> None:
