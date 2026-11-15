@@ -526,6 +526,7 @@ def owned_record(
     *,
     state_root: str | os.PathLike[str] | None = None,
     kin: bool = False,
+    family: bool = True,
 ) -> CreationRecord | None:
     """The ledger row covering ``path`` for ``session_id``'s family, or ``None``.
 
@@ -554,6 +555,12 @@ def owned_record(
     ``origin.json``, both CRITICAL to write from a session), never from
     message text or the environment. An unrelated session stays foreign.
     ``relation`` on the returned record says which rule matched.
+
+    ``family=False`` is the pre-family rule, unchanged: only rows whose
+    ``owner`` is ``session_id`` (its own creations and those its descendants
+    filed under it). ``check.escalate_asked_targets`` needs exactly that
+    (QA Q1, PR #3964): an ancestor's row must not lift the refusal of an
+    unanswered ask naming the path, which binds the whole family (#3966).
     """
     if not session_id or not path:
         return None
@@ -574,7 +581,11 @@ def owned_record(
     except (OSError, sqlite3.Error):
         logger.debug("guardrail ledger unreadable", exc_info=True)
         return None
-    relation_of = _family(session_id, state_root=state_root, kin=kin)
+    relation_of = (
+        _family(session_id, state_root=state_root, kin=kin)
+        if family
+        else (lambda owner, _creator: "" if owner == session_id else None)
+    )
     best: CreationRecord | None = None
     rank = {"": 0, "ancestor": 1, "kin": 2}
     for row in rows:
@@ -604,7 +615,7 @@ def owned_record(
         ):
             best = rec
     if best is not None and _foreign_inside(
-        real, session_id, state_root=state_root, relation_of=relation_of
+        real, session_id, state_root=state_root, relation_of=relation_of if family else None
     ):
         return None
     return best

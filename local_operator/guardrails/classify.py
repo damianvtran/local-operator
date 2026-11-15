@@ -1818,7 +1818,13 @@ def _foreign_reason(target: Target, path: str, foreign: ForeignCreations | None)
 
 
 def _owned_by_session(
-    target: Target, path: str, prot: _Protected, session_id: str, *, kin: bool = False
+    target: Target,
+    path: str,
+    prot: _Protected,
+    session_id: str,
+    *,
+    kin: bool = False,
+    family: bool = True,
 ) -> tuple[str, list[str], str] | None:
     """A LOW reason when this session created what ``target`` destroys, else ``None``.
 
@@ -1827,7 +1833,10 @@ def _owned_by_session(
     sibling's or cousin's ``git worktree add`` too; only the non-forced
     ``git worktree remove`` branch of ``_rank`` passes it. The third item
     is the matched ``CreationRecord.relation`` (``""`` when several targets
-    mix relations, the strictest one seen otherwise).
+    mix relations, the strictest one seen otherwise). ``family=False`` counts
+    only this session's own rows (``provenance.owned_record``); the
+    unanswered-ask escalation passes it so a family member's row never lifts
+    an ask that binds the whole family (QA Q1, PR #3964).
 
     Only reached for a target already ranked HIGH by ``_high_reason`` and
     already cleared of CRITICAL ancestry, credential derivation and opaque or
@@ -1869,7 +1878,7 @@ def _owned_by_session(
         real = os.path.realpath(candidate)
         if any(_under(real, st) for st in prot.state_roots):
             return None
-        record = provenance.owned_record(real, session_id, kin=kin)
+        record = provenance.owned_record(real, session_id, kin=kin and family, family=family)
         if record is None:
             return None
         if record.relation == "kin" and not (record.kind == "worktree" and record.path == real):
