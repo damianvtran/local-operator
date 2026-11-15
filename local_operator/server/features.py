@@ -53,6 +53,7 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # (routes/desktop_mobile_doctor.py); a phone reads `lop mobile doctor`
         # output through the operator, never through the relay.
         "mobile_doctor",
+        "operator_setup",
     }
 )
 
@@ -914,6 +915,13 @@ def static_feature_flags() -> dict[str, Any]:
         # diagnostics" button. ABSENT => the renderer hides the button; an older
         # backend has no route to call.
         "mobile_doctor": 1,
+        # Turning on phone approvals (operator authority) without a terminal
+        # (design v2 §6, C3): `GET/POST /v1/desktop/operator/setup`. Its own
+        # key so a renderer shows [Turn on phone approvals] only against a
+        # backend that has the gesture-only route; an older backend keeps the
+        # renderer's existing copy. Desktop-only (DESKTOP_ONLY_FEATURES): the
+        # phone relay serves no such route.
+        "operator_setup": 1,
         # `remedy.kind` on `GET /v1/desktop/tunnel`, the setup route's new kinds
         # (`open_console`, `wait_network`, `wait_radient`) and the reconnect /
         # lapsed-billing steps, plus `kind` on the gateway's 503 body. ABSENT ⇒

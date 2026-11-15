@@ -584,6 +584,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Drops <config>/operator/anchor.json, the staged statement this run wrote",
         2,
     ),
+    (
+        "local_operator/operator/authority_setup.py::_run",
+        "<path>.unlink",
+        # The no-terminal setup's mirror of `_admission_install` above (PR #3950):
+        # `staged` is `trust.staging_path(root)` = `root/"operator"/"anchor.json"`,
+        # a LITERAL basename under the literal "operator" segment of the CONFIG
+        # root — a fixed sibling of `sessions/`. No session id or caller path is in
+        # the expression, and unlink refuses a directory.
+        "Drops <config>/operator/anchor.json after a cancelled/refused setup prompt",
+    ),
+    (
+        "local_operator/operator/authority_setup.py::_exclusive",
+        "<path>.unlink",
+        # The in-progress marker the same context manager wrote one block earlier:
+        # `root/"operator"/_RUNNING_FILE` with `_RUNNING_FILE` a module literal
+        # ("authority-setup.running"). Only reached when `wrote_marker` is set,
+        # no input reaches the path, and unlink refuses a directory.
+        "Drops <config>/operator/authority-setup.running, the marker this attempt wrote",
+    ),
     # The effective-access listener registry is a module-level ``list`` of
     # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
     # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).
