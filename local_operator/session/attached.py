@@ -10109,6 +10109,20 @@ class AttachedSession:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.state
 
+    def frontend_state_reference(self) -> tuple[FrontendStateStore, FrontendSessionState]:
+        """The store and its canonical state object, WITHOUT the clone.
+
+        For the desktop snapshot, which must read state on the serving loop (its
+        sequence watermark is read in the same step) but cannot afford the clone
+        and the serialization there: see :meth:`FrontendStateStore.state_reference`
+        for why the reference is safe to hand to a worker thread. Raises like
+        :attr:`frontend_state` when the store has not synchronized.
+        """
+        store = self._frontend_store
+        if store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return store, store.state_reference()
+
     @property
     def pending_gate(self) -> Any:
         """The pending gate without the full-state clone ``frontend_state`` pays.

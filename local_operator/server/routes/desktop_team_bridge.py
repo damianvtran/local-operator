@@ -1017,13 +1017,21 @@ async def status(
         #: your chief of staff a message once to receive them", #1325). ``None``
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
-        "delivery_hold": _delivery_hold(config_manager),
+        "delivery_hold": await asyncio.to_thread(_delivery_hold, config_manager),
         #: Screening's held / breaker / rejected counts — the same answer
         #: ``lop team-bridge receiver status --json`` carries under
         #: ``screening`` (``Store.screening_status_readonly``). Counts, codes,
         #: categories and ages only; ``None`` when not enrolled or unreadable.
         #: Additive: an older renderer that ignores the key loses nothing.
-        "screening_summary": read_screening_status(config_manager.config_dir),
+        #:
+        #: Both store reads above and here run IN A THREAD (serve stall,
+        #: 2026-11-15): they open the bridge's SQLite store, and a busy store
+        #: waits out its retry window (``_BUSY_TIMEOUT_MS``) inside the call --
+        #: on the loop that held ``lop serve`` past its ``/health`` deadline
+        #: (``read_screening_status`` -> ``_live_generation`` on MAIN).
+        "screening_summary": await asyncio.to_thread(
+            read_screening_status, config_manager.config_dir
+        ),
         # The receiver's SERVICE state, distinct from enrolment, on every
         # platform (launchd, systemd --user, Task Scheduler): ``loaded`` the
         # supervisor holds it; ``installed`` registered but not running;
