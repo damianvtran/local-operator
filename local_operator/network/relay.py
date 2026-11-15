@@ -4875,6 +4875,12 @@ class PeerLink:
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
+        #: When the writer last sent a keepalive ``ping``. The cadence is measured from
+        #: the LATER of this and ``last_frame_at`` — see ``_write_loop``.
+        self.last_ping_sent_at = 0.0
+        #: True when THIS device dialled the link (set by ``_admit_link(outbound=True)``).
+        #: The dialler's duplicate fence replaces only such links: see ``_admit_link``.
+        self.outbound = False
         self.frames_in = 0
         #: When this link last ANSWERED a member-table pull (`net_member_list`).
         #: Zero means "never", and it is the whole of the due-gate in
@@ -5131,7 +5137,7 @@ class PeerLink:
             except OSError:
                 pass
 
-    def _log_link_error(self, side: str, exc: BaseException) -> None:
+    def _log_link_error(self, side: str, exc: BaseException, *, trace: bool = False) -> None:
         """Say WHY a link died, ONCE, with the cause that actually ended it.
 
         THE AUDIT ROW CARRIES ONLY ``cause=error``, and that was the whole record of
@@ -5161,6 +5167,9 @@ class PeerLink:
             side,
             type(exc).__name__,
             exc,
+            # An UNEXPECTED exception (``trace``) is a bug, not a network event, and
+            # its type and message alone do not say where it came from.
+            exc_info=exc if trace else None,
         )
 
     def _handle(self, frame: dict[str, Any]) -> None:
@@ -5237,14 +5246,44 @@ class PeerLink:
                     continue
                 # Keepalive on an idle link; the reader enforces the other half
                 # (``link_idle_s`` without a frame closes it).
-                if time.time() - self.last_frame_at > self.settings.keepalive_s:
-                    record = self.server.peer_record()
-                    self._write(wire.keepalive_frame(record.pid if record else 0))
+                #
+                # ONE PING PER ``keepalive_s``, measured from the later of the last
+                # frame RECEIVED and the last ping SENT. Measuring from the last frame
+                # received alone (the old rule) meant that once a peer went quiet for
+                # ``keepalive_s`` every 0.5 s wake pinged again, because sending never
+                # moves that clock: on 2026-11-13 lop-remote-node-2 went silent for
+                # 120 s and this Mac pushed 180-270 frames into each silent link
+                # (frames_out 273/194/218 against frames_in 43/17/9), all of which a
+                # recovering node then had to decrypt and ack. A silent peer now gets
+                # at most ``link_idle_s / keepalive_s`` pings before the idle close.
+                now = time.time()
+                if now - max(self.last_frame_at, self.last_ping_sent_at) > (
+                    self.settings.keepalive_s
+                ):
+                    self.last_ping_sent_at = now
+                    # ``os.getpid()``, not ``server.peer_record().pid``: the record
+                    # is built by listing and parsing every network file on disk,
+                    # and its pid IS ``os.getpid()``. That scan ran per ping — 2/s
+                    # per silent link in the same episode — on exactly the host
+                    # that is short of I/O.
+                    self._write(wire.keepalive_frame(os.getpid()))
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
         except (OSError, wire.LinkCryptoError) as exc:
             if not self._closed.is_set():
                 self._log_link_error("writer", exc)
+            self.close("error", flush_s=0.0)
+        except Exception as exc:  # noqa: BLE001 — a dead writer must not stay silent
+            # ANY OTHER EXCEPTION (a ``codec.seal`` of a frame that is not JSON, a
+            # bug in a frame builder) used to end this thread with nothing but
+            # threading's stderr hook, leaving a HALF-DEAD link: still in the table,
+            # still ``alive``, its reader answering, nothing ever written again — so
+            # requests queued into it until the PEER idled it out 120 s later. That
+            # is one of the shapes the 2026-11-13 node2 silence could take. Close
+            # it now, with the traceback, so a fresh link (or an honest
+            # "unreachable") replaces it immediately.
+            if not self._closed.is_set():
+                self._log_link_error("writer", exc, trace=True)
             self.close("error", flush_s=0.0)
 
     def _drain(self) -> bool:
@@ -7793,8 +7832,11 @@ class RelayServer:
             return "untrusted"
         return ""
 
-    def _admit_link(self, link: PeerLink) -> str:
+    def _admit_link(self, link: PeerLink, *, outbound: bool = False) -> str:
         """Put ``link`` in the table and start it; return ``""``, or why it was refused.
+
+        ``outbound`` (a link THIS device dialled) applies the dialler's half of the
+        duplicate-link fence: see the comment at the fence below.
 
         THE ONE WAY INTO ``links``, and why it is one way: the refusal (see
         :meth:`_refusal_reason`) and the insert have to happen in the SAME critical
@@ -7813,8 +7855,45 @@ class RelayServer:
         answer every other refusal on this transport gives — an open port that
         explains itself is an oracle — and the record of why is this device's own.
         """
+        displaced: PeerLink | None = None
         with self._links_lock:
             refusal = self._refusal_reason(link.network_id)
+            if not refusal and outbound:
+                # THE DIALLER'S DUPLICATE FENCE. Only ``register_link`` (the
+                # listener) ever replaced a link, so two dials racing to one peer
+                # left this device holding TWO links to it — seen 2026-11-13 as two
+                # ``link_idle`` rows for lop-remote-node-2 5 s apart, each with its
+                # own reader, writer and keepalive aimed at a node that was already
+                # silent. Single-flight in ``_ensure_link_with_probe`` removes the
+                # common race; this catches every other dial path.
+                #
+                # NEWEST WINS, as in ``register_link``, and it has to: the listener
+                # at the far end has just run that fence for this same handshake
+                # and evicted ITS copy of the older link (``net_bye`` + close), so
+                # keeping the older one here would leave both ends with none.
+                # Decided under the same lock as the insert so two admissions
+                # cannot each see the other as "no link yet".
+                #
+                # ONLY A LINK THIS DEVICE DIALLED is displaced here. In a simultaneous
+                # cross-dial (A dials B while B dials A) the older link to the peer is
+                # the INBOUND one the peer dialled; the peer's own outbound fence is
+                # replacing ITS outbound copy of the other link at the same moment,
+                # so replacing the inbound one here too would close both links and
+                # leave the pair with none. Inbound duplicates stay the listener's
+                # business (``register_link``), as they were before this fence.
+                link.outbound = True
+                displaced = next(
+                    (
+                        held
+                        for held in self.links.values()
+                        if getattr(held, "outbound", False)
+                        and held.device_id == link.device_id
+                        and held.network_id == link.network_id
+                        and held.alive
+                        and not held.closing
+                    ),
+                    None,
+                )
             if not refusal:
                 self.links[link.link_id] = link
                 # Publish the connected transition BEFORE starting the reader and
@@ -7832,6 +7911,12 @@ class RelayServer:
         if refusal:
             _close_quietly(link.sock)
         else:
+            if displaced is not None:
+                # Outside the lock: ``close`` waits on the writer's flush and then
+                # runs ``link_closed``, which finds the new link and so records no
+                # loss for the device.
+                displaced.send({"op": "net_bye", "reason": "replaced"})
+                displaced.close("replaced")
             # A LINK IS UP: the redial schedule for this device resets, and its
             # surfaces stop saying "reconnecting" (``redial.RedialTracker``).
             self.note_link_activity(link, force=True)
@@ -13425,7 +13510,7 @@ class RelayServer:
                 reader=reader,
             )
             link.peer_addr = host
-            refusal = self._admit_link(link)
+            refusal = self._admit_link(link, outbound=True)
             if refusal:
                 return None, refusal
             # The listener's endpoints arrive in its ``welcome``; they are how this
