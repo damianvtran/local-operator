@@ -1564,6 +1564,43 @@ def test_the_printenv_invariant_masks_the_injected_token(
     assert "[redacted]" in result.text, "the result did not show the masking at all"
 
 
+def test_lent_github_env_is_the_one_door_no_scrubber_no_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared door bash, monitor ticks and code requests all take.
+
+    No sink → no borrow at all; a sink that raises → nothing handed out (an
+    unmaskable bearer is withheld); otherwise the token is registered BEFORE the
+    env is returned, and the borrow is ``borrowed_git_env``'s, arguments intact.
+    """
+    token = f"ghs_door_{os.urandom(4).hex()}"
+    injected = github_mod.git_env_for_token(token)
+    calls: list[dict[str, Any]] = []
+
+    def borrow(**kwargs: Any) -> tuple[dict[str, str], str]:
+        calls.append(kwargs)
+        return dict(injected), token
+
+    monkeypatch.setattr(github_mod, "borrowed_git_env", borrow)
+
+    assert github_mod.lent_github_env(session_id="s1", register=None) == ({}, "")
+    assert calls == [], "a caller that cannot scrub must not even trigger a borrow"
+
+    def refuse(_value: str) -> None:
+        raise RuntimeError("ledger full")
+
+    assert github_mod.lent_github_env(session_id="s1", register=refuse) == ({}, "")
+
+    registered: list[str] = []
+    client = object()
+    env_out, served = github_mod.lent_github_env(
+        session_id="s2", register=registered.append, client=client
+    )
+    assert (env_out, served) == (injected, token)
+    assert registered == [token]
+    assert calls[-1] == {"session_id": "s2", "client": client}
+
+
 def test_the_github_refusal_codes_are_in_the_catalogue_and_carry_ttls() -> None:
     """T8d: the four new codes are wired into the shared refusal catalogue.
 
