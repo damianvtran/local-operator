@@ -15,7 +15,7 @@
   "cli.browser_node.refuse_sudo": "已拒绝：这些步骤需要root权限，而`sudo -n`会要求输入密码：{steps}。改用具备免交互sudo的账户运行；或在交互式终端中先运行`sudo -v`，再在同一终端中重新运行此命令（guide://browser，“Headless nodes”）。",
   "cli.browser_node.refuse_no_record": "已拒绝：没有可修复的内容，因为{path}不存在。使用`lop browser setup --node --authorised-by '<who, when>'`安装。",
   "cli.browser_node.refuse_authorisation": "已拒绝：在节点上安装浏览器需要操作者授权。使用`--authorised-by '<who, when>'`重新运行；该文本将原样记录。",
-  "cli.browser_node.paired_yes": "已配对：是。此节点上的新会话可使用browser工具（已在运行的会话不能），但目前还无法在该节点上打开任何网站：在无界面节点上逐站审批需要操作者的签名决定，而此版本尚不具备。",
+  "cli.browser_node.paired_yes": "已配对：是。此节点上的新会话可使用browser工具（已在运行的会话不能）。它们打开的每个网站都需要操作者批准，操作者会在自己的设备上回答并签名。",
   "cli.browser_node.paired_no": "已配对：否。",
   "cli.browser_node.record": "安装记录：{path}",
   "cli.browser_node.failed_tail": "设置在失败的步骤处停止。修复后运行`lop browser setup --node --repair --authorised-by '<who, when>'`。",

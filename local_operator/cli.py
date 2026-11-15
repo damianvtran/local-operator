@@ -1279,6 +1279,23 @@ def build_cli_parser() -> LocalizedArgumentParser:
     setup_browser.add_argument(
         "--json", action="store_true", help=_bn.help_json().envelope(locale=help_locale)["text"]
     )
+    # `lop browser sites [--revoke ORIGIN]`: the stored per-site decisions of
+    # THIS machine's browser, and their removal (browser_bridge/sites_cli.py).
+    # A headless node has no Settings page, and its site cards promise this.
+    from local_operator.i18n.keys import browser_site_approval as _bsa
+
+    sites_browser = browser_subparsers.add_parser(
+        "sites", help=_bsa.sites_help().envelope(locale=help_locale)["text"]
+    )
+    sites_browser.add_argument(
+        "--revoke",
+        metavar="ORIGIN",
+        default=None,
+        help=_bsa.sites_revoke_help().envelope(locale=help_locale)["text"],
+    )
+    sites_browser.add_argument(
+        "--json", action="store_true", help=_bh.json().envelope(locale=help_locale)["text"]
+    )
     status_browser = browser_subparsers.add_parser(
         "status", help=_bh.status().envelope(locale=help_locale)["text"]
     )
@@ -4010,6 +4027,10 @@ def _browser_node_command(args: argparse.Namespace) -> int:
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
+    if command == "sites":
+        from local_operator.browser_bridge import sites_cli
+
+        return sites_cli.main(getattr(args, "revoke", None), as_json=bool(args.json))
     if command in ("tabs", "reconcile", "cleanup"):
         import asyncio
         import json
