@@ -245,6 +245,9 @@ def test_job_deltas_counts_roster_rows_not_dict_keys(
             jobs=[job.model_copy(update={"label": f"moved {job.id}"}) for job in roster[:30]]
         )
 
+    # ``mutate`` returns None for a no-op; both calls here change the roster.
+    assert seed is not None
+    assert moved is not None
     assert len(seed.job_deltas["upserted"]) == 50
     assert (len(moved.job_deltas["upserted"]), len(moved.job_deltas["removed"])) == (30, 20)
     first, second = (record.getMessage() for record in _slow_lines(caplog))
