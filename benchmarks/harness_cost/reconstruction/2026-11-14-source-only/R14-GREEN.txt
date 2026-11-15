@@ -1,0 +1,40 @@
+test_actual_successful_info_then_disconnect_is_not_never_ready (test_engine_history.EngineHistoryTests.test_actual_successful_info_then_disconnect_is_not_never_ready) ... ok
+test_cleanup_query_exception_also_latches_unknown_history (test_engine_history.EngineHistoryTests.test_cleanup_query_exception_also_latches_unknown_history) ... ok
+test_dispatch_deadline_failure_is_unknown_before_disconnect (test_engine_history.EngineHistoryTests.test_dispatch_deadline_failure_is_unknown_before_disconnect) ... ok
+test_recognized_never_ready_reply_keeps_owned_cleanup_exception (test_engine_history.EngineHistoryTests.test_recognized_never_ready_reply_keeps_owned_cleanup_exception) ... ok
+test_signal_and_malformed_response_history_cannot_be_erased (test_engine_history.EngineHistoryTests.test_signal_and_malformed_response_history_cannot_be_erased) ... ok
+test_success_then_journal_failure_retains_available_before_disconnect (test_engine_history.EngineHistoryTests.test_success_then_journal_failure_retains_available_before_disconnect) ... ok
+test_actual_lifecycle_overcap_auto_restart_blocks_termination (test_cleanup_fences.CleanupFenceTests.test_actual_lifecycle_overcap_auto_restart_blocks_termination) ... ok
+test_available_overcap_engine_must_probe_foreign_containers (test_cleanup_fences.CleanupFenceTests.test_available_overcap_engine_must_probe_foreign_containers) ... ok
+test_engine_state_matrix_never_treats_unknown_as_unavailable (test_cleanup_fences.CleanupFenceTests.test_engine_state_matrix_never_treats_unknown_as_unavailable) ... ok
+test_journal_failures_at_callback_root_and_edge_still_retire_authority (test_cleanup_fences.CleanupFenceTests.test_journal_failures_at_callback_root_and_edge_still_retire_authority) ... ok
+test_native_final_receipt_retains_journal_error_and_cannot_be_success (test_cleanup_fences.CleanupFenceTests.test_native_final_receipt_retains_journal_error_and_cannot_be_success) ... ok
+test_refused_terminate_and_broken_journal_still_try_exact_pid_recovery (test_cleanup_fences.CleanupFenceTests.test_refused_terminate_and_broken_journal_still_try_exact_pid_recovery) ... ok
+test_retained_map_dispatches_even_if_owner_attribute_is_lost (test_cleanup_fences.CleanupFenceTests.test_retained_map_dispatches_even_if_owner_attribute_is_lost) ... ok
+test_root_journal_io_cannot_erase_in_memory_cleanup_owner (test_cleanup_fences.CleanupFenceTests.test_root_journal_io_cannot_erase_in_memory_cleanup_owner) ... ok
+test_startup_owner_file_failure_does_not_skip_cleanup (test_cleanup_fences.CleanupFenceTests.test_startup_owner_file_failure_does_not_skip_cleanup) ... ok
+test_terminate_journal_failure_reports_unverified_after_retirement (test_cleanup_fences.CleanupFenceTests.test_terminate_journal_failure_reports_unverified_after_retirement) ... ok
+test_attempt_namespace_is_explicit_and_original_is_never_selected (test_causal_startup.CausalStartupTests.test_attempt_namespace_is_explicit_and_original_is_never_selected) ... ok
+test_callback_timeout_and_late_capture_are_not_skipped (test_causal_startup.CausalStartupTests.test_callback_timeout_and_late_capture_are_not_skipped) ... ok
+test_causal_ticket_root_and_observed_reparented_descendant_only (test_causal_startup.CausalStartupTests.test_causal_ticket_root_and_observed_reparented_descendant_only) ... ok
+test_daemon_absent_cleanup_needs_no_docker_ps (test_causal_startup.CausalStartupTests.test_daemon_absent_cleanup_needs_no_docker_ps) ... ok
+test_foreign_race_and_unknown_pid_preserved (test_causal_startup.CausalStartupTests.test_foreign_race_and_unknown_pid_preserved) ... ok
+test_fresh_admission_paths_reject_legacy_and_escaping_aliases (test_causal_startup.CausalStartupTests.test_fresh_admission_paths_reject_legacy_and_escaping_aliases) ... ok
+test_journal_failure_keeps_authority_for_cleanup (test_causal_startup.CausalStartupTests.test_journal_failure_keeps_authority_for_cleanup) ... ok
+test_launch_error_stops_before_any_docker_api (test_causal_startup.CausalStartupTests.test_launch_error_stops_before_any_docker_api) ... ok
+test_never_returned_callback_is_unresolved_not_guessed (test_causal_startup.CausalStartupTests.test_never_returned_callback_is_unresolved_not_guessed) ... ok
+test_old_pid_or_wrong_identity_ticket_cannot_be_adopted (test_causal_startup.CausalStartupTests.test_old_pid_or_wrong_identity_ticket_cannot_be_adopted) ... ok
+test_old_pid_ticket_and_duplicate_begin_cannot_reuse_authority (test_causal_startup.CausalStartupTests.test_old_pid_ticket_and_duplicate_begin_cannot_reuse_authority) ... ok
+test_readiness_120s_resource_slot_and_work_bounds_stop_before_more_apis (test_causal_startup.CausalStartupTests.test_readiness_120s_resource_slot_and_work_bounds_stop_before_more_apis) ... ok
+test_refused_info_and_overcap_are_not_retried (test_causal_startup.CausalStartupTests.test_refused_info_and_overcap_are_not_retried) ... ok
+test_signal_style_unwind_retains_and_captures_pending_authority (test_causal_startup.CausalStartupTests.test_signal_style_unwind_retains_and_captures_pending_authority) ... ok
+test_singleton_time_window_without_observed_edge_is_rejected (test_causal_startup.CausalStartupTests.test_singleton_time_window_without_observed_edge_is_rejected) ... ok
+test_slow_daemon_info_is_first_api_and_guarded (test_causal_startup.CausalStartupTests.test_slow_daemon_info_is_first_api_and_guarded) ... ok
+
+----------------------------------------------------------------------
+Ran 32 tests in 0.194s
+
+OK
+R13 retained byte-identical function proof: run_lifecycle, has_cleanup_authority, ownership_event, observe_owned, cleanup_pending_launch, record
+PROPOSAL ONLY: no fresh slot/full-scope approval; no execution
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token", "huggingface-token"]}], "errors": [], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 86, "privacy_pattern_hits": [], "runtime_qualified": false}

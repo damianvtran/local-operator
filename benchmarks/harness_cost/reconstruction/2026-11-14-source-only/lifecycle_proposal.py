@@ -262,7 +262,7 @@ class NativeOps:
         self.pull_attempted=False;self.pull_complete=False;self.owned_image_id=None;self.foreign_asset_activity=False
         self.broker=None;self.owned_processes={};self.ownership_edges=[];self.verified_process_paths=set();self.startup_deadline=0
         self.startup_active=False;self.startup_guard_running=False
-        self.daemon_observed_available=False;self.engine_history_unknown=False;self.cleanup_engine_evidence={};self.ownership_journal_errors=[]
+        self.daemon_observed_available=False;self.engine_history_unknown=False;self.engine_query_inflight=False;self.cleanup_engine_evidence={};self.ownership_journal_errors=[]
     def now(self): return time.monotonic()
     def sleep(self,seconds): time.sleep(seconds)
     def command(self,args,timeout=15,check=True):
@@ -452,21 +452,41 @@ class NativeOps:
         except BaseException:
             self.startup_uncertain=True
             raise
+    def query_engine_info(self,timeout=None):
+        # Dispatch itself can time out or be cancelled. Pending/unknown history
+        # must precede it, and response classification must precede journal I/O.
+        # A later known-unavailable reply NEVER clears earlier uncertainty.
+        if self.engine_query_inflight:self.engine_history_unknown=True
+        try:
+            self.engine_query_inflight=True
+            kwargs={'check':False}
+            if timeout is not None:kwargs['timeout']=timeout
+            code,out,err=self.command(self.d+['info','--format','{{json .}}'],**kwargs)
+            if code==0:
+                self.daemon_observed_available=True
+                info=json.loads(out)
+                require(isinstance(info,dict) and isinstance(info.get('MemTotal'),int) and info['MemTotal']>0 and isinstance(info.get('NCPU'),int) and info['NCPU']>0,'malformed engine info object')
+            elif 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' not in err:
+                self.engine_history_unknown=True
+            return code,out,err
+        except BaseException:
+            self.engine_history_unknown=True
+            raise
+        finally:
+            self.engine_query_inflight=False
     def info(self):
         # FIRST Docker API stays info. Only the actual transient daemon-not-ready
         # response is retried, within ONE shared 120 s startup/work/slot envelope.
         while True:
             self.startup_guard();remaining=self.startup_deadline-self.now()
-            code,out,err=self.command(self.d+['info','--format','{{json .}}'],timeout=min(10,remaining),check=False)
+            code,out,err=self.query_engine_info(timeout=min(10,remaining))
             self.startup_event({'event':'first-api-readiness-info','exit':code,'stderr':err[:300]})
             if code==0:
-                self.daemon_observed_available=True  # Over-cap is not permission to stop foreign work.
                 info=json.loads(out);verify_caps(info)  # Abort over-cap BEFORE other APIs/work.
                 self.startup_guard()
                 with (self.directory/'readiness.json').open('x') as output:output.write(json.dumps({'MemTotal':info.get('MemTotal'),'NCPU':info.get('NCPU'),'phase':'post-start-readiness-probe'},sort_keys=True))
                 self.startup_active=False
                 return info
-            if 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' not in err:self.engine_history_unknown=True
             require('Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' in err,'non-transient info failure; no readiness retry')
             self.startup_guard();self.broker.pump(min(0.5,max(0,self.startup_deadline-self.now())))
     def cleanup_pending_launch(self):
@@ -482,7 +502,7 @@ class NativeOps:
         # Every RESPONDING engine must pass the foreign-work fence, including
         # startup/over-cap aborts: it may have auto-restarted someone else's work.
         # Only a positively recognized never-ready engine has a no-work exception.
-        code,out,err=self.command(self.d+['info','--format','{{json .}}'],check=False)
+        code,out,err=self.query_engine_info()
         self.cleanup_engine_evidence={'info_exit':code,'info_stderr':err[:300],'state':'unknown'}
         if code==0:
             info=json.loads(out)

@@ -32,6 +32,7 @@
     "available_engine": "always successful empty foreign-container probe, including prework/overcap",
     "journal_failure": "abort work, continue proven teardown, retain failed/unverified outcome",
     "ownership": "in-memory signed causal proof before fallible journal; dispatch from retained authority",
+    "query_history": "in-flight before dispatch; classify response before journal; dispatch/parse/cancel exceptions latch unknown permanently within attempt",
     "unavailable_exception": "exact recognized never-ready error, no available/unknown history and no admitted work"
   },
   "cli_authentication": {
@@ -52,7 +53,7 @@
     "minimum_free_gib_at_start": 30,
     "operator_ack_id": "a-7072",
     "optional_digest_pull_requires_new_full_scope_review": true,
-    "optional_pull_review_disposition": "Round11 NOT CLEAN; R12/R13 remediation pending independent delta review; no optional-pull approval or runtime GO",
+    "optional_pull_review_disposition": "Round12: R13 approved and normal R12 fence fixed; R14 history ordering remediation pending delta review. Optional pull NO; native/runtime GO closed.",
     "post_start_mem_total_max_bytes": 4300000000,
     "post_start_ncpu_max": 2,
     "prestart_cap_validation": "SKIPPED-with-operator-ack-NOT-verified",

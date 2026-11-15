@@ -1,0 +1,25 @@
+test_success_then_journal_failure_retains_available_before_disconnect (test_engine_history.EngineHistoryTests.test_success_then_journal_failure_retains_available_before_disconnect) ... FAIL
+test_dispatch_deadline_failure_is_unknown_before_disconnect (test_engine_history.EngineHistoryTests.test_dispatch_deadline_failure_is_unknown_before_disconnect) ... FAIL
+
+======================================================================
+FAIL: test_success_then_journal_failure_retains_available_before_disconnect (test_engine_history.EngineHistoryTests.test_success_then_journal_failure_retains_available_before_disconnect)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_engine_history.py", line 47, in test_success_then_journal_failure_retains_available_before_disconnect
+    self.assertTrue(ops.daemon_observed_available)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_dispatch_deadline_failure_is_unknown_before_disconnect (test_engine_history.EngineHistoryTests.test_dispatch_deadline_failure_is_unknown_before_disconnect)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_engine_history.py", line 57, in test_dispatch_deadline_failure_is_unknown_before_disconnect
+    self.assertTrue(ops.engine_history_unknown)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.009s
+
+FAILED (failures=2)
