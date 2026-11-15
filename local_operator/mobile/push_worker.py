@@ -95,6 +95,8 @@ from local_operator.mobile import push_handles
 from local_operator.mobile.push_credentials import with_sound_readiness
 from local_operator.mobile.push_payload import (
     SOUND_CUSTOM_FIELD,
+    TYPE_COMPLETION,
+    TYPE_DIGEST,
     attention_emit_key,
     attention_payload,
     completion_emit_key,
@@ -145,6 +147,13 @@ PRESENCE_RECHECK_S = PRESENCE_TTL_S
 EMIT_RETRY_ATTEMPTS = 3
 EMIT_RETRY_WINDOW_S = 2 * 60
 EMIT_RETRY_INTERVAL_S = EMIT_RETRY_WINDOW_S / (EMIT_RETRY_ATTEMPTS - 1)
+
+#: The most ``exclude`` ids the cloud accepts on one emit. Not a tuning knob: it
+#: mirrors agent-server's ``internal/sessionpush/wire.go`` ``validateExclude``,
+#: which refuses a longer list outright (``400 exclude/max_10``), so an emit
+#: carrying 11 ids is not narrowed by the cloud but lost. ``_preference_gate``
+#: keeps every body it sends within it.
+MAX_EXCLUDE_IDS = 10
 
 #: The three kinds of emit this worker composes. A DIGEST is the coalesced
 #: catch-up of more than ``BURST_LIMIT`` eligible rows (§2.1); an ATTENTION emit
@@ -1136,6 +1145,9 @@ class PushWorker:
         count = self._count()
         emit_id = item.emit_id or uuid.uuid4().hex
         payload: dict[str, Any]
+        # The digest's member kinds, for the preference gate below; empty for
+        # the other two forms (a completion carries its own ``kind``).
+        digest_kinds: Sequence[str] = ()
         sound, sound_custom = self._sound()
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
@@ -1184,6 +1196,7 @@ class PushWorker:
                 member_kind = self.store.state(conversation).get("kind")
                 if isinstance(member_kind, str):
                     kinds.append(member_kind)
+            digest_kinds = kinds
             payload = digest_payload(
                 computer=self.computer,
                 count=count,
@@ -1204,6 +1217,10 @@ class PushWorker:
                 # detected change has nothing here at all.
                 exclude=list(item.exclude) if item.exclude else None,
             )
+        gated = self._preference_gate(payload, digest_kinds)
+        if gated is None:
+            return None
+        payload = gated
         rows = list(self._report_block()) if self._report_block is not None else None
         if SOUND_CUSTOM_FIELD in payload:
             # The cloud picks the custom file PER DEVICE, so an emit naming one
@@ -1393,6 +1410,114 @@ class PushWorker:
 
     # -- the machine-local gates --------------------------------------------
 
+    def _preference_gate(
+        self, payload: dict[str, Any], digest_kinds: Sequence[str]
+    ) -> dict[str, Any] | None:
+        """Apply the devices' push preferences to one composed payload.
+
+        Returns the payload to send (possibly with a widened ``exclude``), or
+        ``None`` when no live device wants it — the caller then resolves the
+        item exactly as it does a stale one, so the cursor still moves.
+
+        Why: the operator asked for it verbatim — "there should be notification
+        preferences in the settings, I have no way to turn off notifications or
+        turn off certain types of notifications so now I just have to deal with
+        notification spam until this setting is available". iOS cannot filter a
+        remote push on the device, so the filter lives here, where the emit is
+        decided. The switches and their defaults are
+        ``push_devices.PREFERENCE_KEYS``.
+
+        Category mapping: a completion's ``kind`` ``error`` is ``errors``; every
+        other kind (``complete``, ``retired``, and also ``interrupted`` and
+        ``closed``) is ``completions``. A digest is the set of its members'
+        categories (no readable member kind counts as ``completions``). The
+        attention correction belongs to no category: only ``enabled`` governs it.
+
+        THE PER-COMPUTER LIMITATION, stated rather than implied: the cloud's
+        wire forbids ``exclude`` on a completion emit (§3.2), and the cloud fans
+        a completion out to every device of the computer. So a completion is
+        gated per COMPUTER: skipped when NO live device wants its category, sent
+        as today when at least one does — which means a device that turned a
+        category off still receives it while another device of the same
+        computer keeps it on. True per-device filtering of completions needs a
+        cloud change and is deferred to it. The attention and digest forms DO
+        permit §3.2's ``exclude`` ("the devices that must NOT be woken"), so
+        there the devices that do not want the emit are added to it, and the
+        emit is skipped only when nobody is left.
+
+        THE EXCLUDE CAP: the cloud refuses more than ``MAX_EXCLUDE_IDS``
+        exclude ids. When widening would cross it, the emit falls back to the
+        per-computer rule above for that one emit: it goes out carrying only
+        the ack-hint excludes it already had (capped too), so a device that
+        opted out may be woken, rather than the whole emit being refused.
+
+        Kept apart from ``_is_candidate`` and the count on purpose: those are
+        the store's gates, these are the device's. A missing or unreadable
+        registry imposes no preference (the pre-preferences behaviour) rather
+        than silencing the phone; gate 4's live list still decides whether
+        there is a device at all, and since that list reads the same registry,
+        an unreadable registry leaves it empty and the item resolves unsent.
+
+        Only rows in gate 4's live list are consulted: ``live`` comes from
+        :meth:`_live_device_ids`, which keeps ``STATE_LIVE`` rows alone, so a
+        row the unpair path tombstoned (``revoke_linked`` sets ``revoked_at``)
+        is never counted as a device that wants a push, whatever its switches.
+        """
+        preferences: dict[str, dict[str, bool]]
+        try:
+            preferences = mobile_push_devices.device_preferences(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            preferences = {}
+        everything: dict[str, bool] = dict.fromkeys(mobile_push_devices.PREFERENCE_KEYS, True)
+        live = self._live_devices()
+        emit_type = payload.get("type")
+
+        def wants(device: str, categories: set[str]) -> bool:
+            switches = preferences.get(device, everything)
+            return switches["enabled"] and any(switches[name] for name in categories)
+
+        categories: set[str]
+        if emit_type == TYPE_COMPLETION:
+            categories = {_preference_category(str(payload.get("kind", "")))}
+            return payload if any(wants(device, categories) for device in live) else None
+        if emit_type == TYPE_DIGEST:
+            categories = {_preference_category(kind) for kind in digest_kinds} or {"completions"}
+        else:
+            # Attention: no category, the master switch alone. An empty set
+            # would make ``wants`` always False, so the switch is asked direct.
+            categories = set()
+        excluded: set[str] = {str(device) for device in payload.get("exclude") or ()}
+        for device in live:
+            if device in excluded:
+                continue
+            keep = (
+                wants(device, categories)
+                if categories
+                else preferences.get(device, everything)["enabled"]
+            )
+            if not keep:
+                excluded.add(device)
+        if not [device for device in live if device not in excluded]:
+            return None
+        if len(excluded) > MAX_EXCLUDE_IDS:
+            # A body past the cloud's cap is refused whole (``exclude/max_10``),
+            # which would silence the devices that DO want it. Degrade instead to
+            # the per-computer rule the completion form already lives with: the
+            # gate above has proved some live device wants this emit, so send it
+            # with just the ack-hint excludes, themselves capped. The cost is an
+            # opted-out device possibly being woken, which beats dropping a
+            # wanted emit. Sorted before the cut so the kept ids are stable.
+            hinted = sorted({str(device) for device in payload.get("exclude") or ()})
+            trimmed = {key: value for key, value in payload.items() if key != "exclude"}
+            if hinted:
+                trimmed["exclude"] = hinted[:MAX_EXCLUDE_IDS]
+            return trimmed
+        if excluded:
+            # Sorted for a stable body: the body is kept across retries, but a
+            # deterministic order keeps two composes of one item identical.
+            return {**payload, "exclude": sorted(excluded)}
+        return payload
+
     def _live_device_ids(self) -> list[str]:
         """Gate 4 of §2.3: which devices this machine may deliver to.
 
@@ -1523,6 +1648,16 @@ class PushWorker:
             except OSError:
                 pass
             raise
+
+
+def _preference_category(kind: str) -> str:
+    """The preference switch a completion ``kind`` answers to.
+
+    ``error`` is the only ``errors`` kind; ``complete``/``retired`` are
+    completions by the contract, and ``interrupted``/``closed`` ride the
+    ``completions`` switch too (documented on ``push_devices.PREFERENCE_KEYS``).
+    """
+    return "errors" if kind == "error" else "completions"
 
 
 def _desktop_attended() -> bool:
