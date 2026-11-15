@@ -195,6 +195,18 @@ _BIND_FAILED_DETAIL_LIMIT = 300
 _BIND_FAILED_CAUSE_PREFIX = "owner could not prepare this view: "
 
 
+def is_bind_failed_reason(reason: str) -> bool:
+    """Recognise the canonical bind announcement, with or without its safe cause.
+
+    The owner's cause is deliberately retained in the displayed reason, so exact
+    equality with the legacy sentence loses the announcement's disposition. Keep
+    this predicate beside the formatter: reset handling and sync-wait errors must
+    agree that only this announced view failure, not an arbitrary disconnect, is
+    evidence of a live runtime that could not prepare the connection.
+    """
+    return reason == BIND_FAILED_REASON or reason.startswith(_BIND_FAILED_CAUSE_PREFIX)
+
+
 def bind_failed_reason(message: object) -> str:
     """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
 
@@ -290,7 +302,7 @@ def _reset_reason(announced: str) -> str:
     ``"owner connection reset"`` — telling the person their session died and
     discarding the very cause the owner sent.
     """
-    if announced in _ANNOUNCED_REASONS or announced.startswith(_BIND_FAILED_CAUSE_PREFIX):
+    if announced in _ANNOUNCED_REASONS or is_bind_failed_reason(announced):
         return announced
     return "owner connection reset"
 
