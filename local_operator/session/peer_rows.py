@@ -162,6 +162,23 @@ def listing_age_s(root: Path | None = None, *, now: float | None = None) -> floa
     return moment - cached[0]
 
 
+def cached_listing(
+    root: Path | None = None,
+) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]] | None:
+    """The cached ``(rows, unanswered)`` for ``root``, or ``None``; a PEEK, never a read.
+
+    Lets a background refresher tell "the read brought news" from "the read
+    confirmed what every open frame already shows" (PR #4020 agent review, R2):
+    the entry is stamped with the read's START, so a read that takes the TTL
+    lands already stale, and ringing the list for an unchanged answer made the
+    open stream's rebuild start the next read, back to back.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return None
+    return cached[1], cached[2]
+
+
 def listing_read_at_ms(root: Path | None, rows: object) -> int | None:
     """When the read that produced ``rows`` started (wall clock, ms), else ``None``.
 

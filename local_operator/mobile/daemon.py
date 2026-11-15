@@ -13234,27 +13234,76 @@ def _models_payload() -> dict[str, Any]:
     return {"models": models, "default": _configured_default()}
 
 
+def _file_stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+#: ``(config root, auth.db stats) -> credential digest`` for the last read, so
+#: an untouched database answers from a stat. One entry: there is one config
+#: root per daemon. Written from worker threads; a whole-tuple assignment is
+#: atomic, and the worst race is one extra read-only query.
+_CREDENTIAL_DIGEST_MEMO: tuple[Any, Any] | None = None
+
+
+def _credential_digest(root: Path) -> tuple[Any, ...] | None:
+    """:meth:`AuthStore.credential_identity_digest` over a read-only open.
+
+    The stat pre-check only skips the query: the stats move on every lease
+    and block write (that is R1's whole problem), but the digest under them
+    then comes back equal, which is what keeps the memo key still.
+    """
+    global _CREDENTIAL_DIGEST_MEMO
+    db = root / "auth.db"
+    stats = (str(root), _file_stat(db), _file_stat(root / "auth.db-wal"))
+    memo = _CREDENTIAL_DIGEST_MEMO
+    if memo is not None and memo[0] == stats:
+        return memo[1]
+    from local_operator.providers.auth_store import AuthStore
+
+    try:
+        # ``open_read_only``: no mkdir, no O_CREAT, no WAL pragma, no DDL -- a
+        # key read on every request must never write the operator's store.
+        store = AuthStore.open_read_only(db)
+    except Exception:
+        logger.debug("mobile models: credential digest unreadable", exc_info=True)
+        return None
+    try:
+        digest = store.credential_identity_digest()
+    finally:
+        store.close()
+    if digest is not None:
+        _CREDENTIAL_DIGEST_MEMO = (stats, digest)
+    return digest
+
+
 def _models_fingerprint() -> tuple[Any, ...]:
     """What, having changed, makes a memoised model sheet WRONG rather than old.
 
-    The listing is authorized by the persisted credentials (``auth.db``; its
-    ``-wal`` too, since a committed login can sit there until a checkpoint) and
-    its default comes from ``config.yml``. A ``stat`` of each is microseconds,
-    so a login, logout or default change on any surface is visible to the very
-    next request; only provider-side catalogue drift waits on the TTLs above.
+    The listing is authorized by the persisted credentials and its default
+    comes from ``config.yml``. The credentials half is the digest of WHICH
+    credentials exist and can authorize (:func:`_credential_digest`), not the
+    ``auth.db`` file stats: the same database takes refresh leases, blocks and
+    token refreshes from every concurrent session, and keying on its bytes
+    rebuilt the sheet on nearly every open (PR #4020 agent review, R1). A
+    login, logout, disable or default change is still visible to the very next
+    request; only provider-side catalogue drift waits on the TTLs above.
+
+    When the digest cannot be read, the key falls back to the file stats --
+    churny, but never a reason to serve a sheet built under other credentials.
     """
     from local_operator.paths import config_dir
 
     root = config_dir()
-    parts: list[Any] = [str(root)]
-    for name in ("auth.db", "auth.db-wal", "config.yml"):
-        try:
-            st = (root / name).stat()
-        except OSError:
-            parts.append(None)
-        else:
-            parts.append((st.st_ino, st.st_mtime_ns, st.st_size))
-    return tuple(parts)
+    config = _file_stat(root / "config.yml")
+    digest = _credential_digest(root)
+    if digest is None:
+        auth = (_file_stat(root / "auth.db"), _file_stat(root / "auth.db-wal"))
+        return (str(root), "stat", auth, config)
+    return (str(root), "digest", digest, config)
 
 
 class _PeerRowsRefresher:
@@ -13280,12 +13329,30 @@ class _PeerRowsRefresher:
     read since the daemon started, or only a seeded row), the frame waits for
     the read exactly as before: there is nothing honest to show instead.
 
+    A refresh rings ONLY when its rows or unanswered set differ from the entry
+    it replaced (agent review R2). The entry is stamped with the read's start,
+    so a fan-out that takes the TTL (a black-holed member spends
+    ``LISTING_CLIENT_TIMEOUT_S`` = the TTL) lands already stale; an
+    unconditional ring made the open stream rebuild, see a stale entry and
+    start the next read -- back-to-back fan-outs on an idle machine.
+
+    One task per config root (R3): production has one root per daemon, but a
+    read for another root must never be answered by the first root's task.
+
+    SHUTDOWN (QA round 1, Q1 -- documented, not changed): a stop that lands
+    while a background refresh is in flight waits for that fan-out (at most
+    ``LISTING_CLIENT_TIMEOUT_S``), because ``asyncio.run`` joins the default
+    executor the read runs on. The task itself is cancelled cleanly and nothing
+    leaks. Not joining would mean a daemon thread abandoned mid-read at
+    interpreter exit; before this class an in-flight request's inline read
+    held exit the same way, so the bounded wait is the safer trade.
+
     Loop-confined; the read and the projection run on worker threads.
     """
 
     def __init__(self, on_refreshed: Callable[[], None]) -> None:
         self._on_refreshed = on_refreshed
-        self._task: asyncio.Future[None] | None = None
+        self._tasks: dict[str, asyncio.Future[None]] = {}
 
     async def rows(self, root: Path, pinned: set[str]) -> list[dict[str, Any]]:
         from local_operator.session import peer_rows
@@ -13306,23 +13373,25 @@ class _PeerRowsRefresher:
         )
 
     def _start(self, root: Path) -> "asyncio.Future[None]":
-        task = self._task
+        task = self._tasks.get(str(root))
         if task is None or task.done():
             task = asyncio.ensure_future(self._run(root))
             task.add_done_callback(lambda done: done.cancelled() or done.exception())
-            self._task = task
+            self._tasks[str(root)] = task
         return task
 
     async def _run(self, root: Path) -> None:
         from local_operator.session import peer_rows
 
+        before = peer_rows.cached_listing(root)
         try:
             # ``ttl_s=0``: the forced read; the age check above already decided.
-            await asyncio.to_thread(peer_rows.read_listing, root, ttl_s=0)
+            after = await asyncio.to_thread(peer_rows.read_listing, root, ttl_s=0)
         except Exception:
             logger.warning("mobile list: peer listing refresh failed", exc_info=True)
             raise
-        self._on_refreshed()
+        if after != before:
+            self._on_refreshed()
 
 
 class _ModelsMemo:

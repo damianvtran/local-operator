@@ -18,6 +18,7 @@ sequence of requests causes, and that a stale cache answers without waiting.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 from pathlib import Path
 
@@ -188,8 +189,58 @@ def test_models_fingerprint_moves_with_credentials_and_config() -> None:
     (root / "config.yml").write_text("values: {}\n")
     with_config = daemon_module._models_fingerprint()
     assert with_config != empty
-    (root / "auth.db-wal").write_bytes(b"x")  # a committed login not yet checkpointed
+    (root / "config.yml").write_text("values: {model: other}\n")  # a default-model change
     assert daemon_module._models_fingerprint() != with_config
+
+
+def test_models_fingerprint_ignores_auth_db_writes_that_are_not_credentials() -> None:
+    """Agent review R1: leases and blocks rewrite ``auth.db-wal`` constantly.
+
+    On the operator's machine ~25 sessions take refresh leases and record
+    blocks in the same database, so a key built from file stats changed every
+    few seconds and the stale-while-revalidate path almost never engaged. The
+    key must move only with what authorizes the listing.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.providers.auth_store import AuthStore
+
+    root = config_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.yml").write_text("values: {}\n")
+    store = AuthStore(root / "auth.db")
+    try:
+        row = store.upsert_credential("openai", {"key": "k", "type": "api_key", "source": "login"})
+        logged_in = daemon_module._models_fingerprint()
+
+        assert store._try_refresh_lease(row.id) is True  # a lease write
+        assert daemon_module._models_fingerprint() == logged_in
+        store._release_refresh_lease(row.id)
+        store.block_credential(row.id, "openai", block_ms=60_000)  # a blocks write
+        assert daemon_module._models_fingerprint() == logged_in
+
+        second = store.upsert_credential(
+            "anthropic", {"key": "a", "type": "api_key", "source": "login"}
+        )  # a login
+        with_second = daemon_module._models_fingerprint()
+        assert with_second != logged_in
+        store.delete_credential(second.id)  # a logout
+        logged_out = daemon_module._models_fingerprint()
+        assert logged_out != with_second
+        (root / "config.yml").write_text("values: {model: other}\n")  # a default change
+        assert daemon_module._models_fingerprint() != logged_out
+    finally:
+        store.close()
+
+
+def test_models_fingerprint_reads_auth_db_without_creating_it() -> None:
+    """The key is read on every request: it must never create or write the store."""
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    assert not (root / "auth.db").exists()
+    daemon_module._models_fingerprint()
+    assert sorted(path.name for path in root.glob("auth.db*")) == []
 
 
 # -- /api/directories ---------------------------------------------------------------
@@ -340,6 +391,112 @@ def test_peers_stale_cache_answers_without_waiting_and_rings_when_fresh(
     assert _names(stale) == ["first"]
     assert _names(fresh) == ["second"]
     assert fake_fanout.reads == 2
+
+
+def test_peers_refresh_slower_than_the_ttl_reads_once_and_does_not_loop(
+    fake_fanout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review R2: a read that takes >= the TTL must not re-arm itself.
+
+    The cache entry is stamped with the read's START, so a fan-out that spends
+    the whole TTL lands already stale. Ringing the list then made every open
+    stream rebuild, see a stale entry and start the next read -- back-to-back
+    fan-outs for as long as the phone held its stream, on an idle machine. The
+    stream loop here rebuilds its frame on every ring, as the real one does.
+    """
+    monkeypatch.setattr(peer_rows, "LISTING_TTL_S", 0.05)
+    monkeypatch.setattr(peer_rows, "_TTL_S", 0.05)
+    rings: list[int] = []
+    rung = asyncio.Event()
+
+    def ring() -> None:
+        rings.append(1)
+        rung.set()
+
+    refresher = _PeerRowsRefresher(ring)
+
+    async def stream() -> None:
+        while True:
+            await rung.wait()
+            rung.clear()
+            await refresher.rows(tmp_path, set())  # the frame rebuild a ring causes
+
+    async def run() -> None:
+        await refresher.rows(tmp_path, set())  # cold: the first listing
+        rings.clear()
+        reads_before = fake_fanout.reads
+        original = fake_fanout.__call__
+
+        def slow(root: object, catalog: object):
+            import time as _time
+
+            _time.sleep(0.15)  # three TTLs: the entry lands already stale
+            return original(root, catalog)
+
+        monkeypatch.setattr(peer_rows, "_read", slow)
+        streamer = asyncio.ensure_future(stream())
+        try:
+            await asyncio.sleep(0.1)  # the cached entry is now past the TTL
+            await refresher.rows(tmp_path, set())  # starts ONE background read
+            await asyncio.sleep(1.0)  # several read durations: a loop would show
+        finally:
+            streamer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await streamer
+        # Same rows, same silence: nothing to repaint, so no ring and no next read.
+        assert fake_fanout.reads - reads_before == 1
+        assert rings == []
+
+    asyncio.run(run())
+
+
+def test_peers_refresh_rings_when_the_listing_changed(fake_fanout, tmp_path: Path) -> None:
+    """The other half of R2's rule: a refresh that brings news still rings."""
+    rings: list[int] = []
+    refresher = _PeerRowsRefresher(lambda: rings.append(1))
+
+    async def run() -> None:
+        await refresher.rows(tmp_path, set())
+        assert rings == [1], "the cold read had nothing before it: it rings"
+        rings.clear()
+        moment, rows, unanswered, at_ms = peer_rows._CACHE[str(tmp_path)]
+        stale = moment - peer_rows.LISTING_TTL_S - 1
+        peer_rows._CACHE[str(tmp_path)] = (stale, rows, unanswered, at_ms)
+        await refresher.rows(tmp_path, set())  # same rows come back
+        assert await _eventually(lambda: fake_fanout.reads == 2)
+        await asyncio.sleep(0.05)
+        assert rings == [], "an unchanged listing does not ring"
+        moment, rows, unanswered, at_ms = peer_rows._CACHE[str(tmp_path)]
+        peer_rows._CACHE[str(tmp_path)] = (
+            moment - peer_rows.LISTING_TTL_S - 1,
+            rows,
+            unanswered,
+            at_ms,
+        )
+        fake_fanout.name = "renamed"
+        await refresher.rows(tmp_path, set())
+        assert await _eventually(lambda: rings == [1]), "a changed listing rings"
+
+    asyncio.run(run())
+
+
+def test_peers_refresher_keeps_one_task_per_root(fake_fanout, tmp_path: Path) -> None:
+    """Agent review R3: a read for another root is its own read, not the first one's."""
+    refresher = _PeerRowsRefresher(lambda: None)
+    other = tmp_path / "other"
+    other.mkdir()
+
+    async def run() -> None:
+        fake_fanout.gate.clear()
+        first = refresher._start(tmp_path)
+        second = refresher._start(other)
+        assert first is not second
+        assert refresher._start(tmp_path) is first  # still single-flight per root
+        fake_fanout.gate.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run())
+    assert set(peer_rows._CACHE) >= {str(tmp_path), str(other)}
 
 
 async def _eventually(predicate, timeout: float = 5.0) -> bool:
