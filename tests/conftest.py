@@ -235,6 +235,16 @@ _AMBIENT_VARS = (
     # and the cells would keep passing while testing a window nothing ships.
     "LOP_UPDATE_LOCK_S",
     "LOP_UPDATE_LOCK_HEARTBEAT_S",
+    # The daemon-refresh hand-off's process markers (``update._REFRESH_ROLE_ENV``
+    # and ``_REFRESH_HANDOFF_ENV``). ROLE=worker is a SWITCH: it makes
+    # ``_run_refresh_child`` skip the hand-off and run the refresh body
+    # in-process, so a value inherited from an update the operator has running
+    # would put every hand-off cell on the worker branch while it still looked
+    # like it tested the hand-off. HANDOFF_AT moves the instant a child hands off
+    # by. Cells that mean either set it through ``monkeypatch`` or an explicit
+    # env map.
+    "LOCAL_OPERATOR_REFRESH_ROLE",
+    "LOCAL_OPERATOR_REFRESH_HANDOFF_AT",
     # The runtime standby's own off switch (`session/runtime/standby.py`,
     # ``DISABLE_ENV``), which the suite SETS for the processes it starts
     # (``_PROCESS_DESKTOP_GATES`` below) and must therefore also SCRUB. An
@@ -1347,6 +1357,24 @@ def restore_active_locale() -> Iterator[None]:
         yield
     finally:
         text.set_active_locale("en")
+
+
+@pytest.fixture(autouse=True)
+def no_real_pkexec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may launch the machine's real pkexec.
+
+    ``elevate.pkexec_path`` resolves pkexec from FIXED system paths, not ``PATH``
+    (agent review R1-5 on #3950), so the old way of hiding it — patching
+    ``shutil.which`` — no longer does, and on a host with ``/usr/bin/pkexec`` (and
+    passwordless sudo) a test that reached ``run_elevated`` would raise a real
+    privileged prompt. The test-launcher-only seam is pinned to a path that does
+    not exist; a test that wants a pkexec host points it at a shim of its own.
+    """
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(
+        elevate, "_PKEXEC_CANDIDATES_OVERRIDE", ("/nonexistent/lop-test-no-real-pkexec",)
+    )
 
 
 @pytest.fixture

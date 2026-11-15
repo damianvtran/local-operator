@@ -571,6 +571,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "own sidecars live outside the session store, so it is not a "
         "session-directory entry",
     ),
+    # The no-terminal approvals setup (PR #3950) keeps its records beside the other
+    # operator-authority files, never in a session, and they are device-local by
+    # nature: they describe THIS machine's root-owned anchor install.
+    "local_operator/operator/authority_setup.py": (
+        4,
+        "``_STATE_FILE`` ('authority-setup.json'), ``_AUDIT_FILE`` "
+        "('authority-setup-audit.jsonl'), ``_LOCK_FILE`` ('authority-setup.lock') and "
+        "``_RUNNING_FILE`` ('authority-setup.running') all live in the per-DEVICE "
+        "<config>/operator/ directory, never inside a session directory. Device-local by "
+        "design: they record (and serialise) the install of THIS machine's root-owned "
+        "operator anchor, so a copy on another device would describe an anchor, a lock "
+        "holder and a pid that are not its own.",
+    ),
     # ---- the transcript compression pass's STORE-LEVEL names ----
     "local_operator/session/compression.py": (
         2,

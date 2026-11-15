@@ -290,6 +290,9 @@ async def test_an_idle_parent_is_marked_at_once(tmp_path, monkeypatch):
 async def test_three_child_fan_out_costs_fewer_parent_calls(tmp_path, monkeypatch):
     """Acceptance: the parent's model calls for 3 children that each note and
     then settle within 5 s, counted from the ACTUAL run, before vs after."""
+    from local_operator.tools import builtin as builtin_module
+
+    await_any_settled = builtin_module._await_any_settled
 
     async def run(grace: float) -> int:
         _grace(monkeypatch, grace)
@@ -327,13 +330,41 @@ async def test_three_child_fan_out_costs_fewer_parent_calls(tmp_path, monkeypatc
         session = make_session(tmp_path / f"g{grace}", stream)
         comms = session.subagent_comms
         start = asyncio.Event()
+        baseline_parks: asyncio.Queue[None] = asyncio.Queue()
+
+        async def await_parent_park(jobs, job_ids, remaining, signal=None, peer_event=None):
+            # Provider call ENTRY is too early: a note arriving during that call
+            # can be drained into its context without buying a separate turn.
+            # This hook is after the previous wake's turn and wait re-arm. Its
+            # preconditions pin the real event-driven path, not polling, abort,
+            # an already-set wake, or a timeout shorter than our deadlock guard.
+            assert jobs is session.jobs
+            assert job_ids
+            assert all(jobs.get(j) is not None and jobs.get(j).status == "running" for j in job_ids)
+            assert all(not jobs.settled_event(j).is_set() for j in job_ids)
+            assert signal is None or not signal.aborted
+            assert peer_event is not None and not peer_event.is_set()
+            assert 30 < remaining <= 600
+            start.set()
+            if grace == 0.0:
+                baseline_parks.put_nowait(None)
+            # Publication does not itself mean "parked". No await intervenes:
+            # the real helper creates pending event waiters and suspends in
+            # asyncio.wait before a released child can run on this loop.
+            await await_any_settled(jobs, job_ids, remaining, signal, peer_event)
+
+        monkeypatch.setattr(builtin_module, "_await_any_settled", await_parent_park)
 
         def child_for(delay_note: float, delay_settle: float):
             async def child(job_id, signal, report_progress):
                 await start.wait()
                 await asyncio.sleep(delay_note)
+                if grace == 0.0:
+                    await baseline_parks.get()
                 comms.reply_to_parent(job_id, f"report from {job_id}")
                 await asyncio.sleep(delay_settle)
+                if grace == 0.0:
+                    await baseline_parks.get()
                 return f"final from {job_id}"
 
             return child
@@ -342,9 +373,10 @@ async def test_three_child_fan_out_costs_fewer_parent_calls(tmp_path, monkeypatc
             session.jobs.register("task", f"c{i}", child_for(0.3 + i * 1.5, 1.0 + i))
             for i in range(3)
         ]
+        # Only the baseline separates all six note/settle wakes into turns.
+        # Gating the coalesced run's settles on a note wake would deadlock it:
+        # those notes deliberately do not interrupt the parent's parked wait.
         prompt = asyncio.ensure_future(session.prompt("fan out"))
-        await wait_for(lambda: len(stream.requests) == 1)
-        start.set()
         await asyncio.wait_for(prompt, timeout=30)
         await wait_for(lambda: not session._background_tasks, timeout=5)
         calls = len(stream.requests)

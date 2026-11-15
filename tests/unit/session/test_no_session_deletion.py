@@ -584,6 +584,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Drops <config>/operator/anchor.json, the staged statement this run wrote",
         2,
     ),
+    (
+        "local_operator/operator/authority_setup.py::_run",
+        "<path>.unlink",
+        # The no-terminal setup's mirror of `_admission_install` above (PR #3950):
+        # `staged` is `trust.staging_path(root)` = `root/"operator"/"anchor.json"`,
+        # a LITERAL basename under the literal "operator" segment of the CONFIG
+        # root — a fixed sibling of `sessions/`. No session id or caller path is in
+        # the expression, and unlink refuses a directory.
+        "Drops <config>/operator/anchor.json after a cancelled/refused setup prompt",
+    ),
+    (
+        "local_operator/operator/authority_setup.py::_exclusive",
+        "<path>.unlink",
+        # The in-progress marker the same context manager wrote one block earlier:
+        # `root/"operator"/_RUNNING_FILE` with `_RUNNING_FILE` a module literal
+        # ("authority-setup.running"). Only reached when `wrote_marker` is set,
+        # no input reaches the path, and unlink refuses a directory.
+        "Drops <config>/operator/authority-setup.running, the marker this attempt wrote",
+    ),
     # The effective-access listener registry is a module-level ``list`` of
     # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
     # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).
@@ -3028,6 +3047,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    # The background daemon-refresh hand-off (PR #4004). Its run directories live
+    # under ``_refresh_runs_root()`` = ``<config>/update/refresh``, created by
+    # ``tempfile.mkdtemp(dir=<that root>)``; no session id or caller-supplied path
+    # names either target. The rmtree is confined IN the function, not by its
+    # caller: it refuses a symlink, anything whose resolved parent is not the
+    # resolved runs root, and any name that is not ``<unit>-<stamp>-<suffix>``
+    # for the unit being pruned (``test_update_refresh_handoff.py`` pins each
+    # refusal with a crafted path).
+    (
+        "local_operator/update.py::_remove_refresh_run",
+        "shutil.rmtree",
+        "<config>/update/refresh/<unit>-<stamp>-<suffix> ENDED run dir only; refuses symlinks, "
+        "non-children of the resolved runs root and non-run names — never under sessions/",
+        1,
+    ),
+    (
+        "local_operator/update.py::_write_run_meta",
+        "os.replace",
+        "<run dir>/spec.json.tmp FILE -> <run dir>/spec.json FILE inside the refresh run dir "
+        "this update just mkdtemp'd under <config>/update/refresh; replace cannot remove a dir",
+        1,
+    ),
     # The install-provenance marker, written atomically after an upgrade. Both
     # calls are confined to the temp file this function itself created with
     # ``mkstemp`` inside the INSTALL prefix (a uv tool root), and the rename

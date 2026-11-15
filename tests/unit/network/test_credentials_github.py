@@ -59,6 +59,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -456,6 +457,64 @@ def _no_secret_broker_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
     from local_operator.secrets import client as secrets_client
 
     monkeypatch.setattr(secrets_client, "ensure_broker", lambda *a, **k: False)
+
+
+class _TimerRecordingThreading:
+    """``github_mod``'s view of :mod:`threading`, recording every ``Timer`` it builds.
+
+    Everything but ``Timer`` is the real module, read at call time, so the
+    module's locks, events and threads behave exactly as in production; only
+    the constructed timers are remembered so the cell's teardown can stop them.
+    """
+
+    def __init__(self, real: Any, sink: list[threading.Timer]) -> None:
+        self._real = real
+        self._sink = sink
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def Timer(self, *args: Any, **kwargs: Any) -> threading.Timer:  # noqa: N802
+        timer = self._real.Timer(*args, **kwargs)
+        self._sink.append(timer)
+        return timer
+
+
+@pytest.fixture(autouse=True)
+def _no_self_revoke_outlives_its_cell(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Stop every borrower self-revoke timer a cell scheduled, at that cell's teardown.
+
+    WHY. ``borrowed_git_env`` arms ``_schedule_self_revoke``: a daemon
+    ``threading.Timer`` that DELETEs the token at the grant's window end. Cells
+    here serve grants whose window ends 600 s out, and nothing cancelled those
+    timers, so they fired ~10 min later on the same xdist worker, inside
+    whatever cell was running then — against the module's real
+    ``GITHUB_API_BASE``. Full-suite runs 43596174675, 43641441274, 43643694388
+    and 43656258089 each failed ``test_desktop_team_bridge.py`` teardowns that
+    way: its wire tripwire counted the timer threads' ``httpx.HTTPTransport``
+    (or, when the client was built just before the cell, ``socket.connect``)
+    as the cell's own. In all four the failing worker had run this module's
+    two 600 s-window cells about ten minutes before.
+
+    CONSTRAINTS. The timer's behaviour inside its own cell is untouched — a
+    cell that waits for its window end (``test_borrower_self_revoke_fires_at_window_end``)
+    still sees the real DELETE; only the leftover is cancelled, then joined so
+    a fire already in flight finishes before the next cell starts. The
+    per-token dedupe set is per cell too: a token string reused by a later cell
+    (``"tok"``) must not have its scheduling suppressed by a cancelled timer.
+    """
+
+    timers: list[threading.Timer] = []
+    monkeypatch.setattr(github_mod, "threading", _TimerRecordingThreading(threading, timers))
+    monkeypatch.setattr(github_mod, "_SELF_REVOKE_SCHEDULED", set())
+    yield
+    for timer in timers:
+        timer.cancel()
+    for timer in timers:
+        # Bounded join, not a sleep: a cancelled timer exits at once; only a
+        # fire already running waits, and its one DELETE is itself capped at
+        # ``github_mod.HTTP_TIMEOUT_S`` (10 s), well inside this bound.
+        timer.join(timeout=30.0)
 
 
 class _Env:
