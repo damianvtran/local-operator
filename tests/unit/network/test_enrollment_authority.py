@@ -806,6 +806,28 @@ def test_every_readiness_capability_is_admitted_by_enrollment():
     assert re.findall(r'\bcode="[a-z_]+"', source) == []
 
 
+def test_a_held_mcp_login_row_is_admitted_and_its_code_is_named():
+    """#3947: a peer riding a held MCP sign-in reports ``mcp_credential`` ok with
+    ``CODE_HELD_OFFLINE``. Verify admits it (an ok row is not a warning), and the
+    code is a named constant, so the receipt would admit it too if a row ever
+    failed with it — the train-t7 guard failure was a literal ``code="held_offline"``.
+    """
+    from local_operator.network import readiness
+
+    held = _row(readiness.CAPABILITY_MCP_CREDENTIAL, ok=True, code=readiness.CODE_HELD_OFFLINE)
+    assert e.ready_evidence(_verify_report(held), device_id="d_target", network_id="n") == []
+    warning = {"capability": readiness.CAPABILITY_MCP_CREDENTIAL, "code": "held_offline"}
+    terminal = e.public_report(
+        {
+            "enrollment_verified": True,
+            "ready_ok": False,
+            "task_ready": False,
+            "equipment_warnings": [warning],
+        }
+    )
+    assert terminal["equipment_warnings"] == [warning]
+
+
 def test_an_unknown_capability_is_still_refused():
     unknown = _row("not_a_readiness_row", ok=False, code="")
     with pytest.raises(MeshRefusal):
