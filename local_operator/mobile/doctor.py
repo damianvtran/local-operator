@@ -74,6 +74,14 @@ LOG_TAIL_BYTES = 8 * 1024 * 1024
 #: open files in system", errno 23) is the whole machine's table, a different
 #: fault with a different fix, so it is excluded rather than counted here (R1-2).
 _EMFILE = re.compile(r"Too many open files(?! in system)|\bEMFILE\b|\[Errno 24\]")
+#: `mobile/accept_backoff.py`'s end-of-episode line. It names EVERY errno the
+#: backoff handles ("... (EMFILE/ENFILE/ENOBUFS/ENOMEM) ...", since #3971), so
+#: a substring match on "EMFILE" would count each recovery, including one from
+#: an ENOBUFS or ENFILE episode, as "too many open files" (R5-1). It reports an
+#: episode ending, not an error, so it is never an EMFILE occurrence; the
+#: episode itself was already counted from its own error record. Anchored on
+#: the line's stable leading words rather than the errno list, which may grow.
+_ACCEPT_RECOVERED = re.compile(r"accepting connections again after")
 _SQLITE_OPEN = re.compile(r"unable to open database file")
 #: asyncio's accept-failure record, and the count `mobile/log_collapse.py`
 #: appends to the copy it keeps: each suppressed copy is one more EMFILE, so
@@ -361,7 +369,7 @@ def _scan_log(path: Path, *, now: float) -> dict[str, int] | None:
                 pass
         if not recent:
             continue
-        if _EMFILE.search(line):
+        if _EMFILE.search(line) and not _ACCEPT_RECOVERED.search(line):
             counts["emfile"] += 1
             record_emfile = True
         collapsed = _SUPPRESSED.search(line) if accept_record else None

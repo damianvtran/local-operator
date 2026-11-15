@@ -475,6 +475,55 @@ def test_the_log_scan_counts_only_emfile_copies_as_emfile(rig):
     assert logs["data"]["emfile"] == 42  # 1 written + 41 suppressed; the ENFILE 50 are not
 
 
+#: `mobile/accept_backoff.py`'s recovery line, copied verbatim from its format
+#: string (#3971's wording) so a change there is a visible change here.
+_RECOVERY_FORMAT = (
+    "accepting connections again after %.1f s paused for lack of system "
+    "resources (EMFILE/ENFILE/ENOBUFS/ENOMEM) (%d retries)"
+)
+
+
+def _recovery_line(stamp: str) -> str:
+    message = _RECOVERY_FORMAT % (12.4, 5)
+    return f"{stamp},003 [WARNING] local_operator.mobile.accept_backoff: {message}\n"
+
+
+def test_the_backoff_recovery_line_is_not_an_emfile_occurrence(rig):
+    """R5-1: the recovery line lists every errno the backoff handles, so after
+    an ENOBUFS episode it must not read as "too many open files"."""
+    import inspect
+
+    from local_operator.mobile import accept_backoff
+
+    # The copy above is still the emitter's: both literal halves, as written there.
+    source = inspect.getsource(accept_backoff)
+    assert '"accepting connections again after %.1f s paused for lack of system "' in source
+    assert '"resources (EMFILE/ENFILE/ENOBUFS/ENOMEM) (%d retries)"' in source
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    (rig / ".local-operator" / "logs" / "mobile.log").write_text(
+        f"{stamp},001 [ERROR] asyncio: socket.accept() out of system resource\n"
+        "socket: <asyncio.TransportSocket fd=6>\n"
+        "OSError: [Errno 55] No buffer space available\n" + _recovery_line(stamp)
+    )
+    logs = doctor.check_logs()
+    assert logs["data"]["emfile"] == 0
+    assert logs["status"] == "pass"
+
+
+def test_a_real_emfile_episode_counts_once_beside_its_recovery_line(rig):
+    """R5-1: the episode's own error record is the occurrence; its recovery
+    line adds nothing, and the check still warns."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    (rig / ".local-operator" / "logs" / "mobile.log").write_text(
+        f"{stamp},001 [ERROR] asyncio: socket.accept() out of system resource\n"
+        "socket: <asyncio.TransportSocket fd=6>\n"
+        "OSError: [Errno 24] Too many open files\n" + _recovery_line(stamp)
+    )
+    logs = doctor.check_logs()
+    assert logs["data"]["emfile"] == 1
+    assert logs["status"] == "warn"
+
+
 @pytest.mark.parametrize(
     "connector,stopped,expected,status",
     [
