@@ -1388,6 +1388,7 @@ def _relay_call(
     timeout: float = 5.0,
     allow_no_answer: bool = False,
     allow_no_relay: bool = False,
+    no_answer_message: str | None = None,
     **fields: Any,
 ) -> dict[str, Any] | None:
     """Run one op on the running relay, or REFUSE when no relay answers it.
@@ -1423,6 +1424,8 @@ def _relay_call(
     live relay record exists. Once a running relay was asked, silence can mean
     its operation failed or partially completed, not permission to repeat the
     destructive operation offline. Keep that distinction at this single lookup.
+    ``no_answer_message`` lets the caller name its already-resolved context;
+    it is display-only and never sent in the control frame or read back from disk.
     """
     from local_operator.network import relay, store
 
@@ -1436,9 +1439,9 @@ def _relay_call(
         if allow_no_relay:
             raise MeshRefusal(
                 "relay_control_failed",
-                "this device's relay was running but did not return a result for member "
-                "removal. The removal may be incomplete; no offline removal was attempted. "
-                "Check 'lop network status' and 'lop network member ls' before retrying.",
+                no_answer_message
+                or "the relay did not confirm the removal; the removal may be incomplete. "
+                "This command did not retry the removal. Wait a moment and retry.",
             )
         raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message())
     if reply.get("op") == "error":
@@ -4906,23 +4909,34 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
             "for the member list (a name, a device id, or an unambiguous tail of one)",
         )
-    # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
-    # epoch rotation and the queue write all happen here (below), and the payload
-    # says the rotation is queued rather than fanning out.
+    # ``allow_no_relay``: a revocation has a local spelling ONLY when no live
+    # relay record exists. That path tombstones, rotates and queues below. A
+    # running relay that gives no answer refuses; it never triggers a second write.
     #
     # ``timeout=REMOVAL_CLI_TIMEOUT_S``, not the 5 s default (review round 2, F1):
     # the relay's ending exchange is probe (3 s) + a 25 s frame budget by
-    # construction, and a CLI that gave up first would fall back to the LOCAL
-    # write while the relay was still mid-exchange — the double-write
-    # ``allow_no_answer`` exists to prevent, not to enable.
+    # construction. Keep that window so a slow ending can finish, while
+    # ``allow_no_relay`` still refuses a lost reply instead of writing twice.
+    import shlex
+
     from local_operator.network.credentials import messages as messages_mod
     from local_operator.network.credentials.sync import REMOVAL_CLI_TIMEOUT_S
 
+    device_name = _member_name(record, device_id) or args.device
+    show_command = shlex.join(["lop", "network", "show", args.network])
+    retry_command = shlex.join(["lop", "network", "member", "rm", args.network, args.device])
     live = _relay_call(
         "net_member_rm",
         network=args.network,
         device_id=device_id,
         allow_no_relay=True,
+        no_answer_message=(
+            f"the relay did not confirm removing {device_name!r} from {record.name!r}; "
+            "the removal may be incomplete. This command did not retry the removal. "
+            f"Run {show_command!r}: if {device_name!r} is still listed, "
+            f"run {retry_command!r} again. If the relay is stuck, "
+            "run 'lop network restart' first; if it has just stopped, wait a moment and retry."
+        ),
         timeout=REMOVAL_CLI_TIMEOUT_S,
     )
     if live is not None:

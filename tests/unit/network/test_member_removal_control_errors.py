@@ -8,6 +8,8 @@ connection closes. Only a genuinely absent relay permits the offline spelling.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import socket
 from pathlib import Path
 from typing import Any
@@ -21,7 +23,7 @@ from tests.unit.network.test_copy_dispatch_removal import (  # noqa: F401
     _deliver_without_ack,
     _loopback_only,
 )
-from tests.unit.network.test_credentials_real_link import _lop_network
+from tests.unit.network.test_credentials_real_link import _lop_network, _parser
 from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixture dependency
 from tests.unit.network.test_secret_copies import (  # noqa: F401 — fixtures by import
     SECRET_NAME,
@@ -86,14 +88,40 @@ def test_a_running_relays_failed_removal_is_not_retried_offline(
     assert code != 0, (captured.out, captured.err)
     if as_json:
         refusal = json.loads(captured.out)
+        assert set(refusal) == {"ok", "code", "message"}
         assert refusal["ok"] is False
         assert refusal["code"] == "relay_control_failed"
         message = refusal["message"]
     else:
         message = captured.out + captured.err
-    assert "did not return a result" in message
-    assert "no offline removal was attempted" in message
+    # Parse the commands actually printed in the refusal, without dispatching
+    # them: a plausible but nonexistent remedy strands the operator (U1/m1).
+    commands = re.findall(r"'(lop network [^']+)'", message)
+    assert commands
+    parsed = [_parser().parse_args(shlex.split(command)[1:]) for command in commands]
+    assert len(parsed) == 3
+    assert [shlex.split(command)[:3] for command in commands] == [
+        ["lop", "network", "show"],
+        ["lop", "network", "member"],
+        ["lop", "network", "restart"],
+    ]
+    assert shlex.split(commands[0]) == ["lop", "network", "show", mesh.network_id]
+    assert shlex.split(commands[1]) == [
+        "lop",
+        "network",
+        "member",
+        "rm",
+        mesh.network_id,
+        mesh.b.identity.name,
+    ]
+    assert mesh.b.identity.name in message
+    assert store.load(mesh.network_id, mesh.a.root).name in message
+    assert "did not confirm removing" in message
+    assert "did not retry the removal" in message
     assert "may be incomplete" in message
+    assert "still listed" in message
+    assert "wait a moment and retry" in message
+    assert "offline removal" not in message and "return a result" not in message
     assert "applied locally" not in captured.out + captured.err
     record = store.load(mesh.network_id, mesh.a.root)
     assert mesh.member in [m.device_id for m in record.active_members()]
