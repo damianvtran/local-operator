@@ -109,6 +109,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -198,6 +199,38 @@ def origin_is_operator_started(origin: Any) -> bool:
     return str(origin.get(STARTED_BY_FIELD) or "") == OPERATOR_STARTED
 
 
+#: ``(path, size, mtime_ns) -> {child: origin}`` for the lineage registry: a
+#: listing classifies every row, and the registry is append-only, so it is
+#: re-read only when it grows or changes.
+_lineage_memo: dict[str, tuple[tuple[int, int], dict[str, str]]] = {}
+
+
+def _lineage_says_agent(root: Path, session_id: str) -> bool:
+    """The harness lineage registry records ``session_id`` as agent-opened (S6).
+
+    An unreadable registry says nothing (the ``origin.json`` rule then decides,
+    as before); only a recorded agent origin flips the answer, toward deny.
+    """
+    from local_operator.guardrails import provenance
+
+    path = provenance.lineage_path(root)
+    try:
+        info = os.stat(path)
+    except OSError:
+        return False
+    stamp = (info.st_size, info.st_mtime_ns)
+    cached = _lineage_memo.get(str(path))
+    if cached is None or cached[0] != stamp:
+        rows = provenance.read_lineage(root)
+        origins = {child: str(row.get("origin") or "") for child, row in rows.items()}
+        if len(_lineage_memo) > 16:
+            _lineage_memo.clear()
+        _lineage_memo[str(path)] = (stamp, origins)
+        cached = _lineage_memo[str(path)]
+    origin = cached[1].get(session_id)
+    return origin is not None and origin not in provenance._HUMAN_ORIGINS  # noqa: SLF001
+
+
 def is_non_agent_session(root: Path, session_id: str, origin: Any, *, started_here: bool) -> bool:
     """Whether ``session_id``'s ``notify`` items may reach the operator's devices.
 
@@ -226,6 +259,15 @@ def is_non_agent_session(root: Path, session_id: str, origin: Any, *, started_he
       the notify tool is ever offered (``session._session_was_agent_spawned``
       reads the same marker to withhold the tool), so a stampless human
       session and an agent-started one ARE distinguishable here.
+    * THE LINEAGE REGISTRY FIRST (security review S6): ``origin.json`` is
+      reachable by the session's own approved interpreter call (HIGH, not
+      CRITICAL), and a deleted marker read as "human". The harness-written
+      registry ``<config>/guardrails/lineage.jsonl``
+      (``guardrails.provenance.record_lineage``, appended at the spawn sites by
+      ``resume.mark_session_origin``; CRITICAL to write from the shell and file
+      tools) records every session opened on an agent's behalf, so any row
+      there with a non-human origin is an agent's, whatever ``origin.json``
+      says or whether it exists.
     """
     if not started_here:
         return origin_is_operator_started(origin)
@@ -239,6 +281,8 @@ def is_non_agent_session(root: Path, session_id: str, origin: Any, *, started_he
     from local_operator.resume import ORIGIN_FORK, ORIGIN_NAME
 
     if not session_id:
+        return False
+    if _lineage_says_agent(Path(root), session_id):
         return False
     marker = Path(root) / "sessions" / session_id / ORIGIN_NAME
     try:
@@ -1285,6 +1329,9 @@ def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, s
                 # that does not collect gets the not-collecting sentence whatever
                 # the attestation (#4001's "brought home" test pins it).
                 return ORIGIN_NOT_COLLECTING, target, False
+            # For the bound leg (``via_operator``) this re-check is redundant — the
+            # agent case already returned above — and always passes; it decides
+            # only STAMPED rows (review R2-n1).
             if not is_non_agent_session(
                 Path(root), session_id, origin_map, started_here=via_operator
             ):

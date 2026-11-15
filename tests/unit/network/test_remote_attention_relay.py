@@ -567,6 +567,27 @@ def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
     )
     OnboardRun._record_operator_binding_target(runner, member_id=server_a.identity.device_id)
     assert ob.onboarded_devices(server_b.root) == {}
+    # R2-M1 ruling (b)/(g): B also holds a signed credential card for ANOTHER
+    # active member. Its signed recipient is not A, so A's link carries none of it.
+    from local_operator.network import store as net_store
+    from local_operator.network.types import MemberRecord
+    from tests.unit.network.test_operator_binding import CARD_SECRETS, file_card
+
+    third = "d_third_member"
+    record_b = net_store.load(network.network_id, server_b.root)
+    record_b.members.append(MemberRecord(device_id=third, name="third"))
+    net_store.save(record_b, server_b.root)
+    file_card(
+        server_b.root,
+        owner=server_b.identity.device_id,
+        recipient=third,
+        network=network.network_id,
+    )
+    assert len(ob.own_proofs(server_b.root, network.network_id, for_device=third)) == 1
+    assert (
+        ob.own_proofs(server_b.root, network.network_id, for_device=server_a.identity.device_id)
+        == []
+    )
 
     sealed: list[dict[str, Any]] = []
     real_write = relay.PeerLink._write
@@ -599,6 +620,6 @@ def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
         link.close("test")
     wire_text = json.dumps(sealed, default=str)
     assert not [f for f in sealed if f.get("op") == ob.OP]
-    for secret in ("secret-node.test", "ssh-secret-ref", "SHA256:fixture"):
+    for secret in ("secret-node.test", "ssh-secret-ref", "SHA256:fixture", *CARD_SECRETS):
         assert secret not in wire_text
     assert ob.load_stored(server_a.root, network.network_id, server_b.identity.device_id) is None

@@ -13854,6 +13854,7 @@ class RelayServer:
         # rotation all write, so the read is inside the lock: minting from a
         # snapshot would revert whatever they wrote in between.
         resolved = self._require_network(str(frame.get("network") or ""))
+        binding_keep = store.binding_invite_ids(self.root)
         with store.mutate(resolved.network_id, self.root) as record:
             state = store.require_secrets(record.network_id, self.root)
             minted: MintedInvite = mint_invite(
@@ -13880,7 +13881,9 @@ class RelayServer:
             # the same locked write that adds a row drops the ones past their own
             # expiry and the retention window (``store.prune_invites``), so repeated
             # pairing attempts no longer accumulate ``minted`` rows forever.
-            expired = store.prune_invites(record)
+            # ``binding_keep`` (computed before the lock): admitted rows a retained
+            # signed onboarding names stay, so that node stays bindable (#4030).
+            expired = store.prune_invites(record, keep=binding_keep)
             record.invites.append(minted.record)
             store.save(record, self.root)
             path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)

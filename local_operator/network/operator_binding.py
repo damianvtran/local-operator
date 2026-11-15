@@ -39,10 +39,11 @@ WHAT IS REFUSED, and where (every step fails closed — see :func:`verify_proof`
   every use is THE revocation lever. The anchor's ``devices`` list is not one:
   it holds operator-device KEY ids (phones), a different namespace from mesh
   ``d_…`` ids, so it can never name the Mac (security review S3);
-* a decision that is not an onboarding — ``device_onboard`` is also filed by the
-  credential share/inheritance flows with a caller-chosen ``requested_by``, so a
-  proof must also carry the onboarding SHAPE (:func:`_is_onboarding_shape`), not
-  just the kind;
+* a decision that is neither an onboarding nor an EXACT credential card —
+  ``device_onboard`` is also filed by the credential share/inheritance flows
+  (owner = the filing device, pinned by their shape predicates), so a proof
+  must carry one of those signed SHAPES (:func:`_is_onboarding_shape`,
+  :func:`_card_target`), not just the kind;
 * an old signer — the signature must verify under the CURRENT anchor's key, so a
   node re-anchored to a new key drops every proof signed by the old one;
 * a tampered stored proof — the store holds the raw proof and every use
@@ -69,6 +70,20 @@ matches it exactly. A peer the Mac did not onboard — a co-member, or a node
 onboarded before this build recorded anything — is sent nothing at all
 (security review S1: the earlier "newest proof for the network" fallback put
 the operator's SSH host, user and credential-ref name on every co-member's link).
+
+CREDENTIAL CARDS ARE PROOFS TOO (PR #4030 review R2-M1, security ruling
+conditions (a)-(g)). A node joined by invite, or onboarded before the runner
+recorded anything, has no Mac-side tie to an onboarding decision — but the
+operator may have signed a credential share/inheritance card FOR it. Such a
+card's digest binds ``requested_by.device_id == owner_device`` (the Mac),
+``recipient_device`` and ``network_id`` inside ``what.credential_*``, all
+proven by the flow's own exact predicate (``finite_share.exact_shape``,
+``inheritance._parse``). So the target is IN the signed bytes: the Mac presents
+a card only to its recipient on its network while that recipient is an active
+member, and the node binds only a card whose recipient is ITSELF. No
+onboarding record or backfill is involved. Accepted residual: revoking the
+credential grant does not revoke the binding (it still truthfully says the Mac
+is the operator's); removing or burning the Mac does.
 
 R5 — COST. ES256 verification stays out of the per-listing loop: a verdict is
 cached keyed by the proof's bytes, the anchor's bytes and the local-key state,
@@ -105,9 +120,12 @@ OP = "net_operator_binding"
 #: either kind is filed by ``onboard_approvals.request_device``, which computes
 #: ``requested_by`` from this install's own identity. ``device_onboard`` is ALSO
 #: filed by ``credentials/finite_share.py`` and ``credentials/inheritance.py``
-#: with a CLI-chosen ``requested_by``; those are kept out by the onboarding shape
-#: (:func:`_is_onboarding_shape`), checked on both the Mac's selection and the
-#: node's verification, not by their happening to lack ``what.network_id``
+#: (owner = the filing device: their ``_subject`` refuses any other owner, and
+#: ``exact_shape`` / ``_parse`` pin ``requested_by.device_id == owner_device``;
+#: security review S7). Those count only in their EXACT signed shape
+#: (:func:`_card_target`), whose target is the signed recipient; any other
+#: ``device_onboard`` must be the onboarding shape (:func:`_is_onboarding_shape`).
+#: Both are checked on the Mac's selection and the node's verification
 #: (security review S2). Kinds a REMOTE peer files into the store
 #: (``operator_device_pair`` via ``mobile/pair_requests``) or that name no network
 #: (``profile_save``, ``local_authority``) are excluded by this allow-list, not by
@@ -189,8 +207,70 @@ def _is_onboarding_shape(request: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _card_target(request: Any) -> tuple[str, str, str] | None:
+    """``(family, network_id, recipient_device)`` of an EXACT credential card, else ``None``.
+
+    Security ruling condition (a): only each flow's OWN exact predicate decides,
+    never a loose "has a credential key" test — ``finite_share.exact_shape`` and
+    ``inheritance._parse`` are what prove ``requested_by.device_id ==
+    owner_device`` and ``device.device_id == recipient_device`` from the signed
+    bytes. Works on a full record or on its immutable request (both carry
+    ``what``/``device``/``requested_by``/``credential_ref``). Never raises.
+    """
+    return _card_check(request)[0]
+
+
+def _card_check(request: Any) -> tuple[tuple[str, str, str] | None, str]:
+    """:func:`_card_target` plus WHY not, for the dry run's ``credential_cards_refused``.
+
+    The reason is ``not_a_card``, ``not_exact_shape`` or ``check_failed:<Exception>``.
+    The last one matters: ``inheritance._parse`` reaches ``reconcile.provider_ok``,
+    which imports pydantic, so a dry run under an interpreter without the
+    runtime's dependencies would otherwise drop an inheritance card silently.
+    """
+    from local_operator.network import approvals
+    from local_operator.network.credentials import finite_share, inheritance
+    from local_operator.network.types import MeshRefusal
+
+    if not isinstance(request, Mapping) or request.get("kind") != approvals.KIND_DEVICE_ONBOARD:
+        return None, "not_a_card"
+    record = dict(request)
+    what = record.get("what")
+    if not isinstance(what, dict):
+        return None, "not_a_card"
+    try:
+        if finite_share.OP in what:
+            data = finite_share.intent(record) if finite_share.exact_shape(record) else None
+            family = "finite_share"
+        elif inheritance.OP in what:
+            data = inheritance._parse(record)["data"]  # noqa: SLF001 — the flow's own gate
+            family = "inheritance"
+        else:
+            return None, "not_a_card"
+    except MeshRefusal:
+        return None, "not_exact_shape"
+    except Exception as exc:  # noqa: BLE001 — any check that cannot run is no proof
+        return None, f"check_failed:{type(exc).__name__}"
+    if not isinstance(data, Mapping):
+        return None, "not_exact_shape"
+    network_id, recipient = data.get("network_id"), data.get("recipient_device")
+    owner = data.get("owner_device")
+    requested_by = record.get("requested_by")
+    if not all(isinstance(v, str) and _NETWORK_ID.fullmatch(v) for v in (network_id, recipient)):
+        return None, "not_exact_shape"
+    # Redundant with both predicates; kept so this module states its own rule.
+    if not isinstance(requested_by, Mapping) or requested_by.get("device_id") != owner:
+        return None, "not_exact_shape"
+    return (family, str(network_id), str(recipient)), ""
+
+
 def _network_of(record: Mapping[str, Any]) -> str:
-    """``what.network_id`` — the one path the signed digest binds the network at.
+    """The signed network, read at the ONE path each proof family binds it at.
+
+    A credential card: ``what.credential_*.network_id`` via :func:`_card_target`
+    (condition (c)); a record carrying a credential key that is NOT an exact card
+    has no network at all — no fallback to any other field. An onboarding:
+    ``what.network_id``, as follows.
 
     Flat in the immutable request for BOTH kinds (the network-only kind's
     on-disk file wraps the record as ``{format, version, record}``, so a raw
@@ -199,6 +279,9 @@ def _network_of(record: Mapping[str, Any]) -> str:
     without a network has none, and is no proof for any network.
     """
     what = record.get("what")
+    if isinstance(what, Mapping) and any(key in what for key in _CREDENTIAL_OPERATION_KEYS):
+        card = _card_target(record)
+        return card[1] if card is not None else ""
     value = what.get("network_id") if isinstance(what, Mapping) else None
     return value if isinstance(value, str) else ""
 
@@ -226,7 +309,9 @@ def proof_from_record(record: Mapping[str, Any], *, own_device_id: str) -> dict[
     requested_by = record.get("requested_by")
     if not isinstance(requested_by, Mapping) or requested_by.get("device_id") != own_device_id:
         return None
-    if not own_device_id or not _network_of(record) or not _is_onboarding_shape(record):
+    if not own_device_id or not _network_of(record):
+        return None
+    if not _is_onboarding_shape(record) and _card_target(record) is None:
         return None
     decided_at = record.get("decided_at")
     if not isinstance(decided_at, (int, float)) or isinstance(decided_at, bool):
@@ -390,12 +475,9 @@ def _backfill_one(root: Path | None, record: Mapping[str, Any], network_id: str)
     if not invites:
         return {"result": "skipped", "reason": "no_invite_receipt"}
     for invite_id in invites:
-        invite = network.invite(invite_id)
-        if invite is None:
-            continue
-        if invite.state != "consumed" or invite.outcome != "admitted" or not invite.redeemed_by:
-            continue
-        candidates.add(invite.redeemed_by)
+        redeemer = admitted_redeemer(network.invite(invite_id))
+        if redeemer:
+            candidates.add(redeemer)
     if not candidates:
         return {"result": "skipped", "reason": "no_admitted_invite"}
     if len(candidates) > 1:
@@ -406,6 +488,18 @@ def _backfill_one(root: Path | None, record: Mapping[str, Any], network_id: str)
     ):
         return {"result": "skipped", "reason": "not_an_active_member", "device_id": device_id}
     return {"result": "resolved", "device_id": device_id}
+
+
+def admitted_redeemer(invite: Any) -> str:
+    """``redeemed_by`` of an invite this relay consumed as ``admitted``, else ``""``.
+
+    THE one definition of "this invite admitted that device", shared by the
+    backfill, the runner's invite path (``onboard._record_operator_binding_target``,
+    security review S8) and the invite prune's keep rule.
+    """
+    if invite is None or invite.state != "consumed" or invite.outcome != "admitted":
+        return ""
+    return str(invite.redeemed_by or "")
 
 
 def admitted_device(
@@ -439,17 +533,32 @@ def backfill(root: Path | None, *, dry_run: bool = False) -> dict[str, Any]:
     (:func:`_backfill_one`), and records NOTHING when it cannot be sure: an
     unresolvable or ambiguous decision stays honestly node-only.
 
-    Idempotent and lazy: run from :func:`present` (link-up) and
-    :func:`retained_approval_ids` (the prune, so a decision the backfill can tie
-    to a node is not pruned first) — never at startup, so it cannot fail one. An
+    Idempotent, and never on a caller's critical path: run from :func:`present`
+    (link-up, off the link's thread), from :func:`retained_approval_ids` (the
+    approvals prune, so a decision the backfill can tie to a node is not pruned
+    first — which the relay runs OFF-THREAD AT EVERY START,
+    ``relay._sweep_approvals_once``, once per namespace), and on the create
+    path. A failure is caught here, so it can never fail a relay start. An
     existing record is NEVER overwritten: the same id is ``already_recorded``, a
     different one is a logged ``conflict`` and skipped.
 
+    Credential cards need no backfill (their target is signed); they are listed
+    under ``credential_cards`` as ``{network: {recipient: [entry]}}`` with
+    ``result`` ``presented`` / ``superseded`` (an older card for the same
+    recipient) / ``skipped`` + ``reason`` (``not_an_active_member``), so a dry run
+    shows which nodes the cards alone will bind.
+
     ``dry_run`` writes nothing and logs nothing; the report is safe to print —
-    approval ids, network ids, kinds, mesh ids and reasons only, never the
-    request's SSH host/user or credential reference. Never raises.
+    approval ids, network ids, kinds, card family, mesh ids and reasons only,
+    never the request's SSH host/user, credential reference or credential
+    name/provider/account. Never raises.
     """
-    report: dict[str, Any] = {"dry_run": dry_run, "networks": {}}
+    report: dict[str, Any] = {
+        "dry_run": dry_run,
+        "networks": {},
+        "credential_cards": {},
+        "credential_cards_refused": [],
+    }
     try:
         recorded = onboarded_devices(root)
         rows = _own_proofs_by_record(root)
@@ -459,7 +568,14 @@ def backfill(root: Path | None, *, dry_run: bool = False) -> dict[str, Any]:
         # "nothing to backfill".
         report["error"] = type(exc).__name__
         return report
+    try:
+        report["credential_cards"] = _card_report(root, rows)
+        report["credential_cards_refused"] = _refused_cards(root)
+    except Exception as exc:  # noqa: BLE001
+        report["credential_cards_error"] = type(exc).__name__
     for record, proof in rows:
+        if _card_target(proof["request"]) is not None:
+            continue  # signed target: nothing to backfill
         approval_id = proof["approval_id"]
         network_id = _network_of(proof["request"])
         entry: dict[str, Any] = {"approval_id": approval_id, "kind": proof["kind"]}
@@ -521,18 +637,124 @@ def _log_backfill(network_id: str, entry: Mapping[str, Any]) -> None:
         )
 
 
-def _presentable(root: Path | None) -> dict[tuple[str, str], dict[str, Any]]:
-    """The NEWEST own proof per ``(network, onboarded device)`` the runner recorded."""
+def _target_of(proof: Mapping[str, Any], admitted: Mapping[str, tuple[str, str]]) -> Any:
+    """``(family, (network, device))`` a proof may be presented to, or ``None``.
+
+    An onboarding: the node the runner (or backfill) recorded it admitted. A
+    credential card: its SIGNED ``(network_id, recipient_device)`` (condition (b)).
+    """
+    card = _card_target(proof["request"])
+    if card is not None:
+        return "card", (card[1], card[2])
+    target = admitted.get(proof["approval_id"])
+    if target is None or target[0] != _network_of(proof["request"]):
+        return None
+    return "onboarding", target
+
+
+def _presentable(
+    root: Path | None,
+    rows: Sequence[tuple[Mapping[str, Any], dict[str, Any]]] | None = None,
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Per ``(network, device)``: the NEWEST onboarding proof and the NEWEST card.
+
+    At most one of each family per target (condition (f)), newest first, so a
+    node that refuses one family still gets the other. A target that is no
+    longer an ACTIVE, unburned member here gets nothing — and so nothing of it
+    is retained by the prune either (security review S5: a removed node's proof
+    is not kept forever, and presenting no longer leans on link admission).
+    """
     admitted = onboarded_devices(root)
-    best: dict[tuple[str, str], dict[str, Any]] = {}
-    for _record, proof in _own_proofs_by_record(root):
-        target = admitted.get(proof["approval_id"])
-        if target is None or target[0] != _network_of(proof["request"]):
+    best: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    for _record, proof in _own_proofs_by_record(root) if rows is None else rows:
+        found = _target_of(proof, admitted)
+        if found is None:
             continue
-        current = best.get(target)
+        family, target = found
+        slot = best.setdefault(target, {})
+        current = slot.get(family)
         if current is None or proof["decided_at"] > current["decided_at"]:
-            best[target] = proof
-    return best
+            slot[family] = proof
+    out: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for target, slot in best.items():
+        if not _active_member(root, target[0], target[1]):
+            continue
+        out[target] = sorted(slot.values(), key=lambda p: p["decided_at"], reverse=True)
+    return out
+
+
+def _refused_cards(root: Path | None) -> list[dict[str, Any]]:
+    """Own, operator-signed credential cards that are NOT proofs, and why (ids only).
+
+    So a dry run that finds no card for a node can tell "there is none" from
+    "there is one this interpreter or this shape check refused"
+    (:func:`_card_check`).
+    """
+    from local_operator.network import approvals
+
+    own = _own_device_id(root)
+    out: list[dict[str, Any]] = []
+    try:
+        directory = approvals.approvals_dir(root, enrollment_only=False)
+    except Exception:  # noqa: BLE001
+        return out
+    if not own or not directory.is_dir():
+        return out
+    for path in sorted(directory.glob("ap_*.json")):
+        try:
+            record = approvals._load_raw(path.stem, root)  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            continue
+        what = record.get("what")
+        family = next(
+            (k for k in _CREDENTIAL_OPERATION_KEYS if isinstance(what, Mapping) and k in what), ""
+        )
+        signature = record.get("signature")
+        requested_by = record.get("requested_by")
+        if (
+            not family
+            or record.get("kind") != approvals.KIND_DEVICE_ONBOARD
+            or record.get("state") not in _APPROVED_STATES
+            or not isinstance(signature, Mapping)
+            or signature.get("cert") is not None
+            or not isinstance(requested_by, Mapping)
+            or requested_by.get("device_id") != own
+        ):
+            continue
+        target, reason = _card_check(record)
+        if target is None:
+            out.append(
+                {
+                    "approval_id": str(record.get("approval_id") or path.stem),
+                    "family": family.removeprefix("credential_"),
+                    "reason": reason,
+                }
+            )
+    return out
+
+
+def _card_report(
+    root: Path | None, rows: Sequence[tuple[Mapping[str, Any], dict[str, Any]]]
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """The dry run's ``credential_cards`` section: ids and verdicts only."""
+    chosen = {
+        proof["approval_id"] for proofs in _presentable(root, rows).values() for proof in proofs
+    }
+    out: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for _record, proof in rows:
+        card = _card_target(proof["request"])
+        if card is None:
+            continue
+        family, network_id, recipient = card
+        entry: dict[str, Any] = {"approval_id": proof["approval_id"], "family": family}
+        if proof["approval_id"] in chosen:
+            entry["result"] = "presented"
+        elif _active_member(root, network_id, recipient):
+            entry["result"] = "superseded"
+        else:
+            entry.update(result="skipped", reason="not_an_active_member")
+        out.setdefault(network_id, {}).setdefault(recipient, []).append(entry)
+    return out
 
 
 def retained_approval_ids(root: Path | None) -> frozenset[str]:
@@ -544,17 +766,41 @@ def retained_approval_ids(root: Path | None) -> frozenset[str]:
     :func:`own_proofs` presents to each onboarded node — the newest per
     ``(network, node)``. Older decisions, and ones with no recorded node (never
     presented to anyone), prune as before: retention is bounded by the number
-    of onboarded nodes.
+    of onboarded nodes. The same holds for credential cards (condition (f)):
+    the newest card per ``(network, recipient)``. Only for targets that are
+    still active members (S5, via :func:`_presentable`).
     """
     backfill(root)
-    return frozenset(proof["approval_id"] for proof in _presentable(root).values())
+    return frozenset(
+        proof["approval_id"] for proofs in _presentable(root).values() for proof in proofs
+    )
+
+
+def retained_invite_ids(root: Path | None) -> frozenset[str]:
+    """Invite ids named by a RETAINED own signed onboarding (``store.prune_invites``' keep).
+
+    WHY (PR #4030 review R2-M1(b)). The backfill's chain runs through this
+    Mac's invite row (``redeemed_by``), which the invite prune dropped 24 h
+    after redemption — so a node onboarded more than a day before a missing
+    ``operator-onboarded`` record was noticed could never be tied again. Every
+    invite an own, still-stored onboarding decision's receipts name is kept;
+    the prune itself keeps only the ones consumed as ``admitted`` by a device
+    still an active, unburned member. Read from the approvals store only.
+    """
+    out: set[str] = set()
+    for record, proof in _own_proofs_by_record(root):
+        if _card_target(proof["request"]) is None:
+            out.update(_invite_ids(record))
+    return frozenset(out)
 
 
 def own_proofs(root: Path | None, network_id: str, *, for_device: str = "") -> list[dict[str, Any]]:
-    """The proof to present to ``for_device`` in ``network_id``: at most one.
+    """The proofs to present to ``for_device`` in ``network_id``: at most two.
 
     ONLY the decision whose onboarding admitted exactly that mesh device in
-    exactly that network (:func:`record_onboarded`). Anything else — a
+    exactly that network (:func:`record_onboarded`), and the newest credential
+    card whose SIGNED recipient and network are exactly these, while that
+    device is an active member (:func:`_presentable`). Anything else — a
     co-member, a node this Mac did not onboard, an empty ``for_device`` — gets
     ``[]``: the preimage discloses the node's SSH host/user and credential-ref
     name, and M3 allows it only to the operator's own nodes, which the Mac can
@@ -562,8 +808,7 @@ def own_proofs(root: Path | None, network_id: str, *, for_device: str = "") -> l
     """
     if not network_id or not for_device:
         return []
-    proof = _presentable(root).get((network_id, for_device))
-    return [proof] if proof is not None else []
+    return list(_presentable(root).get((network_id, for_device), ()))
 
 
 # ---------------------------------------------------------------------------
@@ -662,10 +907,10 @@ def _check_signature(
     request = proof.get("request")
     if not isinstance(request, Mapping) or request.get("kind") != proof.get("kind"):
         return False, "malformed", anchor
-    if not _is_onboarding_shape(request):
-        # A credential share/inheritance card the operator signed is a
-        # ``device_onboard`` too; its signature says nothing about which device
-        # is the operator's (S2).
+    if not _is_onboarding_shape(request) and _card_target(request) is None:
+        # Neither a real onboarding nor an EXACT credential card (S2, ruling
+        # condition (a)): a hybrid or loose shape says nothing about which
+        # device is the operator's.
         return False, "not_onboarding", anchor
     try:
         digest = _digest_for(proof)
@@ -750,11 +995,35 @@ def verify_proof(
         return False, "network_mismatch"
     if bound_device(proof) != device_id:
         return False, "device_mismatch"
+    card = _card_target(proof["request"])
+    if card is not None and card[2] != _node_self_id(Path(config_root), network_id):
+        # Ruling condition (c): a card binds only on ITS recipient. A card the
+        # operator signed for a co-member, presented here, proves nothing here.
+        return False, "not_recipient"
     # NO anchor-revocation check here (security review S3): the anchor's
     # ``devices`` list holds operator-device KEY ids, never mesh ids, so it could
     # not match. Revoking the operator's device for this purpose is removing (or
     # burning) it in the network: :func:`_active_member`, read live on every use.
     return True, ""
+
+
+def _node_self_id(root: Path, network_id: str) -> str:
+    """This node's mesh id in ``network_id``, or ``""`` when its records disagree.
+
+    The network record's ``self_device_id`` (the id the credential flows check
+    against too), and — when an identity is on disk — that identity's id must
+    equal it. Uncached: the verdict cache is keyed on the proof, not on us.
+    """
+    from local_operator.network import store as net_store
+
+    try:
+        self_id = net_store.load(network_id, root).self_device_id
+    except Exception:  # noqa: BLE001 — no record: no self, nothing binds
+        return ""
+    own = _own_device_id(root)
+    if own and own != self_id:
+        return ""
+    return str(self_id or "")
 
 
 def _bindings_dir(root: Path) -> Path:
@@ -840,7 +1109,7 @@ def _record_link_verdict(root: Path, network_id: str, device_id: str, ok: bool) 
         logger.debug("operator binding: could not record the link verdict", exc_info=True)
 
 
-def _active_member(root: Path, network_id: str, device_id: str) -> bool:
+def _active_member(root: Path | None, network_id: str, device_id: str) -> bool:
     """``device_id`` is an ACTIVE, un-burned member of a trusted network here.
 
     Exact id match only: ``MemberRecord.previous_ids`` is node-local and unsigned,
@@ -883,6 +1152,19 @@ def accept_presented(root: Path, link: Any, frame: Mapping[str, Any]) -> dict[st
                 _store(root, network_id, device_id, proof)
             except OSError as exc:
                 return {"accepted": False, "reason": f"store_failed: {exc.strerror}"}
+            # QA Q3: record the link verdict NOW. ``operator_device`` requires
+            # it, and it was otherwise written only by the next catalogue
+            # listing, so a ``notify`` in between under-claimed "node only"
+            # for an item that listing then forwarded.
+            from local_operator.network import wire
+
+            _record_link_verdict(
+                Path(root),
+                network_id,
+                device_id,
+                wire.OPERATOR_BINDING_V1 in getattr(link, "capabilities", ())
+                and _active_member(Path(root), network_id, device_id),
+            )
             _audit(root, "operator_binding_accepted", network_id, device_id)
             return {"accepted": True, "reason": ""}
     _audit(root, "operator_binding_refused", network_id, device_id, reason)

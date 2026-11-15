@@ -577,13 +577,20 @@ The flow keeps the same three calls; only who answers, and where, changes:
    reaches the operator's own device when this session was started from that
    device. A session started directly on the node reaches it too when the
    node has verified which linked device is the operator's: the operator's
-   Mac presents the onboarding approval they signed for THIS node, and the
-   node checks it against its installed operator anchor. Without that (a node
-   not onboarded through a signed card on a build that records it, an older
-   Mac, a node re-anchored to a new key), the card shows only on the node, where nobody
-   can sign — the `notify` result says "Shown on <node> only" in that case;
-   tell the operator. On a node whose user has passwordless sudo this binding
-   is advisory, as site approvals are: root there could replace the anchor.
+   Mac presents an approval they signed that names THIS node — the SSH
+   onboarding card that admitted it, or a credential share/inheritance card
+   whose recipient is this node — and the node checks it against its installed
+   operator anchor. Without one (a node joined by invite that no credential
+   card names, an older Mac, a node re-anchored to a new key), the card shows
+   only on the node, where nobody can sign — the `notify` result says "Shown
+   on <node> only" in that case; tell the operator. What restores forwarding
+   for such a node: the operator signs a credential share or inheritance card
+   for it, or removes it (`lop network member rm <network> <device>`) and
+   onboards it afresh through a signed card (`lop network approvals request
+   --host <host> …`). Re-filing an onboarding for a node that is still a
+   member does not bind it. On a node whose user has passwordless sudo this
+   binding is advisory, as site approvals are: root there could replace the
+   anchor.
 3. `await_access` (each call ≤240 s; the request lives ~10 minutes). There is
    no popup on a node: the card is on the operator's device. Do other work
    between calls rather than sitting on it. `allowed` means the operator

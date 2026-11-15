@@ -2556,14 +2556,18 @@ def test_a_same_named_other_network_row_cannot_satisfy(
     assert len(join_calls) == 1
 
 
+@pytest.mark.parametrize("outcome", ["admitted", "aborted", ""])
 def test_the_runner_records_the_node_it_admitted_for_the_operator_binding(
-    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
 ) -> None:
     """PR #4030 S1: the Mac presents its signed onboarding only to the node it admitted.
 
     The joining path records the invite's ``redeemed_by`` — written by this
     device's relay from the handshake-authenticated id — NOT the node's own
     report over SSH (here deliberately different), and only for an ACTIVE row.
+    Security S8: only an invite consumed as ``admitted`` counts (the backfill's
+    own predicate, ``operator_binding.admitted_redeemer``); any other outcome
+    records nothing.
     """
     from local_operator.network import operator_binding
     from local_operator.network.types import InviteRecord, MemberRecord
@@ -2576,7 +2580,9 @@ def test_the_runner_records_the_node_it_admitted_for_the_operator_binding(
         MemberRecord(device_id="d_authenticated", public_key="pk", name="n", lifecycle="active")
     )
     inviter.invites.append(
-        InviteRecord(invite_id="inv_1", state="consumed", redeemed_by="d_authenticated")
+        InviteRecord(
+            invite_id="inv_1", state="consumed", outcome=outcome, redeemed_by="d_authenticated"
+        )
     )
     network_store.save(inviter, None)
     fake = FakeApprovals(_record())
@@ -2591,7 +2597,8 @@ def test_the_runner_records_the_node_it_admitted_for_the_operator_binding(
     assert payload["state"] == "connected", payload
     join = {row["step"]: row for row in payload["steps"]}["join"]
     assert join["data"]["device_id"] == "d_node"  # the node's self-report
-    assert operator_binding.onboarded_devices(None) == {"ap_aaaa1111": ("n_1", "d_authenticated")}
+    expected = {"ap_aaaa1111": ("n_1", "d_authenticated")} if outcome == "admitted" else {}
+    assert operator_binding.onboarded_devices(None) == expected
 
 
 def test_the_runner_records_nothing_without_an_authenticated_admission(

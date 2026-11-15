@@ -333,6 +333,7 @@ def test_the_network_only_kind_is_a_proof_too(rig: Rig) -> None:
 
 def test_each_onboarded_node_gets_exactly_its_own_proof(rig: Rig) -> None:
     """S1: the decision that onboarded THAT node, and no other node's, ever."""
+    _network(rig.mac, rig.mac_id, (rig.mac_id, NODE, CO, "d_other"))
     other = _onboard(rig, host="other.test", at=time.time() + 5, admitted="d_other")
     mine = _onboard(rig, host="node.test")
     [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
@@ -873,3 +874,349 @@ def test_backfill_never_overwrites_a_recorded_node(rig: Rig) -> None:
     assert entry["result"] == "conflict"
     assert entry["recorded_device_id"] == NODE and entry["device_id"] == CO
     assert ob.onboarded_devices(rig.mac) == {aid: (NET, NODE)}
+
+
+# ---------------------------------------------------------------------------
+# Credential cards as binding proofs (PR #4030 R2-M1, security ruling (a)-(g))
+# ---------------------------------------------------------------------------
+
+#: A recipient key fingerprint in the shape both credential flows sign.
+CARD_FP = "sha256:" + "ab" * 32
+#: Values that must never reach a dry-run report (credential name, provider, account).
+CARD_SECRETS = ("secret:fixture-card", "openai", "acct_fixture")
+
+
+def file_card(
+    root: Path,
+    *,
+    owner: str,
+    recipient: str,
+    network: str = NET,
+    family: str = "finite_share",
+    at: float = 0.0,
+) -> dict[str, Any]:
+    """The operator files and SIGNS one credential card on ``root`` (real store path).
+
+    Built to the EXACT shape each flow mints, and asserted against that flow's
+    own predicate (``finite_share.exact_shape`` / ``inheritance._parse``, via
+    ``_card_target``), so the fixture cannot drift from what the flows sign.
+    """
+    from local_operator.network.credentials import finite_share, inheritance
+
+    trio = A.local_anchor_trio(root)
+    assert trio is not None
+    anchor = {k: trio[k] for k in A.ANCHOR_KEYS}
+    if family == "finite_share":
+        data: dict[str, Any] = {
+            "owner_device": owner,
+            "network_id": network,
+            "recipient_device": recipient,
+            "public_key_fingerprint": CARD_FP,
+            "key": "secret:fixture-card",
+            "scope": "device",
+            "denies": [
+                {
+                    "selector": {"credential_key": "secret:" + "fixture-card"},
+                    "revision": 1,
+                    "reason": "withdrawn",
+                    "approval_ref": "ap_fixture",
+                }
+            ],
+            "policy_revision": 1,
+            "guard": None,
+        }
+        what = {finite_share.OP: data, "anchor": anchor}
+    else:
+        data = {
+            "action": "grant",
+            "owner_device": owner,
+            "network_id": network,
+            "recipient_device": recipient,
+            "public_key_fingerprint": CARD_FP,
+            "inherit": {
+                "providers": {"ids": ["openai"], "future_logins": True},
+                "mcp": {"urls": [], "future_logins": False},
+                "origin": "owner-native-login",
+            },
+            "scope": {"principal_ref": anchor["key_id"], "account_id": "acct_fixture"},
+        }
+        what = {inheritance.OP: data, "anchor": anchor}
+    now = time.time()
+    card = A.create_request(
+        kind=A.KIND_DEVICE_ONBOARD,
+        request_id=A.new_request_id(),
+        requested_by={"device_id": owner, "session_id": "", "surface": "cli"},
+        device={"device_id": recipient, "fingerprint": CARD_FP, "name": "node-box"},
+        what=what,
+        credential_ref=None,
+        created_at=now,
+        expires_at=now + 3600,
+        root=root,
+    )
+    assert ob._card_target(card) == (family, network, recipient)
+    decided_at = at or now
+    return A.approve(
+        card["approval_id"],
+        signature_hex=_sign_decision(root, card, "approve", decided_at),
+        decided_at=decided_at,
+        root=root,
+    )
+
+
+def _card(rig: Rig, **kwargs: Any) -> dict[str, Any]:
+    kwargs.setdefault("owner", rig.mac_id)
+    kwargs.setdefault("recipient", NODE)
+    return file_card(rig.mac, **kwargs)
+
+
+@pytest.mark.parametrize("family", ["finite_share", "inheritance"])
+def test_a_signed_credential_card_binds_its_recipient_with_no_onboarding_record(
+    rig: Rig, family: str
+) -> None:
+    """The Mac's real case: node2 joined by invite, no SSH onboarding, but cards for it."""
+    card = _card(rig, family=family)
+    assert ob.onboarded_devices(rig.mac) == {}, "no onboarding record or backfill involved"
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    assert proof["approval_id"] == card["approval_id"]
+    reply = ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [proof]})
+    assert reply == {"accepted": True, "reason": ""}
+    # Q3: the verdict is recorded at acceptance, so ``notify`` says "forwarded"
+    # before the Mac's first listing on this link.
+    assert ob.operator_device(rig.node) == (rig.mac_id, NET)
+    assert ob.is_operator_link(rig.node, rig.link(rig.mac_id))
+    _node_started_session(rig.node)
+    row = _listing(rig, rig.mac_id)
+    assert "notices" in row
+    co = _listing(rig, CO)
+    assert "notices" not in co
+
+
+def test_a_co_member_is_presented_no_card(rig: Rig) -> None:
+    """Ruling (b): a card goes to its recipient only; every other link gets 0 frames."""
+    _card(rig)
+    co = _WireLink(CO)
+    assert ob.present(_mac_server(rig), co) is None
+    assert co.frames == []
+    node = _WireLink(NODE)
+    ob.present(_mac_server(rig), node)
+    [frame] = node.frames
+    assert len(frame["proofs"]) == 1
+
+
+def test_a_card_for_another_recipient_is_refused_by_the_node(rig: Rig) -> None:
+    """Ruling (c): a card the operator signed for CO, presented to NODE, binds nothing."""
+    from local_operator.network.approvals import _immutable_request
+
+    card = _card(rig, recipient=CO)
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == []
+    [for_co] = ob.own_proofs(rig.mac, NET, for_device=CO)
+    assert for_co["request"] == _immutable_request(card)
+    reply = ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [for_co]})
+    assert reply == {"accepted": False, "reason": "not_recipient"}
+    assert ob.load_stored(rig.node, NET, rig.mac_id) is None
+    assert not ob.is_operator_link(rig.node, rig.link(rig.mac_id))
+
+
+def test_a_card_replayed_on_another_network_is_refused(rig: Rig) -> None:
+    """Ruling (c): the network comes from the signed ``what.credential_*.network_id``."""
+    _network(rig.mac, rig.mac_id, (rig.mac_id, NODE), network_id="n_other")
+    _network(rig.node, NODE, (NODE, rig.mac_id), network_id="n_other")
+    _card(rig, network="n_other")
+    [proof] = ob.own_proofs(rig.mac, "n_other", for_device=NODE)
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == []
+    reply = ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [proof]})
+    assert reply == {"accepted": False, "reason": "network_mismatch"}
+    # Only an unsigned top-level field could have said NET; there is none to read.
+    proof["request"]["what"]["network_id"] = NET
+    reply = ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [proof]})
+    assert reply["accepted"] is False
+
+
+def test_a_tampered_card_owner_fails_the_signature(rig: Rig) -> None:
+    """Ruling (d)/(g): rewriting owner + requested_by consistently keeps the shape, not the sig."""
+    import copy
+
+    _card(rig)
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    forged = copy.deepcopy(proof)
+    forged["request"]["what"]["credential_finite_share"]["owner_device"] = CO
+    forged["request"]["requested_by"]["device_id"] = CO
+    assert ob._card_target(forged["request"]) is not None, "still the exact shape"
+    assert ob.verify_proof(rig.node, forged, network_id=NET, device_id=CO) == (
+        False,
+        "signature_invalid",
+    )
+    reply = ob.accept_presented(rig.node, rig.link(CO), {"proofs": [forged]})
+    assert reply == {"accepted": False, "reason": "signature_invalid"}
+
+
+def test_a_hybrid_card_shape_is_no_proof(rig: Rig) -> None:
+    """Ruling (a): an exact-card ``what`` plus onboarding keys is neither shape."""
+    import copy
+
+    _card(rig)
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    hybrid = copy.deepcopy(proof)
+    hybrid["request"]["what"].update(connect=True, install=True)
+    assert ob._card_target(hybrid["request"]) is None
+    assert ob.verify_proof(rig.node, hybrid, network_id=NET, device_id=rig.mac_id) == (
+        False,
+        "not_onboarding",
+    )
+
+
+def test_an_old_node_is_sent_no_card(rig: Rig) -> None:
+    """Ruling (g): a node without ``operator-binding-v1`` gets nothing, fail-closed."""
+    _card(rig)
+    old = _WireLink(NODE, caps=frozenset({wire.REMOTE_ATTENTION_V1}))
+    assert ob.present(_mac_server(rig), old) is None
+    assert old.frames == []
+
+
+def test_one_card_per_recipient_is_kept_newest_wins(rig: Rig) -> None:
+    """Ruling (f): the newest card per (network, recipient) is presented and retained."""
+    old = _card(rig, at=time.time() - 60)
+    new = _card(rig, family="inheritance")
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    assert proof["approval_id"] == new["approval_id"]
+    retained = ob.retained_approval_ids(rig.mac)
+    assert new["approval_id"] in retained and old["approval_id"] not in retained
+    # Alongside an onboarding proof for the same node, both families travel
+    # (newest first), so a node that refuses one still binds by the other.
+    onboarding = _onboard(rig, at=time.time() + 5)
+    ids = [p["approval_id"] for p in ob.own_proofs(rig.mac, NET, for_device=NODE)]
+    assert ids == [onboarding["approval_id"], new["approval_id"]]
+
+
+@pytest.mark.parametrize("how", ["removed", "burned"])
+def test_s5_a_removed_node_is_presented_and_retained_nothing(rig: Rig, how: str) -> None:
+    """S5: membership is re-checked at presentation AND in the prune-retained set."""
+    onboarding = _onboard(rig)
+    card = _card(rig)
+    assert len(ob.own_proofs(rig.mac, NET, for_device=NODE)) == 2
+    record = net_store.load(NET, rig.mac)
+    if how == "removed":
+        record.members = [m for m in record.members if m.device_id != NODE]
+    else:
+        record.removed_ids.append(NODE)
+    net_store.save(record, rig.mac)
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == []
+    retained = ob.retained_approval_ids(rig.mac)
+    assert onboarding["approval_id"] not in retained and card["approval_id"] not in retained
+
+
+def test_the_dry_run_reports_card_proofs_by_id_only(rig: Rig) -> None:
+    old = _card(rig, at=time.time() - 60)
+    new = _card(rig, family="inheritance")
+    for_co = _card(rig, recipient=CO)
+    gone = _card(rig, recipient="d_gone")
+    dry = ob.backfill(rig.mac, dry_run=True)
+    cards = dry["credential_cards"][NET]
+    assert sorted(cards[NODE], key=lambda e: e["approval_id"]) == sorted(
+        [
+            {"approval_id": old["approval_id"], "family": "finite_share", "result": "superseded"},
+            {"approval_id": new["approval_id"], "family": "inheritance", "result": "presented"},
+        ],
+        key=lambda e: e["approval_id"],
+    )
+    assert cards[CO] == [
+        {"approval_id": for_co["approval_id"], "family": "finite_share", "result": "presented"}
+    ]
+    assert cards["d_gone"] == [
+        {
+            "approval_id": gone["approval_id"],
+            "family": "finite_share",
+            "result": "skipped",
+            "reason": "not_an_active_member",
+        }
+    ]
+    assert dry["networks"] == {}, "cards need no backfill"
+    text = json.dumps(dry)
+    for value in CARD_SECRETS:
+        assert value not in text
+
+
+def test_the_invite_prune_keeps_an_admitted_invite_a_retained_onboarding_names(
+    rig: Rig,
+) -> None:
+    """R2-M1(b): the 24 h invite prune no longer strands an onboarding's backfill chain."""
+    from local_operator.network.types import InviteRecord
+
+    approved = _legacy_onboarding(rig, {"abcd2345": NODE})
+    network = net_store.load(NET, rig.mac)
+    old = time.time() - 3 * 24 * 3600
+    for invite in network.invites:
+        invite.minted_at = old
+        invite.redeemed_at = old
+    # Controls: an unnamed admitted invite, and a named one whose node is gone.
+    network.invites.append(
+        InviteRecord(
+            invite_id="zzzz9999",
+            state="consumed",
+            outcome="admitted",
+            redeemed_by=CO,
+            minted_at=old,
+            redeemed_at=old,
+        )
+    )
+    net_store.save(network, rig.mac)
+    assert net_store.binding_invite_ids(rig.mac) == frozenset({"abcd2345"})
+    assert net_store.sweep_invites(rig.mac) == 1
+    kept = {i.invite_id for i in net_store.load(NET, rig.mac).invites}
+    assert kept == {"abcd2345"}
+    report = ob.backfill(rig.mac, dry_run=True)
+    assert report["networks"][NET][0]["result"] == "resolved"
+    assert report["networks"][NET][0]["approval_id"] == approved["approval_id"]
+    # The node leaves: its admitted row is no longer worth keeping.
+    network = net_store.load(NET, rig.mac)
+    network.members = [m for m in network.members if m.device_id != NODE]
+    net_store.save(network, rig.mac)
+    assert net_store.sweep_invites(rig.mac) == 1
+    assert net_store.load(NET, rig.mac).invites == []
+
+
+def test_s6_the_lineage_registry_outranks_a_missing_origin_marker(rig: Rig) -> None:
+    """S6: an agent-opened session stays an agent's even with ``origin.json`` deleted."""
+    from local_operator.guardrails import provenance
+    from local_operator.resume import ORIGIN_NAME
+
+    _bind(rig)
+    _node_started_session(rig.node)
+    marker = rig.node / "sessions" / SID / ORIGIN_NAME
+    assert not marker.exists()
+    assert ra.is_non_agent_session(rig.node, SID, None, started_here=True)
+    provenance.record_lineage(SID, origin="subagent", parent="s_parent", state_root=rig.node)
+    assert not ra.is_non_agent_session(rig.node, SID, None, started_here=True)
+    row = _listing(rig, rig.mac_id)
+    assert "build" not in json.dumps(row.get("notices", {})), "its notify stays here"
+    assert "remote-ask:" in json.dumps(row.get("notices", {})), "its ask still travels"
+    # A fork is the human's own branch: the registry never records one.
+    provenance.record_lineage("s_forked_one", origin="fork", state_root=rig.node)
+    assert "s_forked_one" not in provenance.read_lineage(rig.node)
+
+
+def test_the_dry_run_names_a_card_it_could_not_check(rig: Rig) -> None:
+    """A dry run must not read "no card" when the check itself could not run.
+
+    Measured: under a bare ``python3`` without the runtime's dependencies,
+    ``inheritance._parse`` -> ``reconcile.provider_ok`` raises
+    ``ModuleNotFoundError: pydantic``; the card was silently missing.
+    """
+    from local_operator.network.credentials import reconcile
+
+    card = _card(rig, family="inheritance")
+
+    def unavailable(_provider: str) -> bool:
+        raise ModuleNotFoundError("No module named 'pydantic'")
+
+    rig.monkeypatch.setattr(reconcile, "provider_ok", unavailable)
+    dry = ob.backfill(rig.mac, dry_run=True)
+    assert dry["credential_cards"] == {}
+    assert dry["credential_cards_refused"] == [
+        {
+            "approval_id": card["approval_id"],
+            "family": "inheritance",
+            "reason": "check_failed:ModuleNotFoundError",
+        }
+    ]
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == [], "fails closed"

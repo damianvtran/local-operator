@@ -1782,8 +1782,10 @@ class OnboardRun:
             record = network_store.load(network_id, self.root)
             device_id = ""
             if invite_id:
-                invite = record.invite(invite_id)
-                device_id = invite.redeemed_by if invite is not None else ""
+                # The same "admitted" predicate as the backfill (security S8):
+                # a ``redeemed_by`` on an invite not consumed as ``admitted``
+                # names no node this onboarding let in.
+                device_id = operator_binding.admitted_redeemer(record.invite(invite_id))
             elif member_id:
                 # The already-active path. ``member_id`` is the node's OWN
                 # ``identity show`` report, and this device's table agreeing it is
