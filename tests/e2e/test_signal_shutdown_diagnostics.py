@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.e2e import signal_shutdown_diagnostics as diag
 from tests.e2e.signal_shutdown_diagnostics import CapturedChild
 
 
@@ -109,3 +110,122 @@ def test_without_capture_negative_control_loses_stderr(tmp_path: Path) -> None:
     assert child.wait(timeout=10) == 7
     assert child.stderr is None
     assert not list(tmp_path.rglob("*.stderr"))
+
+
+# --- native macOS crash report: pure units over SYNTHETIC .ips text --------------
+# Nothing below reads the real DiagnosticReports or crashes anything; the directory
+# is a tmp dir injected into ``find_native_report``.
+
+_PID = 4242
+_SECRET = "ACCESS_TOKEN_MUST_NOT_LEAVE"
+
+
+def _ips(pid: int = _PID, *, bug_type: str = "309", frames: int = 3, proc: str = "python3.12"):
+    header = {"bug_type": bug_type, "incident_id": "INC-1", "timestamp": "2026-11-15 10:00:00"}
+    body = {
+        "pid": pid,
+        "procName": proc,
+        "exception": {"type": "EXC_BAD_ACCESS", "signal": "SIGSEGV", "subtype": "KERN_INVALID"},
+        "faultingThread": 1,
+        "registers_and_env": _SECRET,  # must never be copied out
+        "usedImages": [{"name": "python3.12", "path": "/Users/runner/secret/python"}],
+        "threads": [
+            {"frames": []},
+            {
+                "frames": [
+                    {"imageIndex": 0, "symbol": f"sym{n}-{pid}" + "x" * 300, "imageOffset": n}
+                    for n in range(frames)
+                ]
+            },
+        ],
+    }
+    return json.dumps(header) + "\n" + json.dumps(body)
+
+
+def _find(directory: Path, started: float = 0.0, pid: int = _PID) -> dict:
+    return diag.find_native_report(
+        directory, pid=pid, started_wall=started, poll_budget_s=0.0, sleep=lambda _s: None
+    )
+
+
+def test_native_report_positive_is_allow_listed_and_bounded(tmp_path: Path) -> None:
+    (tmp_path / "python3.12-2026.ips").write_text(_ips(frames=60))
+    found = _find(tmp_path)
+    blob = json.dumps(found, ensure_ascii=True)
+    assert found["found"] is True
+    assert found["signal"] == "SIGSEGV" and found["exception_type"] == "EXC_BAD_ACCESS"
+    assert found["incident_id"] == "INC-1"
+    assert found["frames_total"] == 60 and found["frames_kept"] <= diag.NATIVE_MAX_FRAMES
+    assert found["faulting_thread_frames"][0]["image"] == "python3.12"
+    assert len(blob) <= diag.NATIVE_MAX_OUTPUT_BYTES
+    assert _SECRET not in blob and "/Users/runner" not in blob
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["wrong-pid", "stale", "torn", "oversize", "not-a-crash", "other-process"],
+)
+def test_native_report_negatives_never_return_another_processs_data(
+    tmp_path: Path, case: str
+) -> None:
+    import os
+
+    path = tmp_path / "python3.12-2026.ips"
+    text = {
+        "wrong-pid": _ips(pid=_PID + 1),
+        "stale": _ips(),
+        "torn": _ips()[:-40],
+        "oversize": _ips() + " " * diag.NATIVE_MAX_FILE_BYTES,
+        "not-a-crash": _ips(bug_type="308"),
+        "other-process": _ips(proc="Safari"),
+    }[case]
+    path.write_text(text)
+    started = 1_000_000.0
+    os.utime(path, (started - 100 if case == "stale" else started + 5,) * 2)
+    found = _find(tmp_path, started=started)
+    assert found["found"] is False and found["reason"]
+    assert "sym0" not in json.dumps(found) and "SIGSEGV" not in json.dumps(found)
+
+
+def test_native_report_refuses_symlinks_and_missing_directory(tmp_path: Path) -> None:
+    real = tmp_path / "real.ips"
+    real.write_text(_ips())
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    (scan / "link.ips").symlink_to(real)
+    assert _find(scan)["found"] is False
+    assert _find(tmp_path / "missing")["found"] is False
+    link_dir = tmp_path / "linkdir"
+    link_dir.symlink_to(scan)
+    assert _find(link_dir)["found"] is False
+
+
+@pytest.mark.parametrize(
+    ("code", "system", "environ", "expected"),
+    [
+        (-11, "Darwin", {"CI": "true", "GITHUB_ACTIONS": "true"}, True),
+        (-11, "Darwin", {}, False),  # a developer machine: never read the real home
+        (-11, "Darwin", {"CI": "true"}, False),
+        (-11, "Linux", {"CI": "true", "GITHUB_ACTIONS": "true"}, False),
+        (-9, "Darwin", {"CI": "true", "GITHUB_ACTIONS": "true"}, False),
+        (7, "Darwin", {"CI": "true", "GITHUB_ACTIONS": "true"}, False),
+    ],
+)
+def test_native_report_guard(code: int, system: str, environ: dict, expected: bool) -> None:
+    assert diag.native_report_enabled(code, system=system, environ=environ) is expected
+
+
+def test_a_non_native_exit_never_consults_the_real_reports_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom() -> Path:
+        raise AssertionError("the real DiagnosticReports must not be resolved")
+
+    monkeypatch.setattr(diag, "os_user_reports_dir", _boom)
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    child = CapturedChild([sys.executable, "-c", "import sys; sys.exit(7)"], config=tmp_path / "c")
+    assert child.wait(timeout=10) == 7
+    child.shutdown_evidence(tmp_path / "artifacts")
+    payload = json.loads(next((tmp_path / "artifacts").glob("*.json")).read_text())
+    assert "native_report" not in payload
