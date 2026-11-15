@@ -214,6 +214,19 @@ class RadientPushTransport:
         """The §3.2 ``computer`` handle — the tunnel id (SESSION-PUSH §1)."""
         return self.tunnel_id
 
+    def registration_computer_handle(self) -> str | None:
+        """Return the emit identity only while this lane owns the current binding.
+
+        Registration may outlive a tunnel/account switch or a cloud refusal.
+        Never hand a phone the old lane's handle in either case. This reads the
+        tunnel config, so the daemon calls it off the event loop. The value is
+        the existing SESSION-PUSH computer identity, not a registry-derived ID
+        or a new credential; learning it grants no authority.
+        """
+        if self._disarmed or self._tunnel_key() != (self.tunnel_id, self.credential_id):
+            return None
+        return self.computer
+
     @property
     def disarmed(self) -> bool:
         """Whether calls are refused locally; a disarmed lane may re-arm here.
