@@ -2070,7 +2070,9 @@ class DesktopFeed:
         argument is untouched by the move: the caller still reads on the tick
         that decides, so the answer is never the cache's.
         """
-        if presence.attended and presence.session_id == session_id:
+        # ``DesktopPresence.attending`` is shared with the mobile push worker's
+        # presence gate, so the phone suppresses exactly what this suppresses.
+        if presence.attending(session_id):
             return None
         return "always"
 
