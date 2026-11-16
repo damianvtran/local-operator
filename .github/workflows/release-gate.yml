@@ -249,17 +249,48 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # The phone bundle is built BEFORE `python -m build`, exactly as publish.yml's
+      # "Build the mobile web bundle" does, so this wheel is the release shape: it
+      # carries local_operator/mobile/web/dist/, and slim_wheel.py then drops the web
+      # build inputs the release drops. Without this the wheel kept ~1.0 MB of sources
+      # and lacked the bundle, so the PR size line measured a different artifact than
+      # the one PyPI stores. pnpm comes from the web package.json's packageManager pin
+      # (what corepack reads in publish.yml), cached the way mobile-web.yml caches it.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: local_operator/mobile/web/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: local_operator/mobile/web/pnpm-lock.yaml
+
+      - name: Build the mobile web bundle
+        working-directory: local_operator/mobile/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
       - name: Build the wheel
         run: |
           python -m pip install --upgrade pip
           python -m pip install build
           python -m build --wheel --outdir dist/release-gate
+          # Same assert publish.yml's release-build makes: a wheel without the
+          # phone bundle is not the release shape this job exists to measure.
+          unzip -l dist/release-gate/local_operator-*.whl | grep -q "local_operator/mobile/web/dist/index.html" || {
+            echo "::error::mobile web bundle missing from the wheel"
+            exit 1
+          }
           # The shape publish.yml ships: comments stripped (fails closed if any
           # module cannot be verified AST- and line-identical), within the PR-side
-          # budget: 17.5 MiB, the release's 18 minus the release-only assets this
+          # budget: 23.25 MiB, the release's 23.5 minus the macOS key-agent helper this
           # wheel lacks (see scripts/check_dist_size.py).
           python scripts/slim_wheel.py dist/release-gate/local_operator-*-py3-none-any.whl
-          python scripts/check_dist_size.py --budget-mib 17.5 dist/release-gate
+          # --runway fails under 21 days of PyPI cap runway (30 GiB,
+          # pypi/support#12882) BEFORE a tag exists; a PyPI outage only warns.
+          python scripts/check_dist_size.py --budget-mib 23.25 --runway dist/release-gate
 
       # The repository's own artifact check, unchanged: it installs the built
       # wheel into a throwaway venv, imports it from OUTSIDE the checkout so

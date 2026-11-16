@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import datetime as dt
 import hashlib
 import io
 import runpy
@@ -266,10 +267,10 @@ def _sized(path: Path, size: int) -> Path:
 def test_size_guard_passes_within_budget_and_warns_near_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _sized(tmp_path / "a-1.0-py3-none-any.whl", 14 * SIZE["MIB"])
+    _sized(tmp_path / "a-1.0-py3-none-any.whl", 21 * SIZE["MIB"])
     assert SIZE["main"]([str(tmp_path)]) == 0
     assert "::warning::" not in capsys.readouterr().out
-    _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    _sized(tmp_path / "a-1.0-py3-none-any.whl", 22 * SIZE["MIB"])
     assert SIZE["main"]([str(tmp_path)]) == 0
     assert "::warning::" in capsys.readouterr().out
 
@@ -277,22 +278,22 @@ def test_size_guard_passes_within_budget_and_warns_near_it(
 def test_size_guard_fails_over_budget(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _sized(tmp_path / "a-1.0-py3-none-any.whl", SIZE["BUDGET"] + 1)
     assert SIZE["main"]([str(tmp_path)]) == 1
-    assert "over the 18 MiB budget" in capsys.readouterr().err
+    assert "over the 23.5 MiB budget" in capsys.readouterr().err
 
 
 def test_a_tighter_budget_fails_what_the_release_budget_passes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """PR CI's ``--budget-mib 17.5`` goes red before the release's 18 MiB would."""
-    _sized(tmp_path / "a-1.0-py3-none-any.whl", int(17.75 * SIZE["MIB"]))
+    """PR CI's ``--budget-mib 23.25`` goes red before the release's 23.5 MiB would."""
+    _sized(tmp_path / "a-1.0-py3-none-any.whl", int(23.4 * SIZE["MIB"]))
     assert SIZE["main"]([str(tmp_path)]) == 0
-    assert SIZE["main"](["--budget-mib", "17.5", str(tmp_path)]) == 1
-    assert "over the 17.5 MiB budget" in capsys.readouterr().err
+    assert SIZE["main"](["--budget-mib", "23.25", str(tmp_path)]) == 1
+    assert "over the 23.25 MiB budget" in capsys.readouterr().err
 
 
 def test_the_budget_flag_cannot_raise_the_line(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
-        SIZE["main"](["--budget-mib", "19", str(tmp_path)])
+        SIZE["main"](["--budget-mib", "24", str(tmp_path)])
 
 
 def test_size_guard_fails_on_an_empty_directory(tmp_path: Path) -> None:
@@ -309,3 +310,224 @@ def test_wheels_only_rejects_an_sdist_in_the_upload_dir(
     assert SIZE["main"]([str(tmp_path)]) == 0, "without the flag an sdist is not checked"
     assert SIZE["main"](["--wheels-only", str(tmp_path)]) == 1
     assert "a-1.0.tar.gz is not a wheel" in capsys.readouterr().err
+
+
+# --- the phone UI's web build inputs -------------------------------------------------
+# A release wheel carries the built bundle (mobile/web/dist/); its build inputs are
+# only read to REBUILD a missing dist, so they are dropped when dist is present and
+# kept when it is not (see scripts/slim_wheel.py's module docstring).
+
+WEB = "local_operator/mobile/web/"
+WEB_INPUTS = {
+    WEB + "package.json": b'{"name": "web"}\n',
+    WEB + "pnpm-lock.yaml": b"lockfileVersion: '9.0'\n",
+    WEB + "src/main.tsx": b"export const x = 1;\n",
+    WEB + "src/i18n/en.gen.ts": b"export default {};\n",
+    WEB + "scripts/check-bundle.mjs": b"process.exit(0);\n",
+    WEB + "public/icon.svg": b"<svg/>\n",
+    WEB + ".gitignore": b"node_modules\n",
+}
+DIST = {
+    WEB + "dist/index.html": b"<!doctype html><script src=/assets/a.js></script>\n",
+    WEB + "dist/assets/a.js": b"console.log(1);\n",
+}
+KEPT = {
+    "local_operator/__init__.py": b"x = 1\n",
+    "local_operator/mobile/static/sw.js": b"self.x = 1;\n",
+}
+
+
+def _assert_record_valid(members: dict[str, bytes]) -> None:
+    record_name = f"{DIST_INFO}/RECORD"
+    rows = list(csv.reader(io.StringIO(members[record_name].decode())))
+    assert {row[0] for row in rows} == set(members)
+    for path, digest, size in rows:
+        if path == record_name:
+            assert digest == size == ""
+            continue
+        data = members[path]
+        expected = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+        assert digest == f"sha256={expected.decode()}" and int(size) == len(data)
+
+
+def test_web_inputs_are_dropped_when_the_built_bundle_is_present(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wheel = _build_wheel(tmp_path, {**KEPT, **WEB_INPUTS, **DIST})
+
+    SLIM["slim_wheel"](wheel)
+
+    members = _read(wheel)
+    assert not [name for name in members if name in WEB_INPUTS]
+    for name, data in {**DIST, **KEPT}.items():
+        assert members[name] == data, name
+    _assert_record_valid(members)
+    assert f"dropped {len(WEB_INPUTS)} phone web build input(s)" in capsys.readouterr().out
+
+
+def test_mobile_static_is_never_dropped(tmp_path: Path) -> None:
+    wheel = _build_wheel(tmp_path, {**KEPT, **WEB_INPUTS, **DIST})
+    SLIM["slim_wheel"](wheel)
+    assert (
+        _read(wheel)["local_operator/mobile/static/sw.js"]
+        == KEPT["local_operator/mobile/static/sw.js"]
+    )
+
+
+def test_web_inputs_are_kept_without_a_built_bundle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A source-built wheel keeps the sources `lop mobile install` rebuilds dist from."""
+    wheel = _build_wheel(tmp_path, {**KEPT, **WEB_INPUTS})
+
+    SLIM["slim_wheel"](wheel)
+
+    members = _read(wheel)
+    for name, data in WEB_INPUTS.items():
+        assert members[name] == data, name
+    _assert_record_valid(members)
+    assert "dropped" not in capsys.readouterr().out
+
+
+def test_dropping_web_inputs_is_idempotent(tmp_path: Path) -> None:
+    wheel = _build_wheel(tmp_path, {**KEPT, **WEB_INPUTS, **DIST})
+    SLIM["slim_wheel"](wheel)
+    first = _read(wheel)
+
+    SLIM["slim_wheel"](wheel)
+
+    assert _read(wheel) == first
+
+
+def test_a_bundle_without_assets_is_refused_and_the_wheel_untouched(tmp_path: Path) -> None:
+    """Fail closed: stripping sources under a broken dist leaves nothing to rebuild from."""
+    wheel = _build_wheel(
+        tmp_path, {**KEPT, **WEB_INPUTS, WEB + "dist/index.html": DIST[WEB + "dist/index.html"]}
+    )
+    original = wheel.read_bytes()
+
+    with pytest.raises(SLIM["SlimError"], match="assets/ is empty"):
+        SLIM["slim_wheel"](wheel)
+
+    assert wheel.read_bytes() == original
+    assert SLIM["main"]([str(wheel)]) == 1
+
+
+# --- PyPI cap runway (--runway / --runway-warn-only) ----------------------------------
+# No network: the fetch is replaced in the function's own module globals (runpy returns
+# a COPY of them, so patching SIZE itself would not reach main()).
+
+NOW = dt.datetime(2026, 11, 16, 12, 0, tzinfo=dt.timezone.utc)
+GIB = 1024**3
+
+
+def _payload(*, used: int, recent: int, old: int = 2) -> dict[str, Any]:
+    """PyPI-shaped JSON: ``recent`` releases inside the 30-day window, ``old`` outside,
+    ``used`` bytes spread over them; one recent file is yanked (still counted)."""
+    total = recent + old
+    releases: dict[str, list[dict[str, Any]]] = {}
+    for n in range(total):
+        when = NOW - dt.timedelta(days=(n % 29) + 0.5 if n < recent else 40 + n)
+        stamp = when.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        size = used // total + (used % total if n == 0 else 0)
+        releases[f"0.{n}.0"] = [
+            {"size": size, "upload_time_iso_8601": stamp, "yanked": n == 0},
+        ]
+    releases["0.empty"] = []  # a release with no files is neither size nor cadence
+    return {"releases": releases}
+
+
+def _runway(wheels: list[Path], payload: Any, *, fail_below: float | None = 21) -> list[str]:
+    def fetch() -> Any:
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+    return SIZE["runway"](wheels, fail_below=fail_below, fetch=fetch, now=NOW)
+
+
+def _days(payload: dict[str, Any], per_release: int) -> float:
+    used = sum(f["size"] for files in payload["releases"].values() for f in files)
+    recent = sum(1 for files in payload["releases"].values() if files) - 2
+    return (SIZE["PROJECT_CAP"] - used) / (per_release * recent / 30)
+
+
+def test_the_cap_is_30_gib() -> None:
+    assert SIZE["PROJECT_CAP"] == 32_212_254_720
+
+
+def test_pure_only_estimates_the_macos_wheel(tmp_path: Path) -> None:
+    pure = _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    size, how = SIZE["release_bytes"]([pure])
+    assert size == 2 * 17 * SIZE["MIB"] + int(0.16 * SIZE["MIB"]) and "estimated" in how
+    mac = _sized(tmp_path / "a-1.0-py3-none-macosx_11_0_universal2.whl", 18 * SIZE["MIB"])
+    assert SIZE["release_bytes"]([pure, mac])[0] == 35 * SIZE["MIB"]
+
+
+def test_a_long_runway_passes_quietly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    wheel = _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    payload = _payload(used=13 * GIB, recent=180)  # 6/day, ~85 days at 34 MiB
+    assert _runway([wheel], payload) == []
+    out = capsys.readouterr().out
+    assert "::warning::" not in out
+    assert "cadence 6.00 releases/day (180 in 30 d)" in out
+    assert "used 13,958,643,712 B" in out  # the yanked file's bytes are included
+
+
+def test_under_60_days_warns_but_passes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    wheel = _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    payload = _payload(used=20 * GIB, recent=180)
+    assert 21 < _days(payload, 34 * SIZE["MIB"] + int(0.16 * SIZE["MIB"])) < 60
+    assert _runway([wheel], payload) == []
+    assert "::warning::PyPI runway is" in capsys.readouterr().out
+
+
+def test_under_21_days_fails_and_names_the_retention_owner(tmp_path: Path) -> None:
+    wheel = _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    payload = _payload(used=27 * GIB, recent=180)
+    assert _days(payload, 34 * SIZE["MIB"] + int(0.16 * SIZE["MIB"])) < 21
+    problems = _runway([wheel], payload)
+    assert len(problems) == 1 and "retention decision is Damian's" in problems[0]
+
+
+def test_warn_only_never_fails_under_21_days(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wheel = _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    assert _runway([wheel], _payload(used=27 * GIB, recent=180), fail_below=None) == []
+    assert "::warning::PyPI runway is" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [OSError("network unreachable"), {"releases": {"1.0": [{"size": "x"}]}}, {"info": {}}],
+    ids=["unreachable", "malformed-file", "no-releases-key"],
+)
+def test_pypi_unavailable_or_malformed_only_warns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], payload: Any
+) -> None:
+    wheel = _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    assert _runway([wheel], payload) == []
+    assert "::warning::PyPI runway check skipped" in capsys.readouterr().out
+
+
+def test_main_wires_runway_and_warn_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _sized(tmp_path / "a-1.0-py3-none-any.whl", 17 * SIZE["MIB"])
+    # 27 GiB used with recent uploads relative to the real clock: under 21 days.
+    real_now = dt.datetime.now(dt.timezone.utc)
+    stamp = (real_now - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    payload = {
+        "releases": {
+            f"0.{n}.0": [{"size": 27 * GIB // 180, "upload_time_iso_8601": stamp}]
+            for n in range(180)
+        }
+    }
+    monkeypatch.setitem(SIZE["main"].__globals__, "fetch_pypi_json", lambda: payload)
+    assert SIZE["main"](["--runway", str(tmp_path)]) == 1
+    assert "retention decision is Damian's" in capsys.readouterr().err
+    assert SIZE["main"](["--runway-warn-only", str(tmp_path)]) == 0
+    assert SIZE["main"]([str(tmp_path)]) == 0  # no flag: no PyPI read at all
+    with pytest.raises(SystemExit):
+        SIZE["main"](["--runway", "--runway-warn-only", str(tmp_path)])

@@ -484,23 +484,56 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The phone bundle is built BEFORE `python -m build`, exactly as publish.yml's
+      # "Build the mobile web bundle" does, so this wheel is the release shape: it
+      # carries local_operator/mobile/web/dist/, and slim_wheel.py then drops the web
+      # build inputs the release drops. Without this the wheel kept ~1.0 MB of sources
+      # and lacked the bundle, so the PR size line measured a different artifact than
+      # the one PyPI stores. pnpm comes from the web package.json's packageManager pin
+      # (what corepack reads in publish.yml), cached the way mobile-web.yml caches it.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: local_operator/mobile/web/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: local_operator/mobile/web/pnpm-lock.yaml
+
+      - name: Build the mobile web bundle
+        working-directory: local_operator/mobile/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
       - name: Build the wheel
         run: |
           python -m pip install --upgrade pip
           python -m pip install build
           python -m build --wheel --outdir dist/packaging-smoke
+          # Same assert publish.yml's release-build makes: a wheel without the
+          # phone bundle is not the release shape this job exists to measure.
+          unzip -l dist/packaging-smoke/local_operator-*.whl | grep -q "local_operator/mobile/web/dist/index.html" || {
+            echo "::error::mobile web bundle missing from the wheel"
+            exit 1
+          }
 
       # The release ships a comment-stripped wheel (scripts/slim_wheel.py, for
-      # PyPI's 10 GB project cap), so the smoke legs must install that exact
+      # PyPI's 30 GiB project cap, pypi/support#12882), so the smoke legs must install that exact
       # shape, and a PR whose code the slimmer cannot verify must fail here
-      # rather than at release time. The size guard runs at --budget-mib 17.5, not
-      # the release's 18: this wheel lacks the phone bundle and the key-agent helper
-      # (~0.37 MiB together), so the plain budget would first go red in the release's
-      # keyagent-macos job, after the tag exists (see scripts/check_dist_size.py).
+      # rather than at release time. The size guard runs at --budget-mib 23.25, not
+      # the release's 23.5: this wheel carries the phone bundle but lacks the macOS
+      # key-agent helper (~0.16 MiB), so the plain budget would first go red in the
+      # release's keyagent-macos job, after the tag exists (see
+      # scripts/check_dist_size.py).
       - name: Slim the wheel and check its size budget
         run: |
           python scripts/slim_wheel.py dist/packaging-smoke/local_operator-*-py3-none-any.whl
-          python scripts/check_dist_size.py --budget-mib 17.5 dist/packaging-smoke
+          # --runway-warn-only: the PyPI cap runway is reported here but never
+          # blocks an unrelated PR; it fails only on the release path, where the
+          # bytes are spent (release-gate.yml, publish.yml release-build).
+          python scripts/check_dist_size.py --budget-mib 23.25 --runway-warn-only dist/packaging-smoke
 
       - uses: actions/upload-artifact@v7
         with:

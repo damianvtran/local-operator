@@ -1481,48 +1481,76 @@ it landed.
 
 ### PyPI storage cap and per-release size
 
-PyPI caps a project at **10 GB total**, every release counts, and this project
-ships several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
-19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the cap was
-hit and v0.90.18/19 failed with `400 Project size too large`. Two changes bring
-a release to ~29 MB:
+PyPI caps this project at **30 GiB** (32,212,254,720 B), raised from the
+10 GB default on 2026-11-04 in pypi/support#12882 (#12738 closed 11-05 as
+covered). Every release counts, yanked files included, and this project ships
+several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
+19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the old
+cap was hit and v0.90.18/19 failed with `400 Project size too large`. Two
+changes cut a release's bytes:
 
 - **Slim wheels.** `publish.yml` runs `scripts/slim_wheel.py` on the pure wheel
   (the macOS wheel is retagged from it): `#` comments are stripped, while
   docstrings, shebang/coding lines, pragma comments (`# type:`, `# noqa`,
   `# pragma`, `# pyright:`, `# fmt:`) and every line number are kept. Each
   module must be `ast.dump(..., include_attributes=True)`-identical with an
-  equal line count, or the build fails. `ci.yml` `packaging-smoke-build` and
-  `release-gate.yml` run the same step, so a PR the slimmer cannot verify fails
-  before a release does.
+  equal line count, or the build fails. When the wheel carries the built phone
+  bundle (`local_operator/mobile/web/dist/index.html` plus `dist/assets/`), it
+  also drops every other `mobile/web/` member — the web build inputs (`src/`,
+  `.gen.ts`, lockfile, scripts, manifests, ~1.0 MB compressed) that only
+  `mobile/install.py` reads to rebuild a missing `dist/`; a wheel without
+  `dist/` keeps them so `lop mobile install` can still build. `ci.yml`
+  `packaging-smoke-build` and `release-gate.yml` run the same step, so a PR the
+  slimmer cannot verify fails before a release does.
 - **The sdist lives on the GitHub Release** (`sdist-release` job), not on
   PyPI. Nothing installs it from PyPI: the updater, desktop app and install
   scripts take wheels, and the Dockerfile builds from the tree.
 
-`scripts/check_dist_size.py` is the guard: a wheel over **18 MiB** fails, over
-16 MiB warns. `--wheels-only` runs on both artifacts `pypi-publish` downloads
-(in `release-build` and `keyagent-macos`); the publisher itself runs no repo
-code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
-`release-gate.yml`) passes `--budget-mib 17.5`: its wheel lacks the phone
-bundle and key-agent helper (~0.37 MiB), so the plain 18 MiB line would first
-go red in the release's `keyagent-macos` job, after the tag exists.
+**The runway check is the authoritative gate.** `scripts/check_dist_size.py
+--runway` reads `https://pypi.org/pypi/local-operator/json` and computes used
+bytes (all files, yanked too), cadence (releases first uploaded in the last 30
+days / 30), bytes per release (pure + macOS wheel; with only the pure wheel,
+pure x2 + 0.16 MiB) and `runway_days = (cap - used) / (bytes_per_release x
+cadence)`. Under **60 days** it warns: the retention decision goes to Damian
+then. Under **21 days** it fails `release-gate.yml` (before the tag) and
+`publish.yml` `release-build`. `ci.yml` `packaging-smoke-build` passes
+`--runway-warn-only`, so a low runway never blocks an unrelated PR. A PyPI
+outage or malformed JSON only warns.
+
+**The per-wheel line is a jump tripwire** derived from the cap: on 2026-11-16
+(19,249,689,996 B remaining, 6.43 releases/day) a 23.78 MiB wheel gives exactly
+60 days of linear runway, so a wheel over **23.5 MiB** fails and over
+**21.5 MiB** warns. `--wheels-only` runs on both artifacts `pypi-publish`
+downloads (in `release-build` and `keyagent-macos`); the publisher itself runs
+no repo code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
+`release-gate.yml`) passes `--budget-mib 23.25`. Since 2026-11-16 both build
+the phone bundle before `python -m build`, as `publish.yml` does, so the PR
+wheel is the release shape and the old ~0.37 MiB proxy gap (bundle plus
+helper) is now just the macOS key-agent helper (~0.16 MiB); the plain line
+would still first go red in the release's `keyagent-macos` job, after the tag
+exists.
 
 **Growth, measured.** The pure wheel grew 12.62 MiB (0.65.0, 10-01) to
-19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim. The
-0.91.0 slim wheel with the bundle is 14.41 MiB. At that rate the 16 MiB warning
-arrives in ~9 days and the 17.5 MiB PR line in ~3 weeks. **When the warning
-fires:** compare the wheel's member list and sizes against the last release
-(`unzip -l`) to find what grew; a large non-`.py` asset or a vendored file is
-the usual cause and the fix is to drop or move it. If it is genuine code
-growth, plan the next cut before the PR line is reached (docstrings are not a
-candidate: they are runtime help text), and raise the budgets only together
-with a retention change, after re-reading the script's docstring.
+19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim.
+**When a size warning fires:** compare the wheel's member list and sizes
+against the last release (`unzip -l`) to find what grew; a large non-`.py`
+asset or a vendored file is the usual cause and the fix is to drop or move it.
+Docstrings are not a candidate: they are runtime help text.
 
-**Retention is the operator's decision.** Suggested policy: keep every release
-from the last ~30 days and the last patch of every minor. Deleting a PyPI
-release is a manual, irreversible operator action on pypi.org; agents never
-delete releases or files. Quota-increase requests are pending as
-pypi/support#12738 and pypi/support#12882.
+**2026-11-16 measurement.** The 0.106.2 slim pure wheel (CI shape, no
+`dist/`) was 18,347,774 B; 0.106.1 → 0.106.2 was only +2,294 B, so growth is
+cumulative. Growth since 0.91.2 is +3.42 MB, of which `.py` +2.56 MB, i18n
+JSON +552 KB and `.flac` +181 KB. Dropping the phone web build inputs saves
+~1.0 MB per wheel. **Projection:** 12.96 GB used of 32.21 GB; after that
+relief ~35.4 MB per release at 6.43/day is a linear runway of ~85 days; with
+wheel growth of 0.189 MiB/day, ~63 days, reaching the cap around
+**2027-01-18**.
+
+**Retention is the operator's decision.** When the runway warning fires
+(<60 days), take the retention decision to Damian; the release gate fails at
+<21 days. Suggested policy: keep every release from the last ~30 days and the
+last patch of every minor. Deleting a PyPI release is a manual, irreversible
+operator action on pypi.org; agents never delete releases or files.
 
 ### What the release owner does
 
