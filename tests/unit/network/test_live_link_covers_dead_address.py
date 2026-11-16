@@ -9,9 +9,12 @@ peer's relay, so a working pair reports red. The address is not a fault while
 the peer is reachable over its own link; it is information.
 
 THE RIG: two real relays on loopback, real pairing, a real inbound link (B
-dials A), and a loopback BLACK HOLE for the declared address -- a listener
-whose one-slot accept queue is already full, so a SYN is dropped and the
-connect times out exactly as a filtered address does (no non-loopback traffic).
+dials A). The declared address is made SILENT deterministically: the probe's
+``socket.create_connection`` raises ``TimeoutError`` for that one endpoint and
+passes every other connect through, so the link, the relays and every other
+dial stay real. A kernel trick (a full ``listen(0)`` queue) only drops SYNs on
+Linux; macOS completes the connect (#4110 round 1, R1-1), so the silence is
+injected at the one seam the probe owns instead. No traffic leaves loopback.
 
 Controls that must not move:
 * no live link -> the dead address keeps its fault and its exact remedy;
@@ -44,28 +47,28 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by im
     devices,
 )
 
+#: The silent declared address. Never dialled: :func:`black_hole` answers it
+#: with the timeout a filtered address produces.
+DEAD = "127.0.0.1:2"
+
 
 @pytest.fixture
-def black_hole() -> Iterator[str]:
-    """A loopback address whose connect TIMES OUT: a full one-slot accept queue."""
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(0)
-    endpoint = f"127.0.0.1:{listener.getsockname()[1]}"
-    filler = socket.socket()
-    filler.settimeout(1.0)
-    filler.connect(listener.getsockname())
-    # Rig check: a further connect really is dropped, not refused.
-    probe = socket.socket()
-    probe.settimeout(0.5)
-    with pytest.raises(TimeoutError):
-        probe.connect(listener.getsockname())
-    probe.close()
-    try:
-        yield endpoint
-    finally:
-        filler.close()
-        listener.close()
+def black_hole(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A declared address whose connect TIMES OUT, on every platform."""
+    real = socket.create_connection
+    host, _, port = DEAD.rpartition(":")
+    hits: list[float] = []
+
+    def connect(address: Any, *args: Any, **kwargs: Any) -> socket.socket:
+        if tuple(address) == (host, int(port)):
+            hits.append(1.0)
+            raise TimeoutError("timed out")
+        return real(address, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", connect)
+    yield DEAD
+    # Rig check: the probe really asked this address (the row is about it).
+    assert hits, "the silent address was never dialled"
 
 
 def _inbound_link(
@@ -194,3 +197,102 @@ def test_a_refused_address_with_a_live_link_is_unchanged(
         assert refused and refused[0]["ok"] is False
     finally:
         server_b.stop()
+
+
+def test_a_bad_endpoint_with_a_live_link_stays_red(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A malformed declared address is a config fault, not silence (R1-5)."""
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, host, port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    _inbound_link(server_a, server_b, record, host, port)
+    peer = server_b.identity.device_id
+    _set_peer_endpoints(server_a, record, peer, ["127.0.0.1:not-a-port"])
+    try:
+        _rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+        row = _rows(payload, "reachability", device_id=peer)[0]
+        assert row["observed"]["outcome"] == "bad_endpoint", row
+        assert row["ok"] is False
+        assert "covered_by_link" not in row["observed"]
+        mine = _doctor_rows(server_a, peer)
+        bad = [r for r in mine if r.get("check") == "reachability" and r.get("endpoint")]
+        assert bad and all(r["ok"] is False for r in bad), mine
+    finally:
+        server_b.stop()
+
+
+def _silent(endpoint: str) -> dict[str, Any]:
+    return {
+        "check": "reachability",
+        "endpoint": endpoint,
+        "ok": False,
+        "detail": relay.DETAIL_NO_ANSWER,
+        "observed": {"outcome": "no_answer"},
+        "remedies": ["the firewall advice"],
+    }
+
+
+def test_a_same_lan_private_address_stays_red_and_an_off_lan_one_is_covered() -> None:
+    """F9 counter-probe, pinned on the rule itself (R1-2)."""
+    own = ["192.168.1.20"]
+    same_lan, public = _silent("192.168.1.5:4097"), _silent("203.0.113.9:4097")
+    rows = [same_lan, public]
+    readiness.mark_covered_by_link(rows, link_live=True, own_addresses=own)
+    assert same_lan["ok"] is False and same_lan["remedies"] == ["the firewall advice"]
+    assert "covered_by_link" not in same_lan["observed"]
+    assert public["ok"] is True and public["remedies"] == []
+    assert public["observed"]["covered_by_link"] is True
+
+    untouched = [_silent("203.0.113.9:4097")]
+    readiness.mark_covered_by_link(untouched, link_live=False, own_addresses=own)
+    assert untouched[0]["ok"] is False and untouched[0]["remedies"] == ["the firewall advice"]
+
+
+def test_only_silence_is_covered_never_a_config_or_unproven_row() -> None:
+    """The family is SILENCE: no_answer and timeouts, in both dialects (R1-5)."""
+    covered = [
+        _silent("203.0.113.9:1"),
+        {
+            "check": "reachability",
+            "endpoint": "203.0.113.9:2",
+            "ok": False,
+            "detail": f"{relay.CONNECT_FAILED_PREFIX}TimeoutError",
+        },
+    ]
+    kept = [
+        {"check": "reachability", "endpoint": e, "ok": False, "observed": {"outcome": o}}
+        for e, o in (
+            ("x", "bad_endpoint"),
+            ("nohost.invalid:1", "resolve_failed"),
+            ("203.0.113.9:3", "no_route"),
+            ("203.0.113.9:4", "not_attempted"),
+            ("203.0.113.9:5", "refused"),
+        )
+    ] + [
+        {
+            "check": "reachability",
+            "endpoint": "203.0.113.9:6",
+            "ok": False,
+            "detail": relay.DETAIL_BAD_ENDPOINT,
+        },
+        {
+            "check": "reachability",
+            "endpoint": "203.0.113.9:7",
+            "ok": False,
+            "detail": f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError",
+        },
+        {
+            "check": "reachability",
+            "endpoint": "203.0.113.9:8",
+            "ok": False,
+            "detail": relay.DETAIL_NOT_ATTEMPTED,
+        },
+    ]
+    readiness.mark_covered_by_link(covered + kept, link_live=True, own_addresses=[])
+    assert all(r["ok"] is True for r in covered), covered
+    assert all(r["ok"] is False for r in kept), kept

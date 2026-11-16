@@ -6223,6 +6223,50 @@ def mark_informational(rows: list[dict[str, Any]]) -> None:
             row["remedies"] = []
 
 
+#: The readiness outcomes that mean SILENCE: the candidate was dialled and
+#: nothing answered before the budget ran out. Narrower than the scope family
+#: (``_SCOPE_OUTCOMES``) on purpose: a bad or unresolvable endpoint, a missing
+#: route and an undialled candidate are not silence a live link can vouch for.
+_SILENT_OUTCOMES: frozenset[str] = frozenset({"no_answer", "no_answer_elsewhere"})
+
+
+def _silent_row(row: Mapping[str, Any]) -> bool:
+    """Whether a reachability row recorded SILENCE, in either dialect.
+
+    The readiness dialect rides ``observed.outcome``; the doctor dialect rides
+    ``detail``, read through the PRODUCER's constants (``_did_not_lead``'s
+    discipline): ``no_answer``, or a connect that TIMED OUT.
+    """
+    observed = row.get("observed")
+    outcome = str(observed.get("outcome") or "") if isinstance(observed, Mapping) else ""
+    if outcome:
+        return outcome in _SILENT_OUTCOMES
+    detail = str(row.get("detail") or "")
+    from local_operator.network import relay as relay_mod
+
+    if detail == relay_mod.DETAIL_NO_ANSWER:
+        return True
+    if detail.startswith(relay_mod.CONNECT_FAILED_PREFIX):
+        return detail.split(":", 1)[1] in ("TimeoutError", "socket.timeout")
+    return False
+
+
+def link_is_live(server: Any, device_id: str) -> bool:
+    """Whether ``device_id`` has a live link NOW, read under the link table's lock.
+
+    ``_link_for`` scans ``server.links`` while ``register_link``/``link_closed``
+    mutate it under ``_links_lock`` (an RLock); an unlocked scan from a control
+    thread can raise "dictionary changed size during iteration" and fail a whole
+    report (#4110 round 1, R1-3). Callers read this AFTER their probe, so a link
+    that began closing during the probe never vouches (R1-4).
+    """
+    lock = getattr(server, "_links_lock", None)
+    if lock is None:
+        return server._link_for(device_id) is not None  # noqa: SLF001 — the one link seam
+    with lock:
+        return server._link_for(device_id) is not None  # noqa: SLF001 — the one link seam
+
+
 def mark_covered_by_link(
     rows: list[dict[str, Any]], *, link_live: bool, own_addresses: Sequence[str]
 ) -> None:
@@ -6239,9 +6283,12 @@ def mark_covered_by_link(
     CONSTRAINTS, each the honest negative of its neighbour:
     * only with a live link (``server._link_for``: never one that has begun
       closing); with none every row keeps its fault and its exact remedy;
-    * only the NO-ANSWER family (:func:`_no_answer_row`): a REFUSAL proves
-      something answered at that address and refused, so the address really is
-      wrong -- that row keeps failing with its existing "its link is live" advice;
+    * only SILENCE (:func:`_silent_row`): a timeout or no answer before the
+      budget ran out. A REFUSAL proves something answered there and refused, so
+      the address really is wrong (its existing "its link is live" advice stays);
+      a malformed or unresolvable address is a config fault a live link does not
+      excuse (#4110 round 1, R1-5); a candidate this run never dialled is unproven
+      and proves nothing either way;
     * a row another rule already claimed (scope, informational) is left alone;
     * a PRIVATE address on a /16 this device itself holds keeps its fault (the
       F9 counter-probe): from the same LAN that address is askable, so silence
@@ -6257,7 +6304,7 @@ def mark_covered_by_link(
         if row["ok"] or str(row.get("check") or "") != "reachability":
             continue
         endpoint = str(row.get("endpoint") or "")
-        if not endpoint or not _no_answer_row(row):
+        if not endpoint or not _silent_row(row):
             continue
         host = endpoint.rpartition(":")[0] or endpoint
         if _private_block(host) is not None and not _off_network(host, own_addresses):
@@ -6644,7 +6691,11 @@ def _reachability_rows(
     mark_out_of_scope(rows, own_addresses)
     mark_informational(rows)
     # LAST: an address another answer already vouched for keeps that reading.
-    mark_covered_by_link(rows, link_live=link is not None, own_addresses=own_addresses)
+    # Re-read AFTER the probe (R1-4): ``link`` above was taken before it, and a
+    # link that began closing meanwhile must not vouch.
+    mark_covered_by_link(
+        rows, link_live=link_is_live(server, member.device_id), own_addresses=own_addresses
+    )
     return rows, link
 
 

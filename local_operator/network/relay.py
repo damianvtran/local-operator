@@ -16007,7 +16007,8 @@ class RelayServer:
         # that dials in while its advertised address is dead is up; neither the
         # silent address nor the "restart its relay / open the port" row below is
         # a fault while its link is live. Without one, both stay exactly as before.
-        link_live = self._link_for(member.device_id) is not None
+        # Read under the link lock and AFTER the probe (#4110 round 1, R1-3/R1-4).
+        link_live = readiness_mod.link_is_live(self, member.device_id)
         readiness_mod.mark_covered_by_link(rows, link_live=link_live, own_addresses=own_addresses)
         if (
             not link_live
