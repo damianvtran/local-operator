@@ -207,11 +207,7 @@ def test_assignment_dedup_recursion_budget_never_certifies_unexamined_effects(
         body += "\nrm -rf ~/.local-operator"
     reader = f"cat <<{delimiter}\n{body}\nEOF\n"
     if kind == "mixed":
-        reader = (
-            "cat <<'LITERAL' <<EOF\n`rm -rf ~/.local-operator`\nLITERAL\n"
-            + body
-            + "\nEOF\n"
-        )
+        reader = "cat <<'LITERAL' <<EOF\n`rm -rf ~/.local-operator`\nLITERAL\n" + body + "\nEOF\n"
     command = f"body=$({reader})"
     for _ in range(nesting - 1):
         command = f'body="$({command})"'
