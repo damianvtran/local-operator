@@ -1548,9 +1548,11 @@ async def test_the_card_refuses_while_a_desktop_batch_word_is_unconfirmed(
 
     session = await _session(tmp_path)
     ask_id = _enqueue_bridge_ask(session, issuance_key=f"iss-p1-batch-{word}")
+    runtime = session.bridge_runtime
+    assert runtime is not None
     intents = DecideIntents(tmp_path)
     batch, created = intents.record(
-        session.bridge_runtime.key(),
+        runtime.key(),
         ask_id=ask_id,
         question_id=MESSAGE_ID,
         word="approve",
@@ -1572,6 +1574,7 @@ async def test_the_card_refuses_while_a_desktop_batch_word_is_unconfirmed(
     assert refused["error"] == render_mod.BATCH_PENDING_COPY
     assert log.read_bytes() == before
     after = intents.get(batch.intent_id)
+    assert after is not None
     assert (after.state, after.word, after.consumption_row_id) == (
         "pending",
         "approve",
