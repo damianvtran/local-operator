@@ -59,6 +59,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import signal
 import sqlite3
 import stat
@@ -3218,7 +3219,7 @@ def _entry_dev(entry: os.DirEntry[str]) -> int:
     return entry.stat(follow_symlinks=False).st_dev
 
 
-def _nested_repository(real: str) -> str | None:
+def _nested_repository(real: str, *, worktrees: bool = False) -> str | None:
     """Why ``real`` may hold a repository of its own (not a linked worktree), or ``None``.
 
     A ``.git`` DIRECTORY anywhere in the bounded walk is a clone or ``git
@@ -3238,6 +3239,10 @@ def _nested_repository(real: str) -> str | None:
     another device than the rig is refused, never entered (a mounted volume
     is not the rig's to delete, and BSD ``rm -rf`` without ``-x`` would
     descend into it).
+
+    ``worktrees=True`` also counts a ``.git`` FILE (a linked worktree inside):
+    for callers with no ``_reached_worktrees`` pass of their own, such as the
+    typed whole-set settlement (``check._typed_set_recoverable``, review B2).
     """
     try:
         root_dev = os.stat(real).st_dev
@@ -3262,6 +3267,8 @@ def _nested_repository(real: str) -> str | None:
                 return f"unreadable entry {entry.path}"
             if entry.name == ".git" and is_dir:
                 return f"nested repository at {current}"
+            if worktrees and entry.name == ".git":
+                return f"linked worktree at {current}"
             if not is_dir:
                 continue
             if dev != root_dev:
@@ -3366,6 +3373,19 @@ _LS_REMOTE_TIMEOUT_S = 8.0
 _FETCH_TIMEOUT_S = 20.0
 
 
+def _askpass_false() -> str:
+    """An absolute ``false`` for ``GIT_ASKPASS``, resolved where it actually lives.
+
+    WHY (QA round 2, PR #4098): ``/bin/false`` does not exist on macOS (it is
+    ``/usr/bin/false``), so git failed to spawn the askpass at all. That still
+    failed closed, but by accident. Looked up only in the system directories,
+    never ``$PATH``, so nothing on the caller's path can stand in for it; the
+    last resort is an empty string, which git treats as "no askpass" (and
+    ``GIT_TERMINAL_PROMPT=0`` plus no tty still refuses any prompt).
+    """
+    return shutil.which("false", path="/usr/bin:/bin") or ""
+
+
 def _git_net(args: Sequence[str], cwd: str, *, timeout: float) -> str | None:
     """A git call that may reach the network: no prompt, no tty, group-reaped.
 
@@ -3381,7 +3401,7 @@ def _git_net(args: Sequence[str], cwd: str, *, timeout: float) -> str | None:
     # an https origin never reaches the keychain (the system gitconfig sets
     # ``credential.helper=osxkeychain`` here) — the same posture as the
     # ``finished_foreign_worktree`` ls-remote. Unauthenticated reads only.
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS="/bin/false")
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS=_askpass_false())
     env.pop("SSH_ASKPASS", None)
     try:
         proc = subprocess.Popen(
@@ -3841,6 +3861,21 @@ class OperatorWords:
     #: The picked labels plus any typed answer: a path these name is the
     #: operator's pick even when an unpicked option names it too.
     picked: str = ""
+    #: The part of ``approved`` that only a TYPED answer to a multi-target
+    #: question approved (:func:`_typed_set_question`), one question per
+    #: line. ``DeleteCase.evidence_basis`` settles a path reached ONLY
+    #: through these on the answer alone when nothing unrecoverable can be
+    #: lost (review B2 defence in depth, PR #4098); otherwise the judge reads
+    #: the operator's words.
+    typed_set: str = ""
+
+    @property
+    def firm(self) -> str:
+        """``approved`` minus the typed whole-set questions: picks and exact-path answers."""
+        if not self.typed_set:
+            return self.approved
+        typed = set(self.typed_set.split("\n"))
+        return "\n".join(line for line in self.approved.split("\n") if line not in typed)
 
 
 @dataclass
@@ -3938,6 +3973,7 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
     answers = record.get("answers") or {}
     parts: list[str] = []
     approved: list[str] = []
+    typed_set: list[str] = []
     picked: list[str] = []
     unpicked: list[str] = []
     for q in questions:
@@ -3953,7 +3989,9 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
         # The consent rendering, which the refusal side also reads for every
         # question this answer kept (``unanswered_asks``, review R2-M3).
         parts.append(f"{_ask_question_text(q)} -> operator answered: {', '.join(chosen)}")
-        approved.extend(_approved_text(q, opts, labels, chosen))
+        got = _approved_text(q, opts, labels, chosen)
+        approved.extend(got)
+        typed_set.extend(_typed_set_question(q, labels, chosen, got))
         picked.extend(chosen)
         unpicked.extend(lbl for lbl in labels if lbl not in chosen)
     if not parts:
@@ -3966,6 +4004,7 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
         approved="\n".join(approved),
         unpicked="\n".join(unpicked),
         picked="\n".join(picked),
+        typed_set="\n".join(typed_set),
     )
 
 
@@ -4117,25 +4156,69 @@ _HANDOFF_RE = re.compile(
     r"|notify|loop\s+in|follow\s+up\s+with|report\s+(?:(?:it|this|back)\s+)?to"
     r"|let\s+\w+\s+know|cc)\s+\S"
 )
-#: Words that, anywhere in a hand-off clause, may bend the delete itself:
-#: exclusion, keeping, condition, ordering, retraction. Their presence sends
-#: the answer to the judge even when they were meant for the hand-off — the
-#: safe direction ("tell Aida, unless it is dirty", "… about es first").
-_HANDOFF_QUALIFIER_RE = re.compile(
-    r"(?i)\b(?:but|except|excluding|unless|if|only|save|keep|kept|keeping|hold|wait|stop"
-    r"|cancel|skip|leave|instead|restore|undo|revert|first|before|after|until|once|then"
-    r"|later|mind|actually|scratch|no|nope|never|nothing|none|retract)\b"
+#: Vocabulary that, ANYWHERE in a hand-off clause and in ANY form, sends the
+#: answer to the judge (review B2, PR #4098). WHY so broad: the B1 version
+#: listed a few exact qualifier words, so "tell Aida the dirty one shouldn't
+#: be removed", "… must not be touched", "… is still needed", "… put qa-push
+#: back", "… sauf qa-push", "… a mistake to delete", "… is precious" and
+#: "… I am reconsidering" all read as a benign hand-off and settled a dirty,
+#: unmerged tree with no judge. A hand-off is benign only when it says
+#: NOTHING about deleting, keeping or retaining anything; these are matched
+#: as word STEMS (``remov\w*`` = remove/removed/removal/removing) so passive
+#: and noun forms cannot slip through. Over-matching is the safe direction:
+#: it costs one judge call that sees the operator's words verbatim.
+#: Deliberately NOT here: "blocked", "require … approval", "guardrails",
+#: "guidance", "tuning" — both of Damian's real answers (ask a-798d and its
+#: sibling lane) use them, and they are about the guard process, not about
+#: which target goes.
+_HANDOFF_VETO_RE = re.compile(
+    r"(?i)\b(?:"
+    # deletion, in any form
+    r"remov\w*|delet\w*|wip(?:e|ed|es|ing)\b|eras\w*|discard\w*|purg\w*|destroy\w*"
+    r"|trash\w*|nuk\w*|rm|prun\w*|drop\w*|touch\w*|clean\w*|los(?:e|es|ing|t)\b"
+    r"|get\s+rid|throw\w*"
+    # keeping / retention / recovery
+    r"|keep\w*|kept|hold\w*|held|sav(?:e|ed|es|ing)\b|retain\w*|preserv\w*|protect\w*"
+    r"|spar(?:e|ed|ing)\b|need\w*|necessar\w*|back|restor\w*|recover\w*|undo\w*|undid"
+    r"|revert\w*|mistake\w*|wrong|precious|important|valuable|matters?|reconsider\w*"
+    r"|rethink\w*|still|stay\w*|remain\w*|leav(?:e|es|ing)\b|left|untouched|alone"
+    r"|ignor\w*|skip\w*|spare"
+    # stopping / retraction / ordering
+    r"|wait\w*|stop\w*|cancel\w*|paus\w*|halt\w*|abort\w*|retract\w*|instead|actually"
+    r"|scratch|mind|first|before|after|until|till|once|then|later|yet"
+    # exclusion / condition
+    r"|except\w*|exclud\w*|sauf|but|only|unless|if|apart|besides|without|other\s+than"
+    # refusal
+    r"|no|nope|never|nothing|none|neither|nor"
+    r")\b"
+)
+#: A reference to a TARGET inside a hand-off clause (review B2): a path, a
+#: name-like token (``qa-push``, ``es_2``, ``v1.2``), a state adjective that
+#: picks trees out ("the dirty one"), or a noun for the things being removed
+#: ("her worktree", "that one", "this one"). The question's own basenames
+#: are caught over the whole answer by :func:`_names_question_path`; this
+#: catches the names and descriptions the question never spelled. A hand-off
+#: that has to point at a target is not "tell someone else" any more.
+_HANDOFF_TARGET_RE = re.compile(
+    r"(?i)(?:[~/]|\b\w+[-_./]\w|\b\w*\d\w*\b"
+    r"|\b(?:one|ones|worktrees?|trees?|rigs?|branch\w*|folders?|director\w*|dirs?"
+    r"|repos?|repositor\w*|checkouts?|clones?|copy|copies|files?|work|changes|commits?"
+    r"|data|stuff|dirty|clean|merged|unmerged|uncommitted|wip|detached)\b)"
 )
 #: A negation inside a hand-off clause counts only when it can bend the
 #: delete: "don't remove", "not es", "not the dirty one", a bare "not". The
 #: real answer's "should not require human approval" / "shouldn't be blocked"
-#: / "doesn't get blocked" is a statement about the guard: a modal or
-#: auxiliary verb, the negation, then a verb that is not a removal verb.
+#: / "doesn't get blocked" is a statement about the guard. Review B2: the B1
+#: version accepted any "<modal> not be …", so "shouldn't be removed" was
+#: harmless; now only the guard-process verbs follow the negation (an
+#: optional "be"/"get" then blocked/required/asked/prompted/gated), and
+#: the vocabulary veto above still runs over the whole clause.
 _NEGATION_RE = re.compile(r"(?i)\b(?:not\b|\w*n['\u2019]t\b)")
 _HARMLESS_NEGATION_RE = re.compile(
-    r"(?i)\b(?:should|would|could|does|did|is|are|was|were|will|must|need|can|has|have)"
-    r"(?:\s+not|n['\u2019]t)\s+(?!(?:delete|remove|rm|wipe|discard|clean|touch|do|go|happen|run)\b)"
-    r"(?:be|get|require|need|have|block|ask|stop|prompt|wait|hold|pause)\b"
+    r"(?i)\b(?:should|would|could|does|did|is|are|was|were|will|must|can)"
+    r"(?:\s+not|n['\u2019]t)\s+"
+    r"(?:(?:be|get)\s+(?:blocked|required|asked|prompted|gated|flagged)"
+    r"|(?:require|block|ask|prompt|gate)\b)"
 )
 
 
@@ -4176,9 +4259,12 @@ def _typed_whole_set(answer: str, question: str = "") -> bool:
        approval-restating words (``_WHOLE_SET_TAIL_RE``), then either
     2. nothing, or a clause break (``_HANDOFF_BREAK_RE``) and a hand-off to
        someone else (``_HANDOFF_RE``: "check in with", "send to", "tell" …),
-       whose text carries no qualifier word (``_HANDOFF_QUALIFIER_RE``) and
-       no negation except a modal statement about something other than the
-       removal (``_HARMLESS_NEGATION_RE``: "should not require approval");
+       whose text carries no deletion/keep/retention/exclusion vocabulary in
+       any form (``_HANDOFF_VETO_RE``, review B2), no reference to a target
+       (``_HANDOFF_TARGET_RE``: a path, a name-like token, "the dirty one",
+       "her worktree") and no negation except a statement about the guard
+       process (``_HARMLESS_NEGATION_RE``: "should not require approval",
+       "shouldn't be blocked");
     3. and nowhere names a path, or a question path's basename.
 
     Anything else returns False: the answer still reaches the judge as the
@@ -4203,7 +4289,12 @@ def _typed_whole_set(answer: str, question: str = "") -> bool:
     if brk is None:
         return False
     clause = rest[brk.end() :]
-    if not _HANDOFF_RE.match(clause) or _HANDOFF_QUALIFIER_RE.search(clause):
+    if not _HANDOFF_RE.match(clause):
+        return False
+    # The WHOLE clause is vetted, recipient included: the hand-off verb is
+    # only the shape, and whatever follows it ("tell Aida the dirty one is
+    # precious") is where an exclusion would hide (review B2).
+    if _HANDOFF_VETO_RE.search(clause) or _HANDOFF_TARGET_RE.search(clause):
         return False
     # Every negation must sit inside a harmless modal statement.
     harmless = [h.span() for h in _HARMLESS_NEGATION_RE.finditer(clause)]
@@ -4211,6 +4302,30 @@ def _typed_whole_set(answer: str, question: str = "") -> bool:
         any(a <= n.start() and n.end() <= b for a, b in harmless)
         for n in _NEGATION_RE.finditer(clause)
     )
+
+
+def _typed_set_question(
+    q: Mapping[str, Any], labels: Sequence[str], chosen: Sequence[str], approved: Sequence[str]
+) -> list[str]:
+    """``[question]`` when only a TYPED answer approved this question, else ``[]``.
+
+    WHY (review B2 defence in depth, manager decision on PR #4098): a typed
+    answer is free text, and however carefully :func:`_typed_whole_set`
+    parses it, a phrasing nobody listed can still hide "but not that one".
+    So a question approved by typing ("Remove all as recommended, and send
+    to Aida …", even a bare "yes") is remembered separately, and
+    ``DeleteCase.evidence_basis`` lets it settle a target alone only when
+    removing that target cannot lose unrecoverable work. A PICKED option
+    ("Remove all", "Delete ~/x") is what the operator chose from what he
+    saw, so it is not in here and keeps settling as before (that includes
+    the exact-path asks a-822f/a-72ff, which settled a dirty tree).
+    """
+    question = str(q.get("question") or "")
+    typed = [v for v in chosen if v not in labels]
+    picked = [v for v in chosen if v in labels]
+    if typed and not picked and question and question in approved:
+        return [question]
+    return []
 
 
 def _approved_text(

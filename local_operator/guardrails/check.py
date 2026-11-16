@@ -548,6 +548,59 @@ def _ask_settles_git_root(path: str, session_id: str) -> str | None:
         return None
 
 
+def _typed_set_recoverable(path: str, session_id: str) -> str | None:
+    """A fact phrase when a TYPED whole-set answer may settle ``path`` alone, else ``None``.
+
+    WHY (review B2 on PR #4098, manager decision: defence in depth). Layer 1
+    (``provenance._typed_whole_set``) reads the free text strictly, but a
+    phrasing nobody listed could still carry "except that one". So a typed
+    answer never settles, on its own, a target whose removal can lose work
+    nothing else holds; those go to the judge WITH the operator's words.
+    Settles only when every fact is positively read (any doubt is ``None``):
+
+    - a git root: ``worktree_state`` reads ``clean`` (not dirty, locked or
+      busy), HEAD is on a branch (a detached HEAD may be a dangling commit
+      only its HEAD file names) and ``git_merged`` proves that branch is in
+      origin's default branch (unmerged/squash-unproven commits may exist
+      nowhere else). ``_ask_settles_git_root``'s open-PR/owner bar still
+      applies on top;
+    - a directory: the creation ledger records it (an unrecorded directory is
+      unknown content: only the judge can tell a rig from the operator's own
+      data), and a full bounded walk finds no repository, no linked
+      worktree and no mount inside (``_nested_repository(worktrees=True)``);
+    - anything else (a file, a symlink entry): nothing below it to lose.
+
+    Damian's real cases keep settling: clean merged trees and agent-made rigs
+    with no repositories inside. A PICKED option or an exact-path pick is not
+    affected (``OperatorWords.firm``).
+    """
+    from local_operator.guardrails import provenance as prov
+
+    try:
+        if os.path.islink(path) or not os.path.isdir(path):
+            return "typed whole-set answer; not a directory"
+        real = os.path.realpath(path)
+        if _git_bearing(path):
+            if ".git" in Path(path).parts:
+                return None
+            if prov.worktree_state(real, session_id=session_id) != "clean":
+                return None
+            branch = prov._git(["symbolic-ref", "--quiet", "--short", "HEAD"], real)
+            branch = (branch or "").strip()
+            if not branch:
+                return None  # detached: dangling or unproven HEAD
+            merged, why = prov.git_merged(real, branch)
+            return f"typed whole-set answer; clean, {why}" if merged else None
+        if not prov.recorded_creators(real):
+            return None
+        if prov._nested_repository(real, worktrees=True) is not None:
+            return None
+        return "typed whole-set answer; ledger-recorded directory with no repository inside"
+    except Exception:  # noqa: BLE001 — unreadable facts keep the judge
+        logger.debug("typed whole-set recoverability check failed", exc_info=True)
+        return None
+
+
 @dataclass(frozen=True)
 class _Approved:
     """An ask's deterministic approval, shaped for ``DeleteCase._named_by``."""
@@ -643,22 +696,29 @@ class DeleteCase:
 
         return names_path(words.text, path, home=self.home, cwd=self.cwd, protected=self.stop)
 
-    def _approving_ask(self, path: str) -> Any:
-        """The trusted ask row whose deterministic approval names ``path``, else ``None``.
+    def _approving_ask(self, path: str) -> tuple[Any, str]:
+        """``(trusted ask row, extra fact)`` whose deterministic approval names ``path``.
 
         ``OperatorWords.approved`` holds only what the operator SAW and said yes
         to (the yes/no question text, or the picked labels) — never a
         description, a peer/bridge relay or the agent's own prose — so a path
         it names was in front of the operator before the answer.
+
+        A picked/exact-path approval (``OperatorWords.firm``) wins. A path
+        reached ONLY through a typed whole-set answer (``typed_set``) counts
+        only when :func:`_typed_set_recoverable` proves nothing unrecoverable
+        goes with it (review B2); its fact is returned for the basis line.
+        ``(None, "")`` = no deterministic approval: the judge decides.
         """
-        return next(
-            (
-                w
-                for w in self.operator.words
-                if w.ask_id and w.approved and self._named_by(path, _Approved(w.approved))
-            ),
-            None,
-        )
+        words = [w for w in self.operator.words if w.ask_id and w.approved]
+        for w in words:
+            if self._named_by(path, _Approved(w.firm)):
+                return w, ""
+        for w in words:
+            if self._named_by(path, _Approved(w.approved)):
+                fact = _typed_set_recoverable(path, self.session_id)
+                return (w, fact) if fact is not None else (None, "")
+        return None, ""
 
     def evidence_basis(self) -> str:
         """The basis when re-verified creation evidence ALONE covers every target.
@@ -720,25 +780,24 @@ class DeleteCase:
                 # (``_ask_settles_git_root``); only a tree passing all of them
                 # settles on the answer, so those facts still reach the judge
                 # with the answer shown, and an open PR stays CRITICAL upstream.
-                words = self._approving_ask(path)
+                words, typed_fact = self._approving_ask(path)
                 git_facts = (
                     _ask_settles_git_root(path, self.session_id) if words is not None else None
                 )
                 if words is None or git_facts is None:
                     return ""
-                basis.append(f"{path} named by ask {words.ask_id} (effect: delete; {git_facts})")
+                extra = f"; {typed_fact}" if typed_fact else ""
+                basis.append(
+                    f"{path} named by ask {words.ask_id} (effect: delete; {git_facts}{extra})"
+                )
                 continue
-            words = next(
-                (
-                    w
-                    for w in self.operator.words
-                    if w.ask_id and w.approved and self._named_by(path, _Approved(w.approved))
-                ),
-                None,
-            )
+            # Same lookup as the git-root branch above, so a typed whole-set
+            # answer cannot settle a rig holding a repository here either.
+            words, typed_fact = self._approving_ask(path)
             if words is None:
                 return ""
-            basis.append(f"{path} named by ask {words.ask_id}")
+            extra = f" ({typed_fact})" if typed_fact else ""
+            basis.append(f"{path} named by ask {words.ask_id}{extra}")
         if len(basis) > 6:
             basis = [*basis[:6], f"… and {len(basis) - 6} more"]
         return "; ".join(basis)
@@ -1175,6 +1234,12 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     # the judge must never infer consent from a timeout notice or from the
     # agent's own "the ask timed out, proceeding" in the command or intent.
     lapsed = prov.unanswered_asks(ctx.session_id) if ctx.session_id and paths else []
+    # QA round 2 Q3 (PR #4098): ``_ask_block`` names the FIRST matching ask,
+    # so a remote "Remove all" (an untrusted yes) listed before the
+    # operator's own "Keep them" headed the refusal and blamed the yes. A
+    # decline, lapse or withdrawal is what actually refuses; list untrusted
+    # yeses last (stable sort, store order otherwise kept) so it is named.
+    lapsed = sorted(lapsed, key=lambda a: bool(getattr(a, "untrusted_yes", False)))
     lapsed_only: dict[str, str] = {}
     facts: list[str] = []
     for path in [*paths, *operator_only][:_MAX_FACTS]:

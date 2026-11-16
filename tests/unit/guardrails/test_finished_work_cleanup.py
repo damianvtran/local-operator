@@ -481,7 +481,9 @@ async def test_trusted_answer_naming_a_dirty_tree_settles_it(home: Path, repo: P
     judge = _Judge()
     first = await _check(home, f"git -C {repo} worktree remove --force {wt}", judge)
     assert first.blocked  # refused before the answer
-    _ask(home, "a-822f", f"Remove {wt} (dirty: wip.txt)?", ANSWER_1)
+    # The PICKED option, as on the exact-path asks: a typed answer no longer
+    # settles a dirty tree alone (review B2 layer 2; see the round-2 tests).
+    _ask(home, "a-822f", f"Remove {wt} (dirty: wip.txt)?", "Remove all")
     judge = _Judge()
     outcome = await _check(
         home, f"git -C {repo} worktree remove --force {wt}", judge, _operator("a-822f")
@@ -735,7 +737,8 @@ def test_m4_network_git_never_reaches_a_credential_helper(
     joined = " ".join(seen["args"])
     assert "credential.helper=" in joined
     assert seen["env"].get("GIT_TERMINAL_PROMPT") == "0"
-    assert seen["env"].get("GIT_ASKPASS") == "/bin/false"
+    askpass = seen["env"].get("GIT_ASKPASS")
+    assert askpass and os.path.isabs(askpass) and os.access(askpass, os.X_OK)
 
 
 def test_q1_stale_ref_gives_the_same_answer_twice_and_moves_no_ref(home: Path, repo: Path) -> None:
@@ -780,3 +783,216 @@ def test_n1_refusal_text_names_the_task_tree_the_code_reads() -> None:
     from local_operator.guardrails.check import REFUSAL_SCOPE
 
     assert "parent or child session in its task tree" in REFUSAL_SCOPE
+
+
+# -- PR #4098 round 2 remediation ------------------------------------------------------
+#
+# Security review B2 https://github.com/damianvtran/local-operator/pull/4098#issuecomment-6906034083
+# and QA round 2 https://github.com/damianvtran/local-operator/pull/4098#issuecomment-6906108521.
+
+#: Review B2: an exclusion hidden INSIDE the hand-off clause. Each one read as
+#: a benign "tell Aida …" on cd6f773f and settled a dirty, unmerged tree.
+B2_HIDDEN_EXCLUSIONS = [
+    "Remove all, and tell Aida the dirty one shouldn't be removed",
+    "Remove all, and tell Aida I am reconsidering",
+    "Remove all, and tell Aida it must not be touched",
+    "Remove all, and tell Aida it does not get deleted",
+    "Remove all, and tell Aida one is still needed",
+    "Remove all, and tell Aida to put qa-push back",
+    "Remove all, and tell Aida sauf qa-push",
+    "Remove all, and tell Aida it is a mistake to delete the dirty one",
+    "Remove all, and tell Aida the dirty one is precious",
+    "Remove all, and tell Aida her worktree must stay",
+    "Remove all, and let Aida know that one is hers",
+    "Remove all, and cc Aida about this one",
+]
+
+
+@pytest.mark.parametrize("answer", B2_HIDDEN_EXCLUSIONS)
+def test_b2_hidden_exclusion_approves_nothing(home: Path, answer: str) -> None:
+    _ask(home, "a-b201", "Remove ~/repo/.worktrees/es and ~/repo/.worktrees/fr (dirty)?", answer)
+    words = prov.verified_ask(ME, "a-b201")
+    assert words is None or not words.approved, (answer, words and words.approved)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", B2_HIDDEN_EXCLUSIONS)
+async def test_b2_hidden_exclusion_never_settles_the_dirty_unmerged_tree(
+    home: Path, repo: Path, answer: str
+) -> None:
+    """The reviewer's end-to-end repro: blocked=False with zero judge calls on cd6f773f."""
+    es = _branch_tree(home, repo, "es")
+    fr = _branch_tree(home, repo, "fr")
+    (es / "wip.txt").write_text("uncommitted\n")
+    _ask(home, "a-b202", f"Remove {es} and {fr} (dirty)?", answer)
+    judge = _Judge()
+    outcome = await _check(
+        home, f"git -C {repo} worktree remove --force {es}", judge, _operator("a-b202")
+    )
+    assert outcome.blocked, answer
+    assert judge.prompts and answer in judge.prompts[-1]  # the judge read his words
+
+
+def _rig_of_running_session(home: Path, name: str) -> Path:
+    """A ``$HOME`` rig a still-running session made: HIGH, so only an answer settles it."""
+    return _rig(home, name, creator=LIVE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [ANSWER_1, ANSWER_2])
+async def test_b2_damians_answers_still_settle_named_rigs(home: Path, answer: str) -> None:
+    rig_a = _rig_of_running_session(home, "qa-a")
+    rig_b = _rig_of_running_session(home, "qa-b")
+    assert _rank(home, f"rm -rf {rig_a}").risk is Risk.HIGH
+    _ask(home, "a-b203", f"Remove {rig_a} and {rig_b}?", answer)
+    judge = _Judge()
+    outcome = await _check(home, f"rm -rf {rig_a} {rig_b}", judge, _operator("a-b203"))
+    assert not outcome.blocked, outcome.text
+    assert judge.prompts == []
+
+
+def _merged_tree(home: Path, repo: Path, name: str) -> Path:
+    """A clean tree whose branch is fast-forward merged into origin/main.
+
+    One ignored build file keeps it off the finished-foreign LOW route (which
+    refuses any ignored entry), so it ranks HIGH and needs the answer.
+    """
+    wt = _branch_tree(home, repo, name)
+    _git("merge", "-q", "--ff-only", f"fix/{name}", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as fh:
+        fh.write("build/\n")
+    (wt / "build").mkdir()
+    (wt / "build" / "out.bin").write_text("x\n")
+    return wt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [ANSWER_1, ANSWER_2, "Remove all"])
+async def test_b2_layer2_typed_answer_settles_a_clean_merged_tree(
+    home: Path, repo: Path, answer: str
+) -> None:
+    wt = _merged_tree(home, repo, "merged")
+    other = _merged_tree(home, repo, "merged2")
+    first = await _check(home, f"rm -rf {wt}", _Judge())
+    assert first.blocked  # HIGH without the answer
+    # A typed answer: the ask offers different labels, so "Remove all" is typed.
+    _ask_typed(home, "a-b204", f"Remove {wt} and {other}?", answer)
+    judge = _Judge()
+    outcome = await _check(home, f"rm -rf {wt}", judge, _operator("a-b204"))
+    assert not outcome.blocked, outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [ANSWER_1, ANSWER_2, "Remove all"])
+async def test_b2_layer2_typed_answer_never_settles_a_dirty_unmerged_tree(
+    home: Path, repo: Path, answer: str
+) -> None:
+    """Even a perfectly benign typed answer leaves a dirty, unmerged tree to the judge."""
+    es = _branch_tree(home, repo, "es")
+    fr = _branch_tree(home, repo, "fr")
+    (es / "wip.txt").write_text("uncommitted\n")
+    _ask_typed(home, "a-b205", f"Remove {es} and {fr}?", answer)
+    words = prov.verified_ask(ME, "a-b205")
+    assert words is not None and words.typed_set  # approved, but only by typing
+    judge = _Judge()
+    outcome = await _check(
+        home, f"git -C {repo} worktree remove --force {es}", judge, _operator("a-b205")
+    )
+    assert outcome.blocked
+    assert judge.prompts and answer in judge.prompts[-1]
+
+
+@pytest.mark.asyncio
+async def test_b2_layer2_typed_answer_never_settles_a_rig_holding_a_clone(home: Path) -> None:
+    rig = _rig_of_running_session(home, "qa-clone2")
+    _git("init", "-q", str(rig / "clone"), cwd=home)
+    _ask_typed(home, "a-b206", f"Remove {rig} and {home}/qa-other?", ANSWER_2)
+    judge = _Judge()
+    outcome = await _check(home, f"rm -rf {rig}", judge, _operator("a-b206"))
+    assert outcome.blocked and judge.prompts
+
+
+@pytest.mark.asyncio
+async def test_b2_damians_typed_answer_on_dirty_attr3880_goes_to_the_judge(
+    home: Path, repo: Path
+) -> None:
+    """Layer 2, intended: ANSWER_1 typed alone no longer settles the dirty tree."""
+    wt = _branch_tree(home, repo, "attr3880-ci")
+    (wt / "wip.txt").write_text("uncommitted\n")
+    _ask(home, "a-822e", f"Remove {wt} (dirty: wip.txt)?", ANSWER_1)
+    judge = _Judge()
+    outcome = await _check(
+        home, f"git -C {repo} worktree remove --force {wt}", judge, _operator("a-822e")
+    )
+    assert outcome.blocked and judge.prompts
+
+
+@pytest.mark.asyncio
+async def test_b2_exact_path_pick_still_settles_a_dirty_tree(home: Path, repo: Path) -> None:
+    """The exact-path route (a-822f/a-72ff): a PICKED yes on the named tree settles it."""
+    wt = _branch_tree(home, repo, "picked")
+    (wt / "wip.txt").write_text("uncommitted\n")
+    _ask(home, "a-72fd", f"Remove {wt} (dirty: wip.txt)?", "Remove all")
+    judge = _Judge()
+    outcome = await _check(
+        home, f"git -C {repo} worktree remove --force {wt}", judge, _operator("a-72fd")
+    )
+    assert not outcome.blocked, outcome.text
+    assert judge.prompts == []
+
+
+def _ask_typed(home: Path, ask_id: str, question: str, answer: str) -> None:
+    """An ask whose options do NOT include ``answer``, so the answer counts as typed."""
+    path = home / ".local-operator" / "sessions" / ME / "asks.jsonl"
+    now = int(time.time() * 1000)
+    q = {
+        "id": "q1",
+        "question": question,
+        "options": [{"label": "Delete the listed paths"}, {"label": "Keep them"}],
+        "question_id": "",
+    }
+    rows = [
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": now - 10,
+            "created_at": now - 10,
+            "expires_at": now + 86_400_000,
+            "timeout_s": 86400,
+            "questions": [q],
+        },
+        {
+            "v": 1,
+            "kind": "answered",
+            "ask_id": ask_id,
+            "at": now,
+            "by": {"surface": "desktop"},
+            "answers": {"q1": [answer]},
+        },
+    ]
+    with path.open("a") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def test_q_askpass_is_a_real_false_binary() -> None:
+    """QA round 2: ``/bin/false`` does not exist on macOS; the askpass must."""
+    askpass = prov._askpass_false()
+    assert os.path.isabs(askpass) and os.access(askpass, os.X_OK), askpass
+    assert subprocess.run([askpass], check=False).returncode != 0
+
+
+@pytest.mark.asyncio
+async def test_q3_decline_refusal_names_the_declining_ask(home: Path, repo: Path) -> None:
+    """QA Q3: an earlier remote yes must not head the refusal the operator's 'Keep them' made."""
+    wt = _squashed_tree(home, repo, "named")
+    _ask(home, "a-1111", f"Remove {wt}?", "Remove all", surface="remote")
+    _ask(home, "a-2222", f"Remove {wt}?", "Keep them")
+    outcome = await _check(home, f"git -C {repo} worktree remove {wt}", _Judge("ALLOW"))
+    assert outcome is not None and outcome.blocked
+    first = outcome.text.strip().splitlines()[0]
+    assert "a-2222" in first and "a-1111" not in first, first
