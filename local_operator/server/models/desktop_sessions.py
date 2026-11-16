@@ -1353,6 +1353,16 @@ class CommandReceipt(BaseModel):
 
 class AnswerReceipt(BaseModel):
     detail: str
+    #: Set on an ask ANSWER, REVISION or DECLINE (``features.ask_consent_bearing``);
+    #: ``None`` on every other receipt this model carries (a gate answer, a
+    #: dismissal, a signed bridge decision), where the question does not arise.
+    #: True only when this backend presented the runtime's operator-capability
+    #: proof with the answer (it started that runtime), so the runtime stamped a
+    #: trusted surface; False means it stamped ``unverified``: recorded, settles
+    #: the ask, but never delete/move consent. WHY (incident a-48e3, 2026-11-16):
+    #: a card answer to a runtime the wake supervisor started looked identical to
+    #: a consenting one. Server-computed, never echoed from the request.
+    consent_bearing: bool | None = None
 
 
 class WatchReceipt(BaseModel):

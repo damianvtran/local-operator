@@ -355,7 +355,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # session, and withdraw/the relay cap do not apply (manager requirement:
     # documented where the model reads `relay`). Notes only — the wire schema
     # and description are byte-identical, so the wire ledger above is unchanged.
-    "ask": 1268,
+    # 1268 -> 1352 (+84, incident 2026-11-16 ask a-48e3): one off-wire notes
+    # bullet: a delete/move ask names every exact full path in the question or a
+    # label (a description approves nothing), and only an answer from a surface
+    # that started the runtime is consent. Notes only; the wire is unchanged.
+    "ask": 1352,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only

@@ -5140,7 +5140,22 @@ async def answer(session_id: str, body: Answer, request: Request):
                 # two shapes stay distinguishable.
                 message = str(error) or "the answer was refused"
                 raise HTTPException(409, message) from None
-            return reply({"detail": detail})
+            # ``consent_bearing`` (feature ``ask_consent_bearing``): whether
+            # THIS backend presented operator proof with the answer, i.e. holds
+            # the capability of the runtime it answered (it started that
+            # runtime). False means the runtime stamped the answer
+            # ``unverified``: recorded, but never delete/move consent (incident
+            # a-48e3, 2026-11-16). Computed from the facade's handshake state,
+            # never from the body (``Answer`` is ``extra="forbid"``, so a body
+            # field of that name is a 422). A peer's conversation is always
+            # False: its answer is relayed and stamped ``remote`` whatever this
+            # process holds for a same-numbered local pid. Absent probe (an
+            # older facade or a test double) reads False: fail closed.
+            probe = getattr(bridge.remote, "ask_consent_bearing", None)
+            consent_bearing = bool(
+                getattr(bridge, "remote_row", None) is None and callable(probe) and probe()
+            )
+            return reply({"detail": detail, "consent_bearing": consent_bearing})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         if body.request_id.startswith("prv_"):

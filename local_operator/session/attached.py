@@ -4164,6 +4164,30 @@ class AttachedSession:
             name = "ask_respond"
         return await self._ask_client_method(name, ask_id, answers, by="desktop", images=images)
 
+    def ask_consent_bearing(self) -> bool:
+        """Whether an ask answer sent through this facade now carries operator proof.
+
+        Read by the desktop answer route right after :meth:`ask_respond` (so a
+        cold bind that this process just engaged counts), and reported to the
+        card as ``consent_bearing``. True only when the bound client holds this
+        runtime's operator capability and the runtime proved it
+        (``AttachClient.operator_ask_proof_held``): the case in which the runtime
+        stamps ``desktop`` rather than ``unverified``.
+
+        WHY server-side state and never a request field (incident a-48e3,
+        2026-11-16): the capability is the one thing the model's own ``bash``
+        cannot obtain by dialing the socket with the record's control key, so
+        it is the one honest source for "this window's answer can authorise a
+        delete". The flag never feeds consent itself: the guard reads only the
+        runtime's stamp. Fail-closed: no client, a reconnect in flight, or a
+        client predating the probe reads False.
+        """
+        client = self._client
+        if client is None or not getattr(client, "connected", False):
+            return False
+        probe = getattr(client, "operator_ask_proof_held", None)
+        return bool(probe()) if callable(probe) else False
+
     async def respond_ask(
         self,
         ask_id: str,

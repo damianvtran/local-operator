@@ -4130,6 +4130,25 @@ def unanswered_label(status: str) -> str:
     return _UNANSWERED_LABEL.get(status, "never answered")
 
 
+#: The not-consent label for an answer stamped ``unverified`` (incident
+#: 2026-11-16, ask a-48e3, session 439818272d84). WHY its own wording: the
+#: operator DID answer, on the desktop card, but the runtime had been started
+#: by the wake supervisor, so the desktop backend held no operator capability
+#: for it (``harness.approval.operator_cap_for``) and the runtime stamped the
+#: local, proof-less connection ``unverified`` (``asks.surfaces``). The old
+#: generic label made the agent tell the operator he had "no answer approving
+#: it" after he had answered. The fail-closed itself is deliberate and stays:
+#: the model's own ``bash`` can dial the socket with the 0600 control key and
+#: is indistinguishable from a proof-less window, and an unforgeable desktop
+#: credential (Electron fuse hardening + code-signature check) is an operator
+#: decision not yet taken. :func:`lapsed_refusal_reason` keys its recovery
+#: text on this exact string.
+UNPROVEN_SURFACE_LABEL = (
+    "answered from a surface that could not prove it is the operator's "
+    "(it did not start this session's runtime)"
+)
+
+
 def _not_consent_label(record: Mapping[str, Any], status: str) -> str:
     """Why a folded ask that HAS an end state still is not consent."""
     if status in _UNANSWERED_LABEL:
@@ -4137,6 +4156,8 @@ def _not_consent_label(record: Mapping[str, Any], status: str) -> str:
     if status == "declined":
         return "declined"
     surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if status in ("answered", "late") and surface == "unverified":
+        return UNPROVEN_SURFACE_LABEL
     if status in ("answered", "late") and surface not in TRUSTED_ASK_SURFACES:
         # ``answered_in_chat`` is written by the AGENT (surface ``chat``); a
         # relay row is another session's carriage. Neither is the operator.

@@ -39,6 +39,7 @@ from local_operator.asks.surfaces import (
     weakest_surface,
 )
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
+from local_operator.guardrails.provenance import UNPROVEN_SURFACE_LABEL
 from local_operator.harness.approval import (
     ASK_ANSWER_OPS,
     AUTHORITY_OPS,
@@ -224,7 +225,10 @@ def _assert_refused_not_consent(outcome: Any, judge_calls: int, victim: Path) ->
     assert outcome.blocked is True, outcome
     assert victim.exists()
     if judge_calls == 0:
-        assert _NOT_BY_OPERATOR in outcome.text, outcome
+        # ``unverified`` has its own wording since incident a-48e3 (2026-11-16):
+        # it says the answer could not be proven the operator's rather than
+        # implying there was none. Both are the same deterministic refusal.
+        assert _NOT_BY_OPERATOR in outcome.text or UNPROVEN_SURFACE_LABEL in outcome.text, outcome
 
 
 # ---------------------------------------------------------------------------
@@ -893,3 +897,110 @@ def test_weakest_surface_never_exceeds_any_input(labels: tuple[str, ...], expect
     for reader in (GUARD_TRUSTED_SURFACES, PROFILE_CONSENT_SURFACES):
         if result in reader:
             assert all(label in reader for label in labels)
+
+
+# ---------------------------------------------------------------------------
+# Incident a-48e3 (2026-11-16): an operator's desktop-card answer to a runtime
+# the wake supervisor started was stamped ``unverified``, and nothing recorded
+# which connection answered or told the card it could not authorise a delete.
+# The fail-closed stays; these pin the attribution log and the proof probe the
+# answer route reports as ``consent_bearing``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authority", "label", "proved"),
+    [
+        (_LOCAL_UNPROVEN, "unverified", False),
+        (_PROVED_DESKTOP, "desktop", True),
+        (_REMOTE_PROMPT, "remote", False),
+    ],
+)
+async def test_each_stamp_logs_the_connection_facts_without_the_answer(
+    home: tuple[Path, Path],
+    caplog: pytest.LogCaptureFixture,
+    authority: _ConnectionAuthority,
+    label: str,
+    proved: bool,
+) -> None:
+    rig = _Rig(*home, tag=f"log{label}")
+    with caplog.at_level("INFO", logger="local_operator.session.runtime.server"):
+        await rig.dispatch(
+            "ask_respond",
+            {"ask_id": rig.ask_id, "answers": {"q1": ["Yes-secret-words"]}, "by": "desktop"},
+            authority,
+        )
+    lines = [r.getMessage() for r in caplog.records if "ask answer stamped" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert f"ask={rig.ask_id}" in lines[0]
+    assert f"surface={label}" in lines[0]
+    assert f"proved={proved}" in lines[0]
+    assert f"locality={authority.locality}" in lines[0]
+    # Connection facts only: never the answer's words, never the frame's ``by``.
+    assert "Yes-secret-words" not in lines[0]
+    assert rig.record()["answered_by"] == {"surface": label}
+
+
+@pytest.mark.asyncio
+async def test_the_mirror_stamp_logs_too(
+    home: tuple[Path, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = _Rig(*home, tag="logmirror")
+    request_id = mirror_request_id(rig.ask_id, 0)
+    with caplog.at_level("INFO", logger="local_operator.session.runtime.server"):
+        await rig.dispatch(
+            "ask_answer", {"request_id": request_id, "value": "Yes"}, _LOCAL_UNPROVEN
+        )
+    [line] = [r.getMessage() for r in caplog.records if "ask answer stamped" in r.getMessage()]
+    assert f"ask={request_id}" in line and "surface=unverified" in line and "proved=False" in line
+
+
+@pytest.mark.parametrize(
+    ("cap", "bearing", "held"),
+    [
+        (True, True, True),  # this process started the runtime and it proved itself
+        (False, True, False),  # no capability: not this process's runtime (a-48e3)
+        (True, False, False),  # capability, but the runtime never proved the same one
+        (False, False, False),
+    ],
+)
+def test_the_proof_probe_matches_what_an_opted_in_ask_answer_presents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cap: bool, bearing: bool, held: bool
+) -> None:
+    """``operator_ask_proof_held`` is True exactly when ``authority_proof`` would
+    attach a proof to an opted-in ask answer, i.e. when the runtime will stamp a
+    trusted surface. It is the one source of the route's ``consent_bearing``."""
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    client._operator_cap = mint_operator_cap() if cap else None
+    client._operator_nonce = operator_nonce()
+    client._operator_salt = operator_nonce()
+    client._authority_bearing = bearing
+    assert client.operator_ask_proof_held() is held
+    presented = client.authority_proof("ask_respond", {}, operator_ask=True)
+    assert (presented is not None) is held
+
+
+@pytest.mark.parametrize(
+    ("client", "expected"),
+    [
+        (types.SimpleNamespace(connected=True, operator_ask_proof_held=lambda: True), True),
+        (types.SimpleNamespace(connected=True, operator_ask_proof_held=lambda: False), False),
+        # Mid-reconnect: whatever the old client held, nothing was proven now.
+        (types.SimpleNamespace(connected=False, operator_ask_proof_held=lambda: True), False),
+        # A client predating the probe: fail closed.
+        (types.SimpleNamespace(connected=True), False),
+        (None, False),
+    ],
+)
+def test_the_facade_reports_consent_bearing_only_from_its_bound_client(
+    client: Any, expected: bool
+) -> None:
+    from local_operator.session.attached import AttachedSession
+
+    facade = AttachedSession.__new__(AttachedSession)
+    facade._client = client  # type: ignore[attr-defined]
+    assert facade.ask_consent_bearing() is expected
