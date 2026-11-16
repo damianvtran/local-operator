@@ -1,0 +1,32 @@
+import hashlib, json
+from pathlib import Path
+from local_operator.i18n import runtime
+root = Path.cwd()
+old_path = Path('i18n/audits/evidence/ur/cli.serve_readiness/sd1/record.json')
+old = json.loads(old_path.read_text())
+for name in ('en', 'context'):
+    item = old['input_hashes'][name]
+    assert hashlib.sha256(Path(item['path']).read_bytes()).hexdigest() == item['sha256'], name
+print('UNCHANGED English and context hashes: PASS')
+path = Path(old['input_hashes']['ur']['path'])
+current_bytes = path.read_bytes()
+previous = 'ایسے cgroup میں چلتا ہے جس کی جگہ یہ جانچ متعین نہیں کر سکتی'
+corrected = 'ایسے cgroup میں چلتا ہے جس کی نوعیت یہ جانچ متعین نہیں کر سکتی'
+assert current_bytes.count(corrected.encode()) == 1
+reconstructed_old = current_bytes.replace(corrected.encode(), previous.encode())
+assert hashlib.sha256(reconstructed_old).hexdigest() == old['input_hashes']['ur']['sha256']
+print('EXACT DELTA: only cli.serve_readiness.cgroup_unknown changed; exact sd1 suggestion applied; all other Urdu bytes unchanged')
+print('CURRENT_UR_SHA256', hashlib.sha256(current_bytes).hexdigest())
+prior_script = Path('i18n/audits/evidence/ur/cli.serve_readiness/sd1/mechanical.py.txt')
+expected_script_hash = next(a['sha256'] for a in old['artifacts'] if a['path'] == str(prior_script))
+assert hashlib.sha256(prior_script.read_bytes()).hexdigest() == expected_script_hash
+exec(compile(prior_script.read_text(), str(prior_script), 'exec'))
+# Compose the changed reason inside its direct outer diagnostic, not just in isolation.
+ur = json.loads(path.read_text())
+ns = 'cli.serve_readiness.'
+for count in (0, 1, 2):
+    reason = 'pid 123: ' + ur[ns + 'cgroup_unknown']
+    text = runtime.render_message(ur[ns + 'unknown'], {'count': count, 'device': 'node-2', 'reasons': reason}, 'ur')
+    assert corrected in text
+    print('DELTA_NEIGHBOR_RENDER count=' + str(count), text)
+print('PASS: changed key and direct aggregate neighbor render; sd1 coverage retained for all ten byte-identical keys. Raw rendering only, not visual RTL proof.')

@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1r",
+  "audit_date": "2026-11-16",
+  "record_reference": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/record.json",
+  "provenance": "Auditor/model, independence, input hashes, retained coverage and verdict are recorded in record.json; no ledger append applied.",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "fixed_finding_ids": [
+    "UR-SD1-M1"
+  ],
+  "ledger_append_input": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/ledger-receipt.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/record.json",
+      "sha256": "73917c845659e22a8a84b7f5d43cf15b7da3e606c7d70e4ef83899e55947ebac"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/report.md",
+      "sha256": "24eeb0a3d848a5fe14c68d49e4252da994503a9b13f1c76cfa552c14e02252d1"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/delta.py.txt",
+      "sha256": "3b110005fe73af17de4c0c2cf8b2cfcb1d74412186f180f8660c68cca7b68f68"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/audit.log",
+      "sha256": "ec3dd2c46554492e3941b59efcb8d56b3cc15d1194b4b25d1c342134496972b3"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/ledger-receipt.json",
+      "sha256": "dd866d12a2e96d1e4bfa72b8a5a055beda5dbf7038bc5b252cc98ff5df3b1144"
+    }
+  ]
+}

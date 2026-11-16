@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "key_count": 11,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d590e061719",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session metadata: Model openai/gpt-6.1-sol; no provider fallback observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting task identifies translator task and actual model; not independently queried"
+  },
+  "source_audit_revision": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+  "audited_working_tree_contains_uncommitted_copy": true,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.serve_readiness.json",
+      "sha256": "c02337dab4639daae2784f9b089be5f95cda30406d504dfa558d19a94b569828"
+    }
+  },
+  "policy_input_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/zh-CN.md",
+      "sha256": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+    }
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/report.md",
+      "sha256": "322ef7f004c91fa611758451b4734d746a77f2aa1ab39dc9e6ceef6048314003"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/audit.log",
+      "sha256": "5a393a83af973f85a454ca368fcbdbbfa2022b3316fbc7e9aa9e57290acaddcb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/verify.py.txt",
+      "sha256": "73d91f72e9dc0cb5706e0d5fc3d31b04872b6451c2ceea0335048ad228a5bced"
+    }
+  ],
+  "report": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/report.md",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ZH-SD1-01"
+    ],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 1,
+      "NIT": 0
+    }
+  },
+  "audit_notes_not_execution_log": {
+    "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/report.md",
+    "description": "Human audit reasoning; actual commands are in audit.log and ledger-dry-run.log"
+  },
+  "independent_pass_count_this_record": 1,
+  "second_independent_safety_audit": "Separate requesting-manager gate; not asserted by this record",
+  "evidence_retention": "Repo-only process artifacts; initially untracked, parent must commit. No history append or commit by auditor.",
+  "post_record_companions": {
+    "receipt.json": "Ledger row; hashes this record and the finalized artifacts; excluded from record hashing to avoid a circular digest",
+    "ledger-dry-run.log": "Actual dry-run stdout/stderr and record reference; generated after receipt, excluded from its own causality chain"
+  }
+}

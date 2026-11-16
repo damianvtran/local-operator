@@ -1,0 +1,26 @@
+{
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+  "status": "changes_requested",
+  "auditor": {
+    "agent": "i18n-auditor / Audit daemon Urdu",
+    "session": "c736f176af6f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol. No fallback reported.",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Delegation identifies translator task and actual model; no fallback reported"
+  },
+  "audit_date": "2026-11-16",
+  "note": "i18n/audits/evidence/ur/cli.serve_readiness/sd1/record.json; UR-SD1-M1: cgroup location calque obscures classification; 1 unresolved MAJOR. Independent Urdu audit, 11 keys.",
+  "unresolved_blocker_major_count": 1,
+  "finding_ids": [
+    "UR-SD1-M1"
+  ]
+}

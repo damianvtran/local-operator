@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd1",
+  "audit_date": "2026-11-16",
+  "record_reference": {
+    "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/record.json",
+    "sha256": "d6e820ec3de87bb844927685042b6023276993b80ae7d39fb544e6a9c5f6061b"
+  },
+  "auditor_record_reference": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/record.json#/auditor",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "artifact_hashes": [
+    {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/audit.log",
+      "sha256": "1ade5d35c85aab1e4596f7abacc3f3477ed898f666babd2847bc0bfb10ac4eb9"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/report.md",
+      "sha256": "6dd44a653faf2b124b527045f21ebe033dfa95b18455e47b4e3d225f9bfc871a"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/ledger-receipt.json",
+      "sha256": "f3868eb3cd6b754df5e05bb65cc3ba72b9ebd0cd75256876ea260bdeea89f6b6"
+    }
+  ],
+  "ledger_receipt": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/ledger-receipt.json",
+  "note": "Bundle manifest, not an execution log or an append receipt row. Auditor provenance is explicitly referenced in record.json."
+}

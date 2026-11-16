@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "history_sha256": "4330a9220c24d6bfd1d59088d66a89ecd21e1822894c082f6b38227fa6aaf9a0",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "acf0a84cd992",
+        "model": "openai/gpt-6.1-sol",
+        "provenance_source": "Requesting task explicitly identifies translator task and actual model; translator runtime not independently inspected."
+      },
+      "auditor": {
+        "agent": "Audit daemon Vietnamese",
+        "session": "77442ce206e1",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "translator_session": "acf0a84cd992",
+        "actual_model_source": "Session host context declares openai/gpt-6.1-sol; no fallback incident observed in this audit session.",
+        "fallback": null,
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "i18n/audits/evidence/vi/cli.serve_readiness/sd1/record.json; 11/11 keys; 0 blocker/major; VI-SD1-01 MINOR cgroup wording; single independent pass, no rendered-UI claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "acf0a84cd992",
+        "model": "openai/gpt-6.1-sol",
+        "provenance_source": "Requesting task explicitly identifies translator task and actual model; translator runtime not independently inspected."
+      },
+      "auditor": {
+        "agent": "Audit daemon Vietnamese",
+        "session": "77442ce206e1",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "translator_session": "acf0a84cd992",
+        "actual_model_source": "Session host declares openai/gpt-6.1-sol; resumed same auditor session 77442ce206e1; no model fallback incident observed.",
+        "fallback": null,
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "i18n/audits/evidence/vi/cli.serve_readiness/sd1r/record.json; VI-SD1-01 fixed; exact cgroup replacement; retained sd1 coverage, 11/11 keys; 0 open findings."
+    }
+  ]
+}

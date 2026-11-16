@@ -1,0 +1,57 @@
+{
+  "cli.serve_readiness.unproven": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.not_reporting": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.not_this_daemon": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.unknown_state": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.install_unknown": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.cgroup_unknown": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.recorded_gap": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.unknown": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.stale": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.other_unit": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  },
+  "cli.serve_readiness.identity_restart": {
+    "role": "mesh readiness diagnostic, terminal and remote capability detail",
+    "tone": "factual, non-alarming; never imply a PID identity has been proved when it has not",
+    "note": "`lop serve`, `lop services status`, `lop services restart` are literal commands. {device}, {pids}, {holders}, {builds}, {recorded}, {install}, {reasons} are already bounded diagnostic text inserted verbatim when present. {count} is the full daemon count; plural must agree even if the displayed PID list is capped. A recorded build gap is not evidence the current process runs that build. Restart is guarded by its own process/address checks."
+  }
+}

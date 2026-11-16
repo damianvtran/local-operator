@@ -1,0 +1,248 @@
+"""Bounded, read-only catalogue audit; writes NEW evidence companions only.
+Run from the worktree root: python3 -B i18n/audits/evidence/fr/cli.serve_readiness/sd2/reproduce.py.txt
+No ledger, generated files, translations, installs, tests, or daemon actions.
+The human-readable semantic verdicts below were independently reached before
+reading any first-pass report. Mechanical checks are supporting evidence only.
+"""
+from __future__ import annotations
+import datetime
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import unicodedata
+
+ROOT = Path.cwd().resolve()
+sys.path.insert(0, str(ROOT))
+from local_operator.i18n import runtime
+from local_operator.i18n.format import plural_category
+
+NS = 'cli.serve_readiness'
+LOCALES = ['fr', 'es', 'ru', 'vi', 'hi', 'ur', 'zh-CN']
+BASE = ROOT / 'i18n/audits/evidence'
+CAT = ROOT / 'local_operator/i18n/catalogues'
+SOURCE = CAT / 'en' / (NS + '.json')
+CONTEXT = CAT / 'en' / (NS + '.context.json')
+COUNTS = [0, 1, 2, 3, 4, 5, 11, 21, 22, 25, 1.5, 1000000, 1500000]
+CATEGORIES = {'fr': {'one', 'many', 'other'}, 'es': {'one', 'many', 'other'},
+              'ru': {'one', 'few', 'many', 'other'}, 'vi': {'other'},
+              'hi': {'one', 'other'}, 'ur': {'one', 'other'}, 'zh-CN': {'other'}}
+CONTROLS = set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+NOW = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def relative(path):
+    return str(path.relative_to(ROOT))
+
+def put(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('x', encoding='utf-8') as f:
+        f.write(text)
+
+def dump(path, obj):
+    put(path, json.dumps(obj, ensure_ascii=False, indent=2) + '\n')
+
+def load(path):
+    def no_duplicates(pairs):
+        result = {}
+        for k, v in pairs:
+            assert k not in result, ('duplicate JSON key', path, k)
+            result[k] = v
+        return result
+    return json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=no_duplicates)
+
+source = load(SOURCE)
+context = load(CONTEXT)
+assert len(source) == 11 and set(source) == set(context)
+inputs = [SOURCE, CONTEXT, ROOT/'i18n/glossary.md', ROOT/'local_operator/network/readiness.py']
+inputs += [CAT/l/(NS+'.json') for l in LOCALES]
+inputs += [ROOT/'i18n/style-guides'/(l+'.md') for l in LOCALES]
+initial_hashes = {relative(p): sha(p) for p in inputs}
+head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+
+# Freeze the independently reached verdict before any comparison with earlier
+# auditors. All seven reports are deliberately left unread in this run.
+semantic = {
+ 'fr': 'passed', 'es': 'passed', 'ru': 'passed', 'vi': 'passed',
+ 'hi': 'passed', 'ur': 'passed', 'zh-CN': 'passed'
+}
+provenance = {
+ 'agent': 'Local Operator — second independent i18n auditor (sd2)',
+ 'session': '85af124f4a9f',
+ 'model': 'openai/gpt-6.1-sol',
+ 'actual_model_source': 'Host-supplied session context: Model: openai/gpt-6.1-sol; session self-identity confirmed with sessions(info).',
+ 'fallback': 'none observed or reported by host; no fallback model claimed',
+ 'independence': 'Fresh second-pass session, not translator acf0a84cd992; no translation authorship or edits. Source/context/glossary/styles/targets audited before consulting first reports; no first reports consulted at all.',
+ 'round': 2,
+ 'native_speaker_claim': False
+}
+freeze_path = BASE/'fr'/NS/'sd2'/'independent-verdict.json'
+if freeze_path.exists():
+    frozen = load(freeze_path)
+    assert frozen['input_hashes'] == initial_hashes
+    assert frozen['verdicts'] == semantic
+else:
+    dump(freeze_path, {'timestamp': NOW, 'auditor': provenance, 'verdicts': semantic,
+                       'findings': [], 'input_hashes': initial_hashes,
+                       'first_reports_consulted': False})
+
+locale_notes = {
+ 'fr': 'Native developer register: enregistré/build/daemon retain the distinction between a stored record and a verified running process. Non prouvée never becomes verified. Correspond à l’installation means current installed build, not newest release. Lancez is the professional vous imperative. U+202F precedes prose colons/semicolons; curly apostrophes are retained. one covers 0/1; many and other use plural agreement. Heartbeat/build/daemon loans are intelligible developer vocabulary, not translated command tokens.',
+ 'es': 'Neutral developer Spanish: registrado and identidad sin comprobar do not certify the PID. Compilación registrada stays separate from instalación. Coincide con la instalación preserves current-build meaning rather than claiming latest release. Ejecuta matches tú; daemon/daemons follows the explicit style-guide amendment. one is singular only at 1; many/other are plural, including 0. Heartbeat is an intelligible diagnostic loan, not a command or placeholder alteration.',
+ 'ru': 'Impersonal professional Russian; выполните is the respectful imperative. Запись/не подтверждена keeps recorded-build evidence weaker than current-process identity. Сборка is the established build term; юнит/служба and под управлением distinguish the unit and supervision. one uses демон/использует/на нём; few/many/other use демоны/используют/на них. No visible count is inserted, so English-style quantified noun case is not required in these unnumbered subject phrases. The heartbeat metaphor пульс is understandable in this diagnostic register.',
+ 'vi': 'Concise pronoun-free developer Vietnamese: được ghi nhận and chưa xác minh keep records distinct from proved identity. Bản dựng and bản cài đặt keep build and install separate. Được giám sát is the glossary-endorsed supervision wording, with unit/service context elsewhere. Single other branch is invariant and naturally supports multiple daemons/builds. Chạy and kiểm tra are direct instructions without unwanted politeness padding. All target strings are NFC.',
+ 'hi': 'Respectful Hindi चलाएँ matches the आप register. दर्ज and अप्रमाणित preserve conservative identity wording; बिल्ड and इंस्टॉल किया गया बिल्ड distinguish record and installed build without asserting the record is live. सत्र is the required session term; निगरानी and यूनिट/सेवा follow glossary calls. one at 0/1 uses यह/चल रहा है; other uses ये/चल रहे हैं and plural bilḍ forms. The restart clause is passive and explicitly puts every-daemon checking before action.',
+ 'ur': 'Respectful Urdu چلائیں, natural technical loans ڈیمن/بلڈ/ریموٹ سیشن and glossary زیرِ نگرانی/یونٹ/سروس. ریکارڈ میں درج بلڈ and شناخت ثابت نہیں explicitly preserve unproven identity. one uses چلا رہا ہے/ہے; other uses چلا رہے ہیں/ہیں. Commands, PID and diagnostic Latin values stay logical-order Latin, with no manually embedded bidi controls. Native comma/semicolon usage is retained outside code. This is raw catalogue/runtime text evidence, not terminal shaping, visual bidi, or readiness paint-isolation proof.',
+ 'zh-CN': 'Concise mainland technical Chinese: 记录中的构建 and 进程身份未经证实 do not identify the live process. 与当前安装一致 means matching the installed build, not newest available release. 守护进程/构建/服务/单元 are intelligible native terms; 受监督 preserves the glossary decision. A single other branch correctly avoids number inflection. 请 heads the first remediation directive, with later actions chained without repeated 请. Full-width prose punctuation stays outside unchanged Latin commands.'
+}
+key_notes = {
+ 'unproven': 'Recorded presence only; process identity cannot be proved because no start-time comparison was possible. No assertion of a live recorded build.',
+ 'not_reporting': 'Record remains present; lack of response/ceased heartbeat is not promoted to death or a proved identity.',
+ 'not_this_daemon': 'PID now belongs to another process; never instructs killing or restarting that unrelated process.',
+ 'unknown_state': 'Recorded state remains unknown; no new diagnosis added.',
+ 'install_unknown': 'Build/install comparison is unavailable; does not falsely label a daemon stale.',
+ 'cgroup_unknown': 'This check cannot place the cgroup; does not claim no cgroup or unsupervised execution.',
+ 'recorded_gap': 'Explicitly recorded build {recorded}, installed build {install}, identity unproven. This is not the stale/live-process assertion.',
+ 'unknown': 'The conjunction of current-build and supervision status is unknown. {reasons} remains diagnostic text; all count-selected branches checked.',
+ 'stale': 'Only this confirmed-stale wording says running build differs from installed build, and hosted remote sessions use that other build. PID/build/install parameters preserved in every branch.',
+ 'other_unit': 'Held by another service, not a lop serve unit; does not imply unmanaged or absent service. Holders preserved in every branch.',
+ 'identity_restart': 'Inspect records using literal `lop services status`, then literal `lop services restart` to record identities. Every-daemon checks precede restart action; no unconditional restart or safety guarantee added.'
+}
+
+for locale in LOCALES:
+    directory = BASE/locale/NS/'sd2'
+    target_path = CAT/locale/(NS+'.json')
+    target = load(target_path)
+    assert set(source) == set(target) and len(target) == 11
+    log = [f'$ python3 -B i18n/audits/evidence/fr/{NS}/sd2/reproduce.py.txt',
+           f'cwd={ROOT}', f'python={sys.version}', f'HEAD={head}',
+           f'locale={locale}; namespace={NS}; date={NOW}',
+           'No installs, pytest, daemon actions, translation edits, history writes or commits.',
+           'Validator: production runtime parser + argument/branch/command/Unicode assertions.',
+           'This is a bounded namespace check, not whole-repository CI or ledger eligibility.']
+    rendered = [f'# Rendered catalogue text — {locale} / {NS} / sd2', '',
+                'Production runtime.render_message with explicit locale; raw text, no shipped-eligibility override.',
+                'These are offline catalogue renders, not screenshots or full readiness integration.', '']
+    categories_seen = set()
+    render_count = 0
+    for key, english in source.items():
+        text = target[key]
+        assert isinstance(text, str) and text
+        assert not (set(text) & CONTROLS), (locale, key, 'bidi controls')
+        assert not any(unicodedata.category(c) == 'Cc' for c in text), (locale,key,'control')
+        if locale == 'vi':
+            assert unicodedata.normalize('NFC', text) == text
+        assert runtime.message_arguments(english) == runtime.message_arguments(text), (locale, key, 'arguments/order')
+        plural = runtime.plural_selectors(text)
+        for selectors in plural:
+            assert set(selectors) == CATEGORIES[locale], (locale, key, selectors)
+        for argument in runtime.plural_arguments(text):
+            assert not any(b.empty for b in argument.branches)
+        expected_literals = set(re.findall(r'`([^`]+)`', english))
+        assert expected_literals == set(re.findall(r'`([^`]+)`', text)), (locale,key,'commands')
+        # Audit loss of a parameter or literal in ONE branch, not just a union
+        # across all branches. All plural keys in this namespace are whole-message.
+        for node in runtime.parse_message(text):
+            if getattr(node, 'kind', None) == 'plural':
+                expected_params = {n for n,k in runtime.message_arguments(english) if k != 'plural'}
+                for selector, body in node.parts:
+                    names = {n.name for n in body if hasattr(n, 'name')}
+                    assert names == expected_params, (locale,key,selector,'branch params')
+                    branch_literals = set()
+                    for n in body:
+                        if hasattr(n, 'value'):
+                            branch_literals.update(re.findall(r'`([^`]+)`', n.value))
+                    assert branch_literals == expected_literals, (locale,key,selector,'branch commands')
+        log.append(f'PASS {key}: key/ICU/argument-order/branch-values/commands/Unicode; selectors={plural!r}')
+        for count in (COUNTS if plural else [1]):
+            params = {'count': count, 'device': 'host-sd2', 'pids': '4101, 4102',
+                      'holders': 'worker.service', 'builds': 'v0.99.1+running',
+                      'recorded': 'v0.99.0+recorded', 'install': 'v0.99.2+installed'}
+            params['reasons'] = 'pid 4101: ' + runtime.render_message(target[NS+'.unproven'], {}, locale)
+            needed = {n:v for n,v in params.items() if n in dict(runtime.message_arguments(text))}
+            result = runtime.render_message(text, needed, locale)
+            for name, kind in runtime.message_arguments(text):
+                if kind == 'simple':
+                    assert str(params[name]) in result, (locale,key,count,name,'render lost parameter')
+            assert set(re.findall(r'`([^`]+)`', result)) == expected_literals
+            assert not (set(result) & CONTROLS)
+            category = plural_category(locale, count) if plural else 'n/a'
+            if plural:
+                categories_seen.add(category)
+            rendered += [f'## {key} | count={count} | CLDR={category}', '', result, '']
+            render_count += 1
+    assert categories_seen == CATEGORIES[locale], (locale,'branch coverage',categories_seen)
+    # Pseudo/opaque stress is NOT a translation: ensure parameter bytes survive
+    # unusual but bounded diagnostic values in every count-selected branch.
+    pseudo_params = {'device':'[!!host-α!!]', 'pids':'4101, 4102', 'holders':'worker.service',
+                     'builds':'v0.99.1+build-a', 'recorded':'v0.99.0+record-a',
+                     'install':'v0.99.2+install-b', 'reasons':'[!!reason-ß!!]'}
+    pseudo_count = 0
+    for key, text in target.items():
+        for count in (COUNTS if runtime.plural_selectors(text) else [1]):
+            params = dict(pseudo_params, count=count)
+            result = runtime.render_message(text, params, locale)
+            for name, kind in runtime.message_arguments(text):
+                if kind == 'simple':
+                    assert pseudo_params[name] in result
+            pseudo_count += 1
+    log += [f'PASS CLDR branch coverage: {sorted(categories_seen)}; counts={COUNTS}',
+            f'PASS literal commands preserved in every applicable branch',
+            f'PASS raw catalogue has no bidi controls; Latin digit/token samples unchanged',
+            f'PASS opaque/pseudo parameter preservation: {pseudo_count} renders',
+            f'PASS rendered text samples: {render_count}; keys=11/11',
+            'EXIT_CODE=0']
+    # Fail if a concurrently edited input invalidated this assessment.
+    assert all(sha(ROOT/p) == digest for p,digest in initial_hashes.items()), 'audited inputs changed during audit'
+    put(directory/'audit.log', '\n'.join(log)+'\n')
+    put(directory/'rendered.txt', '\n'.join(rendered)+'\n')
+    hashes = {'en': sha(SOURCE), 'context': sha(CONTEXT), 'target': sha(target_path)}
+    report = [f'# Second independent i18n audit — {locale} / {NS} / sd2', '',
+              f'Verdict: **PASSED — 11/11 keys audited; zero unresolved findings.**', '',
+              '## Provenance and independence', '',
+              'Auditor: Local Operator, second independent i18n auditor; session `85af124f4a9f`; actual model `openai/gpt-6.1-sol` (host session context). No fallback observed/reported. Not translator `acf0a84cd992`; no translation contribution authored or changed. The independent all-key semantic review and this reproducer’s initial verdict were authored before any first-pass findings were received. A parent message summarizing first-pass findings arrived after the reproducer was written, before it ran; no first-pass report files were opened. See `comparison-note.md` for the disclosure and separate disposition. This is an independent LLM language audit, not a native-speaker claim or own-copy approval.', '',
+              f'Audit time (UTC): {NOW}. Checkout HEAD: `{head}`; working-tree bytes, not HEAD catalogue contents, are authoritative for this new namespace.', '',
+              '## Byte binding', '',
+              f'- English source SHA256: `{hashes["en"]}`',
+              f'- English context SHA256: `{hashes["context"]}`',
+              f'- Target SHA256: `{hashes["target"]}`', '',
+              '## Locale result and register', '', locale_notes[locale], '',
+              '## All-key semantic assessment', '']
+    for key in source:
+        short = key[len(NS)+1:]
+        report += [f'- **{key} — PASS:** {key_notes[short]}']
+    report += ['', '## Validation and evidence limits', '',
+               f'`audit.log` contains actual validator output; `rendered.txt` contains all 11 production-runtime rendered catalogue values, with {render_count} count/branch samples. The matrix exercises 0/1/2/3/4/5/11/21/22/25/1.5/1,000,000/1,500,000, covering every declared CLDR category. Pseudo/opaque diagnostic parameters survive unchanged. Commands and arguments are checked in every plural arm, not only the union of message arguments.', '',
+               'The shared reproducer and frozen independent verdict are under `i18n/audits/evidence/fr/cli.serve_readiness/sd2/`. No context maxCells is declared, so no arbitrary width cap was invented. No full application, service restart, process-identity detector, screenshot, terminal RTL shaping/layout, whole-repository validator, shipped eligibility, or native-speaker approval is claimed. Urdu is logical-order raw text only; catalogue controls are forbidden and none were found. No translation, generated file, ledger/history, commit, install or pytest modification/action occurred. First auditors retain ledger-receipt responsibility.', '',
+               'Findings: **none**. No corrective translation or unconditional-restart recommendation is supplied.']
+    put(directory/'report.md', '\n'.join(report)+'\n')
+    artifacts = [directory/'audit.log', directory/'report.md', directory/'rendered.txt']
+    record = {'locale': locale, 'namespace': NS, 'audit_date': NOW, 'key_count': 11,
+              'auditor': provenance, 'source_audit_revision': head,
+              'audited_input_kind': 'current working-tree bytes; namespace untracked at audit start',
+              'input_hashes': hashes,
+              'input_paths': {'en':relative(SOURCE), 'context':relative(CONTEXT), 'target':relative(target_path)},
+              'supporting_input_hashes': {p:h for p,h in initial_hashes.items() if p in [relative(ROOT/'i18n/glossary.md'), relative(ROOT/'i18n/style-guides'/(locale+'.md')),relative(ROOT/'local_operator/network/readiness.py')]},
+              'all_keys_audited':list(source), 'current_report_verdict':'passed',
+              'current_bytes_match_audited_hashes':True, 'findings':[],
+              'locale_result': locale_notes[locale],
+              'validation':{'renders':render_count,'pseudo_renders':pseudo_count,'cldr_categories':sorted(categories_seen),'exit_code':0},
+              'first_reports_consulted':False, 'parent_summary_received_after_independent_review':True, 'translation_edits':False,
+              'ledger_history_appended':False,
+              'artifacts':{p.name:relative(p) for p in artifacts},
+              'shared_reproducer':'i18n/audits/evidence/fr/cli.serve_readiness/sd2/reproduce.py.txt',
+              'independent_verdict':'i18n/audits/evidence/fr/cli.serve_readiness/sd2/independent-verdict.json'}
+    dump(directory/'record.json',record)
+    companions = artifacts+[directory/'record.json']
+    if locale == 'fr':
+        companions += [directory/'reproduce.py.txt',freeze_path,directory/'comparison-note.md',directory/'driver-recovery.log']
+    dump(directory/'receipt.json', {'locale':locale,'namespace':NS,'audit_id':'sd2',
+                                  'sha256':{p.name:sha(p) for p in companions}})
+    print(f'{locale}: PASSED 11/11; renders={render_count}; pseudo={pseudo_count}; findings=0; target_sha256={hashes["target"]}',flush=True)
+
+assert all(sha(ROOT/p) == digest for p,digest in initial_hashes.items())
+print('PASS all source/context/target/glossary/style/readiness input hashes unchanged; 7 locale evidence bundles written; no first reports read.')

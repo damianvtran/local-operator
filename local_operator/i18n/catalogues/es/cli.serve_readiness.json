@@ -1,0 +1,13 @@
+{
+  "cli.serve_readiness.unproven": "está registrado, pero no se puede comprobar la identidad de su proceso (no se pudo comparar ninguna marca de tiempo de inicio)",
+  "cli.serve_readiness.not_reporting": "está registrado pero no responde (dejó de enviar señales de actividad)",
+  "cli.serve_readiness.not_this_daemon": "está registrado, pero ahora otro proceso tiene ese PID",
+  "cli.serve_readiness.unknown_state": "está registrado en un estado desconocido",
+  "cli.serve_readiness.install_unknown": "ejecuta una compilación que no se puede comparar con la instalación",
+  "cli.serve_readiness.cgroup_unknown": "se ejecuta en un cgroup que esta comprobación no puede ubicar",
+  "cli.serve_readiness.recorded_gap": "compilación registrada {recorded}, instalación {install} (identidad del proceso sin comprobar)",
+  "cli.serve_readiness.unknown": "{count, plural, one {el daemon `lop serve` en {device}: {reasons}, por lo que no se sabe si coincide con la instalación y está supervisado} many {los daemons `lop serve` en {device}: {reasons}, por lo que no se sabe si coinciden con la instalación y están supervisados} other {los daemons `lop serve` en {device}: {reasons}, por lo que no se sabe si coinciden con la instalación y están supervisados}}",
+  "cli.serve_readiness.stale": "{count, plural, one {el daemon `lop serve` en {device} ({pids}) ejecuta {builds}, pero la instalación es {install}: las sesiones remotas que aloja ejecutan esa otra compilación} many {los daemons `lop serve` en {device} ({pids}) ejecutan {builds}, pero la instalación es {install}: las sesiones remotas que alojan ejecutan esas otras compilaciones} other {los daemons `lop serve` en {device} ({pids}) ejecutan {builds}, pero la instalación es {install}: las sesiones remotas que alojan ejecutan esas otras compilaciones}}",
+  "cli.serve_readiness.other_unit": "{count, plural, one {el daemon `lop serve` en {device} está a cargo de otro servicio ({holders}), no de una unidad lop serve} many {los daemons `lop serve` en {device} están a cargo de otros servicios ({holders}), no de una unidad lop serve} other {los daemons `lop serve` en {device} están a cargo de otros servicios ({holders}), no de una unidad lop serve}}",
+  "cli.serve_readiness.identity_restart": "en {device}, ejecuta `lop services status` para inspeccionar los registros y luego `lop services restart` para registrar las identidades de los procesos; el reinicio comprueba cada daemon antes de actuar"
+}

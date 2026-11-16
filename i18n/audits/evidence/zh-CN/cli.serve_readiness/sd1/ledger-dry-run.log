@@ -1,0 +1,45 @@
+{
+  "record_reference": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d590e061719",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session metadata: Model openai/gpt-6.1-sol; no provider fallback observed",
+    "fallback": null
+  },
+  "execution_log": [
+    {
+      "command": [
+        ".venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "history-sha",
+        "--locale",
+        "zh-CN",
+        "--namespace",
+        "cli.serve_readiness"
+      ],
+      "executed_at_utc": "2026-11-16T04:41:39.316695+00:00",
+      "exit_code": 0,
+      "stdout": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        ".venv/bin/python",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/receipt.json",
+        "--expected-history-sha",
+        "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "--dry-run"
+      ],
+      "executed_at_utc": "2026-11-16T04:41:39.634510+00:00",
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/zh-CN/cli.serve_readiness.json\n",
+      "stderr": ""
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd2r",
+  "sha256": {
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd2r/record.json": "710d09cc66acd6e711b5b3c8233d4164694b86ab02bc378206401d4ec4cd733e",
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd2r/report.md": "51b7da24cf8989ca8dcd246fc83bcd3533a773819a6a649e297b88d1c2f2055a",
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd2r/rendered.txt": "3e65d6ba97eb499881448ebbd6cd3d66c049c601720dcfb4be7c28f7854ddd6f",
+    "i18n/audits/evidence/hi/cli.serve_readiness/sd2r/delta.json": "89c1f01576009ea3cb256c448e00757a2022f95a1c152bc16bcade1ed33b17b3"
+  },
+  "shared_audit_log_sha256": "c1ecac4f1fa41d1b5a8ae1f0ef7f25da6c093ab87f3283f31f315bde07860699"
+}

@@ -1,0 +1,7 @@
+[
+  {
+    "key": "cli.serve_readiness.cgroup_unknown",
+    "before": "运行于此检查无法定位的cgroup中",
+    "after": "本次检查无法判定其所在cgroup的归属"
+  }
+]

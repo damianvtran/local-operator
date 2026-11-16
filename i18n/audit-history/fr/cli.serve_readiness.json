@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "history_sha256": "dd0b9bd1a2d27d479e06bd44d1ed10d754671677d8a48460ab4bbcf0018cbad6",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+      "status": "passed",
+      "audit_date": "2026-11-16",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "acf0a84cd992",
+        "model": "openai/gpt-6.1-sol",
+        "provenance_source": "Requesting task brief; identity not independently queried"
+      },
+      "auditor": {
+        "agent": "Audit daemon French (i18n-auditor)",
+        "session": "19f657b90086",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "translator_session": "acf0a84cd992",
+        "actual_model_source": "Session runtime Model declaration: openai/gpt-6.1-sol",
+        "fallback": {
+          "observed": false,
+          "reported": false,
+          "actual_model": "openai/gpt-6.1-sol"
+        }
+      },
+      "note": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/record.json; 11/11 keys; 0 blocker/major; FR-SD1-01 MINOR; independent sd1 only",
+      "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/record.json",
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "FR-SD1-01"
+        ]
+      },
+      "bundle_companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/report.md",
+          "sha256": "4276e6a88cc10b0a42e5232763d4a0cfba28a516d4ee9d0ed392a362b84ab238"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/audit.log",
+          "sha256": "f0eabe55491f2487c526c66010e46194294733d9e4511d8b5ec0137127b44b1c"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/verify.py.txt",
+          "sha256": "44ce583dd974c25a7f4bb6f5fbbad88cc6c72d7b3739451c7aea8cb246b54a73"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+      "status": "passed",
+      "audit_date": "2026-11-16",
+      "auditor": {
+        "agent": "Audit daemon French (i18n-auditor)",
+        "session": "19f657b90086",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "translator_session": "acf0a84cd992",
+        "actual_model_source": "Session runtime Model declaration: openai/gpt-6.1-sol",
+        "fallback": {
+          "observed": false,
+          "reported": false,
+          "actual_model": "openai/gpt-6.1-sol"
+        }
+      },
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "acf0a84cd992",
+        "model": "openai/gpt-6.1-sol",
+        "provenance_source": "Requesting task brief; identity not independently queried"
+      },
+      "note": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/record.json; sd1r: FR-SD1-01 fixed; 11-key coverage retained, exact one-key delta; 0 open findings",
+      "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/record.json",
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "FR-SD1-01"
+        ],
+        "fixed_finding_ids": [
+          "FR-SD1-01"
+        ],
+        "open_finding_ids": [],
+        "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/report.md"
+      },
+      "remediation_of": "i18n/audits/evidence/fr/cli.serve_readiness/sd1/record.json",
+      "bundle_companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/report.md",
+          "sha256": "4ab4ff7ee398cb32b6dbd69eb66adcd0dbed70184455f8ef771e88623f72f750"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/audit.log",
+          "sha256": "2f24263ac7048c0101f138a2feac5f79a02a1ea34b44d527eb608fc7121692b5"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/verify.py.txt",
+          "sha256": "02de8cf6d86d1bd6932fc8600346462ef52621293bfa7e49ca4d97636d805187"
+        }
+      ]
+    }
+  ]
+}

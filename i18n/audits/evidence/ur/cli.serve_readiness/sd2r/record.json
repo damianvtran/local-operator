@@ -1,0 +1,91 @@
+{
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "audit_date": "2026-11-16T04:52:46.184602+00:00",
+  "key_count": 11,
+  "auditor": {
+    "agent": "Local Operator — second independent i18n auditor (sd2r)",
+    "session": "85af124f4a9f",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session declaration; same resumed independent auditor session as sd2.",
+    "fallback": "none observed or reported",
+    "independence": "Not translator acf0a84cd992 and not any first-pass auditor. No translation contribution or changes authored by this auditor. Fresh target semantics independently reviewed before reading sd1 finding IDs/suggestions; historical sd2 clean status does not override sd1 findings.",
+    "native_speaker_claim": false,
+    "round": "second-pass remediation"
+  },
+  "source_audit_revision": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca",
+  "input_hashes": {
+    "en": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+    "context": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693",
+    "target": "4180f78e34dd0ca0f9d0fa8b05a53de5abe8a103090d7f2bb9e0ae3446441f2a"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+    "context": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+    "target": "local_operator/i18n/catalogues/ur/cli.serve_readiness.json"
+  },
+  "prior_second_pass_record": "i18n/audits/evidence/ur/cli.serve_readiness/sd2/record.json",
+  "prior_target_sha256": "07c4be789363310c6f1863fd643974ca7741f18c99b7fd6c9404872ed84d9674",
+  "current_report_verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "finding_dispositions": [
+    {
+      "id": "UR-SD1-M1",
+      "original_severity": "MAJOR",
+      "key": "cli.serve_readiness.cgroup_unknown",
+      "disposition": "fixed",
+      "current_target_sha256": "4180f78e34dd0ca0f9d0fa8b05a53de5abe8a103090d7f2bb9e0ae3446441f2a",
+      "independent_assessment": "نوعیت ... متعین نہیں کر سکتی means this check cannot determine the nature/type. It removes spatial جگہ and preserves uncertainty. cgroup stays Latin in logical order; no manual bidi controls are introduced."
+    }
+  ],
+  "changed_keys_reassessed": [
+    "cli.serve_readiness.cgroup_unknown"
+  ],
+  "all_keys_covered": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart"
+  ],
+  "coverage_basis": "Changed keys/direct neighbors freshly reassessed; exact-byte-proven unchanged values retain prior sd2 semantic coverage; all keys mechanically rendered.",
+  "unchanged_keys_carried_forward": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart"
+  ],
+  "unchanged_bytes_proof": "Full prior target SHA256 reconstructed after undoing only declared changed values in memory; current serialization byte-equal.",
+  "current_bytes_match_audited_hashes": true,
+  "validation": {
+    "ordinary_renders": 47,
+    "pseudo_renders": 47,
+    "cldr_categories": [
+      "one",
+      "other"
+    ],
+    "exit_code": 0
+  },
+  "artifacts": {
+    "report": "i18n/audits/evidence/ur/cli.serve_readiness/sd2r/report.md",
+    "delta": "i18n/audits/evidence/ur/cli.serve_readiness/sd2r/delta.json",
+    "rendered": "i18n/audits/evidence/ur/cli.serve_readiness/sd2r/rendered.txt",
+    "shared_log": "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/audit.log",
+    "shared_reproducer": "i18n/audits/evidence/fr/cli.serve_readiness/sd2r/catalogue-check.py.txt"
+  },
+  "ledger_history_appended": false,
+  "translation_edits": false
+}
