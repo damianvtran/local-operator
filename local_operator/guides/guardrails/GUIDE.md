@@ -117,6 +117,33 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   delete words or targets, while a body fed to a shell (`bash <<EOF`, `| sh`)
   and the `$(…)` inside an unquoted `<<EOF` body are still walked.
 
+## Fresh directories inside your scratchpad
+
+For a top-level, straight-line bash script beginning with the exact
+`set -euo pipefail` header, the resolver can retain the parent of a bare
+`ROOT=$(mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXXXX")` assignment.
+The template's parent must already exist, be fully pinned (no symlink or `..`
+components), and be inside the inherited session scratchpad. The random
+component remains **symbolic**, not an invented existing pathname or a creation
+ledger entry. Copies such as `SRC="$ROOT/source"` and bounded literal `for`
+lists retain containment; `${ROOT}old` does not inherit freshness.
+
+This fixes a mac-proof capture case where rejecting every slash-bearing
+`mktemp` template collapsed fresh scratch writes to opaque writes at cwd.
+It does not exempt a script as a whole: protected paths, unknown interpreter
+argv and unknown writers keep their usual checks. In particular, curl's
+explicit `-o`/`--output` destination is checked, but curl is not fully modelled
+or declared read-only, and containment is not carried past it.
+
+Success matters: without the supported errexit header, a failed substitution
+could leave `ROOT` empty. AND/OR lists, pipelines, negation, conditional tests,
+functions, option changes and unsupported controls therefore get no new proof.
+Reassignment/unset removes the binding, and a link, move or other unmodelled
+writer invalidates all fresh bindings before later commands. Existing default
+`$(mktemp -d)` temp-root handling is separate; flags such as `-p`, `-t` and
+`-u` never borrow its default-root assumption. Unsupported shapes remain guarded;
+do not reword an already refused action to fit this supported subset.
+
 ## Cleaning up what you made
 
 Deleting your own rig directories and worktrees works without asking, through
