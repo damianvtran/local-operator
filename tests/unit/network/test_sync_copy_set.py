@@ -709,14 +709,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "~/Library/LaunchAgents, never a session entry",
     ),
     "local_operator/install_transaction.py": (
-        3,
+        6,
         "``install.lock``, ``.install-attempt.json`` and ``.update-operations`` "
         "belong to the node-local INSTALLROOT/generation authority, not a session "
         "directory. Kernel locks and PID/birth-bound build attempts must never "
         "travel with a session move, and ``OPERATION_DIR`` holds the durable "
         "update-operation records for this INSTALLROOT — machine-local recovery "
         "state bound to one install, exactly as untransportable as the lock and "
-        "the attempt file beside it.",
+        "the attempt file beside it. ``V2_OPERATION_DIR`` ('.update-operations-v2') "
+        "is the fenced protocol's record namespace under the SAME INSTALLROOT, and "
+        "``LEGACY_SIDECAR_NAME``/``V2_SIDECAR_NAME`` ('.update-operation.json', "
+        "'.update-operation-v2.json') are sidecars inside an immutable generation "
+        "directory (``<INSTALLROOT>/generations/<name>/``). Both are held here as the "
+        "single source of truth that ``fenced_operation`` and ``recovery_manifest`` "
+        "alias; none is ever an entry of a session directory.",
     ),
     "local_operator/procname.py": (
         4,

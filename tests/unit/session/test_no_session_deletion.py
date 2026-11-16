@@ -3058,6 +3058,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "the staged operation temp FILE only (FileNotFoundError suppressed); unlink refuses "
         "directories",
     ),
+    # Legacy recovery-manifest restore/capture: the same node-local INSTALLROOT
+    # authority. ``_write_exclusive`` holds ONE ``O_DIRECTORY|O_NOFOLLOW`` fd on
+    # INSTALLROOT/.update-operations (or the content store outside it) and unlinks,
+    # through that fd, only the ``.<uuid>.restore.tmp`` name it created itself.
+    (
+        "local_operator/recovery_manifest.py::_write_exclusive",
+        "os.unlink",
+        "its own staged ``.<uuid>.restore.tmp`` FILE only, dir_fd-relative to a validated "
+        "INSTALLROOT/.update-operations (or content-store) directory opened O_NOFOLLOW; "
+        "never a sessions/ path, and unlink refuses directories",
+    ),
     # Candidate publication: the same node-local generation authority. The replace
     # swaps a staged regular FILE onto the attempt FILE, and the unlink removes
     # only that staged temp; ``generation`` is an INSTALLROOT/generations/<id> tree

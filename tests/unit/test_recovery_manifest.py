@@ -393,6 +393,25 @@ def test_write_exclusive_refuses_a_swapped_directory(tmp_path):
     assert list(real.iterdir()) == []
 
 
+def test_owner_checks_never_reach_getuid_where_it_does_not_exist(root, tmp_path, monkeypatch):
+    """xplat-probe FATAL ``os.getuid``: with the uid not meaningful (non-POSIX),
+    containment and the exclusive write skip the uid comparison only; symlinks
+    and directory swaps are still refused."""
+    _legacy(root, _id(1))
+    monkeypatch.setattr(rm, "_UID_IS_MEANINGFUL", False)
+    monkeypatch.delattr(os, "getuid", raising=False)
+    directory, target = rm._contained(root, _rel(1))
+    assert target == directory / f"{_id(1)}.json"
+    assert rm._write_exclusive(directory, f"{_id(2)}.json", b"{}", 0o600, 1)
+    escape = tmp_path / "escape"
+    escape.mkdir()
+    os.rename(root / tx.OPERATION_DIR, tmp_path / "parked")
+    os.symlink(escape, root / tx.OPERATION_DIR)
+    with pytest.raises(rm.ManifestError, match="escapes the install root"):
+        rm._contained(root, _rel(1))
+    assert list(escape.iterdir()) == []
+
+
 def test_only_the_legacy_namespace_passes_the_path_check():
     """M3: restore may never plant a v2 record outside its fence and cap."""
     assert rm._relpath_ok(_rel(1))

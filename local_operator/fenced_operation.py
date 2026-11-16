@@ -69,10 +69,15 @@ PROTOCOL = _tx.V2_PROTOCOL
 EPOCH = 1
 #: Defined in ``install_transaction`` so legacy admission counts it too.
 V2_OPERATION_DIR = _tx.V2_OPERATION_DIR
-V2_SIDECAR_NAME = ".update-operation-v2.json"
-#: Named here, not imported: the legacy literal lives inline in the legacy
-#: functions, and this module only ever READS it to refuse mixed generations.
-LEGACY_SIDECAR_NAME = ".update-operation.json"
+#: Both sidecar names live in ``install_transaction`` (one source of truth); this
+#: module only READS the legacy one, to refuse mixed generations.
+V2_SIDECAR_NAME = _tx.V2_SIDECAR_NAME
+LEGACY_SIDECAR_NAME = _tx.LEGACY_SIDECAR_NAME
+#: The repo's one platform question for owner checks (see ``secrets/protocol.py``):
+#: ``os.getuid`` does not exist off POSIX, and a Windows ``st_uid`` is always 0,
+#: so ownership is only compared where a uid means something. Elsewhere the
+#: other refusals (symlink, type, identity, lock) still apply.
+_UID_IS_MEANINGFUL = os.name == "posix"
 
 #: Permissions are closed per role. ``finish`` is implicit for every role (a
 #: writer must always be able to give up its own authority); ``try_seal`` is not
@@ -186,7 +191,7 @@ def _v2_path(root: Path, identifier: str, *, create: bool = False) -> Path:
 def _require_safe_directory(directory: Path) -> None:
     if directory.exists() or directory.is_symlink():
         info = directory.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        if not stat.S_ISDIR(info.st_mode) or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()):
             raise FencedOperationError(
                 "update operation directory is unsafe; no record was written"
             )
@@ -319,9 +324,7 @@ def advance(context: WriterContext, phase: str, **observations: Any) -> None:
     if phase not in _tx._OPERATION_PHASES:
         raise FencedOperationError("update operation phase has no verified completion contract")
     if set(observations) - ADVANCE_OBSERVATIONS:
-        raise FencedOperationError(
-            "fenced advance cannot replace domain state; use its owning API"
-        )
+        raise FencedOperationError("fenced advance cannot replace domain state; use its owning API")
     with _fenced(context, "advance") as record:
         record.update(observations)
         record["phase"] = phase
@@ -528,7 +531,7 @@ def link_generation(context: WriterContext, generation: Path) -> None:
                 "candidate recovery is outside the canonical generation store"
             )
         info = generation.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        if not stat.S_ISDIR(info.st_mode) or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()):
             raise FencedOperationError("candidate generation is unsafe; nothing was linked")
         legacy = generation / LEGACY_SIDECAR_NAME
         if legacy.exists() or legacy.is_symlink():

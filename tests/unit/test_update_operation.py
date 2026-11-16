@@ -187,8 +187,7 @@ def test_incident_shaped_256_real_legacy_records_remain_protected(tmp_path):
         operations.append(operation)
     directory = tmp_path / tx.OPERATION_DIR
     before = {
-        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in directory.iterdir()
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in directory.iterdir()
     }
     assert len(before) == 256
     report = tx.recovery_capacity_status(tmp_path)
@@ -199,8 +198,7 @@ def test_incident_shaped_256_real_legacy_records_remain_protected(tmp_path):
     with pytest.raises(tx.RecoveryCapacityError):
         start(tmp_path)
     assert before == {
-        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in directory.iterdir()
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in directory.iterdir()
     }
     for operation in operations:
         assert _row(tmp_path, operation.identifier)["retirement"]["eligible"] is False
@@ -214,9 +212,7 @@ def test_legacy_phases_and_dead_owners_remain_protected(tmp_path, monkeypatch, p
     status = _row(tmp_path, operation.identifier)
     assert status["owner_state"] == "gone"
     assert status["phase"] == phase
-    assert status["retirement"] == {
-        "eligible": False, "reason": "writer_finality_unproven"
-    }
+    assert status["retirement"] == {"eligible": False, "reason": "writer_finality_unproven"}
     assert tx.recovery_capacity_status(tmp_path)["retirable_entries"] == 0
     # Existing ID lookup and late writer paths must still work. A dry run does
     # not take ownership from an old controller or move its durable record.
@@ -231,9 +227,7 @@ def test_capacity_dry_run_does_not_trust_a_claimed_terminal_seal(tmp_path):
     row["terminal_seal"] = {"version": 1, "central_services_complete": True}
     record.write_text(json.dumps(row))
     status = _row(tmp_path, operation.identifier)
-    assert status["retirement"] == {
-        "eligible": False, "reason": "unverified_terminal_seal"
-    }
+    assert status["retirement"] == {"eligible": False, "reason": "unverified_terminal_seal"}
     report = tx.recovery_capacity_status(tmp_path)
     assert report["protected_reasons"] == {"unverified_terminal_seal": 1}
     assert report["retirable_entries"] == 0
@@ -270,7 +264,8 @@ def test_capacity_dry_run_protects_unsafe_unknown_and_legacy_entries(tmp_path, m
     (directory / "foreign").mkdir()
     before = {
         path: (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in tmp_path.rglob("*") if path.is_file()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
     }
 
     def forbidden(*_args, **_kwargs):
@@ -289,7 +284,8 @@ def test_capacity_dry_run_protects_unsafe_unknown_and_legacy_entries(tmp_path, m
     }
     assert before == {
         path: (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in tmp_path.rglob("*") if path.is_file()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
     }
     assert (directory / f"{operation.identifier}.json").exists()
 
@@ -298,9 +294,7 @@ def test_capacity_dry_run_stops_after_the_first_overflow_entry(tmp_path, monkeyp
     directory = tmp_path / tx.OPERATION_DIR
     directory.mkdir()
     for index in range(300):
-        (directory / f"{index:032x}.json").write_text(
-            json.dumps({"operation_id": f"{index:032x}"})
-        )
+        (directory / f"{index:032x}.json").write_text(json.dumps({"operation_id": f"{index:032x}"}))
     original = tx.read_record
     reads = []
 

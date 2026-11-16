@@ -359,6 +359,16 @@ V2_OPERATION_DIR = ".update-operations-v2"
 #: The v2 record's protocol tag, also named here so the read-only capacity dry
 #: run can tell a well-formed v2 record from an unreadable one.
 V2_PROTOCOL = "update-operation.v2"
+#: Generation sidecar names, held HERE as the single source of truth for both
+#: protocols (``fenced_operation`` and ``recovery_manifest`` alias them). The
+#: legacy name is the literal the legacy functions below already read/write.
+LEGACY_SIDECAR_NAME = ".update-operation.json"
+V2_SIDECAR_NAME = ".update-operation-v2.json"
+#: The repo's one platform question for owner checks (see ``secrets/protocol.py``):
+#: ``os.getuid`` does not exist off POSIX, and a Windows ``st_uid`` is always 0,
+#: so ownership is only compared where a uid means something. Elsewhere the
+#: other refusals (symlink, type, identity, lock) still apply.
+_UID_IS_MEANINGFUL = os.name == "posix"
 _OPERATION_PHASES = {
     "queued",
     "preparing",
@@ -492,7 +502,7 @@ def _namespace_entries(root: Path, bound: int) -> Iterator[tuple[str, Path | Non
         if not directory.exists() and not directory.is_symlink():
             continue
         info = directory.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        if not stat.S_ISDIR(info.st_mode) or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()):
             yield name, None
             continue
         for entry in directory.iterdir():
@@ -825,9 +835,7 @@ def _retirement_status(record: dict[str, Any] | None) -> dict[str, Any]:
     reason = "unreadable_or_unsafe_record"
     if record is not None:
         reason = (
-            "unverified_terminal_seal"
-            if "terminal_seal" in record
-            else "writer_finality_unproven"
+            "unverified_terminal_seal" if "terminal_seal" in record else "writer_finality_unproven"
         )
     return {"eligible": False, "reason": reason}
 

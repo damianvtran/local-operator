@@ -60,7 +60,12 @@ CANDIDATE_LABEL = "ABANDONMENT CANDIDATE - finality unproven; still protected"
 _PREPARED_PHASES = frozenset({"queued", "preparing", "prepared"})
 #: Bounded scan: never iterate an unbounded directory in a dry run.
 DEFAULT_MAX_ENTRIES = 4096
-_V2_SIDECAR = ".update-operation-v2.json"
+_V2_SIDECAR = _tx.V2_SIDECAR_NAME
+#: The repo's one platform question for owner checks (see ``secrets/protocol.py``):
+#: ``os.getuid`` does not exist off POSIX, and a Windows ``st_uid`` is always 0,
+#: so ownership is only compared where a uid means something. Elsewhere the
+#: other refusals (symlink, type, identity, lock) still apply.
+_UID_IS_MEANINGFUL = os.name == "posix"
 _V2_DIR = _tx.V2_OPERATION_DIR
 
 
@@ -223,9 +228,10 @@ def dry_run_manifest(root: Path, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> d
             digest = hashlib.sha256(data).hexdigest()
             mode = stat.S_IMODE(sample.st_mode)
             name, _ = _generation_name(root, record.get("candidate"))
-            sidecar = name is not None and (
-                root / "generations" / name / ".update-operation.json"
-            ).exists()
+            sidecar = (
+                name is not None
+                and (root / "generations" / name / ".update-operation.json").exists()
+            )
             candidates.append(
                 {
                     "path": str(path),
@@ -353,7 +359,7 @@ def _contained(root: Path, relpath: str) -> tuple[Path, Path]:
         info = directory.lstat()
         if (
             not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.getuid()
+            or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid())
             or Path(os.path.realpath(directory)) != directory
         ):
             raise ManifestError(f"operation directory escapes the install root: {namespace}")
@@ -392,7 +398,7 @@ def _write_exclusive(
     staged = f".{uuid.uuid4().hex}.restore.tmp"
     try:
         info = os.fstat(handle)
-        if info.st_uid != os.getuid() or (
+        if (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()) or (
             expected is not None and (info.st_dev, info.st_ino) != expected
         ):
             raise ManifestError(f"directory changed after its checks: {directory}")
@@ -460,9 +466,7 @@ def capture_content(
             raise ManifestError(
                 f"on-disk bytes no longer match the reviewed manifest: {restore['relpath']}"
             )
-        staged.append(
-            (restore["relpath"], restore["content_sha256"], read[0], read[1].st_mtime_ns)
-        )
+        staged.append((restore["relpath"], restore["content_sha256"], read[0], read[1].st_mtime_ns))
     store.mkdir(mode=0o700, parents=True, exist_ok=True)
     report: dict[str, list[str]] = {"captured": [], "already": []}
     for relpath, digest, data, mtime_ns in staged:
@@ -530,7 +534,9 @@ def restore_manifest(
         root_info = root.lstat()
     except FileNotFoundError as exc:
         raise ManifestError("restore root does not exist; nothing was created") from exc
-    if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.getuid():
+    if not stat.S_ISDIR(root_info.st_mode) or (
+        _UID_IS_MEANINGFUL and root_info.st_uid != os.getuid()
+    ):
         raise ManifestError("restore root is unsafe; nothing was changed")
     plan, already = _restore_plan(entries, store, root)
     if not plan:

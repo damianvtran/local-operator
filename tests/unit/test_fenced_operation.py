@@ -518,6 +518,37 @@ def test_status_reports_unsafe_v2_directory_without_following_it(tmp_path):
     assert not (root / tx.OPERATION_DIR).exists()
 
 
+def test_owner_checks_never_reach_getuid_where_it_does_not_exist(tmp_path, monkeypatch):
+    """xplat-probe FATAL ``os.getuid``: the PR's owner checks follow the repo's
+    ``_UID_IS_MEANINGFUL`` convention (``secrets/protocol.py``), so off POSIX they
+    skip the uid comparison instead of raising AttributeError, while the
+    non-uid refusals (a symlinked namespace) still hold."""
+    _start(tmp_path)
+    root = tx.canonical_root(tmp_path)
+    monkeypatch.setattr(tx, "_UID_IS_MEANINGFUL", False)
+    monkeypatch.setattr(v2, "_UID_IS_MEANINGFUL", False)
+    monkeypatch.delattr(os, "getuid", raising=False)
+    v2._require_safe_directory(root / tx.V2_OPERATION_DIR)
+    assert tx.active_recovery_entries(root) == 1
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    linked = tmp_path / "linked-root"
+    linked.mkdir()
+    os.symlink(elsewhere, linked / tx.V2_OPERATION_DIR)
+    with pytest.raises(v2.FencedOperationError, match="unsafe"):
+        v2._require_safe_directory(linked / tx.V2_OPERATION_DIR)
+    with pytest.raises(tx.InstallTransactionError, match="unsafe"):
+        tx.active_recovery_entries(linked)
+
+
+def test_sidecar_names_have_one_source_of_truth():
+    """The guard-declared constants live in ``install_transaction`` only."""
+    from local_operator import recovery_manifest
+
+    assert v2.V2_SIDECAR_NAME == tx.V2_SIDECAR_NAME == recovery_manifest._V2_SIDECAR
+    assert v2.LEGACY_SIDECAR_NAME == tx.LEGACY_SIDECAR_NAME == ".update-operation.json"
+
+
 def test_legacy_only_boundary_is_unchanged(tmp_path):
     """255 legacy entries still admit the 256th through the old path."""
     _fill_legacy(tmp_path, tx.RecoveryCapacityError.active_limit - 1)

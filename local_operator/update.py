@@ -10528,9 +10528,7 @@ def update_command(
         )
     except UpdateError as exc:
         step = _progress().step
-        return _fail(
-            step, _classify_failure(step, exc), str(exc), failure_code=_failure_code(exc)
-        )
+        return _fail(step, _classify_failure(step, exc), str(exc), failure_code=_failure_code(exc))
     except Exception as exc:  # noqa: BLE001 — reported, then re-raised
         step = _progress().step
         _emit_update_failure(
