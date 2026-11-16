@@ -294,7 +294,7 @@ SUPPORTED_DELETE_PATHS = (
     "worktree (commit or push what you want to keep first), or the literal path the "
     "creating call named; never ask the operator about your own worktrees or scratch. "
     # Operator, ask a-798d (2026-11-15): finished work is cleaned up by default.
-    "Finished work is yours to clean up by default, without asking: a plain "
+    "Finished work is yours to clean up by default, no operator question needed: a plain "
     "`git worktree remove <exact path>` (no --force) of a clean worktree whose branch is "
     "merged (squash merges count) with no open PR and no running owner is allowed whoever "
     "created it, and so is `rm -rf` of a `~/<rig>` the ledger records as made by a session "
@@ -923,6 +923,21 @@ def _ask_block(
     return judge_only
 
 
+#: Reason fragments of the LOWs that rest on PROVEN finished-work facts
+#: (``classify``): a clean idle linked worktree, a finished foreign worktree,
+#: a finished rig. Ordinary-path LOWs are not among them.
+_FINISHED_LOW_MARKERS = (
+    "a clean linked git worktree (",
+    "a finished, merged linked git worktree",
+    "finished, merged linked git worktrees",
+    "finished work: rig recorded by ended session",
+)
+
+
+def _finished_low(reason: str) -> bool:
+    return any(m in (reason or "") for m in _FINISHED_LOW_MARKERS)
+
+
 def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
     """Rank HIGH every LOW destroying target a non-consenting ask in this family reaches.
 
@@ -1004,6 +1019,16 @@ def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
             None,
         )
         if hit is None:
+            continue
+        if hit[0].untrusted_yes and _finished_low(targets[i].reason):
+            # Field case a-2432 (node-2, 2026-11-15): the operator answered
+            # "All 34 paths listed" from the desktop's remote view; the answer
+            # is stamped ``remote`` (not consent), and this escalation turned
+            # the finished, merged incident-clear tree — LOW on proven facts,
+            # needing no answer at all — into a refusal. A non-declining answer
+            # is not a "no": it cannot lower anything (it is still no consent)
+            # and here it does not raise a proven finished-work LOW either.
+            # A declined, timed-out, withdrawn or open ask still escalates.
             continue
         why = (
             f"named by ask {hit[0].ask_id}, which was {hit[0].label}: "

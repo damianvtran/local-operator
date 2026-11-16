@@ -4009,6 +4009,22 @@ _WHOLE_SET_TAIL_RE = re.compile(
     r"(?i)(?:\s+(?:as\s+(?:recommended|suggested|proposed|planned)|i\s+give\s+(?:my\s+)?approval"
     r"|i\s+approve|approved|please|now))*\W*"
 )
+#: The ONLY first clauses :func:`_typed_whole_set` accepts: a removal verb over
+#: the whole set ("Remove all", "Delete them", "Remove all 34"). A bare "yes"/
+#: "ok" is NOT one: "ok, just es" and "Yes. Also check the logs" put the
+#: qualification after it (test_classification_accuracy), and a bare yes is
+#: settled only by ``_BARE_AFFIRM_RE`` over the WHOLE answer.
+_TYPED_WHOLE_SET_RE = re.compile(
+    r"(?i)\W*(?:delete|remove|clean\s?up|wipe|discard)\s+"
+    r"(?:all(?:\s+(?:\d+|of\s+them|them|of\s+these|of\s+those))?|them(?:\s+all)?"
+    r"|everything|both|these|those|it)"
+)
+#: Narrowing words anywhere in the answer that ``_CARVE_OUT_RE`` does not
+#: already list ("ok, just es", "yes, minus fr", "zh-cn stays").
+_NARROWING_RE = re.compile(
+    r"(?i)\b(?:just|minus|stays?|remains?|apart\s+from|other\s+than|save\s+for|besides"
+    r"|aside\s+from|without)\b"
+)
 #: Where a typed answer's FIRST clause ends for :func:`_typed_whole_set`: the
 #: clause breaks the decline check uses, plus a comma and " and ".
 _TYPED_FIRST_CLAUSE_RE = re.compile(r"(?i)\s*(?:,|;|\band\b)\s*")
@@ -4027,8 +4043,8 @@ def _typed_whole_set(answer: str) -> bool:
     whole-set approval ("Remove all", "Delete them"); the rest is an
     instruction to someone else, not a condition on the delete.
 
-    Narrow on purpose: the first clause must fullmatch ``_WHOLE_SET_OPTION_RE``
-    (plus approval-restating words), and NOTHING anywhere in the answer may
+    Narrow on purpose: the first clause must be a removal verb over the whole
+    set (``_TYPED_WHOLE_SET_RE``, plus approval-restating words), and NOTHING anywhere in the answer may
     decline or carve out (``_DECLINE_RE``, ``_CARVE_OUT_RE``, "but not"), so
     "Remove all except qa-push", "Remove only the worktrees", "Remove all but
     keep X" and "No" approve nothing here. (``_kept_answer`` already vetoes
@@ -4036,11 +4052,11 @@ def _typed_whole_set(answer: str) -> bool:
     """
     if _DECLINE_RE.search(answer) or _CARVE_OUT_RE.search(answer):
         return False
-    if re.search(r"(?i)\bbut\s+not\b", answer):
+    if re.search(r"(?i)\bbut\s+not\b", answer) or _NARROWING_RE.search(answer):
         return False
     head = _CLAUSE_BREAK_RE.split(answer, maxsplit=1)[0]
     head = _TYPED_FIRST_CLAUSE_RE.split(head, maxsplit=1)[0]
-    m = _WHOLE_SET_OPTION_RE.match(head)
+    m = _TYPED_WHOLE_SET_RE.match(head)
     if m is None or not m.group(0).strip():
         return False
     # The tail starts where the whole-set words end (``_WHOLE_SET_OPTION_RE``'s
@@ -4191,6 +4207,9 @@ class UnansweredAsk:
     #: deterministically goes to the judge, never to the refusal (review
     #: R2-M3): only an ask with no trusted yes may refuse outright.
     answer: OperatorWords | None = None
+    #: Answered, non-declining, but on an untrusted surface (``remote``,
+    #: ``chat``, ``unverified``): not consent, not a refusal (:func:`_untrusted_yes`).
+    untrusted_yes: bool = False
 
 
 #: Statuses that mean "the operator never answered".
@@ -4311,9 +4330,31 @@ def unanswered_asks(
                     answer=words,
                     created_at=int(record.get("created_at") or 0),
                     never_answered=status in _UNANSWERED_LABEL,
+                    untrusted_yes=words is None and _untrusted_yes(record, status, questions),
                 )
             )
     return out
+
+
+def _untrusted_yes(record: Mapping[str, Any], status: str, questions: Sequence[Any]) -> bool:
+    """An answer that exists, declines nothing, but came from an untrusted surface.
+
+    For :func:`check.escalate_asked_targets` only: such an answer is never
+    consent (field case a-2432: answered from the desktop's remote view of
+    node-2, stamped ``remote``), but it is not a refusal either, so it must
+    not turn a target the guard PROVED finished into a refusal. Any declining
+    answer, any non-answer, and a question-id ask are False.
+    """
+    if status not in ("answered", "late") or not questions:
+        return False
+    surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if surface in TRUSTED_ASK_SURFACES:
+        return False
+    answers = record.get("answers") or {}
+    return all(
+        isinstance(q, Mapping) and not q.get("secret") and _kept_answer(q, answers) is not None
+        for q in questions
+    )
 
 
 def ask_consents(

@@ -173,6 +173,52 @@ def test_squash_merged_tree_without_gh_is_low_for_plain_remove(home: Path, repo:
     assert "merged by content" in reason and "origin/main" in reason
 
 
+@pytest.mark.asyncio
+async def test_incident_clear_needs_no_answer_even_with_a_relayed_one(
+    home: Path, repo: Path
+) -> None:
+    """Field case a-2432 (node-2 d5188): ``git -C <repo> worktree remove …/incident-clear``
+    was refused because the operator's answer arrived on the ``remote`` surface.
+    The tree is clean, squash-merged and its creator ended, so it is LOW with no
+    answer at all; the relayed answer stays NOT consent (it plays no part)."""
+    wt = _squashed_tree(home, repo, "incident-clear")
+    _ask(home, "a-2432", f"All 34 paths listed: {wt}?", "All 34 paths listed", surface="remote")
+    judge = _Judge()
+    outcome = await _check(
+        home, f"git -C {repo} worktree remove {wt}", judge, _operator("a-2432")
+    )
+    assert outcome is not None and not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+    assert prov.verified_ask(ME, "a-2432") is None  # remote is still not consent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer,surface", [("Keep them", "desktop"), ("Keep them", "remote"), (None, "desktop")]
+)
+async def test_declined_or_lapsed_ask_still_escalates_a_finished_tree(
+    home: Path, repo: Path, answer: str | None, surface: str
+) -> None:
+    """Negative control for the a-2432 exemption: "no" or no answer still refuses."""
+    wt = _squashed_tree(home, repo, "asked")
+    _ask(home, "a-2433", f"Remove {wt}?", answer, surface=surface)
+    outcome = await _check(home, f"git -C {repo} worktree remove {wt}", _Judge("ALLOW"))
+    assert outcome is not None and outcome.blocked
+
+
+def test_pre_ledger_finished_tree_is_low_for_plain_remove(home: Path, repo: Path) -> None:
+    """A tree with NO ledger row (made before the ledger) is not held for that alone."""
+    wt = _squashed_tree(home, repo, "pre-ledger")
+    conn = prov._connect(prov.ledger_path(), create=False)
+    assert conn is not None
+    with conn:
+        conn.execute("DELETE FROM created WHERE path = ?", (os.path.realpath(wt),))
+    conn.close()
+    assert prov.recorded_creators(str(wt)) == []
+    verdict = _rank(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
 def test_merge_tree_proof_states_which_proof(home: Path, repo: Path) -> None:
     wt = _squashed_tree(home, repo, "proof")
     merged, why = prov.git_merged(str(wt), "fix/proof")
@@ -360,7 +406,10 @@ ANSWER_2 = (
 )
 
 
-def _ask(home: Path, ask_id: str, question: str, answer: str, surface: str = "desktop") -> None:
+def _ask(
+    home: Path, ask_id: str, question: str, answer: str | None, surface: str = "desktop"
+) -> None:
+    """One ask in this session's store; ``answer=None`` is an ask that EXPIRED unanswered."""
     path = home / ".local-operator" / "sessions" / ME / "asks.jsonl"
     now = int(time.time() * 1000)
     q = {
@@ -376,10 +425,13 @@ def _ask(home: Path, ask_id: str, question: str, answer: str, surface: str = "de
             "ask_id": ask_id,
             "at": now - 10,
             "created_at": now - 10,
-            "expires_at": now + 86_400_000,
+            "expires_at": now + 86_400_000 if answer is not None else now - 5,
             "timeout_s": 86400,
             "questions": [q],
         },
+    ]
+    if answer is not None:
+        rows.append(
         {
             "v": 1,
             "kind": "answered",
@@ -387,8 +439,8 @@ def _ask(home: Path, ask_id: str, question: str, answer: str, surface: str = "de
             "at": now,
             "by": {"surface": surface},
             "answers": {"q1": [answer]},
-        },
-    ]
+        }
+        )
     with path.open("a") as fh:
         for row in rows:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
