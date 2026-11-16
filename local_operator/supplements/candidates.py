@@ -656,6 +656,133 @@ def _in_dir(raw: str, cwd: str | None) -> str | None:
     return os.path.join(cwd, raw) if cwd else raw
 
 
+def literal_bash_inputs(command: str) -> tuple[str, ...]:
+    """Pure, conservative literal FILE operands for live provenance callers.
+
+    This shares tokenization, quoting, heredoc removal, variable expansion and
+    lexical cwd joining with the output grammar. It never stats, expands a glob,
+    follows an unknown cwd, or sweeps a directory. Unsupported shell constructs
+    deliberately lose relative evidence rather than guessing against a later
+    process cwd. Existing inventory/highlight output policy is unchanged.
+    """
+    if len(command) > SHELL_SCAN_MAX_CHARS:
+        return ()
+    stripped, _ = _lift_heredocs(_join_continuations(command))
+    tokens = _shell_tokens(_mark_expansions(stripped))
+    if tokens is None:
+        return ()
+    found: list[str] = []
+    cwd: str | None = ""
+    names: dict[str, str] = {"HOME": "~"}
+    segment: list[str] = []
+    file_commands = {
+        "cat",
+        "cp",
+        "mv",
+        "touch",
+        "stat",
+        "file",
+        "md5sum",
+        "sha1sum",
+        "sha256sum",
+        "wc",
+    }
+    value_options = {
+        "cp": {"-t", "-S", "--target-directory", "--suffix"},
+        "mv": {"-t", "-S", "--target-directory", "--suffix"},
+        "touch": {"-d", "-t", "-r", "--date", "--reference"},
+        "stat": {"-c", "--format", "--printf"},
+        "file": {"-m", "-f", "--magic-file", "--files-from"},
+    }
+
+    def emit(word: str, current: str | None, local_names: dict[str, str]) -> None:
+        if word.startswith(_QUOTED_TILDE):
+            return  # a quoted ~ is a literal directory, not the owner's home
+        raw = _expand_word(word, local_names)
+        if (
+            not raw
+            or raw.startswith(("-", "/dev/"))
+            or any(c in raw for c in "$`*?[]")
+            or "://" in raw
+        ):
+            return
+        joined = _in_dir(raw, current)
+        if joined:
+            found.append(joined)
+
+    def flush(separator: str) -> None:
+        nonlocal cwd
+        words, segment[:] = list(segment), []
+        if not words:
+            return
+        if any(
+            w in _COMPOUND_OPENERS
+            or w in _COMPOUND_CLOSERS
+            or w in {"(", ")", "eval", "source", "."}
+            for w in words
+        ):
+            cwd = None
+            names.clear()
+            return
+        local_names = dict(names)
+        head = 0
+        while head < len(words) and _ASSIGNMENT.match(words[head]):
+            key, raw = words[head].split("=", 1)
+            value = _assigned_value(raw, local_names)
+            if value is None:
+                local_names.pop(key, None)
+            else:
+                local_names[key] = value
+            head += 1
+        if head == len(words):
+            names.clear()
+            names.update(local_names)
+            return
+        executable = os.path.basename(words[head])
+        args = words[head + 1 :]
+        if executable == "cd":
+            target = (
+                _expand_word(args[0], local_names)
+                if len(args) == 1
+                else "~" if not args else "$unknown"
+            )
+            cwd = (
+                None
+                if any(c in target for c in "$`*?[]") or target.startswith("-")
+                else _in_dir(target, cwd)
+            )
+        elif executable in file_commands:
+            skip = False
+            for word in _positionals(args):
+                if skip:
+                    skip = False
+                    continue
+                if word in value_options.get(executable, set()):
+                    skip = True
+                elif not word.startswith("-"):
+                    emit(word, cwd, local_names)
+        elif executable in {"python", "python3", "bash", "sh", "node"} and not any(
+            w in {"-c", "-e", "--eval"} for w in args
+        ):
+            script = next((w for w in _positionals(args) if not w.startswith("-")), None)
+            if script:
+                emit(script, cwd, local_names)
+        for index, word in enumerate(args[:-1]):
+            if word in {"<", "<>"}:
+                emit(args[index + 1], cwd, local_names)
+        if separator in {"||", "|", "&"}:
+            cwd = None
+            names.clear()
+
+    for token in tokens:
+        if token in {";", "&&", "||", "|", "&", "\n"}:
+            flush(token)
+        else:
+            segment.append(token)
+    flush("")
+    return tuple(dict.fromkeys(found))
+
+
 def bash_effects(command: str, *, env: Mapping[str, str] | None = None) -> BashEffects:
     """Output paths named by one shell command (tier 2), ``cd``-aware. Tolerant: bad lexing -> none.
 
@@ -948,6 +1075,83 @@ def _bash_outputs(command: str) -> list[str]:
     did this command write", so the Files inventory gains the ``cd`` tracking too.
     """
     return list(bash_effects(command).outputs)
+
+
+def literal_eval_paths(code: str) -> tuple[str, ...]:
+    """Explicit literal Python file operands; no execution, values or sweeps.
+
+    Live provenance cannot reuse the broader inventory regex unqualified:
+    ``Path('out').write_text('contents')`` names ONE path, not a file named
+    ``contents``. AST call positions separate the file argument from arbitrary
+    strings/comments/stdout. Computed names and shadowed file constructors stay
+    unproven, even if a similarly named file happens to exist now.
+    """
+    import ast
+
+    if len(code) > SHELL_SCAN_MAX_CHARS or "\x00" in code:
+        return ()
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError):
+        return ()
+    shadowed = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+    shadowed.update(node.arg for node in ast.walk(tree) if isinstance(node, ast.arg))
+    shadowed.update(
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    )
+    # Imports may prove pathlib.Path, never an arbitrary module's same spelling.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                if name in {"Path", "open"} and not (
+                    node.module == "pathlib" and alias.name == "Path" and name == "Path"
+                ):
+                    shadowed.add(name)
+        elif isinstance(node, ast.Import):
+            shadowed.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+    found: list[str] = []
+    file_methods = {
+        "to_csv",
+        "to_excel",
+        "to_json",
+        "to_parquet",
+        "to_markdown",
+        "to_html",
+        "savefig",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        simple = (
+            isinstance(node.func, ast.Name)
+            and node.func.id in {"open", "Path"}
+            and node.func.id not in shadowed
+        )
+        method = isinstance(node.func, ast.Attribute) and node.func.attr in file_methods
+        if not (simple or method):
+            continue
+        operand = (
+            node.args[0]
+            if node.args
+            else next(
+                (
+                    kw.value
+                    for kw in node.keywords
+                    if kw.arg in {"file", "path", "filename", "fname", "path_or_buf"}
+                ),
+                None,
+            )
+        )
+        if isinstance(operand, ast.Constant) and isinstance(operand.value, str) and operand.value:
+            found.append(operand.value)
+    return tuple(dict.fromkeys(found))
 
 
 def _eval_outputs(code: str) -> list[str]:

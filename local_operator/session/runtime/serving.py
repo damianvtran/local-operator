@@ -683,6 +683,8 @@ class _PromptCommand:
     documents: list["DocumentContent"] | None = None
     #: False for a prompt from a remote connection (see ``prompt``).
     owner_typed: bool = True
+    # Frozen before queue/spool; never serialized into inbox/receipt JSON.
+    _file_capture: Any = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -4306,6 +4308,7 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         wait_for_turn: bool = True,
         owner_typed: bool = True,
+        _file_admission: Any = None,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
 
@@ -4465,6 +4468,11 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW: an idle handover that QUEUES instead of refusing.
         #
         # This arm is the 2026-09-19 incident's repair. The idle rung leaves in
@@ -4620,6 +4628,7 @@ class ServingSessionHandle(SessionHandle):
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
             owner_typed=owner_typed,
+            _file_capture=file_capture,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -5547,6 +5556,8 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "_file_capture" in parameters:
+                        fields["_file_capture"] = command._file_capture
                     if "owner_typed" in parameters and not command.owner_typed:
                         fields["owner_typed"] = False
                     if "input_mode" in parameters:
@@ -5641,6 +5652,7 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        _file_admission: Any = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
         self._check_loop_thread()
@@ -5706,6 +5718,7 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    _file_admission=_file_admission,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -5784,6 +5797,7 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        _file_admission: Any = None,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -5799,6 +5813,11 @@ class ServingSessionHandle(SessionHandle):
         """
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted", False
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
         # by construction (the window only opens when ``may_refresh`` reports
@@ -5912,6 +5931,8 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        if "_file_capture" in parameters:
+            fields["_file_capture"] = file_capture
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:

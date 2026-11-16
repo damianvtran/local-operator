@@ -510,6 +510,8 @@ class AsyncJob(BaseModel):
     # Plain/extension rows keep None and readers must rebuild them. Sharing a
     # tiny token avoids retaining the manager (and its tasks) from a UI memo.
     _projection_source: _ProjectionRevision | None = PrivateAttr(default=None)
+    # Native original execution context, never serialized/restored from roster.
+    _file_source: Any = PrivateAttr(default=None)
 
     @property
     def projection_revision(self) -> int | None:
@@ -944,10 +946,12 @@ class AsyncJobManager:
         ) = None,
         on_roster_change: Callable[[], None] | None = None,
         on_job_change: Callable[[], None] | None = None,
+        on_file_completed: Callable[[Any, Any], Awaitable[None]] | None = None,
     ) -> None:
         self._max_running = max_running
         self._retention_ms = retention_ms
         self._on_job_complete = on_job_complete
+        self._on_file_completed = on_file_completed
         # Fired (best-effort, synchronously) whenever the SET of ``task`` rows
         # or one of their statuses changes, so the session can re-snapshot the
         # roster to disk without the manager knowing what a transcript is. Kept
@@ -1499,6 +1503,20 @@ class AsyncJobManager:
             agent_id=agent_id,
             queued=queued,
         )
+        from local_operator.session.file_provenance import EXECUTION_SOURCE
+
+        source = EXECUTION_SOURCE.get()
+        if source is not None and type != "task":
+            import copy
+
+            job._file_source = copy.deepcopy(source)
+            call_event = job._file_source.get("call_event")
+            if call_event is not None:
+                # Reserve this job's own original-call row now, not from a
+                # delayed delivery/roster replay or a later argument mutation.
+                job._file_source["call_event"] = call_event.model_copy(
+                    update={"id": uuid.uuid4().hex}
+                )
         signal = AbortSignal()
         job._projection_source = self._projection_revision
         self._jobs[job_id] = job
@@ -1796,6 +1814,15 @@ class AsyncJobManager:
         self._pending_cleanups.pop(job.id, None)
         try:
             result = await coro
+            if self._on_file_completed is not None and job._file_source is not None:
+                # FIRST native completion, before roster projection/delivery.
+                # Frozen evidence is never recreated on wait/peek or restart.
+                try:
+                    await self._on_file_completed(job, job._file_source)
+                except Exception:
+                    logger.debug("native job file provenance unavailable", exc_info=True)
+                finally:
+                    job._file_source = None
             if job.status == "cancelled":
                 return
             job.status = "completed"

@@ -35869,6 +35869,17 @@ class OperatorApp(App[None]):
                     on_update,
                     context,
                 )
+                # Actual local execution, before receipt queue/render work. An
+                # attached/imported receipt has no owner-local native hook and
+                # must not stat at replay or manufacture a remote proof.
+                capture = getattr(session, "_capture_shell_completion", None)
+                if callable(capture):
+                    try:
+                        capture(command, result)
+                    except Exception:
+                        # Metadata failure must never turn the real command's
+                        # ordinary completion/receipt into a synthetic failure.
+                        logger.debug("local shell file provenance unavailable", exc_info=True)
             except Exception as error:  # surface, never crash the app
                 current_card = card_ref()
                 if (

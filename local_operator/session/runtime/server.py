@@ -9029,6 +9029,10 @@ class RuntimeServer:
                 # the operator's own devices can still answer with their
                 # capability. Local attaches keep the default.
                 fields["owner_typed"] = False
+            if "_file_admission" in parameters:
+                from local_operator.session.file_provenance import user_admission
+
+                fields["_file_admission"] = user_admission(authority, op)
             receipt = await h.prompt(frame["text"], **fields)
             if not honours_wait:
                 return receipt
@@ -9071,6 +9075,10 @@ class RuntimeServer:
             if authority.locality != "local" and "owner_typed" in parameters:
                 # Same rule as the prompt op above.
                 fields["owner_typed"] = False
+            if "_file_admission" in parameters:
+                from local_operator.session.file_provenance import user_admission
+
+                fields["_file_admission"] = user_admission(authority, op)
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()

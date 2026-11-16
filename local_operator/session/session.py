@@ -3857,6 +3857,9 @@ class Session:
         #: inventory instead of the factory's gate-less view.
         self._knowledge_hooks: _KnowledgeHooks | None = None
         self._transcript = transcript
+        # Native producer handles only; never populated from retained/replayed
+        # messages. Completed consumers verify disk, not this runtime object.
+        self._file_provenance_state = None
         self._init_bridge_taint(inherited_bridge_taint)
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
@@ -5508,6 +5511,7 @@ class Session:
         # behaviour is exactly what it was before this was configurable.
         self.jobs = AsyncJobManager(
             on_job_complete=self._on_job_completed,
+            on_file_completed=self._file_job_completed,
             # One mutation seam persists resumability and publishes the live
             # canonical roster, including progress/cost/status changes.
             on_roster_change=self._schedule_subagent_persist,
@@ -10390,6 +10394,7 @@ class Session:
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
         owner_typed: bool = True,
+        _file_capture: Any = ...,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -10487,6 +10492,10 @@ class Session:
         # FIFO before this acquire, or across the expansion's await) yields
         # instead of running one more body turn ahead of the person. Harness
         # rows (goal continuations) are not a person and are not marked.
+        if _file_capture is ...:
+            _file_capture = (
+                None if harness_injected else self._capture_file_input(text, producer_command_id)
+            )
         with contextlib.nullcontext() if harness_injected else self.person_prompt_waiting():
             if audio:
                 await self._refuse_audio_admission(audio)
@@ -10612,6 +10621,10 @@ class Session:
             elif input_path is not None:
                 extra["input_path"] = input_path
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
+            if not harness_injected:
+                self._file_owner().bind(user.id, _file_capture)
+                if producer_command_id:
+                    self._file_owner().admissions.pop(producer_command_id, None)
             if not owner_typed:
                 _stamp_remote_prompt(user)
             if harness_injected:
@@ -10725,6 +10738,7 @@ class Session:
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        _file_capture: Any = ...,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -10787,7 +10801,15 @@ class Session:
             extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
         elif input_path is not None:
             extra["input_path"] = input_path
+        if _file_capture is ...:
+            _file_capture = (
+                None if harness_injected else self._capture_file_input(text, producer_command_id)
+            )
         message = Message.user(text, images, audio=audio, documents=documents, **extra)
+        if not harness_injected:
+            self._file_owner().bind(message.id, _file_capture)
+            if producer_command_id:
+                self._file_owner().admissions.pop(producer_command_id, None)
         if not owner_typed:
             _stamp_remote_prompt(message)
         if harness_injected:
@@ -11707,6 +11729,7 @@ class Session:
             # A prompt spooled from a REMOTE connection keeps that provenance
             # (``serving.REMOTE_ORIGIN_SENDER_KEY``): never owner-typed here.
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
+            _file_capture=self._take_file_continuation(command_id),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -12175,7 +12198,11 @@ class Session:
                 and bool(row_id)
                 and not self._transcript.has_entry(row_id)
             )
-            await self._transcript.append_message(message, producer_command_id=producer_command_id)
+            await self._transcript.append_messages(
+                [message],
+                producer_command_id=producer_command_id,
+                _file_captures=self._file_owner().take([message]),
+            )
             if is_new_bridge_row:
                 try:
                     self._maybe_raise_bridge_ask(message)
@@ -21978,6 +22005,7 @@ class Session:
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
                 bind_nested_diff=self._bind_nested_diff,
+                file_provenance=self._file_provenance_hook,
                 divergence_judge=self._divergence_judge,
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
@@ -23927,6 +23955,182 @@ class Session:
             logger.warning("nested diff binding failed for %s", tool_name)
             return False
         return True
+
+    def _file_owner(self):
+        from local_operator.session.file_provenance import OwnerProvenance
+
+        if self._file_provenance_state is None:
+            self._file_provenance_state = OwnerProvenance(
+                self._transcript,
+                config_root=self._config_dir,
+                cwd=Path(os.path.abspath(self._cwd)),
+                home=Path.home(),
+            )
+        return self._file_provenance_state
+
+    def _capture_file_input(self, text: str, command_id: str | None = None):
+        """Synchronous metadata freeze BEFORE any admission queue/spool.
+
+        Locality is not proof eligibility: an authorized remote drive/phone
+        prompt is a genuine owning-runtime admission too, while owner_typed
+        retains its separate existing account/deletion-protection meaning.
+        """
+        from local_operator.session.file_provenance import text_candidates
+
+        owner = self._file_owner()
+        return (
+            owner.admit(text, command_id)
+            if command_id
+            else owner.capture("user", text_candidates(text))
+        )
+
+    def _take_file_continuation(self, command_id: str):
+        # No in-memory ticket after runtime loss => unknown, never stat-at-drain.
+        return self._file_owner().continuation(command_id)
+
+    async def _file_provenance_hook(self, stage: str, value: Any, facts: Any) -> None:
+        """Awaited native harness producer/binder, not an analytics observer."""
+        from itertools import chain
+
+        from local_operator.session.file_provenance import (
+            argument_candidates,
+            native_result_candidates,
+        )
+
+        try:
+            owner = self._file_owner()
+            if stage == "assistant":
+                owner.capture_message(value)
+            elif stage == "executing":
+                from hashlib import sha256
+
+                candidates = list(argument_candidates(facts["tool"], facts["arguments"]))
+                allowed = owner.call_references.get(value.id)
+                references = [
+                    {"digest": sha256(c.reference.encode()).hexdigest(), "locator": c.locator}
+                    for c in candidates
+                    if allowed is None
+                    or (sha256(c.reference.encode()).hexdigest(), c.locator) in allowed
+                ]
+                call_event = CustomMessage(
+                    custom_type="file_provenance_native_call_v1",
+                    details={
+                        "hidden": True,
+                        "call_id": value.id,
+                        "tool": facts["tool"],
+                        "references": references,
+                    },
+                )
+                input_ticket = owner.capture("tool_call", candidates, cwd=Path(facts["cwd"]))
+                input_ticket.call_id = value.id
+                owner.native_calls[value.id] = (call_event, input_ticket)
+                facts["call_event"] = call_event
+                facts["references"] = references
+            elif stage == "executed":
+                # Capture output arguments immediately after the real executor,
+                # before result copies, post hooks or queued completion events.
+                ticket = owner.capture(
+                    "tool_completion",
+                    chain(
+                        argument_candidates(facts["tool"], facts["arguments"]),
+                        native_result_candidates(facts["tool"], facts["result"].details),
+                    ),
+                    cwd=Path(facts["cwd"]),
+                )
+                native_call = owner.native_calls.get(value.id)
+                ticket.call_id = value.id
+                ticket.origin_id = owner.call_sources.pop(value.id, None) or (
+                    native_call[0].id if native_call else None
+                )
+                owner.calls[value.id] = (facts, ticket)
+                owner.call_references.pop(value.id, None)
+            elif stage == "result":
+                captured = owner.calls.pop(facts.tool_call_id, None)
+                if captured is not None:
+                    owner.bind(value.id, captured[1])
+                owner.native_calls.pop(facts.tool_call_id, None)
+            elif stage == "nested":
+                captured = owner.calls.pop(value.id, None)
+                if captured is None:
+                    return
+                native, ticket = captured
+                # A nested tool has no ordinary tool row. This host-created
+                # source event is awaited before arbitrary cell code sees it;
+                # a cell-returned lookalike has no native capture ticket.
+                message = CustomMessage(
+                    custom_type="file_provenance_native_v1",
+                    details={
+                        "hidden": True,
+                        "tool": native["tool"],
+                        "call_id": value.id,
+                        "outer_call_id": facts["outer_call_id"],
+                        "references": (
+                            [
+                                {"digest": f.reference_digest, "locator": f.locator}
+                                for f in ticket.files
+                            ]
+                            if ticket
+                            else []
+                        ),
+                    },
+                )
+                native_call = owner.native_calls.pop(value.id, None)
+                if native_call is None:
+                    return
+                call_event, input_ticket = native_call
+                input_ticket.outer_call_id = facts["outer_call_id"]
+                owner.bind(call_event.id, input_ticket)
+                if ticket is not None:
+                    ticket.origin_id = call_event.id
+                    ticket.outer_call_id = facts["outer_call_id"]
+                    owner.bind(message.id, ticket)
+                messages = [call_event, message]
+                await self._transcript.append_messages(
+                    messages, _file_captures=owner.take(messages)
+                )
+        except Exception:
+            # Ordinary transcript/tool delivery survives provenance failure.
+            # This is unknown evidence, never a deferred target restat/retry.
+            logger.debug("native file provenance unavailable", exc_info=True)
+
+    async def _file_job_completed(self, job: Any, native: Any) -> None:
+        """Freeze at FIRST native completion, not wait/roster/on-delivery replay."""
+        from local_operator.session.file_provenance import argument_candidates
+
+        owner = self._file_owner()
+        from hashlib import sha256
+
+        allowed = {(r["digest"], r["locator"]) for r in native.get("references", [])}
+        ticket = owner.capture(
+            "job_completion",
+            (
+                c
+                for c in argument_candidates(native["tool"], native["arguments"])
+                if (sha256(c.reference.encode()).hexdigest(), c.locator) in allowed
+            ),
+            cwd=Path(native["cwd"]),
+        )
+        call_event = native.get("call_event")
+        if not isinstance(call_event, CustomMessage):
+            return
+        ticket.origin_id = call_event.id
+        ticket.call_id, ticket.job_id = native["call_id"], job.id
+        message = CustomMessage(
+            custom_type="file_provenance_native_v1",
+            details={
+                "hidden": True,
+                "job_id": job.id,
+                "call_id": native["call_id"],
+                "tool": native["tool"],
+                "references": [
+                    {"digest": f.reference_digest, "locator": f.locator} for f in ticket.files
+                ],
+                "unproven": list(ticket.unknown),
+            },
+        )
+        owner.bind(message.id, ticket)
+        messages = [call_event, message]
+        await self._transcript.append_messages(messages, _file_captures=owner.take(messages))
 
     def _capture_prepared_write(self, call: ToolCall, result: ToolResult) -> None:
         """Private exact executed bytes; never persisted or passed to a provider.
@@ -26924,7 +27128,9 @@ class Session:
         # boundary while avoiding an fsync for every already-paired result.
         # A latched checkpoint rides THIS commit, so the record and its batch
         # are never split (see `_persist_new_messages`).
-        await self._transcript.append_messages(fresh, checkpoint=checkpoint)
+        await self._transcript.append_messages(
+            fresh, checkpoint=checkpoint, _file_captures=self._file_owner().take(fresh)
+        )
         if checkpoint is not None:
             self._checkpoint_pending = False
 
@@ -31278,6 +31484,20 @@ class Session:
         # splice its own messages through the middle of them.
         self._context.messages.extend(messages)
 
+    def _capture_shell_completion(self, command: str, result: ToolResult) -> None:
+        """Native local bang executor only; receipt/adoption callers never mint."""
+        from local_operator.session.file_provenance import argument_candidates
+        from local_operator.session.shell_record import shell_record_messages
+
+        owner = self._file_owner()
+        ticket = owner.capture(
+            "local_shell_completion", argument_candidates("bash", {"command": command})
+        )
+        messages = shell_record_messages(command, result)
+        ticket.origin_id = messages[1].id
+        ticket.call_id = result.tool_call_id
+        owner.bind(messages[-1].id, ticket)
+
     async def record_shell(self, command: str, result: ToolResult) -> None:
         """Persist a user-typed bang-mode command into the conversation.
 
@@ -31333,7 +31553,9 @@ class Session:
         if self._transcript.has_entry(messages[-1].id):
             return
         # The synthetic assistant/tool exchange is one fork-visible unit.
-        await self._transcript.append_messages(messages)
+        await self._transcript.append_messages(
+            messages, _file_captures=self._file_owner().take(messages)
+        )
         self._context.messages.extend(messages)
 
     async def _flush_shell_records(self) -> None:

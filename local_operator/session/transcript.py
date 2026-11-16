@@ -2777,6 +2777,7 @@ class Transcript:
         producer_command_id: str | None = None,
         preserve_mtime: bool = False,
         checkpoint: dict[str, Any] | None = None,
+        _file_captures: Mapping[str, Any] | None = None,
     ) -> list[TranscriptEntry]:
         """Durably commit an ordered message batch with one fsync.
 
@@ -2801,6 +2802,8 @@ class Transcript:
         if not messages and checkpoint is None:
             return []
 
+        provenance_pending: list[dict[str, Any]] = []
+
         def build() -> list[TranscriptEntry]:
             rows = []
             for message in messages:
@@ -2809,6 +2812,30 @@ class Transcript:
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
                 rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+            if _file_captures is not None:
+                from local_operator.session.file_provenance import NATIVE_TYPES
+
+                # Native provenance facts are BOOKKEEPING, never conversation
+                # messages. Existing replay/audit/display decoders already skip
+                # ENTRY_CUSTOM; no old client must understand a new hidden flag.
+                # Classify even empty/failed captures, before proof publication,
+                # so metadata failures cannot create phantom transcript cards.
+                rows = [
+                    (
+                        TranscriptEntry(
+                            row.id,
+                            row.ts,
+                            ENTRY_CUSTOM,
+                            {
+                                "custom_type": row.payload["custom_type"],
+                                "details": row.payload.get("details", {}),
+                            },
+                        )
+                        if row.payload.get("custom_type") in NATIVE_TYPES
+                        else row
+                    )
+                    for row in rows
+                ]
             if checkpoint is not None:
                 rows.append(
                     TranscriptEntry(
@@ -2818,9 +2845,24 @@ class Transcript:
                         {"custom_type": CHECKPOINT_CUSTOM_TYPE, "details": checkpoint},
                     )
                 )
+            if _file_captures:
+                # Only sealed native tickets can add receipts. Generic/imported
+                # commits keep their exact old row builder and cannot issue.
+                from local_operator.session.file_provenance import prepare_batch
+
+                rows, pending = prepare_batch(self, rows, _file_captures)
+                provenance_pending.extend(pending)
             return rows
 
-        return await self._commit(build, preserve_mtime=preserve_mtime)
+        def finish(rows: list[TranscriptEntry]) -> None:
+            if provenance_pending:
+                from local_operator.session.file_provenance import finish_batch
+
+                finish_batch(self, rows, provenance_pending)
+
+        return await self._commit(
+            build, preserve_mtime=preserve_mtime, _file_finish=finish if _file_captures else None
+        )
 
     async def append_imported(
         self,
@@ -3081,6 +3123,7 @@ class Transcript:
         build: Callable[[], list[TranscriptEntry]],
         *,
         preserve_mtime: bool = False,
+        _file_finish: Callable[[list[TranscriptEntry]], None] | None = None,
     ) -> list[TranscriptEntry]:
         """Serialize writes and acknowledge only after durable publication.
 
@@ -3097,6 +3140,10 @@ class Transcript:
             def write() -> tuple[list[TranscriptEntry], tuple[int, int, float]]:
                 rows = build()
                 source = self._write_entries(rows, preserve_mtime=preserve_mtime)
+                if _file_finish is not None:
+                    # Same worker/shield/order lock: cancellation cannot expose
+                    # an unlogged proof or abandon finalization halfway through.
+                    _file_finish(rows)
                 return rows, source
 
             worker = asyncio.create_task(asyncio.to_thread(write))
