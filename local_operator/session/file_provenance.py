@@ -270,42 +270,10 @@ def argument_candidates(tool: str, args: Mapping[str, Any]) -> Iterable[Candidat
         for index, item in enumerate(values):
             if isinstance(item, str) and item:
                 yield Candidate(item, f"argument:{key}:{index}")
-    if tool == "bash" and isinstance(args.get("command"), str):
-        from local_operator.supplements.candidates import (
-            SHELL_SCAN_MAX_CHARS,
-            _shell_tokens,
-            bash_effects,
-            literal_bash_scan,
-        )
-
-        command = args["command"]
-        if len(command) > SHELL_SCAN_MAX_CHARS:
-            return
-        # Existing deterministic output grammar includes known literal cwd/env
-        # effects. Never use its sweep_dirs: discovering a file is not naming it.
-        raw_tokens = _shell_tokens(command)
-        if raw_tokens is None:
-            return
-        unsafe = [
-            token.split("=", 1)[-1]
-            for token in raw_tokens
-            if ".." in Path(token.split("=", 1)[-1]).parts
-        ]
-        if unsafe:
-            for token in unsafe:
-                yield Candidate(token, "shell_unsafe_lexical")
-            return
-        scan = literal_bash_scan(command)
-        # The shared output grammar is a Highlights heuristic: it models subshells and
-        # functions and is blind to pushd/HOME/prefix-assignment state (QA-Q1, PR #4108).
-        # Its outputs are attested only when the fail-closed literal walk proved every
-        # piece of shell state it relied on; otherwise they are unknown, never guessed.
-        if scan.exact:
-            for index, output in enumerate(bash_effects(command).outputs):
-                yield Candidate(output, f"shell_output:{index}")
-        for index, path in enumerate(scan.inputs):
-            yield Candidate(path, f"shell_literal:{index}")
-    elif tool == "eval" and isinstance(args.get("code"), str):
+    # Shell strings are not explicit file contracts. Static shell interpretation has
+    # repeatedly invented paths bash never touched (PR #4108, QA-Q1/R2-1/R3-1/R3-2).
+    # Keep Highlights heuristics separate: neither shell inputs nor outputs issue proofs.
+    if tool == "eval" and isinstance(args.get("code"), str):
         from local_operator.supplements.candidates import literal_eval_paths
 
         for index, path in enumerate(literal_eval_paths(args["code"])):

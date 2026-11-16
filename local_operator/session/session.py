@@ -31484,20 +31484,6 @@ class Session:
         # splice its own messages through the middle of them.
         self._context.messages.extend(messages)
 
-    def _capture_shell_completion(self, command: str, result: ToolResult) -> None:
-        """Native local bang executor only; receipt/adoption callers never mint."""
-        from local_operator.session.file_provenance import argument_candidates
-        from local_operator.session.shell_record import shell_record_messages
-
-        owner = self._file_owner()
-        ticket = owner.capture(
-            "local_shell_completion", argument_candidates("bash", {"command": command})
-        )
-        messages = shell_record_messages(command, result)
-        ticket.origin_id = messages[1].id
-        ticket.call_id = result.tool_call_id
-        owner.bind(messages[-1].id, ticket)
-
     async def record_shell(self, command: str, result: ToolResult) -> None:
         """Persist a user-typed bang-mode command into the conversation.
 

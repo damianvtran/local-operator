@@ -244,23 +244,30 @@ async def test_actual_nested_executor_awaits_content_free_host_binding(rig):
 
 
 @pytest.mark.asyncio
-async def test_native_job_freezes_at_first_completion_before_delayed_delivery(rig):
+@pytest.mark.parametrize("source", ["structured", "shell"])
+async def test_native_job_freezes_at_first_completion_before_delayed_delivery(rig, source):
     target = rig.work / "job.txt"
     release, delivering, delivered = asyncio.Event(), asyncio.Event(), asyncio.Event()
     held = {}
+    tool_name = "write" if source == "structured" else "bash"
 
     async def background(call_id, args, signal, update, context):
         async def run(job_id, abort, progress):
             await release.wait()
             target.write_text("job-completed-v1")
+            progress({"path": str(target)})
             return "stdout alone is not a file fact"
 
-        held["id"] = context.jobs.register("bash", "native output", run)
+        held["id"] = context.jobs.register(
+            "music" if source == "structured" else "bash", "native output", run
+        )
         return ToolResult(
-            tool_call_id=call_id, tool_name="bash", content=[TextContent(text="running")]
+            tool_call_id=call_id, tool_name=tool_name, content=[TextContent(text="running")]
         )
 
-    tool = AgentTool(name="bash", parameters={"type": "object"}, execute=background)
+    # The job boundary needs a positive file contract, independent of shell
+    # heuristics: P2 deliberately never attests paths inferred from a command.
+    tool = AgentTool(name=tool_name, parameters={"type": "object"}, execute=background)
     session = make_session(
         rig,
         [
@@ -268,8 +275,12 @@ async def test_native_job_freezes_at_first_completion_before_delayed_delivery(ri
                 StreamToolCallDelta(
                     index=0,
                     id="background-call",
-                    name="bash",
-                    argument_delta=json.dumps({"command": f"printf data > {target}"}),
+                    name=tool_name,
+                    argument_delta=json.dumps(
+                        {"path": str(target), "content": "job-completed-v1"}
+                        if source == "structured"
+                        else {"command": f"printf data > {target}"}
+                    ),
                 ),
                 StreamEndEvent(stop_reason="toolUse"),
             ],
@@ -289,12 +300,22 @@ async def test_native_job_freezes_at_first_completion_before_delayed_delivery(ri
         release.set()
         await delivering.wait()
         completed = [p for p in proofs(rig) if p and p["source_class"] == "job_completion"]
-        assert completed
-        opaque = completed[0]["id"]
+        assert session.jobs.get(held["id"]).latest_details["path"] == str(target)
+        if source == "structured":
+            assert completed
+            opaque = completed[0]["id"]
+        else:
+            # Even a real native job with a real completed file and structured
+            # progress path cannot turn its shell command into a file proof.
+            assert completed == []
+            assert proofs(rig) == []
         target.write_text("changed while delivery held")
         delivered.set()
         await task
-        assert F.lookup_proof(rig.root, rig.directory.name, opaque) is None
+        if source == "structured":
+            assert F.lookup_proof(rig.root, rig.directory.name, opaque) is None
+        else:
+            assert proofs(rig) == []
         assert (
             len(
                 [
@@ -312,7 +333,7 @@ async def test_native_job_freezes_at_first_completion_before_delayed_delivery(ri
 
 
 @pytest.mark.asyncio
-async def test_only_real_local_shell_completion_not_adopted_receipt_can_issue(rig):
+async def test_real_local_shell_completion_and_imported_receipt_never_issue(rig):
     from local_operator.harness.types import AbortSignal, ToolContext
     from local_operator.tools.builtin import execute_bash
 
@@ -323,9 +344,9 @@ async def test_only_real_local_shell_completion_not_adopted_receipt_can_issue(ri
         result = await execute_bash(
             "local-shell", {"command": command}, AbortSignal(), None, ToolContext(cwd=str(rig.work))
         )
-        session._capture_shell_completion(command, result)
         await session.record_shell(command, result)
-        assert any(proofs(rig))
+        assert target.read_text() == "data"
+        assert proofs(rig) == []
         before = len(ids(rig.transcript))
         imported = result.model_copy(update={"tool_call_id": "imported-receipt"})
         await session.record_shell(command, imported)
@@ -457,9 +478,7 @@ async def test_eval_path_literal_not_write_content_is_real_completion_evidence(r
         pytest.param("echo '\n' cd sub\ncat x.txt", "\n cd sub\nWORK", id="quoted-newline"),
     ],
 )
-async def test_r2_1_shell_boundaries_fail_closed_against_real_bash(rig, command, expected):
-    from local_operator.supplements.candidates import literal_bash_scan
-
+async def test_r2_1_shell_commands_never_mint_against_real_bash(rig, command, expected):
     home = rig.work.parent
     (home / "notes").mkdir()
     (rig.work / "sub").mkdir()
@@ -493,11 +512,9 @@ async def test_r2_1_shell_boundaries_fail_closed_against_real_bash(rig, command,
         await session.prompt("run it")
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
         # This output comes from real bash with distinct per-path contents, not
-        # the grammar under test; in the CRLF case bash also reports a failed cd.
+        # provenance code; in the CRLF case bash also reports a failed cd.
         assert results[-1].content[0].text.startswith(("CONTROL\n" if prefix else "") + expected)
         assert output.read_text() == "OUTPUT"
-        scan = literal_bash_scan(command)
-        assert scan.inputs == () and not scan.exact
         assert list(F.argument_candidates("bash", {"command": command})) == []
         assert proofs(rig) == []
     finally:
@@ -505,7 +522,7 @@ async def test_r2_1_shell_boundaries_fail_closed_against_real_bash(rig, command,
 
 
 @pytest.mark.asyncio
-async def test_r2_1_plain_lf_remains_a_statement_boundary(rig):
+async def test_shell_plain_lf_never_mints(rig):
     (rig.work / "sub").mkdir()
     target = rig.work / "sub" / "x.txt"
     target.write_text("LF-CONTROL")
@@ -514,7 +531,7 @@ async def test_r2_1_plain_lf_remains_a_statement_boundary(rig):
         await session.prompt("run it")
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
         assert results[-1].content[0].text == "LF-CONTROL"
-        assert any(p and p["file"]["path"] == str(target) for p in proofs(rig))
+        assert proofs(rig) == []
     finally:
         await session.dispose()
 
@@ -634,24 +651,22 @@ async def test_qa_q1_shell_never_attests_a_file_the_command_did_not_touch(rig, s
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
         # The real shell did not open the decoy (it failed on another path).
         assert "No such file" in results[-1].content[0].text
-        attested = [p for p in proofs(rig) if p and p["file"]["path"] == str(decoy)]
-        assert attested == []
+        assert proofs(rig) == []
     finally:
         await session.dispose()
 
 
 @pytest.mark.asyncio
-async def test_qa_q1_control_plain_relative_cat_still_attests(rig):
-    # Positive control for the three repros above: same rig, same decoy, plain read.
-    target = rig.work / "inside.txt"
+async def test_plain_literal_shell_command_never_mints(rig):
+    # Even a successful absolute literal read is not a structured file contract.
+    target = rig.work / "plain.txt"
     target.write_text("QA-CONTROL")
-    session = _bash_session(rig, "cat inside.txt")
+    session = _bash_session(rig, f"cat {shlex.quote(str(target))}")
     try:
         await session.prompt("run it")
-        attested = {
-            p["source_class"] for p in proofs(rig) if p and p["file"]["path"] == str(target)
-        }
-        assert "tool_completion" in attested
+        results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        assert results[-1].content[0].text == "QA-CONTROL"
+        assert proofs(rig) == []
     finally:
         await session.dispose()
 
@@ -798,3 +813,105 @@ async def test_r2_job_started_after_its_call_returned_carries_no_source(rig):
     finally:
         late_start.set()
         await session.dispose()
+
+
+# -- PR #4108 round-3 scope split ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        pytest.param("echo ${X:-;cd sub}; cat x.txt", ";cd sub\nWORK", id="r3-1-default"),
+        pytest.param("echo ${X:-\ncd sub}; cat x.txt", "cd sub\nWORK", id="r3-1-newline"),
+        pytest.param("X=y; echo ${X:+;cd sub}; cat x.txt", ";cd sub\nWORK", id="r3-1-alternate"),
+        pytest.param("echo ${X:=;cd sub}; cat x.txt", ";cd sub\nWORK", id="r3-1-assignment"),
+        pytest.param("F=sub;cat \ue001F/x.txt", "", id="r3-2-private-use"),
+    ],
+)
+async def test_r3_shell_commands_never_mint_with_existing_decoys(
+    rig, command, expected, monkeypatch
+):
+    # Existing decoys are essential: earlier QA missed ${...} because sub}/x.txt
+    # did not exist, so a wrong candidate happened to fail descriptor admission.
+    monkeypatch.delenv("X", raising=False)
+    (rig.work / "x.txt").write_text("WORK")
+    for directory in ("sub", "sub}"):
+        (rig.work / directory).mkdir()
+        (rig.work / directory / "x.txt").write_text("DECOY")
+    session = _bash_session(rig, command)
+    try:
+        await session.prompt("run it")
+        results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        actual = results[-1].content[0].text
+        if expected:
+            assert actual == expected
+        else:
+            assert "No such file or directory" in actual
+        assert proofs(rig) == []
+        assert list(F.argument_candidates("bash", {"command": command})) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", ["updating", "draining"])
+async def test_r3_committed_spool_cancellation_conservatively_drops_ticket(
+    rig, monkeypatch, window
+):
+    # await_spool_write can durably finish and still raise cancellation. Until
+    # storage communicates that outcome separately, omission is safer than an
+    # admission retained after an unwritten spool. Do not re-stat at drain time.
+    import os
+    import threading
+
+    from local_operator.wakes.spooled import await_spool_write
+
+    target = rig.work / "cancelled-spooled.txt"
+    target.write_text("v1")
+    durable = rig.work / "durable-spool.txt"
+    started, release = threading.Event(), threading.Event()
+    session = make_session(rig)
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(rig.work), config_dir=rig.root
+    )
+    command_id = "committed-cancel"
+
+    def write():
+        started.set()
+        assert release.wait(10)
+        with durable.open("w") as stream:
+            stream.write("DURABLE")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    async def spool(*args, **kwargs):
+        assert command_id in session._file_owner().admissions
+        await await_spool_write(write)
+
+    monkeypatch.setattr(handle, "_spool_for_successor", spool)
+    handle._updating = window == "updating"
+    handle._draining = window == "draining"
+    handle._retiring_cause = "synthetic drain" if handle._draining else ""
+    admission = F.user_admission(_ConnectionAuthority(), "prompt")
+    task = asyncio.create_task(
+        handle.prompt(str(target), command_id=command_id, _file_admission=admission)
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 10)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert durable.read_text() == "DURABLE"
+        assert command_id not in session._file_owner().admissions
+        assert handle._command_reservations.reserve(command_id, kind="prompt")
+        handle._command_reservations.reject(command_id)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        handle._updating = handle._draining = False
+        handle._retiring_cause = ""
+        await handle.dispose()

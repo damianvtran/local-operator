@@ -34,10 +34,10 @@ Other production boundaries are:
   events, never a cell-returned lookalike;
 * native non-child async-job registration carrying its original private executor
   context, followed by the **first** coroutine completion before roster update,
-  delivery, wait or peek. Persisted roster data cannot recover that context;
-* the actual local bang executor immediately after `execute_bash`, before receipt
-  queue/render work. `record_shell` alone is also an adoption/import sink and
-  cannot issue. An attached/remote receipt has no owner-local native hook.
+  delivery, wait or peek. Persisted roster data cannot recover that context.
+
+The local bang executor and `record_shell` are not proof producers: executing or
+retaining a shell receipt does not turn command strings into file contracts.
 
 Ordinary tool/web/peer text does not count as owner adoption. The assistant can
 later explicitly adopt a path in its own retained text. Typed write/edit/browser
@@ -56,14 +56,16 @@ hashed or copied, and no file descriptor survives a turn. Raw `..` is refused
 rather than normalized away; globs, unknown expansions and ambiguous cwd/code
 remain unproven. No directory sweep is used.
 
-The pure reference, markdown, explicit quoted literal, structured-argument and
-shell/Python leaves are shared with the existing parser module. The new shell
-input leaf handles conservative literal file operands using the existing token,
-heredoc, expansion and lexical cwd helpers; it does not change inventory's
-existing output/sweep policy. The Python leaf uses AST file-argument positions,
-so `Path('out').write_text('contents')` does not attest a file named `contents`.
-Computed values, comments/strings containing code and shadowed constructors do
-not supply literal file operands.
+The pure reference, markdown, explicit quoted literal and structured-argument
+leaves are shared with the existing parser module. The Python leaf uses AST
+file-argument positions, so `Path('out').write_text('contents')` does not attest
+a file named `contents`. Computed values, comments/strings containing code and
+shadowed constructors do not supply literal file operands. Shell command strings
+are deliberately **not a provenance source in P2**: neither literal inputs nor
+outputs inferred from `bash`/`execute_bash` can mint a proof. Structured path
+arguments, native `details.path` contracts, and explicit assistant/prompt/steer
+mentions remain eligible. Highlights' existing shell output/sweep heuristics
+remain unchanged and confer no provenance authority.
 
 A ticket also freezes the existing owner public key, physical config-root
 identity, session identity, known birth and any already initialized proof
@@ -134,6 +136,21 @@ negative witnesses are trusted; coherently rewinding **all surviving transition
 knowledge** is unsupported and may require restoring only the journal after a
 failed projection, not every physical file.
 
+Shell parsing is intentionally outside this slice. Three remediation rounds
+(QA-Q1, R2-1, R3-1/R3-2 on PR #4108) found shell-state, token-boundary,
+parameter-expansion and internal-marker bypasses that named untouched decoy
+files. Rather than continue per-shape refusals, P2 removes the shell-to-proof
+path entirely, including plain literal commands. A future separately reviewed
+follow-up could implement a positive allowlist grammar with a non-colliding
+token representation; no such grammar is implemented or promised here.
+
+Committed spool cancellation is a conservative omission: `await_spool_write`
+joins a durable write before re-raising cancellation, while prompt cleanup drops
+the same-runtime capture ticket. The queued text survives but cannot regain
+provenance by re-statting it later. Distinguishing durable cancellation from a
+failed write needs an explicit storage-outcome handoff; that lifecycle change is
+deferred (R3-3), rather than widening this shell-path removal.
+
 ## Held integration dependencies
 
 Linux file-only/staged native approval remains **denied**, exactly as P1 left
@@ -150,9 +167,9 @@ claim to fix it. Prior relay-comment nits remain for the next relay delta.
 ## Validation boundaries
 
 The focused tests use actual owning Session/harness/Serving/transcript worker,
-real isolated file metadata, exact JSON and receipt readback, native nested/job/
-shell callbacks, adversarial retention/failure controls and separate W/R process
-lifetimes. Providers, mesh admission facts and host tool implementations are
+real isolated file metadata, exact JSON and receipt readback, native nested/job
+callbacks, real shell refusal controls, adversarial retention/failure controls
+and separate W/R process lifetimes. Providers, mesh admission facts and host tool implementations are
 synthetic, not canonical-account/native-presence/hardware proof. No live user
 config, credentials, device peers or outside-PAD serving is used. Independent
 security/code review and real-path QA on the pushed head are separate gates;

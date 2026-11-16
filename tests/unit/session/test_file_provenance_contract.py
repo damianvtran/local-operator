@@ -133,12 +133,8 @@ async def test_actual_user_steer_freezes_before_idle_wake_and_first_birth(rig):
 @pytest.mark.parametrize(
     "text", ["cat ../escape.txt", "cd a/..; cat ./file.txt", "printf x > ../escape.txt"]
 )
-def test_raw_shell_traversal_is_not_erased_by_shared_output_normalization(rig, text):
-    candidates = list(F.argument_candidates("bash", {"command": text}))
-    assert candidates
-    captured = rig.owner.capture("tool_call", candidates)
-    assert not captured.files
-    assert "file_provenance_unsafe_components" in captured.unknown
+def test_shell_traversal_strings_are_not_provenance_candidates(rig, text):
+    assert list(F.argument_candidates("bash", {"command": text})) == []
 
 
 @pytest.mark.parametrize(
@@ -237,103 +233,6 @@ async def test_native_facts_are_bookkeeping_not_live_or_legacy_display_messages(
     ]
     assert [m.model_dump(mode="json") for m in dto().messages] == before
     assert [m.id for m in rig.transcript.build_llm_history()] == [ordinary.id]
-
-
-@pytest.mark.parametrize(
-    "command, expected",
-    [
-        ("cat report.txt", ("report.txt",)),
-        ("cd data && cat report.txt", ("data/report.txt",)),
-        ("cd $UNKNOWN; cat report.txt", ()),
-        ('cat "$HOME/report.txt"', ("~/report.txt",)),
-        ('P=report.txt; cat "$P"', ("report.txt",)),
-        ("wc -c report.txt", ("report.txt",)),
-        ("python3 script.py", ("script.py",)),
-        ("printf '/not/a/file.txt'", ()),
-        ("cat <<'END'\n/not/a/file.txt\nEND", ()),
-    ],
-)
-def test_shared_literal_input_grammar_does_not_guess_or_read_stdout(command, expected):
-    from local_operator.supplements.candidates import literal_bash_inputs
-
-    assert literal_bash_inputs(command) == expected
-
-
-@pytest.mark.parametrize(
-    "command, expected",
-    [
-        # QA-Q1 repros (PR #4108): each resolved an operand the shell never opened.
-        ("pushd /tmp >/dev/null; cat inside.txt", ()),
-        ("export HOME=/tmp; cat ~/notes/home.txt", ()),
-        ('F=/w/cold.txt cat "$F"', ()),
-        # Siblings: shell state the walker would model but the shell does not share.
-        ('F=/a; F=/b cat "$F"', ()),
-        ("popd; cat x.txt", ()),
-        ("HOME=/tmp; cat ~/x.txt", ()),
-        ('HOME=/tmp cat "$HOME/x.txt"', ()),
-        ("unset HOME; cat ~/x.txt", ()),
-        ('F=/a; unset F; cat "$F"', ()),
-        ('printf -v F /a; cat "$F"', ()),
-        ('PWD=/q; cat "$PWD/a.txt"', ()),
-        ("OLDPWD=/a; cd -; cat x.txt", ()),
-        ("cd -; cat x.txt", ()),
-        ("CDPATH=/z; cd sub; cat x.txt", ()),
-        ("CDPATH=/z cd sub; cat x.txt", ()),
-        ("IFS=/; F=a/b; cat $F", ()),
-        ("true || cd /a; cat x.txt", ()),
-        ("false && cd /a; cat x.txt", ()),
-        ("echo | cd /a; cat x.txt", ()),
-        ("cd /a & cat x.txt", ()),
-        ("builtin cd /a; cat x.txt", ()),
-        ("command cd /a; cat x.txt", ()),
-        ("! cd /a; cat x.txt", ()),
-        ("time cd /a; cat x.txt", ()),
-        ("( cd /a ); cat x.txt", ()),
-        ("{ HOME=/t; }; cat ~/x.txt", ()),
-        ("if :; then HOME=/t; fi; cat ~/x.txt", ()),
-        ("cat() { :; }; cat /abs.txt", ()),
-        ("alias cat=true; cat /abs.txt", ()),
-        ("source ~/.rc; cat /abs.txt", ()),
-        (". ~/.rc; cat /abs.txt", ()),
-        ("eval x; cat /abs.txt", ()),
-        ("exec 3<x.txt; cat /abs.txt", ()),
-        ("set -k; cat /abs.txt", ()),
-        ("set -o posix; cat /abs.txt", ()),
-        ("echo `cd /a`; cat x.txt", ()),
-        ("cat <<< /etc/hosts", ()),
-        # Still eligible: literal state on the shell's own main path.
-        ('F=/a.txt; cat "$F"', ("/a.txt",)),
-        ('export F=/b.txt; cat "$F"', ("/b.txt",)),
-        ('F=/a.txt; export F=/b.txt; cat "$F"', ("/b.txt",)),
-        ("cd /a && cat x.txt; cat y.txt", ("/a/x.txt", "/a/y.txt")),
-        ("set -euo pipefail; cd /a; cat x.txt", ("/a/x.txt",)),
-        ("cd ~/w; cat x.txt", ("~/w/x.txt",)),
-        ("cat < in.txt", ("in.txt",)),
-    ],
-)
-def test_literal_input_grammar_fails_closed_on_unshared_shell_state(command, expected):
-    from local_operator.supplements.candidates import literal_bash_inputs
-
-    assert literal_bash_inputs(command) == expected
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "pushd /tmp >/dev/null; printf x > out.txt",
-        "export HOME=/tmp; printf x > ~/out.txt",
-        "true || cd /a; printf x > out.txt",
-        "f() { cd /tmp; }; f; printf x > out.txt",
-    ],
-)
-def test_shell_outputs_need_an_exact_literal_walk(command):
-    # The shared Highlights output grammar is attested only when the fail-closed
-    # walk proved the shell state; otherwise its outputs are unknown (QA-Q1).
-    assert not [
-        c for c in F.argument_candidates("bash", {"command": command}) if "out.txt" in c.reference
-    ]
-    control = F.argument_candidates("bash", {"command": "cd /a; printf x > out.txt"})
-    assert [c.reference for c in control if c.locator.startswith("shell_output")] == ["/a/out.txt"]
 
 
 @pytest.mark.parametrize(
