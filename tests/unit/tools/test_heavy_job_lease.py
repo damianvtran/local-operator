@@ -803,23 +803,45 @@ def test_build_chained_with_a_server_takes_no_slot_keeps_its_cap_and_says_so(
 
 def test_inherited_lock_descriptor_is_read_only(tmp_path: Path) -> None:
     """R2-2: a confined command inheriting the fd cannot write through it."""
+    import fcntl
+
     directory = tmp_path / "heavy-jobs"
     lease = heavy_lease.try_acquire(directory, 1, command="pnpm build")
     assert lease is not None
-    fd = lease.fileno()
-    assert fd is not None
+    lease_fd = lease.fileno()
+    assert lease_fd is not None
+    # dash only parses single-digit redirection descriptors. Duplicate above
+    # that boundary so the regression tests the inherited fd, not shell syntax.
+    fd = fcntl.fcntl(lease_fd, fcntl.F_DUPFD, 10)
+    assert fd >= 10
     try:
         probe = subprocess.run(
-            ["sh", "-c", f"printf x >&{fd} && echo wrote || echo refused"],
+            [
+                sys.executable,
+                "-c",
+                "import errno, os, sys\n"
+                "fd = int(sys.argv[1])\n"
+                "os.fstat(fd)  # it must actually be inherited, not closed\n"
+                "try:\n"
+                "    os.write(fd, b'x')\n"
+                "except OSError as exc:\n"
+                "    assert exc.errno == errno.EBADF, exc\n"
+                "    print('EBADF: inherited descriptor is read-only')\n"
+                "else:\n"
+                "    raise AssertionError('inherited descriptor was writable')\n",
+                str(fd),
+            ],
             pass_fds=(fd,),
             capture_output=True,
             text=True,
             timeout=10,
         )
-        assert probe.stdout.strip() == "refused", probe
+        assert probe.returncode == 0, probe
+        assert probe.stdout.strip() == "EBADF: inherited descriptor is read-only", probe
         assert (directory / "slot-0.lock").stat().st_size == 0
         assert heavy_lease.try_acquire(directory, 1) is None  # the read-only fd still locks
     finally:
+        os.close(fd)
         lease.release()
     after = heavy_lease.try_acquire(directory, 1)  # explicit unlock still frees it
     assert after is not None
