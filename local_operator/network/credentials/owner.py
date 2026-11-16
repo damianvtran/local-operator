@@ -998,6 +998,13 @@ class MeshCredentialBroker:
         except BaseException as exc:
             with suppress(Exception):
                 slot.set_exception(exc)
+                # The leader propagates this same failure to grant(), but nobody
+                # necessarily joined its publication slot. Observe that copy here
+                # before removing it, or an ordinary refused grant also emits an
+                # unrelated "Future exception was never retrieved" diagnostic.
+                # Reading the exception does not consume it: existing joiners still
+                # receive it and retain their current resolve/refusal behavior.
+                slot.exception()
             raise
         finally:
             if self._inflight.get(ckey) is slot:

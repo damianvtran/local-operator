@@ -505,7 +505,12 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "repeats",
         }
     ),
-    "authorisation_refused": frozenset({"op", "capability", "phase", "link_epoch"}),
+    # Handler refusals share this event with chokepoint denials. Keep their
+    # original typed code even when the closed cause vocabulary says "policy";
+    # the reason is scrubbed before recording and bounded by _clean_value.
+    "authorisation_refused": frozenset(
+        {"op", "capability", "phase", "link_epoch", "refusal_code", "reason"}
+    ),
     "link_opened": frozenset({"role", "epoch", "phase"}),
     # A VIEWER'S PIPE, BOTH HALVES. `session_stream_opened` is emitted by whichever
     # relay opened the stream and by the one that accepted it, so a leak is visible
