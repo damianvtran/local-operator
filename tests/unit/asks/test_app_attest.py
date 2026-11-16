@@ -73,6 +73,11 @@ class _Backend:
         self.start = start
         self.static_status = 0
         self.static_calls = 0
+        #: ``KERN_PROCARGS2`` launch path; ``None`` = the vnode path (not moved).
+        self.launch_path: str | None = None
+        #: The vnode path re-read after the walk; ``None`` = unchanged.
+        self.current_main: str | None = None
+        self.token_stale = False
 
     def guest_facts(self, token: bytes) -> GuestFacts:
         return self.facts
@@ -83,6 +88,14 @@ class _Backend:
 
     def process_start(self, pid: int) -> float | None:
         return self.start
+
+    def exec_path(self, pid: int) -> str:
+        return self.facts.main_executable if self.launch_path is None else self.launch_path
+
+    def live_main_executable(self, token: bytes) -> str | None:
+        if self.token_stale:
+            return None
+        return self.facts.main_executable if self.current_main is None else self.current_main
 
 
 _HARDENED_WIRE = [b"010011011"]
@@ -232,6 +245,77 @@ def test_an_unreadable_directory_in_the_bundle_is_a_refusal(tmp_path: Path) -> N
             app_attest.newest_ctime(bundle)
     finally:
         os.chmod(locked, 0o755)
+
+
+@pytest.mark.parametrize(
+    ("launch", "current"),
+    [
+        # Root renamed after launch: the vnode now sits in the pristine P.old
+        # while Chromium spawns helpers from the launch path P (the attacker's B).
+        (_EXE, _EXE.replace("Local Operator.app", "Local Operator.old.app")),
+        # The same, seen through the launch path against the first vnode read.
+        ("/Applications/Staged.app/Contents/MacOS/Local Operator", None),
+        # Renamed during the walk: the post-walk vnode re-read disagrees.
+        (None, "/Applications/Moved.app/Contents/MacOS/Local Operator"),
+        # A relative launch path is never compared.
+        ("Local Operator.app/Contents/MacOS/Local Operator", None),
+    ],
+)
+def test_r2_m1_a_bundle_moved_after_launch_is_refused(
+    launch: str | None, current: str | None
+) -> None:
+    """Regression, agent review round 2 R2-M1: vnode path vs launch path."""
+    backend = _Backend()
+    if launch is not None and current is not None:
+        backend.facts = GuestFacts(0, 0, _GOOD_FLAGS, frozenset(), current)
+        backend.current_main = current
+        backend.launch_path = launch
+    else:
+        backend.launch_path = launch
+        backend.current_main = current
+    verdict = _verifier(backend).verify(_token())
+    assert verdict == app_attest.Verdict(False, "moved-after-launch", _PID)
+
+
+def test_r2_m1_launch_path_equal_to_the_vnode_path_is_ok(tmp_path: Path) -> None:
+    """Equal after ``realpath`` (a symlinked parent is the same file) is ``ok``."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    backend = _Backend(
+        GuestFacts(0, 0, _GOOD_FLAGS, frozenset(), str(real / "X.app/Contents/MacOS/X"))
+    )
+    backend.launch_path = str(tmp_path / "link/X.app/Contents/MacOS/X")
+    assert _verifier(backend).verify(_token()) == app_attest.Verdict(True, "ok", _PID)
+
+
+def test_r2_m1_a_failed_sysctl_or_stale_token_is_refused() -> None:
+    class _NoArgs(_Backend):
+        def exec_path(self, pid: int) -> str:
+            raise OSError("sysctl KERN_PROCARGS2")
+
+    assert _verifier(_NoArgs()).verify(_token()) == app_attest.Verdict(False, "error:OSError", 0)
+    stale = _Backend()
+    stale.token_stale = True  # pid recycled between the lookup and the sysctl
+    assert _verifier(stale).verify(_token()) == app_attest.Verdict(False, "no-process", _PID)
+
+
+@pytest.mark.parametrize(
+    "buf",
+    [b"", b"\x01\0\0\0", b"\x01\0\0\0/no/terminator", b"\x01\0\0\0\0argv"],
+)
+def test_procargs2_parse_errors_raise(buf: bytes) -> None:
+    with pytest.raises(ValueError):
+        app_attest.parse_procargs2(buf)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="KERN_PROCARGS2 is macOS-only")
+def test_kern_procargs2_returns_this_process_executable() -> None:
+    """The real sysctl path, against this test process's own launch path."""
+    backend = app_attest._CtypesSecurity()
+    got = backend.exec_path(os.getpid())
+    assert os.path.isabs(got)
+    assert os.path.realpath(got) == os.path.realpath(sys.executable)
 
 
 def test_any_backend_exception_is_a_refusal() -> None:

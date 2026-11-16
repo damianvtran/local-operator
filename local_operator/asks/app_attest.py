@@ -55,6 +55,19 @@ WHAT "VERIFIED" MEANS (all must hold, see :meth:`AppAttestVerifier.verify`):
    of it: helper apps, framework resources, ``app.asar.unpacked`` (agent review
    round 1, R1-M1: a helper overwritten in place after the first check stayed
    ``ok`` while a guard over four files looked on).
+6. The peer's LAUNCH path (``sysctl KERN_PROCARGS2``) resolves to the same
+   file as step 4's vnode path, else ``moved-after-launch``. Steps 4-5 follow
+   the main executable's vnode, which travels with a rename; Chromium spawns
+   its helpers from the bundle path it recorded at startup. Renaming the
+   genuine bundle away (``P`` -> ``P.old``) and a pre-staged modified copy
+   into ``P`` after launch touches only the two roots' ctimes, which step 5
+   excludes, so the vnode check passes on pristine ``P.old`` while the next
+   renderer runs the copy's helper (agent review round 2, R2-M1, measured: a
+   renamed running binary's ``proc_pidpath`` follows the vnode, its
+   ``KERN_PROCARGS2`` keeps the launch path). The token is re-checked after
+   the sysctl so a pid recycled in between cannot lend its path. Runs last,
+   re-reading the vnode path after the walk, so a rename during steps 4-5 is
+   caught too.
 
 Step 4 costs 1.6-3.3 s (one measurement each, warm cache, design note), so its
 result is cached per ``(pid, pidversion, bundle)``. That cache is sound only
@@ -228,6 +241,14 @@ class SecurityBackend(Protocol):
 
     def process_start(self, pid: int) -> float | None: ...
 
+    def exec_path(self, pid: int) -> str:
+        """The path the process was exec'd from; raises ``OSError`` on failure."""
+        ...
+
+    def live_main_executable(self, token: bytes) -> str | None:
+        """The main executable's current vnode path; ``None`` if the token is stale."""
+        ...
+
 
 class PeerVerifier(Protocol):
     """What the listener needs from a verifier (``AppAttestVerifier``; tests fake it)."""
@@ -276,6 +297,21 @@ def fuses_hardened(wires: list[bytes]) -> bool:
             if index >= len(wire) or wire[index] != want:
                 return False
     return True
+
+
+def parse_procargs2(buf: bytes) -> str:
+    """The exec path from a ``KERN_PROCARGS2`` buffer.
+
+    Layout (xnu ``kern_sysctl.c``): a native ``int`` argc, then the exec path
+    NUL-terminated, then NUL padding and the argv/envp strings. Raises
+    ``ValueError`` on anything short or unterminated so the caller refuses.
+    """
+    if len(buf) <= 4:
+        raise ValueError("procargs too short")
+    end = buf.find(b"\0", 4)
+    if end <= 4:
+        raise ValueError("procargs exec path missing or unterminated")
+    return os.fsdecode(buf[4:end])
 
 
 def _raise(exc: OSError) -> None:
@@ -385,6 +421,25 @@ class AppAttestVerifier:
         # a cached one, carries a ctime at or after launch and is caught here.
         if self._newest_ctime(bundle) >= started:
             return Verdict(False, "modified-after-launch", pid)
+        # Step 6 (R2-M1), LAST so it brackets steps 4-5: the vnode path
+        # follows a rename of the bundle root, while Chromium spawns helpers
+        # from the launch path. The vnode path is read again AFTER the walk and
+        # the sysctl; a root renamed at any point before that re-read leaves the
+        # launch path pointing elsewhere. Any sysctl or parse error propagates
+        # to ``verify`` as ``error:...`` (fail closed).
+        launched = backend.exec_path(pid)
+        current = backend.live_main_executable(token)
+        if current is None:
+            # The token no longer matches (pid recycled since the lookup): the
+            # path read may belong to another process.
+            return Verdict(False, "no-process", pid)
+        want = os.path.realpath(facts.main_executable)
+        if (
+            not os.path.isabs(launched)
+            or os.path.realpath(launched) != want
+            or os.path.realpath(current) != want
+        ):
+            return Verdict(False, "moved-after-launch", pid)
         return Verdict(True, "ok", pid)
 
     def _static_reason(self, backend: SecurityBackend, bundle: Path) -> str:
@@ -459,6 +514,14 @@ class _CtypesSecurity:
             vp,
             ctypes.c_int,
         ]
+        self._libc.sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_uint,
+            vp,
+            ctypes.POINTER(ctypes.c_size_t),
+            vp,
+            ctypes.c_size_t,
+        ]
         self._cf, self._sec = cf, sec
         self._dict_key_cb = vp.in_dll(cf, "kCFTypeDictionaryKeyCallBacks")
         self._dict_val_cb = vp.in_dll(cf, "kCFTypeDictionaryValueCallBacks")
@@ -483,8 +546,8 @@ class _CtypesSecurity:
             raise OSError(f"requirement did not compile: {status}")
         return req
 
-    def guest_facts(self, token: bytes) -> GuestFacts:
-        cf, sec = self._cf, self._sec
+    def _guest_attrs(self, token: bytes) -> tuple[Any, Any]:
+        cf = self._cf
         data = cf.CFDataCreate(None, token, len(token))
         keys = (ctypes.c_void_p * 1)(self._k_audit)
         values = (ctypes.c_void_p * 1)(data)
@@ -496,6 +559,50 @@ class _CtypesSecurity:
             ctypes.addressof(self._dict_key_cb),
             ctypes.addressof(self._dict_val_cb),
         )
+        return attrs, data
+
+    def live_main_executable(self, token: bytes) -> str | None:
+        # SecCodeCopyGuestWithAttributes with an audit token fails once the
+        # token's pidversion no longer matches the process at that pid.
+        attrs, data = self._guest_attrs(token)
+        code, info = ctypes.c_void_p(), ctypes.c_void_p()
+        try:
+            status = self._sec.SecCodeCopyGuestWithAttributes(None, attrs, 0, ctypes.byref(code))
+            if status != 0 or not code.value:
+                return None
+            if self._sec.SecCodeCopySigningInformation(code, 0, ctypes.byref(info)) != 0:
+                raise OSError("signing information unavailable")
+            return self._main_executable(info)
+        finally:
+            self._release(info.value, code.value, attrs, data)
+
+    def _main_executable(self, info: Any) -> str:
+        xref = self._cf.CFDictionaryGetValue(info, self._k_exe)
+        if not xref:
+            return ""
+        buf = ctypes.create_string_buffer(4096)
+        if not self._cf.CFURLGetFileSystemRepresentation(xref, True, buf, len(buf)):
+            return ""
+        return buf.value.decode("utf-8", "replace")
+
+    def exec_path(self, pid: int) -> str:
+        libc = self._libc
+        ctl_kern, kern_argmax, kern_procargs2 = 1, 8, 49
+        argmax = ctypes.c_int(0)
+        size = ctypes.c_size_t(ctypes.sizeof(argmax))
+        mib = (ctypes.c_int * 2)(ctl_kern, kern_argmax)
+        if libc.sysctl(mib, 2, ctypes.byref(argmax), ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), "sysctl KERN_ARGMAX")
+        buf = ctypes.create_string_buffer(argmax.value)
+        size = ctypes.c_size_t(argmax.value)
+        mib3 = (ctypes.c_int * 3)(ctl_kern, kern_procargs2, pid)
+        if libc.sysctl(mib3, 3, buf, ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), "sysctl KERN_PROCARGS2")
+        return parse_procargs2(buf.raw[: size.value])
+
+    def guest_facts(self, token: bytes) -> GuestFacts:
+        cf, sec = self._cf, self._sec
+        attrs, data = self._guest_attrs(token)
         code, info, req = ctypes.c_void_p(), ctypes.c_void_p(), None
         try:
             status = sec.SecCodeCopyGuestWithAttributes(None, attrs, 0, ctypes.byref(code))
@@ -524,12 +631,7 @@ class _CtypesSecurity:
                             ents.add(name)
                     finally:
                         self._release(key)
-            exe = ""
-            xref = cf.CFDictionaryGetValue(info, self._k_exe)
-            if xref:
-                buf = ctypes.create_string_buffer(4096)
-                if cf.CFURLGetFileSystemRepresentation(xref, True, buf, len(buf)):
-                    exe = buf.value.decode("utf-8", "replace")
+            exe = self._main_executable(info)
             return GuestFacts(
                 status=0,
                 requirement_status=req_status,
