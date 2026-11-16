@@ -239,8 +239,8 @@ jobs:
             exit 1
           fi
 
-      # PYPI'S 10 GB PROJECT CAP. 0.90.17 cost ~59 MB on PyPI (two ~20 MB wheels
-      # plus a ~19 MB sdist) and v0.90.18/19 were refused with `400 Project size
+      # PYPI'S PROJECT CAP (10 GB then; 30 GiB since 2026-11-04, pypi/support#12882).
+      # 0.90.17 cost ~59 MB on PyPI (two ~20 MB wheels plus a ~19 MB sdist) and v0.90.18/19 were refused with `400 Project size
       # too large`. Two cuts, both here so every downstream job sees the final shape:
       # the wheel's comments are stripped (verified AST- and line-identical, fails
       # closed), and the sdist leaves the PyPI artifact for the GitHub Release —
@@ -255,7 +255,9 @@ jobs:
           python scripts/slim_wheel.py dist/local_operator-*-py3-none-any.whl
           mkdir -p sdist
           mv dist/*.tar.gz sdist/
-          python scripts/check_dist_size.py --wheels-only dist/
+          # --runway: fail under 21 days of PyPI cap runway (estimated from the
+          # pure wheel; keyagent-macos has not run yet); a PyPI outage only warns.
+          python scripts/check_dist_size.py --wheels-only dist/ --runway
 
       - name: Upload distributions
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
@@ -863,7 +865,7 @@ jobs:
 
       # The last gate before an irreversible upload: exactly what PyPI will store
       # is two wheels (pure + macOS) and NO sdist — it lives on the GitHub Release
-      # (`sdist-release`), off the 10 GB project quota. Any non-dotfile that is not
+      # (`sdist-release`), off the PyPI project quota (30 GiB, pypi/support#12882). Any non-dotfile that is not
       # a wheel fails, not only *.tar.gz, matching check_dist_size.py --wheels-only.
       - name: Assert the upload is exactly two wheels
         run: |
@@ -910,8 +912,8 @@ jobs:
           # install-time guarantee — stated plainly rather than implied.
           attestations: true
 
-  # THE SDIST LIVES ON THE GITHUB RELEASE, NOT ON PYPI. PyPI's 10 GB project cap
-  # was reached at ~59 MB per release (v0.90.18/19 refused), and the ~19 MB sdist
+  # THE SDIST LIVES ON THE GITHUB RELEASE, NOT ON PYPI. PyPI's then 10 GB project cap
+  # (30 GiB since 2026-11-04, pypi/support#12882) was reached at ~59 MB per release (v0.90.18/19 refused), and the ~19 MB sdist
   # was a third of that while nothing installs it from PyPI: the updater, the
   # desktop app and scripts/install.{sh,ps1} take wheels, the Dockerfile builds
   # from the tree. Attaching it here keeps the full-source, comment-intact
