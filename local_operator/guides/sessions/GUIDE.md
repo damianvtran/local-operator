@@ -55,6 +55,15 @@ and the result's note names the reason and the dropped windows.
 Message delivery to a session on another device is `send` with `peer`;
 `guide://peer-messaging` carries it.
 
+**Artifact provenance.** Cite a peer-session artifact with its owner peer, exact
+session id and source reference: `peer=<owner>, session=<sid>,
+ref=scratchpad://<relative-path>` (or `ref=attachment:<id>`). A peer's absolute
+filesystem path is not a portable citation, and a bare `scratchpad://` reference
+resolves in the reader's own session, not the source session. To inspect the
+artifact, use the existing CLI pull recipe in `guide://network` under "Reading
+an artifact from a peer session"; keep the original peer, session and reference
+in review/evidence citations even after reading a local copy.
+
 A session on a mesh node delegates its OWN lane's review, QA, design and UX
 with `task` subagents (`agent='reviewer'`, `'qa-tester'`, `'designer'`,
 `'ux-reviewer'`), exactly as locally — never by spawning parallel sessions.

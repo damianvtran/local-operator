@@ -489,6 +489,38 @@ pairing whose window closed with nobody answering exits `3` as
 `pairing_unanswered`, having joined nothing. Park a fresh ceremony rather than
 reusing the invite — the scope of every exit code is in "Reference".
 
+## Reading an artifact from a peer session
+
+A review/evidence citation must carry the source **peer + exact session id +
+`scratchpad://<relative-path>` or `attachment:<id>`**. Obtain that tuple from the
+source session's reply; a peer's absolute filesystem path is not portable, and
+reading its bare scratchpad reference locally would address your own session.
+Pull the authorized artifact through the existing CLI, then read the local copy:
+
+```bash
+lop network files pull <peer> <sid> scratchpad://review/report.md --json
+lop network files pull <peer> <sid> attachment:<id> --json
+```
+
+These are templates: substitute the actual peer, session and reported reference;
+an attachment id is 32 lowercase hex characters and must be referenced by that
+session. Omit `--out` for a verified copy in this device's attachment store. On a
+successful receipt (`verified: true`), read its top-level JSON `path` with
+`read(path="<returned path>")`; `landed.store` names the store copy too. Preserve
+the original peer, session and source reference in citations: the returned local
+path is this device's inspection location, not the artifact's origin.
+
+`--out` requests an optional additional copy. A resolved destination inside
+Local Operator's config/data directory—including your own session scratchpad
+under that directory—is refused as `out_invalid`, even with `--force`. Use the
+store-only form above; do not direct `--out` into session data.
+
+**No new authority or bypass.** This recipe does not grant access to arbitrary
+remote paths or other sessions' attachments. `BLOCKED by guardrail` remains
+final for the same effect on the same targets: report it. Never pull, copy or
+import the blocked material through another path, tool or peer to reroute the
+refusal.
+
 ## Who the session on the peer runs as
 
 A create on a peer can name the agent PROFILE it runs as or the TEAM it manages,
@@ -1491,10 +1523,12 @@ lop network identity rotate --json    # for a suspected key compromise
 - Do not add a member by editing a member list. Membership changes through
   `invite`/`join`, `member rm`, and the epoch rotation they carry.
 - Do not force a full re-sync, and do not invent a `--force` on a verb that does
-  not take one: the only verb in this family with a `--force` is `network sessions
-  --stop`, and it means the owner's own `lop stop --force` — stop a target the
-  plain stop skipped (one already leaving, or mid-turn with a socket that will not
-  answer), accepting that the turn goes with it.
+  not take one. For session lifecycle operations, `network sessions --stop
+  --force` means the owner's own `lop stop --force` — stop a target the plain
+  stop skipped (one already leaving, or mid-turn with a socket that will not
+  answer), accepting that the turn goes with it. Separately, `network files pull
+  --force` permits replacing an existing `--out` file; it does not bypass the
+  config/data-directory restriction. Store-only pulls need neither flag.
 
 ## Reference
 
