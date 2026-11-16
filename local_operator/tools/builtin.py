@@ -2710,6 +2710,8 @@ async def _acquire_heavy_lease(
     context: ToolContext | None,
     signal: AbortSignal | None,
     on_update: Callable[[AgentToolUpdate], None] | None,
+    heavy: heavy_lease.HeavyClass | None,
+    memory_budget: memory_guard.Budget,
 ) -> heavy_lease.Lease | ToolResult | None:
     """Queue a heavy command for the machine-wide slot; None for everything else.
 
@@ -2723,17 +2725,21 @@ async def _acquire_heavy_lease(
     while queued, or None when the command is not heavy, the lease is off
     (``bash.heavy_jobs.enabled: false``) or the host has no ``flock`` (Windows).
 
-    The memory guard is deliberately NOT forced on here: a heavy command runs
-    under the guard's normal budget when ``bash.memory.enabled`` is true, and
-    with the guard off when the operator turned it off machine-wide. The
-    concurrency limit is the fix for the incident; overriding an explicit
-    operator off-switch for one class of command would make that switch lie.
+    Memory cap: a heavy command cannot opt out per call. ``execute_bash``
+    turns its ``memory_mb <= 0`` into "unset" before resolving the budget (PR
+    #4104 R3: ``memory_mb=0`` let an agent take the slot and run uncapped).
+    The operator's machine-wide ``bash.memory.enabled=false`` still WINS: it
+    is their master switch, and overriding it for one class of command would
+    make that switch lie. Such a command still takes the lease, and its
+    queued/acquired lines say the memory cap is off, so the transcript shows
+    the build ran uncapped.
 
-    The wait is capped by the command's own ``timeout`` (a 60 s command should
-    not queue for ten minutes), and the command's timeout starts at spawn, so
-    queueing never eats into its run time.
+    The queue bound is ``LOCAL_OPERATOR_HEAVY_JOB_WAIT_S`` (default 900 s), on
+    its own: it is NOT capped by the command's ``timeout``, which bounds the
+    command's run and starts at spawn, so queueing never eats into it (PR
+    #4104 K2: capping the queue at the 120 s default timeout refused a build
+    queued behind an ordinary 5-10 minute one).
     """
-    heavy = heavy_lease.is_heavy(params.command, params.memory_mb)
     if heavy is None or not heavy_lease.supported():
         return None
     settings = await asyncio.to_thread(heavy_lease.configured_settings)
@@ -2746,8 +2752,14 @@ async def _acquire_heavy_lease(
     # and printed by `lop services status`, and a command line can carry a token.
     preview = " ".join(_redact_tool_text(params.command, context).split())
     queued_text: list[str] = []
+    cap_off = (
+        f"; memory cap off on this machine ({memory_budget.reason})"
+        if memory_budget.source == "disabled"
+        else ""
+    )
 
     def _on_wait(line: str) -> None:
+        line += cap_off
         queued_text[:] = [line]
         if on_update is not None:
             on_update(
@@ -2760,7 +2772,7 @@ async def _acquire_heavy_lease(
     result = await heavy_lease.acquire(
         heavy_lease.lease_dir(),
         settings.slots,
-        wait_seconds=min(settings.wait_seconds, params.timeout),
+        wait_seconds=settings.wait_seconds,
         reason=heavy.reason,
         session_id=str(session_id or ""),
         command=preview,
@@ -2768,6 +2780,16 @@ async def _acquire_heavy_lease(
         aborted=(lambda: signal is not None and signal.aborted),
     )
     if isinstance(result, heavy_lease.Lease):
+        if cap_off and on_update is not None:
+            # Only when the cap is off: an ordinary acquisition stays silent,
+            # but an uncapped heavy build is worth one visible line.
+            line = f"heavy-job slot acquired ({heavy.reason}){cap_off}"
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
         return result
     if isinstance(result, heavy_lease.Refusal):
         return _error(tool_call_id, "bash", result.message)
@@ -4794,7 +4816,15 @@ async def execute_bash(
     # inherit credentials. This preserves the existing fail-closed first read.
     # Still resolve BEFORE spawn: a cooperative runner can immediately start a
     # separate PG outside our group accounting. Reuse this Budget for both guards.
-    memory_budget = _configured_memory_budget(params.memory_mb)
+    # Heavy-job classification is pure and cheap, so it runs here, before the
+    # budget: a heavy command's `memory_mb <= 0` ("no cap for this call") is
+    # treated as unset, so it gets the configured budget (PR #4104 R3). The
+    # operator's `bash.memory.enabled=false` is untouched and still wins.
+    heavy_class = heavy_lease.is_heavy(params.command, params.memory_mb, cwd=_safe_cwd(context))
+    budget_override = params.memory_mb
+    if heavy_class is not None and budget_override is not None and budget_override <= 0:
+        budget_override = None
+    memory_budget = _configured_memory_budget(budget_override)
 
     # Resource metadata is reserved, not a credential grant: caller extras or
     # shell policy exclusion must not silently drop/widen the resolved ceiling.
@@ -4846,11 +4876,21 @@ async def execute_bash(
     # after every refusal above, so a command that would be refused anyway never
     # queues, and immediately before the spawn so the slot covers the command's
     # whole life. A non-heavy command returns None here without touching it.
-    heavy = await _acquire_heavy_lease(tool_call_id, params, context, signal, on_update)
+    heavy = await _acquire_heavy_lease(
+        tool_call_id, params, context, signal, on_update, heavy_class, memory_budget
+    )
     if isinstance(heavy, ToolResult):
         return heavy
     heavy_slot: heavy_lease.Lease | None = heavy
-    spawn_options = detached_popen_kwargs()
+    spawn_options: dict[str, Any] = dict(detached_popen_kwargs())
+    lease_fd = heavy_slot.fileno() if heavy_slot is not None else None
+    if lease_fd is not None and os.name == "posix":
+        # The command inherits the lease descriptor, so the flock lives until
+        # BOTH this harness and the command are gone: a harness SIGKILLed or
+        # OOM-killed mid-build no longer frees the slot beside its still
+        # running, detached build (PR #4104 QA Q1). A normal end still frees
+        # it at once: Lease.release() unlocks the shared description.
+        spawn_options["pass_fds"] = (lease_fd,)
     # Filesystem clock, not monotonic or wall: compared with the mtime of a
     # lock git writes during this call (guardrails/interrupted_worktree_add.py).
     spawned_at = interrupted_worktree_add.spawn_stamp(params.command)

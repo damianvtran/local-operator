@@ -69,7 +69,7 @@
   "wire.settings.bash_heavy_jobs_enabled.choice.true.description": {
     "role": "choice description",
     "tone": "terse",
-    "note": "Short lowercase fragment shown beside the 'on' choice."
+    "note": "Short lowercase fragment shown beside the 'on' choice. Must stay true whether the machine allows one or several heavy jobs at once."
   },
   "wire.settings.bash_heavy_jobs_enabled.help": {
     "role": "settings row help",
@@ -180,12 +180,12 @@
   "wire.settings.heavy_jobs.description": {
     "role": "settings section description",
     "tone": "plain, precise",
-    "note": "Explains why the queue exists: parallel builds from several sessions exhausted a machine's memory. 'Sessions' are agent conversations."
+    "note": "Explains why the queue exists: parallel builds from several sessions exhausted a machine's memory. The slot count depends on the machine's memory, so the copy must not promise exactly one; the parenthesis states when it is one. 'Sessions' are agent conversations."
   },
   "wire.settings.heavy_jobs.title": {
     "role": "settings section title",
     "tone": "plain",
-    "note": "Section heading for the machine-wide queue that runs heavy builds/tests one at a time. 'Heavy job' = a build, type check or test run that uses a lot of memory."
+    "note": "Section heading for the machine-wide queue that limits how many heavy builds/tests run at once (one at a time on machines with 16 GB or less, up to four on larger ones). 'Heavy job' = a build, type check or test run that uses a lot of memory."
   },
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": {
     "note": "Explains the threshold for delegated (subagent) requests only. '5 minutes' and '1-hour' are Anthropic's two prompt-cache lifetimes; keep both durations. 0 is the default and means no SIZE rule only: the separate after-a-4-minute-call rule stays on unless the main 1-hour setting is 0. '4 minutes' is the fixed 240-second threshold; keep the number.",

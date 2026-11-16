@@ -59,6 +59,84 @@ HEAVY = [
     ("nice -n 10 timeout -k 5 900 vitest run", "vitest"),
     ("env CI=1 FOO=bar jest", "jest"),
     ("git status && pnpm build 2>&1 | tail -20", "pnpm build"),
+    # R1: pnpm/yarn run a local binary when no script has that name, as exec.
+    ("pnpm vitest run", "vitest"),
+    ("pnpm tsc --noEmit", "tsc"),
+    ("pnpm esbuild src/x.ts --bundle", "esbuild"),
+    ("pnpm electron-vite build", "electron-vite build"),
+    ("pnpm dlx vitest", "vitest"),
+    ("yarn exec jest --ci", "jest"),
+    ("npm exec -- vitest run", "vitest"),
+    # R1: wrappers that run the rest of the line.
+    ("bash -c 'pnpm build'", "pnpm build"),
+    ('sh -c "npm run build"', "npm build"),
+    ("bash -lc 'cd x && pnpm build'", "pnpm build"),
+    ("scripts/run_bounded.py -- pnpm build", "pnpm build"),
+    ("python3 scripts/run_bounded.py --memory-mb 4096 -- pnpm build", "pnpm build"),
+    ("xvfb-run -a pnpm test", "pnpm test"),
+    ("taskset -c 0-3 pnpm build", "pnpm build"),
+    ("chrt -f 10 pnpm build", "pnpm build"),
+    ("prlimit --as=4000000000 pnpm build", "pnpm build"),
+    ("corepack pnpm build", "pnpm build"),
+    ("next build", "next build"),
+    ("nx run web:build", "nx build"),
+    ("nx run-many -t test", "nx test"),
+    ("node node_modules/typescript/bin/tsc -p .", "tsc"),
+    # R8 control: `-v` is verbose for pytest, not a version query.
+    ("pytest -v -n 4", "pytest -n"),
+]
+
+#: Tonight's (2026-11-16) incident shapes, each pinned as its own row
+#: (manager addition (c) on PR #4104). `timeout 900 pnpm test` is how the mac
+#: proof runs were spelled: timeout -> node -> node-22.
+INCIDENT = [
+    ("pnpm vitest run", "vitest"),
+    ("pnpm tsc --noEmit", "tsc"),
+    ("node node_modules/.bin/esbuild src/main.ts --bundle --outfile=out/main.js", "esbuild"),
+    ("timeout 900 pnpm test", "pnpm test"),
+    ("bash -c 'cd x && pnpm build'", "pnpm build"),
+]
+
+#: Watchers and dev servers: they run until stopped, so they must never hold
+#: the slot (R2 / QA Q2). One row per QA row 5 shape plus the reviewer's.
+LONG_LIVED = [
+    "tsc --watch",
+    "tsc -w",
+    "tsc -b -w",
+    "vue-tsc --watch",
+    "vitest --watch",
+    "vitest -w",
+    "vitest watch",
+    "vitest dev",
+    "jest --watch",
+    "jest --watchAll",
+    "node --test --watch test/",
+    "esbuild --watch src/x.ts",
+    "esbuild --serve src/x.ts",
+    "webpack --watch",
+    "webpack serve",
+    "rollup -w",
+    "vite build --watch",
+    "pnpm test -- --watch",
+    "pnpm test --watch",
+    "npm test -- --watchAll",
+    "pnpm test:watch",
+    "pnpm build:watch",
+    "pnpm watch",
+    "pnpm dev",
+    "pnpm serve",
+    "pnpm start",
+    "npm start",
+    "npm run dev",
+    "yarn dev",
+    "next dev",
+    "nx serve web",
+    "nx run web:serve",
+    "turbo watch build",
+    "turbo run dev",
+    "bash -c 'pnpm dev'",
+    # A command line that also starts a watcher lives as long as the watcher.
+    "pnpm build && pnpm dev",
 ]
 
 NOT_HEAVY = [
@@ -78,6 +156,15 @@ NOT_HEAVY = [
     "echo 'pnpm build'",
     "grep -rn vitest src/",
     "",
+    # R8: informational flags anywhere in the argv.
+    "pnpm build --help",
+    "vitest run --version",
+    "pnpm lint",
+    "pnpm add -D vitest",
+    "bash -c 'ls -la'",
+    "bash script.sh",
+    "taskset -c 0-3 ls",
+    "nx run web:lint",
 ]
 
 
@@ -91,6 +178,54 @@ def test_heavy_commands_are_classified(command: str, reason: str) -> None:
 @pytest.mark.parametrize("command", NOT_HEAVY)
 def test_short_commands_are_not_heavy(command: str) -> None:
     assert heavy_lease.is_heavy(command) is None
+
+
+@pytest.mark.parametrize("command,reason", INCIDENT)
+def test_incident_shapes_are_heavy(command: str, reason: str) -> None:
+    heavy = heavy_lease.is_heavy(command)
+    assert heavy is not None and heavy.reason == reason, command
+
+
+@pytest.mark.parametrize("command", LONG_LIVED)
+def test_watchers_and_dev_servers_never_take_the_slot(command: str) -> None:
+    assert heavy_lease.is_heavy(command) is None, command
+
+
+def _ui_repo(root: Path) -> Path:
+    """A package.json shaped like local-operator-ui's (electron-vite + vitest)."""
+    repo = root / "local-operator-ui"
+    (repo / "src").mkdir(parents=True)
+    (repo / "package.json").write_text(
+        '{"scripts": {"build": "electron-vite build", "dev": "electron-vite dev",'
+        ' "test": "vitest run", "test:watch": "vitest", "lint": "eslint .",'
+        ' "compile": "tsc -b", "loop": "pnpm loop", "start": "electron-vite preview"}}'
+    )
+    return repo
+
+
+def test_package_scripts_resolve_through_package_json(tmp_path: Path) -> None:
+    repo = _ui_repo(tmp_path)
+    cwd = str(repo)
+    # The incident's own shapes in the ui repo.
+    assert heavy_lease.is_heavy("pnpm build", cwd=cwd) == heavy_lease.HeavyClass("pnpm build")
+    assert heavy_lease.is_heavy("pnpm electron-vite build", cwd=cwd) == heavy_lease.HeavyClass(
+        "electron-vite build"
+    )
+    # A script whose NAME says nothing, resolved by its body.
+    assert heavy_lease.is_heavy("pnpm compile", cwd=cwd) == heavy_lease.HeavyClass("pnpm compile")
+    assert heavy_lease.is_heavy("npm run compile", cwd=cwd) == heavy_lease.HeavyClass("npm compile")
+    # From a subdirectory (nearest package.json up the tree) and after a `cd`.
+    assert heavy_lease.is_heavy("pnpm compile", cwd=str(repo / "src")) is not None
+    assert heavy_lease.is_heavy(f"cd {repo} && pnpm compile", cwd=str(tmp_path)) is not None
+    assert heavy_lease.is_heavy("bash -c 'cd local-operator-ui && pnpm compile'", cwd=str(tmp_path))
+    # Not heavy: a non-heavy body, watcher names, and a self-recursive script.
+    for command in ("pnpm lint", "pnpm dev", "pnpm test:watch", "pnpm start", "pnpm loop"):
+        assert heavy_lease.is_heavy(command, cwd=cwd) is None, command
+    # Without a readable package.json the name heuristics still decide.
+    assert heavy_lease.is_heavy("pnpm compile", cwd=str(tmp_path / "missing")) is None
+    assert heavy_lease.is_heavy("pnpm build", cwd=str(tmp_path / "missing")) is not None
+    (repo / "package.json").write_text("{not json")
+    assert heavy_lease.is_heavy("pnpm build", cwd=cwd) is not None
 
 
 def test_a_large_memory_request_is_heavy_on_its_own() -> None:
@@ -125,7 +260,7 @@ def test_env_overrides_set_slots_and_wait(monkeypatch: pytest.MonkeyPatch, tmp_p
     settings = heavy_lease.configured_settings()
     assert (settings.enabled, settings.slots, settings.wait_seconds) == (True, 3, 7.5)
     monkeypatch.setenv(heavy_lease.HEAVY_JOBS_WAIT_SECONDS_ENV, "garbage")
-    assert heavy_lease.configured_settings().wait_seconds == 600
+    assert heavy_lease.configured_settings().wait_seconds == 900
 
 
 # -- real cross-process serialisation --------------------------------------------
@@ -219,9 +354,14 @@ def test_timeout_refusal_names_the_holder(tmp_path: Path) -> None:
     finally:
         held.release()
     assert isinstance(result, heavy_lease.Refusal)
-    assert "sess-holder (pnpm build)" in result.message
+    assert f"sess-holder/{os.getpid()} (pnpm build)" in result.message
+    # Q3: the refusal names the bound that refused it, the queue limit.
+    assert "the queue limit (LOCAL_OPERATOR_HEAVY_JOB_WAIT_S=0.3s)" in result.message
     assert "bash.heavy_jobs.enabled" in result.message
-    assert lines and lines[0].startswith("queued behind sess-holder (pnpm build), waited")
+    # R7: the holder is named `<session>/<pid>`, as the request specified.
+    assert lines and lines[0].startswith(
+        f"queued behind sess-holder/{os.getpid()} (pnpm build), waited"
+    )
 
 
 def test_status_line_renders_holders_and_ignores_stale_records(tmp_path: Path) -> None:
@@ -261,7 +401,9 @@ def lease_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     config.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     monkeypatch.setenv(heavy_lease.HEAVY_JOBS_SLOTS_ENV, "1")
-    monkeypatch.setenv(heavy_lease.HEAVY_JOBS_WAIT_SECONDS_ENV, "0.5")
+    # 1 s is the smallest accepted queue limit (R4 clamps lower values back to
+    # the 900 s default, which would hang these cells).
+    monkeypatch.setenv(heavy_lease.HEAVY_JOBS_WAIT_SECONDS_ENV, "1")
     return heavy_lease.lease_dir()
 
 
@@ -311,7 +453,7 @@ def test_heavy_command_is_refused_when_the_slot_stays_held(lease_env: Path) -> N
         held.release()
     text = _text(result)
     assert result.is_error
-    assert "HEAVY JOB QUEUE FULL" in text and "sess-xyz (pnpm build)" in text
+    assert "HEAVY JOB QUEUE FULL" in text and f"sess-xyz/{os.getpid()} (pnpm build)" in text
     assert "ran" not in text.split("Held by")[0]
 
 
@@ -342,7 +484,9 @@ def test_heavy_command_queues_then_runs_and_releases(lease_env: Path, tmp_path: 
     text = _text(result)
     assert not result.is_error and "started" in text, text
     queued = [u.details.get("heavy_job_queue") for u in updates if u.details]
-    assert any(q and q.startswith("queued behind first-session (pnpm build)") for q in queued)
+    assert any(
+        q and q.startswith(f"queued behind first-session/{holder.pid} (pnpm build)") for q in queued
+    )
     command_start = float(text.split("started", 1)[1].split()[0])
     holder_end = float(log.read_text().split()[1])
     assert command_start >= holder_end
@@ -366,3 +510,200 @@ def test_kill_switch_disables_the_lease(lease_env: Path) -> None:
     finally:
         held.release()
     assert not result.is_error and "ran" in _text(result)
+
+
+# -- round-1 remediation (PR #4104) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("inf", 900), ("-inf", 900), ("nan", 900), ("-5", 900), ("0", 900), ("0.2", 900)]
+    + [("1e9", 900), ("14401", 900), ("1", 1), ("14400", 14400), ("75.5", 75.5)],
+)
+def test_wait_override_is_finite_and_clamped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str, expected: float
+) -> None:
+    """R4: a bad queue limit falls back to 900 s instead of crashing or hanging."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv(heavy_lease.HEAVY_JOBS_SLOTS_ENV, "1")
+    monkeypatch.setenv(heavy_lease.HEAVY_JOBS_WAIT_SECONDS_ENV, raw)
+    assert heavy_lease.configured_settings().wait_seconds == expected
+
+
+@pytest.mark.parametrize("raw", ["inf", "nan", "-1", "1e3", "5", "99999999999999999999"])
+def test_bad_slot_override_means_auto(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str
+) -> None:
+    """R4: `inf` once raised OverflowError out of every heavy bash call."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(heavy_lease, "auto_slot_count", lambda total, avail: 1)
+    monkeypatch.setenv(heavy_lease.HEAVY_JOBS_SLOTS_ENV, raw)
+    assert heavy_lease.configured_settings().slots == 1
+    monkeypatch.setenv(heavy_lease.HEAVY_JOBS_SLOTS_ENV, "4")
+    assert heavy_lease.configured_settings().slots == 4
+
+
+def test_status_counts_holders_above_the_current_slot_count(tmp_path: Path) -> None:
+    """R5: auto sizing can shrink while builds run; no live holder may vanish."""
+    directory = tmp_path / "heavy-jobs"
+    first = heavy_lease.try_acquire(directory, 2, session_id="s0", command="pnpm build")
+    second = heavy_lease.try_acquire(directory, 2, session_id="s1", command="tsc -b")
+    assert first is not None and second is not None and second.slot == 1
+    try:
+        shrunk = heavy_lease.status_line(directory, 1)
+        same = heavy_lease.status_line(directory, 2)
+    finally:
+        first.release()
+        second.release()
+    assert shrunk.startswith("heavy jobs: 2 held (1 slot now): s0/")
+    assert "s1/" in shrunk and "tsc -b" in shrunk
+    assert same.startswith("heavy jobs: 2/2 slots held: ")
+
+
+def test_release_frees_the_slot_even_while_a_child_holds_a_duplicate(tmp_path: Path) -> None:
+    """Q1's other half: the harness's normal release must not wait on the child.
+
+    A daemon a build leaves behind (nx/turbo) inherits the descriptor; the
+    explicit LOCK_UN in release() frees the slot for every duplicate.
+    """
+    directory = tmp_path / "heavy-jobs"
+    lease = heavy_lease.try_acquire(directory, 1, command="pnpm build")
+    assert lease is not None and lease.fileno() is not None
+    child = subprocess.Popen(["sleep", "30"], pass_fds=(lease.fileno(),), start_new_session=True)
+    try:
+        assert heavy_lease.try_acquire(directory, 1) is None
+        lease.release()
+        after = heavy_lease.try_acquire(directory, 1)
+        assert after is not None, "release left the slot locked by the child's copy"
+        after.release()
+    finally:
+        _reap(child)
+
+
+_BASH_HARNESS = textwrap.dedent("""
+    import asyncio, sys
+    from local_operator.tools import builtin
+    asyncio.run(builtin.execute_bash("t", {"command": sys.argv[1], "memory_mb": 2048,
+                                           "timeout": 60}))
+""")
+
+
+def test_killed_harness_keeps_the_slot_until_its_command_exits(
+    lease_env: Path, tmp_path: Path
+) -> None:
+    """Q1: SIGKILL the harness mid-build; a waiter must not start beside the orphan.
+
+    The real ``execute_bash`` runs in a child "harness" process. Its command
+    (its own session, as in production) marks start, sleeps, marks end. After
+    the harness is SIGKILLed by exact pid, the slot must stay held until the
+    command exits, then free on its own.
+    """
+    started, done = tmp_path / "started", tmp_path / "done"
+    command = f"touch {started}; sleep 2; touch {done}"
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    harness = subprocess.Popen(
+        [sys.executable, "-c", _BASH_HARNESS, command], env=env, start_new_session=True
+    )
+    pgid = None
+    try:
+        _wait_for(started, timeout=30)
+        record = (lease_env / "slot-0.json").read_text()
+        pgid = __import__("json").loads(record)["pgid"]
+        os.kill(harness.pid, signal.SIGKILL)
+        harness.wait(timeout=5)
+        assert not done.exists(), "command finished before the check; widen the sleep"
+        assert heavy_lease.try_acquire(lease_env, 1) is None, "slot freed beside the orphan"
+        # The dead harness's record still names the live build to a waiter.
+        holders = heavy_lease.read_holders(lease_env)
+        assert [h.pgid for h in holders] == [pgid]
+        lease = asyncio.run(heavy_lease.acquire(lease_env, 1, wait_seconds=10, reason="t"))
+        assert isinstance(lease, heavy_lease.Lease)
+        acquired_at = time.time()
+        lease.release()
+        assert done.exists() and done.stat().st_mtime <= acquired_at
+    finally:
+        _reap(harness)
+        if pgid:
+            with __import__("contextlib").suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGKILL)
+
+
+def test_queue_wait_is_not_capped_by_the_command_timeout(lease_env: Path, tmp_path: Path) -> None:
+    """K2: the queue limit is separate from `timeout`, which starts at spawn."""
+    from local_operator.tools import builtin
+
+    os.environ[heavy_lease.HEAVY_JOBS_WAIT_SECONDS_ENV] = "10"
+    log = tmp_path / "k2.log"
+    holder = _spawn_holder(lease_env, log, 2.5, "long-build")
+    try:
+        _wait_for(tmp_path / "k2.log.held")
+        started = time.monotonic()
+        result = asyncio.run(
+            builtin.execute_bash(
+                "t", {"command": "printf ran-after-queue", "memory_mb": 2048, "timeout": 1}
+            )
+        )
+        elapsed = time.monotonic() - started
+        assert holder.wait(timeout=10) == 0
+    finally:
+        _reap(holder)
+    assert not result.is_error and "ran-after-queue" in _text(result), _text(result)
+    assert elapsed > 1.0  # it queued past its own 1 s timeout and still ran
+
+
+def test_heavy_command_cannot_drop_its_memory_cap_per_call(lease_env: Path) -> None:
+    """R3: `memory_mb=0` on a heavy command is treated as unset."""
+    from local_operator.tools import builtin
+
+    probe = "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB"
+    heavy = asyncio.run(
+        builtin.execute_bash("t", {"command": f"{probe}; false && pnpm build", "memory_mb": 0})
+    )
+    light = asyncio.run(builtin.execute_bash("t", {"command": probe, "memory_mb": 0}))
+    assert "mem=0" in _text(light)  # control: a normal command may still opt out
+    assert "mem=" in _text(heavy) and "mem=0" not in _text(heavy), _text(heavy)
+
+
+def test_operator_memory_switch_still_wins_and_is_announced(lease_env: Path) -> None:
+    """R3 decision: bash.memory.enabled=false is the operator's master switch."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+    from local_operator.tools import builtin
+
+    settings_io.write_setting(
+        ConfigManager(config_dir()), settings_io.BY_KEY["bash.memory.enabled"], False
+    )
+    updates: list = []
+    result = asyncio.run(
+        builtin.execute_bash(
+            "t",
+            {"command": "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB; false && pnpm build"},
+            None,
+            updates.append,
+        )
+    )
+    assert "mem=0" in _text(result)
+    lines = [u.details.get("heavy_job_queue") for u in updates if u.details]
+    assert any(
+        line and line.startswith("heavy-job slot acquired (pnpm build); memory cap off")
+        for line in lines
+    ), lines
+
+
+def test_spawn_passes_the_lease_descriptor(lease_env: Path) -> None:
+    """Q1 wiring: the command sees the lock description as an open descriptor."""
+    from local_operator.tools import builtin
+
+    lock = lease_env / "slot-0.lock"
+    # A probe that finds an inherited fd pointing at the slot lock.
+    probe = (
+        f"{sys.executable} -c \"import os,sys; p=os.path.realpath('{lock}');"
+        " fds=[f for f in range(3,256) if os.path.exists(f'/dev/fd/{f}')"
+        " and os.path.realpath(f'/proc/self/fd/{f}' if os.path.exists('/proc/self/fd')"
+        " else f'/dev/fd/{f}')==p]; print('inherited', len(fds))\"; false && pnpm build"
+    )
+    if not Path("/proc/self/fd").exists():
+        pytest.skip("fd-to-path probe needs /proc")
+    result = asyncio.run(builtin.execute_bash("t", {"command": probe}))
+    assert "inherited 1" in _text(result), _text(result)

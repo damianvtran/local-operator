@@ -1,4 +1,4 @@
-"""A machine-wide lease that lets ONE heavy build or test run at a time per host.
+"""A machine-wide lease that limits how many heavy builds or tests run at once per host.
 
 WHY THIS EXISTS
 ---------------
@@ -18,14 +18,30 @@ HOW IT WORKS
 A cross-process counting semaphore made of N slot files,
 ``<config_dir>/run/heavy-jobs/slot-<i>.lock``. Taking a slot is a non-blocking
 ``flock(LOCK_EX)`` on one of them; the lock is held by an open file descriptor
-in the harness process for the life of the command. Constraints this relies on:
+in the harness process for the life of the command, and the spawned command
+inherits a duplicate of that descriptor (``Lease.fileno`` via ``pass_fds``).
+Constraints this relies on:
 
 * ``flock`` locks belong to the OPEN FILE DESCRIPTION, not the process, so two
   sessions inside one harness process (subagents share the pid) still exclude
   each other: each ``open`` makes its own description.
-* The kernel drops the lock when the descriptor closes, including when the
-  holder dies by SIGKILL or OOM. A crashed harness therefore can never wedge
-  the queue, which is why the lock, not the JSON record, is the truth.
+* The kernel drops the lock when the LAST descriptor for that description
+  closes, including when the holder dies by SIGKILL or OOM. Because the
+  command holds a duplicate, a harness killed mid-build does NOT free the slot
+  while its (detached, ``start_new_session``) build keeps running and keeping
+  its memory: the slot frees when the build exits too (PR #4104 QA Q1, where
+  the next queued build started beside the orphan). The lock, not the JSON
+  record, is the truth.
+* On a NORMAL end the harness unlocks explicitly (``LOCK_UN`` on its own
+  descriptor, which releases the lock for every duplicate) as soon as the
+  command's shell exits, so a daemon the build left behind holding an
+  inherited copy (an nx/turbo daemon) cannot pin the slot. The only residual:
+  such a daemon outliving a harness that died outright keeps the slot until it
+  exits; ``fuser <config_dir>/run/heavy-jobs/slot-N.lock`` finds it.
+* A command that self-backgrounds (``(build &)``, ``nohup build &``) keeps
+  the slot only until its shell exits, because of that same ``LOCK_UN``. The
+  sessions guide forbids escaping the queue that way; the lease does not try
+  to chase a process that deliberately left its process group.
 * ``flock`` exists on Linux and macOS. On Windows ``fcntl`` is absent and the
   lease is DISABLED (:func:`supported` is False): there is no fleet of
   Windows build nodes to protect, and a half-working lease would be worse than
@@ -46,7 +62,8 @@ non-heavy command never touches the lease. The kill switch is the config key
 ``bash.heavy_jobs.enabled`` (LIVE, read per heavy command; default on). Two
 node tuning knobs are environment overrides: ``LOCAL_OPERATOR_HEAVY_JOB_SLOTS``
 (0 = auto, see :func:`auto_slot_count`) and ``LOCAL_OPERATOR_HEAVY_JOB_WAIT_S``
-(how long a heavy command queues before it is refused, default 600).
+(how long a heavy command queues before it is refused, default 900, separate
+from and never capped by the command's own ``timeout``).
 ``lop services status`` prints the current holders.
 """
 
@@ -54,6 +71,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import shlex
@@ -88,9 +106,15 @@ HEAVY_JOBS_SLOTS_ENV = "LOCAL_OPERATOR_HEAVY_JOB_SLOTS"
 HEAVY_JOBS_WAIT_SECONDS_ENV = "LOCAL_OPERATOR_HEAVY_JOB_WAIT_S"
 #: ``0`` (or unset) means "size from the host" (:func:`auto_slot_count`).
 HEAVY_JOBS_SLOTS_DEFAULT = 0
-#: Ten minutes: long enough to outlast a typical build ahead in the queue,
+#: Fifteen minutes: long enough to outlast a typical 5-10 minute build ahead in
+#: the queue (PR #4104 QA K2 measured that a 120 s queue refused exactly that),
 #: short enough that a wedged holder surfaces as a refusal, not a silent hang.
-HEAVY_JOBS_WAIT_SECONDS_DEFAULT = 600
+#: Deliberately NOT capped by the bash call's ``timeout``: that bounds the
+#: command's own run, which starts at spawn, after the queue.
+HEAVY_JOBS_WAIT_SECONDS_DEFAULT = 900
+#: Accepted ranges for the env overrides; a value outside (or non-finite, or
+#: unparseable) falls back to the default rather than stopping a command.
+_WAIT_SECONDS_RANGE = (1.0, 4 * 3600.0)
 
 #: A caller asking for this much memory (``memory_mb``) is declaring a heavy
 #: job whatever the command looks like.
@@ -130,8 +154,8 @@ class Holder:
     pgid: int | None = None
 
     def who(self) -> str:
-        """The name a waiter is told: the session when known, else the pid."""
-        return self.session_id or f"pid {self.pid}"
+        """``<session>/<pid>`` when the session is known, else ``pid N``."""
+        return f"{self.session_id}/{self.pid}" if self.session_id else f"pid {self.pid}"
 
 
 def supported() -> bool:
@@ -142,38 +166,80 @@ def supported() -> bool:
 # -- classification ---------------------------------------------------------
 
 #: Splits a command line into simple commands. ``&`` is included so that
-#: ``build & other`` is two segments; redirections like ``2>&1`` survive because
-#: shlex keeps ``2>&1`` punctuation together with its neighbours only as ``>&``
-#: and that is harmless (it never matches a tool name).
+#: ``build & other`` is two segments. A redirection such as ``2>&1`` lexes as
+#: ``2>``, ``&``, ``1``, so it splits into a stray ``1`` segment; that is
+#: harmless because ``2>`` stays with its command and ``1`` names no tool.
 _SEPARATORS = {"&&", "||", ";", "|", "&", "\n", "(", ")", ";;", "|&"}
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
-#: Wrappers that run "the rest of the line" as the real command. Each maps to
-#: the number of positional arguments it consumes before the wrapped command
-#: (``timeout 600 cmd`` eats one); option tokens are skipped separately.
-_PREFIX_WRAPPERS: dict[str, int] = {
-    "timeout": 1,
-    "nice": 0,
-    "nohup": 0,
-    "setsid": 0,
-    "time": 0,
-    "command": 0,
-    "exec": 0,
-    "env": 0,
-    "stdbuf": 0,
-    "ionice": 0,
-    "caffeinate": 0,
-    "npx": 0,
-    "bunx": 0,
+#: Wrappers that run "the rest of the line" as the real command: name ->
+#: (positional arguments eaten before the wrapped command, options that take a
+#: separate value). Per wrapper because one letter means different things:
+#: ``nice -n 10`` takes a value, while ``taskset -c 0-3`` is a flag followed by
+#: the positional cpu list.
+_PREFIX_WRAPPERS: dict[str, tuple[int, frozenset[str]]] = {
+    "timeout": (1, frozenset({"-s", "--signal", "-k", "--kill-after"})),
+    "nice": (0, frozenset({"-n", "--adjustment"})),
+    "nohup": (0, frozenset()),
+    "setsid": (0, frozenset()),
+    "time": (0, frozenset({"-f", "--format", "-o", "--output"})),
+    "command": (0, frozenset()),
+    "exec": (0, frozenset({"-a"})),
+    "env": (0, frozenset({"-u", "--unset", "-C", "--chdir"})),
+    "stdbuf": (0, frozenset({"-i", "-o", "-e"})),
+    "ionice": (0, frozenset({"-c", "--class", "-n", "--classdata"})),
+    "caffeinate": (0, frozenset({"-t", "-w"})),
+    "taskset": (1, frozenset()),
+    "chrt": (1, frozenset()),
+    "prlimit": (0, frozenset({"-p", "--pid", "-o", "--output"})),
+    "xvfb-run": (
+        0,
+        frozenset({"-n", "--server-num", "-s", "--server-args", "-e", "--error-file"})
+        | frozenset({"-f", "--auth-file", "-p", "--xauth-protocol", "-w", "--wait"}),
+    ),
+    "corepack": (0, frozenset()),
+    "npx": (0, frozenset({"-p", "--package"})),
+    "bunx": (0, frozenset({"-p", "--package"})),
 }
-#: Options of those wrappers that take a separate value (``nice -n 10``).
-_WRAPPER_VALUE_OPTS = {"-n", "-s", "-k", "--signal", "--kill-after", "-u", "-c", "-C"}
 
 #: Package-manager scripts that run builds, test runners or type checks. These
 #: are the scripts every JS repo on the fleet maps to tsc/vite/vitest/esbuild.
 _PM_HEAVY_SCRIPT = re.compile(r"^(build|test|typecheck|type-check)(:.*)?$")
-_PM_VALUE_OPTS = {"-C", "--dir", "--filter", "-F", "--prefix", "--cwd", "-w", "--workspace"}
+_PACKAGE_MANAGERS = ("pnpm", "npm", "yarn", "bun")
+#: Options that take a separate value, per package manager: ``-w`` is npm's
+#: ``--workspace <name>`` but pnpm's value-less ``--workspace-root``.
+_PM_VALUE_OPTS = {"-C", "--dir", "--filter", "-F", "--prefix", "--cwd", "--workspace"}
+#: Options that point the package manager at another package.json, so the
+#: script table under the cwd no longer applies: fall back to name heuristics.
+_PM_ELSEWHERE_OPTS = {"--filter", "-F", "-r", "--recursive", "--workspace", "-w", "--workspaces"}
+_PM_DIR_OPTS = {"-C", "--dir", "--prefix", "--cwd"}
+#: `npm <x>` runs a script only for these; any other word is an npm command.
+_NPM_SCRIPT_ALIASES = {"test": "test", "t": "test", "tst": "test", "start": "start"}
+#: Informational flags. The short ones count only as the SOLE argument
+#: (``tsc -v``, ``vitest -h``), because ``-v`` is "verbose" for many test
+#: runners (``pytest -v -n 4`` is a parallel run, not a version query).
 _VERSION_FLAGS = {"--version", "-v", "-V", "--help", "-h"}
+_INFO_FLAGS_ANYWHERE = {"--version", "--help"}
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+_PYTHON = re.compile(r"python(\d+(\.\d+)?)?")
+#: JS tools that `node <path>/.bin/<tool>` (or `node …/tsc`) is really running.
+_NODE_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "vite", "electron-vite"} | {
+    "webpack",
+    "rollup",
+    "next",
+}
+#: Recursion bound for `bash -c`, package.json script bodies and wrappers that
+#: re-dispatch: deep enough for `bash -c 'pnpm build'` → `electron-vite build`,
+#: and it stops a script that calls itself (`"build": "pnpm build"`).
+_MAX_DEPTH = 4
+#: package.json files larger than this are not read (a cheap read by contract).
+_PACKAGE_JSON_MAX_BYTES = 1_000_000
+
+#: Sentinel verdict: the segment is a watcher or a server that runs until it is
+#: stopped. It never takes the slot (it would pin the machine's only slot for
+#: hours while using little memory), and a command line containing one is not
+#: leased at all, because the lease would last as long as the watcher.
+_LONG_LIVED = "\0long-lived"
 
 
 def _segments(command: str) -> list[list[str]]:
@@ -223,10 +289,8 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
                     i += 1
                 i += 1
             continue
-        if base in ("uvx", "pipx") or (
-            base in ("pnpm", "yarn") and tokens[i + 1 : i + 2] == ["exec"]
-        ):
-            i += 1 if base in ("uvx", "pipx") else 2
+        if base in ("uvx", "pipx"):
+            i += 1
             while i < len(tokens) and tokens[i].startswith("-"):
                 i += 1
             if base == "pipx" and i < len(tokens) and tokens[i] == "run":
@@ -234,10 +298,13 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
             continue
         if base in _PREFIX_WRAPPERS:
             i += 1
-            positionals = _PREFIX_WRAPPERS[base]
+            positionals, value_opts = _PREFIX_WRAPPERS[base]
             while i < len(tokens):
+                if tokens[i] == "--":
+                    i += 1
+                    break
                 if tokens[i].startswith("-") and tokens[i] != "-":
-                    i += 2 if tokens[i] in _WRAPPER_VALUE_OPTS else 1
+                    i += 2 if tokens[i] in value_opts else 1
                     continue
                 if base == "env" and _ENV_ASSIGNMENT.match(tokens[i]):
                     i += 1
@@ -252,51 +319,270 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
     return tokens[i:]
 
 
-def _pm_script(args: list[str]) -> str | None:
-    """The script name a package-manager invocation runs, if any."""
+def _watch_flag(arg: str) -> bool:
+    """``--watch``/``--watchAll`` (or ``=true``-style values) on any tool."""
+    if arg in ("--watch", "--watchAll", "--watch-all"):
+        return True
+    for flag in ("--watch=", "--watchAll="):
+        if arg.startswith(flag):
+            return arg[len(flag) :].lower() not in ("false", "0", "no")
+    return False
+
+
+def _script_is_long_lived(name: str) -> bool:
+    """``dev``, ``serve``, ``start``, ``watch``, ``*:watch``, ``build:watch``…"""
+    parts = [part for part in re.split(r"[:\-_.]", name.lower()) if part]
+    if not parts:
+        return False
+    return (
+        "watch" in parts
+        or parts[0] in ("dev", "serve", "start", "preview")
+        or parts[-1] in ("serve", "start")
+    )
+
+
+def _positionals(args: list[str]) -> list[str]:
+    return [arg for arg in args if not arg.startswith("-")]
+
+
+def _cd(cwd: str | None, args: list[str]) -> str | None:
+    """The directory after ``cd <args>``; None once it is unknowable (``cd -``)."""
+    if cwd is None:
+        return None
+    target = args[0] if args else "~"
+    if target == "-" or "$" in target:
+        return None
+    return os.path.join(cwd, os.path.expanduser(target))
+
+
+def _package_scripts(directory: str | None) -> dict[str, str] | None:
+    """``scripts`` from the nearest package.json at or above ``directory``.
+
+    Why: ``pnpm build`` is only as heavy as what its script runs, and what
+    exec would run when no script has that name is the binary itself. Cheap by
+    contract: one small JSON read, no package-manager subprocess; any failure
+    means "unknown" and the caller falls back to name heuristics.
+    """
+    if not directory:
+        return None
+    try:
+        current = Path(directory).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    for folder in (current, *current.parents):
+        path = folder / "package.json"
+        try:
+            if not path.is_file():
+                continue
+            if path.stat().st_size > _PACKAGE_JSON_MAX_BYTES:
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        scripts = data.get("scripts") if isinstance(data, dict) else None
+        if not isinstance(scripts, dict):
+            return {}
+        return {k: v for k, v in scripts.items() if isinstance(k, str) and isinstance(v, str)}
+    return None
+
+
+def _classify_command(command: str, cwd: str | None, depth: int) -> str | None:
+    """Heavy reason, :data:`_LONG_LIVED`, or None for a whole command line."""
+    if depth > _MAX_DEPTH:
+        return None
+    heavy: str | None = None
+    for segment in _segments(command):
+        if segment[0] in ("cd", "pushd"):
+            cwd = _cd(cwd, segment[1:])
+            continue
+        verdict = _classify_segment(segment, cwd, depth)
+        if verdict == _LONG_LIVED:
+            return _LONG_LIVED
+        if heavy is None:
+            heavy = verdict
+    return heavy
+
+
+def _shell_c_string(args: list[str]) -> str | None:
+    """The command string of ``bash -c '…'`` / ``sh -lc '…'``, if any."""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-o", "+o"):
+            i += 2
+            continue
+        if arg.startswith("--"):
+            if arg == "--":
+                return None
+            i += 1
+            continue
+        if not arg.startswith("-"):
+            return None  # a script file: not inspected
+        if "c" in arg[1:]:
+            return args[i + 1] if i + 1 < len(args) else None
+        i += 1
+    return None
+
+
+def _classify_pm(program: str, args: list[str], cwd: str | None, depth: int) -> str | None:
+    """``pnpm|npm|yarn|bun …``: classify what it really runs."""
+    pkg_dir, elsewhere = cwd, False
     i = 0
     while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in _PM_VALUE_OPTS else 1
+        opt, _, attached = args[i].partition("=")
+        if opt in _PM_ELSEWHERE_OPTS:
+            elsewhere = True
+        value = attached or (args[i + 1] if i + 1 < len(args) else "")
+        if opt in _PM_DIR_OPTS:
+            pkg_dir = _cd(pkg_dir, [value])
+        takes_value = opt in _PM_VALUE_OPTS or (program == "npm" and opt == "-w")
+        i += 2 if takes_value and not attached else 1
     if i >= len(args):
         return None
-    if args[i] in ("run", "run-script"):
-        i += 1
-        while i < len(args) and args[i].startswith("-"):
-            i += 2 if args[i] in _PM_VALUE_OPTS else 1
-        return args[i] if i < len(args) else None
-    # `pnpm build` / `yarn build` run the script directly; `npm build` is a
-    # different (obsolete) command, but `npm test` is the test script.
-    return args[i]
+    sub, rest = args[i], args[i + 1 :]
+    if sub in ("exec", "dlx", "x"):
+        j = 0
+        while j < len(rest) and rest[j].startswith("-"):
+            if rest[j] == "--":
+                j += 1
+                break
+            j += 2 if rest[j] in ("-p", "--package") else 1
+        return _classify_segment(rest[j:], pkg_dir, depth + 1) if rest[j:] else None
+    explicit_run = sub in ("run", "run-script")
+    if explicit_run:
+        j = 0
+        while j < len(rest) and rest[j].startswith("-"):
+            j += 2 if rest[j] in _PM_VALUE_OPTS else 1
+        if j >= len(rest):
+            return None
+        script, extra = rest[j], rest[j + 1 :]
+    elif program == "npm":
+        if sub not in _NPM_SCRIPT_ALIASES:
+            return None  # `npm build`, `npm install`: npm commands, not scripts
+        script, extra = _NPM_SCRIPT_ALIASES[sub], rest
+    else:
+        script, extra = sub, rest
+    # `pnpm test -- --watch`, `pnpm test --watch`: the flag reaches the runner.
+    if any(_watch_flag(arg) for arg in extra):
+        return _LONG_LIVED
+    # The NAME wins first for watchers: `"test:watch": "vitest"` runs vitest
+    # in watch mode in a terminal, which its body alone does not show.
+    if _script_is_long_lived(script):
+        return _LONG_LIVED
+    scripts = None if elsewhere else _package_scripts(pkg_dir)
+    body = scripts.get(script) if scripts else None
+    if body is not None:
+        verdict = _classify_command(body, pkg_dir, depth + 1)
+        if verdict == _LONG_LIVED:
+            return _LONG_LIVED
+        if verdict is not None:
+            return f"{program} {script}"
+    if _PM_HEAVY_SCRIPT.match(script):
+        return f"{program} {script}"
+    if body is None and not explicit_run and program != "npm":
+        # No script by that name: pnpm/yarn/bun run the local binary, so
+        # `pnpm vitest run` is vitest and `pnpm tsc --noEmit` is tsc.
+        return _classify_segment([script, *extra], pkg_dir, depth + 1)
+    return None
 
 
-def _classify_segment(tokens: list[str]) -> str | None:
+def _task_names(args: list[str]) -> list[str]:
+    """Target names in an nx/turbo argv: ``proj:build``, ``-t build,test``…"""
+    names: list[str] = []
+    take_next = False
+    for arg in args:
+        if take_next:
+            names.extend(arg.split(","))
+            take_next = False
+            continue
+        opt, eq, value = arg.partition("=")
+        if opt in ("-t", "--target", "--targets", "--task", "--tasks"):
+            if eq:
+                names.extend(value.split(","))
+            else:
+                take_next = True
+            continue
+        if not arg.startswith("-"):
+            names.extend(
+                part for chunk in arg.split(",") for part in chunk.split(":")[1:2] or [chunk]
+            )
+    return names
+
+
+def _classify_segment(tokens: list[str], cwd: str | None, depth: int = 0) -> str | None:
+    if depth > _MAX_DEPTH:
+        return None
     tokens = _strip_wrappers(tokens)
     if not tokens:
         return None
     program = os.path.basename(tokens[0])
     args = tokens[1:]
-    if any(arg in _VERSION_FLAGS for arg in args[:1]):
-        # `tsc --version`, `vitest -h`: an informational call is not a build.
+    if (len(args) == 1 and args[0] in _VERSION_FLAGS) or any(
+        a in _INFO_FLAGS_ANYWHERE for a in args
+    ):
+        # `tsc --version`, `pnpm build --help`: an informational call is not a build.
         return None
-    if program in ("pnpm", "npm", "yarn", "bun"):
-        script = _pm_script(args)
-        if script is not None and _PM_HEAVY_SCRIPT.match(script):
-            if program == "npm" and script.startswith("build") and "run" not in args:
-                return None
-            return f"{program} {script}"
+    if program in _SHELLS:
+        script = _shell_c_string(args)
+        return _classify_command(script, cwd, depth + 1) if script is not None else None
+    if program == "run_bounded.py" or (
+        _PYTHON.fullmatch(program) and args[:1] and os.path.basename(args[0]) == "run_bounded.py"
+    ):
+        # The bounded runner AGENTS.md prescribes for heavy runs: `… -- <cmd>`.
+        rest = args[args.index("--") + 1 :] if "--" in args else []
+        return _classify_segment(rest, cwd, depth + 1) if rest else None
+    if program in _PACKAGE_MANAGERS:
+        verdict = _classify_pm(program, args, cwd, depth)
+        if verdict is not None or program != "bun":
+            return verdict
+    if program in ("node", "bun", "deno"):
+        if "--test" in args:
+            return _LONG_LIVED if any(_watch_flag(a) for a in args) else f"{program} --test"
+        if any(_watch_flag(a) for a in args):
+            return _LONG_LIVED
+        # `node node_modules/.bin/esbuild …`: the script is the tool.
+        script_at = next((n for n, a in enumerate(args) if not a.startswith("-")), None)
+        if script_at is not None:
+            tool = re.sub(r"\.(c|m)?js$", "", os.path.basename(args[script_at]))
+            if tool in _NODE_TOOLS:
+                return _classify_segment([tool, *args[script_at + 1 :]], cwd, depth + 1)
         return None
+    first = _positionals(args)[:1]
     if program in ("vite", "electron-vite"):
-        # Builds only. `vite`/`electron-vite dev` is a long-lived dev server:
-        # leasing it would pin the slot for hours while using little memory.
-        return f"{program} build" if "build" in args else None
+        # Builds only. `vite`/`electron-vite dev|preview` is a long-lived server.
+        if "build" in args and not any(_watch_flag(a) or a == "-w" for a in args):
+            return f"{program} build"
+        return _LONG_LIVED
     if program in ("tsc", "vue-tsc"):
+        return _LONG_LIVED if any(_watch_flag(a) or a == "-w" for a in args) else program
+    if program == "vitest":
+        if first in (["watch"], ["dev"]) or any(_watch_flag(a) or a == "-w" for a in args):
+            return _LONG_LIVED
         return program
-    if program in ("esbuild", "vitest", "jest", "webpack", "rollup", "turbo", "nx"):
-        if program in ("turbo", "nx") and not any(_PM_HEAVY_SCRIPT.match(a) for a in args):
-            return None
+    if program == "jest":
+        return _LONG_LIVED if any(_watch_flag(a) for a in args) else program
+    if program == "esbuild":
+        if any(_watch_flag(a) or a == "--serve" or a.startswith("--serve=") for a in args):
+            return _LONG_LIVED
         return program
-    if program in ("node", "bun", "deno") and "--test" in args:
-        return f"{program} --test"
+    if program in ("webpack", "webpack-cli", "rollup"):
+        if first in (["serve"], ["watch"]) or any(_watch_flag(a) or a == "-w" for a in args):
+            return _LONG_LIVED
+        return program
+    if program == "webpack-dev-server":
+        return _LONG_LIVED
+    if program == "next":
+        if first == ["build"]:
+            return "next build"
+        return _LONG_LIVED if first in (["dev"], ["start"]) else None
+    if program in ("turbo", "nx"):
+        if first == ["watch"] or any(_watch_flag(a) for a in args):
+            return _LONG_LIVED
+        names = _task_names(args)
+        if any(_script_is_long_lived(name) for name in names):
+            return _LONG_LIVED
+        heavy = next((name for name in names if _PM_HEAVY_SCRIPT.match(name)), None)
+        return f"{program} {heavy}" if heavy else None
     if program in ("cargo", "go") and args[:1] and args[0] in ("build", "test"):
         return f"{program} {args[0]}"
     if program == "make" and any(a.startswith("test") for a in args if not a.startswith("-")):
@@ -304,7 +590,7 @@ def _classify_segment(tokens: list[str]) -> str | None:
     pytest_args: list[str] | None = None
     if program in ("pytest", "py.test"):
         pytest_args = args
-    elif re.fullmatch(r"python(\d+(\.\d+)?)?", program) and args[:2] == ["-m", "pytest"]:
+    elif _PYTHON.fullmatch(program) and args[:2] == ["-m", "pytest"]:
         pytest_args = args[2:]
     if pytest_args is not None:
         # Only a PARALLEL pytest is heavy: `-n 8` forks eight interpreters,
@@ -323,28 +609,45 @@ def _classify_segment(tokens: list[str]) -> str | None:
     return None
 
 
-def is_heavy(command: str, memory_mb: float | None = None) -> HeavyClass | None:
+def is_heavy(
+    command: str, memory_mb: float | None = None, cwd: str | None = None
+) -> HeavyClass | None:
     """Classify a ``bash`` command as heavy (lease it) or not (run it now).
 
     Deliberately conservative: a false positive only queues a command behind a
     build, while a false negative is what the lease exists to prevent, yet a
     lease that queues `ls` would be disabled by the first operator it annoys.
     So only program families that measurably spend gigabytes are matched:
-    bundlers (esbuild, vite/electron-vite build, webpack, rollup), the
-    TypeScript compiler, JS test runners (vitest, jest, node --test), package
-    manager build/test/typecheck scripts, parallel pytest (``-n``),
-    ``make test*`` and ``cargo``/``go`` build|test. Wrappers (``cd x &&``,
-    env assignments, ``timeout N``, ``nice``, ``systemd-run … --``,
-    ``uv run``, ``npx``) are seen through. A caller-declared ``memory_mb`` at
-    or above :data:`HEAVY_MEMORY_MB_THRESHOLD` is heavy regardless.
+    bundlers (esbuild, vite/electron-vite build, webpack, rollup, next build),
+    the TypeScript compiler, JS test runners (vitest, jest, node --test),
+    package-manager build/test/typecheck scripts, nx/turbo build|test targets,
+    parallel pytest (``-n``), ``make test*`` and ``cargo``/``go`` build|test.
+
+    Classified by what actually runs: wrappers (``cd x &&``, env assignments,
+    ``timeout N``, ``nice``, ``taskset``, ``chrt``, ``prlimit``, ``xvfb-run``,
+    ``corepack``, ``systemd-run … --``, ``scripts/run_bounded.py … --``,
+    ``uv run``, ``npx``, ``pnpm exec|dlx``) are seen through, ``bash -c '…'``
+    strings are classified, ``node <path>/.bin/<tool>`` is the tool, and a
+    package-manager script is resolved through the nearest package.json under
+    ``cwd`` (when given and readable): its body decides, and with no script of
+    that name pnpm/yarn/bun run the binary, as ``exec`` would. Without
+    ``cwd`` (or package.json) the script NAME decides.
+
+    Watchers and servers are never heavy (``--watch``, ``tsc -w``, ``vitest
+    watch|dev``, ``jest --watchAll``, ``esbuild --serve``, ``vite`` dev, and
+    scripts named ``dev``/``serve``/``start``/``watch``/``*:watch``): they run
+    until stopped, so a lease would pin the machine's slot for hours.
+    ``--help``/``--version`` anywhere is informational, never heavy.
+
+    A caller-declared ``memory_mb`` at or above :data:`HEAVY_MEMORY_MB_THRESHOLD`
+    is heavy regardless.
     """
     if memory_mb is not None and memory_mb >= HEAVY_MEMORY_MB_THRESHOLD:
         return HeavyClass(f"memory_mb={int(memory_mb)}")
-    for segment in _segments(command):
-        reason = _classify_segment(segment)
-        if reason is not None:
-            return HeavyClass(reason)
-    return None
+    verdict = _classify_command(command, cwd, 0)
+    if verdict is None or verdict == _LONG_LIVED:
+        return None
+    return HeavyClass(verdict)
 
 
 # -- slot sizing ------------------------------------------------------------
@@ -363,9 +666,13 @@ def auto_slot_count(total_mb: int | None, available_mb: int | None) -> int:
 
 
 def resolve_slot_count(configured: Any) -> int:
-    """The slot count for a configured value; non-positive or bad means auto."""
+    """The slot count for a configured value; non-positive or bad means auto.
+
+    Clamped to ``_MAX_SLOTS``: more parallel builds than the largest auto size
+    is the failure this module prevents, not a tuning choice.
+    """
     if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
-        return configured
+        return min(configured, _MAX_SLOTS)
     from local_operator import memory_guard
 
     return auto_slot_count(
@@ -381,7 +688,13 @@ class Settings:
     wait_seconds: float
 
 
-def _env_number(name: str, default: float) -> float:
+def _env_number(name: str, default: float, low: float, high: float) -> float:
+    """A finite env number in ``[low, high]``, else ``default``.
+
+    ``inf`` once crashed every heavy call (``int(inf)`` raised OverflowError,
+    PR #4104 R4), and ``nan`` compares false to everything, so both are
+    rejected explicitly instead of trusting comparisons.
+    """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -389,7 +702,9 @@ def _env_number(name: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         return default
-    return value if value >= 0 else default
+    if not math.isfinite(value) or not low <= value <= high:
+        return default
+    return value
 
 
 def configured_settings() -> Settings:
@@ -409,8 +724,11 @@ def configured_settings() -> Settings:
         pass
     if not isinstance(enabled, bool):
         enabled = HEAVY_JOBS_ENABLED_DEFAULT
-    slots = int(_env_number(HEAVY_JOBS_SLOTS_ENV, HEAVY_JOBS_SLOTS_DEFAULT))
-    wait = _env_number(HEAVY_JOBS_WAIT_SECONDS_ENV, HEAVY_JOBS_WAIT_SECONDS_DEFAULT)
+    # Slots: 0 = auto, 1.._MAX_SLOTS as given; anything else is auto.
+    slots = int(_env_number(HEAVY_JOBS_SLOTS_ENV, HEAVY_JOBS_SLOTS_DEFAULT, 0, _MAX_SLOTS))
+    wait = _env_number(
+        HEAVY_JOBS_WAIT_SECONDS_ENV, HEAVY_JOBS_WAIT_SECONDS_DEFAULT, *_WAIT_SECONDS_RANGE
+    )
     return Settings(enabled=enabled, slots=resolve_slot_count(slots), wait_seconds=wait)
 
 
@@ -432,6 +750,18 @@ def _pid_alive(pid: int) -> bool:
     return pid_liveness(pid) is not False
 
 
+def _group_alive(pgid: int) -> bool:
+    if pgid <= 1:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM: it exists, it is just not ours to signal
+    return True
+
+
 class Lease:
     """One held slot. Release exactly once; closing the fd drops the flock."""
 
@@ -444,6 +774,15 @@ class Lease:
     @property
     def held(self) -> bool:
         return self._fd is not None
+
+    def fileno(self) -> int | None:
+        """The lock descriptor, for the spawn's ``pass_fds`` (None once released).
+
+        The command inherits a duplicate so the flock outlives a harness that
+        dies mid-build (see the module docstring); the harness's own
+        :meth:`release` still frees the slot for every duplicate.
+        """
+        return self._fd
 
     def note_pgid(self, pgid: int | None) -> None:
         """Record the spawned group once known, so status can name the command."""
@@ -467,8 +806,17 @@ class Lease:
             self._record_path.unlink()
         except OSError:
             pass
+        # LOCK_UN, not just close: the command (and anything it left behind)
+        # holds a duplicate of this description, and closing ours alone would
+        # leave the slot locked by that copy. An explicit unlock releases the
+        # lock for every duplicate at once.
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
         try:
-            os.close(fd)  # closing the only descriptor releases the flock
+            os.close(fd)
         except OSError:
             pass
 
@@ -521,7 +869,12 @@ def try_acquire(
 
 
 def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
-    """Live holders from the slot records; stale (dead-pid) records are skipped.
+    """Live holders from the slot records; stale records are skipped.
+
+    A record is live while its harness ``pid`` OR its command's ``pgid`` is
+    alive: a harness killed mid-build leaves its record behind, and the build
+    still holds the slot through its inherited descriptor, so it is still the
+    holder a waiter must be told about.
 
     Reads JSON only and never probes the flock, so it is cheap enough for a
     status command and cannot disturb a holder.
@@ -540,9 +893,9 @@ def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
             continue
         if slots is not None and slot >= slots:
             continue
-        if not _pid_alive(pid):
-            continue
         pgid = raw.get("pgid")
+        if not _pid_alive(pid) and not (isinstance(pgid, int) and _group_alive(pgid)):
+            continue
         holders.append(
             Holder(
                 slot=slot,
@@ -570,15 +923,28 @@ class Refusal:
     holders: tuple[Holder, ...]
 
 
-def refusal_message(holders: Iterable[Holder], waited: float, reason: str) -> str:
+def refusal_message(
+    holders: Iterable[Holder], waited: float, reason: str, wait_seconds: float | None = None
+) -> str:
+    """The refusal once the QUEUE bound ran out.
+
+    The queue bound is the only bound that can refuse here: the command's own
+    ``timeout`` starts at spawn and never caps the queue (PR #4104 Q3 found
+    the old message blaming the wrong bound). So the remedy names the queue
+    bound and its owner, the operator's harness environment, not a parameter
+    the agent could change.
+    """
+    bound = f"{wait_seconds if wait_seconds is not None else waited:g}"
     return (
-        f"HEAVY JOB QUEUE FULL: this command ({reason}) waited {int(waited)}s for the "
-        f"machine-wide heavy-job slot and did not get it.\n"
+        f"HEAVY JOB QUEUE FULL: this command ({reason}) waited {int(waited)}s, the "
+        f"queue limit ({HEAVY_JOBS_WAIT_SECONDS_ENV}={bound}s), for the machine-wide "
+        "heavy-job slot and did not get it.\n"
         f"Held by: {describe_holders(holders)}.\n"
-        "Only one heavy build/test runs per machine at a time, so parallel builds "
-        "cannot OOM the host. Retry once the holder finishes (check with "
-        "`lop services status`), or raise LOCAL_OPERATOR_HEAVY_JOB_WAIT_S. To turn the "
-        "queue off on this machine: set bash.heavy_jobs.enabled to false."
+        "Heavy builds/tests share a few slots per machine (one on hosts with 16 GB "
+        "or less), so parallel builds cannot OOM the host. Retry once the holder "
+        "finishes (check with `lop services status`). The operator can lengthen the "
+        f"queue limit with {HEAVY_JOBS_WAIT_SECONDS_ENV} in lop's environment, or turn "
+        "the queue off on this machine with bash.heavy_jobs.enabled=false."
     )
 
 
@@ -614,23 +980,32 @@ async def acquire(
         if aborted is not None and aborted():
             return None
         if waited >= wait_seconds:
-            holders = tuple(read_holders(directory, slots))
-            return Refusal(refusal_message(holders, waited, reason), holders)
+            holders = tuple(read_holders(directory))
+            return Refusal(refusal_message(holders, waited, reason, wait_seconds), holders)
         if on_wait is not None and waited - last_note >= 1.0:
             last_note = waited
-            on_wait(queued_line(read_holders(directory, slots), waited))
+            on_wait(queued_line(read_holders(directory), waited))
         await sleep(min(_POLL_SECONDS, max(0.01, wait_seconds - waited)))
 
 
 def status_line(directory: Path, slots: int, now: float | None = None) -> str:
-    """The ``lop services status`` row: holders with age, or the free count."""
-    holders = read_holders(directory, slots)
+    """The ``lop services status`` row: holders with age, or the free count.
+
+    Counts EVERY live holder, not just those below the current slot count:
+    auto sizing follows MemAvailable, which falls while builds run, so a
+    holder taken under a larger count must not vanish from the report (PR
+    #4104 R5). When they disagree the row says so: ``2 held (1 slot now)``.
+    """
+    holders = read_holders(directory)
     if not holders:
         return f"heavy jobs: 0/{slots} slots in use"
     now = time.time() if now is None else now
     parts = []
     for holder in holders:
         minutes = max(0, int((now - holder.started_at) // 60))
-        who = f"{holder.session_id}/{holder.pid}" if holder.session_id else f"pid {holder.pid}"
-        parts.append(f"{who} {holder.command} ({minutes}m)")
-    return f"heavy jobs: {len(holders)}/{slots} slots held: " + "; ".join(parts)
+        parts.append(f"{holder.who()} {holder.command} ({minutes}m)")
+    if len(holders) <= slots and all(holder.slot < slots for holder in holders):
+        head = f"{len(holders)}/{slots} slots held"
+    else:
+        head = f"{len(holders)} held ({slots} slot{'s' if slots != 1 else ''} now)"
+    return f"heavy jobs: {head}: " + "; ".join(parts)
