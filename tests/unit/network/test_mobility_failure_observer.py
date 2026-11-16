@@ -121,6 +121,7 @@ def test_wrappers_keep_results_and_exception_identity_when_recording_breaks(
 def test_threadsafe_event_bound_and_explicit_truncation() -> None:
     emitted: list[str] = []
     observer = MobilityFailureObserver(emitted.append)
+
     def record_batch() -> None:
         for _ in range(96):
             observer.record("worker.begin", ("root-1", "instance-1"))
@@ -222,7 +223,8 @@ def test_worker_and_phase_events_report_exception_type_not_value(phase: str) -> 
         "worker.exit",
     ]
     assert [event["type"] for event in events if event["type"]] == [
-        "FileNotFoundError", "FileNotFoundError"
+        "FileNotFoundError",
+        "FileNotFoundError",
     ]
 
 
@@ -288,7 +290,14 @@ def test_install_wraps_registration_worker_phases_and_journal_without_payloads(
     assert "PRIVATE" not in emitted[0]
     events = json.loads(emitted[0])["events"]
     names = [event["event"] for event in events]
-    for label in ("hook.registration", "worker", "cleanup", "staging", "reconcile", "journal.write"):
+    for label in (
+        "hook.registration",
+        "worker",
+        "cleanup",
+        "staging",
+        "reconcile",
+        "journal.write",
+    ):
         assert label + ".begin" in names
         assert label + ".complete" in names
     assert names[-1] == "worker.exit"
@@ -326,4 +335,6 @@ def test_exact_target_keeps_original_deadline_poll_and_assertions() -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "mobility_failure_observer"
     )
     assert ast.unparse(fixture.decorator_list[0]) == "pytest.fixture(autouse=True)"
-    assert "request.node.name != TARGET" in ast.get_source_segment(source, fixture)
+    fixture_source = ast.get_source_segment(source, fixture)
+    assert fixture_source is not None
+    assert "request.node.name != TARGET" in fixture_source

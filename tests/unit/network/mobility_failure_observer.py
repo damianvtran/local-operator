@@ -181,9 +181,7 @@ class MobilityFailureObserver:
             get_context = journal_context if name == "_write_journal" else root_context
             monkeypatch.setattr(module, name, self.wrap(getattr(module, name), label, get_context))
 
-    def _frames(
-        self, workers: dict[int, tuple[str, str]]
-    ) -> tuple[list[dict[str, Any]], bool]:
+    def _frames(self, workers: dict[int, tuple[str, str]]) -> tuple[list[dict[str, Any]], bool]:
         if not workers:
             return [], False
         # CPython only offers a process-wide map. Immediately select tracked hook
