@@ -226,14 +226,56 @@ def _running_receiver(root: Path) -> dict[str, Any] | None:
         return None
 
 
+def _supervised_receiver(state: str) -> tuple[bool, int | None]:
+    """``(held, pid)``: whether a receiver PROCESS runs under the service manager.
+
+    WHY (review round 2 M2): ``connector_state`` answers ``loaded`` from three
+    supervisors that mean different things by it. systemd ``active`` and Task
+    Scheduler ``running`` already mean a running process. launchd ``loaded``
+    means only that the label is REGISTERED (``install._registered``), which is
+    also true through the up-to-60 s ``ThrottleInterval`` after any exit and
+    throughout a crash loop — states where no receiver exists and the exited
+    record's ``has exited`` line is the truthful one. So on launchd ``held``
+    needs a live pid behind the label, read through the guarded
+    ``launchd.job_pid`` (refuses a redirected home, never raises); that pid is
+    returned so the verdict can tell a different, unrecorded receiver from the
+    recorded one. Elsewhere the pid is ``None`` (the supervisors there do not
+    hand one over cheaply, and ``held`` already implies a process).
+    """
+
+    from local_operator import supervisors
+    from local_operator.team_bridge.connector import install
+
+    if state != install.STATE_LOADED:
+        return False, None
+    if supervisors.supervisor() != supervisors.LAUNCHCTL:
+        return True, None
+    try:
+        from local_operator import launchd
+        from local_operator.procstate import pid_liveness
+
+        pid = launchd.job_pid(
+            label=install.LABEL, path=install.plist_path(), run=install._launchctl
+        )
+        if pid is not None and pid_liveness(pid) is True:
+            return True, pid
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return False, None
+    return False, None
+
+
 def _restart_verdict(
-    running: dict[str, Any] | None, *, loaded: bool
+    running: dict[str, Any] | None, *, held: bool, held_pid: int | None = None
 ) -> tuple[bool | None, str | None]:
     """``(restart_needed, restart_reason)`` for the whole status, human and JSON alike.
 
-    ``no_record`` (review M1/C2): the service manager holds a receiver, yet no
-    live receiver has recorded itself. Every receiver started by a version
-    older than ``runtime_record`` is exactly that — the teammate's 0.102.4
+    ``held``/``held_pid`` come from :func:`_supervised_receiver`, never from the
+    bare service state (review round 2 M2: a registered launchd label is not a
+    running receiver).
+
+    ``no_record`` (review M1/C2): a receiver process runs under the service
+    manager, yet no live receiver has recorded itself. Every receiver started
+    by a version older than ``runtime_record`` is exactly that — the teammate's 0.102.4
     launchd receiver this feature exists for — and so is one that replaced a
     record's (now exited) pid without writing its own. Only a restart onto the
     installed code makes it record, so that IS the verdict, not "none".
@@ -241,17 +283,21 @@ def _restart_verdict(
     ``replaced_build``, ``None`` when liveness could not be proven).
     """
 
-    if loaded and (running is None or running["alive"] is False):
+    # A dead record naming the SAME pid launchd holds is a contradiction, not
+    # an unrecorded receiver; keep the record's own ``has exited`` reading.
+    if held and (running is None or (running["alive"] is False and running["pid"] != held_pid)):
         return True, "no_record"
     if running is None:
         return False, None
     return running["restart_needed"], running["restart_reason"]
 
 
-def _running_lines(running: dict[str, Any] | None, *, loaded: bool) -> list[Any]:
+def _running_lines(
+    running: dict[str, Any] | None, *, held: bool, held_pid: int | None = None
+) -> list[Any]:
     """The human lines for :func:`_running_receiver`; versions/pids verbatim."""
 
-    restart_needed, reason = _restart_verdict(running, loaded=loaded)
+    restart_needed, reason = _restart_verdict(running, held=held, held_pid=held_pid)
     if reason == "no_record":
         return [_k.status_running_unrecorded()]
     if running is None:
@@ -305,8 +351,8 @@ def _status(root: Path, *, as_json: bool) -> int:
     screening = read_screening_status(root)
     woke_nobody = _woke_nobody(root)
     running = _running_receiver(root)
-    loaded = state == install.STATE_LOADED
-    restart_needed, restart_reason = _restart_verdict(running, loaded=loaded)
+    held, held_pid = _supervised_receiver(state)
+    restart_needed, restart_reason = _restart_verdict(running, held=held, held_pid=held_pid)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
@@ -352,7 +398,7 @@ def _status(root: Path, *, as_json: bool) -> int:
     t = _tr()
     print(t(_k.status_supervisor(name=install.supervisor_name())))
     print(t(_k.status_state(state=state)))
-    for line in _running_lines(running, loaded=loaded):
+    for line in _running_lines(running, held=held, held_pid=held_pid):
         print(t(line))
     print(t(_k.status_enrolment(state=enrolment)))
     print(t(_k.status_config_dir(path=str(root))))

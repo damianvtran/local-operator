@@ -289,6 +289,8 @@ def test_status_says_restart_needed_for_a_loaded_receiver_with_no_record(
     from local_operator.team_bridge.connector import install
 
     monkeypatch.setattr(install, "connector_state", lambda root: install.STATE_LOADED)
+    # launchd holds a live pid (the parent, not the one ``record_start`` writes).
+    _fake_launchd(monkeypatch, job_pid=os.getppid())
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     assert tb_cli.main(_status(["team-bridge", "receiver", "status"])) == 0
     out = capsys.readouterr().out
@@ -302,8 +304,8 @@ def test_status_says_restart_needed_for_a_loaded_receiver_with_no_record(
     assert payload["running"] is None
     assert payload["restart_needed"] is True and payload["restart_reason"] == "no_record"
 
-    # A record naming an exited pid while launchd holds a receiver: the loaded
-    # one never recorded itself either.
+    # A record naming an exited pid while launchd holds a DIFFERENT live pid:
+    # the held receiver never recorded itself either.
     rr.record_start(tmp_path, started_at=1.0)
     monkeypatch.setattr(rr, "_receiver_alive", lambda pid, root: False)
     assert tb_cli.main(_status(["team-bridge", "receiver", "status", "--json"])) == 0
@@ -316,6 +318,77 @@ def test_status_says_restart_needed_for_a_loaded_receiver_with_no_record(
     assert tb_cli.main(_status(["team-bridge", "receiver", "status"])) == 0
     out = capsys.readouterr().out
     assert "Restart needed" not in out and "no details recorded" not in out
+
+
+def _fake_launchd(monkeypatch: pytest.MonkeyPatch, *, job_pid: int | None) -> list[tuple[str, ...]]:
+    """Answer as launchd would for the receiver label; NEVER the real launchctl.
+
+    ``job_pid=None`` prints what ``launchctl print`` shows for a registered job
+    with no process (throttled after an exit, or crash-looping): a state and a
+    last exit code, no ``pid =`` line. The address guard is satisfied so the
+    injected runner is what ``launchd.job_pid`` actually reads.
+    """
+
+    import subprocess
+
+    from local_operator import launchd, supervisors
+    from local_operator.team_bridge.connector import install
+
+    calls: list[tuple[str, ...]] = []
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        body = (
+            f"{install.LABEL} = {{\n\tstate = running\n\tpid = {job_pid}\n}}\n"
+            if job_pid is not None
+            else f"{install.LABEL} = {{\n\tstate = not running\n\tlast exit code = 1\n}}\n"
+        )
+        return subprocess.CompletedProcess(["launchctl", *args], 0, body, "")
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(install, "_launchctl", run)
+    monkeypatch.setattr(launchd, "is_own_plist", lambda path, label: True)
+    return calls
+
+
+def test_a_registered_launchd_label_with_no_process_is_not_no_record(
+    tmp_path: Path,
+    facts: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review round 2 M2: launchd ``loaded`` = registered, not running.
+
+    Through ``ThrottleInterval`` after an exit, or in a crash loop, launchd
+    holds the label with no pid. ``status`` must keep the truthful ``has
+    exited`` / ``none recorded`` lines, never claim an unrecorded receiver.
+    """
+
+    from local_operator.team_bridge.connector import cli as tb_cli
+    from local_operator.team_bridge.connector import install
+
+    monkeypatch.setattr(install, "connector_state", lambda root: install.STATE_LOADED)
+    calls = _fake_launchd(monkeypatch, job_pid=None)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert tb_cli.main(_status(["team-bridge", "receiver", "status", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert calls and calls[0][0] == "print"  # the injected runner was consulted
+    assert payload["running"] is None
+    assert payload["restart_needed"] is False and payload["restart_reason"] is None
+    assert tb_cli.main(_status(["team-bridge", "receiver", "status"])) == 0
+    assert "Running receiver: none recorded" in capsys.readouterr().out
+
+    # A crash-looping receiver left a record naming its exited pid.
+    rr.record_start(tmp_path, started_at=1.0)
+    monkeypatch.setattr(rr, "_receiver_alive", lambda pid, root: False)
+    assert tb_cli.main(_status(["team-bridge", "receiver", "status"])) == 0
+    out = capsys.readouterr().out
+    assert f"(pid {os.getpid()}, version 0.102.4) has exited" in out
+    assert "no details recorded" not in out
+    assert tb_cli.main(_status(["team-bridge", "receiver", "status", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["restart_reason"] is None
 
 
 _WINNER = 424_242
@@ -414,7 +487,14 @@ def _wire_owned_receiver(
 
     async def keeper(root: Any, facts: Any, **kw: Any) -> None:
         calls.append("keeper")
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Review round 2 n1: the ``finally``'s ``keeper.cancel()`` lands
+            # here at the caller's next yield; without it only ``asyncio.run``'s
+            # shutdown sweep would, after the caller marks "returned".
+            calls.append("keeper-cancelled")
+            raise
 
     monkeypatch.setattr(rr, "keep_own_record", keeper)
     monkeypatch.setattr(connector_main, "_configure_logging", lambda root: None)
@@ -472,11 +552,27 @@ def _wire_owned_receiver(
 def test_the_holder_records_held_keeps_it_and_clears_on_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review m2: fails if the post-lock ``held`` write or the ``finally`` clear is removed."""
+    """Review m2/n1: fails without the ``held`` write, the keeper's cancel or the final clear."""
 
     coroutine, calls = _wire_owned_receiver(tmp_path, monkeypatch, lock_busy=False)
-    assert asyncio.run(coroutine) == 0
-    assert calls == ["start", "held", "keeper", "serve", "clear", "release"]
+
+    async def run_then_yield() -> int:
+        code = await coroutine
+        await asyncio.sleep(0)  # a cancelled keeper finishes on this step
+        calls.append("returned")
+        return code
+
+    assert asyncio.run(run_then_yield()) == 0
+    assert calls == [
+        "start",
+        "held",
+        "keeper",
+        "serve",
+        "clear",
+        "release",
+        "keeper-cancelled",
+        "returned",
+    ]
 
 
 def test_a_receiver_refused_the_singleton_clears_its_record_and_exits_75(
