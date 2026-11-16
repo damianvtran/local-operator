@@ -4534,11 +4534,14 @@ class ServingSessionHandle(SessionHandle):
                     command_id=command_id,
                     harness_injected=harness_injected,
                 )
-            finally:
-                # Rejected on both outcomes, for the reason the refusal below
-                # rejects: this command is not in the transcript, so the
-                # identity must not be spent. A retry that re-spools is
-                # deduplicated by whoever drains it against the durable index.
+            except BaseException:
+                # No durable spool owns the message on failure/cancellation: release
+                # the frozen ticket too, just as an ordinary admission refusal does.
+                self._refuse_admitted(command_id)
+                raise
+            else:
+                # The successor's drain needs the frozen ticket, but not this
+                # process's reservation: its durable index deduplicates retries.
                 self._command_reservations.reject(command_id)
             return receipt
         if self._retiring_cause:
@@ -4585,14 +4588,14 @@ class ServingSessionHandle(SessionHandle):
                         command_id=command_id,
                         harness_injected=harness_injected,
                     )
-                finally:
-                    # Rejected on BOTH outcomes, and for the same reason the
-                    # refusal below rejects: this command is not in the
-                    # transcript, so the identity must not be spent. A retry
-                    # that re-spools is deduplicated by the successor instead
-                    # (``process._drain_inbox_into`` consults the durable index
-                    # with this same id), which is the only place the answer is
-                    # authoritative — this process is leaving.
+                except BaseException:
+                    # A failed/cancelled spool has no successor-owned message to
+                    # consume the ticket. Keep neither it nor the reservation.
+                    self._refuse_admitted(command_id)
+                    raise
+                else:
+                    # Preserve only the ticket for the successor's drain. Its
+                    # durable index, not this leaving process, deduplicates retries.
                     self._command_reservations.reject(command_id)
                 return receipt
             self._refuse_admitted(command_id)

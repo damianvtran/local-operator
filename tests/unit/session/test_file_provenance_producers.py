@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -409,6 +410,161 @@ async def test_eval_path_literal_not_write_content_is_real_completion_evidence(r
         assert decoy.read_text() == "not named as a file"
     finally:
         await session.dispose()
+
+
+# -- PR #4108 round-2 remediation -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        pytest.param("echo hi # ; cd ~/notes\ncat x.txt", "hi\nWORK", id="comment-home"),
+        pytest.param("echo hi #; cd sub\ncat x.txt", "hi\nWORK", id="comment-relative"),
+        pytest.param("cd sub #; cd ~\ncat x.txt", "SUB", id="comment-after-cd"),
+        pytest.param("cat x.txt #comment", "WORK", id="comment-operand"),
+        # Refuse even harmless/quoted # rather than guess at word-start semantics.
+        pytest.param("cat a#b", "HASH", id="hash-midword"),
+        pytest.param("cat 'a#b'", "HASH", id="hash-single-quoted"),
+        pytest.param('cat "a#b"', "HASH", id="hash-double-quoted"),
+        pytest.param("cd su\\\nb; cat x.txt", "SUB", id="continuation"),
+        pytest.param("printf '%s' '\\\n'; cat x.txt", "\\\nWORK", id="quoted-continuation"),
+        pytest.param("cat <<EOF\n; cd ~/notes\nEOF\ncat x.txt", "; cd ~/notes\nWORK", id="heredoc"),
+        pytest.param(
+            "cat <<-EOF\n\t; cd sub\n\tEOF\ncat x.txt", "; cd sub\nWORK", id="heredoc-tabs"
+        ),
+        pytest.param("cd $'su\\x62'; cat x.txt", "SUB", id="ansi-c-quote"),
+        pytest.param('cd $"sub"; cat x.txt', "SUB", id="locale-quote"),
+        pytest.param("case x in x) : ;; esac\ncat x.txt", "WORK", id="case-double-semi"),
+        pytest.param("case x in x) : ;& y) : ;; esac\ncat x.txt", "WORK", id="case-fallthrough"),
+        pytest.param("cd sub\r\ncat x.txt", "WORK", id="crlf"),
+        pytest.param("cat x.txt\r", "CR", id="cr-in-word"),
+        # shlex erases quote/escape provenance for punctuation-only words. Every
+        # shell operator needs a row: none of these echo operands is syntax.
+        *[
+            pytest.param(
+                f"echo {spelling} cd sub\ncat x.txt",
+                f"{char} cd sub\nWORK",
+                id=f"protected-punctuation-{style}-{char}",
+            )
+            for char in ";&|()<>"
+            for style, spelling in [
+                ("single", f"'{char}'"),
+                ("double", f'"{char}"'),
+                ("escaped", f"\\{char}"),
+            ]
+        ],
+        pytest.param("echo '\n' cd sub\ncat x.txt", "\n cd sub\nWORK", id="quoted-newline"),
+    ],
+)
+async def test_r2_1_shell_boundaries_fail_closed_against_real_bash(rig, command, expected):
+    from local_operator.supplements.candidates import literal_bash_scan
+
+    home = rig.work.parent
+    (home / "notes").mkdir()
+    (rig.work / "sub").mkdir()
+    for path, content in [
+        (rig.work / "x.txt", "WORK"),
+        (rig.work / "sub" / "x.txt", "SUB"),
+        (home / "x.txt", "HOME-DECOY"),
+        (home / "notes" / "x.txt", "NOTES-DECOY"),
+        (rig.work / "a#b", "HASH"),
+        (rig.work / "x.txt\r", "CR"),
+        (rig.work / "control.txt", "CONTROL\n"),
+    ]:
+        path.write_text(content)
+    # Keep the three reported repros byte-for-byte. For siblings, a preceding
+    # literal read proves the refusal is command-wide, not merely cwd amnesia.
+    prefix = (
+        ""
+        if command
+        in {
+            "echo hi # ; cd ~/notes\ncat x.txt",
+            "echo hi #; cd sub\ncat x.txt",
+            "cd sub #; cd ~\ncat x.txt",
+        }
+        else "cat control.txt; "
+    )
+    output = rig.work / "output.txt"
+    # The appended output probe must be independent of the command's real cwd.
+    command = prefix + command + f"\nprintf OUTPUT > {shlex.quote(str(output))}"
+    session = _bash_session(rig, command)
+    try:
+        await session.prompt("run it")
+        results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        # This output comes from real bash with distinct per-path contents, not
+        # the grammar under test; in the CRLF case bash also reports a failed cd.
+        assert results[-1].content[0].text.startswith(("CONTROL\n" if prefix else "") + expected)
+        assert output.read_text() == "OUTPUT"
+        scan = literal_bash_scan(command)
+        assert scan.inputs == () and not scan.exact
+        assert list(F.argument_candidates("bash", {"command": command})) == []
+        assert proofs(rig) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r2_1_plain_lf_remains_a_statement_boundary(rig):
+    (rig.work / "sub").mkdir()
+    target = rig.work / "sub" / "x.txt"
+    target.write_text("LF-CONTROL")
+    session = _bash_session(rig, "cd sub\ncat x.txt")
+    try:
+        await session.prompt("run it")
+        results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        assert results[-1].content[0].text == "LF-CONTROL"
+        assert any(p and p["file"]["path"] == str(target) for p in proofs(rig))
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", ["updating", "draining"])
+@pytest.mark.parametrize("outcome", ["error", "cancelled", "success"])
+async def test_r2_2_prompt_spool_owns_ticket_only_after_success(rig, monkeypatch, window, outcome):
+    target = rig.work / "spooled.txt"
+    target.write_text("v1")
+    session = make_session(rig)
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(rig.work), config_dir=rig.root
+    )
+    command_id = "spool-native"
+    receipt = {"queued": True}
+    error = asyncio.CancelledError if outcome == "cancelled" else OSError
+
+    async def spool(*args, **kwargs):
+        # Check the real prompt path froze a ticket before this dispatch.
+        assert command_id in session._file_owner().admissions
+        if outcome != "success":
+            raise error("synthetic spool failure")
+        return receipt
+
+    monkeypatch.setattr(handle, "_spool_for_successor", spool)
+    if window == "updating":
+        handle._updating = True
+    else:
+        handle._retiring_cause = "synthetic drain"
+        handle._draining = True
+    try:
+        admission = F.user_admission(_ConnectionAuthority(), "prompt")
+        if outcome == "success":
+            assert (
+                await handle.prompt(str(target), command_id=command_id, _file_admission=admission)
+                is receipt
+            )
+        else:
+            with pytest.raises(error, match="synthetic spool failure"):
+                await handle.prompt(str(target), command_id=command_id, _file_admission=admission)
+        assert (command_id in session._file_owner().admissions) is (outcome == "success")
+        # Both outcomes leave the producer id retryable in this departing process.
+        assert handle._command_reservations.reserve(command_id, kind="prompt")
+        handle._command_reservations.reject(command_id)
+    finally:
+        handle._updating = False
+        handle._retiring_cause = ""
+        handle._draining = False
+        await handle.dispose()
 
 
 # -- PR #4108 round-1 remediation -------------------------------------------------------

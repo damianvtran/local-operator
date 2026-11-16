@@ -727,6 +727,36 @@ def literal_bash_scan(command: str) -> LiteralShellScan:
     """
     if len(command) > SHELL_SCAN_MAX_CHARS:
         return LiteralShellScan(exact=False)
+    # Provenance must not inherit the inventory lexer's approximate shell boundaries.
+    # In particular, shlex keeps comments, decodes neither ANSI-C nor locale quotes,
+    # and treats CR as whitespace (bash treats it as an ordinary word character).
+    # Continuation/heredoc preprocessing also changes which text is executable, and
+    # case terminators are not ordinary list separators. Rather than guess at any
+    # of these grammars, refuse the WHOLE command, including its output candidates.
+    # This deliberately also refuses quoted #/<< and literal escaped spellings:
+    # losing a proof is safe; attesting a path bash never touched is not.
+    if any(marker in command for marker in ("#", "\\\n", "<<", "$'", '$"', ";;", ";&", "\r")):
+        return LiteralShellScan(exact=False)
+    # shlex also erases the distinction between a syntax token and a quoted or
+    # escaped punctuation-only WORD: ``echo ";" cd sub`` never changes directory.
+    # Refuse protected punctuation before it loses that distinction. Ordinary
+    # quoted paths/variables still work; even embedded punctuation is unknown.
+    quote = ""
+    escaped = False
+    for char in command:
+        if escaped:
+            if char in ";()<>|&\n":
+                return LiteralShellScan(exact=False)
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+            elif char in ";()<>|&\n":
+                return LiteralShellScan(exact=False)
+        elif char in {"'", '"'}:
+            quote = char
     stripped, _ = _lift_heredocs(_join_continuations(command))
     if "`" in stripped:
         # Backtick substitutions lex as ordinary words split across ``;``: the walker would
