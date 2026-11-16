@@ -32,6 +32,7 @@ NONRESTRICTIVE = frozenset(
         "owner_unreachable",
         "internal",
         "rate_limited",
+        "owner_busy",
         "quota_blocked",
         "unsupported",
     }

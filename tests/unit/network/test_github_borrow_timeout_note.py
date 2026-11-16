@@ -37,6 +37,7 @@ from local_operator.harness.types import ToolContext
 from local_operator.network import store
 from local_operator.network.credentials import github, placement
 from local_operator.network.credentials.client import MeshCredentialClient
+from local_operator.network.credentials.github_source import SOURCE_TIMEOUT_S
 from local_operator.network.credentials.types import BorrowTimeout, BrokerError
 from local_operator.tools import builtin
 from local_operator.variables import VariableStore
@@ -46,7 +47,14 @@ from tests.unit.network.test_credentials_github import (
     _seed_borrower_network,
 )
 
-NOTE = "GitHub credential from synthetic-owner did not arrive within 8 s; retry the command"
+# #4091's owner source ladder needs its full 12s window plus the existing
+# control-hop margin. Report that effective GitHub deadline, not the unchanged
+# 8s default used by the other families.
+GITHUB_TIMEOUT_S = max(8.0, SOURCE_TIMEOUT_S + 2)
+NOTE = (
+    "GitHub credential from synthetic-owner did not arrive within "
+    f"{GITHUB_TIMEOUT_S:g} s; retry the command"
+)
 CHILD = (
     'import os,sys; print("TOKEN_PRESENT", bool(os.environ.get("GH_TOKEN"))); '
     'print("ordinary stderr", file=sys.stderr)'
@@ -69,7 +77,8 @@ def _client(root: Path) -> MeshCredentialClient:
     client = MeshCredentialClient(
         root=root, self_device=BORROWER_DEVICE, network_id="n_gh", placement=document
     )
-    # The production bound, unchanged: this is the deadline the node hit.
+    # The default remains unchanged; GitHub's source ladder gets a larger
+    # per-call control bound after #4091. No other family is lengthened here.
     assert client.deadline_s == 8.0
     return client
 
@@ -104,7 +113,9 @@ class _Relay:
                     reply = {"code": "not_a_holder", "message": "synthetic refusal"}
                     conn.sendall((json.dumps(reply) + "\n").encode())
                 elif self.behaviour == "silent":
-                    assert self.release.wait(15)
+                    # Keep the original 7s fixture headroom beyond the effective
+                    # deadline, so a slow test child cannot turn silence into EOF.
+                    assert self.release.wait(GITHUB_TIMEOUT_S + 7)
                 # "close": fall through and close at once -- an early no-answer.
         except BaseException as exc:  # noqa: BLE001 — reported by the cell
             self.errors.append(type(exc).__name__)
@@ -165,7 +176,8 @@ def test_a_real_borrow_timeout_adds_one_note_and_the_env_stays_empty(
     text, outcome, elapsed = _run_bash(tmp_path, monkeypatch, "silent")
     assert isinstance(outcome, BorrowTimeout) and outcome.code == "owner_offline"
     assert not getattr(outcome, "access_token", "")
-    assert elapsed >= 8.0, "the existing deadline must not change"
+    assert elapsed >= GITHUB_TIMEOUT_S, "the owner's full source budget must remain intact"
+    assert outcome.timeout_s == GITHUB_TIMEOUT_S
     assert "TOKEN_PRESENT False" in text
     assert "ordinary stderr" in text
     assert text.count(NOTE) == 1, text

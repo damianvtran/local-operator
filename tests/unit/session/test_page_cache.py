@@ -130,6 +130,40 @@ async def test_a_hit_reads_nothing_and_returns_the_same_page(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_a_miss_sizes_the_page_off_the_event_loop(tmp_path, monkeypatch):
+    """The admission walk runs in the read worker, never on the serving loop.
+
+    PR #4012 gate (full-suite run 43701985694): ``retained_bytes`` on the loop
+    was the cold open's whole worst tick -- 323 ms of loop-thread CPU on a CI
+    coverage shard. Asserted by thread identity, not a clock: the walk must
+    still RUN (the page is admitted at the figure it measured) and must not run
+    on the thread that drives this coroutine.
+    """
+    directory = tmp_path / "sess"
+    _journal(directory, ["a", "b", "c"])
+    sized_on: list[int] = []
+    real = page_cache_module.retained_bytes
+
+    def recording(value: object, limit: int) -> int | None:
+        sized_on.append(threading.get_ident())
+        return real(value, limit)
+
+    monkeypatch.setattr(page_cache_module, "retained_bytes", recording)
+    loop_thread = threading.get_ident()
+
+    page = await load_transcript_page(directory, limit=10)
+
+    assert _ids(page) == ["a", "b", "c"]
+    assert (
+        sized_on and loop_thread not in sized_on
+    ), f"the page was sized on thread(s) {sized_on}, including the loop's {loop_thread}"
+    key = _key(directory, limit=10)
+    assert page_cache().entry_count == 1 and page_cache().accounted_bytes == real(
+        (key, page), page_cache().admit_limit
+    ), "the worker's figure must be the one the cache accounted"
+
+
+@pytest.mark.asyncio
 async def test_a_cursor_page_and_a_tail_page_of_one_file_do_not_collide(tmp_path):
     """The cursor fields are part of the key, not decoration on it."""
     directory = tmp_path / "sess"
