@@ -3659,6 +3659,54 @@ browser work: use the `browser` tool against the paired browser like any other
 session. Reach for a harness only when you need a browser that does not yet
 have the build you are testing.
 
+#### Testing a node browser without the operator
+
+A headless node approves a site only on the OPERATOR's signature, which the
+extension re-verifies against the anchor in Chrome managed policy
+(`browser_bridge/site_approval.py`). Never answer a card in the operator's real
+asks or notifications stores to test that, and never loosen the default-deny.
+Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
+
+```sh
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness            # full flow
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --preflight  # rig only
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --security-control \
+  --root "$LOCAL_OPERATOR_SCRATCHPAD/<run dir of a previous run>"
+```
+
+- **What is real:** the installed CRX the live node runs (read only; its version
+  is in the results), a fresh headless Chrome profile, the bridge daemon,
+  policy-delivered pairing, a `Session` running the real browser tool, the
+  `RuntimeServer` door, and a separate operator process answering through
+  `bridge_decision_target` + `AttachClient.bridge_decide` (the `/answers`
+  route's two calls) with a synthetic file key. Only the model (scripted) and
+  the root-owned anchor (`tests/fixtures/anchor_fixture.py`) are replaced.
+- **Isolation:** one `systemd-run --user --scope` (1536M, no swap) around
+  `unshare -Urmn`; scratch dirs are bind-mounted over
+  `/etc/opt/chrome/policies/managed` and `/etc/local-operator/operators`, the
+  private netns makes the real bridge on `127.0.0.1:4099` unreachable, and the
+  inner run aborts if the real policy file is visible. Every root lives under
+  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else.
+- **Proof it touched nothing:** the launcher hashes the real policy and anchor,
+  records the live node Chrome's PID and the paired-identity lines of the real
+  `lop browser status` before and after, and fails the run on any difference.
+- **Rows:** open refused (`origin_not_allowed`), card raised, wrong-key
+  signature, plain `ask_respond`, the agent's own unsigned decide, signed Approve
+  (`lop browser sites --json` allows the origin), open succeeds, light/dark
+  screenshots both rendered (a loading-spinner frame does not count) and differ,
+  signed Deny (origin in the denied list, open still refused), an answer after
+  the extension entry is gone (`BLOCKED`, not `PASS`, when the withdrawal did
+  not take). Results: `results.md`/`results.json`, PNGs and logs in the run
+  directory. LOOK at both PNGs before citing them; a sha256 alone is not proof.
+- **Not covered:** the card's trip over two mesh relays into the operator's
+  inbox, and the desktop `/answers` HTTP route itself (the operator attaches over
+  loopback). Those legs are pinned by `tests/unit/network/test_remote_attention_relay.py`
+  and `tests/unit/network/test_remote_viewer.py`.
+- **Testing an extension change:** the harness installs the CRX named in
+  `~/.local-operator/browser/extension/update.xml`, not `extension/` source.
+- A long `TMPDIR` breaks Chrome's singleton socket (108-byte unix path limit),
+  so Chrome gets a short private dir under `/tmp`, removed at exit.
+
 ### 7. Evidence goes on the PR, never into the repository
 
 **Do not commit PR evidence artifacts** — before/after frames (SVG or PNG),
