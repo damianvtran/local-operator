@@ -184,6 +184,57 @@ def test_complete_assignment_owns_quoted_heredoc_once(
     assert report.builtin_effect == BUILTIN_PASS
 
 
+@pytest.mark.parametrize("nesting", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("kind", ["write", "delete", "literal", "mixed"])
+def test_assignment_dedup_recursion_budget_never_certifies_unexamined_effects(
+    home: Path, nesting: int, kind: str
+) -> None:
+    """R1: ownership must not turn exhausted semantic analysis into LOW.
+
+    The active expansion reaches the existing depth-3 budget one level before
+    a literal reader does. Literal readers stay LOW while analyzed; beyond the
+    budget even their safety is unproven, so conservative scrutiny is intended.
+    These are preview-only inputs: no protected write or delete is executed.
+    """
+    from local_operator.guardrails.resolve import resolve_command
+
+    body = "$(printf changed > ~/.local-operator/config.yml)"
+    delimiter = "EOF"
+    if kind == "delete":
+        body = "$(rm -rf ~/.local-operator)"
+    elif kind == "literal":
+        delimiter = "'EOF'"
+        body += "\nrm -rf ~/.local-operator"
+    reader = f"cat <<{delimiter}\n{body}\nEOF\n"
+    if kind == "mixed":
+        reader = (
+            "cat <<'LITERAL' <<EOF\n`rm -rf ~/.local-operator`\nLITERAL\n"
+            + body
+            + "\nEOF\n"
+        )
+    command = f"body=$({reader})"
+    for _ in range(nesting - 1):
+        command = f'body="$({command})"'
+    ctx = _context(home)
+    result = resolve_command(command, cwd=ctx.cwd, env=ctx.env, home=str(home))
+    report = preview_tool_call(
+        "bash", {"command": command}, ctx, settings=GuardSettings(rules_dirs=())
+    )
+    if kind == "literal" and nesting <= 3:
+        assert not result.targets
+        assert not result.opaque_reasons
+        assert report.builtin_risk == "LOW"
+        assert report.builtin_effect == BUILTIN_PASS
+    elif kind != "literal" and nesting <= 2:
+        assert result.targets
+        assert report.builtin_risk == "CRITICAL"
+        assert report.builtin_effect == "refuse-critical"
+    else:
+        assert "nested shell too deep to resolve" in result.opaque_reasons
+        assert report.builtin_risk == "HIGH"
+        assert report.builtin_effect == "judge"
+
+
 @pytest.mark.parametrize(
     ("command", "owned"),
     [

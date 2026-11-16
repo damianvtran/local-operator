@@ -3181,7 +3181,12 @@ class _Walker:
     # -- entry -------------------------------------------------------------
     def walk(self, command: str, depth: int = 0) -> None:
         if depth > _MAX_PEEL_DEPTH:
-            if _DELETE_WORD_RE.search(command):
+            # Structural ownership is not proof that the owned substitution was
+            # analyzed: assignment/body dedup may have removed its shallower
+            # fallback. Once the budget is exhausted, ANY unexamined shell text
+            # can hide effects (including writes without a delete word). Keep
+            # that uncertainty visible instead of certifying the command LOW.
+            if command.strip():
                 self.result.opaque_reasons.append("nested shell too deep to resolve")
             return
         # S2-4: each heredoc body belongs to the segment whose ``<<`` opened it.
