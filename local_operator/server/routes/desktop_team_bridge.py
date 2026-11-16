@@ -86,7 +86,7 @@ import logging
 import re
 import unicodedata
 import urllib.parse
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -4716,19 +4716,71 @@ async def discard_hold(
 # The desktop half of the approvals flow (TEAM-BRIDGE.md §10.2–§10.4); the
 # harness logic, and the WHY of each rule, live in ``team_bridge/approvals.py``.
 #
-# DECIDE AUTHORITY IS HUMAN-ONLY, and this router is where that is enforced at
-# the process edge. Every route here sits behind ``require_desktop`` (the
-# router-wide dependency): the desktop bearer AND an allowlisted Origin, the
-# same door the ask card's signed ``bridge_decide`` answer takes. A model never
-# holds that bearer — ``agent_shell.DAEMON_BEARER_ENVS`` strips
-# ``LOCAL_OPERATOR_DESKTOP_TOKEN`` from every agent shell — and no tool imports
-# ``team_bridge.approvals``, so the batch decide below is reachable only from a
-# person's explicit selection in the desktop UI.
+# DECIDE AUTHORITY IS HUMAN-ONLY, and the BEARER DOES NOT PROVE IT. Every route
+# here sits behind ``require_desktop`` (the desktop bearer, plus the Origin
+# allowlist for browser-shaped callers), but the bearer is not a same-uid
+# boundary: ``agent_shell.DAEMON_BEARER_ENVS`` only keeps it out of an agent
+# shell's environment, while the desktop persists it in a 0600 file any
+# ordinary same-uid shell can read, and a native caller with no Origin is
+# admitted by design (security review round 1, S-1). So the batch decide also
+# requires an OPERATOR PRESENCE SIGNATURE over the exact selection, minted and
+# signed through ``…/requests/decide/authorize`` (the daemon raises the OS
+# Touch ID prompt, as it does for the card path's signed ``bridge_decide``) and
+# verified by ``…/requests/decide`` BEFORE any hub call. Hosts without a
+# presence-gated operator key are refused with ``operator_presence_required``.
 
 #: Query names the two approvals reads accept; anything else is refused, not
 #: dropped (the inbox read's closed-table rule).
 _APPROVALS_LIST_PARAMS = frozenset({"expected_account_id", "after", "limit"})
 _APPROVALS_LEDGER_PARAMS = frozenset({"expected_account_id", "after", "limit", "role"})
+
+#: The batch decide's refusals, WRITE-shaped (QA Q1: a decision is not a read).
+#: Codes not listed here fall through to the read table, whose sentences are
+#: about the bridge's standing (sign-in, consent) and read the same for both.
+_DECIDE_REFUSALS: dict[str, tuple[int, str]] = {
+    "invalid_request": (422, "this decision named a value the approvals decide does not accept"),
+    "account_mismatch": (
+        409,
+        "this decision was made for a different account; sign in as that account and try again",
+    ),
+    "operator_presence_required": (
+        409,
+        "deciding several requests at once needs operator authority with Touch ID on this "
+        "machine; answer each request on its own card instead",
+    ),
+    "operator_signature_required": (
+        403,
+        "this decision needs your Touch ID confirmation; nothing was decided",
+    ),
+    "operator_signature_invalid": (
+        403,
+        "this confirmation does not match this decision; confirm it again — nothing was decided",
+    ),
+    "operator_signature_expired": (
+        403,
+        "this confirmation expired; confirm the decision again — nothing was decided",
+    ),
+    "operator_signature_unavailable": (
+        409,
+        "Touch ID did not confirm this decision; nothing was decided",
+    ),
+    "operator_challenge_limit": (
+        429,
+        "too many decisions are waiting for confirmation; wait a moment and try again",
+    ),
+}
+
+
+def _raise_decide(code: str, details: dict[str, Any] | None = None) -> NoReturn:
+    """One batch-decide refusal; unlisted codes take the read table's entry."""
+
+    if code not in _DECIDE_REFUSALS:
+        _raise_read(code)
+    status, message = _DECIDE_REFUSALS[code]
+    payload: dict[str, Any] = {"code": code, "message": message}
+    if details:
+        payload["details"] = details
+    raise HTTPException(status, payload)
 
 
 class ApprovalsQuery(_Strict):
@@ -4765,8 +4817,8 @@ class ApprovalDecisionIn(_Strict):
         return self
 
 
-class ApprovalsDecideIn(_Strict):
-    """The batch body. ``items`` is bounded here (≤50, §10.2) before any lookup.
+class ApprovalsSelectionIn(_Strict):
+    """The selection body (``…/decide/authorize``). ``items`` ≤50 (§10.2).
 
     No "all" flag exists and none may be added: §10.2's select-and-approve is
     per item, so the client names every request the human selected.
@@ -4776,10 +4828,28 @@ class ApprovalsDecideIn(_Strict):
     items: list[ApprovalDecisionIn] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _grammar(self) -> "ApprovalsDecideIn":
+    def _grammar(self) -> "ApprovalsSelectionIn":
         if not is_account_id(self.expected_account_id):
             raise ValueError("expected_account_id is outside the accepted grammar")
         return self
+
+
+class OperatorProofIn(_Strict):
+    """What ``…/decide/authorize`` returned, echoed verbatim to ``…/decide``.
+
+    Optional in the MODEL only so its absence is the typed 403
+    ``operator_signature_required`` rather than an anonymous 422.
+    """
+
+    challenge: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sig: str = Field(min_length=2, max_length=320, pattern=r"^[0-9a-f]+$")
+    key_id: str = Field(min_length=1, max_length=128)
+
+
+class ApprovalsDecideIn(ApprovalsSelectionIn):
+    """The batch decide body: the same selection plus its presence proof."""
+
+    operator_proof: OperatorProofIn | None = None
 
 
 def _approvals_query(request: Request, accepted: frozenset[str]) -> ApprovalsQuery:
@@ -4794,7 +4864,11 @@ def _approvals_query(request: Request, accepted: frozenset[str]) -> ApprovalsQue
         _raise_read("invalid_request")
 
 
-async def _approvals_context(config_manager: ConfigManager, expected_account_id: str) -> Any:
+async def _approvals_context(
+    config_manager: ConfigManager,
+    expected_account_id: str,
+    refuse: Callable[[str], NoReturn] = _raise_read,
+) -> Any:
     """The committed owner + pinned access the captured account names (read rules)."""
 
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
@@ -4814,7 +4888,46 @@ async def _approvals_context(config_manager: ConfigManager, expected_account_id:
     except BridgeRefusal as exc:
         _raise_bridge(exc)
     except ReadRefused as exc:
-        _raise_read(exc.code)
+        refuse(exc.code)
+    return wire, context
+
+
+async def _selection_body(request: Request, model: type[ApprovalsSelectionIn]) -> Any:
+    """Parse a selection body; refused WHOLE (422) before any lookup or hub call.
+
+    The ≤50 bound is checked on the RAW list, before model validation, so an
+    oversized body is refused by its size alone (and its items never parsed).
+    """
+
+    from local_operator.team_bridge import approvals
+
+    _refuse_write_scope(request)
+    if request.query_params:
+        _raise_decide("invalid_request")
+    try:
+        raw = await request.json()
+    except ValueError:
+        _raise_decide("invalid_request")
+    if isinstance(raw, Mapping) and isinstance(raw.get("items"), list):
+        if len(raw["items"]) > approvals.BATCH_MAX:
+            _raise_decide(
+                "invalid_request",
+                {"field": "items", "rule": "max_items", "max": approvals.BATCH_MAX},
+            )
+    try:
+        body = model.model_validate(raw)
+        selection = approvals.parse_selection(item.model_dump() for item in body.items)
+    except ValueError:
+        _raise_decide("invalid_request")
+    return body, selection
+
+
+async def _decide_context(config_manager: ConfigManager, expected_account_id: str) -> Any:
+    wire, context = await _approvals_context(config_manager, expected_account_id, _raise_decide)
+    if getattr(context, "read_only", False):
+        # Retained-history standing (the local switch is off) reads; it never
+        # decides — a decision is new outbound work under the owner's authority.
+        _raise_decide("bridge_off")
     return wire, context
 
 
@@ -4822,18 +4935,30 @@ async def _approvals_context(config_manager: ConfigManager, expected_account_id:
 async def list_requests(
     request: Request, config_manager: ConfigManager = Depends(get_config_manager)
 ) -> CRUDResponse[Any]:
-    """Pending requests addressed to me, with ``pending_count`` ("N requests waiting").
+    """Pending requests addressed to me, one cursor page (``limit`` ≤100).
 
     Reference fields only (``approvals.request_rows``): ids, request state and
-    expiry, the hub-resolved sender identity, and the local ask the item joins
-    to. No body, no screening rationale. ``pending_count`` counts THIS page;
-    ``next_cursor`` non-null means more are waiting beyond it.
+    expiry, the hub-resolved sender identity, the local ask the item joins to,
+    and on decidable rows the ask card's screened ``excerpt``. No body, no
+    screening rationale.
+
+    PAGING (review R1-4): ``pending_count`` counts the DECIDABLE rows on THIS
+    page — the ones an "approve all" can act on — not every row; ``has_more``
+    (``next_cursor`` non-null) says more requests wait beyond it, so a badge
+    should read "N+" then. Pass ``after=<next_cursor>`` for the next page.
+
+    Before projecting, a request the decision ledger already shows as decided
+    but whose local ask is still open is settled (R1-1, no POST — see
+    ``approvals.reconcile_with_ledger``). The ledger is read only when that can
+    matter: an unconfirmed batch intent exists, or this is the last page and a
+    decidable local ask is missing from the hub's pending set.
     """
 
     from local_operator.team_bridge import approvals
 
     query = _approvals_query(request, _APPROVALS_LIST_PARAMS)
     wire, context = await _approvals_context(config_manager, query.expected_account_id)
+    config_dir = Path(config_manager.config_dir)
     page = await _conversation_reply(
         wire.requests(
             tenant_id=context.tenant_id,
@@ -4843,17 +4968,85 @@ async def list_requests(
             access=context.access,
         )
     )
-    rows = approvals.request_rows(
-        page.get("items") or [],
-        approvals.bridge_asks_by_message(config_manager.config_dir),
-        tenant_id=context.tenant_id,
+    items = page.get("items") or []
+    asks = approvals.bridge_asks_by_message(config_dir)
+    listed = {
+        str((item.get("message") or {}).get("id") or "")
+        for item in items
+        if isinstance(item, Mapping) and isinstance(item.get("message"), Mapping)
+    }
+    stranded = page.get("next_cursor") is None and any(
+        ask.status in ("open", "timed_out") and message_id not in listed
+        for message_id, ask in asks.items()
     )
+    if stranded or approvals.has_batch_leftovers(config_dir, context.owner):
+        ledger = await _conversation_reply(
+            wire.decisions(
+                tenant_id=context.tenant_id, role="made", limit=100, access=context.access
+            )
+        )
+        if await approvals.reconcile_with_ledger(
+            config_dir, context.owner, ledger.get("items") or []
+        ):
+            asks = approvals.bridge_asks_by_message(config_dir)
+    rows = approvals.request_rows(items, asks, tenant_id=context.tenant_id)
     return reply(
         {
             "tenant_id": context.tenant_id,
             "items": rows,
-            "pending_count": len(rows),
+            "pending_count": sum(1 for row in rows if row["decidable"]),
             "next_cursor": page.get("next_cursor"),
+            "has_more": page.get("next_cursor") is not None,
+        }
+    )
+
+
+@router.post("/v1/desktop/team-bridge/requests/decide/authorize", response_model=CRUDResponse[Any])
+async def authorize_decision(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """Confirm a selection with the operator's presence: mint, prompt, sign.
+
+    Same body as ``…/decide`` minus the proof. Refusals before any prompt:
+    a malformed selection (422), the account fence, ``bridge_off``, and
+    ``operator_presence_required`` on a host whose operator key is not
+    presence-gated. Otherwise the daemon mints a single-use 30 s challenge bound
+    to the selection digest and signs it with the operator key — THIS RAISES
+    THE OS TOUCH ID PROMPT and blocks (off the event loop) until the person
+    answers; a dismissed prompt is ``operator_signature_unavailable``.
+
+    Returns ``{operator_proof: {challenge, sig, key_id}, selection_digest,
+    expires_s}``. The desktop sends ``operator_proof`` unchanged with the SAME
+    selection to ``…/decide`` within ``expires_s``. No hub call is made here.
+    """
+
+    from local_operator.team_bridge import approvals
+
+    body, selection = await _selection_body(request, ApprovalsSelectionIn)
+    _wire, context = await _decide_context(config_manager, body.expected_account_id)
+    try:
+        approvals.presence_anchor()
+        digest = approvals.selection_digest(
+            account_id=body.expected_account_id,
+            tenant_id=context.tenant_id,
+            selection=selection,
+        )
+        challenge = approvals.mint_challenge(
+            account_id=body.expected_account_id, tenant_id=context.tenant_id, digest=digest
+        )
+        signature = await asyncio.to_thread(
+            approvals.sign_selection,
+            Path(config_manager.config_dir),
+            challenge=challenge,
+            digest=digest,
+        )
+    except approvals.PresenceRefused as refusal:
+        _raise_decide(refusal.code)
+    return reply(
+        {
+            "operator_proof": {"challenge": challenge, **signature},
+            "selection_digest": digest,
+            "expires_s": int(approvals.CHALLENGE_TTL_S),
         }
     )
 
@@ -4862,60 +5055,49 @@ async def list_requests(
 async def decide_requests(
     request: Request, config_manager: ConfigManager = Depends(get_config_manager)
 ) -> CRUDResponse[Any]:
-    """Decide the human's EXPLICIT selection (≤50); per-item results, submitted order.
+    """Decide the human's EXPLICIT, presence-confirmed selection (≤50).
 
-    Refused WHOLE before any lookup or hub call: a malformed body, more than 50
-    items, a duplicate id (``invalid_request``, 422). Otherwise each item gets
-    ``{message_id, decision, sent, ask_settled, status | error}``; only items
-    whose local ask and owner binding verify are sent, in ONE hub batch call.
+    Refused WHOLE with zero hub calls: a malformed body, more than 50 items, a
+    duplicate id (422 ``invalid_request``); the account fence; ``bridge_off``;
+    ``operator_presence_required`` (409); and a missing, spent, expired,
+    mismatched or unverifiable ``operator_proof`` (403
+    ``operator_signature_*``). Otherwise each item gets ``{message_id,
+    decision, sent, ask_settled, status | error}``; only items whose local ask
+    and owner binding verify are sent, in ONE hub batch call that also re-sends
+    any earlier unconfirmed batch decisions, reported under ``recovered``.
     """
 
     from local_operator.team_bridge import approvals
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
 
-    _refuse_write_scope(request)
-    if request.query_params:
-        _raise_read("invalid_request")
+    body, selection = await _selection_body(request, ApprovalsDecideIn)
+    wire, context = await _decide_context(config_manager, body.expected_account_id)
+    proof = body.operator_proof.model_dump() if body.operator_proof is not None else None
     try:
-        raw = await request.json()
-    except ValueError:
-        _raise_read("invalid_request")
-    # The ≤50 bound is checked on the RAW list, before model validation, so an
-    # oversized body is refused by its size alone (and its items never parsed).
-    if isinstance(raw, Mapping) and isinstance(raw.get("items"), list):
-        if len(raw["items"]) > approvals.BATCH_MAX:
-            raise HTTPException(
-                422,
-                {
-                    "code": "invalid_request",
-                    "message": INVALID_READ_QUERY,
-                    "details": {"field": "items", "rule": "max_items", "max": approvals.BATCH_MAX},
-                },
-            )
+        approvals.verify_selection_proof(
+            proof,
+            account_id=body.expected_account_id,
+            tenant_id=context.tenant_id,
+            selection=selection,
+        )
+    except approvals.PresenceRefused as refusal:
+        _raise_decide(refusal.code)
+    assert proof is not None  # verify_selection_proof refuses a missing proof
     try:
-        body = ApprovalsDecideIn.model_validate(raw)
-        selection = approvals.parse_selection(item.model_dump() for item in body.items)
-    except ValueError:
-        _raise_read("invalid_request")
-    wire, context = await _approvals_context(config_manager, body.expected_account_id)
-    if getattr(context, "read_only", False):
-        # Retained-history standing (the local switch is off) reads; it never
-        # decides — a decision is new outbound work under the owner's authority.
-        _raise_read("bridge_off")
-    try:
-        results = await approvals.decide_selection(
+        outcome = await approvals.decide_selection(
             wire,
             selection,
             config_dir=Path(config_manager.config_dir),
             owner=context.owner,
             access=context.access,
             expected_account_id=body.expected_account_id,
+            batch_ref=f"{approvals.BATCH_INTENT_PREFIX}{proof['challenge'][:16]}",
         )
     except BridgeSignInRequired as exc:
         _raise_sign_in(exc)
     except BridgeRefusal as exc:
         _raise_bridge(exc)
-    return reply({"results": results})
+    return reply(outcome)
 
 
 @router.get("/v1/desktop/team-bridge/decisions", response_model=CRUDResponse[Any])
@@ -4925,7 +5107,8 @@ async def list_decisions(
     """The decision ledger (§10.4): who asked, who decided, the decision, when.
 
     ``role`` is ``made`` (default) or ``requested``; cursor-paginated (≤100).
-    References only — the decider's note and the body hash stay on the hub.
+    References only — the decider's note and the body hash stay on the hub;
+    rows naming another tenant are dropped.
     """
 
     from local_operator.team_bridge import approvals
@@ -4945,7 +5128,7 @@ async def list_decisions(
         {
             "tenant_id": context.tenant_id,
             "role": query.role,
-            "items": approvals.ledger_rows(page.get("items") or []),
+            "items": approvals.ledger_rows(page.get("items") or [], tenant_id=context.tenant_id),
             "next_cursor": page.get("next_cursor"),
         }
     )

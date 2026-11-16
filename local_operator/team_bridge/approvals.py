@@ -11,14 +11,28 @@ but nothing called it. This module is the harness half the desktop routes in
 
 THE TRUST BOUNDARY — DECIDE AUTHORITY IS HUMAN-ONLY. "Answered by the human" is
 CLIENT-ASSERTED (TEAM-BRIDGE.md §10.1): the server checks the receipt's shape
-and binding, never that a person tapped. The claim is honest only because the
-code that drives ``/decide`` is reachable from a human surface and nowhere
-else, so:
+and binding, never that a person tapped. So the human proof has to live HERE,
+and it is an OPERATOR PRESENCE SIGNATURE, not the desktop bearer:
 
-- this module is imported ONLY by the desktop route family, which sits behind
-  ``require_desktop`` (the desktop bearer AND an allowlisted Origin — the same
-  door the signed ``bridge_decide`` answer path rides from the ask card). No
-  model tool, agent loop or connector imports it; a test pins that.
+- the bearer is NOT a same-uid boundary. ``agent_shell.DAEMON_BEARER_ENVS``
+  only keeps it out of an agent shell's ENVIRONMENT; the desktop persists it
+  in a 0600 file any ordinary same-uid shell can read (security review
+  round 1, S-1 — measured). ``agent_shell`` says it itself: only a
+  presence-gated key proves a person.
+- every batch therefore carries one operator signature over a digest of the
+  EXACT selection (account, tenant, sorted ``(message_id, word)`` pairs) and a
+  daemon-minted, single-use, 30 s challenge (:func:`verify_selection_proof`),
+  verified BEFORE any hub call. The signing key is the same operator key the
+  runtime's card path verifies (``operator.verify.signed_message`` /
+  ``signature_verdict``); on an ``operator-presence`` host every signature
+  costs an OS gesture (Touch ID), which is the human act. A host whose anchor
+  is file-only or absent is refused (``operator_presence_required``): there a
+  signature proves nothing against a same-uid process, and the per-item ask
+  card stays the way to decide.
+- this module is imported ONLY by the desktop route family (behind
+  ``require_desktop``). No model tool, agent loop or connector imports it; a
+  test pins that. That keeps the door narrow; it is the signature, not the
+  import graph, that makes it human-only.
 - the selection is EXPLICIT: every item names one ``message_id`` and one word
   (approve | deny). Nothing here expands "all", defaults a word, or derives a
   selection from server state — §10.2's select-and-approve is per item.
@@ -33,20 +47,45 @@ already terminal server-side) gets a ``withdrawn`` row in its ask's log. That
 event is terminal-on-write and injects nothing (asks/store.py ``fold``), and —
 unlike ``answered`` — it never reaches the decide-at-consumption seam, so the
 ask card can no longer answer it (every answer re-folds the log from disk and
-refuses a withdrawn ask). An answer the human already gave on the card
-outranks a later withdrawal in the fold, and the hub's one-decision-per-request
-rule (``request_already_decided``) backs both orders. The reverse direction is
-the list read: a request whose local ask is already answered is not listed,
-and once that answer reaches the hub it is no longer pending there either.
+refuses a withdrawn ask, with copy naming the desktop decision). The reverse
+direction is the list read: a request whose local ask is already answered is
+not listed, and once that answer reaches the hub it is no longer pending there.
+
+ONE RACE IS NOT FULLY CONSISTENT, and is accepted (review R1-5): a card answer
+that lands WHILE a batch is awaiting the hub outranks the batch's later
+``withdrawn`` in the fold, so the card's word is injected into the session,
+while the hub keeps the batch's word (the card's own decide gets
+``request_already_decided``, and finds the batch's intent row already recorded,
+so it sends nothing). The hub's one-decision rule means nothing is decided
+twice and the audit names the batch; only the session's local view can
+disagree. The window is one human on two surfaces during one hub round trip.
+
+CRASH / LOST-RESPONSE SAFETY (review R1-1). Each item is recorded in the SAME
+durable decide-intent ledger the card path uses (``decide_intents``) BEFORE the
+hub call, tagged ``consumption_row_id = "batch:…"`` so it is never mistaken for
+a card row (whose retry is the card's own explicit Retry). An intent left
+``pending``/``signin`` by a lost response or a kill is re-sent with its FROZEN
+word in the next signed batch (a re-send is safe: the hub answers
+``request_already_decided`` and that settles the ask). A request the hub
+already decided but whose ask is still open locally is settled from the
+decision ledger on the next list read (:func:`reconcile_with_ledger`). The
+list never POSTs: the intent ledger's law is that no read, poll or boundary
+re-sends a decision — only a human-signed act does.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
+import secrets
+import threading
+import time
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -88,6 +127,10 @@ class BridgeAsk:
     session_id: str
     ask_id: str
     status: str
+    #: The question text the ask card shows: ``<sender>: <excerpt>``, built by
+    #: ``asks_bridge.bridge_request_question`` from the SCREENED excerpt at
+    #: issuance (flattened, bounded, tag-neutralised). Never the raw body.
+    text: str = ""
 
 
 def _bridge_message_ids(row: Mapping[str, Any]) -> list[str]:
@@ -119,11 +162,17 @@ def bridge_asks_by_message(config_dir: Path | str) -> dict[str, BridgeAsk]:
     found: dict[str, BridgeAsk] = {}
     for row in asks_store.index_asks(config_dir):
         status = str(row.get("status") or "")
+        texts = {
+            str(q.get("question_id") or ""): str(q.get("question") or "")
+            for q in (row.get("questions") or ())
+            if isinstance(q, Mapping)
+        }
         for message_id in _bridge_message_ids(row):
             candidate = BridgeAsk(
                 session_id=str(row.get("session_id") or ""),
                 ask_id=str(row.get("ask_id") or ""),
                 status=status,
+                text=texts.get(message_id, ""),
             )
             current = found.get(message_id)
             if current is None or rank.get(status, 2) < rank.get(current.status, 2):
@@ -160,8 +209,15 @@ def request_rows(
     label) and the local ask reference the UI joins to the ask card. The message
     BODY is never read — it is untrusted third-party text, and the screened
     excerpt a human decides on already rides the ask card — and no screening
-    rationale exists on this path to leak. Items for another tenant, items that
-    are not requests, and items whose local ask is already answered are dropped.
+    rationale exists on this path to leak. Items for another tenant, items with
+    NO tenant (the projection is a fence, so absence fails closed — review S-4)
+    and items whose local ask is already answered are dropped.
+
+    ``excerpt`` (review S-2): on a DECIDABLE row only, the ask card's own
+    question text — ``<sender>: <screened excerpt>`` as issued — so a batch is
+    never blind: two requests from one sender are told apart by what they ask.
+    It comes from the LOCAL ask, which was screened before it was raised; the
+    hub's body is still never read here. Non-decidable rows carry ``None``.
     """
 
     rows: list[dict[str, Any]] = []
@@ -177,7 +233,7 @@ def request_rows(
         item_tenant = _str_or_none(message.get("tenant_id")) or _str_or_none(
             thread.get("tenant_id")
         )
-        if item_tenant is not None and item_tenant != tenant_id:
+        if item_tenant != tenant_id:
             continue
         request = _mapping(message.get("request"))
         ask = asks.get(message_id)
@@ -191,6 +247,7 @@ def request_rows(
                 or _str_or_none(thread.get("id")),
                 "created_at": _str_or_none(message.get("created_at")),
                 "title": None,  # the hub serves no title; the body is never read here
+                "excerpt": (ask.text or None) if decidable and ask is not None else None,
                 "request": {
                     "state": _str_or_none(request.get("state")),
                     "expires_at": _str_or_none(request.get("expires_at")),
@@ -212,17 +269,23 @@ def request_rows(
     return rows
 
 
-def ledger_rows(items: Sequence[Any]) -> list[dict[str, Any]]:
+def ledger_rows(items: Sequence[Any], *, tenant_id: str) -> list[dict[str, Any]]:
     """Project decision-ledger rows (§10.4) to references: who, what, decision, when.
 
     The decider's ``note`` and the request ``body_hash`` stay on the hub; the
     ``decided_via`` claim is passed through and labelled CLIENT-ASSERTED by the
-    field name the UI renders it under.
+    field name the UI renders it under. A row naming ANOTHER tenant is dropped
+    (review S-3): the hub's tenant scoping is the control, this is the same
+    defence-in-depth fence the list applies. The ledger wire does not always
+    carry ``tenant_id``, so only a present, different value drops a row.
     """
 
     rows: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, Mapping):
+            continue
+        row_tenant = _str_or_none(item.get("tenant_id"))
+        if row_tenant is not None and row_tenant != tenant_id:
             continue
         request_id = _str_or_none(item.get("request_id"))
         if request_id is None:
@@ -298,6 +361,271 @@ class Selection:
     word: str  # "approve" | "deny"
 
 
+# -- the operator presence proof over the exact selection (review S-1) --------
+#
+# WHY THESE PRIMITIVES AND NO NEW CRYPTO. The runtime's card path already has
+# the whole mechanism: a daemon-minted single-use challenge, the operator key
+# signing ``operator.verify.signed_message(action, session_id, request_id,
+# challenge)`` (``operator.sign.sign_challenge`` — the call that raises the OS
+# presence prompt), and ``operator.verify.signature_verdict`` against the
+# root-owned anchor. The batch reuses all three verbatim. What it binds:
+#
+# * ``action`` = ``decide`` (the bridge decide class, ``harness/approval``);
+# * ``session_id`` = :data:`SIGNING_SESSION`, a fixed label no real session id
+#   can equal, because a batch spans sessions and is not one session's act;
+# * ``request_id`` = ``batch:<selection digest>`` — the digest covers the
+#   account, the tenant and the SORTED ``(message_id, word)`` pairs, so a
+#   signature over one selection cannot carry another;
+# * ``challenge`` = minted HERE, kept server-side with the digest it was minted
+#   for, popped on first use (pop-then-verify, the runtime's replay rule).
+#
+# A runtime's challenge and this one live in different stores, so a signature
+# minted for either can never be presented to the other.
+
+#: The fixed signing "session" of a batch decide (see the block above).
+SIGNING_SESSION = "team-bridge:approvals-batch"
+
+#: The signed action class: a bridge decide (both words are authority-bearing,
+#: ``harness.approval.frame_authority``).
+SIGNING_ACTION = "decide"
+
+#: The challenge lifetime. The runtime's own value and rationale
+#: (``session/runtime/server._CHALLENGE_TTL_S``, design rev. 2 §2.3: 30 s, one
+#: human gesture); expiry is checked at USE, so a slow prompt is refused and the
+#: surface asks again rather than a stale challenge being honoured.
+CHALLENGE_TTL_S = 30.0
+
+#: Unspent challenges held at once, the runtime's ``_MAX_LIVE_CHALLENGES``: a
+#: bearer holder can mint in a loop (minting prompts nobody), so the store is
+#: bounded; expired entries are pruned first, so a real caller is never refused.
+MAX_LIVE_CHALLENGES = 64
+
+#: The selection-digest schema; bump if the canonical form ever changes.
+_DIGEST_VERSION = 1
+
+
+class PresenceRefused(Exception):
+    """A batch refused for want of a valid operator presence proof."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class _Minted:
+    digest: str
+    account_id: str
+    tenant_id: str
+    expires_at: float  # time.monotonic()
+
+
+_challenges: dict[str, _Minted] = {}
+_challenges_lock = threading.Lock()
+
+
+def selection_digest(*, account_id: str, tenant_id: str, selection: Sequence[Selection]) -> str:
+    """SHA-256 over the canonical selection: what one signature authorises.
+
+    Canonical JSON (sorted keys, no whitespace) with the pairs SORTED by message
+    id, so the submitted order does not change the digest but any added,
+    dropped or flipped item does.
+    """
+
+    canonical = {
+        "v": _DIGEST_VERSION,
+        "account_id": account_id,
+        "tenant_id": tenant_id,
+        "items": sorted([item.message_id, item.word] for item in selection),
+    }
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def signing_request_id(digest: str) -> str:
+    """The ``request_id`` the signed message binds for one selection."""
+
+    return f"batch:{digest}"
+
+
+def presence_anchor() -> Any:
+    """This host's operator anchor, ONLY when it is presence-gated.
+
+    ``operator-presence`` is the one level at which a signature costs a human
+    gesture; ``operator-file-only`` lets any same-uid process sign, and with no
+    usable anchor there is nothing to verify against — both refuse with
+    ``operator_presence_required`` before any challenge is minted or prompt
+    raised (the per-item card path stays available there).
+    """
+
+    from local_operator import operator as operator_authority
+
+    level, loaded = operator_authority.authority_level_load()
+    if level != operator_authority.LEVEL_OPERATOR_PRESENCE or loaded.anchor is None:
+        raise PresenceRefused("operator_presence_required")
+    return loaded.anchor
+
+
+def mint_challenge(*, account_id: str, tenant_id: str, digest: str) -> str:
+    """Mint one single-use challenge bound to this selection digest."""
+
+    now = time.monotonic()
+    with _challenges_lock:
+        for key in [k for k, v in _challenges.items() if v.expires_at < now]:
+            _challenges.pop(key, None)
+        if len(_challenges) >= MAX_LIVE_CHALLENGES:
+            raise PresenceRefused("operator_challenge_limit")
+        challenge = secrets.token_hex(32)
+        _challenges[challenge] = _Minted(
+            digest=digest,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            expires_at=now + CHALLENGE_TTL_S,
+        )
+    return challenge
+
+
+def sign_selection(config_root: Path, *, challenge: str, digest: str) -> dict[str, str]:
+    """Sign one minted challenge with the operator key. THIS CALL PROMPTS.
+
+    The same ``sign_challenge`` the CLI's ``lop operator sign`` and the card
+    path's ``attach_client`` call: on a presence host the OS shows its Touch ID
+    sheet and blocks until the person answers, so callers run it off the event
+    loop. A dismissed sheet or a missing key is ``operator_signature_unavailable``.
+    """
+
+    from local_operator.operator.keychain import KeyBackendError
+    from local_operator.operator.sign import sign_challenge
+
+    try:
+        signature = sign_challenge(
+            challenge=challenge,
+            purpose=SIGNING_ACTION,
+            config_root=config_root,
+            session_id=SIGNING_SESSION,
+            request_id=signing_request_id(digest),
+        )
+    except KeyBackendError:
+        raise PresenceRefused("operator_signature_unavailable") from None
+    return signature.as_json()
+
+
+def verify_selection_proof(
+    proof: Mapping[str, Any] | None,
+    *,
+    account_id: str,
+    tenant_id: str,
+    selection: Sequence[Selection],
+) -> None:
+    """Admit the batch only on a valid presence signature over THIS selection.
+
+    Raises :class:`PresenceRefused`: ``operator_presence_required`` (host
+    level), ``operator_signature_required`` (no proof), ``operator_signature_invalid``
+    (unknown/spent challenge, a different selection, account or tenant, or a
+    signature the anchor does not verify) or ``operator_signature_expired``.
+    The challenge is POPPED before verification, so every proof has exactly one
+    use whether it verifies or not (the runtime's replay rule).
+    """
+
+    from local_operator.operator.verify import signature_verdict
+
+    anchor = presence_anchor()
+    if not isinstance(proof, Mapping) or not proof:
+        raise PresenceRefused("operator_signature_required")
+    challenge = str(proof.get("challenge") or "")
+    with _challenges_lock:
+        minted = _challenges.pop(challenge, None)
+    if minted is None:
+        raise PresenceRefused("operator_signature_invalid")
+    if time.monotonic() > minted.expires_at:
+        raise PresenceRefused("operator_signature_expired")
+    digest = selection_digest(account_id=account_id, tenant_id=tenant_id, selection=selection)
+    if (minted.digest, minted.account_id, minted.tenant_id) != (digest, account_id, tenant_id):
+        raise PresenceRefused("operator_signature_invalid")
+    verdict = signature_verdict(
+        action=SIGNING_ACTION,
+        session_id=SIGNING_SESSION,
+        request_id=signing_request_id(digest),
+        challenge=challenge,
+        signature_hex=proof.get("sig"),
+        operator_spki=anchor.spki,
+        operator_key_id=str(proof.get("key_id") or ""),
+        operator_cert=None,
+        device_spki=None,
+        now=int(time.time()),
+    )
+    if verdict is not True:
+        raise PresenceRefused("operator_signature_invalid")
+
+
+# -- the batch, recorded before it is sent (review R1-1) ----------------------
+
+#: The ``consumption_row_id`` prefix that marks a decide-intent row as a BATCH
+#: row. Card rows carry the ask's response-row id instead, and keep their own
+#: explicit-Retry rule; only batch rows are re-sent by a later signed batch.
+BATCH_INTENT_PREFIX = "batch:"
+
+_RETRY_POOL = ("pending", "signin")
+
+
+def _owner_key(owner: Any) -> str:
+    """``BridgeRuntime.key()``'s construction: the intent ledger's owner key."""
+
+    from .decide_intents import scope_owner_key
+
+    return scope_owner_key(
+        {
+            "base_url": getattr(owner, "canonical_base_url", ""),
+            "account_id": getattr(owner, "account_id", ""),
+            "tenant_id": getattr(owner, "tenant_id", ""),
+        }
+    )
+
+
+def _runtime_view(config_dir: Path, owner: Any, session_id: str) -> Any:
+    """A runtime-shaped view of one ask's session for the shared fences."""
+
+    return SimpleNamespace(
+        config_dir=config_dir,
+        owner=owner,
+        tenant_id=str(owner.tenant_id),
+        session_id=session_id,
+    )
+
+
+def _batch_leftovers(intents: Any, owner_key: str) -> list[Any]:
+    """Batch intents a lost response or a kill left unconfirmed, oldest first."""
+
+    return [
+        intent
+        for intent in intents.pending(owner_key)
+        if intent.consumption_row_id.startswith(BATCH_INTENT_PREFIX)
+    ]
+
+
+async def _settle_and_cancel(config_dir: Path, ask: BridgeAsk) -> bool:
+    settled = settle_ask(config_dir, ask)
+    if settled:
+        from local_operator.asks.dismiss import _cancel_deadline_wake
+
+        try:
+            # The ask's hidden deadline row would otherwise fire an
+            # ask_timeout turn for a request that is already decided.
+            await _cancel_deadline_wake(config_dir, ask.session_id, ask.ask_id)
+        except Exception:  # noqa: BLE001 — the decision stands; a stale
+            # wake row only fires a notice for a withdrawn ask
+            logger.warning("approvals: deadline wake not cancelled", exc_info=True)
+    return settled
+
+
+def _receipt_status(intent: Any) -> str | None:
+    try:
+        receipt = json.loads(intent.receipt_json or "null")
+    except ValueError:
+        return None
+    return _str_or_none(receipt.get("status")) if isinstance(receipt, Mapping) else None
+
+
 async def decide_selection(
     client: Any,
     selection: Sequence[Selection],
@@ -306,26 +634,39 @@ async def decide_selection(
     owner: Any,
     access: Any,
     expected_account_id: str,
-) -> list[dict[str, Any]]:
+    batch_ref: str,
+) -> dict[str, list[dict[str, Any]]]:
     """Decide the human's explicit selection; per-item results in submitted order.
 
-    Each result is ``{message_id, decision, status|error, sent, ask_settled}``:
-    ``status`` is the hub's ``approved|denied``; ``error`` is either a hub code
-    or a LOCAL refusal (``no_open_ask``, ``answered_on_card``,
+    The CALLER has already verified the presence proof over exactly this
+    selection (:func:`verify_selection_proof`). Returns ``{"results",
+    "recovered"}``. Each result is ``{message_id, decision, sent, ask_settled,
+    status|error}``: ``status`` is the hub's ``approved|denied``; ``error`` is a
+    hub code, or a LOCAL refusal (``no_open_ask``, ``answered_on_card``,
     ``owner_changed``, ``not_designated``, ``feature_off``,
-    ``consent_revoked``) for an item that was never sent. ``sent`` says which.
-    Only items that passed every local check reach ONE batch call.
+    ``consent_revoked``, ``earlier_decision_unconfirmed``) for an item that was
+    never sent. ``sent`` is True for every item that went out, including one
+    the hub's answer omitted (review R1-2: it may be committed). ``recovered``
+    reports batch intents from an earlier lost response, re-sent here with
+    their FROZEN word in the same single hub call.
     """
 
-    from local_operator.asks.dismiss import _cancel_deadline_wake
-
     from .authority import authority_fence, scope_matches_runtime
+    from .client import BridgeRefusal, BridgeSignInRequired
     from .decide import decide_batch_from_human_selection, human_decision
+    from .decide_intents import (
+        DecideIntents,
+        DecideIntentsRefused,
+        _validated_for_transport,
+    )
 
     asks = bridge_asks_by_message(config_dir)
+    intents = DecideIntents(config_dir)
+    owner_key = _owner_key(owner)
+    consumed_at = datetime.now(UTC).isoformat()
     results: dict[str, dict[str, Any]] = {}
-    eligible: list[Any] = []
-    located: dict[str, BridgeAsk] = {}
+    # message_id -> (ask, intent, recovered?) for everything that goes out.
+    outgoing: dict[str, tuple[BridgeAsk | None, Any, bool]] = {}
     for item in selection:
         result: dict[str, Any] = {
             "message_id": item.message_id,
@@ -344,12 +685,7 @@ async def decide_selection(
             continue
         # The SAME fence + original-scope equality the single decide path runs
         # (decide_intents), against a runtime-shaped view of the ask's session.
-        runtime = SimpleNamespace(
-            config_dir=config_dir,
-            owner=owner,
-            tenant_id=str(owner.tenant_id),
-            session_id=ask.session_id,
-        )
+        runtime = _runtime_view(config_dir, owner, ask.session_id)
         refusal = authority_fence(runtime)
         if refusal is not None:
             result["error"] = str(refusal.get("code") or "owner_changed")
@@ -357,12 +693,71 @@ async def decide_selection(
         if not scope_matches_runtime(scope, runtime):
             result["error"] = "owner_changed"
             continue
-        eligible.append(
-            human_decision(message_id=item.message_id, ask_id=ask.ask_id, word=item.word)
+        # DURABLE BEFORE THE POST (R1-1): first record wins, exactly as on the
+        # card path, so a re-selection never mints a second word for one ask.
+        intent, created = intents.record(
+            owner_key,
+            ask_id=ask.ask_id,
+            question_id=item.message_id,
+            word=item.word,
+            generation=str(scope.get("generation") or ""),
+            scope_json=json.dumps(dict(scope), sort_keys=True),
+            consumption_row_id=batch_ref,
+            consumed_at=consumed_at,
         )
-        located[item.message_id] = ask
+        if not created and intent.state in ("sent", "refused"):
+            # The hub already answered this item; only the local settle was
+            # lost. Settle now; nothing is sent again.
+            result["sent"] = True
+            status = _receipt_status(intent) if intent.state == "sent" else None
+            if status is not None:
+                result["status"] = status
+            else:
+                result["error"] = str(intent.error_code or "request_already_decided")
+            result["ask_settled"] = await _settle_and_cancel(config_dir, ask)
+            continue
+        if not created and intent.word != item.word:
+            # An earlier signed word for this ask is still unconfirmed; it is
+            # re-sent below and wins (first record wins), so this one is not.
+            result["error"] = "earlier_decision_unconfirmed"
+            continue
+        outgoing[item.message_id] = (ask, intent, False)
 
-    if eligible:
+    recovered: dict[str, dict[str, Any]] = {}
+    for intent in _batch_leftovers(intents, owner_key):
+        if intent.question_id in outgoing:
+            continue  # re-selected with the same word: it rides as a result
+        if len(outgoing) >= BATCH_MAX:
+            break  # the rest wait for the next signed batch
+        ask = asks.get(intent.question_id)
+        session_id = ask.session_id if ask is not None and ask.ask_id == intent.ask_id else ""
+        try:
+            scope = json.loads(intent.scope_json or "{}")
+            session_id = session_id or str(scope.get("session_id") or "")
+            _validated_for_transport(intent, _runtime_view(config_dir, owner, session_id))
+        except (DecideIntentsRefused, ValueError, AttributeError):
+            intents.mark_refused(intent.intent_id, "owner_changed")
+            continue
+        recovered[intent.question_id] = {
+            "message_id": intent.question_id,
+            "decision": intent.word,
+            "sent": False,
+            "ask_settled": False,
+        }
+        located = ask if ask is not None and ask.ask_id == intent.ask_id else None
+        outgoing[intent.question_id] = (located, intent, True)
+
+    if not outgoing:
+        return {
+            "results": [results[item.message_id] for item in selection],
+            "recovered": list(recovered.values()),
+        }
+
+    eligible = [
+        human_decision(message_id=mid, ask_id=intent.ask_id, word=intent.word)
+        for mid, (_ask, intent, _rec) in outgoing.items()
+    ]
+    try:
         answer = await decide_batch_from_human_selection(
             client,
             eligible,
@@ -370,38 +765,120 @@ async def decide_selection(
             expected_account_id=expected_account_id,
             access=access,
         )
-        for outcome in answer.get("results") or ():
-            if not isinstance(outcome, Mapping):
-                continue
-            message_id = str(outcome.get("message_id") or "")
-            if message_id not in located:
-                continue  # the hub cannot add an item the human did not select
-            result = results[message_id]
-            result["sent"] = True
-            status = _str_or_none(outcome.get("status"))
-            error = _str_or_none(outcome.get("error"))
-            if status is not None:
-                result["status"] = status
+    except BridgeSignInRequired:
+        for _ask, intent, _rec in outgoing.values():
+            intents.mark_signin(intent.intent_id)
+        raise
+    except BridgeRefusal as exc:
+        # Whole-call failure (unreachable, timeout, a whole-batch refusal): the
+        # hub may or may not have committed. The rows stay in the retry pool and
+        # the next signed batch re-sends them; a committed one answers
+        # ``request_already_decided`` there, and the list's ledger read settles
+        # its ask before that.
+        code = str(getattr(exc, "code", "") or "bridge_unreachable")
+        for _ask, intent, _rec in outgoing.values():
+            intents.mark_transient(intent.intent_id, code)
+        raise
+
+    answered: set[str] = set()
+    for outcome in answer.get("results") or ():
+        if not isinstance(outcome, Mapping):
+            continue
+        message_id = str(outcome.get("message_id") or "")
+        if message_id not in outgoing or message_id in answered:
+            continue  # the hub cannot add an item the human did not select
+        answered.add(message_id)
+        ask, intent, is_recovered = outgoing[message_id]
+        result = (recovered if is_recovered else results)[message_id]
+        result["sent"] = True
+        status = _str_or_none(outcome.get("status"))
+        error = _str_or_none(outcome.get("error"))
+        if status is not None:
+            result["status"] = status
+            intents.mark_sent(intent.intent_id, dict(outcome))
+        else:
+            result["error"] = error or "messaging_unavailable"
+            if error in TERMINAL_ITEM_ERRORS:
+                intents.mark_refused(intent.intent_id, str(error))
             else:
-                result["error"] = error or "messaging_unavailable"
-            if status is not None or error in TERMINAL_ITEM_ERRORS:
-                ask = located[message_id]
-                result["ask_settled"] = settle_ask(config_dir, ask)
-                if result["ask_settled"]:
-                    try:
-                        # The ask's hidden deadline row would otherwise fire an
-                        # ask_timeout turn for a request that is already decided.
-                        await _cancel_deadline_wake(config_dir, ask.session_id, ask.ask_id)
-                    except Exception:  # noqa: BLE001 — the decision stands; a stale
-                        # wake row only fires a notice for a withdrawn ask
-                        logger.warning("approvals: deadline wake not cancelled", exc_info=True)
-        for message_id in located:
-            result = results[message_id]
-            if not result["sent"]:
-                # Selected and sent, but the hub's answer omitted it: say so
-                # rather than claim a decision nobody confirmed.
-                result["error"] = "messaging_unavailable"
-    return [results[item.message_id] for item in selection]
+                # Transient per item (``bridge_disabled``,
+                # ``messaging_unavailable``, unknown): the request is still
+                # decidable, so the ask stays open and the intent stays pending.
+                intents.mark_transient(intent.intent_id, str(error or "messaging_unavailable"))
+                continue
+        if ask is not None and ask.status in _DECIDABLE_STATUSES:
+            result["ask_settled"] = await _settle_and_cancel(config_dir, ask)
+    for message_id, (_ask, intent, is_recovered) in outgoing.items():
+        if message_id in answered:
+            continue
+        # Sent, but the hub's answer omitted it (R1-2): it may be committed, so
+        # ``sent`` stays True and the intent stays pending for the next batch.
+        result = (recovered if is_recovered else results)[message_id]
+        result["sent"] = True
+        result["error"] = "messaging_unavailable"
+    return {
+        "results": [results[item.message_id] for item in selection],
+        "recovered": list(recovered.values()),
+    }
+
+
+async def reconcile_with_ledger(
+    config_dir: Path, owner: Any, ledger_items: Sequence[Any]
+) -> list[str]:
+    """Settle local asks for requests the decision ledger says are DECIDED.
+
+    The lost-response half of R1-1 that needs no POST: the hub committed a
+    decision (any surface, this account) but the local ask is still open, so it
+    is invisible to the pending list yet still card-answerable. Each ledger row
+    (tenant-fenced) whose request has a decidable local ask, verified against
+    the log and naming THIS owner's account and tenant in its original scope,
+    gets the ``withdrawn`` settle; a batch intent still pending for it is marked
+    sent with the ledger row as its receipt. Returns the settled message ids.
+    """
+
+    from .decide_intents import DecideIntents
+
+    tenant_id = str(owner.tenant_id)
+    asks = bridge_asks_by_message(config_dir)
+    intents = DecideIntents(config_dir)
+    owner_key = _owner_key(owner)
+    pending = {intent.question_id: intent for intent in _batch_leftovers(intents, owner_key)}
+    settled: list[str] = []
+    for item in ledger_items:
+        if not isinstance(item, Mapping):
+            continue
+        request_id = _str_or_none(item.get("request_id"))
+        row_tenant = _str_or_none(item.get("tenant_id"))
+        if request_id is None or (row_tenant is not None and row_tenant != tenant_id):
+            continue
+        ask = asks.get(request_id)
+        if ask is None or ask.status not in _DECIDABLE_STATUSES:
+            continue
+        code, scope = _verified_ask(config_dir, ask, request_id)
+        if code or scope is None:
+            continue
+        if (str(scope.get("account_id") or ""), str(scope.get("tenant_id") or "")) != (
+            str(owner.account_id),
+            tenant_id,
+        ):
+            continue
+        intent = pending.get(request_id)
+        if intent is not None and intent.ask_id == ask.ask_id:
+            intents.mark_sent(
+                intent.intent_id,
+                {"message_id": request_id, "status": _str_or_none(item.get("state"))},
+            )
+        if await _settle_and_cancel(config_dir, ask):
+            settled.append(request_id)
+    return settled
+
+
+def has_batch_leftovers(config_dir: Path, owner: Any) -> bool:
+    """Whether any batch intent for this owner is still unconfirmed."""
+
+    from .decide_intents import DecideIntents
+
+    return bool(_batch_leftovers(DecideIntents(config_dir), _owner_key(owner)))
 
 
 def settle_ask(config_dir: Path | str, ask: BridgeAsk) -> bool:

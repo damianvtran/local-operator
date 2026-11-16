@@ -6,6 +6,13 @@ disk), the REAL ask queue writing a real ``asks.jsonl`` and index, the REAL
 ``TeamBridgeClient`` over real loopback HTTP to a stub hub that records every
 request it receives, and the real ``require_desktop`` door. Only the
 credential store (``FakeStore``) and the hub's domain are fixtures.
+
+THE OPERATOR PRESENCE PROOF is exercised with a REAL operator key: a file-backed
+key created by ``operator.sign.create_key`` in the scratch root and signed by the
+real ``sign_challenge`` (the call that raises Touch ID on a presence host) and
+verified by the real ``signature_verdict``. Only the anchor's ``presence`` flag
+is asserted by the fixture — the OS gesture itself cannot run headless, the
+same limit the operator-authority suite documents.
 """
 
 from __future__ import annotations
@@ -36,6 +43,9 @@ TOKEN = "fixture-desktop-capability"
 AUTH = {"authorization": f"Bearer {TOKEN}"}
 COS = "s-cos"
 ACC = "acc_1"
+DECIDE = "/v1/desktop/team-bridge/requests/decide"
+AUTHORIZE = "/v1/desktop/team-bridge/requests/decide/authorize"
+LIST = "/v1/desktop/team-bridge/requests"
 
 
 def _owner() -> OwnerSnapshot:
@@ -49,7 +59,7 @@ def _owner() -> OwnerSnapshot:
     )
 
 
-def _item(message_id: str, *, tenant: str = "tnt_1") -> dict[str, Any]:
+def _item(message_id: str, *, tenant: str | None = "tnt_1") -> dict[str, Any]:
     return {
         "message": {
             "id": message_id,
@@ -61,7 +71,7 @@ def _item(message_id: str, *, tenant: str = "tnt_1") -> dict[str, Any]:
             "screening": {"rationale": "PRIVATE RATIONALE"},
         },
         "delivery": {"state": "unread"},
-        "thread": {"id": "bth_" + message_id[5:], "tenant_id": tenant},
+        "thread": {"id": "bth_" + message_id[5:], **({"tenant_id": tenant} if tenant else {})},
         "sender": {
             "account_id": "acc_2",
             "endpoint_id": "ep_2",
@@ -79,6 +89,14 @@ class Hub:
         self.calls: list[dict[str, Any]] = []
         self.pending = ["bmsg_a", "bmsg_b", "bmsg_c"]
         self.batch_answer: dict[str, dict[str, str]] = {}
+        #: Commit the batch, then drop the connection before answering (R1-1).
+        self.drop_after_commit = False
+        #: Answer the batch 503 without committing anything.
+        self.fail_batch = False
+        #: Items the hub serves with no tenant at all (S-4).
+        self.tenantless: set[str] = set()
+        #: Two-page list: items beyond this many go on page 2 (R1-4).
+        self.page_size: int | None = None
         self.ledger = [
             {
                 "request_id": "bmsg_old",
@@ -96,19 +114,83 @@ class Hub:
 
     def answer(self, method: str, path: str, query: dict[str, list[str]], body: Any):
         if method == "GET" and path == "/v1/messaging/requests":
-            return {"items": [_item(m) for m in self.pending], "next_cursor": None}
+            ids = list(self.pending)
+            cursor = None
+            if self.page_size is not None:
+                start = self.page_size if query.get("after") == ["cur_page2"] else 0
+                cursor = "cur_page2" if start == 0 and len(ids) > self.page_size else None
+                ids = ids[start : start + self.page_size]
+            items = [_item(m, tenant=None if m in self.tenantless else "tnt_1") for m in ids]
+            return {"items": items, "next_cursor": cursor}
         if method == "POST" and path == "/v1/messaging/requests/decide":
+            if self.fail_batch:
+                return "fail"
             results = []
             for entry in body["decisions"]:
                 mid = entry["message_id"]
-                outcome = self.batch_answer.get(mid) or {"status": entry["decision"]}
+                if mid not in self.pending and mid not in self.batch_answer:
+                    outcome: dict[str, str] = {"error": "request_already_decided"}
+                else:
+                    outcome = self.batch_answer.get(mid) or {"status": entry["decision"]}
+                if "omit" in outcome:
+                    continue
                 results.append({"message_id": mid, **outcome})
                 if "status" in outcome and mid in self.pending:
                     self.pending.remove(mid)
-            return {"results": results}
+                    self.ledger.insert(
+                        0,
+                        {
+                            "request_id": mid,
+                            "thread_id": "bth_" + mid[5:],
+                            "state": outcome["status"],
+                            "decided_by": {"account_id": ACC},
+                            "decided_at": "2026-11-15T11:00:00Z",
+                            "decided_via": "bearer-only",
+                            "ask_ref": entry["ask_ref"],
+                        },
+                    )
+            return "drop" if self.drop_after_commit else {"results": results}
         if method == "GET" and path == "/v1/messaging/decisions":
             return {"items": self.ledger, "next_cursor": None}
         return None
+
+
+def _presence_host(root: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """A real file operator key in ``root``, anchored as a PRESENCE host.
+
+    ``create_key`` writes the canonical file key and the staged anchor makes
+    ``sign_challenge`` resolve that backend (the operator-authority suite's
+    ``keyed`` recipe). The pinned-anchor read is the one seam replaced: it
+    reports this key's anchor, root-owned, with ``presence=True`` — the
+    level a Secure Enclave key reports, which no headless run can create.
+    ``state.presence = False`` turns the host into a file-only one.
+    """
+
+    from dataclasses import replace
+
+    from local_operator import operator as operator_authority
+    from local_operator.operator import trust
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+
+    handle = create_key(config_root=root, preference=FILE_ONLY)
+    anchor = anchor_for_handle(handle, label="test")
+    staged = trust.staging_path(root)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(trust.anchor_bytes(anchor))
+    state = SimpleNamespace(presence=True, anchor=anchor)
+
+    def load(_uid: Any = None) -> Any:
+        return trust.AnchorLoad(
+            anchor=replace(anchor, presence=state.presence),
+            path=root / "anchor.json",
+            root_owned=True,
+            reason="",
+            exists=True,
+        )
+
+    monkeypatch.setattr(operator_authority, "load_anchor", load)
+    return state
 
 
 @pytest.fixture
@@ -128,6 +210,22 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 {"method": self.command, "path": parts.path, "query": query, "body": body}
             )
             result = hub_state.answer(self.command, parts.path, query, body)
+            if result == "drop":
+                # Committed, then the connection dies before any response.
+                self.close_connection = True
+                return
+            if result == "fail":
+                result, failed = None, True
+            else:
+                failed = False
+            if failed:
+                encoded = json.dumps({"code": "messaging_unavailable", "error": "down"}).encode()
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                return
             code, out = (
                 (200, {"msg": "ok", "result": result})
                 if result is not None
@@ -167,12 +265,15 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ),
     )
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    presence = _presence_host(root, monkeypatch)
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[get_config_manager] = lambda: SimpleNamespace(config_dir=root)
     try:
         with TestClient(app) as http:
-            yield SimpleNamespace(http=http, hub=hub_state, root=root, owner=owner)
+            yield SimpleNamespace(
+                http=http, hub=hub_state, root=root, owner=owner, presence=presence
+            )
     finally:
         server.shutdown()
         server.server_close()
@@ -212,6 +313,51 @@ def _hub_calls(hub: Hub, path: str) -> list[dict[str, Any]]:
     return [c for c in hub.calls if c["path"] == path]
 
 
+def _items(*pairs: tuple[str, str]) -> list[dict[str, str]]:
+    return [{"message_id": mid, "decision": word} for mid, word in pairs]
+
+
+def _authorize(world, items: list[dict[str, str]], *, account: str = ACC) -> dict[str, Any]:
+    """The desktop's confirm step: the daemon mints, prompts and signs."""
+
+    response = world.http.post(
+        AUTHORIZE, json={"expected_account_id": account, "items": items}, headers=AUTH
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["result"]["operator_proof"]
+
+
+def _decide(
+    world,
+    items: list[dict[str, str]],
+    *,
+    proof: Any = "authorize",
+    account: str = ACC,
+    headers: dict[str, str] = AUTH,
+):
+    """POST the batch; by default with a fresh proof over exactly ``items``."""
+
+    body: dict[str, Any] = {"expected_account_id": account, "items": items}
+    if proof == "authorize":
+        proof = _authorize(world, items, account=account)
+    if proof is not None:
+        body["operator_proof"] = proof
+    return world.http.post(DECIDE, json=body, headers=headers)
+
+
+def _intent_states(root: Path) -> dict[str, str]:
+    import sqlite3
+
+    from local_operator.team_bridge.decide_intents import decide_intents_db_path
+
+    path = decide_intents_db_path(root)
+    if not path.exists():
+        return {}
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute("SELECT question_id, state FROM decide_intents").fetchall()
+    return {str(mid): str(state) for mid, state in rows}
+
+
 # --- the list ---------------------------------------------------------------
 
 
@@ -222,12 +368,17 @@ def test_list_counts_pending_and_carries_references_only(world) -> None:
     )
     assert response.status_code == 200, response.text
     result = response.json()["result"]
-    assert result["pending_count"] == 3
+    # Only the ACTIONABLE rows count (R1-4): bmsg_b/c have no local ask.
+    assert result["pending_count"] == 1
+    assert result["has_more"] is False and result["next_cursor"] is None
     assert [row["message_id"] for row in result["items"]] == ["bmsg_a", "bmsg_b", "bmsg_c"]
     first = result["items"][0]
     assert first["ask"] == {"session_id": COS, "ask_id": ask_a, "status": "open"}
     assert first["decidable"] is True
+    # S-2: the ask card's own screened question text, so a batch is not blind.
+    assert first["excerpt"] == "priya@acme.example: approve the spend?"
     assert result["items"][1]["ask"] is None and result["items"][1]["decidable"] is False
+    assert result["items"][1]["excerpt"] is None
     assert first["sender"] == {
         "account_id": "acc_2",
         "endpoint_id": "ep_2",
@@ -247,17 +398,8 @@ def test_mixed_batch_gives_per_item_results_and_settles_asks(world) -> None:
     ask_a = _raise_ask(world.root, "bmsg_a")
     ask_b = _raise_ask(world.root, "bmsg_b")
     world.hub.batch_answer = {"bmsg_b": {"error": "request_already_decided"}}
-    response = world.http.post(
-        "/v1/desktop/team-bridge/requests/decide",
-        json={
-            "expected_account_id": ACC,
-            "items": [
-                {"message_id": "bmsg_a", "decision": "approve"},
-                {"message_id": "bmsg_b", "decision": "deny"},
-                {"message_id": "bmsg_c", "decision": "approve"},
-            ],
-        },
-        headers=AUTH,
+    response = _decide(
+        world, _items(("bmsg_a", "approve"), ("bmsg_b", "deny"), ("bmsg_c", "approve"))
     )
     assert response.status_code == 200, response.text
     assert response.json()["result"]["results"] == [
@@ -305,11 +447,7 @@ def test_mixed_batch_gives_per_item_results_and_settles_asks(world) -> None:
     assert _ask_status(world.root, COS, ask_a) == "withdrawn"
     assert _ask_status(world.root, COS, ask_b) == "withdrawn"
     # A second batch for the same request is refused locally: nothing is sent.
-    again = world.http.post(
-        "/v1/desktop/team-bridge/requests/decide",
-        json={"expected_account_id": ACC, "items": [{"message_id": "bmsg_a", "decision": "deny"}]},
-        headers=AUTH,
-    )
+    again = _decide(world, _items(("bmsg_a", "deny")))
     assert again.json()["result"]["results"][0]["error"] == "no_open_ask"
     assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
     # And the card's own door: a live queue answering the settled ask re-folds
@@ -320,6 +458,10 @@ def test_mixed_batch_gives_per_item_results_and_settles_asks(world) -> None:
     live = AskQueue(FakeSession(), config_dir=world.root, session_id=COS)
     refused = live.respond(ask_a, {"bridge-bmsg_a": ["approve"]}, by="desktop")
     assert refused["ok"] is False
+    # Q2: the refusal names the desktop decision, not an agent withdrawal.
+    from local_operator.asks.render import BATCH_DECIDED_COPY
+
+    assert refused["error"] == BATCH_DECIDED_COPY
     assert _ask_status(world.root, COS, ask_a) == "withdrawn"
     # The settled requests leave the list once the hub stops serving them.
     world.hub.pending = ["bmsg_c"]
@@ -353,26 +495,15 @@ def test_an_ask_answered_on_the_card_leaves_the_list_and_is_not_decided_again(wo
         "/v1/desktop/team-bridge/requests", params={"expected_account_id": ACC}, headers=AUTH
     ).json()["result"]
     assert "bmsg_a" not in [row["message_id"] for row in listed["items"]]
-    assert listed["pending_count"] == 2
-    decided = world.http.post(
-        "/v1/desktop/team-bridge/requests/decide",
-        json={"expected_account_id": ACC, "items": [{"message_id": "bmsg_a", "decision": "deny"}]},
-        headers=AUTH,
-    ).json()["result"]["results"]
+    assert listed["pending_count"] == 0  # bmsg_b/c are listed but not decidable here
+    decided = _decide(world, _items(("bmsg_a", "deny"))).json()["result"]["results"]
     assert decided[0]["error"] == "answered_on_card" and decided[0]["sent"] is False
     assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
 
 
 def test_an_ask_outside_the_designated_session_is_not_sent(world) -> None:
     _raise_ask(world.root, "bmsg_a", session_id="s-other")
-    decided = world.http.post(
-        "/v1/desktop/team-bridge/requests/decide",
-        json={
-            "expected_account_id": ACC,
-            "items": [{"message_id": "bmsg_a", "decision": "approve"}],
-        },
-        headers=AUTH,
-    ).json()["result"]["results"]
+    decided = _decide(world, _items(("bmsg_a", "approve"))).json()["result"]["results"]
     assert decided[0]["sent"] is False
     assert decided[0]["error"] == "not_designated"
     assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
@@ -471,6 +602,7 @@ def test_ledger_refuses_an_unknown_role_and_unknown_params(world) -> None:
     [
         ("GET", "/v1/desktop/team-bridge/requests"),
         ("POST", "/v1/desktop/team-bridge/requests/decide"),
+        ("POST", "/v1/desktop/team-bridge/requests/decide/authorize"),
         ("GET", "/v1/desktop/team-bridge/decisions"),
     ],
 )
@@ -549,3 +681,294 @@ async def test_client_requests_refuses_an_unknown_state_before_any_io(tmp_path) 
     client = bridge.TeamBridgeClient(tmp_path, base_url="http://127.0.0.1:9/v1", store=FakeStore())
     with pytest.raises(ValueError):
         await client.requests(tenant_id="tnt_1", state="open")
+
+
+# --- S-1: a decision needs the operator's presence, not just the bearer ------
+
+
+def test_a_bearer_only_post_is_refused_with_zero_hub_calls(world) -> None:
+    """What ``curl`` from an agent shell sends: bearer, no Origin, no proof."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    response = _decide(world, _items(("bmsg_a", "approve")), proof=None)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "operator_signature_required"
+    assert world.hub.calls == []
+    assert _ask_status(world.root, COS, ask_a) == "open"
+    assert _intent_states(world.root) == {}
+
+
+def test_a_signature_over_a_different_selection_is_refused(world) -> None:
+    _raise_ask(world.root, "bmsg_a")
+    _raise_ask(world.root, "bmsg_b")
+    proof = _authorize(world, _items(("bmsg_a", "deny")))
+    # Flipped word, then an added item: neither is what was confirmed.
+    flipped = _decide(world, _items(("bmsg_a", "approve")), proof=proof)
+    assert flipped.status_code == 403
+    assert flipped.json()["detail"]["code"] == "operator_signature_invalid"
+    proof = _authorize(world, _items(("bmsg_a", "deny")))
+    widened = _decide(world, _items(("bmsg_a", "deny"), ("bmsg_b", "approve")), proof=proof)
+    assert widened.json()["detail"]["code"] == "operator_signature_invalid"
+    assert world.hub.calls == []
+
+
+def test_a_replayed_signature_is_refused(world) -> None:
+    _raise_ask(world.root, "bmsg_a")
+    items = _items(("bmsg_a", "approve"))
+    proof = _authorize(world, items)
+    first = _decide(world, items, proof=proof)
+    assert first.status_code == 200, first.text
+    assert first.json()["result"]["results"][0]["status"] == "approved"
+    replay = _decide(world, items, proof=proof)
+    assert replay.status_code == 403
+    assert replay.json()["detail"]["code"] == "operator_signature_invalid"
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
+
+
+def test_a_forged_or_expired_proof_is_refused(world, monkeypatch) -> None:
+    from local_operator.team_bridge import approvals
+
+    _raise_ask(world.root, "bmsg_a")
+    items = _items(("bmsg_a", "approve"))
+    proof = _authorize(world, items)
+    forged = _decide(world, items, proof={**proof, "sig": "30" + "ab" * 35})
+    assert forged.json()["detail"]["code"] == "operator_signature_invalid"
+    monkeypatch.setattr(approvals, "CHALLENGE_TTL_S", -1.0)
+    expired = _decide(world, items)
+    assert expired.status_code == 403
+    assert expired.json()["detail"]["code"] == "operator_signature_expired"
+    assert world.hub.calls == []
+
+
+def test_the_proof_names_the_selection_digest_the_daemon_signed(world) -> None:
+    """The signed message is the runtime's own ``signed_message``, re-checkable."""
+
+    from local_operator.operator.verify import signed_message, verify_signature
+    from local_operator.team_bridge import approvals
+
+    items = _items(("bmsg_b", "deny"), ("bmsg_a", "approve"))
+    response = world.http.post(
+        AUTHORIZE, json={"expected_account_id": ACC, "items": items}, headers=AUTH
+    )
+    result = response.json()["result"]
+    digest = approvals.selection_digest(
+        account_id=ACC,
+        tenant_id="tnt_1",
+        selection=[approvals.Selection(i["message_id"], i["decision"]) for i in reversed(items)],
+    )
+    assert result["selection_digest"] == digest  # submitted order does not matter
+    assert result["expires_s"] == 30
+    message = signed_message(
+        action="decide",
+        session_id=approvals.SIGNING_SESSION,
+        request_id=f"batch:{digest}",
+        challenge=result["operator_proof"]["challenge"],
+    )
+    assert verify_signature(
+        spki=world.presence.anchor.spki,
+        message=message,
+        signature=bytes.fromhex(result["operator_proof"]["sig"]),
+    )
+    assert world.hub.calls == []  # authorizing calls nobody
+
+
+def test_a_host_without_a_presence_key_cannot_batch_decide(world) -> None:
+    _raise_ask(world.root, "bmsg_a")
+    items = _items(("bmsg_a", "approve"))
+    proof = _authorize(world, items)
+    world.presence.presence = False  # the anchor is now file-only
+    authorize = world.http.post(
+        AUTHORIZE, json={"expected_account_id": ACC, "items": items}, headers=AUTH
+    )
+    assert authorize.status_code == 409
+    assert authorize.json()["detail"]["code"] == "operator_presence_required"
+    decided = _decide(world, items, proof=proof)
+    assert decided.status_code == 409
+    assert decided.json()["detail"]["code"] == "operator_presence_required"
+    assert world.hub.calls == []
+
+
+# --- R1-1: a lost response never strands a decided request ------------------
+
+
+def test_drop_after_commit_is_settled_from_the_ledger_on_the_next_list(world) -> None:
+    """The reviewer's repro: the hub commits, then the connection drops."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.drop_after_commit = True
+    response = _decide(world, _items(("bmsg_a", "approve")))
+    assert response.status_code == 502, response.text
+    assert world.hub.pending == ["bmsg_b", "bmsg_c"]  # the hub recorded it
+    # Recorded BEFORE the POST, so the lost answer left a durable trace.
+    assert _intent_states(world.root) == {"bmsg_a": "pending"}
+    assert _ask_status(world.root, COS, ask_a) == "open"
+
+    world.hub.drop_after_commit = False
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    assert listed.status_code == 200, listed.text
+    assert [r["message_id"] for r in listed.json()["result"]["items"]] == ["bmsg_b", "bmsg_c"]
+    # The ledger read settled it: no POST, ask retired, intent confirmed.
+    assert len(_hub_calls(world.hub, "/v1/messaging/decisions")) == 1
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
+    assert _intent_states(world.root) == {"bmsg_a": "sent"}
+
+
+def test_an_unsent_batch_is_re_sent_by_the_next_signed_batch(world) -> None:
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    ask_b = _raise_ask(world.root, "bmsg_b")
+    world.hub.fail_batch = True
+    failed = _decide(world, _items(("bmsg_a", "approve")))
+    assert failed.status_code >= 500
+    assert _intent_states(world.root) == {"bmsg_a": "pending"}
+    assert world.hub.pending == ["bmsg_a", "bmsg_b", "bmsg_c"]  # nothing committed
+
+    # A list read never POSTs: the hub still has bmsg_a pending.
+    world.hub.fail_batch = False
+    world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
+
+    # The next human-signed batch carries the leftover with its FROZEN word.
+    result = _decide(world, _items(("bmsg_b", "deny"))).json()["result"]
+    assert result["results"][0]["status"] == "denied"
+    assert result["recovered"] == [
+        {
+            "message_id": "bmsg_a",
+            "decision": "approve",
+            "sent": True,
+            "ask_settled": True,
+            "status": "approved",
+        }
+    ]
+    last = _hub_calls(world.hub, "/v1/messaging/requests/decide")[-1]
+    assert [d["message_id"] for d in last["body"]["decisions"]] == ["bmsg_b", "bmsg_a"]
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
+    assert _ask_status(world.root, COS, ask_b) == "withdrawn"
+    assert _intent_states(world.root) == {"bmsg_a": "sent", "bmsg_b": "sent"}
+
+
+def test_a_request_decided_elsewhere_is_settled_by_the_list(world) -> None:
+    """Decided at the hub, no local intent at all: the ledger still settles it."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.pending = ["bmsg_b"]
+    world.hub.ledger.insert(
+        0,
+        {
+            "request_id": "bmsg_a",
+            "state": "denied",
+            "decided_by": {"account_id": ACC},
+            "ask_ref": {"ask_id": ask_a, "question_id": "bmsg_a"},
+        },
+    )
+    world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+
+
+# --- R1-2 / R1-3: per-item outcomes ------------------------------------------
+
+
+def test_an_item_the_hub_omits_is_reported_sent(world) -> None:
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.batch_answer = {"bmsg_a": {"omit": "1"}}
+    (result,) = _decide(world, _items(("bmsg_a", "approve"))).json()["result"]["results"]
+    assert result["sent"] is True and result["error"] == "messaging_unavailable"
+    assert result["ask_settled"] is False
+    assert _ask_status(world.root, COS, ask_a) == "open"
+    assert _intent_states(world.root) == {"bmsg_a": "pending"}
+
+
+def test_a_transient_hub_error_leaves_the_ask_open(world) -> None:
+    """Fails if every hub error were treated as terminal (R1-3)."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.batch_answer = {"bmsg_a": {"error": "bridge_disabled"}}
+    (result,) = _decide(world, _items(("bmsg_a", "approve"))).json()["result"]["results"]
+    assert result == {
+        "message_id": "bmsg_a",
+        "decision": "approve",
+        "sent": True,
+        "ask_settled": False,
+        "error": "bridge_disabled",
+    }
+    assert _ask_status(world.root, COS, ask_a) == "open"
+    assert _intent_states(world.root) == {"bmsg_a": "pending"}
+
+
+def test_a_re_enrolled_owner_refuses_an_ask_raised_under_the_old_generation(world) -> None:
+    """Fails if ``scope_matches_runtime`` were bypassed (R1-3)."""
+
+    from dataclasses import replace
+
+    _raise_ask(world.root, "bmsg_a")
+    store = Store(world.root)
+    regenerated = replace(world.owner, enrollment_generation=6)
+    store.commit_enrollment(regenerated, OwnerReceipt("bridge_consent_v1", "ref-2"))
+    store.update_designated_session(regenerated, COS)
+    (result,) = _decide(world, _items(("bmsg_a", "approve"))).json()["result"]["results"]
+    assert result["sent"] is False and result["error"] == "owner_changed"
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+
+
+# --- R1-4 / S-3 / S-4 / Q1 ---------------------------------------------------
+
+
+def test_the_list_pages_with_after_and_next_cursor(world) -> None:
+    _raise_ask(world.root, "bmsg_a")
+    _raise_ask(world.root, "bmsg_c")
+    world.hub.page_size = 2
+    first = world.http.get(
+        LIST, params={"expected_account_id": ACC, "limit": "2"}, headers=AUTH
+    ).json()["result"]
+    assert [r["message_id"] for r in first["items"]] == ["bmsg_a", "bmsg_b"]
+    assert first["pending_count"] == 1 and first["has_more"] is True
+    assert first["next_cursor"] == "cur_page2"
+    second = world.http.get(
+        LIST,
+        params={"expected_account_id": ACC, "limit": "2", "after": first["next_cursor"]},
+        headers=AUTH,
+    ).json()["result"]
+    assert [r["message_id"] for r in second["items"]] == ["bmsg_c"]
+    assert second["pending_count"] == 1 and second["has_more"] is False
+    calls = _hub_calls(world.hub, "/v1/messaging/requests")
+    assert calls[-1]["query"]["after"] == ["cur_page2"]
+
+
+def test_the_list_drops_an_item_with_no_tenant(world) -> None:
+    world.hub.tenantless = {"bmsg_b"}
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    assert [r["message_id"] for r in listed.json()["result"]["items"]] == ["bmsg_a", "bmsg_c"]
+
+
+def test_the_ledger_drops_a_row_for_another_tenant(world) -> None:
+    world.hub.ledger.append({**world.hub.ledger[0], "request_id": "bmsg_x", "tenant_id": "tnt_9"})
+    response = world.http.get(
+        "/v1/desktop/team-bridge/decisions", params={"expected_account_id": ACC}, headers=AUTH
+    )
+    assert [r["request_id"] for r in response.json()["result"]["items"]] == ["bmsg_old"]
+
+
+def test_decide_refusals_speak_of_a_decision(world) -> None:
+    bad = world.http.post(
+        DECIDE,
+        json={"expected_account_id": ACC, "items": _items(("../x", "approve"))},
+        headers=AUTH,
+    )
+    assert "decision" in bad.json()["detail"]["message"]
+    assert "read" not in bad.json()["detail"]["message"]
+    wrong = world.http.post(
+        AUTHORIZE,
+        json={"expected_account_id": "acc_9", "items": _items(("bmsg_a", "approve"))},
+        headers=AUTH,
+    )
+    assert wrong.status_code == 409
+    assert wrong.json()["detail"]["code"] == "account_mismatch"
+    assert "decision" in wrong.json()["detail"]["message"]
+
+
+def test_the_settled_by_stamp_matches_the_card_copy_key() -> None:
+    from local_operator.asks.render import BATCH_DECIDE_VIA
+    from local_operator.team_bridge.approvals import SETTLED_BY
+
+    assert SETTLED_BY["via"] == BATCH_DECIDE_VIA
