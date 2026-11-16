@@ -3503,7 +3503,10 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
 
 
 def _cmd_credential_refresh(args: argparse.Namespace) -> int:
-    """Ask the existing owner broker once; never expose the returned bearer.
+    """Ask the existing owner broker; retry one transient GitHub lookup deadline.
+
+    Other keys and all authorization refusals still get exactly one ask. Never
+    expose a returned bearer or extend a lease while recovering the source.
 
     The local relay resolves the owner from placement and the owner still checks
     holder permission and ADMIN. A CLI refresh cannot grant, retarget, or repair
@@ -3513,12 +3516,20 @@ def _cmd_credential_refresh(args: argparse.Namespace) -> int:
     from local_operator.network.types import MeshRefusal
 
     key = str(args.key)
-    detail = _relay_answer(
-        "credential_grant",
-        timeout=BROKER_OP_DEADLINE_S,
-        credential_key=key,
-        force_refresh=True,
-    )
+    from local_operator.network.credentials.github_source import SOURCE_TIMEOUT_S
+
+    def ask() -> dict[str, Any]:
+        return _relay_answer(
+            "credential_grant",
+            timeout=SOURCE_TIMEOUT_S + 2 if key == "github" else BROKER_OP_DEADLINE_S,
+            credential_key=key,
+            force_refresh=True,
+        )
+
+    detail = ask()
+    if key == "github" and detail.get("code") == "owner_busy":
+        time.sleep(0.25)
+        detail = ask()
     if detail.get("kind") != "grant":
         raise MeshRefusal(
             str(detail.get("code") or "grant_invalid"),

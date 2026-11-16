@@ -108,7 +108,7 @@ def _retire_code(verdict: str) -> str:
 #: Outcomes that are not an owner answer about permission either, so they neither
 #: serve nor drop a held grant: a local broker fault, a busy owner, a quota rest.
 _TRANSIENT_REFUSALS: frozenset[str] = frozenset(
-    {"internal", "rate_limited", "quota_blocked", "unsupported"}
+    {"internal", "rate_limited", "owner_busy", "quota_blocked", "unsupported"}
 )
 
 #: The report kinds that ask the owner for a forced refresh (``owner.py``'s
@@ -971,6 +971,108 @@ class MeshCredentialClient:
         affinity: tuple[int, int] | None = None,
         demote_credential_ids: Collection[int] = (),
     ) -> Grant | BrokerError:
+        """One bounded GitHub recovery retry, never a wider/longer permission.
+
+        A source deadline is transient, unlike an answered deny. During the
+        proactive re-ask margin a CURRENT lease may still serve; after its actual
+        expiry it may not. A second miss returns truthfully, with no retry loop.
+        """
+        from local_operator.network.credentials.github import is_github_key
+
+        denied = self._github_membership_denial(key)
+        if denied is not None:
+            return denied
+        outcome = self._request_grant_once(
+            key,
+            session_id=session_id,
+            model_id=model_id,
+            force_refresh=force_refresh,
+            provider=provider,
+            affinity=affinity,
+            demote_credential_ids=demote_credential_ids,
+        )
+        if not (
+            is_github_key(key) and isinstance(outcome, BrokerError) and outcome.code == "owner_busy"
+        ):
+            return outcome
+        if not force_refresh:
+            held = self._current_lease(key, session_id)
+            if held is not None:
+                from local_operator.network.credentials.effective import note_resolution
+
+                # The completed call used a CURRENT permitted lease. Publish its
+                # usability, not the provisional owner-busy receipt; do not call
+                # _remember_grant (which would claim a new owner sighting).
+                note_resolution(self.root, key, held)
+                return held
+        time.sleep(0.25)
+        denied = self._github_membership_denial(key)
+        if denied is not None:
+            return denied
+        return self._request_grant_once(
+            key,
+            session_id=session_id,
+            model_id=model_id,
+            force_refresh=force_refresh,
+            provider=provider,
+            affinity=affinity,
+            demote_credential_ids=demote_credential_ids,
+        )
+
+    def _github_membership_denial(self, key: str) -> BrokerError | None:
+        """Re-check panic before BOTH asks, including a panic during backoff.
+
+        get() hides grants inside the proactive margin before live_grant's
+        membership check, so that normal hot-cache fence alone is insufficient.
+        """
+        from local_operator.network.credentials.github import is_github_key
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        if not is_github_key(key) or self._self_membership_active():
+            return None
+        try:
+            return self._invalidate_membership_scope(key)
+        except PolicyUnknown:
+            self._revoke_dropped_github(self.grants.drop_borrowed(self.self_device))
+            self._retire_held(None, "member_not_active")
+            return self._policy_error(key, "not_a_holder")
+
+    def _current_lease(self, key: str, session_id: str) -> Grant | None:
+        """Serve only an unexpired owner lease behind the existing policy fence."""
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        if not self.should_borrow(key) or not self._self_membership_active():
+            return None
+        held = self.grants.peek(key, session_id)
+        if (
+            held is None
+            or not held.usable_at()
+            or held.credential_ref.owner_device != self.owner_of(key)
+        ):
+            return None
+        try:
+            policy = self._policy()
+            with policy.transaction() as document:
+                verdict, stamp = self._hold_admission(policy, document, key)
+                if verdict or self.grants.invalidate_policy(key, session_id, stamp):
+                    return None
+                return (
+                    held if self.grants.peek(key, session_id) is held and held.usable_at() else None
+                )
+        except PolicyUnknown:
+            return None
+
+    def _request_grant_once(
+        self,
+        key: str,
+        *,
+        session_id: str = "",
+        model_id: str = "",
+        force_refresh: bool = False,
+        provider: str = "",
+        affinity: tuple[int, int] | None = None,
+        demote_credential_ids: Collection[int] = (),
+    ) -> Grant | BrokerError:
         """Borrow a bearer for ``key``. Blocking; call from a thread.
 
         ``affinity`` is this session's warm-account anchor ``(owner row id, row
@@ -1075,10 +1177,21 @@ class MeshCredentialClient:
                 extra["exclude_credential_ids"] = excluded
             # The same only-when-present rule for the selection inputs.
             extra.update(_selection_fields(affinity, demote_credential_ids))
+            # GitHub's whole source bound must answer before this control hop
+            # closes, while preserving the existing 10s gh-unusable distinction.
+            # Other provider/MCP callers retain their existing short budget.
+            from local_operator.network.credentials.github_source import (
+                SOURCE_TIMEOUT_S,
+            )
+
             reply = control_request(
                 record,
                 "credential_grant",
-                timeout=self.deadline_s,
+                timeout=(
+                    max(self.deadline_s, SOURCE_TIMEOUT_S + 2)
+                    if key == "github"
+                    else self.deadline_s
+                ),
                 # ``credential_key``, never ``key``: the control socket's FIRST frame
                 # already uses ``key`` for the control key (``control_request`` sends
                 # it), and a second field of the same name in the op frame is a

@@ -552,6 +552,7 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "quota_blocked": 0,
     "interactive_required": 300_000,
     "rate_limited": 0,
+    "owner_busy": 0,
     "unsupported": NO_RETRY,
     "device_bound": 300_000,
     "not_authorised": 60_000,
