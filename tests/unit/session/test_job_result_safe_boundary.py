@@ -319,7 +319,7 @@ async def test_result_after_last_yield_uses_the_finally_fallback(
 async def test_peer_run_records_job_origin_only_after_result_commit(
     tmp_path: Path,
 ) -> None:
-    """A job incorporated into a peer run retains the job's loud completion policy."""
+    """A committed routine result retains its origin without requesting attention."""
     tool_entered = asyncio.Event()
     release_tool = asyncio.Event()
     ends: list[AgentEndEvent] = []
@@ -385,10 +385,15 @@ async def test_peer_run_records_job_origin_only_after_result_commit(
         assert len(stream.requests) == 2
         assert "distinct important final B" in _wire(stream.requests[1])
         assert len(ends) == 1
-        assert ends[0].notify is True
+        # The result must still be consumed and tracked, but routine settlement
+        # is not an interruption, even when incorporated into a peer's turn.
+        assert ends[0].notify is False
         assert session._run_input_types == {"peer_message", "job_result"}
         assert _job(session, job_id).consumed is True
-        assert (await session.refresh_attention())["unseen"] is True
+        attention = await session.refresh_attention()
+        assert attention["unseen"] is True
+        assert attention["completion_token"] is not None
+        assert attention["notify"] is False
     finally:
         release_tool.set()
         await session.dispose()
