@@ -3702,7 +3702,9 @@ Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
   directory. LOOK at both PNGs before citing them; a sha256 alone is not proof.
 - **Not covered:** the card's trip over two mesh relays into the operator's
   inbox, and the desktop `/answers` HTTP route itself (the operator attaches over
-  loopback). Those legs are pinned by `tests/unit/network/test_remote_attention_relay.py`
+  loopback). The node root is not a mesh member, so node-only branches gated on
+  `node_host.headless_node_once()` (e.g. `cancel_access` withdrawing the card
+  with its entry) do not run here. Those legs are pinned by `tests/unit/network/test_remote_attention_relay.py`
   and `tests/unit/network/test_remote_viewer.py`.
 - **Testing an extension change:** the harness installs the CRX named in
   `~/.local-operator/browser/extension/update.xml`, not `extension/` source.

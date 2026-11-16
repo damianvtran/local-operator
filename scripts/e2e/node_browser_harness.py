@@ -665,6 +665,22 @@ def _open_site_ask(session: Any, origin: str) -> dict[str, Any] | None:
     return None
 
 
+def withdrawal_confirmed(result: dict[str, Any]) -> bool:
+    """Whether the agent's ``cancel_access`` removed the extension's entry.
+
+    The extension's own reply is the proof: ``state: cancelled`` only when it
+    found and dropped this requester's pending entry (``approval-store.ts``
+    ``cancelAccess``; ``none`` when nothing matched, which is what run 6's
+    identity-less call got). Run 7 gated on the card's ``withdrawn_asks`` too
+    and reported BLOCKED although the entry was gone: that list is filled only
+    on a host ``node_host.headless_node_once()`` calls a node, i.e. a mesh
+    member, and this rig's node root is not one (the relay leg is out of
+    scope). So the card stays open here; the extension entry does not.
+    """
+    details = result.get("details") or {}
+    return not result.get("error") and details.get("state") == "cancelled"
+
+
 def _site_ask(session: Any, origin: str) -> dict[str, Any] | None:
     """The newest site card for ``origin`` in ANY status (a withdrawn one too)."""
     queue = session.ask_queue()
@@ -1246,11 +1262,7 @@ async def _inner_flow(
         results.row("expired: card raised", "an ask", _last_result(session, "call_11"), False)
     else:
         details = withdrawal["details"] or {}
-        gone = (
-            not withdrawal["error"]
-            and details.get("state") == "cancelled"
-            and str(expire_ask["ask_id"]) in (details.get("withdrawn_asks") or ())
-        )
+        gone = withdrawal_confirmed(withdrawal)
         late = await asyncio.to_thread(
             _operator, root, op_root, node_root, sid, expire_ask, approve_word, "signed"
         )

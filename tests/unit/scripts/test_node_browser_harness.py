@@ -203,3 +203,15 @@ def test_a_capture_that_never_renders_its_theme_records_not_rendered(
     assert capture.outcome["rendered"] is False
     assert "not rendered" in capture.outcome["error"]
     assert capture.outcome["background_luminance"] > harness.LIGHT_MIN_LUMINANCE
+
+
+def test_the_withdrawal_is_proven_by_the_extensions_cancelled_reply() -> None:
+    """Run 7's over-strict gate: ``cancelled`` alone proves the entry is gone."""
+    run7 = {
+        "error": False,
+        "details": {"origin": "http://127.0.0.1:57651", "state": "cancelled", "pending_count": 0},
+    }
+    assert harness.withdrawal_confirmed(run7)
+    # Run 6's identity-less call matched nothing: the extension says "none".
+    assert not harness.withdrawal_confirmed({"error": False, "details": {"state": "none"}})
+    assert not harness.withdrawal_confirmed({"error": True, "details": {"state": "cancelled"}})
