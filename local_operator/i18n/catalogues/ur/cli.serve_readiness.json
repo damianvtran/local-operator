@@ -1,13 +1,17 @@
 {
-  "cli.serve_readiness.unproven": "ریکارڈ میں درج ہے، مگر اس کے عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)",
-  "cli.serve_readiness.not_reporting": "ریکارڈ میں درج ہے مگر جواب نہیں دے رہا (اس کی ہارٹ بیٹ رک گئی ہے)",
-  "cli.serve_readiness.not_this_daemon": "ریکارڈ میں درج ہے، مگر اب وہ PID کسی دوسرے عمل کے پاس ہے",
-  "cli.serve_readiness.unknown_state": "ریکارڈ میں نامعلوم حالت میں درج ہے",
+  "cli.serve_readiness.unproven": "ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)",
+  "cli.serve_readiness.not_reporting": "ریکارڈ موجود ہے مگر کوئی جواب نہیں آ رہا (ہارٹ بیٹ رک گئی ہے)",
+  "cli.serve_readiness.not_this_daemon": "ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا",
+  "cli.serve_readiness.unknown_state": "نامعلوم حالت والا ریکارڈ",
   "cli.serve_readiness.install_unknown": "ایسا بلڈ چلاتا ہے جس کا نصب شدہ بلڈ سے موازنہ نہیں کیا جا سکتا",
   "cli.serve_readiness.cgroup_unknown": "ایسے cgroup میں چلتا ہے جس کی نوعیت یہ جانچ متعین نہیں کر سکتی",
-  "cli.serve_readiness.recorded_gap": "ریکارڈ میں درج بلڈ {recorded}، نصب شدہ بلڈ {install} (عمل کی شناخت ثابت نہیں)",
-  "cli.serve_readiness.unknown": "{count, plural, one {{device} پر `lop serve` ڈیمن: {reasons}، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہا ہے اور زیرِ نگرانی ہے یا نہیں} other {{device} پر `lop serve` ڈیمن: {reasons}، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں}}",
+  "cli.serve_readiness.recorded_gap": "ریکارڈ میں بلڈ {recorded} درج ہے؛ نصب شدہ بلڈ {install} ہے",
+  "cli.serve_readiness.unknown": "{count, plural, one {{device} پر `lop serve` ڈیمن — {reasons}، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہا ہے اور زیرِ نگرانی ہے یا نہیں} other {{device} پر `lop serve` ڈیمن — {reasons}، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں}}",
   "cli.serve_readiness.stale": "{count, plural, one {{device} پر `lop serve` ڈیمن ({pids})، {builds} چلاتا ہے، مگر نصب شدہ بلڈ {install} ہے: اس کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرا بلڈ چلاتے ہیں} other {{device} پر `lop serve` ڈیمن ({pids})، {builds} چلاتے ہیں، مگر نصب شدہ بلڈ {install} ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں}}",
   "cli.serve_readiness.other_unit": "{count, plural, one {{device} پر `lop serve` ڈیمن کسی دوسری سروس ({holders}) کے تحت ہے، lop serve یونٹ کے تحت نہیں} other {{device} پر `lop serve` ڈیمن دوسری سروسز ({holders}) کے تحت ہیں، lop serve یونٹ کے تحت نہیں}}",
-  "cli.serve_readiness.identity_restart": "{device} پر ریکارڈ دیکھنے کے لیے `lop services status` چلائیں، پھر ہر عمل کی شناخت درج کرنے کے لیے `lop services restart` چلائیں؛ دوبارہ شروع کرنے کا عمل کارروائی سے پہلے ہر ڈیمن کی جانچ کرتا ہے"
+  "cli.serve_readiness.identity_restart": "{device} پر ریکارڈ میں درج ڈیمن کو نصب شدہ بلڈ پر منتقل کرنے کے لیے `lop services restart` چلائیں؛ یہ کمانڈ کارروائی سے پہلے ہر ڈیمن کی جانچ کرتی ہے",
+  "cli.serve_readiness.pid_reason": "{count, plural, one {عمل کا شناختی نمبر {pids} — {reason}} other {اعمال کے شناختی نمبر {pids} — {reason}}}",
+  "cli.serve_readiness.and_more": "{count, plural, one {اور مزید #} other {اور مزید #}}",
+  "cli.serve_readiness.identity_no_action": "{count, plural, one {جس ریکارڈ میں عمل کی شناخت ثابت نہیں، اس میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتا ہے؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں} other {جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں}}",
+  "cli.serve_readiness.identity_restart_manual": "{device} پر ریکارڈ میں درج ڈیمن کو نصب شدہ بلڈ پر منتقل کرنے کے لیے `lop serve` کو دستی طور پر دوبارہ شروع کریں؛ یہ موجودہ عمل میں خود کو دوبارہ لوڈ نہیں کر سکتا"
 }

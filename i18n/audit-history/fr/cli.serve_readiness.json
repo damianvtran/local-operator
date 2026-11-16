@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "cli.serve_readiness",
-  "history_sha256": "dd0b9bd1a2d27d479e06bd44d1ed10d754671677d8a48460ab4bbcf0018cbad6",
+  "history_sha256": "4692addab7a336687255f03a03c8aa19a1892f71e635d823257f66cf084b5e25",
   "entries": [
     {
       "locale": "fr",
@@ -105,6 +105,186 @@
         {
           "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd1r/verify.py.txt",
           "sha256": "02de8cf6d86d1bd6932fc8600346462ef52621293bfa7e49ca4d97636d805187"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+      "status": "passed",
+      "audit_date": "2026-11-16",
+      "auditor": {
+        "agent": "Audit daemon French (i18n-auditor)",
+        "session": "19f657b90086",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "translator_session": "170903662c6e",
+        "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol",
+        "fallback": {
+          "observed": false,
+          "reported": false,
+          "actual_model": "openai/gpt-6.1-sol"
+        }
+      },
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "170903662c6e",
+        "model": "openai/gpt-6.1-sol",
+        "provenance_source": "Task brief identifies same original translator; previous task acf0a84cd992 actual model openai/gpt-6.1-sol. Current job identity supplied by requesting session, not independently queried."
+      },
+      "note": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/record.json; sd3 first independent revised-copy pass: 11 changed/new audited, 4 unchanged proven; 15-key mechanics; 0 findings",
+      "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/record.json",
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [],
+        "open_finding_ids": [],
+        "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/report.md"
+      },
+      "bundle_companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/report.md",
+          "sha256": "fcd94ceae38fea4a79affa324f6fef5b5eab1ffefa3d5f1a35e9ca68e14a872a"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/audit.log",
+          "sha256": "bce90939e92c4724525d8b538746dbb4036a9d3f0f1e48463907b00a30a5e8cc"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3/verify.py.txt",
+          "sha256": "e4fbd1f515c7a42b1f197571d7ddb57b1e9c735ab7ddf733fc3ec4c92429bb12"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+      "status": "passed",
+      "audit_date": "2026-11-16",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "7f2b030d2636",
+        "model": null,
+        "actual_model_source": "Request names the current translator job but does not supply its actual model. Prior translator model is not assumed to establish this job model.",
+        "fallback": "unknown for translator job; no inference made"
+      },
+      "auditor": {
+        "agent": "Audit daemon French (i18n-auditor)",
+        "session": "19f657b90086",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": true,
+        "translator_session": "7f2b030d2636",
+        "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol",
+        "fallback": {
+          "observed": false,
+          "reported": false,
+          "actual_model": "openai/gpt-6.1-sol"
+        }
+      },
+      "note": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/record.json; 1 changed PID-reuse key and grouped neighbors passed; 14 keys byte-retained; all 15 mechanical/render checks passed",
+      "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/record.json",
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [],
+        "open_finding_ids": [],
+        "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md"
+      },
+      "bundle_companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md",
+          "sha256": "5c0d682ed79ff900d96767a4506b2a63774e306cd85de31a3b6d1c78b0ff8e45"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/audit.log",
+          "sha256": "4988670ac9943fbbc8ab4e6d9695ad97a04380ed2c63ddb93be27b1c86ecc428"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/verify.py.txt",
+          "sha256": "a75b6370865843d49e2a88a983694160af7920b9d8a5a101256e4eefc34f3481"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.serve_readiness",
+      "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+      "status": "passed",
+      "audit_date": "2026-11-16",
+      "auditor": {
+        "agent": "Local Operator independent SECOND i18n auditor sd4r",
+        "session": "85af124f4a9f",
+        "model": "openai/gpt-6.1-sol",
+        "actual_model_source": "Host session runtime declaration, same resumed independent auditor session.",
+        "fallback": {
+          "observed": false,
+          "reported": false,
+          "statement": "No fallback observed or reported; not inferred from another agent."
+        },
+        "independent_from_translator_session": true,
+        "translator_session": "7f2b030d2636",
+        "independence": "No translation or source authorship; current seven replacements independently inspected. No first-auditor remediation reports consulted; original accepted finding ID supplied by parent."
+      },
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "7f2b030d2636",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "none per parent-provided provenance; not independently inferred",
+        "provenance_source": "Current requesting parent message."
+      },
+      "key_count": 15,
+      "key_coverage": [
+        "cli.serve_readiness.unproven",
+        "cli.serve_readiness.not_reporting",
+        "cli.serve_readiness.not_this_daemon",
+        "cli.serve_readiness.unknown_state",
+        "cli.serve_readiness.install_unknown",
+        "cli.serve_readiness.cgroup_unknown",
+        "cli.serve_readiness.recorded_gap",
+        "cli.serve_readiness.unknown",
+        "cli.serve_readiness.stale",
+        "cli.serve_readiness.other_unit",
+        "cli.serve_readiness.identity_restart",
+        "cli.serve_readiness.pid_reason",
+        "cli.serve_readiness.and_more",
+        "cli.serve_readiness.identity_no_action",
+        "cli.serve_readiness.identity_restart_manual"
+      ],
+      "note": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/record.json; sd4r SECOND: PID-reuse fixed; 14 exact retained; 15-key checked; N1 deferred",
+      "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/record.json",
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [],
+        "open_finding_ids": [],
+        "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/report.md"
+      },
+      "bundle_companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/report.md",
+          "sha256": "b9773cd4b50a3b3d54aad808ba51035e2df3858ce822ab1e0b544b54a1fa1370"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/rendered.txt",
+          "sha256": "dfdaa9abaffb79d1f59867346f29a4751fb1f04a76a081afb17bbb73bf69dd26"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/delta.json",
+          "sha256": "f1671c12f42d8933bc5b4f00b9bd88145e43517cdb6a8905b6bf5f76b1063605"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/audit.log",
+          "sha256": "22d0c52041490b641e8344b1b62cf856a2907752d144204685f80a5396741266"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/input-manifest.json",
+          "sha256": "e48d1546f2642e53c6562f9847fa034e7b72435e59eb158b1a6214e72140c731"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/verify.py.txt",
+          "sha256": "43ad159523eacbcd35ab868b31e475d4f374679e8875d4ca64c603d4d9f6ba2f"
         }
       ]
     }

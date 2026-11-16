@@ -1,0 +1,22 @@
+{
+  "key": "cli.serve_readiness.not_this_daemon",
+  "before": "đã ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác",
+  "after": "đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID",
+  "previous_target_sha256": "68589105a34916a64d5a66028e9f042b7686128a50b851bd88967142c9d7c347",
+  "retained_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ]
+}

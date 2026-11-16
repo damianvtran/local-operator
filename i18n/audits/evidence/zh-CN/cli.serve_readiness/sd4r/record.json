@@ -1,0 +1,106 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "audit_date": "2026-11-16T05:25:37.919093+00:00",
+  "key_count": 15,
+  "auditor": {
+    "agent": "Local Operator independent SECOND i18n auditor sd4r",
+    "session": "85af124f4a9f",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session runtime declaration, same resumed independent auditor session.",
+    "fallback": {
+      "observed": false,
+      "reported": false,
+      "statement": "No fallback observed or reported; not inferred from another agent."
+    },
+    "independent_from_translator_session": true,
+    "translator_session": "7f2b030d2636",
+    "independence": "No translation or source authorship; current seven replacements independently inspected. No first-auditor remediation reports consulted; original accepted finding ID supplied by parent."
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7f2b030d2636",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "none per parent-provided provenance; not independently inferred",
+    "provenance_source": "Current requesting parent message."
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "input_hashes": {
+    "en": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+    "context": "e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629",
+    "target": "d3836560eb7aa4cbefd2e331c8c3971da0aa9522184fd940f8796bcdb255298c"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+    "context": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+    "target": "local_operator/i18n/catalogues/zh-CN/cli.serve_readiness.json"
+  },
+  "current_report_verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "findings": [],
+  "finding_dispositions": [
+    {
+      "id": "RU-SD3-01",
+      "status": "fixed",
+      "key": "cli.serve_readiness.not_this_daemon",
+      "assessment": "检测到PID复用 is natural concise technical Chinese and avoids 该PID. It is number-neutral and composes with one or multiple 进程ID values; no claim about another process build appears."
+    }
+  ],
+  "deferred_findings": [
+    {
+      "id": "N1",
+      "status": "preexisting deferred cgroup jargon"
+    }
+  ],
+  "all_keys_audited": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "fresh_semantic_keys": [
+    "cli.serve_readiness.not_this_daemon"
+  ],
+  "retained_byte_identical_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "prior_second_pass_record": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd4/record.json",
+  "current_bytes_match_audited_hashes": true,
+  "validation": {
+    "renders": 87,
+    "opaque_renders": 87,
+    "composed_samples": 5,
+    "exit_code": 0
+  },
+  "artifacts": {
+    "report": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd4r/report.md",
+    "rendered": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd4r/rendered.txt",
+    "delta": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd4r/delta.json",
+    "shared_log": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/audit.log",
+    "manifest": "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/input-manifest.json"
+  }
+}

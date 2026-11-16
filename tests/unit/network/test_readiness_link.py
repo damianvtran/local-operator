@@ -1434,7 +1434,9 @@ def test_ready_names_the_owner_decision_a_remote_model_switch_needs(
     server_b.stop()
 
 
+@pytest.mark.parametrize("recorded_version", ["0.90.1", "0.90.18"])
 def test_unproven_record_reaches_the_viewer_with_an_honest_restart_remedy(
+    recorded_version: str,
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1466,7 +1468,7 @@ def test_unproven_record_reaches_the_viewer_with_an_honest_restart_remedy(
                         "pid": 10001,
                         "state": "live",
                         "identity": "unproven",
-                        "version": "0.90.1",
+                        "version": recorded_version,
                         "source_ref": "",
                         "reloadable": True,
                         "cgroup": None,
@@ -1493,11 +1495,16 @@ def test_unproven_record_reaches_the_viewer_with_an_honest_restart_remedy(
             print("WIRE_RESULT " + json.dumps(row, sort_keys=True))
             print("CLI_RESULT " + " | ".join(shown))
         assert row["source"] == readiness.SOURCE_PEER and row["code"] == readiness.CODE_UNKNOWN
-        assert "recorded build 0.90.1" in row["detail"]
-        assert "identity unproven" in row["detail"]
+        assert row["observed"]["daemons"][0]["identity"] == "unproven"
         assert "serving" not in row["observed"]["daemons"][0]
-        assert any("lop services restart" in remedy for remedy in row["remedies"])
         assert "no start-time stamp could be compared" in text
-        assert "lop services restart" in text
+        assert "(identity unproven)" not in text
+        if recorded_version == "0.90.1":
+            assert "the record says build 0.90.1; 0.90.18 is installed" in row["detail"]
+            assert sum(remedy.count("lop services restart") for remedy in row["remedies"]) == 1
+            assert "lop services restart" in text
+        else:
+            assert "lop services restart" not in text
+            assert any("no action is needed" in remedy for remedy in row["remedies"])
     finally:
         server_b.stop()

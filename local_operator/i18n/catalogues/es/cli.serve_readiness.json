@@ -1,13 +1,17 @@
 {
-  "cli.serve_readiness.unproven": "está registrado, pero no se puede comprobar la identidad de su proceso (no se pudo comparar ninguna marca de tiempo de inicio)",
-  "cli.serve_readiness.not_reporting": "está registrado pero no responde (dejó de enviar señales de actividad)",
-  "cli.serve_readiness.not_this_daemon": "está registrado, pero ahora otro proceso tiene ese PID",
-  "cli.serve_readiness.unknown_state": "está registrado en un estado desconocido",
+  "cli.serve_readiness.unproven": "hay registro, pero no se puede comprobar la identidad del proceso (no se pudo comparar ninguna marca de tiempo de inicio)",
+  "cli.serve_readiness.not_reporting": "hay registro, pero no hay respuesta (ya no se reciben señales de actividad)",
+  "cli.serve_readiness.not_this_daemon": "hay registro, pero se detectó reutilización de PID",
+  "cli.serve_readiness.unknown_state": "registro con estado desconocido",
   "cli.serve_readiness.install_unknown": "ejecuta una compilación que no se puede comparar con la instalación",
   "cli.serve_readiness.cgroup_unknown": "se ejecuta en un cgroup que esta comprobación no puede ubicar",
-  "cli.serve_readiness.recorded_gap": "compilación registrada {recorded}, instalación {install} (identidad del proceso sin comprobar)",
-  "cli.serve_readiness.unknown": "{count, plural, one {el daemon `lop serve` en {device}: {reasons}, por lo que no se sabe si coincide con la instalación y está supervisado} many {los daemons `lop serve` en {device}: {reasons}, por lo que no se sabe si coinciden con la instalación y están supervisados} other {los daemons `lop serve` en {device}: {reasons}, por lo que no se sabe si coinciden con la instalación y están supervisados}}",
+  "cli.serve_readiness.recorded_gap": "el registro indica la compilación {recorded}; está instalada la compilación {install}",
+  "cli.serve_readiness.unknown": "{count, plural, one {el daemon `lop serve` en {device} — {reasons}, por lo que no se sabe si coincide con la instalación y está supervisado} many {los daemons `lop serve` en {device} — {reasons}, por lo que no se sabe si coinciden con la instalación y están supervisados} other {los daemons `lop serve` en {device} — {reasons}, por lo que no se sabe si coinciden con la instalación y están supervisados}}",
   "cli.serve_readiness.stale": "{count, plural, one {el daemon `lop serve` en {device} ({pids}) ejecuta {builds}, pero la instalación es {install}: las sesiones remotas que aloja ejecutan esa otra compilación} many {los daemons `lop serve` en {device} ({pids}) ejecutan {builds}, pero la instalación es {install}: las sesiones remotas que alojan ejecutan esas otras compilaciones} other {los daemons `lop serve` en {device} ({pids}) ejecutan {builds}, pero la instalación es {install}: las sesiones remotas que alojan ejecutan esas otras compilaciones}}",
   "cli.serve_readiness.other_unit": "{count, plural, one {el daemon `lop serve` en {device} está a cargo de otro servicio ({holders}), no de una unidad lop serve} many {los daemons `lop serve` en {device} están a cargo de otros servicios ({holders}), no de una unidad lop serve} other {los daemons `lop serve` en {device} están a cargo de otros servicios ({holders}), no de una unidad lop serve}}",
-  "cli.serve_readiness.identity_restart": "en {device}, ejecuta `lop services status` para inspeccionar los registros y luego `lop services restart` para registrar las identidades de los procesos; el reinicio comprueba cada daemon antes de actuar"
+  "cli.serve_readiness.identity_restart": "en {device}, ejecuta `lop services restart` para pasar el daemon registrado a la compilación instalada; el reinicio comprueba cada daemon antes de actuar",
+  "cli.serve_readiness.pid_reason": "{count, plural, one {identificador de proceso {pids} — {reason}} many {identificadores de proceso {pids} — {reason}} other {identificadores de proceso {pids} — {reason}}}",
+  "cli.serve_readiness.and_more": "{count, plural, one {y # más} many {y # más} other {y # más}}",
+  "cli.serve_readiness.identity_no_action": "{count, plural, one {el registro cuya identidad de proceso no está comprobada coincide con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria} many {los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria} other {los registros cuyas identidades de proceso no están comprobadas coinciden con la compilación instalada; no se necesita ninguna acción para esta comprobación no obligatoria}}",
+  "cli.serve_readiness.identity_restart_manual": "en {device}, reinicia `lop serve` manualmente para pasar el daemon registrado a la compilación instalada; no puede recargarse en el mismo proceso"
 }

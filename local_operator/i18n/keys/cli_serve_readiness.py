@@ -10,12 +10,24 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def and_more(*, count: int | float) -> Msg:
+    return Msg("cli.serve_readiness.and_more", {"count": count})
+
+
 def cgroup_unknown() -> Msg:
     return Msg("cli.serve_readiness.cgroup_unknown", {})
 
 
+def identity_no_action(*, count: int | float) -> Msg:
+    return Msg("cli.serve_readiness.identity_no_action", {"count": count})
+
+
 def identity_restart(*, device: str) -> Msg:
     return Msg("cli.serve_readiness.identity_restart", {"device": device})
+
+
+def identity_restart_manual(*, device: str) -> Msg:
+    return Msg("cli.serve_readiness.identity_restart_manual", {"device": device})
 
 
 def install_unknown() -> Msg:
@@ -35,6 +47,10 @@ def other_unit(*, count: int | float, device: str, holders: str) -> Msg:
         "cli.serve_readiness.other_unit",
         {"count": count, "device": device, "holders": holders},
     )
+
+
+def pid_reason(*, count: int | float, pids: str, reason: str) -> Msg:
+    return Msg("cli.serve_readiness.pid_reason", {"count": count, "pids": pids, "reason": reason})
 
 
 def recorded_gap(*, recorded: str, install: str) -> Msg:

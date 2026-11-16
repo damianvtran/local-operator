@@ -1,13 +1,17 @@
 {
-  "cli.serve_readiness.unproven": "已有记录，但无法证实其进程身份（没有可供比较的启动时间戳）",
-  "cli.serve_readiness.not_reporting": "已有记录但未响应（心跳已停止）",
-  "cli.serve_readiness.not_this_daemon": "已有记录，但该PID现已被其他进程占用",
-  "cli.serve_readiness.unknown_state": "记录中的状态未知",
+  "cli.serve_readiness.unproven": "已有记录，但无法证实进程身份（没有可供比较的启动时间戳）",
+  "cli.serve_readiness.not_reporting": "记录存在但未响应（心跳已停止）",
+  "cli.serve_readiness.not_this_daemon": "已有记录，但检测到PID复用",
+  "cli.serve_readiness.unknown_state": "记录存在，状态未知",
   "cli.serve_readiness.install_unknown": "运行的构建无法与当前安装的构建比较",
   "cli.serve_readiness.cgroup_unknown": "本次检查无法判定其所在cgroup的归属",
-  "cli.serve_readiness.recorded_gap": "记录中的构建为{recorded}，已安装的构建为{install}（进程身份未经证实）",
-  "cli.serve_readiness.unknown": "{count, plural, other {{device}上的`lop serve`守护进程：{reasons}，因此无法确定是否与当前安装一致并受监督}}",
+  "cli.serve_readiness.recorded_gap": "记录中注明构建为{recorded}；已安装的构建为{install}",
+  "cli.serve_readiness.unknown": "{count, plural, other {{device}上的`lop serve`守护进程——{reasons}，因此无法确定是否与当前安装一致并受监督}}",
   "cli.serve_readiness.stale": "{count, plural, other {{device}上的`lop serve`守护进程（{pids}）运行的是{builds}，但已安装的构建为{install}：其托管的远程会话也运行上述构建，而非已安装的构建}}",
   "cli.serve_readiness.other_unit": "{count, plural, other {{device}上的`lop serve`守护进程由其他服务（{holders}）管理，而非lop serve单元}}",
-  "cli.serve_readiness.identity_restart": "请在{device}上运行`lop services status`检查记录，再运行`lop services restart`记录进程身份；重启操作会在采取行动前检查每个守护进程"
+  "cli.serve_readiness.identity_restart": "请在{device}上运行`lop services restart`，将记录中的守护进程切换到已安装的构建；重启命令会在采取行动前检查每个守护进程",
+  "cli.serve_readiness.pid_reason": "{count, plural, other {进程ID{pids}——{reason}}}",
+  "cli.serve_readiness.and_more": "{count, plural, other {以及另外#个}}",
+  "cli.serve_readiness.identity_no_action": "{count, plural, other {记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作}}",
+  "cli.serve_readiness.identity_restart_manual": "请在{device}上手动重启`lop serve`，将记录中的守护进程切换到已安装的构建；它无法在当前进程内自行重新加载"
 }
