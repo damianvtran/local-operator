@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import re
 import signal
@@ -532,6 +533,326 @@ def active_recovery_entries(root: Path, *, limit: int | None = None) -> int:
     return count
 
 
+#: In-root archive for RETIRED recovery records (operator request 2026-11-16:
+#: "make sure that this store properly rotates so that users don't run into this
+#: hard limit"). It lives INSIDE the INSTALLROOT on purpose:
+#:
+#: * a retirement is then a same-filesystem ``os.rename`` -- atomic, and the
+#:   record keeps its inode, so its bytes, mode and mtime are preserved without
+#:   a copy (no content store is needed; see ``_archive_moves``);
+#: * rotation and aging never read, age or write anything OUTSIDE the root. A
+#:   sibling such as ``<parent>/lop-record-archive/`` (the reviewed manual
+#:   archive of 2026-11-16) is never discovered, let alone aged;
+#: * it is NOT one of the namespaces ``_namespace_entries`` enumerates, so an
+#:   archived record frees its admission slot while staying restorable with
+#:   :func:`restore_archived` (a rename back).
+ARCHIVE_DIR = ".update-operations-archive"
+#: Rotation switch. A module flag, not configuration: it exists so the negative
+#: control (rotation off -> the 256 refusal still fires) and an emergency
+#: bisect can turn retirement off without touching admission itself.
+RECORD_ROTATION_ENABLED = True
+#: Sealed v2 records kept LIVE after rotation, newest first, for diagnostics
+#: (``lop install status``/``operation_status`` read them without the archive).
+ROTATION_KEEP_SEALED = 32
+#: Archive bounds: the archive must not become the next unbounded store. Count
+#: and age are both enforced on every rotation; the oldest archive entries go
+#: first. These unlinks are the ONLY deletions this module performs on records.
+ARCHIVE_MAX_ENTRIES = 512
+ARCHIVE_MAX_AGE_S = 30 * 24 * 60 * 60
+#: "Near the cap" for LEGACY auto-migration. Legacy records have no positive
+#: finality, so they are only archived under pressure, never routinely: 240 of
+#: 256 leaves 16 admissions of headroom (several updates' worth of retries) so
+#: the migration runs well before a user can hit the refusal, yet a store with
+#: ordinary history (tens of records) is never touched.
+LEGACY_MIGRATION_THRESHOLD = 240
+#: A legacy candidate whose record changed within this window is left live even
+#: under pressure. Age is never finality proof; it is used ONLY to exclude (like
+#: phase in ``recovery_manifest``), so a controller tail or report that is still
+#: advancing a just-superseded operation (``operation_for_generation`` ->
+#: ``advance``) does not find its record gone. Installer attempts expire after
+#: 1800 s, so one hour covers a whole update plus its service tail.
+LEGACY_MIGRATION_GRACE_S = 60 * 60
+#: Archive entry names: ``<archived_at_ms>.<v1|v2>.<operation id>.json``. The
+#: millisecond stamp is the archive time (rename keeps the record's own mtime,
+#: so the mtime cannot carry it); the tag says which namespace a restore
+#: returns the record to. Anything else in the archive is foreign: never
+#: indexed, aged or deleted.
+_ARCHIVE_ENTRY = re.compile(r"^([0-9]{13,})\.(v1|v2)\.([0-9a-f]{32})\.json$")
+_ARCHIVE_TAGS = {OPERATION_DIR: "v1", V2_OPERATION_DIR: "v2"}
+#: Bounded directory scans: a flooded archive or namespace cannot make
+#: admission unbounded. Entries past this bound are simply not considered.
+_ROTATION_SCAN_BOUND = 4096
+_CAPACITY_SENTENCE = "update recovery records are at capacity; inspect pending operations"
+_log = logging.getLogger(__name__)
+
+
+def _archive_directory(root: Path, *, create: bool) -> Path | None:
+    """The validated in-root archive directory, or ``None`` when absent.
+
+    Same refusals as the namespace directories: a symlink, non-directory or
+    (where a uid means something) foreign-owned archive is never followed,
+    so a planted link cannot redirect retired records -- or aging unlinks --
+    outside the root.
+    """
+    directory = root / ARCHIVE_DIR
+    if create and not directory.exists() and not directory.is_symlink():
+        directory.mkdir(mode=0o700)
+    if not directory.exists() and not directory.is_symlink():
+        return None
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()):
+        raise InstallTransactionError("update operation archive is unsafe; nothing was moved")
+    return directory
+
+
+def _archive_index(directory: Path | None) -> dict[str, tuple[int, str, str]]:
+    """``operation id -> (archived_at_ms, tag, entry name)`` for OUR entries only.
+
+    Bounded (``_ROTATION_SCAN_BOUND``) and read-only. Foreign names are left
+    out, which is what keeps them out of aging too.
+    """
+    index: dict[str, tuple[int, str, str]] = {}
+    if directory is None:
+        return index
+    with os.scandir(directory) as entries:
+        for seen, entry in enumerate(entries):
+            if seen >= _ROTATION_SCAN_BOUND:
+                break
+            match = _ARCHIVE_ENTRY.match(entry.name)
+            if match is not None and entry.is_file(follow_symlinks=False):
+                index[match.group(3)] = (int(match.group(1)), match.group(2), entry.name)
+    return index
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make renames into/out of ``directory`` durable (review M3 of the manual run)."""
+    handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
+def _move_entry(source: Path, target: Path) -> None:
+    """THE one rename for retirement and restore; never replaces an existing name.
+
+    ``os.rename`` would silently replace ``target``, so absence is checked
+    first. That check is sufficient because every caller holds the root
+    transaction and record names are uuid4 ids no cooperating writer reuses.
+    Same filesystem by construction (both ends are inside the root; callers
+    also compare ``st_dev`` before the first move), so the rename is atomic
+    and keeps the inode: bytes, mode and mtime are unchanged.
+    """
+    if target.exists() or target.is_symlink():
+        raise InstallTransactionError(f"refusing to replace {target.name}; nothing was moved")
+    os.rename(source, target)
+
+
+def _archive_moves(
+    root: Path, namespace: str, moves: Sequence[tuple[str, Path]], now: float
+) -> list[str]:
+    """Move verified records of ONE namespace into the archive; return their ids.
+
+    Every source and every target is checked BEFORE the first rename (review
+    M1): a refusal leaves the store exactly as it was. A crash between renames
+    leaves each record wholly in one place (rename is atomic), and the next
+    rotation simply re-plans from what is still live (review M2). Both
+    directories are fsynced afterwards, including on failure (review M3).
+    """
+    if not moves:
+        return []
+    source_dir = root / namespace
+    info = source_dir.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()):
+        raise InstallTransactionError("update operation directory is unsafe; nothing was moved")
+    archive = _archive_directory(root, create=True)
+    if archive is None:
+        raise InstallTransactionError("update operation archive is missing; nothing was moved")
+    if archive.lstat().st_dev != info.st_dev:
+        raise InstallTransactionError("update operation archive is on another filesystem")
+    stamp = max(0, int(now * 1000))
+    tag = _ARCHIVE_TAGS[namespace]
+    archived = _archive_index(archive)
+    plan: list[tuple[str, Path, Path]] = []
+    for identifier, source in moves:
+        target = archive / f"{stamp:013d}.{tag}.{identifier}.json"
+        if (
+            source.parent != source_dir
+            or source.is_symlink()
+            or not source.is_file()
+            or identifier in archived
+            or target.exists()
+            or target.is_symlink()
+        ):
+            raise InstallTransactionError(
+                f"cannot archive update operation {identifier}; nothing was moved"
+            )
+        plan.append((identifier, source, target))
+    moved: list[str] = []
+    try:
+        for identifier, source, target in plan:
+            _move_entry(source, target)
+            moved.append(identifier)
+    finally:
+        _fsync_directory(source_dir)
+        _fsync_directory(archive)
+    return moved
+
+
+def _age_archive(root: Path, now: float) -> list[str]:
+    """Bound the archive by age, then by count; return the names removed.
+
+    The ONLY unlink of a recovery record anywhere in the update modules, and
+    only of OUR archive names (``_ARCHIVE_ENTRY``), only inside the validated
+    in-root archive, through one ``O_DIRECTORY|O_NOFOLLOW`` descriptor whose
+    identity matches the validated directory. Nothing outside the root is
+    ever looked at. Oldest archive time goes first; a future stamp (clock
+    skew) counts as new rather than being dropped early.
+    """
+    directory = _archive_directory(root, create=False)
+    if directory is None:
+        return []
+    now_ms = int(now * 1000)
+    ordered = sorted((stamp, name) for stamp, _tag, name in _archive_index(directory).values())
+    expired = [name for stamp, name in ordered if now_ms - stamp > ARCHIVE_MAX_AGE_S * 1000]
+    gone = set(expired)
+    kept = [name for _stamp, name in ordered if name not in gone]
+    overflow = kept[: max(0, len(kept) - ARCHIVE_MAX_ENTRIES)]
+    drop = expired + overflow
+    if not drop:
+        return []
+    expected = directory.lstat()
+    handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    removed: list[str] = []
+    try:
+        held = os.fstat(handle)
+        if (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino):
+            raise InstallTransactionError("update operation archive moved; nothing was aged")
+        for name in drop:
+            info = os.stat(name, dir_fd=handle, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            os.unlink(name, dir_fd=handle)
+            removed.append(name)
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+    return removed
+
+
+def rotate_for_admission(
+    root: Path, held: Transaction, *, now: float | None = None
+) -> dict[str, list[str]]:
+    """Free admission slots by archiving ONLY records that are provably done.
+
+    Called by both admission paths (through ``_admit``) while the root
+    transaction is HELD, so two updaters can never plan against the same
+    records: the second waits on the lock (or gets ``LockBusy``) and then sees
+    the first one's result. Observers (``operation_status``,
+    ``recovery_capacity_status``, ``observe_generation``) never call this.
+
+    1. Sealed v2 records whose generations no top-level pointer references are
+       archived oldest-seal first, keeping the newest ``ROTATION_KEEP_SEALED``
+       live. A seal is positive finality: ``_fenced`` refuses every write to a
+       sealed record, so no writer can be cut off by the move.
+    2. Only when legacy+v2 entries are at ``LEGACY_MIGRATION_THRESHOLD`` or
+       more, the reviewed legacy classifier (``recovery_manifest``) runs and
+       its candidates (never an excluded class) are archived -- legacy records
+       cannot be sealed, so this is the operator-approved abandonment of
+       finality-unproven history, not a finality claim.
+    3. The archive is aged by count and time.
+
+    ``now`` is injectable for tests (no sleeping); production uses the clock.
+    """
+    report: dict[str, list[str]] = {"v2_archived": [], "legacy_archived": [], "aged": []}
+    if not RECORD_ROTATION_ENABLED:
+        return report
+    # Imported here, not at module level: both modules import this one.
+    from local_operator import recovery_manifest as _manifest
+
+    # Legacy admission passes the caller's spelling of the root; every path
+    # comparison below (and in the classifiers) is against the canonical one.
+    root = canonical_root(root)
+    held.validate(root)
+    clock = time.time() if now is None else now
+    retirable = _manifest.retirable_sealed_v2(root, keep=ROTATION_KEEP_SEALED)
+    report["v2_archived"] = _archive_moves(root, V2_OPERATION_DIR, retirable, clock)
+    if active_recovery_entries(root) >= LEGACY_MIGRATION_THRESHOLD:
+        manifest = _manifest.dry_run_manifest(root)
+        if not manifest["root_uncertain"] and manifest["candidates"]:
+            # The digest binds the moves to exactly the bytes just classified;
+            # approval itself is the standing operator policy quoted above.
+            result = _manifest.archive_candidates(
+                manifest,
+                approved_sha256=manifest["manifest_sha256"],
+                now=clock,
+                min_age_s=LEGACY_MIGRATION_GRACE_S,
+            )
+            report["legacy_archived"] = result["archived"]
+    report["aged"] = _age_archive(root, clock)
+    held.validate(root)
+    return report
+
+
+def _admit(root: Path, held: Transaction) -> None:
+    """THE shared admission gate for legacy and v2 ``start_operation``.
+
+    Rotation first, then the unchanged cap check. A rotation failure never
+    becomes a new hard stop: below the cap the update proceeds (the failure is
+    logged), and at the cap the SAME typed ``RecoveryCapacityError`` sentence
+    and code are raised, chained to the rotation failure for diagnosis. When
+    only protected records remain, rotation frees nothing and the refusal is
+    exactly the pre-rotation one.
+    """
+    failure: Exception | None = None
+    try:
+        rotate_for_admission(root, held)
+    except (InstallTransactionError, OSError) as exc:
+        failure = exc
+        _log.warning("update record rotation failed; checking the cap without it: %s", exc)
+    if active_recovery_entries(root) >= RecoveryCapacityError.active_limit:
+        if failure is not None:
+            raise RecoveryCapacityError(_CAPACITY_SENTENCE) from failure
+        raise RecoveryCapacityError(_CAPACITY_SENTENCE)
+
+
+def restore_archived(root: Path, identifier: str) -> Path:
+    """Rename ONE archived record back into its namespace; return its live path.
+
+    The documented undo for rotation and legacy migration. Refuses when the
+    live name exists (never replaces) and when the shared cap is full (a
+    restore must not mint the slot admission refuses). Note: a restored record
+    that is still retirable is archived again by the next admission; restore
+    to inspect, or with ``RECORD_ROTATION_ENABLED`` off to keep it live.
+    """
+    root = canonical_root(root)
+    _operation_path(root, identifier)  # validates the id shape only
+    with transaction(root, operation="restore archived update operation") as held:
+        held.validate(root)
+        archive = _archive_directory(root, create=False)
+        found = _archive_index(archive).get(identifier)
+        if archive is None or found is None:
+            raise InstallTransactionError("no archived update operation has that id")
+        _stamp, tag, name = found
+        namespace = OPERATION_DIR if tag == "v1" else V2_OPERATION_DIR
+        if active_recovery_entries(root) >= RecoveryCapacityError.active_limit:
+            raise RecoveryCapacityError(_CAPACITY_SENTENCE)
+        directory = root / namespace
+        if not directory.exists() and not directory.is_symlink():
+            directory.mkdir(mode=0o700)
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()):
+            raise InstallTransactionError("update operation directory is unsafe; nothing moved")
+        target = directory / f"{identifier}.json"
+        try:
+            _move_entry(archive / name, target)
+        finally:
+            _fsync_directory(archive)
+            _fsync_directory(directory)
+        held.validate(root)
+    return target
+
+
 def start_operation(root: Path, *, baseline: str, target: str, route: str) -> UpdateOperation:
     identifier = uuid.uuid4().hex
     with transaction(root, operation="register durable update operation") as held:
@@ -542,10 +863,9 @@ def start_operation(root: Path, *, baseline: str, target: str, route: str) -> Up
         # Counted BEFORE the legacy directory is created, so a refusal (full, or
         # an unsafe v2 directory) leaves no new directory behind (round 1, Q1);
         # creating an empty directory adds no entry, so the count is unchanged.
-        if active_recovery_entries(root) >= RecoveryCapacityError.active_limit:
-            raise RecoveryCapacityError(
-                "update recovery records are at capacity; inspect pending operations"
-            )
+        # ``_admit`` first retires provably-finished records (rotation), so the
+        # cap is a backstop for protected records rather than a lifetime limit.
+        _admit(root, held)
         path = _operation_path(root, identifier, create=True)
         _persist_operation(
             path,

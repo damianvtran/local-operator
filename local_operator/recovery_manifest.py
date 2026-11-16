@@ -5,7 +5,18 @@ proved terminal (see :mod:`local_operator.fenced_operation`): any loaded legacy
 build may still rewrite them. Unblocking a full namespace therefore needs an
 explicit OPERATOR abandonment decision, and that decision needs an exact,
 reviewable inventory first. This module produces that inventory and a restore
-path for it; it never decides, retires, moves or deletes anything.
+path for it. The classifier itself never decides, retires, moves or deletes.
+
+AUTOMATIC ROTATION (operator request 2026-11-16, "make sure that this store
+properly rotates so that users don't run into this hard limit") is that
+standing abandonment decision: under cap pressure, admission
+(``install_transaction.rotate_for_admission``) runs :func:`dry_run_manifest`
+and moves ONLY its candidates into the in-root archive with
+:func:`archive_candidates`; excluded classes are never touched, and
+``install_transaction.restore_archived`` renames a record back. Sealed v2
+records are selected by :func:`retirable_sealed_v2`. A legacy writer that later
+addresses an archived record fails closed (every legacy mutator refuses a
+missing record rather than recreating it).
 
 CONSTRAINTS, deliberately enforced here:
 
@@ -34,10 +45,10 @@ CONSTRAINTS, deliberately enforced here:
   manifest's own ``root``, which must already exist. Any failure refuses the
   run before anything is written or locked.
 
-Callers are tests over synthetic roots today; nothing in the CLI invokes this,
-and nothing discovers a live root implicitly: capture uses the reviewed
-manifest's ``root``, and restore's ``root`` argument must equal it.
-A live dry run is a separate, explicitly authorised read-only step.
+:func:`capture_content` and :func:`restore_manifest` are invoked by no CLI
+path, and nothing discovers a live root implicitly: capture uses the reviewed
+manifest's ``root``, and restore's ``root`` argument must equal it. The only
+live caller is admission rotation (above), on the root it already holds locked.
 """
 
 from __future__ import annotations
@@ -569,3 +580,178 @@ def restore_manifest(
             report["restored"].append(restore["relpath"])
         held.validate(root)
     return report
+
+
+def _sha256_file(path: Path) -> str | None:
+    read = _read_exact(path)
+    return None if read is None else hashlib.sha256(read[0]).hexdigest()
+
+
+def archive_candidates(
+    manifest: dict[str, Any],
+    *,
+    approved_sha256: str,
+    now: float,
+    min_age_s: float = 0.0,
+) -> dict[str, list[str]]:
+    """Move a verified manifest's candidates into the in-root archive.
+
+    The automatic form of the reviewed 2026-11-16 manual archive (dry run ->
+    verify -> rename), with that review's minors applied:
+
+    * M1: EVERY entry is checked before the first move -- the manifest digest
+      (``_verify_manifest``), containment (``_contained``), the on-disk bytes
+      against the reviewed SHA-256, and every archive target (in
+      ``_tx._archive_moves``). Any mismatch refuses the whole run unmoved.
+    * M2: resumable. An entry whose source is gone and whose archive copy
+      already hashes to the reviewed SHA-256 was moved by an interrupted run;
+      it is skipped, not an error. A source that is gone with NO matching
+      archive copy is an anomaly and refuses the run.
+    * M3: both directories are fsynced after the renames.
+
+    No content store is written: a same-filesystem rename keeps the record's
+    inode, so its bytes, mode and mtime are preserved by construction, and
+    :func:`capture_content` requires a store OUTSIDE the root, which rotation
+    must never touch. ``min_age_s`` EXCLUDES records changed recently (see
+    ``_tx.LEGACY_MIGRATION_GRACE_S``); it never makes anything eligible.
+    Caller must hold the root transaction.
+    """
+    entries = _verify_manifest(manifest, approved_sha256)
+    root = _tx.canonical_root(Path(manifest["root"]))
+    index = _tx._archive_index(_tx._archive_directory(root, create=False))
+    archive = root / _tx.ARCHIVE_DIR
+    moves: list[tuple[str, Path]] = []
+    report: dict[str, list[str]] = {"archived": [], "already_archived": [], "deferred": []}
+    for entry in entries:
+        restore = entry["restore"]
+        relpath = restore["relpath"]
+        _directory, source = _contained(root, relpath)
+        identifier = source.name[: -len(".json")]
+        found = index.get(identifier)
+        if not source.exists() and not source.is_symlink():
+            if found is not None and _sha256_file(archive / found[2]) == restore["content_sha256"]:
+                report["already_archived"].append(relpath)
+                continue
+            raise ManifestError(f"record vanished and is not archived: {relpath}")
+        read = _read_exact(source)
+        if read is None or hashlib.sha256(read[0]).hexdigest() != restore["content_sha256"]:
+            raise ManifestError(f"on-disk bytes no longer match the reviewed manifest: {relpath}")
+        if now - read[1].st_mtime_ns / 1e9 < min_age_s:
+            report["deferred"].append(relpath)
+            continue
+        moves.append((identifier, source))
+    moved = _tx._archive_moves(root, _tx.OPERATION_DIR, moves, now)
+    report["archived"] = [f"{_tx.OPERATION_DIR}/{identifier}.json" for identifier in moved]
+    return report
+
+
+def retirable_sealed_v2(root: Path, *, keep: int) -> list[tuple[str, Path]]:
+    """``(operation id, record path)`` of sealed v2 records to retire, oldest first.
+
+    Read-only; the caller holds the root transaction. A record qualifies only
+    when ALL of these hold, and anything unreadable or uncertain is skipped
+    (kept live), never guessed:
+
+    * it is a well-formed v2 record of its own id with a ``sealed`` block AND
+      ``fenced_operation.seal_blockers`` is empty (enrollment closed, every
+      writer finished, every obligation terminal, no unknown field, no legacy
+      alias) -- the seal is the protocol's only positive finality;
+    * its phase is not a prepared/in-flight one;
+    * none of its generations (``candidate``, ``current``,
+      ``linked_generations``) is the target of a top-level pointer
+      (``current`` or any other symlink into ``generations/``), or carries an
+      install attempt, and the root's pointers are all readable.
+
+    The newest ``keep`` qualifying records (by seal time) stay live.
+    """
+    from local_operator import fenced_operation as _v2
+
+    root = _tx.canonical_root(root)
+    directory = root / _V2_DIR
+    if not directory.exists() and not directory.is_symlink():
+        return []
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (_UID_IS_MEANINGFUL and info.st_uid != os.getuid()):
+        return []
+    referenced, uncertain = _referenced_generations(root)
+    pointers = _pointer_realpaths(root)
+    if uncertain or pointers is None:
+        return []
+    found: list[tuple[float, str, Path]] = []
+    with os.scandir(directory) as entries:
+        for seen, entry in enumerate(entries):
+            if seen >= DEFAULT_MAX_ENTRIES:
+                break
+            identifier = entry.name[: -len(".json")] if entry.name.endswith(".json") else ""
+            if not _is_hex_id(identifier):
+                continue
+            path = directory / entry.name
+            record = _tx.read_record(path)
+            if (
+                record is None
+                or record.get("protocol") != _tx.V2_PROTOCOL
+                or record.get("operation_id") != identifier
+                or not isinstance(record.get("sealed"), dict)
+                or record.get("phase") in _PREPARED_PHASES
+                or _v2.seal_blockers(record, root)
+            ):
+                continue
+            sealed_at = record["sealed"].get("sealed_at")
+            if not isinstance(sealed_at, (int, float)) or isinstance(sealed_at, bool):
+                continue
+            if _v2_generations_protected(root, record, referenced, pointers):
+                continue
+            found.append((float(sealed_at), identifier, path))
+    found.sort()
+    retire = found[: max(0, len(found) - max(0, keep))]
+    return [(identifier, path) for _sealed_at, identifier, path in retire]
+
+
+def _pointer_realpaths(root: Path) -> list[Path] | None:
+    """Fully resolved targets of every top-level symlink; ``None`` if any is unreadable.
+
+    ``_referenced_generations`` compares lexically normalised targets, which is
+    right for the dry run but would MISS a pointer written through a symlinked
+    prefix (``/var`` vs ``/private/var`` on macOS) against the canonical root a
+    v2 record stores. Rotation moves records, so it also compares realpaths:
+    a generation is protected if either comparison says it is referenced.
+    """
+    targets: list[Path] = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.is_symlink():
+            continue
+        try:
+            targets.append(Path(os.path.realpath(entry)))
+        except OSError:
+            return None
+    return targets
+
+
+def _v2_generations_protected(
+    root: Path, record: dict[str, Any], referenced: set[str], pointers: list[Path]
+) -> bool:
+    """True when any generation the record names is live, attempted or uncertain."""
+    values: list[object] = [record.get("candidate"), record.get("current")]
+    linked = record.get("linked_generations", [])
+    if not isinstance(linked, list):
+        return True
+    values.extend(linked)
+    for value in values:
+        name, certain = _generation_name(root, value)
+        if not certain:
+            return True
+        if name is None:
+            continue
+        if name in referenced:
+            return True
+        real = Path(os.path.realpath(root / "generations" / name))
+        if any(target == real or real in target.parents for target in pointers):
+            return True
+        attempt = root / "generations" / name / _tx.ATTEMPT_NAME
+        if attempt.exists() or attempt.is_symlink():
+            return True
+    return False

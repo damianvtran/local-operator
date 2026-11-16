@@ -709,7 +709,7 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "~/Library/LaunchAgents, never a session entry",
     ),
     "local_operator/install_transaction.py": (
-        6,
+        7,
         "``install.lock``, ``.install-attempt.json`` and ``.update-operations`` "
         "belong to the node-local INSTALLROOT/generation authority, not a session "
         "directory. Kernel locks and PID/birth-bound build attempts must never "
@@ -722,7 +722,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "'.update-operation-v2.json') are sidecars inside an immutable generation "
         "directory (``<INSTALLROOT>/generations/<name>/``). Both are held here as the "
         "single source of truth that ``fenced_operation`` and ``recovery_manifest`` "
-        "alias; none is ever an entry of a session directory.",
+        "alias; none is ever an entry of a session directory. ``ARCHIVE_DIR`` "
+        "('.update-operations-archive') is where admission rotation retires finished "
+        "update-operation records, inside the SAME INSTALLROOT so a retirement is a "
+        "same-filesystem rename; it is machine-local recovery state like the record "
+        "namespaces, never an entry of a session directory.",
     ),
     "local_operator/procname.py": (
         4,
