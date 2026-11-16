@@ -16,6 +16,7 @@ import signal
 import socket
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,8 @@ from tests.unit.network.test_session_plane import _create_named_session_on_a_rea
 from tests.unit.network.test_sessions_pilot_cli import _journals
 
 TREE = Path(__file__).resolve().parents[3]
+_GUARD_ACTIVE = False
+_GUARD_INSTALLED: bool = globals().get("_GUARD_INSTALLED", False)
 
 
 @pytest.fixture
@@ -37,32 +40,75 @@ def peer_pair(request: pytest.FixtureRequest) -> Any:
 
 
 def _loopback_only(event: str, args: tuple[Any, ...]) -> None:
-    if event == "socket.connect" and isinstance(args[1], tuple):
+    if _GUARD_ACTIVE and event == "socket.connect" and isinstance(args[1], tuple):
         if not ipaddress.ip_address(args[1][0]).is_loopback:
             raise RuntimeError("attribution fixture refuses non-loopback access")
 
 
+def _install_guard() -> None:
+    global _GUARD_INSTALLED
+    if not _GUARD_INSTALLED:
+        sys.addaudithook(_loopback_only)
+        _GUARD_INSTALLED = True
+
+
+# Audit hooks cannot be removed. Register once, but activate only for this
+# module's fixture lifetime: a shared xdist worker must not inherit our fence.
+_install_guard()
+
+
 @pytest.fixture(autouse=True)
-def _guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    sys.addaudithook(_loopback_only)
-    monkeypatch.setattr(addresses, "_default_route_address", lambda: None)
-    with socket.socket() as probe:
-        with pytest.raises(RuntimeError, match="non-loopback"):
-            probe.connect(("203.0.113.9", 1))
+def _guard(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    global _GUARD_ACTIVE
+    _GUARD_ACTIVE = True
+    try:
+        monkeypatch.setattr(addresses, "_default_route_address", lambda: None)
+        with socket.socket() as probe:
+            with pytest.raises(RuntimeError, match="non-loopback"):
+                probe.connect(("203.0.113.9", 1))
 
-    def check_source(root: Path) -> None:
-        for module in (owner_mod, relay, audit):
-            filename = module.__file__
-            assert isinstance(filename, str) and Path(filename).resolve().is_relative_to(
-                root
-            ), "wrong attribution source tree"
+        def check_source(root: Path) -> None:
+            for module in (owner_mod, relay, audit):
+                filename = module.__file__
+                assert isinstance(filename, str) and Path(filename).resolve().is_relative_to(
+                    root
+                ), "wrong attribution source tree"
 
-    check_source(TREE)
-    with pytest.raises(AssertionError, match="wrong attribution source"):
-        check_source(TREE / "WRONG_TREE")
+        check_source(TREE)
+        with pytest.raises(AssertionError, match="wrong attribution source"):
+            check_source(TREE / "WRONG_TREE")
+        yield
+    finally:
+        # Also reset after setup/assertion failure, not only a passing test.
+        _GUARD_ACTIVE = False
+
+
+def test_the_registered_guard_is_inert_outside_its_fixture() -> None:
+    global _GUARD_ACTIVE
+    assert _GUARD_ACTIVE
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        # Emit events only: no connection or packet. This literal route query
+        # also distinguishes OUR active fence from the runner's TCP fence.
+        with pytest.raises(RuntimeError, match="attribution fixture"):
+            sys.audit("socket.connect", probe, ("1.1.1.1", 53))
+        try:
+            _GUARD_ACTIVE = False
+            sys.audit("socket.connect", probe, ("1.1.1.1", 53))
+        finally:
+            _GUARD_ACTIVE = True
+
+
+def test_the_guard_is_installed_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Any] = []
+    monkeypatch.setattr(sys, "addaudithook", calls.append)
+    _install_guard()
+    _install_guard()
+    assert calls == []
 
 
 def _cli(root: Path, home: Path, session: str) -> tuple[int, dict[str, Any], str]:
+    # This hook lives in a dedicated one-command child, reaped below; unlike
+    # pytest's shared worker, that process cannot carry it into another test.
     program = """import ipaddress,pathlib,runpy,socket,sys
 from local_operator.network import addresses,cli,projection,relay
 root=pathlib.Path(sys.argv[1]);sys.argv=sys.argv[2:]
