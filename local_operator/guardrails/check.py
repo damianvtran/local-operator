@@ -973,8 +973,8 @@ def lapsed_refusal_reason(case: DeleteCase) -> str:
         # stays deterministic (no judge): a proof-less local dial is exactly
         # what the model's own ``bash`` can forge with the record's control key.
         # The recovery leads with the one route that always works. Only the
-        # process that STARTED the runtime holds its capability
-        # (``harness.approval.operator_cap_for``; launch.py), so a runtime the
+        # process that STARTED the runtime holds its capability (the
+        # in-memory table in ``harness/approval.py``; launch.py), so a runtime the
         # wake supervisor or scheduler started has no answering surface that
         # can prove the operator, and a re-ask answered on the same desktop
         # card is refused identically: an unconditional "ask again" is a

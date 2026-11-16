@@ -4134,7 +4134,8 @@ def unanswered_label(status: str) -> str:
 #: 2026-11-16, ask a-48e3, session 439818272d84). WHY its own wording: the
 #: operator DID answer, on the desktop card, but the runtime had been started
 #: by the wake supervisor, so the desktop backend held no operator capability
-#: for it (``harness.approval.operator_cap_for``) and the runtime stamped the
+#: for it (that in-memory table in ``harness/approval.py`` is held only by the
+#: process that started the runtime) and the runtime stamped the
 #: local, proof-less connection ``unverified`` (``asks.surfaces``). The old
 #: generic label made the agent tell the operator he had "no answer approving
 #: it" after he had answered. The fail-closed itself is deliberate and stays:
