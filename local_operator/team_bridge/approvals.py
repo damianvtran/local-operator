@@ -680,8 +680,8 @@ async def decide_selection(
             result["error"] = "no_open_ask"
             continue
         code, scope = _verified_ask(config_dir, ask, item.message_id)
-        if code:
-            result["error"] = code
+        if code or scope is None:
+            result["error"] = code or "owner_changed"
             continue
         # The SAME fence + original-scope equality the single decide path runs
         # (decide_intents), against a runtime-shaped view of the ask's session.
