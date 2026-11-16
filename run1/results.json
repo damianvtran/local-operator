@@ -1,0 +1,218 @@
+{
+  "rows": [
+    {
+      "row": "namespace masks the real managed policy",
+      "expected": "/etc/opt/chrome/policies/managed/local-operator.json absent",
+      "actual": "exists=False; visible=[]",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real bridge 127.0.0.1:4099 unreachable before harness daemon",
+      "expected": "connect refused",
+      "actual": "refused=True",
+      "verdict": "PASS"
+    },
+    {
+      "row": "harness bridge daemon healthy (inside netns)",
+      "expected": "health ok",
+      "actual": "{\"status\": \"ok\", \"proto\": 1, \"extension_connected\": false, \"paired\": false, \"browser\": \"\", \"downloads_dir\": \"/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/pr2-full/node/browser/downloads\", \"current_url\": \"\", \"current_title\": \"\", \"extension_unresponsive\": false, \"extension_version\": \"\", \"extension_proto\": 0, \"extension_expected_version\": \"0.1.27\", \"extension_update_available\": false, \"link_attached\": false, \"link_silent_s\": 0.0, \"takeover_within_s\": null, \"driven_tabs\": [], \"pending_origin\": \"\", \"driver_extension_id\": \"\", \"standby_extension_ids\": [], \"standby_labels\": [], \"unlisted_extension_count\": 0, \"authorized_extension_ids\": [], \"driver_label\": \"\", \"driver_short_id\": \"\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "policy carries the SYNTHETIC anchor + node id",
+      "expected": "operatorKeyId == synthetic key id",
+      "actual": "{\"headlessNode\": true, \"operatorAnchorPoint\": \"040b63b6fe64fe10\\u2026\", \"operatorKeyId\": \"f6a021e2a9ef4f89e6d5b4c35219573b\", \"nodeDeviceId\": \"d_c2982e6f5fbc5feea4b9b2487dd03aed\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "extension force-installed and connected unpaired",
+      "expected": "a pairing code minted for it",
+      "actual": "{\"codes\": 1, \"chrome_alive\": true}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "policy pairing code pairs the extension",
+      "expected": "paired_connected_count>=1",
+      "actual": "{\"ok\": true, \"codes\": [], \"connected_count\": 1, \"paired_connected_count\": 1, \"expected_extension_version\": \"0.1.27\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "node is a real active headless mesh member",
+      "expected": "two loopback relays; signed operator binding",
+      "actual": "{\"network_id\": \"n_fa845ef430e702a595b2ce2e\", \"node_device\": \"d_c2982e6f5fbc5feea4b9b2487dd03aed\", \"operator_device\": \"d_025292032929afe0fcc828f9e7423917\", \"relay_ports\": [33985, 34579], \"signed_binding\": [\"d_025292032929afe0fcc828f9e7423917\", \"n_fa845ef430e702a595b2ce2e\"], \"headless_node\": true}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "first open refused: origin_not_allowed",
+      "expected": "is_error, details.error_code == origin_not_allowed",
+      "actual": "{\"error_code\": \"origin_not_allowed\", \"text\": \"site http://127.0.0.1:48765 is not allowed yet. Nobody can approve anything inside this headless node's browser: call browser action='request_access' url=http:/\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "request_access raises the signed site card (site:v1:)",
+      "expected": "open ask with a site:v1: question for the origin",
+      "actual": "{\"ask\": \"a-04fe\", \"question_id\": \"site:v1:bb022b7e0e2a86a1\", \"result\": \"asked the operator to allow http://127.0.0.1:48765 on this node (ask\\na-04fe).\\nNobody can click this headless browser: the operator approves or denies\\non their own device, signed with their operator ke\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "site card crosses real catalogue transport into synthetic operator inbox",
+      "expected": "one full remote-notice key naming node/session/ask",
+      "actual": "{\"expected_key\": \"remote-notice:d_c2982e6f5fbc5feea4b9b2487dd03aed:6fd9b99fa56b:remote-ask:a-04fe\", \"count\": 1, \"items\": [{\"id\": \"n_u36ayhlqv3kc3izc\", \"seq\": 1, \"session_id\": \"6fd9b99fa56b\", \"session_title\": \"\", \"agent_id\": \"\", \"team_id\": \"\", \"priority\": \"high\", \"title\": \"Allow http://127.0.0.1:48765 on harness-node? An agent there asked to open this exact origin in that machine's browser.\\u2026\", \"body_md\": \"runs on harness-node\", \"links_json\": \"[]\", \"key\": \"remote-notice:d_c2982e6f5fbc5feea4b9b2487dd03aed:6fd9b99fa56b:remote-ask:a-04fe\", \"content_hash\": \"50c4d807ba443f917448a2182472652e13c050ec609b06e66bef4b5320102b01\", \"revision\": 1, \"repeat_count\": 1, \"anchor_id\": \"rev:1\", \"created_at\": 1794812348019, \"updated_at\": 1794812348019, \"read_rev\": 0, \"read_at\": null, \"read_via\": null, \"read_surface\": null, \"dismissed_at\": null, \"dismissed_via\": null, \"delivered_rev\": 0, \"delivered_by\": null, \"delivered_at\": null, \"links\": [], \"read\": false, \"dismissed\": false}]}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "wrong-key operator signature refused",
+      "expected": "decide refused at the authority seam (refused_old_signer), ask still open, origin not granted",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"{'detail': 'owner connection lost: owner exited'}\", \"http_status\": 409, \"http_path\": \"/v1/desktop/sessions/6fd9b99fa56b/answers\", \"request\": {\"ask_id\": \"a-04fe\", \"answers\": {\"site-access\": [\"approve\"]}}, \"response\": {\"detail\": \"owner connection lost: owner exited\"}, \"surface\": \"desktop-http-remote-session\", \"remote_owner\": \"d_c2982e6f5fbc5feea4b9b2487dd03aed\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "plain ask_respond from the operator surface is not the decision",
+      "expected": "refused at the authority seam (refused_old_signer), ask still open, origin not granted",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"RuntimeError: This device can't answer a node's site request. Answer it from Local Operator on your own computer (the app or lop), updated to the latest release \\u2014 not from a phone or the node itself. The card stays open until it times out, so you can answer it once you've updated.\", \"surface\": \"remote-facade\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "agent's own unsigned decide (node-local, no operator signature) refused",
+      "expected": "extension refuses (unsigned_decision), origin not granted",
+      "actual": "{\"verdict\": {\"ok\": false, \"error\": \"The node's browser refused this answer: it was not signed with your operator key. Nothing was approved. Answer from Local Operator on your own computer (the app or lop), not from the node or a phone.\", \"code\": \"unsigned_decision\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "operator's signed Approve lands on the node",
+      "expected": "decided; ask answered; `lop browser sites` lists the origin",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"{'detail': 'owner connection lost: owner exited'}\", \"http_status\": 409, \"http_path\": \"/v1/desktop/sessions/6fd9b99fa56b/answers\", \"request\": {\"ask_id\": \"a-04fe\", \"answers\": {\"site-access\": [\"approve\"]}}, \"response\": {\"detail\": \"owner connection lost: owner exited\"}, \"surface\": \"desktop-http-remote-session\", \"remote_owner\": \"d_c2982e6f5fbc5feea4b9b2487dd03aed\"}, \"ask\": \"open\", \"sites\": \"No site decisions are stored in this machine's browser.\"}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "answered member card retires from the operator inbox",
+      "expected": "one forwarded notice, now dismissed",
+      "actual": "{\"expected_key\": \"remote-notice:d_c2982e6f5fbc5feea4b9b2487dd03aed:6fd9b99fa56b:remote-ask:a-04fe\", \"count\": 1, \"items\": [{\"id\": \"n_u36ayhlqv3kc3izc\", \"seq\": 1, \"session_id\": \"6fd9b99fa56b\", \"session_title\": \"\", \"agent_id\": \"\", \"team_id\": \"\", \"priority\": \"high\", \"title\": \"Allow http://127.0.0.1:48765 on harness-node? An agent there asked to open this exact origin in that machine's browser.\\u2026\", \"body_md\": \"runs on harness-node\", \"links_json\": \"[]\", \"key\": \"remote-notice:d_c2982e6f5fbc5feea4b9b2487dd03aed:6fd9b99fa56b:remote-ask:a-04fe\", \"content_hash\": \"50c4d807ba443f917448a2182472652e13c050ec609b06e66bef4b5320102b01\", \"revision\": 1, \"repeat_count\": 1, \"anchor_id\": \"rev:1\", \"created_at\": 1794812348019, \"updated_at\": 1794812348019, \"read_rev\": 0, \"read_at\": null, \"read_via\": null, \"read_surface\": null, \"dismissed_at\": null, \"dismissed_via\": null, \"delivered_rev\": 0, \"delivered_by\": null, \"delivered_at\": null, \"links\": [], \"read\": false, \"dismissed\": false}]}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "open succeeds after approval",
+      "expected": "no error",
+      "actual": "{\"resumed\": \"prompted (no turn began after the answer)\", \"text\": \"site http://127.0.0.1:48765 is not allowed yet. Nobody can approve anything inside this headless node's browser: call browser action='request_access' url=http://127.0.0.1:48765/iframe.html?id=browser-\"}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "light and dark screenshots rendered in their themes and differ",
+      "expected": "story root seen; rendered_fraction >= 0.01; background luminance dark < 100, light > 180; different sha256",
+      "actual": "{\"sha256\": {\"light\": \"\", \"dark\": \"\"}, \"captures\": {\"light\": {\"theme\": \"light\", \"rendered\": false, \"attempts\": 6, \"story_root_seen\": false}, \"dark\": {\"theme\": \"dark\", \"rendered\": false, \"attempts\": 0}}, \"error\": \"not rendered\"}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "deny: card raised",
+      "expected": "open ask",
+      "actual": "{\"id\": \"call_8\", \"error\": true, \"text\": \"<no tool result recorded>\", \"details\": null}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "expired: card raised",
+      "expected": "an ask",
+      "actual": "{\"id\": \"call_11\", \"error\": true, \"text\": \"<no tool result recorded>\", \"details\": null}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "no native /etc anchor read in the node process",
+      "expected": "0",
+      "actual": "0",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real /etc policy + anchor hashes unchanged",
+      "expected": "{\"/etc/opt/chrome/policies/managed/local-operator.json\": \"71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834\", \"/etc/local-operator/operators/1000.json\": \"66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11\"}",
+      "actual": "{\"/etc/opt/chrome/policies/managed/local-operator.json\": \"71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834\", \"/etc/local-operator/operators/1000.json\": \"66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "live node Chrome PID unchanged",
+      "expected": "\"MainPID=3471975\"",
+      "actual": "\"MainPID=3471975\"",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real `lop browser status` paired identity unchanged",
+      "expected": "[\"extension connected: yes\", \"paired:              yes\", \"identities:          1 authorised\", \"                     - Chrome extension 0.1.27.11 (lofpppoc\\u2026) driving\", \"port:                4099\"]",
+      "actual": "[\"extension connected: yes\", \"paired:              yes\", \"identities:          1 authorised\", \"                     - Chrome extension 0.1.27.11 (lofpppoc\\u2026) driving\", \"port:                4099\"]",
+      "verdict": "PASS"
+    }
+  ],
+  "facts": {
+    "product_source": "/home/ec2-user/local-operator/.worktrees/node-browser-relay-harness/local_operator/__init__.py",
+    "synthetic_operator_key_id": "f6a021e2a9ef4f89e6d5b4c35219573b",
+    "node_device_id": "d_c2982e6f5fbc5feea4b9b2487dd03aed",
+    "extension": {
+      "id": "lofpppoceigbphankfepghkakdjmefep",
+      "crx": "/home/ec2-user/.local-operator/browser/extension/local-operator-0.1.27.11.crx",
+      "version": "0.1.27.11"
+    },
+    "chrome_sandbox": "sandboxed",
+    "mesh": {
+      "network_id": "n_fa845ef430e702a595b2ce2e",
+      "node_device": "d_c2982e6f5fbc5feea4b9b2487dd03aed",
+      "operator_device": "d_025292032929afe0fcc828f9e7423917",
+      "relay_ports": [
+        33985,
+        34579
+      ],
+      "signed_binding": [
+        "d_025292032929afe0fcc828f9e7423917",
+        "n_fa845ef430e702a595b2ce2e"
+      ]
+    },
+    "session_id": "6fd9b99fa56b",
+    "resumed_after_approve": "prompted (no turn began after the answer)",
+    "screenshots": {
+      "light": {
+        "path": "/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/pr2-full/light.png",
+        "sha256": "",
+        "theme": "light",
+        "rendered": false,
+        "attempts": 6,
+        "story_root_seen": false
+      },
+      "dark": {
+        "path": "/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/pr2-full/dark.png",
+        "sha256": "",
+        "theme": "dark",
+        "rendered": false,
+        "attempts": 0
+      }
+    },
+    "chrome_profile_removed": true,
+    "native_anchor_reads": 0
+  },
+  "host_before": {
+    "hashes": {
+      "/etc/opt/chrome/policies/managed/local-operator.json": "71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834",
+      "/etc/local-operator/operators/1000.json": "66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11"
+    },
+    "live_chrome": "MainPID=3471975",
+    "browser_status_identity": [
+      "extension connected: yes",
+      "paired:              yes",
+      "identities:          1 authorised",
+      "                     - Chrome extension 0.1.27.11 (lofpppoc\u2026) driving",
+      "port:                4099"
+    ],
+    "live_bridge_owner": "LISTEN 0      2048   127.0.0.1:4099 0.0.0.0:* users:((\"Local Operator\",pid=3290711,fd=7))"
+  },
+  "host_after": {
+    "hashes": {
+      "/etc/opt/chrome/policies/managed/local-operator.json": "71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834",
+      "/etc/local-operator/operators/1000.json": "66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11"
+    },
+    "live_chrome": "MainPID=3471975",
+    "browser_status_identity": [
+      "extension connected: yes",
+      "paired:              yes",
+      "identities:          1 authorised",
+      "                     - Chrome extension 0.1.27.11 (lofpppoc\u2026) driving",
+      "port:                4099"
+    ],
+    "live_bridge_owner": "LISTEN 0      2048   127.0.0.1:4099 0.0.0.0:* users:((\"Local Operator\",pid=3290711,fd=7))"
+  },
+  "inner_rc": 1
+}

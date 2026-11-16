@@ -1,0 +1,68 @@
+Running scope as unit: nbh-pr2-retirement-check.scope
+[run_bounded] memory budget 1536 MiB (explicit); sampled owned child group and escaped descendants
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+/home/ec2-user/local-operator/.worktrees/file-provenance/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:306: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session". Set it to "fixture-scope" to keep the current behavior.
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+.                                                                        [100%]
+1 passed in 1.06s
+{
+  "kind": "recorded-state re-evaluation, NOT a native rerun",
+  "source_head": "0d4e761b4ca47875472b1e9256433e5a66c2fe90",
+  "helper_sha256": "eb7baa9e3b619b94d14d94463c70eacd74def6885578c2948373eeff730fc2ac",
+  "raw_run2_sha256": "de7cb62192f650f9d62333ca29325160d0bdb44d47c5b69a50aec9f62a917f6e",
+  "raw_run2_preserved": true,
+  "source_db_sha256": "eee1337249fa1c627f26fa3383e81b90fe364e90173e12695044e15f26667fb0",
+  "source_db_preserved": true,
+  "sqlite_backup_sha256": "e2caedf7c050f605e19cdc8de8f3bd0847fd6052862356e38d0836ddbe9dcf79",
+  "backup_readback_unchanged": true,
+  "native_run2_result": {
+    "rc": 1,
+    "PASS": 25,
+    "FAIL": 3
+  },
+  "rows": [
+    {
+      "original_raw_row": "answered member card retires from the operator inbox",
+      "key": "remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-11e9",
+      "session_id": "5598a06f15c8",
+      "source_device": "d_bd63194059fe0b12fb430243a9210be2",
+      "source_ask": "a-11e9",
+      "old_visible_query_count": 0,
+      "corrected_helper_count": 1,
+      "dismissed_at": 1794813489443,
+      "dismissed_via": "remote-attention",
+      "created_at": 1794813470707,
+      "verdict": "PASS"
+    },
+    {
+      "original_raw_row": "denied member card retires from the operator inbox",
+      "key": "remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-2c91",
+      "session_id": "5598a06f15c8",
+      "source_device": "d_bd63194059fe0b12fb430243a9210be2",
+      "source_ask": "a-2c91",
+      "old_visible_query_count": 0,
+      "corrected_helper_count": 1,
+      "dismissed_at": 1794813494404,
+      "dismissed_via": "remote-attention",
+      "created_at": 1794813491979,
+      "verdict": "PASS"
+    },
+    {
+      "original_raw_row": "cancelled member card retires from the operator inbox",
+      "key": "remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-627b",
+      "session_id": "5598a06f15c8",
+      "source_device": "d_bd63194059fe0b12fb430243a9210be2",
+      "source_ask": "a-627b",
+      "old_visible_query_count": 0,
+      "corrected_helper_count": 1,
+      "dismissed_at": 1794813498401,
+      "dismissed_via": "remote-attention",
+      "created_at": 1794813495959,
+      "verdict": "PASS"
+    }
+  ]
+}
+RECORDED-STATE PASS: exact3 existing tombstones; old query0/new helper1 each; raw run2 and source DB unchanged
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=ff4e84c287bf4cb783dfaa3a49447719 completion=/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/run-bounded-runs/ff4e84c287bf4cb783dfaa3a49447719.completion.json

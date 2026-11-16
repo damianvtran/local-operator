@@ -1,0 +1,268 @@
+{
+  "rows": [
+    {
+      "row": "namespace masks the real managed policy",
+      "expected": "/etc/opt/chrome/policies/managed/local-operator.json absent",
+      "actual": "exists=False; visible=[]",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real bridge 127.0.0.1:4099 unreachable before harness daemon",
+      "expected": "connect refused",
+      "actual": "refused=True",
+      "verdict": "PASS"
+    },
+    {
+      "row": "harness bridge daemon healthy (inside netns)",
+      "expected": "health ok",
+      "actual": "{\"status\": \"ok\", \"proto\": 1, \"extension_connected\": false, \"paired\": false, \"browser\": \"\", \"downloads_dir\": \"/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/pr2-run2/node/browser/downloads\", \"current_url\": \"\", \"current_title\": \"\", \"extension_unresponsive\": false, \"extension_version\": \"\", \"extension_proto\": 0, \"extension_expected_version\": \"0.1.27\", \"extension_update_available\": false, \"link_attached\": false, \"link_silent_s\": 0.0, \"takeover_within_s\": null, \"driven_tabs\": [], \"pending_origin\": \"\", \"driver_extension_id\": \"\", \"standby_extension_ids\": [], \"standby_labels\": [], \"unlisted_extension_count\": 0, \"authorized_extension_ids\": [], \"driver_label\": \"\", \"driver_short_id\": \"\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "policy carries the SYNTHETIC anchor + node id",
+      "expected": "operatorKeyId == synthetic key id",
+      "actual": "{\"headlessNode\": true, \"operatorAnchorPoint\": \"0413f59fc90398c3\\u2026\", \"operatorKeyId\": \"59fd5ca7aa7b4a02155b1df6ad3fbb7f\", \"nodeDeviceId\": \"d_bd63194059fe0b12fb430243a9210be2\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "extension force-installed and connected unpaired",
+      "expected": "a pairing code minted for it",
+      "actual": "{\"codes\": 1, \"chrome_alive\": true}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "policy pairing code pairs the extension",
+      "expected": "paired_connected_count>=1",
+      "actual": "{\"ok\": true, \"codes\": [], \"connected_count\": 1, \"paired_connected_count\": 1, \"expected_extension_version\": \"0.1.27\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "node is a real active headless mesh member",
+      "expected": "two loopback relays; signed operator binding",
+      "actual": "{\"network_id\": \"n_eae383330ef40ddae2d6c41f\", \"node_device\": \"d_bd63194059fe0b12fb430243a9210be2\", \"operator_device\": \"d_0495c657b95a5ba3ad0755e2c85c2769\", \"relay_ports\": [46233, 41101], \"signed_binding\": [\"d_0495c657b95a5ba3ad0755e2c85c2769\", \"n_eae383330ef40ddae2d6c41f\"], \"operator_member_capabilities\": [\"admin\", \"approve\", \"broker_credential\", \"delete\", \"list\", \"move\", \"prompt\", \"slash\", \"steer\", \"stop\", \"unattended\", \"update\", \"view\"], \"headless_node\": true}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "first open refused: origin_not_allowed",
+      "expected": "is_error, details.error_code == origin_not_allowed",
+      "actual": "{\"error_code\": \"origin_not_allowed\", \"text\": \"site http://127.0.0.1:44949 is not allowed yet. Nobody can approve anything inside this headless node's browser: call browser action='request_access' url=http:/\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "request_access raises the signed site card (site:v1:)",
+      "expected": "open ask with a site:v1: question for the origin",
+      "actual": "{\"ask\": \"a-11e9\", \"question_id\": \"site:v1:46a29d146d29f1da\", \"result\": \"asked the operator to allow http://127.0.0.1:44949 on this node (ask\\na-11e9).\\nNobody can click this headless browser: the operator approves or denies\\non their own device, signed with their operator ke\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "site card crosses real catalogue transport into synthetic operator inbox",
+      "expected": "one full remote-notice key naming node/session/ask",
+      "actual": "{\"expected_key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-11e9\", \"count\": 1, \"items\": [{\"id\": \"n_zezjhnojd7u3zsgo\", \"seq\": 1, \"session_id\": \"5598a06f15c8\", \"session_title\": \"\", \"agent_id\": \"\", \"team_id\": \"\", \"priority\": \"high\", \"title\": \"Allow http://127.0.0.1:44949 on harness-node? An agent there asked to open this exact origin in that machine's browser.\\u2026\", \"body_md\": \"runs on harness-node\", \"links_json\": \"[]\", \"key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-11e9\", \"content_hash\": \"cb1257257b9e6d33c670bccbc994be700a74152129a1af51954d9fba1a57fa87\", \"revision\": 1, \"repeat_count\": 1, \"anchor_id\": \"rev:1\", \"created_at\": 1794813470707, \"updated_at\": 1794813470707, \"read_rev\": 0, \"read_at\": null, \"read_via\": null, \"read_surface\": null, \"dismissed_at\": null, \"dismissed_via\": null, \"delivered_rev\": 0, \"delivered_by\": null, \"delivered_at\": null, \"links\": [], \"read\": false, \"dismissed\": false}]}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "wrong-key operator signature refused",
+      "expected": "decide refused at the authority seam (refused_old_signer), ask still open, origin not granted",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"{'detail': \\\"This device can't answer a node's site request. Answer it from Local Operator on your own computer (the app or lop), updated to the latest release \\u2014 not from a phone or the node itself. The card stays open until it times out, so you can answer it once you've updated.\\\"}\", \"http_status\": 409, \"http_path\": \"/v1/desktop/sessions/5598a06f15c8/answers\", \"request\": {\"ask_id\": \"a-11e9\", \"answers\": {\"site-access\": [\"approve\"]}}, \"response\": {\"detail\": \"This device can't answer a node's site request. Answer it from Local Operator on your own computer (the app or lop), updated to the latest release \\u2014 not from a phone or the node itself. The card stays open until it times out, so you can answer it once you've updated.\"}, \"surface\": \"desktop-http-remote-session\", \"remote_owner\": \"d_bd63194059fe0b12fb430243a9210be2\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "plain ask_respond from the operator surface is not the decision",
+      "expected": "refused at the authority seam (refused_old_signer), ask still open, origin not granted",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"RuntimeError: This device can't answer a node's site request. Answer it from Local Operator on your own computer (the app or lop), updated to the latest release \\u2014 not from a phone or the node itself. The card stays open until it times out, so you can answer it once you've updated.\", \"surface\": \"remote-facade\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "agent's own unsigned decide (node-local, no operator signature) refused",
+      "expected": "extension refuses (unsigned_decision), origin not granted",
+      "actual": "{\"verdict\": {\"ok\": false, \"error\": \"The node's browser refused this answer: it was not signed with your operator key. Nothing was approved. Answer from Local Operator on your own computer (the app or lop), not from the node or a phone.\", \"code\": \"unsigned_decision\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "operator's signed Approve lands on the node",
+      "expected": "decided; ask answered; `lop browser sites` lists the origin",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": true, \"error\": \"\", \"http_status\": 200, \"http_path\": \"/v1/desktop/sessions/5598a06f15c8/answers\", \"request\": {\"ask_id\": \"a-11e9\", \"answers\": {\"site-access\": [\"approve\"]}}, \"response\": {\"status\": 200, \"message\": \"Desktop session result.\", \"result\": {\"detail\": \"decided\"}}, \"surface\": \"desktop-http-remote-session\", \"remote_owner\": \"d_bd63194059fe0b12fb430243a9210be2\"}, \"ask\": \"answered\", \"sites\": \"Allowed (exact origin):\\n  http://127.0.0.1:44949\\nRemove one exact origin's decision with: lop browser sites --revoke ORIGIN\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "answered member card retires from the operator inbox",
+      "expected": "one forwarded notice, now dismissed",
+      "actual": "{\"expected_key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-11e9\", \"count\": 0, \"items\": []}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "open succeeds after approval",
+      "expected": "no error",
+      "actual": "{\"resumed\": \"auto (answer delivery)\", \"text\": \"Opened browser surface bridge:563660615:21dd934d66874750a916f618e4167abe on the browser extension: Storybook \\u2014 http://127.0.0.1:44949/iframe.html?id=browser-approvals-dock--approved&args=theme:localOp\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "light and dark screenshots rendered in their themes and differ",
+      "expected": "story root seen; rendered_fraction >= 0.01; background luminance dark < 100, light > 180; different sha256",
+      "actual": "{\"sha256\": {\"light\": \"d46200971fa6a578bdc4ab4e74a7f977255e67a8edd5c365cac774a8433985e6\", \"dark\": \"b71c5e5e7fd61119349883d7014f36c7ff1659975d6ed6d68f2999a2a2687fcc\"}, \"captures\": {\"light\": {\"theme\": \"light\", \"rendered\": true, \"attempts\": 2, \"story_root_seen\": true, \"rendered_fraction\": 0.0616, \"background_luminance\": 237.4}, \"dark\": {\"theme\": \"dark\", \"rendered\": true, \"attempts\": 1, \"story_root_seen\": true, \"rendered_fraction\": 0.065, \"background_luminance\": 27.1}}}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "deny card reaches the operator inbox",
+      "expected": "one active forwarded notice",
+      "actual": "{\"expected_key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-2c91\", \"count\": 1, \"items\": [{\"id\": \"n_272ex5yg5lerpmae\", \"seq\": 3, \"session_id\": \"5598a06f15c8\", \"session_title\": \"\", \"agent_id\": \"\", \"team_id\": \"\", \"priority\": \"high\", \"title\": \"Allow http://127.0.0.1:46131 on harness-node? An agent there asked to open this exact origin in that machine's browser.\\u2026\", \"body_md\": \"runs on harness-node\", \"links_json\": \"[]\", \"key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-2c91\", \"content_hash\": \"f50c4f393823812eabd4655dc09764fb5fc8c84f115435563f5b520291ac486c\", \"revision\": 1, \"repeat_count\": 1, \"anchor_id\": \"rev:1\", \"created_at\": 1794813491979, \"updated_at\": 1794813491979, \"read_rev\": 0, \"read_at\": null, \"read_via\": null, \"read_surface\": null, \"dismissed_at\": null, \"dismissed_via\": null, \"delivered_rev\": 0, \"delivered_by\": null, \"delivered_at\": null, \"links\": [], \"read\": false, \"dismissed\": false}]}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "denied member card retires from the operator inbox",
+      "expected": "one dismissed forwarded notice",
+      "actual": "{\"expected_key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-2c91\", \"count\": 0, \"items\": []}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "deny: signed Deny keeps the origin out and the open refused",
+      "expected": "decided; origin in sites' denied list, not allowed; open still refused",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": true, \"error\": \"\", \"http_status\": 200, \"http_path\": \"/v1/desktop/sessions/5598a06f15c8/answers\", \"request\": {\"ask_id\": \"a-2c91\", \"answers\": {\"site-access\": [\"deny\"]}}, \"response\": {\"status\": 200, \"message\": \"Desktop session result.\", \"result\": {\"detail\": \"decided\"}}, \"surface\": \"desktop-http-remote-session\", \"remote_owner\": \"d_bd63194059fe0b12fb430243a9210be2\"}, \"lists\": {\"allowed\": [\"http://127.0.0.1:44949\"], \"denied\": [\"http://127.0.0.1:46131\"]}, \"open\": {\"error_code\": \"origin_not_allowed\"}, \"resumed\": \"auto (answer delivery)\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "cancellable card reaches the operator inbox",
+      "expected": "one active forwarded notice",
+      "actual": "{\"expected_key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-627b\", \"count\": 1, \"items\": [{\"id\": \"n_w5nasnhqa6ecrrl4\", \"seq\": 5, \"session_id\": \"5598a06f15c8\", \"session_title\": \"\", \"agent_id\": \"\", \"team_id\": \"\", \"priority\": \"high\", \"title\": \"Allow http://127.0.0.1:54047 on harness-node? An agent there asked to open this exact origin in that machine's browser.\\u2026\", \"body_md\": \"runs on harness-node\", \"links_json\": \"[]\", \"key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-627b\", \"content_hash\": \"946609fa17da732980ec7850ae847e22672ed8d2441a02433f7e310f19a532b0\", \"revision\": 1, \"repeat_count\": 1, \"anchor_id\": \"rev:1\", \"created_at\": 1794813495959, \"updated_at\": 1794813495959, \"read_rev\": 0, \"read_at\": null, \"read_via\": null, \"read_surface\": null, \"dismissed_at\": null, \"dismissed_via\": null, \"delivered_rev\": 0, \"delivered_by\": null, \"delivered_at\": null, \"links\": [], \"read\": false, \"dismissed\": false}]}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "cancelled member card retires from the operator inbox",
+      "expected": "one dismissed forwarded notice",
+      "actual": "{\"expected_key\": \"remote-notice:d_bd63194059fe0b12fb430243a9210be2:5598a06f15c8:remote-ask:a-627b\", \"count\": 0, \"items\": []}",
+      "verdict": "FAIL"
+    },
+    {
+      "row": "cancelled member card: late HTTP Approve grants nothing",
+      "expected": "cancel_access -> cancelled entry and withdrawn ask; POST /answers -> 409 with the queue's withdrawn refusal; origin not allowed",
+      "actual": "{\"withdrawal\": {\"error\": false, \"details\": {\"origin\": \"http://127.0.0.1:54047\", \"state\": \"cancelled\", \"withdrawn_asks\": [\"a-627b\"], \"pending_count\": 0}}, \"ask\": \"withdrawn\", \"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"{'detail': 'the agent withdrew this question \\u2014 if you have an answer, send it as a chat message.'}\", \"http_status\": 409, \"http_path\": \"/v1/desktop/sessions/5598a06f15c8/answers\", \"request\": {\"ask_id\": \"a-627b\", \"answers\": {\"site-access\": [\"approve\"]}}, \"response\": {\"detail\": \"the agent withdrew this question \\u2014 if you have an answer, send it as a chat message.\"}, \"surface\": \"desktop-http-remote-session\", \"remote_owner\": \"d_bd63194059fe0b12fb430243a9210be2\"}, \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "no native /etc anchor read in the node process",
+      "expected": "0",
+      "actual": "0",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real /etc policy + anchor hashes unchanged",
+      "expected": "{\"/etc/opt/chrome/policies/managed/local-operator.json\": \"71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834\", \"/etc/local-operator/operators/1000.json\": \"66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11\"}",
+      "actual": "{\"/etc/opt/chrome/policies/managed/local-operator.json\": \"71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834\", \"/etc/local-operator/operators/1000.json\": \"66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "live node Chrome PID unchanged",
+      "expected": "\"MainPID=3471975\"",
+      "actual": "\"MainPID=3471975\"",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real bridge :4099 listener owner unchanged",
+      "expected": "\"LISTEN 0      2048   127.0.0.1:4099 0.0.0.0:* users:((\\\"Local Operator\\\",pid=3290711,fd=7))\"",
+      "actual": "\"LISTEN 0      2048   127.0.0.1:4099 0.0.0.0:* users:((\\\"Local Operator\\\",pid=3290711,fd=7))\"",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real `lop browser status` paired identity unchanged",
+      "expected": "[\"extension connected: yes\", \"paired:              yes\", \"identities:          1 authorised\", \"                     - Chrome extension 0.1.27.11 (lofpppoc\\u2026) driving\", \"port:                4099\"]",
+      "actual": "[\"extension connected: yes\", \"paired:              yes\", \"identities:          1 authorised\", \"                     - Chrome extension 0.1.27.11 (lofpppoc\\u2026) driving\", \"port:                4099\"]",
+      "verdict": "PASS"
+    }
+  ],
+  "facts": {
+    "product_source": "/home/ec2-user/local-operator/.worktrees/node-browser-relay-harness/local_operator/__init__.py",
+    "synthetic_operator_key_id": "59fd5ca7aa7b4a02155b1df6ad3fbb7f",
+    "node_device_id": "d_bd63194059fe0b12fb430243a9210be2",
+    "extension": {
+      "id": "lofpppoceigbphankfepghkakdjmefep",
+      "crx": "/home/ec2-user/.local-operator/browser/extension/local-operator-0.1.27.11.crx",
+      "version": "0.1.27.11"
+    },
+    "chrome_sandbox": "sandboxed",
+    "mesh": {
+      "network_id": "n_eae383330ef40ddae2d6c41f",
+      "node_device": "d_bd63194059fe0b12fb430243a9210be2",
+      "operator_device": "d_0495c657b95a5ba3ad0755e2c85c2769",
+      "relay_ports": [
+        46233,
+        41101
+      ],
+      "signed_binding": [
+        "d_0495c657b95a5ba3ad0755e2c85c2769",
+        "n_eae383330ef40ddae2d6c41f"
+      ],
+      "operator_member_capabilities": [
+        "admin",
+        "approve",
+        "broker_credential",
+        "delete",
+        "list",
+        "move",
+        "prompt",
+        "slash",
+        "steer",
+        "stop",
+        "unattended",
+        "update",
+        "view"
+      ]
+    },
+    "session_id": "5598a06f15c8",
+    "resumed_after_approve": "auto (answer delivery)",
+    "screenshots": {
+      "light": {
+        "path": "/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/pr2-run2/light.png",
+        "sha256": "d46200971fa6a578bdc4ab4e74a7f977255e67a8edd5c365cac774a8433985e6",
+        "theme": "light",
+        "rendered": true,
+        "attempts": 2,
+        "story_root_seen": true,
+        "rendered_fraction": 0.0616,
+        "background_luminance": 237.4
+      },
+      "dark": {
+        "path": "/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/pr2-run2/dark.png",
+        "sha256": "b71c5e5e7fd61119349883d7014f36c7ff1659975d6ed6d68f2999a2a2687fcc",
+        "theme": "dark",
+        "rendered": true,
+        "attempts": 1,
+        "story_root_seen": true,
+        "rendered_fraction": 0.065,
+        "background_luminance": 27.1
+      }
+    },
+    "chrome_profile_removed": true,
+    "native_anchor_reads": 0
+  },
+  "host_before": {
+    "hashes": {
+      "/etc/opt/chrome/policies/managed/local-operator.json": "71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834",
+      "/etc/local-operator/operators/1000.json": "66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11"
+    },
+    "live_chrome": "MainPID=3471975",
+    "browser_status_identity": [
+      "extension connected: yes",
+      "paired:              yes",
+      "identities:          1 authorised",
+      "                     - Chrome extension 0.1.27.11 (lofpppoc\u2026) driving",
+      "port:                4099"
+    ],
+    "live_bridge_owner": "LISTEN 0      2048   127.0.0.1:4099 0.0.0.0:* users:((\"Local Operator\",pid=3290711,fd=7))"
+  },
+  "host_after": {
+    "hashes": {
+      "/etc/opt/chrome/policies/managed/local-operator.json": "71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834",
+      "/etc/local-operator/operators/1000.json": "66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11"
+    },
+    "live_chrome": "MainPID=3471975",
+    "browser_status_identity": [
+      "extension connected: yes",
+      "paired:              yes",
+      "identities:          1 authorised",
+      "                     - Chrome extension 0.1.27.11 (lofpppoc\u2026) driving",
+      "port:                4099"
+    ],
+    "live_bridge_owner": "LISTEN 0      2048   127.0.0.1:4099 0.0.0.0:* users:((\"Local Operator\",pid=3290711,fd=7))"
+  },
+  "inner_rc": 1
+}

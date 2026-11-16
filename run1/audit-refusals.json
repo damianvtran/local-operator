@@ -1,0 +1,40 @@
+[
+  {
+    "actor": "d_025292032929afe0fcc828f9e7423917",
+    "actor_kind": "unknown",
+    "cause": "not_authorised",
+    "detail": {
+      "op": "net_stream",
+      "reason": "harness-operator may not do that here (it does not hold the 'approve' capability)",
+      "refusal_code": "not_authorised"
+    },
+    "epoch": 1,
+    "event": "authorisation_refused",
+    "network_id": "n_fa845ef430e702a595b2ce2e",
+    "outcome": "refused",
+    "schema": "lop.mesh.audit.v1",
+    "seq": 8,
+    "subject": "n_fa845ef430e702a595b2ce2e",
+    "ts": 1794812349.992,
+    "ts_iso": "2026-11-16T06:59:09.992Z"
+  },
+  {
+    "actor": "d_025292032929afe0fcc828f9e7423917",
+    "actor_kind": "unknown",
+    "cause": "not_authorised",
+    "detail": {
+      "op": "net_stream",
+      "reason": "harness-operator may not do that here (it does not hold the 'approve' capability)",
+      "refusal_code": "not_authorised"
+    },
+    "epoch": 1,
+    "event": "authorisation_refused",
+    "network_id": "n_fa845ef430e702a595b2ce2e",
+    "outcome": "refused",
+    "schema": "lop.mesh.audit.v1",
+    "seq": 13,
+    "subject": "n_fa845ef430e702a595b2ce2e",
+    "ts": 1794812361.174,
+    "ts_iso": "2026-11-16T06:59:21.174Z"
+  }
+]

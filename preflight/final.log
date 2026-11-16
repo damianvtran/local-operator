@@ -1,0 +1,45 @@
+Running scope as unit: nbh-pr2-final-preflight.scope
+[run_bounded] memory budget 1536 MiB (explicit); sampled owned child group and escaped descendants
+SOURCE PASS /home/ec2-user/local-operator/.worktrees/node-browser-relay-harness/local_operator/__init__.py
+AST PASS scripts/e2e/node_browser_harness.py
+AST PASS scripts/e2e/node_browser_mesh.py
+AST PASS tests/unit/scripts/test_node_browser_harness.py
+DEPENDENCY PASS PIL
+DEPENDENCY PASS pytest
+DEPENDENCY PASS httpx
+DEPENDENCY PASS uvicorn
+DEPENDENCY PASS fastapi
+DEPENDENCY PASS pyright
+DEPENDENCY PASS flake8
+CRX PASS lofpppoceigbphankfepghkakdjmefep 0.1.27.11 /home/ec2-user/.local-operator/browser/extension/local-operator-0.1.27.11.crx
+STORYBOOK PASS /home/ec2-user/local-operator-ui/.worktrees/sb-pr1833/storybook-static
+0 errors, 0 warnings, 0 informations
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+/home/ec2-user/local-operator/.worktrees/file-provenance/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:306: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session". Set it to "fixture-scope" to keep the current behavior.
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+......................................                                   [100%]
+38 passed in 2.56s
+SOURCE PASS /home/ec2-user/local-operator/.worktrees/node-browser-relay-harness/local_operator/__init__.py
+AST PASS scripts/e2e/node_browser_harness.py
+AST PASS scripts/e2e/node_browser_mesh.py
+AST PASS tests/unit/scripts/test_node_browser_harness.py
+DEPENDENCY PASS PIL
+DEPENDENCY PASS pytest
+DEPENDENCY PASS httpx
+DEPENDENCY PASS uvicorn
+DEPENDENCY PASS fastapi
+DEPENDENCY PASS pyright
+DEPENDENCY PASS flake8
+CRX PASS lofpppoceigbphankfepghkakdjmefep 0.1.27.11 /home/ec2-user/.local-operator/browser/extension/local-operator-0.1.27.11.crx
+STORYBOOK PASS /home/ec2-user/local-operator-ui/.worktrees/sb-pr1833/storybook-static
+NAMESPACE PASS lo-only; real policy masked; host bridge unreachable
+{"sas": "407000", "fingerprint": "6CVS-FW6D-M7TC-ER5J-BW28-Q96T-SY7F-637J"}
+mesh link 2873e14375cdf6a197eb4027530f5c15 to d_3790cd2a49eb09a52b7217a386b47449 closed by its reader: ConnectionResetError: [Errno 104] Connection reset by peer
+RELAYS PASS {"network_id": "n_40f2c00ef997d85104a409ab", "node_device": "d_6dc1a4505b729c490a9256414ff21d51", "operator_device": "d_3790cd2a49eb09a52b7217a386b47449", "relay_ports": [44191, 43601], "signed_binding": ["d_3790cd2a49eb09a52b7217a386b47449", "n_40f2c00ef997d85104a409ab"], "operator_member_capabilities": ["admin", "approve", "broker_credential", "delete", "list", "move", "prompt", "slash", "steer", "stop", "unattended", "update", "view"]}
+ROUTE PASS POST /v1/desktop/sessions/{session_id}/answers
+mesh link 1cd90620ff366a55cd8c15f726a4b659 to d_3790cd2a49eb09a52b7217a386b47449 closed by its reader: ConnectionError: the peer closed the connection
+PREFLIGHT BOOTSTRAP PASS; relays closed
+ALL PREFLIGHT ROWS PASS
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=c465d962fa6a4a57a568ba5abab8803f completion=/home/ec2-user/.local-operator/sessions/4b22292b70a8/scratchpad/run-bounded-runs/c465d962fa6a4a57a568ba5abab8803f.completion.json
