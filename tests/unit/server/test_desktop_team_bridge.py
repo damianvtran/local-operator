@@ -1264,6 +1264,42 @@ async def test_status_carries_the_screening_summary_and_survives_damage(api):
     assert summary["rejected_24h"]["by_category"] == {"unknown": 1}
 
 
+async def test_status_store_reads_run_off_the_event_loop(api, monkeypatch):
+    """Serve stall, 2026-11-15: ``read_screening_status`` ran on the loop thread.
+
+    The dump showed ``status`` -> ``read_screening_status`` -> ``_live_generation``
+    on MAIN: a SQLite read that waits out the store's busy timeout inside the
+    call, so a contended store held every other route (``/health`` included).
+    Both of the route's store reads (screening and the F8 delivery hold) must
+    run on a worker thread.
+    """
+
+    from local_operator.team_bridge import store as tb_store
+
+    threads: dict[str, str] = {}
+    real_screening = tb_store.read_screening_status
+    real_hold = desktop_team_bridge._delivery_hold
+
+    def screening(config_dir):
+        threads["screening"] = threading.current_thread().name
+        return real_screening(config_dir)
+
+    def hold(config_manager):
+        threads["hold"] = threading.current_thread().name
+        return real_hold(config_manager)
+
+    monkeypatch.setattr(tb_store, "read_screening_status", screening)
+    monkeypatch.setattr(desktop_team_bridge, "_delivery_hold", hold)
+    client, _root, _discipline = api
+
+    response = await client.get("/v1/desktop/team-bridge/status")
+
+    assert response.status_code == 200
+    loop_thread = threading.current_thread().name
+    assert set(threads) == {"screening", "hold"}
+    assert loop_thread not in threads.values(), threads
+
+
 async def test_status_screening_summary_survives_non_finite_timestamps(api):
     """PR #3189 review round 2, m4: ``created_at`` = +inf/-inf/``'NaN'`` and an
     infinite breaker deadline still answer 200 with strict-JSON numbers. (A
