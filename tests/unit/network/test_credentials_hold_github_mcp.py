@@ -56,7 +56,8 @@ from tests.unit.network.test_credentials_github import (  # noqa: F401 — fixtu
     github_api,
     owner,
 )
-from tests.unit.network.test_credentials_held_offline import _stop_owner
+from tests.unit.network.test_credentials_held_offline import _restart_owner, _stop_owner
+from tests.unit.network.test_credentials_offline_hold import _hold_records
 from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtures by import
     STUB_PROVIDER,
     idp,
@@ -158,6 +159,74 @@ def _past_window(grant: Grant) -> None:
     assert net_fixtures.wait_for(
         lambda: time.time() * 1000 > grant.grant_expires_at_ms + 200, timeout_s=10.0
     )
+
+
+def test_the_tool_github_env_survives_the_owner_and_renews_on_return(
+    held: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool's redaction-gated door, not only the inner git-env helper.
+
+    A broker/cache-only success misses a caller that drops the env before its
+    child starts. Keep the real lent_github_env path and one session partition
+    through grant -> offline hold -> owner return; the last step must replace
+    the old grant and retire its durable held status, not just keep a bearer.
+    """
+    client, net = held.client, held.mesh
+    session_id = "github-held-tool-session"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(net.b.root))
+    registered = 0
+
+    def register(_token: str) -> None:
+        # The consumer must supply a working redaction sink. Count registrations
+        # without retaining or printing the synthetic installation bearer.
+        nonlocal registered
+        registered += 1
+
+    def tool_has_token() -> bool:
+        env, _ = github_mod.lent_github_env(
+            session_id=session_id, register=register, client=client
+        )
+        return bool(env.get("GH_TOKEN"))
+
+    assert tool_has_token(), "the tool received no initial GitHub environment"
+    first = client.grants.peek(github_mod.GITHUB_KEY, session_id)
+    assert isinstance(first, Grant)
+    assert first.grant_id
+
+    _stop_owner(net)
+    _past_window(first)
+    assert tool_has_token(), "the tool lost GH_TOKEN while the offline hold was valid"
+    offline = client.grants.peek(github_mod.GITHUB_KEY, session_id)
+    assert isinstance(offline, Grant)
+    assert offline.grant_id == first.grant_id
+    offline_state = mcp_state.load(net.network_id, net.b.root)[github_mod.GITHUB_KEY]
+    assert offline_state["state"] == "held"
+    served = [
+        row
+        for row in _hold_records(net.b.root)
+        if row["event"] == "credential.held_served"
+        and row["detail"]["grant_id"] == first.grant_id
+    ]
+    assert len(served) == 1
+
+    # Install the existing minter-factory seam BEFORE restart: reconnect work
+    # may ask before the helper returns, and it too must use the loopback issuer.
+    monkeypatch.setattr(
+        github_mod, "default_minter", lambda: github_mod.GithubMinter(base_url=held.api.url)
+    )
+    returned = _restart_owner(net, monkeypatch)
+    try:
+        assert tool_has_token(), "the tool received no GitHub environment after owner return"
+        fresh = client.grants.peek(github_mod.GITHUB_KEY, session_id)
+        assert isinstance(fresh, Grant)
+        assert fresh.grant_id != first.grant_id, "owner return reused the held grant"
+        assert not fresh.held_offline
+        row = mcp_state.load(net.network_id, net.b.root)[github_mod.GITHUB_KEY]
+        assert row["state"] == "synced", "owner return left the old held status live"
+        assert "until" not in row
+        assert registered == 3
+    finally:
+        returned.stop()
 
 
 def test_github_and_mcp_are_served_through_the_hold_and_refused_after_it(held: Any) -> None:
