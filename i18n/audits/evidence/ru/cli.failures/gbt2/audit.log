@@ -1,0 +1,33 @@
+# audit.log — actual command output, ru/cli.failures gbt2, auditor session 2753becb3d9e, 2026-11-16
+$ git rev-parse HEAD HEAD~1
+80a55b20802ed13a7379fef90644f2345b63066a
+f0689a27c2af546e71be2a2783e6c6e86bc5004d
+$ sha256sum en/ru catalogues + en context
+8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea  local_operator/i18n/catalogues/en/cli.failures.json
+b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f  local_operator/i18n/catalogues/en/cli.failures.context.json
+224acab136701ec6539e5792547d57a12139129fa36468cd7d69d6affa3a69b5  local_operator/i18n/catalogues/ru/cli.failures.json
+$ catalogues.catalogue_sha256('en','cli.failures')
+8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/generate.py --check
+generate.py --check: committed artifacts are stale — regenerate with
+  .venv/bin/python scripts/i18n/generate.py
+(the emitter is pinned to Node 24 — CI's setup-node major — and its output is normalised to be node-major stable; see the note in scripts/i18n/emit.mjs)
+  orphaned: local_operator/mobile/web/src/i18n/bundled.es.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.fr.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.hi.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.ru.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.ur.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.vi.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts
+exit=1
+$ parity script (key order, placeholder names, rich cell_len)
+keys 5 5 same_order True
+cli.failures.error_line placeholders_equal True ['message', 'prog'] backticks 0 0 cells_en 24 cells_ru 25
+cli.failures.required placeholders_equal True ['names'] backticks 0 0 cells_en 45 cells_ru 47
+cli.failures.invalid_choice placeholders_equal True ['argument', 'choices', 'value'] backticks 0 0 cells_en 68 cells_ru 75
+cli.failures.invalid_command placeholders_equal True ['command', 'group'] backticks 0 0 cells_en 34 cells_ru 39
+cli.failures.github_borrow_timeout placeholders_equal True ['owner', 'seconds'] backticks 0 0 cells_en 83 cells_ru 98
+exit=0

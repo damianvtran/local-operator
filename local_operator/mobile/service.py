@@ -16,7 +16,12 @@ import signal
 from local_operator import supervisors
 from local_operator.logger import configure_console_logging, quiet_wire_clients
 from local_operator.mobile.auth import load_password, store_description
-from local_operator.mobile.daemon import DEFAULT_PORT, MobileDaemon, build_app
+from local_operator.mobile.daemon import (
+    DEFAULT_PORT,
+    MobileDaemon,
+    SessionTable,
+    build_app,
+)
 from local_operator.procstate import install_loop_signal_handlers
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,30 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     # what a reader wants) would silently restore the flood.
     configure_console_logging()
     quiet_wire_clients()
+    # The push worker's one INFO line per wire attempt is the ONLY local record
+    # of what this machine pushed (the 2026-11-15 audit found 0 push lines here
+    # and had to reconstruct 17 pushes from the attention store). The root
+    # floor above is WARNING, so that one logger is raised explicitly; its only
+    # INFO record is that line, roughly one per push.
+    logging.getLogger("local_operator.mobile.push_worker").setLevel(logging.INFO)
+    # Before anything opens a descriptor in volume: launchd starts this job at a
+    # 256-descriptor soft limit, which a busy phone plus sessions can exhaust
+    # (the "Asleep / Not answering" + sqlite "unable to open database file"
+    # report). See `mobile/fdlimit.py` for the cap and why it is in-process.
+    from local_operator.mobile import fdlimit, log_collapse
+
+    # If the limit is reached anyway, asyncio's accept loop logs a traceback on
+    # every wakeup (~7 MB/s measured): one copy per minute plus a count instead.
+    log_collapse.install("asyncio")
+    limits = fdlimit.raise_soft_limit()
+    fdlimit.record(limits)
+    if limits["before"] != limits["soft"]:
+        logger.info(
+            "raised open-file soft limit from %s to %s (hard %s)",
+            limits["before"],
+            limits["soft"],
+            limits["hard"] if limits["hard"] is not None else "unlimited",
+        )
     password = load_password()
     if not password:
         # First-run is an operator action, not a silent default: the daemon
@@ -84,7 +113,14 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     from local_operator.mobile.push_transport import build_push_lane
     from local_operator.paths import config_dir as _push_config_dir
 
-    push_lane = build_push_lane(_push_config_dir()) if dial else None
+    # The push's "N conversations need you" is the LISTING's unread count —
+    # the number the phone's badge shows — read from this table, which the
+    # daemon below adopts. Both lane paths (start and late tunnel) get it;
+    # without it the worker fell back to a lifetime store census and the
+    # 2026-11-14 banner read "47502 conversations need you".
+    table = SessionTable()
+    unread_count = table.listing_unread_count
+    push_lane = build_push_lane(_push_config_dir(), unread_count=unread_count) if dial else None
     if push_lane is not None:
         logger.info("mobile push armed for tunnel %s", push_lane.transport.computer)
     # The factory lets the scan arm the lane when `lop tunnel create` runs after
@@ -94,7 +130,12 @@ async def amain(port: int = DEFAULT_PORT) -> int:
         password=password,
         dial_registrants=dial,
         push_lane=push_lane,
-        push_lane_factory=(lambda: build_push_lane(_push_config_dir())) if dial else None,
+        push_lane_factory=(
+            (lambda: build_push_lane(_push_config_dir(), unread_count=unread_count))
+            if dial
+            else None
+        ),
+        table=table,
     )
     # Follow ``display.*`` writes made by other processes (design review round 1
     # on #1746, D1/D2): the daemon's durable folds read the process-cached

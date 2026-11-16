@@ -169,6 +169,31 @@ def test_slims_the_wheel_in_place_with_a_valid_record(tmp_path: Path) -> None:
     assert not list(tmp_path.glob(".slim-*")), "the temporary wheel was left behind"
 
 
+def test_repack_uses_maximum_lossless_compression(tmp_path: Path) -> None:
+    # Structured resources distinguish level 9 from the default level 6; a
+    # tiny repeated string would compress identically and miss the regression.
+    payload = b"".join(
+        f'{{"id":{i},"label":"runtime resource","enabled":true}}\n'.encode() for i in range(4000)
+    )
+    expected_sizes = {}
+    for level in (6, 9):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("data.json", payload, compresslevel=level)
+        with zipfile.ZipFile(buffer) as archive:
+            expected_sizes[level] = archive.getinfo("data.json").compress_size
+    assert expected_sizes[9] < expected_sizes[6]
+
+    wheel = _build_wheel(
+        tmp_path, {"demo/__init__.py": b'VALUE = "runtime"\n', "demo/data.json": payload}
+    )
+    original = _read(wheel)
+    SLIM["slim_wheel"](wheel)
+    assert _read(wheel) == original
+    with zipfile.ZipFile(wheel) as archive:
+        assert archive.getinfo("demo/data.json").compress_size == expected_sizes[9]
+
+
 def test_the_slimmed_wheel_keeps_the_source_wheels_permissions(tmp_path: Path) -> None:
     """``mkstemp`` creates 0600 and ``os.replace`` keeps it; the slimmer must not."""
     wheel = _build_wheel(tmp_path, {"demo/__init__.py": MODULE.encode()})

@@ -135,26 +135,43 @@ def _spawn_successor(
         )
 
 
-def _reap(child: subprocess.Popen[bytes]) -> None:
+def _reap(child: subprocess.Popen[bytes], *, exit_wait_s: float = 30.0) -> None:
     """Kill the child's whole process group by exact pid and wait for it.
 
     A real runtime owns a lease and a journal; leaving one running would hold the
     session against the NEXT cell in this file.
+
+    ``exit_wait_s`` bounds how long a group that DENIED the SIGKILL may take to
+    finish exiting before the denial is judged a failure. It exists so a rig can
+    exercise the bound quickly; every cell uses the default.
     """
     if child.poll() is None:
         try:
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except PermissionError:
-            # Darwin can return EPERM if the child exits after poll() but is
-            # still an unreaped zombie. Popen.poll() reaps a newly exited child;
-            # wait() completes that ownership contract before checking the group.
-            # An exited leader alone is insufficient: descendants may still own
-            # the lease. Accept only ESRCH after reaping, never a denied probe or
-            # a group that remains alive, and do not retry an unowned group.
+        except PermissionError as denied:
+            # Darwin returns EPERM for a group whose members are EXITING, in two
+            # shapes. (1) The child exited after poll() and is an unreaped zombie:
+            # poll() now reaps it. (2) The leader is mid-exit (P_WEXIT) but not a
+            # zombie yet, so waitpid(WNOHANG) still reports it running and poll()
+            # is None. Shape (2) is routine here, not a race we invented: a
+            # viewer-less self-move records ``STAGE_HANDOFF`` and then retires BY
+            # ITSELF (server.py ``_apply_queued_cwd_move`` -> accept_handoff ->
+            # ``_retire_for_queued_move`` -> request_stop), so the cell that waits
+            # for the handoff reaps a runtime already on its way out (seen twice
+            # on tui-e2e macos-latest, jobs 132375062820 and 132578485414).
+            #
+            # So wait for the leader on the event, bounded: a leader that does
+            # not exit in time is a LIVE group that denied the signal, which is
+            # a failure, never retried. An exited leader alone is insufficient:
+            # descendants may still own the lease, so accept only ESRCH from the
+            # group probe after reaping, never a denied probe or a live group.
             if child.poll() is None:
-                raise
+                try:
+                    child.wait(timeout=exit_wait_s)
+                except subprocess.TimeoutExpired:
+                    raise denied from None
             child.wait(timeout=30)
             try:
                 os.killpg(child.pid, 0)

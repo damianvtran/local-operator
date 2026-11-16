@@ -50,24 +50,85 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   the resolver could not pin down** (opaque substitution, empty expansion, unknown
   cwd) — unless it lands on something already critical, as an empty expansion
   collapsing to `/` does. Goes to the judge.
+  Also HIGH, wherever the path is: unlocking write-protected files for removal
+  — `chmod -R u+w`/`+w`/`755`/`-N`, the same through `find -exec` or `xargs`,
+  `setfacl -R`, `chflags nouchg`/`noschg`, `chattr -i` — on anything outside
+  this session's own directory that its ledger does not record. That is a
+  forced removal, even where `rm -rf` of the same path alone would be LOW.
+- **Only an approving operator answer to an ask is consent.** An ask that
+  timed out, expired, was withdrawn, dismissed or declined, is still open, or
+  was "answered" by the agent itself, a relay or a declining pick never
+  authorises a delete. Asking about a path also ranks deleting, moving away or
+  unlocking it at least HIGH, however deep it is (a path equal to, under or
+  above one the ask names, in its question, labels or descriptions; globs and
+  brace lists included; asks from this session, its parents and its
+  subagents, up to 7 days old). Such a call is refused without the judge,
+  unless this session's creation ledger records the path or the operator
+  approved it; under a broad dir the ask names (a direct child of `~`, or one
+  with over 1000 entries) the judge decides instead. Once the operator gives a
+  real yes, that ask never refuses on its own: a question they answered is
+  read like consent (question and labels, never a description), a path their
+  pick covers keeps its usual rank, and one only an option they did not pick
+  names goes to the judge, where citing the ask for it never verifies.
+  Overwrites keep their usual rank. Leave the path in place and report it as
+  waiting for the operator's answer.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.
-  Also LOW: a HIGH path this session (or a subagent it launched) recorded
+  Also LOW: a HIGH path this session's family (see below) recorded
   creating, and `git worktree remove <path>` of a clean linked worktree.
+  Heredoc and quoted body arguments are data, not commands: a quoted-delimiter
+  body (`gh pr comment N --body "$(cat <<'EOF' … EOF)"`) is never read for
+  delete words or targets, while a body fed to a shell (`bash <<EOF`, `| sh`)
+  and the `$(…)` inside an unquoted `<<EOF` body are still walked.
 
 ## Cleaning up what you made
 
 Deleting your own rig directories and worktrees works without asking, through
-three routes the checkpoint can verify. Everything CRITICAL is still refused.
+the routes below the checkpoint can verify; so does a finished worktree another
+session made. Everything CRITICAL is still refused.
 
 - **Creation ledger.** After every bash call the loop records the directories it
   created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
-  `git worktree add <path>`, `git clone <url> [<dir>]` — inside a `for` loop, one
-  candidate per loop value (a `$(…)` or unknown loop list records nothing). Rows live in
+  `git worktree add [--detach|-d] <path>` (also `git -C <repo> worktree add …`),
+  `git clone <url> [<dir>]` — inside a `for` loop, one candidate per loop value
+  (a `$(…)` or unknown loop list records nothing). Every host records the same
+  way — a headless or mesh-spawned session included; nothing is gated on a
+  desktop surface. A worktree also gets a row for its `.git` file: on Linux a
+  directory's stamp is its ctime, which moves whenever an entry in the tree
+  root changes, and the `.git` file keeps the row matching after that. A
+  worktree row with no such companion (written by an older runtime) or no
+  stamp at all still matches while the tree's `.git` gitdir file is older than
+  the row itself: any later `git worktree add` at that inode writes a newer
+  one, and a moved, relinked or rewritten `.git` fails closed. Rows live in
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
+  A creation inside a loop is recorded for every loop value, including
+  `for r in a b; do (cd $r; git worktree add .worktrees/x); done`; a loop whose
+  later cwds cannot be named (a `cd $r` outside a subshell with relative
+  values, a value that is not a directory) records nothing for them, and a
+  relative delete after such a `cd` ranks as unresolved. That per-loop-value
+  cwd only ever adds to what a delete is ranked against: the delete is also
+  ranked where the guard placed it before it modelled loop `cd`s, so a loop
+  never ranks a delete lower than that.
+- **A session's family shares ownership.** What a session, its parents (any
+  ancestor) or its subagents (any descendant) created counts as that session's
+  own, with every own-path rule below, so a cleanup subagent may remove the
+  worktrees its parent made. Lineage comes only from the harness's own spawn
+  records (`<config_dir>/guardrails/lineage.jsonl`, `origin.json`), never from
+  message text or the environment. A parent that is running while its subagent
+  cleans up does not count as an "owning session running". Two narrower rules:
+  a sibling's or cousin's linked worktree (same subagent tree) is yours only
+  for `git worktree remove <exact path>` without `--force`, when it is clean
+  (ignored files allowed), no PR/MR is open or unreadable, and neither its
+  creator nor any other session is running in it — git refuses a dirty tree
+  and keeps the branch, so that removal loses nothing; `rm -rf`, `--force` or
+  any other delete of it stays HIGH and names the creator. And `rm -rf` or a
+  forced removal of an ANCESTOR's tree still counts its non-regenerable
+  ignored files (an ignored `.env` you did not make) as dirty, so the judge
+  sees them; a plain `git worktree remove` follows git's own rule. An
+  unrelated session's tree is never yours.
   A later delete of exactly that path, or anything inside it, ranks LOW —
   unless another session's ledger row sits at or under the target, or the
   target is or holds a git work tree or repository this session's ledger does
@@ -82,14 +143,20 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 - **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
   is LOW when the path is a registered linked worktree with no tracked or
   untracked change, no ignored entry beyond regenerable output (`node_modules`,
-  `.venv`, `__pycache__`, `build`, `dist` …) and no repository nested inside
+  `.venv`, `__pycache__`, `build`, `dist`, `dist-ssr` …) and no repository nested inside
   that output, and HEAD on a branch or in some
   ref — AND it is idle: no running session other than yours owns it (created
   it, or has its cwd inside) and its branch has no open PR (GitHub) or MR (GitLab) on the
   repo's remote. An open PR or MR is refused outright, at any state and even with an earlier
   answered ask: finish or close it first. A running owner, or (for a tree that is
   not your own) a PR state nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed
-  or timed out), goes to the judge with those facts. An interrupted delete can leave a half-removed tree
+  or timed out), goes to the judge with those facts. When `gh`/`glab` fails,
+  git decides instead: one bounded `git ls-remote origin` (8 s; plus a bounded
+  `git fetch` of the default branch if its tip is not local), or the
+  already-fetched refs if origin cannot be reached. The PR state reads "none"
+  only when the branch tip is an ancestor of `origin/<default>` AND the
+  remote branch, if any, is too; a squash-merged branch, a remote branch with
+  newer commits, or stale refs that do not prove it stay unknown. An interrupted delete can leave a half-removed tree
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the
   ordinary ranking. Prefer this to
@@ -101,7 +168,7 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **Your own worktree.** A linked worktree the ledger records for this session
-  (or a subagent it launched) is yours to remove, by `git worktree remove
+  or its family (above) is yours to remove, by `git worktree remove
   [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
   reaches only your own trees (up to 16 per command; their checks run in
   parallel under one deadline, and any past either bound goes to the judge). It ranks LOW, with no judge call, only when it is
@@ -112,7 +179,37 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   out) does not hold your own clean tree: removal keeps the branch, so nothing
   is lost and neither the forge nor the judge is asked. A known open PR or MR is
   refused outright; any other shortfall (dirty, locked, busy, `git status`
-  failed or timed out, another running session) goes to the judge. Ignored
+  failed or timed out, another running session) goes to the judge — with one
+  exception: a **detached** own worktree (`git worktree add --detach`, no
+  branch) under the repository's `.worktrees/` directory, whose HEAD some branch,
+  remote-tracking ref or tag still contains, ranks LOW even with uncommitted
+  changes, for `git worktree remove [--force] <exact path>` and `rm -rf` of
+  its path — or a glob that matches only your own trees, as ledger LOW does
+  elsewhere; a glob that also reaches someone else's tree still holds. There
+  is no branch whose work could be lost and no commit is lost, so what goes
+  is your own scratch (a `merge-tree`/`read-tree` index, edited files). The
+  same tree anywhere else, a detached tree whose HEAD no ref contains
+  (commits made only there — `git tag` or `git branch` it first), a
+  repository nested inside it, or a lock, live cwd or other running session
+  keeps the judge. For your own tree the process inventory is always read
+  fresh, never from the 30-second cache, and a live cwd counts only when it
+  is someone else's: your own eval kernel and bash children (recorded by the
+  session that spawned them, since subagents share one harness process), your
+  ancestor's and descendant's, and processes of your registry-recorded harness
+  that no session spawned do not make your own tree busy. A sibling
+  subagent's shell or kernel, another session's process, an orphan with no
+  session record, or an inventory or process table that cannot be read keeps
+  it busy, and the judge is told each holder's pid, command and session, or
+  why the inventory failed. On Linux a same-user process whose
+  `/proc/<pid>/cwd` reads "Permission denied" (non-dumpable — Chromium and
+  Electron helpers — or set-id/capability-privileged, such as `(sd-pam)`) is
+  not attributable: it counts as a holder only when its readable open files
+  or mappings point inside the tree, and is otherwise ignored and named in the
+  facts ("N same-user processes had an unreadable cwd …; ignored"). Their
+  `fd/` and `maps` sit behind the same kernel check, so such a process with
+  only its cwd inside a tree is not seen — an accepted residual risk: these
+  are system and sandbox processes, not agent work. An unreadable `/proc`
+  still fails closed. Ignored
   entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
   or local config) never count against your own tree: removing it deletes them
   with no judge call, exactly as `git worktree remove` does — move a secret you
@@ -126,6 +223,29 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   (`~/repo/.worktrees/{a,b}` works); a relative `.worktrees/a`, or a path only
   in an option's description, names nothing (live ask a-1d54, 2026-11-11). Another session's
   worktree, a primary checkout, `$HOME` and the state root keep their ranking.
+- **A finished worktree another session made.** `git worktree remove --force`,
+  `rm -rf` of the exact tree, or a glob matching only such trees ranks LOW with
+  no judge call, plus a short warning listing the facts, when ALL hold: a
+  registered linked tree, clean (no tracked, untracked or ANY ignored entry —
+  a `.venv` or `node_modules` name proves nothing about its contents), not
+  locked, no live cwd; HEAD on a named branch that points at it; HEAD an
+  ancestor of the commit origin advertises for its default branch (read with
+  `git ls-remote --symref origin HEAD`, no fetch; your local
+  `origin/<default>` must equal it — run `git fetch` first if it is stale); no
+  open PR or MR (an unreadable forge fails, even when git alone proves the
+  branch merged: that fallback never earns this route); and no running owner, with the
+  creation ledger and session registry both readable. A parent directory
+  holding only such trees loses that objection and is ranked on its own data.
+  Not covered, by design: squash- or rebase-merged branches (no ancestry),
+  trees with ignored content, trees with no ledger creator row (pre-ledger),
+  detached HEADs — those go to the judge, or to an `ask` naming each exact path.
+- **Path-valued credential variables.** A credential-named variable whose whole
+  value is one absolute or `~/` path (`GOOGLE_APPLICATION_CREDENTIALS`) resolves
+  like that literal path, so `rm -f "$GOOGLE_APPLICATION_CREDENTIALS"` of an old
+  key file is ranked by where it lands (CRITICAL under a protected root). Every
+  refusal, judge brief, journal line and preview shows it as
+  `$NAME <credential path>`, never the path. Token values, URLs, relative words
+  and shell syntax keep the credential refusal: spell the path literally.
 - **In-place edits are writes, not deletes.** `sed -i` / `perl -i` rewrite a
   file's content and remove no path, so they rank like any write: CRITICAL on
   the state root, `config.yml`, `secrets/` and session evidence, LOW elsewhere
@@ -226,9 +346,29 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   inside a quoted script or pager setting, or a working directory there — is
   at least HIGH, so a misparsed writer costs a judge call, never a silent
   LOW. A glob counts when it could reach those trees (`~/.local-operator/sess*`).
-  `sed`, `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
-  (`w`, `.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
-  they rank HIGH when they name session state. Under a working directory that
+  One exception, for reads only: one subagent lineage is one owner, so a
+  session treats its ancestors' and descendants' scratchpads (any depth, by
+  `parent` links in the harness lineage registry or `origin.json`) as its own
+  for FILES — an existing regular file (not a link, not a directory, not the
+  pad itself) in one of them, handed to any program, `node -e
+  '…readFileSync(…)'` or `node <child pad>/x.mjs` included, ranks as it would
+  in your own scratchpad: LOW. Every spelling, the resolved one included,
+  must land in such a pad, and the word must not be named as an output nor
+  handed to a `sed` that runs code (`e`, `s///e`, `-f`). Siblings, cousins,
+  agent-opened and unrelated sessions inherit nothing (a sibling's read still
+  passes with a git-tracked script); evidence files keep their ranking.
+  Recognisable deletes and writes into a lineage member's scratchpad (`rm`,
+  `mv`, `cp`, `tee`, `>`, `-o`, `sed -i`/`-I`, delete one-liners) stay HIGH,
+  because it is a live session's working state (what you created there is
+  already credited through the creation ledger). Code an interpreter runs is
+  opaque: given a lineage FILE it is ranked as for your own scratchpad, so it
+  could rewrite or remove that one file; given a directory or the pad root it
+  stays HIGH.
+  `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
+  (`.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
+  they rank HIGH when they name session state; nor is `sed`, unless every flag
+  is a known non-writing one (no `-i`, no `-f`) and its script has no `w`,
+  `W` or `e` at all (`sed -n '1,135p' <file>` is a read). Under a working directory that
   cannot be determined (`cd $(…)`, a glob `cd`, `CDPATH`), naming an evidence
   file (`origin.json`, `transcript.jsonl` …) is HIGH. The `write`, `edit` and `browser` (screenshot/recording `path`)
   tools refuse those files the same way. An interpreter that computes the path
@@ -241,7 +381,15 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 session they opened (one the harness knows no parent or opener for — no
 in-process parent, no lineage-registry row, no `origin.json`; a missing or
 symlinked `origin.json` alone never makes a session operator-opened), or their answer to `ask` as recorded in the ask store
-(`sessions/<id>/asks.jsonl`, answered on the terminal, desktop or phone). In a
+(`sessions/<id>/asks.jsonl`) and answered on a local operator surface: the
+terminal or TUI, or the desktop app or its attached pane on a runtime it
+started. The runtime stamps who answered (`answered_by.surface`) itself and
+never takes the answering frame's `by`. A trusted surface is recorded only
+when the connection proved the in-memory operator capability on that frame.
+Answers from the phone portal, a mesh peer, or any process that merely read the
+session's `control_key` (your own `bash` included) are recorded as `remote` or
+`unverified`. They settle the ask but are never consent, so do not answer your
+own asks through the socket: it only sends the delete to the judge. In a
 subagent or an agent-opened workstream the user rows are the delegating agent's
 words, so there only store-verified asks count. An ask id (`a-xxxx`) cited by a
 peer message, the intent or the command is looked up only in this session's

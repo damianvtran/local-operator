@@ -344,7 +344,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # description; same reading on both LOP_ASK_NONBLOCKING arms. The start
     # budget (bench_context_budget.py) absorbs it with headroom on both arms, so
     # that ceiling is unchanged.
-    "ask": 1195,
+    # 1195 -> 1210 (+15, incident 2026-11-14 ask a-20fc): the queued tail now says a
+    # timeout is never consent to delete or overwrite ("only where it is
+    # reversible" already covers the rest; trimmed on the rebase over #3926 so
+    # bench_context_budget.py's start budget still passes). Measured by this test
+    # on the default (queued) arm; the blocking tail is unchanged.
+    # 1210 -> 1268 (+58, E2E 44ab2361d833 remote relay): one off-wire notes
+    # bullet saying a relay of a NODE session's forwarded card re-raises that
+    # card in the operator's inbox, its answer never comes back to the relaying
+    # session, and withdraw/the relay cap do not apply (manager requirement:
+    # documented where the model reads `relay`). Notes only — the wire schema
+    # and description are byte-identical, so the wire ledger above is unchanged.
+    "ask": 1268,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only

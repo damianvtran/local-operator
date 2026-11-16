@@ -32,6 +32,7 @@ CONSTRAINTS, each from an incident or a measurement:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import signal
@@ -42,6 +43,8 @@ from typing import Any
 from local_operator import procname
 from local_operator.i18n.keys import cli_permissions as _k
 from local_operator.i18n.text import tr
+
+logger = logging.getLogger(__name__)
 
 _t = tr("cli.permissions")
 
@@ -220,8 +223,18 @@ def _developer_identities(team: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for match in re.finditer(r'^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"', result.stdout, re.M):
         sha1, name = match.groups()
-        if name.startswith("Developer ID Application:") and name.endswith(f"({team})"):
-            found.append((sha1, name))
+        if not (name.startswith("Developer ID Application:") and name.endswith(f"({team})")):
+            continue
+        # ONLY THE ORGANIZATION'S IDENTITY (``procname.SIGNING_AUTHORITY``). The
+        # team id survived the individual-to-organization conversion, so the
+        # suffix test above also matches the retired individual certificate —
+        # which BTM and the keychain dialog would then show by its personal
+        # name. It is skipped here, so setup reports "no identity" and runtimes
+        # stay ad-hoc rather than signing with it.
+        if not procname.signing_authority_allowed(name):
+            logger.warning("skipping signing identity %r: not %s", name, procname.SIGNING_AUTHORITY)
+            continue
+        found.append((sha1, name))
     return found
 
 
@@ -247,6 +260,9 @@ def _restore_optin(prior: dict[str, object] | None) -> None:
         str(prior["identity"]),
         str(prior["team"]),
         always_allow_confirmed=bool(prior.get("always_allow_confirmed")),
+        # ``read_signing_optin`` only returns organization-signed records, so the
+        # name it carries always passes the write's own refusal.
+        name=str(prior.get("name") or ""),
     )
 
 
@@ -268,7 +284,13 @@ def _setup() -> int:
         return 1
     identities = _developer_identities(team)
     if not identities:
-        print(_t(_k.setup_no_identity(team=team)), file=sys.stderr)
+        # The organization's name rides in the team slot: an individual identity
+        # of the same team may well be in the keychain, and "no identity for
+        # team SHA2U6KT7V" would then read as false. Existing key, so no new copy.
+        print(
+            _t(_k.setup_no_identity(team=f"{team} ({procname.SIGNING_AUTHORITY_ORG})")),
+            file=sys.stderr,
+        )
         return 1
     sha1, name = identities[0]
     print(_t(_k.setup_explain(name=name)))
@@ -286,7 +308,7 @@ def _setup() -> int:
     # Recorded BEFORE signing because ``publish_team_runtime`` reads the record;
     # ``always_allow_confirmed`` stays False until the operator says otherwise,
     # which keeps unattended updates from signing until then.
-    procname.write_signing_optin(sha1, team, always_allow_confirmed=kept)
+    procname.write_signing_optin(sha1, team, always_allow_confirmed=kept, name=name)
     result = procname.publish_team_runtime_result(sys.executable, interactive=True)
     if result.image is None:
         _restore_optin(prior)
@@ -294,7 +316,7 @@ def _setup() -> int:
         return 1
     if result.signed:
         always = _ask(_t(_k.setup_always_allow()))
-        procname.write_signing_optin(sha1, team, always_allow_confirmed=always)
+        procname.write_signing_optin(sha1, team, always_allow_confirmed=always, name=name)
     else:
         # The image already existed, so no codesign ran and no keychain
         # dialog was answered: asking now would record "Always Allow" for an

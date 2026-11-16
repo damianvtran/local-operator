@@ -1,0 +1,112 @@
+{
+ "schema": 1,
+ "audit_id": "c1esa1",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "tui.session_move",
+ "audit_date": "2026-11-11",
+ "audited_revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+ "audited_revision_note": "Target es file is a PRE-MERGE shard outside the catalogue tree; HEAD does not bind its bytes. The exact audited on-disk target sha256 is recorded below.",
+ "key_count": {
+  "en": 7,
+  "target": 7,
+  "group_total": 22
+ },
+ "verdict": "passed",
+ "result": "no blocker, no major — status passed; verdict clean-with-findings (3 minor, 3 nit)",
+ "findings": [
+  {
+   "id": "N2",
+   "severity": "nit",
+   "key": "tui.session_move.ambiguous / tui.session_move.to_needs_device",
+   "current": "Usa /move <ruta> para un directorio de trabajo, o /move <sesión> --to <dispositivo> para mover una sesión. · --to requiere un dispositivo: /move --to <dispositivo|local>",
+   "problem": "en distinguishes <peer> (ambiguous) from a 'device' (to_needs_device); es renders both as 'dispositivo', which is accurate for the --to target but drops the peer sense the shipped CLI help keeps: cli.sessions_help.peer = 'listar las sesiones de un dispositivo par', cli.sessions_help.move_queue 'al mover a un par'. Not misleading (the value really is a device name), so nit only; the two new strings are at least consistent with each other.",
+   "suggested": "/move <sesión> --to <par> … and keep <dispositivo|local> in to_needs_device as it stands (en says 'device' there), or accept 'dispositivo' in both."
+  },
+  {
+   "id": "N3",
+   "severity": "nit",
+   "key": "tui.session_move.cannot_wait",
+   "current": "esta vista no puede esperar — desde una terminal: `lop sessions move <id> --to <to> --wait <seconds>`",
+   "problem": "en says 'from a shell'; es says 'desde una terminal'. Both words are shipped (the catalogue keeps 'shell' English in 'sin un bucle de shell', 'Presupuesto de consultas de shell', and has a near-identical remedy in cli.permissions.setup.refused.isolated: 'Ejecuta el comando desde tu propio shell de inicio de sesión'), so this is consistency, not meaning: the user is already in a terminal when reading this line.",
+   "suggested": "esta vista no puede esperar — desde un shell: `lop sessions move <id> --to <to> --wait <seconds>`"
+  }
+ ],
+ "auditor": {
+  "agent": "i18n-auditor (lopdev team), c1-au-es-A",
+  "session": "96bf9fded81d",
+  "model": "deepseek/deepseek-flash",
+  "actual_model_source": "session model header (no model-switch notice observed this session)",
+  "independent_from_translator_session": true,
+  "translator": {
+   "agent": "i18n-translator",
+   "model": "openai/gpt-6.1-sol"
+  },
+  "date": "2026-11-11",
+  "independence": "I authored none of this copy: no translation was written, edited or proposed as a patch. Findings are reported only; the suggested wordings are for the translator/manager to apply."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/tui.session_move.json",
+   "revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+   "sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/tui.session_move.context.json",
+   "sha256": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573"
+  },
+  "target_locale": {
+   "path": "<scratchpad>/c1-prep/es.json",
+   "sha256": "6efa2c270acc737b81e1d8596e387fc52e2598f787b4c83f2a512fee3803a1a1",
+   "tracked": false
+  },
+  "source_notes": {
+   "path": "<scratchpad>/c1-prep/keys.json",
+   "sha256": "ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc"
+  }
+ },
+ "artifacts": {
+  "report.md": "1e15f7b2cffa5cb1d5f2be49876f7090921a19ee29ec120a7ebb4faa02fe1936",
+  "audit.log": "b733dd97e97d87eb281824eca469cbcdb9819a425be7e31c53887064337f652c",
+  "checks.py.txt": "b42030e56ccaabd742c95798efe606528b7e3d5f85c9901ecc0c8f95ca64aba7"
+ },
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "N2",
+   "N3"
+  ],
+  "counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 0,
+   "nit": 2
+  }
+ },
+ "check_output": [
+  {
+   "cmd": "python3 scripts/i18n/check.py",
+   "result": "ok — 217 file(s) scanned, 2540 literal(s) at or below the baseline, catalogues consistent; 83 advisory finding(s) (report-only until activated)"
+  },
+  {
+   "cmd": ".venv/bin/python <mechanical sweep, retained as checks.py.txt>",
+   "result": "22/22 keys; ordered parity with the en catalogues; placeholder name/kind parity; parse_message accepted all values; backtick spans identical; no invisible or edge-space characters; final-period and dash-spacing parity; widths measured"
+  },
+  {
+   "cmd": ".venv/bin/python -c 'runtime.render_message(<each es value>, sample params, \"es\")'",
+   "result": "all 22 render; samples recorded in audit.log"
+  },
+  {
+   "cmd": "python3 scripts/i18n/ledger.py append --dry-run (then --apply) --receipt …",
+   "result": "see receipt.json companions and audit.log tail"
+  }
+ ],
+ "auditor_note": "Independent audit of a pre-merge translation shard; I authored no es copy and edited no translation, catalogue, sidecar, ledger allowance or generated file. Ledger rows record this verdict for es/cli.config and es/tui.session_move.",
+ "limitations": [
+  "LLM semantic judgement; no native-speaker attestation.",
+  "No rendered terminal frames were captured: this group declares no maxCells, and the boxed/wrapping CLI lines were assessed by measured cell width, not by a screenshot.",
+  "The target file is a pre-merge shard outside the catalogue tree; its sha256 is recorded exactly and the catalogue bytes it becomes are not yet bound to this audit.",
+  "No translation/MT service was used for comparison or back-translation."
+ ]
+}

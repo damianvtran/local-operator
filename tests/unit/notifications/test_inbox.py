@@ -465,7 +465,7 @@ def test_an_agent_spawned_session_gets_no_notify_tool(tmp_path: Path) -> None:
     assert workstream._build_tool_context().notify_inbox is None
     assert workstream._notify_inbox_callable() is not None
 
-    def placed(name: str, kind: str) -> Any:
+    def placed(name: str, kind: str, **attested: str) -> Any:
         session = make_session(tmp_path / name, ScriptedStream([]))
         (Path(session.transcript.directory) / MESH_STAMP_NAME).write_text(
             json.dumps(
@@ -473,7 +473,7 @@ def test_an_agent_spawned_session_gets_no_notify_tool(tmp_path: Path) -> None:
                     "version": 1,
                     "session_id": "s",
                     "home_device": "d_node",
-                    "origin": {"kind": kind, "source_device": "d_head"},
+                    "origin": {"kind": kind, "source_device": "d_head", **attested},
                 }
             ),
             encoding="utf-8",
@@ -483,7 +483,11 @@ def test_an_agent_spawned_session_gets_no_notify_tool(tmp_path: Path) -> None:
     agent_placed = placed("a", "agent")
     assert agent_placed._notify_tool_callable() is None
     assert agent_placed._notify_inbox_callable() is not None
-    assert placed("u", "user")._notify_tool_callable() is not None
+    # A user create keeps the tool only when its stamp carries the operator
+    # attestation (#4001 default-deny); an unattested one is withheld like an
+    # agent's.
+    assert placed("u", "user", started_by="operator")._notify_tool_callable() is not None
+    assert placed("legacy", "user")._notify_tool_callable() is None
     mine = make_session(tmp_path / "m", ScriptedStream([]))
     assert mine._notify_tool_callable() is not None
     assert mine._build_tool_context().notify_inbox is not None

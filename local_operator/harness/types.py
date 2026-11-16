@@ -2277,6 +2277,10 @@ class AskRowQuestion(AskQuestion):
     human_required: bool = False
     #: The authority block frozen at issuance (S-3), present only when supplied.
     bridge: dict[str, Any] | None = None
+    #: A headless node's site approval: the inputs its ``site:v1:`` question id
+    #: binds, so the SIGNER can rebuild the id and the card it shows
+    #: (``browser_bridge/site_approval.verify_site_card``). Present only then.
+    site: dict[str, Any] | None = None
     # The row's options are the strict option PLUS the carriage's id, so the
     # field narrows to the seat-bearing subclass. A list is mutable and therefore
     # invariant, which pyright reports even though every ``AskRowOption`` IS an
@@ -2875,6 +2879,21 @@ class ToolContext(BaseModel):
     #: :attr:`enqueue_ask`: a plain callable returning ``{"ok", "text"/"error",
     #: "details"}``, resolved once per session turn.
     withdraw_ask: Callable[..., Mapping[str, Any]] | None = None
+    #: A headless node's site cards (``browser_bridge/site_approval.py``):
+    #: ``withdraw_site_asks(origin, keep_question_id="")`` settles (``moot``)
+    #: every OPEN site card in this session for ``origin`` except the one bound
+    #: to ``keep_question_id``, and returns the ask ids it withdrew. The browser
+    #: tool calls it on ``cancel_access`` and before raising a fresh card, so a
+    #: card bound to a dead extension entry never blocks the live one (review
+    #: U3/Q1). Bound beside :attr:`withdraw_ask`, ``None`` where it is.
+    withdraw_site_asks: Callable[..., list[str]] | None = None
+    #: ``site_ask_lapses(origin)``: how many of this session's site cards for
+    #: ``origin`` lapsed unanswered since the operator's last admitted chat
+    #: message. ``request_access`` refuses a further card past the one re-raise
+    #: (review U15); an operator reply re-opens one card plus one re-raise
+    #: (review R4-1). Bound beside
+    #: :attr:`withdraw_site_asks`, ``None`` where it is.
+    site_ask_lapses: Callable[[str], int] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
     #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
@@ -4890,6 +4909,25 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # Opt-in transport invariant, not a role-name special case. Failover must
+    # recheck it against the model and content it actually dispatches.
+    required_image_count: int = Field(default=0, ge=0)
+
+    def validate_required_images(self) -> None:
+        if not self.required_image_count:
+            return
+        count = sum(
+            isinstance(block, ImageContent)
+            for message in self.messages
+            for block in message.content
+        )
+        if (
+            not self.model.supports_images
+            or not self.model.supports_images_stated
+            or count < self.required_image_count
+        ):
+            raise ValueError("required image evidence cannot be sent to the serving model")
+
     # A reasoning-effort ceiling the harness set DELIBERATELY (an empty
     # truncation retry stepped the effort down one rung). The session's
     # frozen auto-effort override must not raise the request back above it:

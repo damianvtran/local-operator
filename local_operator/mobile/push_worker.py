@@ -86,6 +86,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from local_operator.config import read_config_values
@@ -94,6 +95,8 @@ from local_operator.mobile import push_handles
 from local_operator.mobile.push_credentials import with_sound_readiness
 from local_operator.mobile.push_payload import (
     SOUND_CUSTOM_FIELD,
+    TYPE_COMPLETION,
+    TYPE_DIGEST,
     attention_emit_key,
     attention_payload,
     completion_emit_key,
@@ -105,7 +108,11 @@ from local_operator.mobile.push_payload import (
 )
 from local_operator.notifications.catalog_view import selected_push_stem
 from local_operator.session.attention import AttentionStore
-from local_operator.session.runtime.presence import PRESENCE_TTL_S, desktop_presence
+from local_operator.session.runtime.presence import (
+    PRESENCE_TTL_S,
+    desktop_attending_session,
+    desktop_presence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +130,29 @@ PUSH_WORKER_STATE_NAME = "mobile-push-worker.json"
 #: the two constants are equal, which is the guard an import would only move.
 BURST_LIMIT = 3
 
-#: The bound on a presence deferral (§2.3, decision 2). A suppressed push is
-#: DEFERRED, never dropped silently: the worker re-checks while the completion is
-#: still ``unseen`` and still inside this window, and emits when the window
-#: expires even if the user is still looking at the desktop app. The window is
-#: what keeps "do not interrupt a user who is already looking at the work" from
-#: becoming "never tell the phone".
-DEFERRAL_WINDOW_S = 5 * 60
+#: THE PRESENCE DEFERRAL HAS NO TIME BOUND, and that AMENDS ADR 0006 §2.3
+#: decision 2 (the amendment text lands in local-operator-mobile, owned by
+#: session 316765a40496; this file only implements it). The ADR's 5-minute
+#: window (``DEFERRAL_WINDOW_S``, now retired) released a deferred completion
+#: while the desktop was STILL attended — i.e. it pushed exactly the banners the
+#: desktop had deliberately not raised. The operator, 2026-11-15 on TestFlight
+#: 1067: "It still seems like a lot of routine wakes and task completions are
+#: notifying… I feel like I'm still seeing more notifications on mobile than I
+#: see pop up on desktop." The rule this file now holds is PHONE <= DESKTOP: a
+#: deferred completion leaves only when the presence lapses and it is still
+#: unseen and unannounced; a read drops it, a desktop banner (a ``deliveries``
+#: claim) drops it, and an attended window showing its own conversation drops
+#: it (:meth:`PushWorker._settle_deferred`). It is still a delay and not a
+#: silent loss for the case the window existed for — the user walks away with
+#: unread work the desktop never announced — because the lapse releases it.
+
+#: The desktop feed's burst WINDOW (``desktop_feed.ITEM_BURST_WINDOW_S``):
+#: at most ``BURST_LIMIT`` singles per window, then one digest, then nothing
+#: until the next window. A literal for the same reason ``BURST_LIMIT`` is one,
+#: and asserted equal by the same test. Per-window rather than per-pass because
+#: a trickle (one completion per 2 s scan) never exceeds a per-pass limit, so
+#: the phone banner'd every item of a burst the desktop capped at 3 + 1 digest.
+BURST_WINDOW_S = 10.0
 
 #: How often a deferred item re-reads the presence. It is the presence TTL and
 #: not an independent number on purpose: a desktop lease stops being believed one
@@ -144,6 +167,13 @@ PRESENCE_RECHECK_S = PRESENCE_TTL_S
 EMIT_RETRY_ATTEMPTS = 3
 EMIT_RETRY_WINDOW_S = 2 * 60
 EMIT_RETRY_INTERVAL_S = EMIT_RETRY_WINDOW_S / (EMIT_RETRY_ATTEMPTS - 1)
+
+#: The most ``exclude`` ids the cloud accepts on one emit. Not a tuning knob: it
+#: mirrors agent-server's ``internal/sessionpush/wire.go`` ``validateExclude``,
+#: which refuses a longer list outright (``400 exclude/max_10``), so an emit
+#: carrying 11 ids is not narrowed by the cloud but lost. ``_preference_gate``
+#: keeps every body it sends within it.
+MAX_EXCLUDE_IDS = 10
 
 #: The three kinds of emit this worker composes. A DIGEST is the coalesced
 #: catch-up of more than ``BURST_LIMIT`` eligible rows (§2.1); an ATTENTION emit
@@ -331,8 +361,9 @@ class _PendingEmit:
 
     ``deferred_since`` is set only for a presence-deferred item, and it is what
     makes the deferral a delay rather than a drop: the item is still pending, so
-    it is still ahead of its cursor, and the window bounds how long that can
-    last.
+    it is still ahead of its cursor. Nothing time-bounds it any more; the
+    presence lapse, a read, or a desktop claim ends it (see ``BURST_WINDOW_S``'s
+    neighbour comment for the amendment).
     """
 
     key: str
@@ -386,7 +417,8 @@ class PushWorker:
         presence: Callable[[], bool] | None = None,
         live_devices: Callable[[], Sequence[str]] | None = None,
         report_block: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
-        unread_count: Callable[[], int] | None = None,
+        unread_count: Callable[[], int | None] | None = None,
+        attending: Callable[[str], bool] | None = None,
     ) -> None:
         """``computer`` is the opaque per-account handle §3.2 carries.
 
@@ -402,6 +434,16 @@ class PushWorker:
         devices a correction would actually reach once §3.2's ``exclude`` has
         been subtracted (`[]` is "no device this machine may deliver to").
 
+        ``unread_count`` is the DAEMON'S LISTING count
+        (``SessionTable.listing_unread_count``) whenever a daemon composes this
+        worker — the lane passes it — so the push's number is the badge's number.
+        It answers ``None`` when the listing could not be read, and the alert
+        then makes no count claim (``push_payload.wire_count``). Leaving it
+        unset falls back to :meth:`_store_count`, which is for a daemon-less
+        caller ONLY: on 2026-11-14 the production lane left it unset and the
+        operator's first push read "Task complete · 47502 conversations need
+        you" — that census over a long-lived machine's lifetime history.
+
         ``report_block`` is the S4c coalescer's ``piggyback(CARRIER_EMIT)``. It
         is OPTIONAL and the body falls back to the bare §3.2 payload rather than
         an empty block: an empty block is a claim about every device ("nothing
@@ -414,7 +456,24 @@ class PushWorker:
         self.computer = computer
         self._clock = clock
         self._presence = presence if presence is not None else _desktop_attended
+        #: ``session_id -> bool``: is an attended desktop window showing it?
+        #: UNCACHED by default for the reason ``_desktop_attended`` is: a True
+        #: here DROPS the completion, a terminal decision.
+        self._attending = (
+            attending
+            if attending is not None
+            else (lambda session_id: desktop_attending_session(session_id, cached=False))
+        )
+        #: The per-window burst budget (see ``BURST_WINDOW_S``). In memory: a
+        #: restart opens a fresh window, as the desktop feed's restart does.
+        self._window_started = float("-inf")
+        self._window_singles = 0
+        self._window_digested = False
         self._live_devices = live_devices if live_devices is not None else self._live_device_ids
+        # Whether gate 4 was injected (a test seam). The preview gate derives the
+        # live list from its own single registry load in production
+        # (:meth:`_previews_allowed`); only an injected list overrides that.
+        self._live_devices_injected = live_devices is not None
         self._report_block = report_block
         self._unread_count = unread_count if unread_count is not None else self._store_count
         self._cursors = WorkerCursors()
@@ -475,6 +534,7 @@ class PushWorker:
             self._load(stamp)
             attended = self._presence()
             self._collect(stamp, attended)
+            self._settle_deferred(attended)
             records = self._drain(stamp, attended)
             self._advance(stamp)
             self._save()
@@ -786,7 +846,56 @@ class PushWorker:
         is a property of the computer rather than of the row.
         """
         state = self.store.state(conversation)
-        return bool(state.get("unseen")) and bool(state.get("notify"))
+        if not (bool(state.get("unseen")) and bool(state.get("notify"))):
+            return False
+        return self._desktop_would_announce(conversation, state.get("kind"))
+
+    def _desktop_would_announce(self, conversation: str, kind: Any) -> bool:
+        """The desktop banner's OWN gates, asked of a pushed completion (parity).
+
+        WHY: the operator, 2026-11-14 — "only notify under the same circumstances
+        that the UI notifies … It seems to be now giving me notification spam on
+        every single completed task". The store's ``notify`` flag (gate 2 above)
+        already settles wake/monitor triggers, peer-only runs, ``no_reply`` quiet
+        ends and the proactive veto, but the desktop's completion banner
+        (``serving.SessionRuntime._announce_completion``) refuses three more
+        cases the push lane never asked about, and on a machine running dozens
+        of delegated agent sessions the second one is the spam:
+
+        1. ``notifications_enabled()`` False — the env kill switch or the
+           config flag (``tui/notify.py``);
+        2. ``session_may_announce`` False — a session the operator's own
+           listings hide (subagent, exec worker, agent-opened run), judged by
+           ``resume.is_user_session`` on the transcript dir's ``origin.json``;
+        3. ``kind`` outside ``BRIDGE_NOTIFIABLE_KINDS`` (complete/error/retired).
+
+        Each is the SAME function or constant the desktop calls, never a
+        re-derivation, so the two surfaces cannot drift. The session handle the
+        desktop predicate takes is shaped here from ``<config>/sessions/<id>`` —
+        the layout ``mobile.daemon._durable_user_session_dir`` and the listing
+        address — and a conversation that is not a ``session/<id>`` identity has
+        no directory: ``session_may_announce``'s own documented answer for that
+        is YES ("a question that cannot be put must not silence a banner"), so it
+        is followed here rather than invented. Runs on the worker's thread with
+        a config read and one small file read; nothing touches the loop.
+        """
+        from local_operator.server.utils.desktop_sessions import BRIDGE_NOTIFIABLE_KINDS
+        from local_operator.session.runtime.serving import session_may_announce
+        from local_operator.tui.notify import notifications_enabled
+
+        if kind not in BRIDGE_NOTIFIABLE_KINDS:
+            return False
+        if not notifications_enabled():
+            return False
+        session_id = _session_id_of(conversation)
+        directory = (
+            self.config_dir / "sessions" / session_id
+            # The daemon's own traversal guard (``_durable_user_session_dir``).
+            if session_id not in (None, "", ".", "..") and Path(session_id).name == session_id
+            else None
+        )
+        handle = SimpleNamespace(transcript=SimpleNamespace(directory=directory))
+        return session_may_announce(handle)
 
     def _add_completion(
         self,
@@ -842,6 +951,69 @@ class PushWorker:
         )
         if attended and existing.deferred_since is None:
             existing.deferred_since = now
+        if existing.deferred_since is not None:
+            self._absorb_superseded(conversation, existing)
+
+    def _absorb_superseded(self, conversation: str, keep: _PendingEmit) -> None:
+        """Fold this conversation's OLDER never-attempted completions into ``keep``.
+
+        BOUNDED STATE, now that a deferral has no time limit. INVARIANT: at most
+        ONE never-attempted completion per conversation is pending, so the
+        deferred set is bounded by the number of distinct conversations that are
+        unseen, ``notify``, and unannounced by the desktop — each of which a
+        read, a desktop claim or the presence lapse ends. An older completion of
+        the same conversation is already stale by construction (``_compose``
+        refuses a key the record has moved past), so pushing it is never right;
+        its positions move into ``keep`` rather than being resolved, so the
+        cursor still waits for the item that actually speaks for them.
+        """
+        for key, item in list(self._pending.items()):
+            if (
+                item is keep
+                or item.kind != EVENT_COMPLETION
+                or item.first_attempt_at is not None
+                or item.conversations != (conversation,)
+            ):
+                continue
+            keep.publications += tuple(p for p in item.publications if p not in keep.publications)
+            keep.supersedes += tuple(p for p in item.supersedes if p not in keep.supersedes)
+            del self._pending[key]
+
+    def _settle_deferred(self, attended: bool) -> None:
+        """End the deferrals the desktop has already answered: phone <= desktop.
+
+        Run every pass, BEFORE the drain, so a presence lapse never releases an
+        item the desktop has dealt with. Two ways the desktop answers, and both
+        RESOLVE the item (a drop, not a loss — the desktop is where the user is):
+
+        1. RUNG 1 — an attended window is SHOWING this conversation. Mirrors
+           ``desktop_feed.DesktopFeed._focus_policy_for``
+           (``local_operator/server/utils/desktop_feed.py`` — the
+           ``if presence.attending(session_id): return None`` branch): the card
+           is in band on its own stream and the desktop raises nothing, so the
+           phone raises nothing either, now or after the user leaves. Both read
+           the SAME predicate, ``DesktopPresence.attending``. This also covers
+           the feed's bridged-conversation skip (``if identity in bridged:
+           continue``): a bridged session the user is looking at is rung 1 here.
+        2. ANNOUNCED — a desktop surface claimed the toast
+           (``AttentionStore.delivered``). For a session the window is NOT
+           showing, ``_focus_policy_for`` answers ``"always"``: the desktop
+           banners it and that banner claims the token. The user at the desk was
+           told; repeating it on the phone when they walk away is the duplicate.
+
+        What stays deferred is what the desktop has NOT announced (e.g. a
+        bridged session whose renderer frame is ``when_unfocused`` while another
+        window is focused); the presence lapse releases those, still unseen.
+        """
+        for item in list(self._pending.values()):
+            if item.kind != EVENT_COMPLETION or item.deferred_since is None:
+                continue
+            conversation = item.conversations[0] if item.conversations else ""
+            session_id = _session_id_of(conversation) or ""
+            token = self.store.state(conversation).get("completion_token")
+            announced = isinstance(token, str) and self.store.delivered(conversation, token)
+            if announced or (attended and self._attending(session_id)):
+                self._resolve(item)
 
     # -- the emit ------------------------------------------------------------
 
@@ -863,7 +1035,8 @@ class PushWorker:
     def _emissions(self, now: float, attended: bool) -> list[tuple[str, _PendingEmit]]:
         """The queue in the order it must leave, applying the burst rule.
 
-        More than ``BURST_LIMIT`` eligible completions in ONE pass become a
+        More than the window's remaining ``BURST_LIMIT`` budget of eligible
+        completions in ONE pass become a
         single digest rather than four banners (ADR §2.1's "catch-up is bounded
         and coalesced"; the same ceiling the desktop feed holds). The digest
         replaces the batch rather than following the first ``BURST_LIMIT`` of it,
@@ -900,7 +1073,24 @@ class PushWorker:
         # one event, which is exactly the duplicate the ``Idempotency-Key``
         # exists to prevent.
         fresh = [(key, item) for key, item in ready_completions if item.first_attempt_at is None]
-        if len(fresh) > BURST_LIMIT:
+        # THE DESKTOP'S PER-WINDOW BUDGET (``desktop_feed`` BURST, "per WINDOW,
+        # not per tick"). INVARIANT: within one ``BURST_WINDOW_S`` the phone
+        # raises at most ``BURST_LIMIT`` fresh completion banners plus ONE
+        # digest — never more than the desktop's own 3 singles + 1 digest, so a
+        # trickle cannot out-buzz the desk, and deferred items released together
+        # on a presence lapse fold exactly as a fresh burst does. Retries are not
+        # counted: they are the same emit, already budgeted.
+        if now - self._window_started >= BURST_WINDOW_S:
+            self._window_started = now
+            self._window_singles = 0
+            self._window_digested = False
+        if fresh and self._window_digested:
+            # The window already said "N more"; later items wait for the next
+            # window, still pending and still re-gated, as the desktop holds them.
+            held = {key for key, _item in fresh}
+            ready_completions = [pair for pair in ready_completions if pair[0] not in held]
+            fresh = []
+        if len(fresh) > BURST_LIMIT - self._window_singles:
             digest = self._digest(fresh)
             if digest is not None:
                 key, item = digest
@@ -908,8 +1098,10 @@ class PushWorker:
                 for old_key in folded:
                     self._pending.pop(old_key, None)
                 self._pending[key] = item
+                self._window_digested = True
                 remaining = [(key, item) for key, item in ready_completions if key not in folded]
                 return [*remaining, (key, item), *others]
+        self._window_singles += len(fresh)
         ordered = sorted(
             ready_completions,
             key=lambda pair: min(pair[1].sequences) if pair[1].sequences else 0,
@@ -1003,20 +1195,19 @@ class PushWorker:
 
         Three cases, and they are the whole of the scheduling policy:
 
-        - a completion still inside its deferral is due when the presence is
-          gone, or when the window has expired — the hard bound that keeps a
-          focused window from silencing the phone for good (§2.3). The OTHER way
-          a deferral ends, an ack, never reaches here: a completion the user has
-          read is no longer a candidate at all, so ``_collect`` has already
-          discarded the item (see :meth:`_discard_positions`) and nothing is
-          emitted for it;
+        - a deferred completion is due ONLY when the presence is gone. There is
+          no time bound (ADR 0006 §2.3 decision 2, amended 2026-11-15: phone <=
+          desktop — see ``BURST_WINDOW_S``'s neighbour comment). The other ways
+          a deferral ends never reach here: an ack makes it a non-candidate, so
+          ``_collect`` discarded it (:meth:`_discard_positions`), and a desktop
+          claim or rung-1 view resolved it in :meth:`_settle_deferred`;
         - an item that has never been attempted is due as soon as it exists;
         - anything already attempted retries on the wire interval, with the same
           key. An item that has exhausted its attempts is resolved by
           :meth:`_attempt`, so it never reaches this test again.
         """
         if item.deferred_since is not None:
-            return not attended or now - item.deferred_since >= DEFERRAL_WINDOW_S
+            return not attended
         if item.last_attempt_at is None:
             return True
         return now - item.last_attempt_at >= EMIT_RETRY_INTERVAL_S
@@ -1042,7 +1233,9 @@ class PushWorker:
             item.first_attempt_at = now
         item.attempts += 1
         item.last_attempt_at = now
+        started = time.monotonic()
         verdict = self.transport(dict(item.body), idempotency_key=item.key)
+        _log_wire_attempt(item, verdict, time.monotonic() - started)
         if isinstance(verdict, EmitAccepted):
             self._resolve(item)
             return EmitRecord(kind=item.kind, idempotency_key=item.key, accepted=True, status=202)
@@ -1069,13 +1262,16 @@ class PushWorker:
 
         Composed at the first attempt rather than when the item was queued, so
         ``count`` is the machine's unread count at the moment of composition
-        (§3.2's field table) — a deferred item may sit for five minutes, and a
+        (§3.2's field table) — a deferred item may sit for hours, and a
         count taken when it was queued would be a number the phone reads as
         current.
         """
         count = self._count()
         emit_id = item.emit_id or uuid.uuid4().hex
         payload: dict[str, Any]
+        # The digest's member kinds, for the preference gate below; empty for
+        # the other two forms (a completion carries its own ``kind``).
+        digest_kinds: Sequence[str] = ()
         sound, sound_custom = self._sound()
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
@@ -1093,15 +1289,33 @@ class PushWorker:
                 # construction. Resolved, not re-keyed — the move that changed
                 # the content has its own cursor read and its own emit.
                 return None
+            # FLOOR AT 1 (PR #3989 review R1). The snapshot ``count`` reads was
+            # built before this tick collected the item, so a completion
+            # published in between is missing from it — and when it is the only
+            # unread conversation the banner would read "0 conversations need
+            # you". The candidacy gate already proved THIS conversation is
+            # unseen and listed, so 1 is a true lower bound. ``None`` (the
+            # degraded read) stays ``None``: inventing a number there is exactly
+            # what the degraded form refuses.
+            completion_count = None if count is None else max(1, count)
             payload = completion_payload(
                 computer=self.computer,
                 conversation=handle,
                 completion_token=token,
                 kind=kind,
                 emit_id=emit_id,
-                count=count,
+                count=completion_count,
                 sound=sound,
                 sound_custom=sound_custom,
+                # The alert names the session and previews the turn (operator
+                # request, 2026-11-14), composed by the desktop's own composer
+                # from this directory — only when every live phone allows
+                # previews (``_previews_allowed``) AND the desktop's privacy
+                # switch is on (applied inside compose). This runs on the tick's
+                # worker thread, never the event loop, because compose reads
+                # the transcript.
+                session_dir=_session_dir_of(self.config_dir, session_id),
+                previews=self._previews_allowed(),
             )
         elif item.kind == EVENT_DIGEST:
             # The coalesced catch-up: a set, so it names no conversation and
@@ -1115,6 +1329,7 @@ class PushWorker:
                 member_kind = self.store.state(conversation).get("kind")
                 if isinstance(member_kind, str):
                     kinds.append(member_kind)
+            digest_kinds = kinds
             payload = digest_payload(
                 computer=self.computer,
                 count=count,
@@ -1135,6 +1350,10 @@ class PushWorker:
                 # detected change has nothing here at all.
                 exclude=list(item.exclude) if item.exclude else None,
             )
+        gated = self._preference_gate(payload, digest_kinds)
+        if gated is None:
+            return None
+        payload = gated
         rows = list(self._report_block()) if self._report_block is not None else None
         if SOUND_CUSTOM_FIELD in payload:
             # The cloud picks the custom file PER DEVICE, so an emit naming one
@@ -1324,6 +1543,151 @@ class PushWorker:
 
     # -- the machine-local gates --------------------------------------------
 
+    def _preference_gate(
+        self, payload: dict[str, Any], digest_kinds: Sequence[str]
+    ) -> dict[str, Any] | None:
+        """Apply the devices' push preferences to one composed payload.
+
+        Returns the payload to send (possibly with a widened ``exclude``), or
+        ``None`` when no live device wants it — the caller then resolves the
+        item exactly as it does a stale one, so the cursor still moves.
+
+        Why: the operator asked for it verbatim — "there should be notification
+        preferences in the settings, I have no way to turn off notifications or
+        turn off certain types of notifications so now I just have to deal with
+        notification spam until this setting is available". iOS cannot filter a
+        remote push on the device, so the filter lives here, where the emit is
+        decided. The switches and their defaults are
+        ``push_devices.PREFERENCE_KEYS``.
+
+        Category mapping: a completion's ``kind`` ``error`` is ``errors``; every
+        other kind (``complete``, ``retired``, and also ``interrupted`` and
+        ``closed``) is ``completions``. A digest is the set of its members'
+        categories (no readable member kind counts as ``completions``). The
+        attention correction belongs to no category: only ``enabled`` governs it.
+
+        THE PER-COMPUTER LIMITATION, stated rather than implied: the cloud's
+        wire forbids ``exclude`` on a completion emit (§3.2), and the cloud fans
+        a completion out to every device of the computer. So a completion is
+        gated per COMPUTER: skipped when NO live device wants its category, sent
+        as today when at least one does — which means a device that turned a
+        category off still receives it while another device of the same
+        computer keeps it on. True per-device filtering of completions needs a
+        cloud change and is deferred to it. The attention and digest forms DO
+        permit §3.2's ``exclude`` ("the devices that must NOT be woken"), so
+        there the devices that do not want the emit are added to it, and the
+        emit is skipped only when nobody is left.
+
+        THE EXCLUDE CAP: the cloud refuses more than ``MAX_EXCLUDE_IDS``
+        exclude ids. When widening would cross it, the emit falls back to the
+        per-computer rule above for that one emit: it goes out carrying only
+        the ack-hint excludes it already had (capped too), so a device that
+        opted out may be woken, rather than the whole emit being refused.
+
+        Kept apart from ``_is_candidate`` and the count on purpose: those are
+        the store's gates, these are the device's. A missing or unreadable
+        registry imposes no preference (the pre-preferences behaviour) rather
+        than silencing the phone; gate 4's live list still decides whether
+        there is a device at all, and since that list reads the same registry,
+        an unreadable registry leaves it empty and the item resolves unsent.
+
+        Only rows in gate 4's live list are consulted: ``live`` comes from
+        :meth:`_live_device_ids`, which keeps ``STATE_LIVE`` rows alone, so a
+        row the unpair path tombstoned (``revoke_linked`` sets ``revoked_at``)
+        is never counted as a device that wants a push, whatever its switches.
+        """
+        preferences: dict[str, dict[str, bool]]
+        try:
+            preferences = mobile_push_devices.device_preferences(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            preferences = {}
+        everything: dict[str, bool] = dict.fromkeys(mobile_push_devices.PREFERENCE_KEYS, True)
+        live = self._live_devices()
+        emit_type = payload.get("type")
+
+        def wants(device: str, categories: set[str]) -> bool:
+            switches = preferences.get(device, everything)
+            return switches["enabled"] and any(switches[name] for name in categories)
+
+        categories: set[str]
+        if emit_type == TYPE_COMPLETION:
+            categories = {_preference_category(str(payload.get("kind", "")))}
+            return payload if any(wants(device, categories) for device in live) else None
+        if emit_type == TYPE_DIGEST:
+            categories = {_preference_category(kind) for kind in digest_kinds} or {"completions"}
+        else:
+            # Attention: no category, the master switch alone. An empty set
+            # would make ``wants`` always False, so the switch is asked direct.
+            categories = set()
+        excluded: set[str] = {str(device) for device in payload.get("exclude") or ()}
+        for device in live:
+            if device in excluded:
+                continue
+            keep = (
+                wants(device, categories)
+                if categories
+                else preferences.get(device, everything)["enabled"]
+            )
+            if not keep:
+                excluded.add(device)
+        if not [device for device in live if device not in excluded]:
+            return None
+        if len(excluded) > MAX_EXCLUDE_IDS:
+            # A body past the cloud's cap is refused whole (``exclude/max_10``),
+            # which would silence the devices that DO want it. Degrade instead to
+            # the per-computer rule the completion form already lives with: the
+            # gate above has proved some live device wants this emit, so send it
+            # with just the ack-hint excludes, themselves capped. The cost is an
+            # opted-out device possibly being woken, which beats dropping a
+            # wanted emit. Sorted before the cut so the kept ids are stable.
+            hinted = sorted({str(device) for device in payload.get("exclude") or ()})
+            trimmed = {key: value for key, value in payload.items() if key != "exclude"}
+            if hinted:
+                trimmed["exclude"] = hinted[:MAX_EXCLUDE_IDS]
+            return trimmed
+        if excluded:
+            # Sorted for a stable body: the body is kept across retries, but a
+            # deterministic order keeps two composes of one item identical.
+            return {**payload, "exclude": sorted(excluded)}
+        return payload
+
+    def _previews_allowed(self) -> bool:
+        """Whether a completion banner may carry the session's name and a preview.
+
+        The PHONES' half of the two-switch consent rule (operator decision,
+        2026-11-14, PR #3990 comment 6881635039; the desktop's half,
+        ``display.notification_session_name``, is applied inside compose):
+        previews are on by default, and true here only when EVERY live device
+        resolves ``preferences.previews`` to true (missing means true, as for
+        every switch in ``push_devices.PREFERENCE_KEYS``).
+
+        Every, not any: the cloud fans a completion out to all of the
+        computer's devices and forbids ``exclude`` on that form (§3.2), so the
+        only way to honour one phone's "off" is a generic banner for all. What
+        is at stake is text Radient's cloud keeps for 14 days (agent-server
+        ``session_push_emits``) and that crosses APNs/FCM, so this fails CLOSED:
+        an unreadable registry, or no live device at all, answers False. (No
+        live device means the emit is not sent anyway; False keeps the answer
+        from being a vacuous "all of none agreed".)
+
+        ONE REGISTRY LOAD (security review r2, N-1): the live list and the
+        switches come from the same :func:`push_devices.preview_snapshot`, so a
+        registration landing mid-gate cannot produce a live device with no
+        switch on record. Should a live device still have no row (an injected
+        gate-4 list, or a foreign registry), it counts as previews OFF — the
+        race defaults to the generic banner. That is NOT the same as a row
+        that exists without a ``previews`` key: such a row is an older app's,
+        and the operator's rule keeps it on (``resolved_preferences``).
+        """
+        try:
+            live_rows, previews = mobile_push_devices.preview_snapshot(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            return False
+        live = list(self._live_devices()) if self._live_devices_injected else live_rows
+        if not live:
+            return False
+        return all(previews.get(str(device), False) for device in live)
+
     def _live_device_ids(self) -> list[str]:
         """Gate 4 of §2.3: which devices this machine may deliver to.
 
@@ -1355,12 +1719,27 @@ class PushWorker:
             and bool(fact.get("credential_live"))
         ]
 
-    def _count(self) -> int:
-        """§3.2's ``count``: the machine's unread count at composition time."""
-        return max(0, int(self._unread_count()))
+    def _count(self) -> int | None:
+        """§3.2's ``count``: the machine's unread count at composition time.
+
+        ``None`` is "unknown" (a degraded listing), carried through to the
+        payload builders rather than coerced here: a coerced 0 would print
+        "0 conversations need you" on a banner announcing a completion.
+        """
+        value = self._unread_count()
+        if value is None:
+            return None
+        return max(0, int(value))
 
     def _store_count(self) -> int:
-        """The default unread count: a census over this machine's own store.
+        """The no-daemon fallback unread count: a census over this machine's own store.
+
+        NEVER THE PRODUCTION SOURCE. The census counts every conversation the
+        store has ever published a completion for and not acked — on a
+        long-lived machine that is lifetime history, and it is how the
+        2026-11-14 banner came to read "47502 conversations need you" when the
+        operator's real unread count was a handful. ``PushLane`` now passes the
+        listing count; this stays only so the worker runs with no daemon.
 
         INTERIM, and named as such: §1.4's badge population is the LISTING's rows
         in the listing's snapshot, and the daemon already has that implementation
@@ -1441,6 +1820,53 @@ class PushWorker:
             raise
 
 
+def _log_wire_attempt(
+    item: _PendingEmit, verdict: EmitAccepted | EmitRefused, latency_s: float
+) -> None:
+    """ONE INFO line per wire attempt: the durable local record of what pushed.
+
+    WHY: the 2026-11-15 audit of "more notifications on mobile than on desktop"
+    found no local emit record at all (0 push lines in ``mobile.log``) and had to
+    reconstruct 17 pushes from the attention store. This line is that record.
+
+    PRIVACY CONSTRAINT: identifiers and counters only — the emit kind, the local
+    conversation key(s) (``session/<id>``, a store key already in this machine's
+    logs), the first 8 chars of the emit id, the payload's unread ``count``, the
+    attempt number, the outcome and the latency. NEVER the alert title/body,
+    previews, the idempotency key, push handles, device ids or tokens: the body
+    is not formatted here at all, only ``count`` is lifted out of it.
+    """
+    body = item.body or {}
+    count = body.get("count")
+    if isinstance(verdict, EmitAccepted):
+        outcome = "accepted"
+    else:
+        outcome = f"refused status={verdict.status}"
+    conversations = ",".join(item.conversations[:BURST_LIMIT]) or "-"
+    if len(item.conversations) > BURST_LIMIT:
+        conversations += f",+{len(item.conversations) - BURST_LIMIT}"
+    logger.info(
+        "push emit kind=%s conversation=%s emit=%s count=%s attempt=%d outcome=%s latency_ms=%d",
+        item.kind,
+        conversations,
+        (item.emit_id or "-")[:8],
+        count if isinstance(count, int) else "-",
+        item.attempts,
+        outcome,
+        round(latency_s * 1000),
+    )
+
+
+def _preference_category(kind: str) -> str:
+    """The preference switch a completion ``kind`` answers to.
+
+    ``error`` is the only ``errors`` kind; ``complete``/``retired`` are
+    completions by the contract, and ``interrupted``/``closed`` ride the
+    ``completions`` switch too (documented on ``push_devices.PREFERENCE_KEYS``).
+    """
+    return "errors" if kind == "error" else "completions"
+
+
 def _desktop_attended() -> bool:
     """§2.3 gate 3: is a desktop window focused, visible and not minimised?
 
@@ -1448,7 +1874,7 @@ def _desktop_attended() -> bool:
     that for a caller whose decision is terminal, and this gate's decision is
     terminal in the direction that matters: a two-second-stale "the desktop is
     attended" defers a push the user has already walked away from, and the only
-    thing that revisits it is the 5-minute window.
+    thing that revisits it is the next pass's re-read.
 
     The TUI viewer record is NOT consulted, and that is the ADR's own correction
     (review M3): "a TUI is running on this machine" says nothing about whether a
@@ -1479,3 +1905,17 @@ def _session_id_of(conversation: str) -> str | None:
     if namespace != "session" or not session_id:
         return None
     return session_id
+
+
+def _session_dir_of(config_dir: Path, session_id: str | None) -> Path | None:
+    """The session directory a completion alert is composed from, or ``None``.
+
+    ``<config_dir>/sessions/<id>`` is the layout the desktop feed composes from
+    (``desktop_feed.sessions_dir``). The id must be a bare name — the same check
+    ``daemon._durable_user_session_dir`` applies — so a malformed store key can
+    never point compose's reads outside the sessions tree. A missing directory is
+    fine: compose degrades to its nameless fallback.
+    """
+    if not session_id or session_id in (".", "..") or Path(session_id).name != session_id:
+        return None
+    return config_dir / "sessions" / session_id

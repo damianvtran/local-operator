@@ -49,6 +49,15 @@ from pathlib import Path
 #: Where the bundle lands inside the wheel, and therefore inside ``site-packages``.
 BUNDLE_DEST = Path("local_operator") / "operator" / "macos" / "lop-keyagent.app"
 
+#: Where the CI-signed LaunchAgent launcher lands (``update.LAUNCHER_PACKAGE_PATH``
+#: must agree). ``update.ensure_daemon_launcher`` copies it from here to
+#: ``~/.local/share/lop/bin/`` on every install, and every LaunchAgent's ``Program``
+#: then names that copy — which is what makes Background Task Management show
+#: "Local Operator" under "Radient Inc." instead of "python3" (packaging/macos/
+#: lop-launcher/launcher.c has the measurement).
+LAUNCHER_DEST = Path("local_operator") / "operator" / "macos" / "Local Operator.lopruntime"
+LAUNCHER_EXECUTABLE = "Local Operator"
+
 #: The tag the macOS wheel carries. ``macosx_11_0`` matches Info.plist's
 #: ``LSMinimumSystemVersion``; ``universal2`` is what ``-arch arm64 -arch x86_64``
 #: produces, and both must agree with the binary or an Intel Mac installs a wheel it
@@ -96,6 +105,34 @@ def _app_entries(app: Path) -> dict[str, tuple[bytes, int]]:
     return entries
 
 
+def _launcher_entries(launcher: Path) -> dict[str, tuple[bytes, int]]:
+    """The launcher bundle's files, keyed by destination; refuses a malformed bundle.
+
+    The executable must carry 0755 for the same reason the key agent's must: a
+    LaunchAgent whose ``Program`` is not executable never starts. The signature
+    lives in ``Contents/_CodeSignature`` and the Mach-O itself, both plain files,
+    so copying bytes preserves it (the install-time check re-verifies anyway).
+    """
+    executable = launcher / "Contents" / "MacOS" / LAUNCHER_EXECUTABLE
+    if not executable.is_file():
+        raise SystemExit(f"{launcher} has no Contents/MacOS/{LAUNCHER_EXECUTABLE}")
+    if not (launcher / "Contents" / "_CodeSignature" / "CodeResources").is_file():
+        raise SystemExit(
+            f"{launcher} is not a signed bundle (no Contents/_CodeSignature/CodeResources); "
+            "an unsigned launcher is never selected, so shipping one buys nothing"
+        )
+    entries: dict[str, tuple[bytes, int]] = {}
+    for path in sorted(launcher.rglob("*")):
+        if not path.is_file():
+            continue
+        mode = _EXECUTABLE if path == executable else _REGULAR
+        entries[(LAUNCHER_DEST / path.relative_to(launcher)).as_posix()] = (
+            path.read_bytes(),
+            mode,
+        )
+    return entries
+
+
 def _retagged(metadata: str) -> str:
     """WHEEL with the macOS tag and a non-purelib root, everything else untouched."""
     lines = []
@@ -109,7 +146,7 @@ def _retagged(metadata: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def retag(wheel: Path, app: Path, out_dir: Path) -> Path:
+def retag(wheel: Path, app: Path, out_dir: Path, launcher: Path | None = None) -> Path:
     """Write the macOS wheel into ``out_dir`` and return its path.
 
     The pure wheel is read and never modified: both dists are published for the same
@@ -122,6 +159,8 @@ def retag(wheel: Path, app: Path, out_dir: Path) -> Path:
     destination = out_dir / f"{wheel.name[: -len(suffix)]}-py3-none-{PLATFORM_TAG}.whl"
     out_dir.mkdir(parents=True, exist_ok=True)
     injected = _app_entries(app)
+    if launcher is not None:
+        injected.update(_launcher_entries(launcher))
 
     with zipfile.ZipFile(wheel) as src:
         names = src.namelist()
@@ -131,6 +170,8 @@ def retag(wheel: Path, app: Path, out_dir: Path) -> Path:
             raise SystemExit(f"{wheel.name} has no .dist-info/WHEEL or /RECORD")
         if any(n.startswith(f"{BUNDLE_DEST}/") for n in names):
             raise SystemExit(f"{wheel.name} already contains the key agent bundle")
+        if any(n.startswith(f"{LAUNCHER_DEST}/") for n in names):
+            raise SystemExit(f"{wheel.name} already contains the launcher bundle")
         written: dict[str, tuple[bytes, int]] = {}
         for info in src.infolist():
             if info.filename == record_name:
@@ -174,8 +215,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out-dir", required=True, type=Path, help="where to write the macOS wheel"
     )
+    parser.add_argument(
+        "--launcher",
+        type=Path,
+        default=None,
+        help="the signed 'Local Operator.lopruntime' LaunchAgent launcher",
+    )
     args = parser.parse_args(argv)
-    destination = retag(args.wheel, args.app, args.out_dir)
+    destination = retag(args.wheel, args.app, args.out_dir, launcher=args.launcher)
     print(destination)
     return 0
 

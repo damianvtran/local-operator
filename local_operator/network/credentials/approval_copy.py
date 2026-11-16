@@ -89,6 +89,11 @@ _REASONS: dict[str, str] = {
     "owner_offline": "The credential-owning device could not be reached.",
 }
 
+# A changed file intent invalidates the signed scope just like a finite share.
+# Reuse its established wording rather than expose the intent or add new copy;
+# registration must precede KNOWN_CODES so every surface classifies it alike.
+_REASONS["file_approval_intent_changed"] = _REASONS["finite_scope_mismatch"]
+
 _UNKNOWN_REASON = "The change was refused."
 
 #: Refusal codes the credential apply can store that have no sentence of their own yet. They

@@ -469,7 +469,8 @@ never on an empty listing or a zero exit alone; the family's vocabulary is in
   a `lop network doctor --json` question, not a retry.
 - `session_unknown` — the device answered and holds no such conversation.
 - `session_unreachable` — the device accepted the act and its runtime then
-  stopped answering inside the time this verb allows; nothing here changed.
+  stopped answering inside the time this verb allows, or is running but too busy
+  to answer; nothing here changed, and the act was not delivered: retry.
 - `turn_not_running` — a `--steer` reached a session with no turn there to
   correct.
 - `stop_unreported` / `engage_unreported` / `create_unreported` /
@@ -680,8 +681,11 @@ acting on one (QA round 5, Q-R5-1):
   there".
 - `session_unreachable` — the peer accepted the act and then its runtime stopped
   answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
-  (that runtime may be starting, or wedged), or the act as a whole running out of
-  `PILOT_ACT_TIMEOUT_S`. The peer's own sentence is carried verbatim, and nothing on
+  (that runtime may be starting, or wedged), the act as a whole running out of
+  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer (it
+  accepted the connection and did not produce its state in time, or said it could
+  not prepare it). The busy sentence says the act was not delivered and to retry;
+  it is not a link problem, so it does not point at `network doctor`. The peer's own sentence is carried verbatim, and nothing on
   this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
   `relay_unavailable` with no local relay) even when the rung that noticed was the
   bind: the two codes answer "which side of the open died", not "which sentence did
@@ -1003,8 +1007,8 @@ trust unit: while the share stands, **any process or session on the borrowing
 device (same user) can use it**, because there is no per-session secret on a
 node for the design to bound.
 
-**The source ladder** (strongest first; resolved fresh on the owner at every
-command, so a re-login or a token rotation needs no gesture on the node):
+**The source ladder** (strongest first; checked on the owner for each new
+borrow, so a re-login or token rotation needs no gesture on the node):
 
 1. **A GitHub App**, if one is configured — the strongest route, and the only
    one GitHub-side narrowing and per-token revocation apply to (setup below).
@@ -1018,15 +1022,85 @@ command, so a re-login or a token rotation needs no gesture on the node):
    keychain — wherever that install keeps it); the owner is the trusted side,
    and the borrowing device never reads it.
 
-**Designate the repositories on the owner**:
-`network.credentials.github.repositories` (search it in `/settings`),
-`owner/repo` entries, e.g. `damianvtran/scratch`. This list is the git helper's
-allow-list, and it is the enforced bound on every route: empty is a refusal,
-never "everything" — an empty list reads like a bug but is the contract
-working: every push is refused until the owner designates at least one
-repository. The designation travels WITH the grant — the borrowing
-device writes the owner's list into its own config before the git child runs —
-so a node does not maintain one by hand.
+The owner's `gh` login read has a dedicated, single-flight worker: unrelated
+provider/MCP work cannot queue ahead of its keychain lookup. The raw login is
+cached **in memory for at most 30 seconds**; repository policy is still read for
+every flight. Ordinary `gh auth login/logout` hosts-file changes invalidate the
+cache on the next owner read, without waiting for the TTL. A keychain-only change is picked up by the next owner read
+after that 30-second bound. Revoke and panic invalidate the source cache; existing
+borrower permission leases are not extended by this cache.
+
+The whole source lookup is bounded at 12 seconds, above `gh`'s own 10-second
+subprocess timeout. This is a caller bound, including designation enumeration:
+a slow cold listing may outlast it, but the ONE worker finishes warming the
+existing enumeration cache; callers never spawn replacements or wait indefinitely.
+A GitHub lookup/budget timeout travels as `rate_limited` plus `reason: owner_busy`,
+so older borrowers keep their held grant. Upgraded borrowers show `owner_busy`
+and honest timeout copy, not a claim that too many requests arrived. Other
+families retain their existing codes. GitHub borrowing and explicit `credential
+refresh github` retry **once**, after 250 ms. Ordinary GitHub borrowing allows at
+least 14 seconds per control ask; explicit refresh retains its existing 75-second
+window because App minting is outside the bounded gh lane. An ordinary borrow
+may instead use its **still-current permission lease** during proactive refresh;
+an expired lease, answered deny, revoke, panic or forced refresh never gets that
+fallback. This is not a new offline lease or refresh authority.
+
+**Which repositories a share lends for — by default, every one the owner's
+login can push to.** Before a hand-picked list has been lent (or after the
+explicit return to the default below), the owner ENUMERATES: for a token or a
+`gh` login, every repository that login can push to (`GET /user/repos`, owned,
+collaborator and organization-member, keeping push access); for an App, every
+repository the installation covers. It is always an explicit list — shown on
+the share receipt, in readiness, and carried on every grant — never "all
+repositories":
+
+- `lop network credential github repos` prints every repository a share lends
+  for and says where the list came from — every repository this device's
+  GitHub login can push to (with how long ago it was listed), the list you
+  chose by hand, or, when GitHub can't be reached, the list fetched earlier
+  (with its age) — then the opted-out repositories by name. `--refresh` asks
+  GitHub again now; `--json` carries the same list with an `origin` field
+  (`enumerated`, `explicit`, `last_good`, `unavailable`).
+- **Opt one out:** `lop network credential github exclude <owner/repo>` (back
+  in: `… include <owner/repo>`). The reply names what changed and every
+  repository still opted out. A name that isn't in the current list is kept
+  anyway, with a "check the spelling" warning, so a repository the login gains
+  later arrives already opted out. It is stored as
+  `network.credentials.github.excluded` on the owner, and devices you share
+  with lose push to it the next time they fetch the credential — within the
+  grant window (`network.credentials.grant_ttl_s`, 15 min by default): the owner
+  re-reads the opt-outs on every grant and the grant carries the narrowed list.
+- **The list is cached for 6 hours** and fetched again at every `credential
+  share github`, on `repos --refresh`, and on the first borrow after the 6 h
+  bound. A repository the owner gains reaches borrowers within that bound (at
+  once with a refresh); one the owner loses push to is refused by GitHub
+  whatever the list says. If GitHub can't be reached, the list fetched earlier
+  keeps serving, and `repos` and readiness say how old it is; with no earlier
+  list, a borrow is refused by name. Nothing ever widens to "everything".
+- **A hand-picked list still wins:** set the GitHub repositories setting
+  (`network.credentials.github.repositories`; search it in `/settings`,
+  `owner/repo` entries) and only those are lent, minus any opt-outs; nothing is
+  fetched from GitHub.
+- **Clear means refuse-all, not return to the default.** After lending a
+  hand-picked list, clearing it in `/settings` (including deleting its config
+  key) keeps a device-local clear fence: borrowers receive an empty list and
+  cannot push. `repos --refresh` does not remove that fence. To explicitly
+  return to every pushable repository minus opt-outs, run
+  `lop network credential github repos --use-default` **on the owner**. It
+  unsets the hand-picked list and removes its clear marker in one locked
+  transaction, preserves opt-outs, asks GitHub again and prints the effective
+  list. The next ordinary fetch carries the new list and its order metadata;
+  already-cached GitHub credentials retain the existing grant window above.
+- **Limits:** one share carries at most 2000 repositories, and an App token at
+  most 500 (GitHub's own per-token limit). A larger list is refused by name —
+  pick the ones to lend with the GitHub repositories setting, or opt some out —
+  never cut to a prefix. The share receipt shows the first 10 names and points
+  at `repos` for the rest.
+
+This list is the git helper's allow-list and the enforced bound on every
+route; the App mint is also narrowed to it. The designation travels WITH the
+grant — the borrowing device writes the owner's list into its own config
+before the git child runs — so a node does not maintain one by hand.
 
 Once any source resolves, the flow is: `lop network credential share github
 --with <device>` (device scope; session scope for this key is refused by name),

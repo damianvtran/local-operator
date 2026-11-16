@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.config",
+  "history_sha256": "1c426e8e5ddc93a02d42548b1b51a9a5092cd68121cfed0bcd0800529dae5fe5",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "changes_requested",
+        "findings": 7,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "hi C1 cli.config (15 keys): 1 major, 3 minor, 3 nit. Major: hosting description uses प्रदाता where shipped hi uses प्रोवाइडर. Minors: loosen idiom, verb agreement, learnings term. Evidence: i18n/audits/evidence/hi/cli.config/c1a/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a/record.json",
+          "sha256": "f7f5287ccbb480b298d7e63fc91b81bb0fd274a358297a6f9f28281f7bd55a11"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a/report.md",
+          "sha256": "379112f662733023ea9c711471e6e3e5f597f069db438709b1e6cee5ed6d881b"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a/audit.log",
+          "sha256": "a9b19e80550012f637a8f942c9efa85c70bd46f95dbb3b50868f11393794ddfe"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a/target-candidate.json",
+          "sha256": "0ac41cb7253a92c63f4d852519182c5625d04e5c6bba12dbb1d338979d38feba"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "session": "fb68c83d54be",
+        "actual_model_source": "harness-served model disclosed in the auditor session's own system prompt; no fallback claimed"
+      },
+      "status": "passed",
+      "note": "hi C1 cli.config (15 keys) round-2 delta audit passed: 9 changed keys re-judged, both round-1 declines upheld; 0 blocker/major/minor, 1 nit. Judged d575bebe candidate (not in tree). Evidence: i18n/audits/evidence/hi/cli.config/c1a2/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a2/record.json",
+          "sha256": "9dbc4c48d0a9d67e9e30a43a9bb9c29baea4fdd7e33bc604afab30598c3587f6"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a2/report.md",
+          "sha256": "42028b9a6fe5a9e47a719f583dae26502b9eaeb81075d9a711032c510c23b595"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a2/audit.log",
+          "sha256": "515f6a69cbeae2416f6d26b8b0ffe4928519f07cf8d65bdc44cca1c397cac48d"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.config/c1a2/target-candidate.json",
+          "sha256": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5"
+        }
+      ]
+    }
+  ]
+}

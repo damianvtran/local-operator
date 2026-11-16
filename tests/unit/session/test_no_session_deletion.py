@@ -73,6 +73,24 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/remote_files/cache.py::evict",
+        "os.unlink",
+        "Removes only 32-hex digest blobs/sidecars relative to a held cache/remote-files "
+        "directory fd, opened no-follow from the config root; never sessions or attachments.",
+    ),
+    (
+        "local_operator/server/utils/remote_session_files.py::land",
+        "<path>.unlink",
+        "Removes only this call's fixed-prefix, random O_EXCL-created download temp FILE; "
+        "creation failure never enters cleanup, and unlink rejects directories.",
+    ),
+    (
+        "local_operator/network/credentials/github.py::use_default_repositories",
+        "<path>.unlink",
+        "Explicit owner opt-in removes only network/github-designation-delivered.json, "
+        "the fixed device-local clear marker, never a session member; unlink refuses directories.",
+    ),
+    (
         "local_operator/definition_transaction.py::_durable_json",
         "os.replace",
         "Publishes the O_EXCL-created regular JSON temp file; "
@@ -578,6 +596,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Drops <config>/operator/anchor.json, the staged statement this run wrote",
         2,
     ),
+    (
+        "local_operator/operator/authority_setup.py::_run",
+        "<path>.unlink",
+        # The no-terminal setup's mirror of `_admission_install` above (PR #3950):
+        # `staged` is `trust.staging_path(root)` = `root/"operator"/"anchor.json"`,
+        # a LITERAL basename under the literal "operator" segment of the CONFIG
+        # root — a fixed sibling of `sessions/`. No session id or caller path is in
+        # the expression, and unlink refuses a directory.
+        "Drops <config>/operator/anchor.json after a cancelled/refused setup prompt",
+    ),
+    (
+        "local_operator/operator/authority_setup.py::_exclusive",
+        "<path>.unlink",
+        # The in-progress marker the same context manager wrote one block earlier:
+        # `root/"operator"/_RUNNING_FILE` with `_RUNNING_FILE` a module literal
+        # ("authority-setup.running"). Only reached when `wrote_marker` is set,
+        # no input reaches the path, and unlink refuses a directory.
+        "Drops <config>/operator/authority-setup.running, the marker this attempt wrote",
+    ),
     # The effective-access listener registry is a module-level ``list`` of
     # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
     # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).
@@ -821,6 +858,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
         "<config>/network after a failed write or replace",
+    ),
+    # The operator binding's private files (`network/operator_binding.py`, PR
+    # #4030): every path `_atomic_write` is given is composed under
+    # `<config>/network/` (`operator-bindings/<net>/<dev>.json`,
+    # `operator-onboarded/<approval>.json`, `operator-binding-links.json`), with
+    # ids regex-checked to one path component. The tmp FILE is a sibling of its
+    # target, named per write (pid + uuid4, O_EXCL), so neither call can name a
+    # directory, let alone one under sessions/.
+    (
+        "local_operator/network/operator_binding.py::_atomic_write",
+        "os.replace",
+        "Atomic replacement of one operator-binding FILE under <config>/network/ from this "
+        "call's own O_EXCL sibling tmp file; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/operator_binding.py::_atomic_write",
+        "<path>.unlink",
+        "Removes only this call's own `.<name>.<pid>.<uuid>.tmp` FILE beside an "
+        "operator-binding file under <config>/network/ after a failed write or replace",
     ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
@@ -2059,6 +2115,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that temp FILE, only while the write above is failing",
     ),
+    # The daemon's file-descriptor limits record (`mobile/fdlimit.py`), read back
+    # by `lop mobile doctor`. `record` writes `<path>.tmp` then atomically replaces
+    # `limits_path()`, which takes NO arguments and is always
+    # `config_dir() / "mobile" / "daemon-limits.json"` — a fixed basename in the
+    # mobile config subdirectory, with no session id and no caller input, so
+    # neither the temp nor the target can name a path under `sessions/`.
+    (
+        "local_operator/mobile/fdlimit.py::record",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile/daemon-limits.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
     # The push device registry (`mobile/push_devices.py`): one JSON store at a fixed
@@ -2123,6 +2191,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/mobile/transfer_receipts.py::TransferReceipts._write",
         "os.unlink",
         "that same temp FILE, only while the replace above is failing",
+    ),
+    # The phone's remote-session viewer refcount: `RemoteView.queues` is a
+    # `set[asyncio.Queue]` of live phone subscribers, so `.remove` is set.remove
+    # of one subscriber queue (guarded by `in`), never a filesystem path.
+    (
+        "local_operator/mobile/remote_sessions.py::RemoteViews.release",
+        "<path>.remove",
+        "set.remove of a subscriber asyncio.Queue from RemoteView.queues; no filesystem path",
     ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
@@ -2839,6 +2915,36 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # i.e. a sibling of the reserved name. A record's ``install_root`` is only
     # ever read to ADD to ``wanted`` (protecting a generation), never to choose
     # a path to delete, which is why a hostile record cannot redirect it.
+    # The BTM launcher plant: every path is ``launcher_bundle_path()`` (a fixed
+    # name under ``<stable root>/bin``) or a ``mkdtemp`` staging dir this call
+    # created beside it. No session id, config dir or caller input reaches them.
+    (
+        "local_operator/update.py::ensure_daemon_launcher",
+        "os.rename",
+        "Swaps <stable>/bin/Local Operator.lopruntime with this call's own staging "
+        "copy (aside, publish, and restore on failure)",
+        3,
+    ),
+    (
+        "local_operator/update.py::ensure_daemon_launcher",
+        "shutil.rmtree",
+        "Removes this call's own mkdtemp staging dir under <stable>/bin",
+        1,
+    ),
+    (
+        "local_operator/update.py::_sweep_legacy_episode_plists",
+        "<path>.unlink",
+        "Deletes a ~/Library/LaunchAgents/com.damian.lop-episode.*.plist FILE "
+        "(globbed by fixed prefix, never a directory, never under sessions/)",
+        1,
+    ),
+    (
+        "local_operator/procname.py::publish_team_runtime_result",
+        "os.rename",
+        "Moves an unmarked <runtime root>/<key>-team tree aside to <key>-team.dead.<pid>."
+        "<thread>, the plant-scratch name _sweep_orphan_plants reclaims",
+        1,
+    ),
     (
         "local_operator/update.py::_remove_tree_unlocked",
         "shutil.rmtree",
@@ -2980,6 +3086,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    # The background daemon-refresh hand-off (PR #4004). Its run directories live
+    # under ``_refresh_runs_root()`` = ``<config>/update/refresh``, created by
+    # ``tempfile.mkdtemp(dir=<that root>)``; no session id or caller-supplied path
+    # names either target. The rmtree is confined IN the function, not by its
+    # caller: it refuses a symlink, anything whose resolved parent is not the
+    # resolved runs root, and any name that is not ``<unit>-<stamp>-<suffix>``
+    # for the unit being pruned (``test_update_refresh_handoff.py`` pins each
+    # refusal with a crafted path).
+    (
+        "local_operator/update.py::_remove_refresh_run",
+        "shutil.rmtree",
+        "<config>/update/refresh/<unit>-<stamp>-<suffix> ENDED run dir only; refuses symlinks, "
+        "non-children of the resolved runs root and non-run names — never under sessions/",
+        1,
+    ),
+    (
+        "local_operator/update.py::_write_run_meta",
+        "os.replace",
+        "<run dir>/spec.json.tmp FILE -> <run dir>/spec.json FILE inside the refresh run dir "
+        "this update just mkdtemp'd under <config>/update/refresh; replace cannot remove a dir",
+        1,
+    ),
     # The install-provenance marker, written atomically after an upgrade. Both
     # calls are confined to the temp file this function itself created with
     # ``mkstemp`` inside the INSTALL prefix (a uv tool root), and the rename
@@ -3098,10 +3226,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        # ``_join`` rather than ``subscribe``: both entry points (``subscribe``
-        # and ``subscribe_threadsafe``) admit their callback through this one
-        # private method, so the closure that removes it is qualified here.
-        "local_operator/session/frontend_state.py::FrontendStateStore._join.unsubscribe",
+        # ``_register`` rather than ``subscribe``: every entry point admits its
+        # callback through this one private method (it takes the state reference
+        # under the same lock as the append), so the closure that removes it is
+        # qualified here. The receiver is ``self._subscribers``, a
+        # ``list[Callable]``; ``.remove(callback)`` drops a listener, never a path.
+        "local_operator/session/frontend_state.py::FrontendStateStore._register.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
     ),
@@ -3384,6 +3514,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
         "never a directory, never under sessions/",
+    ),
+    # The UI browser host's health-probe failure log (2026-11-15). Source and
+    # target are `ensure_log_dir()` joined to the fixed basename
+    # `HEALTH_FAILURE_LOG_NAME` and that name + ".1" — no session id, no caller
+    # input — so the rotation can only displace that one log FILE.
+    (
+        "local_operator/ui_browser/backend.py::_open_health_log_for_append",
+        "os.replace",
+        "Rotates the browser-health.log FILE to browser-health.log.1 under log_dir(); "
+        "both names are fixed constants, never a directory, never under sessions/",
     ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes
     # these from `paths.log_dir()` and an int pid ALONE — never a session id,

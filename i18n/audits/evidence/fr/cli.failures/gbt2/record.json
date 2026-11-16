@@ -1,0 +1,74 @@
+{
+ "schema": 1,
+ "audit_id": "gbt2",
+ "audit_round": 1,
+ "audit_kind": "fresh independent audit of the whole namespace after new key cli.failures.github_borrow_timeout",
+ "locale": "fr",
+ "namespace": "cli.failures",
+ "audit_date": "2026-11-16",
+ "worktree_commit": "80a55b20802ed13a7379fef90644f2345b63066a",
+ "base_commit": "f0689a27c",
+ "key_count": 5,
+ "new_keys": [
+  "cli.failures.github_borrow_timeout"
+ ],
+ "auditor": {
+  "agent": "i18n-auditor (audit2-fr)",
+  "session": "e73cdb50a745",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "host [model switch] notice in this session: started on openai/gpt-6.1-sol, switched to fallback anthropic/claude-opus-5-5 after provider quota HTTP 429 before any catalogue was read; all audit reasoning and the verdict ran on the fallback",
+  "fallback_used": true,
+  "primary_model": "openai/gpt-6.1-sol"
+ },
+ "translator": {
+  "agent": "i18n-translator (timeout-fr)",
+  "model": "openai/gpt-6.1-sol",
+  "fallback_model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-16",
+  "model_source": "reported by the parent session"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/cli.failures.json",
+   "sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/cli.failures.context.json",
+   "sha256": "b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f"
+  },
+  "fr": {
+   "path": "local_operator/i18n/catalogues/fr/cli.failures.json",
+   "sha256": "7014901c52628bb6d158068e37d347b58b1d307d3636fc98275618c2894e5254"
+  }
+ },
+ "artifacts": [
+  {
+   "path": "i18n/audits/evidence/fr/cli.failures/gbt2/report.md",
+   "sha256": "579142f29ba3647c1dfda1e3de83148d0b0bdd6e7725eefde5e8f8c72dae4e91"
+  },
+  {
+   "path": "i18n/audits/evidence/fr/cli.failures/gbt2/audit.log",
+   "sha256": "5c84c144f33f4ef294b0814a7b4d2ec6288f154229eff105c438c1568067bfbf"
+  }
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 4,
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "N1",
+   "N2",
+   "N3",
+   "N4"
+  ]
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning/notes; audit.log is actual command output (check.py, sha256sum, parity script). The ledger append --dry-run ran after this record and receipt were written; its output is in dryrun.log, which is therefore not hashed here.",
+ "limits": [
+  "No rendered terminal frame; no human native-speaker review.",
+  "No MT service used; no earlier audit records for this key consulted."
+ ]
+}

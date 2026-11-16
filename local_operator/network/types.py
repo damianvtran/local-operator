@@ -358,6 +358,9 @@ NET_OPS: tuple[str, ...] = (
     # One file out of one session this device owns, by digest-framed chunks
     # (network/files.py; docs/design/mesh-file-transfer.md S1).
     "net_file_get",
+    # A peer session's Files index, answered by the owner (network/file_index.py;
+    # docs/design/remote-files-parity.md §2).
+    "net_session_files",
     "net_broker",
     "net_session_lifecycle",
     "net_session_receipt",
@@ -405,6 +408,11 @@ NET_OPS: tuple[str, ...] = (
     # row (``admin``, the same decision ``net_definitions`` records above) and
     # its own audit event, rather than a section inside that bundle.
     "net_mcp_defs",
+    # THE OPERATOR BINDING (operator_binding.py): the operator's device presents
+    # an onboarding decision the operator already signed; this device verifies it
+    # against its root-owned anchor and stores it. Self-authenticating — the
+    # signature, not the sender's role, is the authority — so it rides ``list``.
+    "net_operator_binding",
     # USER SKILLS (skillsync.py): one skill directory per apply, packaged with
     # the hub's untrusted-safe bundle. Its own op for the reasons mcpdefs gives
     # (different payload, size class and apply semantics) and its own
@@ -519,6 +527,8 @@ LOCAL_OPS: tuple[str, ...] = (
     # ``lop network files pull``: ask THIS device's relay to pull one file from a
     # peer's session. Local for the family's reason: the link lives in the relay.
     "session_file_pull",
+    # The desktop's ask for a peer session's Files index (remote-files-parity.md §2).
+    "peer_session_files",
     "session_lifecycle",
     "session_receipt",
     # The credential broker's leg 1 (runtime → its own relay, §2.3).
@@ -535,6 +545,11 @@ LOCAL_OPS: tuple[str, ...] = (
     # asks THIS device's relay to hand the new placement row to its holder now —
     # local because the link to the holder lives in the relay process.
     "credential_share_push",
+    # The renewal claim and the owner's post-renewal push (mesh-credential-renewal
+    # §B.3 R3): an owner process asks THIS device's relay to talk to the renewing
+    # node — local because the link to it lives in the relay process.
+    "credential_claim",
+    "credential_lend_push",
     # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
     # same boundary rule — this device's own relay is told to pull one copy from
     # its owner now, and the link it needs lives in that process.
@@ -687,6 +702,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # file out of that same set is a narrower read of bytes the role already reads
     # (mesh-file-transfer.md, Decision 2). A drive-only pull is a one-row narrowing.
     "net_file_get": "view",
+    # ``view`` WIDENS NOTHING either: the listing is metadata of the journal ``net_sync``
+    # already serves a view member, and every byte still goes through ``net_file_get``.
+    "net_session_files": "view",
     "net_broker": "broker_credential",
     "net_session_lifecycle": "delete",
     # ``view``, the same row the stream plane's ``acknowledge_attention`` carries
@@ -736,6 +754,11 @@ OP_CAPABILITY: dict[str, str | None] = {
     # those files is readable only to root or to the daemon, so a member that
     # may look at this device's catalogue may look at its readiness too.
     "net_readiness": "list",
+    # ``list``, the least authority there is: the frame's authority is the
+    # operator's ES256 signature verified against this device's ROOT-OWNED anchor
+    # (``network/operator_binding.py``), never the sender's role, and the only
+    # write is a 0600 cache of that self-verifying proof, re-verified on use.
+    "net_operator_binding": "list",
     # ``admin``, the same decision as ``net_definitions`` and for the same
     # reason: installing a server writes DURABLE, install-wide state that can
     # spawn commands for every FUTURE session, which is broader than any one
@@ -1369,6 +1392,14 @@ def may_run_slash_in_the_owners_terminal(
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
+
+
+class ControlRequestTimeout(TimeoutError):
+    """Local-only timeout metadata, never a wire refusal or a secret payload."""
+
+    def __init__(self, timeout_s: float) -> None:
+        self.timeout_s = timeout_s
+        super().__init__("the local control reply did not arrive within its existing deadline")
 
 
 class MeshRefusal(Exception):
@@ -2005,6 +2036,14 @@ class PeerRecord:
     version: str = ""
     source_ref: str = ""
     install_root: str = ""
+    #: The file THIS relay's stdout/stderr actually append to, read from its own
+    #: fd 1 at start (``relay._own_output_path``). The supervisor opens that file,
+    #: not the relay, and from a path the reader's environment cannot recompute: a
+    #: CLI with its own ``LOCAL_OPERATOR_CONFIG_DIR`` derived ``<its config>/logs``
+    #: and printed a log that nothing writes. ``""`` when stdout is not a file (a
+    #: terminal, a journal socket) or from an older relay; a reader then falls
+    #: back. A location, not a secret, so it may ride a record dumped by status.
+    log_path: str = ""
     started_at: float = field(default_factory=time.time)
     heartbeat_at: float = field(default_factory=time.time)
 

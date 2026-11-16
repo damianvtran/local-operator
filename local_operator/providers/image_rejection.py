@@ -287,6 +287,9 @@ async def stream_with_rejected_image_retry(
     this cannot see, and the session's degrade is the right owner of it.
     """
     request = with_rejected_images_replaced(request)
+    # A cached ordinary-session refusal must not silently erase evidence in an
+    # opt-in required-media request. Validate after that projection as well.
+    request.validate_required_images()
     sent: dict[str, Any] = {}
     yielded = False
     try:
@@ -295,7 +298,10 @@ async def stream_with_rejected_image_retry(
             yield event
         return
     except ProviderError as error:
-        if yielded:
+        if yielded or request.required_image_count:
+            # Required-media verification cannot accept an answer to a retry
+            # that removed its evidence. Keep the original provider failure and
+            # do not poison the ordinary-session rejection cache for this run.
             raise
         retry = replace_rejected_image(request, error, sent.get("body"))
         if retry is None:

@@ -139,7 +139,13 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         state = (
             "owner_unavailable"
             if result.code
-            in {"owner_offline", "owner_unreachable", "refresh_failed", "consent_unverifiable"}
+            in {
+                "owner_offline",
+                "owner_unreachable",
+                "owner_busy",
+                "refresh_failed",
+                "consent_unverifiable",
+            }
             else (
                 "withdrawn"
                 if result.code
@@ -186,6 +192,25 @@ def note_held_dropped(root: Path | None, provider: str) -> None:
         if previous is None or previous.state != "held_offline":
             return
         _receipts[key] = dataclasses.replace(previous, last_grant_expires_at=time.time())
+    _notify(key)
+
+
+def note_awaiting_handback(root: Path | None, provider: str, *, node: str, node_label: str) -> None:
+    """The OWNER is waiting for ``node`` to hand back a lent login (design
+    mesh-credential-renewal §B.3 R4, made visible per §D D2).
+
+    Published as its own state, ``awaiting_handback``, beside ``held_offline``: the
+    login is this device's own, it is NOT broken, and it is not usable for renewal
+    until the node answers or the 7-day return cap passes. ``owner``/``owner_label``
+    carry the NODE here — the device a reader must name ("Waiting for node2 to hand
+    back your Anthropic login"). Not in :data:`USABLE_STATES`.
+    """
+    key = (_root(root), provider)
+    receipt = EffectiveAccess(
+        "awaiting_handback", owner=node, owner_label=node_label or node, observed_at=time.time()
+    )
+    with _lock:
+        _receipts[key] = receipt
     _notify(key)
 
 

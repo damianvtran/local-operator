@@ -35,7 +35,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import relay
+from local_operator.network import relay, wire
 from local_operator.session.errors import FirstTurnFailed
 from tests.unit.network import test_session_plane as plane
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
@@ -427,6 +427,39 @@ def _scale_the_hop(monkeypatch: pytest.MonkeyPatch, server_b: relay.RelayServer)
     return relay.engage_hop_bound_s(server_b.settings.op_wait_s)
 
 
+def _turn_of(reply: Any, context: Any) -> dict[str, Any]:
+    """The first-turn receipt out of a create's reply, or an assertion that SHOWS the reply.
+
+    WHY: a create whose reply is a refusal frame (``wire.refusal_frame``: ``op``
+    ``error`` plus a sentence, NO ``detail``) or no reply at all used to surface as
+    ``KeyError: 'detail'`` / ``TypeError``, which hides the one fact a CI failure
+    needs: what the peer actually answered. This only moves the failure earlier and
+    makes it say what arrived; it tolerates nothing, so a refusal still fails the
+    test, and the state/budget assertions after it are unchanged.
+    """
+    assert reply is not None, f"no reply to the create (context={context!r})"
+    detail = reply.get("detail") if isinstance(reply, dict) else None
+    turn = detail.get("turn") if isinstance(detail, dict) else None
+    assert isinstance(
+        turn, dict
+    ), f"the create's reply carried no first-turn receipt: reply={reply!r} context={context!r}"
+    return turn
+
+
+def test_a_create_reply_without_a_receipt_fails_showing_the_frame() -> None:
+    """The diagnostic itself: a refusal frame is reported, not hidden behind a KeyError."""
+    frame = wire.refusal_frame(101, "that peer refused the create")
+    with pytest.raises(AssertionError) as shown:
+        _turn_of(frame, "ctx")
+    assert "that peer refused the create" in str(shown.value)
+    assert "'op': 'error'" in str(shown.value)
+    with pytest.raises(AssertionError, match="no reply"):
+        _turn_of(None, "ctx")
+    # A well-formed receipt passes through untouched.
+    receipt = {"op": "ack", "detail": {"turn": {"state": "running"}}}
+    assert _turn_of(receipt, "ctx") == {"state": "running"}
+
+
 def test_two_concurrent_slow_creates_on_one_link_both_get_receipts(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -459,8 +492,9 @@ def test_two_concurrent_slow_creates_on_one_link_both_get_receipts(
     for req in (101, 102):
         reply = replies.get(req)
         assert reply is not None and reply["op"] == "ack", (req, replies)
-        assert reply["detail"]["turn"]["state"] == "running", (req, reply)
-        assert "waited_s" in reply["detail"]["turn"], (req, reply)
+        turn = _turn_of(reply, (req, replies))
+        assert turn["state"] == "running", (req, reply)
+        assert "waited_s" in turn, (req, reply)
 
 
 def test_the_link_answers_other_ops_while_a_first_turn_runs(
@@ -506,4 +540,4 @@ def test_the_link_answers_other_ops_while_a_first_turn_runs(
     assert page is not None and page["op"] == "ack", (page, peek_s)
     assert ping_s < bound and peek_s < bound, (ping_s, peek_s)
     reply = created.get("reply")
-    assert reply is not None and reply["detail"]["turn"]["state"] == "running", created
+    assert _turn_of(reply, created)["state"] == "running", created

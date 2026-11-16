@@ -146,6 +146,14 @@ CREDENTIAL_SHARE_PUSH_V1 = "credential-share-push-v1"
 #: predates this one answers the pull exactly as it always did and is never sent a field
 #: it does not know.
 CREDENTIAL_PLACEMENT_DIGEST_V1 = "credential-placement-digest-v1"
+#: The owner's RENEW NUDGE on (re)connect (``credentials/renew_push.py``): when a link
+#: to a holder comes up, or the owner wakes with links that survived, the owner tells
+#: the holder "ask me again now" for the keys it lends it, and the holder's relay asks
+#: through its ordinary grant path. WHY: the 24 h offline hold restarts only on a fresh
+#: grant, and an idle node never asks, so a daily owner login did not keep it working.
+#: A distinct string (no shipped capability is reused for a new frame kind): a peer
+#: without it is not nudged and keeps counting from its last own ask, as before.
+CREDENTIAL_RENEW_PUSH_V1 = "credential-renew-push-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -165,6 +173,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     CREDENTIAL_PLACEMENT_PUSH_V1,
     CREDENTIAL_SHARE_PUSH_V1,
     CREDENTIAL_PLACEMENT_DIGEST_V1,
+    CREDENTIAL_RENEW_PUSH_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
@@ -186,6 +195,12 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-journal-source-v1",
     # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
     "session-peek-v1",
+    # Owner-folded mobile history/projection; never infer this schema from a
+    # legacy journal page whose entries use the desktop transcript vocabulary.
+    "mobile-session-read-v1",
+    # Turn-supplement (Highlights) bytes on that same owner-folded read; see
+    # MOBILE_SESSION_SUPPLEMENTS_V1 below.
+    "mobile-session-supplements-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
     # Change-only member tables permit a long anti-entropy interval, without
@@ -193,9 +208,14 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "member-list-push-v1",
     # The single-file pull (``files.py``'s ``net_file_get``); see MESH_FILE_V1.
     "mesh-file-v1",
+    # A peer session's Files index (``file_index.py``'s ``net_session_files``).
+    "mesh-file-index-v1",
     # Origin-only completion/notice fields on catalogue rows; see
     # REMOTE_ATTENTION_V1 below.
     "remote-attention-v1",
+    # The operator's device presents its signed onboarding decision; see
+    # OPERATOR_BINDING_V1 below.
+    "operator-binding-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
@@ -206,6 +226,12 @@ MESH_NET_V1 = "mesh-net-v1"
 #: always did. Named here so the tuple above, the owner's condition and the tests
 #: read ONE spelling of the string.
 REMOTE_ATTENTION_V1 = "remote-attention-v1"
+#: ``net_operator_binding`` (``network/operator_binding.py``): the operator's Mac
+#: presents the onboarding decision the operator already signed, so a node can
+#: forward asks/notices of sessions STARTED on it to that device. A peer without
+#: it is never sent the op, and a node only treats a link as the operator's while
+#: that link advertises it — an old Mac degrades to "shown on this node only".
+OPERATOR_BINDING_V1 = "operator-binding-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
 #: purposes). The runtime-record half of the same promise lives in
 #: ``session/runtime/types.PEER_JOURNAL_SOURCE_CAPABILITY`` — one string, two
@@ -264,6 +290,19 @@ MESH_RESTART_V1 = "mesh-restart-v1"
 #: answered by some other route (the base64-through-the-model path this replaces is
 #: what corrupted bytes).
 MESH_FILE_V1 = "mesh-file-v1"
+#: Turn-supplement bytes (a Highlight's component document, featured file or sound)
+#: over the owner-folded mobile read: ``peer_session_history`` with
+#: ``mobile_session_read="supplement"`` (``mobile/remote_sessions.py``). It adds no op,
+#: only a purpose on ``net_session_history``. BOTH ends check it — the viewer before
+#: forwarding and the owner before serving — so an owner that predates it is
+#: answered ``unsupported`` (the phone's 409 ``remote_unsupported``, "Update
+#: <owner>") instead of reading a purpose it would refuse as a protocol error.
+MOBILE_SESSION_SUPPLEMENTS_V1 = "mobile-session-supplements-v1"
+#: A peer session's Files index (``network/file_index.py``; remote-files-parity.md §2).
+#: Checked by the viewer BEFORE asking, so an owner that predates it is answered with
+#: ``peer_update_required`` (the desktop says "update <device>") rather than asked an op
+#: it would refuse as unknown — and never answered by a viewer-side scan.
+MESH_FILE_INDEX_V1 = "mesh-file-index-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it

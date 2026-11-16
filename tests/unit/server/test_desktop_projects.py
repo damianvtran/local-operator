@@ -823,13 +823,15 @@ async def test_forced_done_is_true_only_for_the_call_that_made_the_transition(ap
     assert reclosed.json()["result"]["forced_done"] is True
 
 
-def _write_paged_row(root: Path, project_id: str, name: str, *, stamp_ns: int) -> None:
+def _write_paged_row(
+    root: Path, project_id: str, name: str, *, stamp_ns: int, **fields: Any
+) -> None:
     """Write one valid row straight into the route's store with a stated mtime."""
     from local_operator.projects import Project
 
     projects_dir = root / "projects"
     projects_dir.mkdir(parents=True, exist_ok=True)
-    row = Project(id=project_id, name=name)
+    row = Project(id=project_id, name=name, **fields)
     path = projects_dir / f"{project_id}.json"
     path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
     os.utime(path, ns=(stamp_ns, stamp_ns))
@@ -920,3 +922,155 @@ async def test_a_whole_store_search_does_not_scan_the_disk_for_a_miss(api, monke
     assert missed.json()["result"]["count"] == 0
     assert missed.json()["result"]["truncated"] is False
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/desktop/sessions/{session_id}/projects — the chat view's reverse
+# lookup. Rows must be the listing's own shape and order (the tab opens the
+# same detail view the board does), membership is either link list, and a
+# session the store has never seen is "no projects", not an error.
+# ---------------------------------------------------------------------------
+
+SESSION_B = "0123456789ab"
+
+
+async def test_session_projects_lists_linked_rows_in_listing_order(api) -> None:
+    client, root = api
+    ids: dict[str, str] = {}
+    for name in ("done-one", "active-one", "unlinked-one", "filed-one"):
+        created = await client.post("/v1/desktop/projects", json={"name": name})
+        ids[name] = created.json()["result"]["id"]
+    await client.patch(f"/v1/desktop/projects/{ids['done-one']}", json={"status": "done"})
+    await client.patch(f"/v1/desktop/projects/{ids['active-one']}", json={"status": "active"})
+    for name in ("done-one", "active-one"):
+        linked = await client.post(
+            f"/v1/desktop/projects/{ids[name]}/links", json={"session_id": SESSION_A}
+        )
+        assert linked.status_code == 200
+    # A coordination ("filed by") link is still membership for this read.
+    ProjectRegistry(root).link_session(ids["filed-one"], SESSION_A, role="coordination")
+
+    answer = await client.get(f"/v1/desktop/sessions/{SESSION_A}/projects")
+    assert answer.status_code == 200
+    result = answer.json()["result"]
+    assert result["session_id"] == SESSION_A
+    names = [row["name"] for row in result["projects"]]
+    assert "unlinked-one" not in names
+    # Exactly the listing's order, restricted to the linked rows.
+    listing = await client.get("/v1/desktop/projects")
+    listing_rows = listing.json()["result"]["projects"]
+    expected = [row for row in listing_rows if row["name"] != "unlinked-one"]
+    assert result["projects"] == expected
+    assert names.index("active-one") < names.index("done-one")
+
+
+async def test_session_projects_is_empty_for_unlinked_and_unknown_sessions(api) -> None:
+    client, _root = api
+    created = await client.post("/v1/desktop/projects", json={"name": "alpha"})
+    project_id = created.json()["result"]["id"]
+    await client.post(f"/v1/desktop/projects/{project_id}/links", json={"session_id": SESSION_A})
+
+    for session_id in (SESSION_B, "ffffffffffff"):
+        answer = await client.get(f"/v1/desktop/sessions/{session_id}/projects")
+        assert answer.status_code == 200
+        assert answer.json()["result"] == {
+            "session_id": session_id,
+            "projects": [],
+            "total_rows": 1,
+            "loaded_rows": 1,
+            "truncated": False,
+        }
+
+    # Unlinking empties it again: the read is live, not a cached index.
+    await client.delete(f"/v1/desktop/projects/{project_id}/links/{SESSION_A}")
+    after = await client.get(f"/v1/desktop/sessions/{SESSION_A}/projects")
+    assert after.json()["result"]["projects"] == []
+
+
+@pytest.mark.parametrize("bad", ["nope", "ABCDEF012345", "0123456789abc"])
+async def test_session_projects_refuses_malformed_ids(api, bad: str) -> None:
+    """A single path segment that only the pattern can refuse is exactly a 422."""
+    client, _root = api
+    refused = await client.get(f"/v1/desktop/sessions/{bad}/projects")
+    assert refused.status_code == 422
+    assert refused.json().get("result") is None
+
+
+@pytest.mark.parametrize("bad", ["..%2F..%2Fetc", "0123456789a%2F"])
+async def test_session_projects_refuses_traversal_shaped_ids(api, bad: str) -> None:
+    # An encoded slash may decode before routing and fail to match the route at
+    # all (404) rather than reach the pattern (422). Either way no handler ran
+    # and nothing was read for that id.
+    client, _root = api
+    refused = await client.get(f"/v1/desktop/sessions/{bad}/projects")
+    assert refused.status_code in (404, 422)
+    assert refused.json().get("result") is None
+
+
+async def test_session_projects_returns_links_past_the_recency_page(api, monkeypatch) -> None:
+    """Q1: a linked row that aged off the page is still in the chat's tab.
+
+    The board is page-scoped by design; the chat tab's contract is ANY linked
+    project. Two dormant rows are linked (one work link, one coordination
+    link), one dormant row only MENTIONS the id in its description (the
+    substring prefilter must not admit it), and newer rows fill the page.
+    """
+    from local_operator import projects as projects_module
+
+    client, root = api
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 2)
+    base = 1_700_000_000_000_000_000
+    _write_paged_row(
+        root, "old-work", "old-work", stamp_ns=base, sessions=[SESSION_A], updated_at=1.0
+    )
+    _write_paged_row(
+        root,
+        "old-filed",
+        "old-filed",
+        stamp_ns=base + 1,
+        coordination_sessions=[SESSION_A],
+        updated_at=2.0,
+    )
+    _write_paged_row(
+        root, "old-mention", "old-mention", stamp_ns=base + 2, description=f"see {SESSION_A}"
+    )
+    _write_paged_row(
+        root, "new-linked", "new-linked", stamp_ns=base + 10, sessions=[SESSION_A], updated_at=3.0
+    )
+    _write_paged_row(root, "new-other", "new-other", stamp_ns=base + 11, sessions=[SESSION_B])
+
+    listed = (await client.get("/v1/desktop/projects")).json()["result"]
+    assert {row["id"] for row in listed["projects"]} == {"new-linked", "new-other"}
+
+    answer = await client.get(f"/v1/desktop/sessions/{SESSION_A}/projects")
+    assert answer.status_code == 200
+    result = answer.json()["result"]
+    ids = [row["id"] for row in result["projects"]]
+    assert sorted(ids) == ["new-linked", "old-filed", "old-work"]
+    # Listing order (status rank, then newest first) across page and off-page.
+    assert ids == ["new-linked", "old-filed", "old-work"]
+    assert (result["total_rows"], result["loaded_rows"], result["truncated"]) == (5, 2, True)
+
+    # The other session's only link is on the page; nothing off-page leaks in.
+    other = (await client.get(f"/v1/desktop/sessions/{SESSION_B}/projects")).json()["result"]
+    assert [row["id"] for row in other["projects"]] == ["new-other"]
+
+
+async def test_session_projects_requires_the_desktop_token(api) -> None:
+    client, _root = api
+    refused = await client.get(
+        f"/v1/desktop/sessions/{SESSION_A}/projects", headers={"Authorization": "Bearer wrong"}
+    )
+    assert refused.status_code in (401, 403)
+
+
+async def test_the_projects_by_session_capability_is_desktop_only(api) -> None:
+    from local_operator.server.features import DESKTOP_ONLY_FEATURES
+
+    client, _root = api
+    caps = await client.get("/v1/capabilities")
+    features: dict[str, Any] = caps.json()["result"]["features"]
+    assert features["projects_by_session"] == 1
+    assert features["projects"] == 2
+    # The phone relay serves no per-session lookup, so it must not republish it.
+    assert "projects_by_session" in DESKTOP_ONLY_FEATURES

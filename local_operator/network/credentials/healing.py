@@ -91,6 +91,9 @@ CAUSE_BY_EVIDENCE: dict[str, str] = {
     "revoked": CAUSE_GRANT,
     "unavailable": CAUSE_UNREACHABLE,
     "synced": "",
+    # A ``held`` row (the offline hold, 2026-11-14) is a working borrow, not a
+    # failure, so it names no cause — even though its code is ``owner_offline``.
+    "held": "",
 }
 
 
@@ -107,6 +110,10 @@ def cause_for_evidence(state: str, code: str = "") -> str:
     is the same repair for a person. Kept for symmetry with the broker mapping so a
     reader sees one classification, not two.
     """
+    if str(state or "") == "held":
+        # Before the code lookup: a held row carries ``owner_offline`` as its code,
+        # which alone would classify a working hold as unreachable (#3947 N).
+        return ""
     by_code = CAUSE_BY_CODE.get(str(code or ""), "")
     if by_code:
         return by_code

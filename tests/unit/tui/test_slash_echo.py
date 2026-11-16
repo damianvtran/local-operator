@@ -30,6 +30,7 @@ from local_operator.tui.widgets.editor import Editor, InlineCommandRequested
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.usage_panel import UsagePanel
 from local_operator.tui.widgets.welcome import WelcomeView
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _factory
 from tests.unit.tui.waiting import settle
 
@@ -2284,9 +2285,14 @@ async def test_a_stopped_session_does_not_swallow_tab_and_enter() -> None:
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        # Join boot before simulating stop: a late adoption would reattach the
+        # fake and offer built-in verbs (chart/new/...), so Enter would complete
+        # a row instead of exercising the stopped, empty-list submission path.
+        await await_session_boot(app)
         app._session = None
         app._stopped_session_id = "sess-abc123"
+        assert app._session is None
+        assert app._team_choices() == []
 
         editor = app._editor()
         editor.focus()

@@ -1353,6 +1353,14 @@ def remote_owner_for(
     return RemoteOwner(config_dir=config_dir, session_id=session_id, facts=facts, root=root)
 
 
+class RemoteStreamRefusal(ConnectionError):
+    """An explicit mesh rejection, not an ambiguous missing owner ack."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class RemoteSessionClient(AttachClient):
     """An ``AttachClient`` whose endpoint is the LOCAL relay, not the runtime.
 
@@ -1392,6 +1400,12 @@ class RemoteSessionClient(AttachClient):
         #: retained domain — a viewer that declared nothing can never vouch,
         #: and a local client with no such property reads False.
         self.peer_journal_source_declared = False
+
+    def _raise_for_reply_error(self, reply: dict[str, Any]) -> None:
+        code = reply.get("mesh_refusal_code")
+        if reply.get("op") == "error" and isinstance(code, str) and code:
+            raise RemoteStreamRefusal(code, str(reply.get("message") or "mesh refusal"))
+        super()._raise_for_reply_error(reply)
 
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Open a forwarded stream to the owner and consume its welcome.
@@ -1540,9 +1554,12 @@ class RemoteSessionClient(AttachClient):
             raise ConnectionError("the local relay did not answer") from exc
         except ValueError as exc:
             raise ConnectionError("the local relay sent a malformed frame") from exc
-        if not isinstance(opening, dict) or opening.get("op") != "ack":
-            raise ConnectionError(
-                str((opening or {}).get("message") or "the relay refused to open that stream")
+        if not isinstance(opening, dict):
+            raise ConnectionError("the local relay sent a malformed frame")
+        if opening.get("op") != "ack":
+            raise RemoteStreamRefusal(
+                str(opening.get("code") or "not_authorised"),
+                str(opening.get("message") or "the relay refused to open that stream"),
             )
         raw_detail = opening.get("detail")
         detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}

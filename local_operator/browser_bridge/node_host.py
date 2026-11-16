@@ -276,6 +276,9 @@ class NodeEnv:
     install_daemon: Callable[[], Mapping[str, Any]] = field(default=lambda: _install_daemon())
     enable_linger: Callable[[], bool] = field(default=lambda: _enable_linger())
     request_codes: Callable[[], Mapping[str, Any]] = field(default=lambda: _request_codes())
+    #: The signed-site-approval policy block (``site_approval.anchor_policy_fields``):
+    #: read from the root-owned operator anchor at each policy write.
+    approval_policy: Callable[[], Mapping[str, Any]] = field(default=lambda: _approval_policy())
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
     now: Callable[[], str] = field(
@@ -317,6 +320,12 @@ class NodeEnv:
         # ``-n``: never prompt. A prompt on a headless node is a hang nobody can
         # answer; the preflight refuses with a remedy before any step gets here.
         return self.run("sudo", "-n", *argv, input_text=input_text)
+
+
+def _approval_policy() -> Mapping[str, Any]:
+    from local_operator.browser_bridge.site_approval import anchor_policy_fields
+
+    return anchor_policy_fields()
 
 
 def _daemon_status() -> Mapping[str, Any]:
@@ -511,13 +520,25 @@ def render_update_manifest(extension_id: str, crx: Path, version: str) -> str:
 
 
 def render_policy(
-    extension_id: str, update_manifest: Path, pairing_code: str = ""
+    extension_id: str,
+    update_manifest: Path,
+    pairing_code: str = "",
+    approval: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """The whole managed-policy file. ``approval`` is the signed-site-approval
+    block (``site_approval.policy_fields``): the operator anchor the extension
+    verifies decisions against. It is part of the CLEAN policy — unlike the
+    pairing code it is public material and stays — so ``check_policy`` compares
+    it too, and a changed ``/etc/local-operator/operators/<uid>.json`` is
+    re-derived on the next setup run instead of drifting from the runtime's."""
     policy: dict[str, Any] = {
         "ExtensionInstallForcelist": [f"{extension_id};{update_manifest.as_uri()}"]
     }
+    managed: dict[str, Any] = dict(approval or {})
     if pairing_code:
-        policy["3rdparty"] = {"extensions": {extension_id: {MANAGED_PAIRING_KEY: pairing_code}}}
+        managed[MANAGED_PAIRING_KEY] = pairing_code
+    if managed:
+        policy["3rdparty"] = {"extensions": {extension_id: managed}}
     return policy
 
 
@@ -1075,11 +1096,23 @@ class _Plan:
             return None
         return value if isinstance(value, dict) else None
 
+    def _render_policy(self, extension_id: str, pairing_code: str = "") -> dict[str, Any]:
+        """``render_policy`` with this host's signed-approval block.
+
+        Setup is the ONE writer of the anchor copy the extension trusts; it is
+        re-derived from the root-owned anchor on every write, never cached."""
+        return render_policy(
+            extension_id,
+            self.env.update_manifest,
+            pairing_code,
+            approval=self.env.approval_policy(),
+        )
+
     def check_policy(self) -> Check:
         extension_id = self._extension_id()
         if not extension_id:
             return Check(False, "no extension id yet")
-        wanted = render_policy(extension_id, self.env.update_manifest)
+        wanted = self._render_policy(extension_id)
         current = self._policy_now()
         if current is None:
             return Check(False, f"{POLICY_PATH} absent or unreadable")
@@ -1088,7 +1121,7 @@ class _Plan:
         return Check(current == wanted, f"{POLICY_PATH} force-installs {extension_id}")
 
     def apply_policy(self) -> str:
-        policy = render_policy(self._extension_id(), self.env.update_manifest)
+        policy = self._render_policy(self._extension_id())
         self._write_policy(policy)
         return f"wrote {POLICY_PATH}"
 
@@ -1234,7 +1267,7 @@ class _Plan:
         """
         version = self._current_version()
         extension_id = self._extension_id()
-        clean = render_policy(extension_id, self.env.update_manifest)
+        clean = self._render_policy(extension_id)
         try:
             self._write_policy({**clean, "ExtensionInstallForcelist": []})
             self._wait_for(
@@ -1279,11 +1312,9 @@ class _Plan:
         """Mint → deliver through policy → bounded wait → remove. See module doc."""
         extension_id = self._extension_id()
         code = self._wait_for_code(extension_id)
-        clean = render_policy(extension_id, self.env.update_manifest)
+        clean = self._render_policy(extension_id)
         try:
-            self._write_policy(
-                render_policy(extension_id, self.env.update_manifest, code), secret=True
-            )
+            self._write_policy(self._render_policy(extension_id, code), secret=True)
             deadline = self.env.monotonic() + PAIR_WAIT_S
             while self.env.monotonic() < deadline:
                 if self._paired():
@@ -1863,6 +1894,27 @@ def headless_node_once() -> bool:
     return is_headless_node()
 
 
+def _operator_key_held_locally() -> bool:
+    """Whether THIS node holds the private half of its operator anchor (R2-3).
+
+    Setup keeps the anchor out of managed policy when it does
+    (``site_approval.anchor_policy_fields``), but only at setup time: a key
+    file copied onto the node LATER leaves the anchor in policy while the agent
+    could sign its own approvals. The browser tool refuses to raise a card in
+    that state; this fact lets ``lop network ready`` say so too. Never raises.
+    """
+    try:
+        from local_operator.browser_bridge.site_approval import anchor_key_held_locally
+        from local_operator.operator.trust import load_anchor
+        from local_operator.paths import config_dir
+
+        loaded = load_anchor()
+        anchor = loaded.anchor if loaded.usable else None
+        return bool(anchor is not None and anchor_key_held_locally(config_dir(), anchor.key_id))
+    except Exception:  # noqa: BLE001 — an unreadable anchor is not a held key
+        return False
+
+
 def browser_fact(env: NodeEnv | None = None) -> dict[str, Any]:
     """This device's browser hosting, as facts for ``lop network ready``.
 
@@ -1921,6 +1973,7 @@ def browser_fact(env: NodeEnv | None = None) -> dict[str, Any]:
             "daemon_healthy": bool(status.get("healthy")),
             "paired": paired,
             "connected": connected,
+            "operator_key_held_locally": _operator_key_held_locally(),
         }
     except Exception as error:  # noqa: BLE001 - a fact that cannot be read says so
         return {"host": "unknown", "error": str(error)[:200]}

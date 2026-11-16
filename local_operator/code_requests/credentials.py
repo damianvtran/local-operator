@@ -213,8 +213,9 @@ def resolve(
         # revoke to produce the 401 that would otherwise evict it. The grant
         # cache behind ``borrowed_git_env`` is already the memo, so not caching
         # costs a dict lookup per resolve, not an owner round-trip. The value is
-        # still registered for scrubbing before any caller can use it.
-        _register_for_scrubbing(token.value)
+        # already registered for scrubbing: ``_borrow_github`` (the only source
+        # of a brokered token) takes ``lent_github_env``, which registers it
+        # before handing it back, so a second registration here is not needed.
         return token
     return _remember(token)
 
@@ -386,10 +387,14 @@ def _borrow_github() -> _Borrow:
         # and this device's grant-cache partition, per ``borrowed_git_env``):
         # a fixed label makes these process-wide reads legible on the owner's
         # audit rows instead of a blank (review round 1, R1-4).
-        _env, token = github_credentials.borrowed_git_env(
-            client=client, session_id=BORROW_ATTRIBUTION
+        # Through ``lent_github_env``, the one door bash children and monitor
+        # ticks take too, so the three surfaces cannot drift apart again. The
+        # sink is the process-wide store, best effort by its own contract, so a
+        # token is never withheld here that the borrow itself served.
+        _env, token = github_credentials.lent_github_env(
+            client=client, session_id=BORROW_ATTRIBUTION, register=_register_for_scrubbing
         )
-    except Exception:  # noqa: BLE001 - borrowed_git_env never raises; belt and braces
+    except Exception:  # noqa: BLE001 - lent_github_env never raises; belt and braces
         token = ""
     if token:
         return _Borrow(arranged=True, token=token, owner=owner)

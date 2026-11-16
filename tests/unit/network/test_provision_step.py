@@ -166,6 +166,49 @@ def _pushes_ok(recorded: list[list[str]]):
     return run_local
 
 
+def test_a_failed_push_names_the_rows_reason(
+    provision_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reason is in the CLI's per-device row, and the step must carry it.
+
+    ``definitions push --json`` answers ``{"ok": false, "peers": [row]}``: the
+    code and sentence are on the row. Reading only the top level filed #3849's
+    ``no_answer`` as a codeless failure, so the run's log could not say why.
+    """
+    _seed(provision_root, "openai", {"refresh": "r", "access": "a", "email": "d@example.com"})
+    _operator_record(provision_root)
+    _real_networks(monkeypatch)
+    row = {
+        "ok": False,
+        "code": "no_answer",
+        "message": "that device did not answer (a timeout or a closed link); "
+        "its definitions will be retried",
+        "device_id": NODE,
+    }
+
+    def run_local(argv: list[str], *, timeout: float) -> onboard.CommandResult:
+        if "definitions" in argv:
+            return _result((), stdout=json.dumps({"ok": False, "peers": [row]}))
+        if "mcp" in argv:
+            return _result((), stdout=json.dumps({"ok": True, "peers": [{"device_id": NODE}]}))
+        return _result(())
+
+    transport = FakeTransport(
+        outputs=[
+            ("network credentials", {"stdout": json.dumps(_listing(held=["openai"]))}),
+            ("mcp state", {"stdout": json.dumps({"ok": True, "servers": []})}),
+        ]
+    )
+    outcome = _run(_view(), transport, run_local).step_provision()
+
+    assert outcome.data["definitions"] == {
+        "ok": False,
+        "code": "no_answer",
+        "message": row["message"],
+    }, outcome.data["definitions"]
+    assert outcome.data["mcp"] == {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # The writes, the receipt, idempotency
 # ---------------------------------------------------------------------------

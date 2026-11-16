@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "Используйте /move <путь> для смены рабочего каталога или /move <сессия> --to <пир> для перемещения сессии.",
+  "tui.session_move.to_needs_device": "--to требует указать устройство: /move --to <пир|local>",
+  "tui.session_move.cannot_wait": "на этом экране нельзя дождаться перемещения — выполните в shell: `lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to поддерживает только --keep, --queue и --drop-session-roles, но не {flag}",
+  "tui.session_move.cli_unavailable": "не удалось запустить CLI ({reason})",
+  "tui.session_move.deadline_exceeded": "за отведённое время результат перемещения не установлен; повторный запуск `lop sessions move {session} --to {to}` покажет, до какого этапа оно дошло",
+  "tui.session_move.cli_no_answer": "CLI завершился с кодом {code} без ответа"
+}

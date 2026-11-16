@@ -1,0 +1,48 @@
+# ru/mobile.doctor: every key rendered through local_operator.i18n Msg.envelope(locale='ru') at a3722be7dada with sample args {"lop": "0.42.1", "python": "3.12.7", "platform": "macOS-15.1-arm64", "ms": "2400", "open": "231", "limit": "256", "emfile": "14", "sqlite": "3", "state": "stopped", "reason": "login_required", "count": "3"}; daemon_action also with action=bogus (other branch).
+# Text render only; no terminal or desktop frame captured.
+mobile.doctor.daemon.gate_open
+  -> Служба доступа с телефона ответила, не запросив пароль: портал для телефона не защищён.
+mobile.doctor.daemon.not_answering
+  -> Служба доступа с телефона запущена, но не отвечает; мобильное приложение показывает этот компьютер как не отвечающий. Возможно, она исчерпала лимит открытых файлов.
+mobile.doctor.daemon.not_installed
+  -> Служба доступа с телефона не настроена на этом компьютере, поэтому она не запущена.
+mobile.doctor.daemon.not_running
+  -> Служба доступа с телефона настроена, но не запущена; пока она не запустится, мобильное приложение показывает этот компьютер в спящем режиме.
+mobile.doctor.daemon.ok
+  -> Служба доступа с телефона запущена и ответила за 2400 мс.
+mobile.doctor.daemon.slow
+  -> Служба доступа с телефона запущена, но ответила только через 2400 мс; в мобильном приложении этот компьютер может отображаться как не отвечающий.
+mobile.doctor.daemon.state_not_running
+  -> не запущен
+mobile.doctor.files.near
+  -> У службы доступа с телефона открыто файлов: 231 из 256, это близко к лимиту, поэтому новые подключения с телефона и открытие базы данных могут завершаться ошибкой.
+mobile.doctor.files.not_running
+  -> Служба доступа с телефона не запущена, поэтому открытых файлов для подсчёта нет.
+mobile.doctor.files.ok
+  -> У службы доступа с телефона открыто файлов: 231 из 256.
+mobile.doctor.files.status_line
+  -> открыто 231 из 256
+mobile.doctor.files.unknown
+  -> Не удалось подсчитать открытые файлы службы доступа с телефона на этом компьютере.
+mobile.doctor.login.missing
+  -> Вход в Radient не выполнен.
+mobile.doctor.login.ok
+  -> Вход в Radient выполнен.
+mobile.doctor.logs.clean
+  -> В журналах за последние сутки нет ошибок «слишком много открытых файлов» и ошибок открытия базы данных.
+mobile.doctor.logs.errors
+  -> В журналах за последние сутки есть ошибки «слишком много открытых файлов» (14) и ошибки открытия базы данных (3); возможно, служба доступа с телефона упирается в лимит открытых файлов.
+mobile.doctor.tunnel.duplicates
+  -> У этой учётной записи Radient туннелей для этого компьютера: 3; возможно, мобильное приложение подключается к старому.
+mobile.doctor.tunnel.list_unchecked
+  -> Не удалось прочитать список туннелей учётной записи, поэтому дубликаты туннелей не проверялись.
+mobile.doctor.tunnel.not_configured
+  -> Доступ с телефона через Radient на этом компьютере не настроен.
+mobile.doctor.tunnel.ok
+  -> Туннель настроен, его коннектор в состоянии stopped.
+mobile.doctor.tunnel.problem
+  -> Туннель настроен, но его коннектор в состоянии stopped (login_required).
+mobile.doctor.tunnel.single
+  -> У этой учётной записи Radient один туннель для этого компьютера.
+mobile.doctor.versions.ok
+  -> Local Operator 0.42.1 на Python 3.12.7 (macOS-15.1-arm64).

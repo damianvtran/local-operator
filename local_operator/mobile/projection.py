@@ -95,6 +95,7 @@ from local_operator.harness.types import (
     CompactionEndEvent,
     CompactionStartEvent,
     CustomMessage,
+    DocumentContent,
     ImageContent,
     Message,
     MessageEndEvent,
@@ -606,6 +607,37 @@ def _image_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
             refs.append({"index": image_index, "mime_type": block.content_type or "image/png"})
             image_index += 1
     return refs
+
+
+def _file_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
+    """Retained documents, never origin paths or inline document bytes.
+
+    The family index is also the owner media reader's index. Adding these facts
+    to both durable and live folds makes an existing remote PDF discoverable
+    without pretending the phone can upload a document across the mesh.
+    """
+    refs: list[dict[str, Any]] = []
+    for block in content or []:
+        if isinstance(block, DocumentContent):
+            size = block.bytes
+            if not size and block.data:
+                size = len(block.data) // 4 * 3 - (
+                    2 if block.data.endswith("==") else 1 if block.data.endswith("=") else 0
+                )
+            refs.append(
+                {
+                    "index": len(refs),
+                    "filename": block.filename,
+                    "mime_type": block.mime_type,
+                    "bytes": size,
+                }
+            )
+    return refs
+
+
+def _file_refs(message: AgentMessage) -> list[dict[str, Any]]:
+    content = getattr(message, "content", None)
+    return _file_refs_for_content(content if isinstance(content, list) else None)
 
 
 def _video_refs(message: AgentMessage) -> list[dict[str, Any]]:
@@ -1845,6 +1877,7 @@ def fold_messages_to_entries(
                         # (review round 3, R3-3) — the unmarked-image control
                         # beside it already does exactly this.
                         images=_image_refs(message),
+                        files=_file_refs(message),
                     )
                 )
                 continue
@@ -1897,7 +1930,11 @@ def fold_messages_to_entries(
             # inline render the live fold produces. The bytes are fetched
             # lazily from the image endpoint; only the reference travels here.
             refs = _image_refs(message)
-            entries.append(TranscriptEntry(id=message.id, kind="user", text=text, images=refs))
+            entries.append(
+                TranscriptEntry(
+                    id=message.id, kind="user", text=text, images=refs, files=_file_refs(message)
+                )
+            )
             # A bang-mode receipt replays as open as it lived: the user row is
             # `! <command>` and the assistant message that follows carries
             # exactly one bash call, whose card opens expanded. SET only,
@@ -2094,6 +2131,7 @@ def fold_messages_to_entries(
                 video_refs = _video_refs(message)
                 if video_refs:
                     entry.videos = video_refs
+                entry.files = _file_refs(message)
                 # The expansion flag is set on the CALL and must survive the
                 # result settling the row.
                 if entry.details.get("user_run"):
@@ -2894,6 +2932,9 @@ class ProjectionFold:
             )
             if video_refs:
                 row.videos = video_refs
+            row.files = _file_refs_for_content(
+                result.content if isinstance(result.content, list) else None
+            )
             row.details = self._tool_details(
                 self._tool_args.pop(event.tool_call_id, {}),
                 result.text,
@@ -3257,6 +3298,7 @@ class ProjectionFold:
                 entry.text = parent_message.body
             if refs and not entry.images:
                 entry.images = refs
+            entry.files = _file_refs(message)
             return False
         if marker_body is not None and marker_facts is not None:
             # A hub steer delivered mid-turn announces itself as a user
@@ -3279,6 +3321,7 @@ class ProjectionFold:
                     # (original id/index) rather than dropping them on
                     # reclassification (review round 3, R3-3).
                     images=refs,
+                    files=_file_refs(message),
                 )
             )
             return True
@@ -3295,7 +3338,14 @@ class ProjectionFold:
             )
             return True
         self._append(
-            TranscriptEntry(id=message.id, kind="user", text=row_text, images=refs, final=True)
+            TranscriptEntry(
+                id=message.id,
+                kind="user",
+                text=row_text,
+                images=refs,
+                files=_file_refs(message),
+                final=True,
+            )
         )
         return True
 
