@@ -3329,6 +3329,15 @@ def _tolerant(token_class: str) -> str:
 #: matches prose (`"private_key": "BEGINNER guide"`) and the file's own marker words.
 _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY")
 
+#: Openers of the MULTI-LINE secret shapes: a shape that matches only once its
+#: closing line is in view, so a scrub over a bounded head of the text misses it
+#: when the close falls past that head. A bounded scrubber that still finds one of
+#: these in its scrubbed output must rescan the whole text (security review r4,
+#: S-9, ``notifications.compose._scrubbed_snippet``). Searched against UPPER-CASED
+#: text, as :data:`_PEM_HEADER_PHRASE` is elsewhere in this module. Extend this
+#: tuple when a new multi-line shape lands, and every bounded scrubber follows.
+MULTI_LINE_SECRET_OPENERS: tuple[re.Pattern[str], ...] = (_PEM_HEADER_PHRASE,)
+
 
 #: One NUMBERED unit of a tool's line numbering: an optional opening bracket, the digit
 #: run, an optional closing bracket, whitespace, and an optional separator.

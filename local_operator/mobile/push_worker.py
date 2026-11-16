@@ -435,6 +435,10 @@ class PushWorker:
         self._clock = clock
         self._presence = presence if presence is not None else _desktop_attended
         self._live_devices = live_devices if live_devices is not None else self._live_device_ids
+        # Whether gate 4 was injected (a test seam). The preview gate derives the
+        # live list from its own single registry load in production
+        # (:meth:`_previews_allowed`); only an injected list overrides that.
+        self._live_devices_injected = live_devices is not None
         self._report_block = report_block
         self._unread_count = unread_count if unread_count is not None else self._store_count
         self._cursors = WorkerCursors()
@@ -1183,6 +1187,15 @@ class PushWorker:
                 count=completion_count,
                 sound=sound,
                 sound_custom=sound_custom,
+                # The alert names the session and previews the turn (operator
+                # request, 2026-11-14), composed by the desktop's own composer
+                # from this directory — only when every live phone allows
+                # previews (``_previews_allowed``) AND the desktop's privacy
+                # switch is on (applied inside compose). This runs on the tick's
+                # worker thread, never the event loop, because compose reads
+                # the transcript.
+                session_dir=_session_dir_of(self.config_dir, session_id),
+                previews=self._previews_allowed(),
             )
         elif item.kind == EVENT_DIGEST:
             # The coalesced catch-up: a set, so it names no conversation and
@@ -1518,6 +1531,43 @@ class PushWorker:
             return {**payload, "exclude": sorted(excluded)}
         return payload
 
+    def _previews_allowed(self) -> bool:
+        """Whether a completion banner may carry the session's name and a preview.
+
+        The PHONES' half of the two-switch consent rule (operator decision,
+        2026-11-14, PR #3990 comment 6881635039; the desktop's half,
+        ``display.notification_session_name``, is applied inside compose):
+        previews are on by default, and true here only when EVERY live device
+        resolves ``preferences.previews`` to true (missing means true, as for
+        every switch in ``push_devices.PREFERENCE_KEYS``).
+
+        Every, not any: the cloud fans a completion out to all of the
+        computer's devices and forbids ``exclude`` on that form (§3.2), so the
+        only way to honour one phone's "off" is a generic banner for all. What
+        is at stake is text Radient's cloud keeps for 14 days (agent-server
+        ``session_push_emits``) and that crosses APNs/FCM, so this fails CLOSED:
+        an unreadable registry, or no live device at all, answers False. (No
+        live device means the emit is not sent anyway; False keeps the answer
+        from being a vacuous "all of none agreed".)
+
+        ONE REGISTRY LOAD (security review r2, N-1): the live list and the
+        switches come from the same :func:`push_devices.preview_snapshot`, so a
+        registration landing mid-gate cannot produce a live device with no
+        switch on record. Should a live device still have no row (an injected
+        gate-4 list, or a foreign registry), it counts as previews OFF — the
+        race defaults to the generic banner. That is NOT the same as a row
+        that exists without a ``previews`` key: such a row is an older app's,
+        and the operator's rule keeps it on (``resolved_preferences``).
+        """
+        try:
+            live_rows, previews = mobile_push_devices.preview_snapshot(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            return False
+        live = list(self._live_devices()) if self._live_devices_injected else live_rows
+        if not live:
+            return False
+        return all(previews.get(str(device), False) for device in live)
+
     def _live_device_ids(self) -> list[str]:
         """Gate 4 of §2.3: which devices this machine may deliver to.
 
@@ -1698,3 +1748,17 @@ def _session_id_of(conversation: str) -> str | None:
     if namespace != "session" or not session_id:
         return None
     return session_id
+
+
+def _session_dir_of(config_dir: Path, session_id: str | None) -> Path | None:
+    """The session directory a completion alert is composed from, or ``None``.
+
+    ``<config_dir>/sessions/<id>`` is the layout the desktop feed composes from
+    (``desktop_feed.sessions_dir``). The id must be a bare name — the same check
+    ``daemon._durable_user_session_dir`` applies — so a malformed store key can
+    never point compose's reads outside the sessions tree. A missing directory is
+    fine: compose degrades to its nameless fallback.
+    """
+    if not session_id or session_id in (".", "..") or Path(session_id).name != session_id:
+        return None
+    return config_dir / "sessions" / session_id
