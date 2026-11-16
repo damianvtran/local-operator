@@ -235,24 +235,6 @@ async def test_native_facts_are_bookkeeping_not_live_or_legacy_display_messages(
     assert [m.id for m in rig.transcript.build_llm_history()] == [ordinary.id]
 
 
-@pytest.mark.parametrize(
-    "code, expected",
-    [
-        ("from pathlib import Path; Path('out.txt').write_text('contents')", ("out.txt",)),
-        ("open('input.txt').read()", ("input.txt",)),
-        ("print(\"Path('not-a-file.txt')\")", ()),
-        ("name='dynamic.txt'; open(name)", ()),
-        ("def open(x): return x\nopen('shadowed.txt')", ()),
-        ("from alien import Path\nPath('shadowed.txt')", ()),
-        ("Path(f'{unknown}.txt').write_text('contents')", ()),
-    ],
-)
-def test_shared_eval_grammar_separates_file_operands_from_content(code, expected):
-    from local_operator.supplements.candidates import literal_eval_paths
-
-    assert literal_eval_paths(code) == expected
-
-
 @pytest.mark.asyncio
 async def test_directory_glob_output_never_sweeps_into_metadata_proofs(rig):
     destination = rig.work / "outputs"

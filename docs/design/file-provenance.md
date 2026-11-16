@@ -57,15 +57,17 @@ rather than normalized away; globs, unknown expansions and ambiguous cwd/code
 remain unproven. No directory sweep is used.
 
 The pure reference, markdown, explicit quoted literal and structured-argument
-leaves are shared with the existing parser module. The Python leaf uses AST
-file-argument positions, so `Path('out').write_text('contents')` does not attest
-a file named `contents`. Computed values, comments/strings containing code and
-shadowed constructors do not supply literal file operands. Shell command strings
-are deliberately **not a provenance source in P2**: neither literal inputs nor
-outputs inferred from `bash`/`execute_bash` can mint a proof. Structured path
-arguments, native `details.path` contracts, and explicit assistant/prompt/steer
-mentions remain eligible. Highlights' existing shell output/sweep heuristics
-remain unchanged and confer no provenance authority.
+leaves are shared with the existing parser module. Shell command strings are
+**not a provenance source in P2**: neither literal inputs nor outputs inferred
+from `bash`/`execute_bash` can mint a proof. Absolute structured path arguments
+and native `details.path` contracts remain eligible; relative paths, `~` and
+whitespace-normalized spellings fail closed because execution-time resolution
+is not captured by these contracts. Explicit assistant/prompt/steer mentions
+retain their frozen Session cwd/home semantics. Eval code strings are not a
+source either, including absolute literals: Python can change cwd within or
+between cells, shadow file APIs, or interpret `~` literally. Highlights' existing
+shell output/sweep and eval heuristics remain unchanged and confer no
+provenance authority.
 
 A ticket also freezes the existing owner public key, physical config-root
 identity, session identity, known birth and any already initialized proof
@@ -136,13 +138,16 @@ negative witnesses are trusted; coherently rewinding **all surviving transition
 knowledge** is unsupported and may require restoring only the journal after a
 failed projection, not every physical file.
 
-Shell parsing is intentionally outside this slice. Three remediation rounds
-(QA-Q1, R2-1, R3-1/R3-2 on PR #4108) found shell-state, token-boundary,
-parameter-expansion and internal-marker bypasses that named untouched decoy
-files. Rather than continue per-shape refusals, P2 removes the shell-to-proof
-path entirely, including plain literal commands. A future separately reviewed
-follow-up could implement a positive allowlist grammar with a non-colliding
-token representation; no such grammar is implemented or promised here.
+Shell and eval code-string interpretation is intentionally outside this slice.
+Three shell remediation rounds (QA-Q1, R2-1, R3-1/R3-2 on PR #4108) found
+shell-state, token-boundary, parameter-expansion and internal-marker bypasses
+that named untouched decoy files. R4-1 found the same class in eval: the
+persistent kernel can change cwd, and Python `open` does not expand `~`.
+P2 removes both code-string-to-proof paths entirely, including plain shell
+literals and absolute eval literals. No grammar allowlist is planned. A possible
+future route is runtime-observed opens: the bash/eval sandbox would report the
+files it actually touched, not paths inferred by parsing code strings. That
+runtime observation is not implemented or promised here.
 
 Committed spool cancellation is a conservative omission: `await_spool_write`
 joins a durable write before re-raising cancellation, while prompt cleanup drops

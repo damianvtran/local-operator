@@ -393,44 +393,90 @@ async def test_tool_output_json_alone_never_issues_until_assistant_adopts(rig):
 
 
 @pytest.mark.asyncio
-async def test_eval_path_literal_not_write_content_is_real_completion_evidence(rig):
-    target = rig.work / "eval-output.txt"
-    decoy = rig.work / "contents"
-    decoy.write_text("not named as a file")
+@pytest.mark.parametrize("case", ["same-cell-chdir", "prior-cell-chdir", "tilde", "absolute"])
+async def test_r4_real_eval_never_mints_proofs(rig, case):
+    from local_operator.tools.eval import close_session_kernel, execute_eval
+
+    target = rig.work / "x.txt"
+    target.write_text("WORK-DECOY")
+    sub = rig.work / "sub"
+    sub.mkdir()
+    (sub / "x.txt").write_text("SUB-REAL")
+    (rig.work / "~").mkdir()
+    (rig.work / "~" / "x.txt").write_text("TILDE-REAL")
+    (rig.work.parent / "x.txt").write_text("HOME-DECOY")
+    codes = {
+        "same-cell-chdir": ["import os; os.chdir('sub'); print(open('x.txt').read())"],
+        "prior-cell-chdir": ["import os; os.chdir('sub')", "print(open('x.txt').read())"],
+        "tilde": ["print(open('~/x.txt').read())"],
+        "absolute": [f"print(open({str(sub / 'x.txt')!r}).read())"],
+    }[case]
+    actual = []
+    contexts = []
 
     async def evaluate(call_id, args, signal, update, context):
-        # Synthetic native executor, actual Python file side effect. The production
-        # harness still owns admission/execution/completion and real source rows.
-        exec(compile(args["code"], "<synthetic-native-eval>", "exec"), {})
-        return ToolResult(
-            tool_call_id=call_id, tool_name="eval", content=[TextContent(text="completed")]
-        )
+        # Exercise the production persistent worker, not exec() in the pytest
+        # process: cwd state must survive one cell without contaminating tests.
+        contexts.append(context)
+        result = await execute_eval(call_id, args, signal, update, context)
+        assert not result.is_error
+        actual.extend(block.text for block in result.content if isinstance(block, TextContent))
+        return result
 
-    code = f"from pathlib import Path; Path({str(target)!r}).write_text('contents')"
-    tool = AgentTool(name="eval", parameters={"type": "object"}, execute=evaluate)
-    session = make_session(
-        rig,
-        [
+    turns = []
+    for index, code in enumerate(codes):
+        turns.append(
             [
                 StreamToolCallDelta(
                     index=0,
-                    id="eval-literal",
+                    id=f"eval-{index}",
                     name="eval",
                     argument_delta=json.dumps({"code": code}),
                 ),
                 StreamEndEvent(stop_reason="toolUse"),
-            ],
-            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+    turns.append([StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")])
+    session = make_session(
+        rig,
+        turns,
+        [
+            AgentTool(
+                name="eval",
+                parameters={"type": "object"},
+                execute=evaluate,
+            )
         ],
-        [tool],
     )
     try:
-        await session.prompt("execute literal path")
-        completed = [p for p in proofs(rig) if p and p["source_class"] == "tool_completion"]
-        assert completed and all(p["file"]["path"] == str(target) for p in completed)
-        assert decoy.read_text() == "not named as a file"
+        await session.prompt("execute the supplied cells")
+        expected = "TILDE-REAL" if case == "tilde" else "SUB-REAL"
+        assert expected in "\n".join(actual)
+        print("R4 EVAL", case, "stdout=", actual, "proofs=", len(ids(rig.transcript)))
+        assert not ids(rig.transcript)
     finally:
         await session.dispose()
+        for context in contexts:
+            await close_session_kernel(context.session_id)
+
+
+@pytest.mark.parametrize("tool", ["read", "write", "edit", "browser"])
+@pytest.mark.parametrize("reference", ["x.txt", "~/x.txt", "~other/x.txt", "absolute-whitespace"])
+def test_r4_structured_unresolved_paths_never_mint(rig, tool, reference):
+    # Existing decoys make a resolver mismatch observable; this is not merely
+    # refusal because the guessed file happened to be missing.
+    (rig.work / "x.txt").write_text("WORK-DECOY")
+    (rig.work.parent / "x.txt").write_text("HOME-DECOY")
+    if reference == "absolute-whitespace":
+        reference = str(rig.work / "x.txt ")
+        Path(reference).write_text("TRIM-DECOY")
+    candidates = list(F.argument_candidates(tool, {"path": reference}))
+    candidates += list(
+        F.native_result_candidates(tool, {"path": reference, "files": [{"path": reference}]})
+    )
+    ticket = rig.owner.capture("tool_completion", candidates)
+    assert not ticket.files
+    assert candidates == []
 
 
 # -- PR #4108 round-2 remediation -------------------------------------------------------

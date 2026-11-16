@@ -261,6 +261,13 @@ def text_candidates(text: str) -> Iterable[Candidate]:
             yield Candidate(raw.rstrip(".,;:"), f"{grammar}:{match.start()}:{match.end()}")
 
 
+def _absolute_tool_path(raw: str) -> bool:
+    # Tools resolve relative/~ paths using their execution context (and some trim
+    # whitespace). That context need not equal the Session's frozen cwd/home.
+    # Without the executor's exact resolved path, omit rather than attest a decoy.
+    return raw == raw.strip() and Path(raw).is_absolute()
+
+
 def argument_candidates(tool: str, args: Mapping[str, Any]) -> Iterable[Candidate]:
     from local_operator.session_files.scan import _MENTION_ARG_KEYS
 
@@ -268,16 +275,11 @@ def argument_candidates(tool: str, args: Mapping[str, Any]) -> Iterable[Candidat
         value = args.get(key)
         values = value if isinstance(value, list) else [value]
         for index, item in enumerate(values):
-            if isinstance(item, str) and item:
+            if isinstance(item, str) and _absolute_tool_path(item):
                 yield Candidate(item, f"argument:{key}:{index}")
-    # Shell strings are not explicit file contracts. Static shell interpretation has
-    # repeatedly invented paths bash never touched (PR #4108, QA-Q1/R2-1/R3-1/R3-2).
-    # Keep Highlights heuristics separate: neither shell inputs nor outputs issue proofs.
-    if tool == "eval" and isinstance(args.get("code"), str):
-        from local_operator.supplements.candidates import literal_eval_paths
-
-        for index, path in enumerate(literal_eval_paths(args["code"])):
-            yield Candidate(path, f"eval_literal:{index}")
+    # Interpreter code is not an explicit file contract: shell expansion and Python's
+    # mutable cwd/open bindings can name files the interpreter never touched. Keep
+    # Highlights heuristics separate; neither shell nor eval strings issue proofs.
 
 
 def native_result_candidates(tool: str, details: Any) -> Iterable[Candidate]:
@@ -286,12 +288,12 @@ def native_result_candidates(tool: str, details: Any) -> Iterable[Candidate]:
     # attachment authority stays separate and is never converted to a raw path.
     if tool not in {"write", "edit", "browser"} or not isinstance(details, dict):
         return
-    if isinstance(details.get("path"), str):
+    if isinstance(details.get("path"), str) and _absolute_tool_path(details["path"]):
         yield Candidate(details["path"], "result:path")
     if tool == "browser" and isinstance(details.get("files"), list):
         for index, item in enumerate(details["files"]):
             path = item.get("path") if isinstance(item, dict) else item
-            if isinstance(path, str):
+            if isinstance(path, str) and _absolute_tool_path(path):
                 yield Candidate(path, f"result:files:{index}")
 
 
