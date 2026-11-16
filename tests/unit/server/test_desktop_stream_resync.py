@@ -25,6 +25,19 @@ from local_operator.server.utils import desktop_sessions as module
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 
 
+@pytest.fixture(autouse=True)
+def _fresh_snapshot_pool() -> Any:
+    """Each test gets its own snapshot pool, joined at teardown (#4023 R1-n1).
+
+    The resync snapshots build on the process-wide pool; without the join its
+    worker thread outlives the test and the thread-leak reporter flags it --
+    the same fixture ``test_desktop_snapshot_off_loop`` uses.
+    """
+    module.shutdown_snapshot_pool(wait=True)
+    yield
+    module.shutdown_snapshot_pool(wait=True)
+
+
 async def _opened(bridge: Any) -> tuple[Any, Any]:
     """A subscriber past its OPEN handshake (open + snapshot consumed)."""
     sub = bridge.subscribe()

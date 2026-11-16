@@ -223,7 +223,7 @@ REPLAY_BYTES = 8 * 1024 * 1024
 #: WHY A RESYNC AND NOT THE FRAME. A frame larger than the whole per-subscriber
 #: budget can never be queued, so the old path disconnected EVERY opened viewer
 #: at once (QA Q2 on #4012: one ~37 MB ``history_delta`` cut all three streams
-#: with ``subscriber overflow``), and the desktop relay would drop it anyway
+#: with ``subscriber overflow``), and the desktop relay would cut the stream on it anyway
 #: (``MAX_FRAME_BYTES``, 8 MiB, ``local-operator-ui`` ``src/main/desktop-stream.ts``).
 #: The snapshot already restates the state such a frame carries -- the bounded
 #: history page plus ``frontend`` -- and the paged history route serves the rest.
@@ -510,7 +510,7 @@ def _wire_state_of(capture: _WireCapture) -> dict[str, Any]:
     # The bytes are identical: ``test_desktop_snapshot_off_loop`` compares the
     # two builds. ``model_copy`` is shallow and builds a new object.
     state = capture.reference.model_copy(update={"attention": capture.attention})
-    return sync_wire_payload(
+    payload = sync_wire_payload(
         FrontendSync(
             epoch=state.epoch,
             sequence=state.sequence,
@@ -518,6 +518,136 @@ def _wire_state_of(capture: _WireCapture) -> dict[str, Any]:
             live_cursor=state.history_cursor,
         )
     )
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, dict):
+        slim_desktop_job_rows_in_place(snapshot)
+    return payload
+
+
+#: The job-row keys the desktop renderer reads, and the ONLY ones a desktop
+#: snapshot's roster rows keep (``slim_desktop_job_rows_in_place``).
+#:
+#: WHY AN ALLOWLIST. The desktop relay ends the stream on any record over 8 MiB
+#: (``MAX_FRAME_BYTES``, ``local-operator-ui`` ``src/main/desktop-stream.ts``),
+#: and the roster was the part of the open snapshot that grew with the session:
+#: ~3.3 KB per job, ~6.6 MB at 2,000 jobs, so a long-lived orchestrator was a
+#: few thousand jobs away from a conversation that could never open. Most of a
+#: row is data only the TUI and the runtime socket read (``descendant_usage``,
+#: ``session_dir``, ``trajectory_length``, the per-call ``usage`` receipt,
+#: ``attempt_aliases``...). An allowlist rather than a denylist so a field a
+#: future runtime adds to ``JobState`` costs the desktop nothing until the app
+#: is taught to read it -- and then it is added HERE, deliberately.
+#:
+#: WHERE THE LIST COMES FROM: the renderer's raw-row readers on
+#: ``local-operator-ui`` main -- ``deriveChild`` (``run-detail-model.ts``), the
+#: one reader of a row's fields; ``settled-job-rows.ts`` and ``job-deltas.ts``,
+#: which read only ``id``/``status``. Session cost comes from
+#: ``frontend.child_costs``/``cumulative_cost``, never a job's ``usage``.
+#:
+#: WHY IT IS SAFE TO DROP A FIELD: a job delta (``job_deltas.upserted``) still
+#: carries the FULL bounded row, and the app REPLACES the row it holds with it
+#: (``job-deltas.ts``), so the first change to a row restores every field. A
+#: settled row never changes again, and it renders nothing from what was dropped.
+#:
+#: SCOPE: the desktop plane only. ``sync_wire_payload`` itself is shared with the
+#: runtime socket and the TUI followers, which DO read the dropped fields; this
+#: runs after it, on the bridge's own copy.
+DESKTOP_JOB_ROW_KEYS: Final = frozenset(
+    {
+        "id",
+        "type",
+        "label",
+        "agent_role",
+        "status",
+        "queued",
+        "start_time",
+        "settled_at",
+        "usage",
+        "context_window",
+        "direct_cost",
+        "latest_details",
+        "error_text",
+        "result_text",
+        "session_id",
+        "parent_job_id",
+        "model_label",
+        "prompt",
+        "launch_prompts",
+        "launch_message_id",
+    }
+)
+
+#: The two ``usage`` readings the row draws: ``deriveChild``'s context label is
+#: ``context_tokens``, falling back to ``input_tokens``. The rest of the receipt
+#: (``cost_components``, cache and reasoning splits, provider ids) is the
+#: priced breakdown the TUI's spend view reads, and the bulk of a usage dict.
+DESKTOP_JOB_USAGE_KEYS: Final = frozenset({"context_tokens", "input_tokens"})
+
+#: Raw statuses the renderer folds to a SETTLED state (``foldStatus`` /
+#: ``isOpenChildStatus``): a settled row's activity line is null, so its
+#: ``latest_details`` is never drawn. Explicit rather than "not running" so a
+#: status word the app has not been taught keeps its details.
+_DESKTOP_SETTLED_JOB_STATUSES: Final = frozenset(
+    {"completed", "done", "failed", "cancelled", "canceled", "interrupted", "gone"}
+)
+
+
+#: Keys every slim row carries even when empty: the row's identity and the two
+#: words the roster partitions and folds on.
+_DESKTOP_JOB_ROW_ALWAYS: Final = frozenset({"id", "type", "status"})
+
+
+def _empty_wire_value(value: Any) -> bool:
+    # ``False`` is checked by identity: ``0`` (a zero cost, a zero token count)
+    # is a reading the row draws, not an absent one.
+    return value is None or value is False or value == "" or value == {} or value == []
+
+
+def slim_desktop_job_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One roster row reduced to what the desktop app renders (a new dict).
+
+    See :data:`DESKTOP_JOB_ROW_KEYS`. ``latest_details`` is kept on an open row
+    (its activity line) and on every ``music`` row, settled or not: the music
+    card reads ``latest_details.music`` (tracks, stage) to state how a cancelled
+    or failed generation ended.
+
+    EMPTY VALUES ARE OMITTED (``None``, ``""``, ``False``, ``{}``, ``[]``): every
+    reader in ``deriveChild`` treats an absent key exactly like its empty value
+    (``wireText`` -> ``""``, ``wireNumber`` -> ``null``, ``toWireStringMap`` ->
+    ``{}``, ``queued === true``, ``isRecord(latest_details)``), and a settled
+    roster is mostly empty ``error_text``/``parent_job_id``/``queued`` -- ~60
+    bytes a row, which is what keeps 10,000 jobs inside the relay's 8 MiB.
+    """
+    slim = {
+        key: value
+        for key, value in row.items()
+        if key in DESKTOP_JOB_ROW_KEYS
+        and (key in _DESKTOP_JOB_ROW_ALWAYS or not _empty_wire_value(value))
+    }
+    usage = slim.get("usage")
+    if isinstance(usage, dict):
+        slim["usage"] = {k: v for k, v in usage.items() if k in DESKTOP_JOB_USAGE_KEYS}
+    if (
+        slim.get("latest_details") is not None
+        and slim.get("queued") is not True
+        and slim.get("type") != "music"
+        and str(slim.get("status") or "").lower() in _DESKTOP_SETTLED_JOB_STATUSES
+    ):
+        del slim["latest_details"]
+    return slim
+
+
+def slim_desktop_job_rows_in_place(snapshot: dict[str, Any]) -> None:
+    """Replace ``snapshot["jobs"]`` with slim rows (:func:`slim_desktop_job_row`).
+
+    Builds new row dicts rather than deleting keys: the rows may be shared with
+    a coalesced build another viewer is reading.
+    """
+    jobs = snapshot.get("jobs")
+    if isinstance(jobs, list):
+        snapshot["jobs"] = [
+            slim_desktop_job_row(row) if isinstance(row, dict) else row for row in jobs
+        ]
 
 
 def _wire_entries(entries: Sequence[Any]) -> list[dict[str, Any]]:

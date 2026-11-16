@@ -2063,7 +2063,31 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    end); when present it is authoritative. `changes["jobs"]` remains the
    REPLACEMENT form and is what a snapshot/seed carries; a renderer that has
    never heard of `job_deltas` ignores it and keeps its last snapshot until the
-   next sync, which is safe. Rows in both forms are the same bounded summaries.
+   next sync, which is safe. Rows in both forms are the same bounded summaries,
+   with one desktop-only difference: the SLIM ROW. On the desktop plane the
+   roster in the `snapshot` frame, in `frontend.replace`, and in a
+   `changes["jobs"]` replacement keeps only the fields the app renders —
+   `id`, `type`, `status`, `label`, `agent_role`, `queued`, `start_time`,
+   `settled_at`, `usage` (`context_tokens` and `input_tokens` only),
+   `context_window`, `direct_cost`, `latest_details` (open rows and every
+   `music` row; a settled row draws no activity line), `error_text`,
+   `result_text`, `session_id`, `parent_job_id`, `model_label`, `prompt`,
+   `launch_prompts`, `launch_message_id` — and omits any of them whose value is
+   empty (`null`, `""`, `false`, `{}`, `[]`), which every reader treats as
+   absent. Everything else (`descendant_usage`, `session_dir`,
+   `trajectory_length`, `attempt_aliases`, the priced usage receipt, …) is
+   left out: a 2,000-job roster went from ~6.6 MB to ~1.6 MB (the whole open
+   record with an ordinary open-frame page: ~6.8 MB to ~1.8 MB), and a
+   10,000-job open record measures ~8.15 MB, under the relay's 8 MiB record
+   cap. That is the ceiling this slimming reaches: past ~10,000 jobs the
+   remaining weight is the 200-char per-row text floor the rows render.
+   `job_deltas.upserted` rows stay FULL bounded rows, and a merge REPLACES the
+   row it names, so a row's first change restores every field; a settled row
+   does not change again and renders nothing from the dropped fields. The
+   runtime socket and the TUI followers still receive full rows
+   (`sync_wire_payload`); the slim row is applied only by the desktop bridge
+   (`slim_desktop_job_rows_in_place`). A field the app starts reading must be
+   added to `DESKTOP_JOB_ROW_KEYS` in the same change.
    A DEGRADED frame says so rather than going silent: `frontend.update` with
    `degraded: true, paused: true` + `degraded_reason`, and an `event` whose
    type is `notice` with `paused: true, action: "reload"`. `paused` means the
@@ -2247,7 +2271,7 @@ and8MiB; each subscriber has the same backlog bounds. A SINGLE frame larger than
 retained for replay or used to close anyone: each opened subscriber instead
 receives, in that frame's place and on the same connection, an in-band `gap`
 followed by a fresh `snapshot` (frames behind it at or below the snapshot's `seq`
-are superseded, newer ones follow it), and a reconnect whose cursor predates it
+are superseded — journal-order corrections excepted, as at open — newer ones follow it), and a reconnect whose cursor predates it
 gets `open{gap:true}`. Overflow emits `gap` and
 closes instead of silently losing semantic events — and an OVERFLOW is only
 reached by a subscriber that has already been served its snapshot. A subscriber
