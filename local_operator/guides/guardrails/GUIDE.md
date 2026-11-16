@@ -126,7 +126,14 @@ The template's parent must already exist, be fully pinned (no symlink or `..`
 components), and be inside the inherited session scratchpad. The random
 component remains **symbolic**, not an invented existing pathname or a creation
 ledger entry. Copies such as `SRC="$ROOT/source"` and bounded literal `for`
-lists retain containment; `${ROOT}old` does not inherit freshness.
+lists retain containment; `${ROOT}old` does not inherit freshness. Bare `mktemp`
+must resolve through PATH to the root-owned system executable under root-owned,
+non-group/world-writable parents; an inherited PATH is not itself proof. Unknown
+or shadowed executables, shell startup files and imported functions get no proof.
+Shell declarations/namerefs, variable-mutating builtins (including `printf -v`
+and `%n`), arithmetic/assignment expansions and unconfined earlier writes end
+all copied fresh bindings. Read-only filesystem classification alone cannot
+prove that a command preserves shell variables.
 
 This fixes a mac-proof capture case where rejecting every slash-bearing
 `mktemp` template collapsed fresh scratch writes to opaque writes at cwd.

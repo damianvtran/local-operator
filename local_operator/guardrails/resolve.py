@@ -38,6 +38,8 @@ import fnmatch
 import itertools
 import os
 import re
+import shutil
+import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
@@ -3648,7 +3650,13 @@ class _Walker:
                         if not nested
                     ]
         if depth == 0:
-            self.fresh_scope = _fresh_errexit_scope(command)
+            # Bash startup files and imported functions can shadow builtins or
+            # mktemp before the first visible segment. PATH inspection cannot
+            # prove executable identity in such a shell.
+            self.fresh_scope = _fresh_errexit_scope(command) and not any(
+                value and (key in ("BASH_ENV", "ENV") or key.startswith("BASH_FUNC_"))
+                for key, value in self.state.env.items()
+            )
         pieces, owned_bodies = _fd_redirect_merge(lexed.segments, owned_bodies)
         # R7-1/R8, structural: if the text ends inside a construct the ONE
         # shared scanner tracks (quote, ``$(``, ``${``, backtick, heredoc), its
@@ -3835,6 +3843,10 @@ class _Walker:
             for var in _arith_assigned(body):
                 self._invalidate(var)
         raw_words, redirects = scan(text)
+        # Arithmetic and parameter-assignment expansion can mutate bindings even
+        # inside otherwise harmless words. We do not model their shell lvalues.
+        if "((" in text or re.search(r"\$\{[^}]*[:+?=-]", text):
+            self._forget_fresh_directories()
         st = self.state
         words: list[Expanded] = []
         for w in raw_words:
@@ -3859,9 +3871,15 @@ class _Walker:
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self.result.touched.append(_target(exp, "write", op, st))
+                    target = _target(exp, "write", op, st)
+                    self.result.touched.append(target)
                     if op in (">", ">|", ">>"):
                         self._add(exp, "append" if op == ">>" else "overwrite", op)
+                    # A prior write may plant a PATH executable or shell input.
+                    # Only writes already confined to a proved fresh directory
+                    # preserve the proof; do not bless a later mktemp after it.
+                    if not target.opaque_contained:
+                        self._forget_fresh_directories()
             elif op == "<<<":
                 # R3-1: the body is re-parsed by the consuming shell, which
                 # loses the refs span; mask a referenced credential value now.
@@ -3885,6 +3903,10 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
+            # Declarations can install namerefs, integer attributes and aliases
+            # for future assignments; ordinary assignment tracking cannot prove
+            # their effects. Invalidate all copies before accepting any binding.
+            self._forget_fresh_directories()
             nameref = any(
                 w.text.startswith("-") and "n" in w.text and not w.text.startswith("--")
                 for w in words[1:]
@@ -3932,6 +3954,7 @@ class _Walker:
                     self._forget_fresh_directories()
             return
         if name == "read":
+            self._forget_fresh_directories()
             for w in words[1:]:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
@@ -3996,8 +4019,26 @@ class _Walker:
             words[0].text == name
             and not raw_assigns
             and st.env.get("PATH") == self.inherited_path
-            and name not in ({"unset", "read"} | _DECLARE_WORDS)
-            and (readonly or name in ("mkdir", "gmkdir", "mktemp", "gmktemp"))
+            # Read-only *filesystem* classification is not a shell-state
+            # proof: printf -v/%n, let, eval and declaration builtins mutate
+            # variables. Preserve only the small forms this proof understands.
+            and (
+                name in (":", "echo", "pwd", "mkdir", "gmkdir", "mktemp", "gmktemp")
+                or (name == "git" and readonly)
+                or (
+                    name == "printf"
+                    and bool(args)
+                    and len(raw_words) == len(words)
+                    and "".join(p.text for p in raw_words[0].parts) == "printf"
+                    and len(raw_words) > 1
+                    and not args[0].text.startswith("-")
+                    and "n" not in args[0].text
+                    and all(
+                        p.kind != "sub" and "$" not in p.text and "`" not in p.text
+                        for p in raw_words[1].parts
+                    )
+                )
+            )
         )
         if not preserves_fresh or (
             name == "set" and [w.text for w in args] != ["-euo", "pipefail"]
@@ -4254,6 +4295,45 @@ class _Walker:
             if FRESH_DIR_MARK in value:
                 self.state.env[key] = OPAQUE_MARK
 
+    def _trusted_mktemp(self) -> bool:
+        """Inspect, never execute, PATH's winner before granting fresh provenance.
+
+        An unchanged inherited PATH may start with a user-controlled executable.
+        Only the root-owned system mktemp, reached through root-owned unwritable
+        parents, proves the expected creator semantics. Other installations stay
+        opaque rather than running a candidate to ask whether it is trustworthy.
+        Earlier unmodelled shell/filesystem effects already end fresh_scope.
+        """
+        path = self.state.env.get("PATH")
+        if path is None:
+            return False
+        # PATH's empty/relative entries use the modeled shell cwd, not the
+        # resolver process's cwd. If it is unknown, identity is unknown too.
+        entries = path.split(os.pathsep)
+        if any(not os.path.isabs(p) for p in entries):
+            if self.state.cwd is None:
+                return False
+            entries = [p if os.path.isabs(p) else os.path.join(self.state.cwd, p) for p in entries]
+        selected = shutil.which("mktemp", path=os.pathsep.join(entries))
+        if selected not in ("/usr/bin/mktemp", "/bin/mktemp"):
+            return False
+        selected = os.path.realpath(selected)
+        try:
+            info = os.stat(selected)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            current = selected
+            while True:
+                info = os.stat(current)
+                if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return False
+                parent = os.path.dirname(current)
+                if parent == current:
+                    return True
+                current = parent
+        except OSError:
+            return False
+
     def _fresh_directory_assignment(self, raw: _RawWord, word: Expanded) -> None:
         """Pin only the parent of `R=$(mktemp -d TEMPLATE)`; R stays symbolic.
 
@@ -4282,6 +4362,8 @@ class _Walker:
         if any(w.opaque or w.empty or w.pattern or w.substitutions for w in args):
             return
         if [w.text for w in args[:2]] != ["mktemp", "-d"]:
+            return
+        if not self._trusted_mktemp():
             return
         template = args[2].text
         parent, leaf = os.path.split(template)

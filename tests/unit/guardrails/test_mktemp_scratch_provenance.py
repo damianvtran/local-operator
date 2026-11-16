@@ -190,6 +190,112 @@ def test_failed_mktemp_exits_before_empty_root_can_write(tree) -> None:
     assert not any(t.opaque_contained for t in _resolve(tree, command + WRITE).targets)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        'printf -v ROOT %s "$HOME/.local-operator"',
+        'COPY="$ROOT/source"; printf -v COPY %s "$HOME/.local-operator"',
+        'declare -n REF=ROOT; REF="$HOME/.local-operator"',
+        'typeset -n REF=ROOT; REF="$HOME/.local-operator"',
+        "declare -i ROOT=0",
+        "printf '%n' ROOT",
+        'FORMAT=%n; printf "$FORMAT" ROOT',
+        'builtin printf -v ROOT %s "$HOME/.local-operator"',
+        'command printf -v ROOT %s "$HOME/.local-operator"',
+        "read -a ROOT",
+        "let ROOT=0",
+        "eval 'ROOT=0'",
+        "set -- ROOT",
+        'alias printf="printf -v ROOT"',
+        "echo $((ROOT=0))",
+        'echo "${ROOT:=0}"',
+    ],
+)
+def test_shell_mutators_end_all_fresh_binding_proofs(tree, mutation) -> None:
+    # Never execute these protected-target probes. Copies must be invalidated
+    # too: modeling only the directly named variable misses nameref aliases.
+    destination = "COPY" if mutation.startswith("COPY=") else "ROOT"
+    command = HEADER + ASSIGN + mutation + f'\nprintf proof > "${destination}/config.yml"\n'
+    result = _resolve(tree, command)
+    assert not any(t.opaque_contained for t in result.targets if t.op == "overwrite")
+    # Literal zero assignments are accurately resolved as ordinary paths; the
+    # invariant is lost freshness, not forcing harmless literal paths HIGH.
+    if mutation not in ("declare -i ROOT=0", "eval 'ROOT=0'"):
+        assert _rank(tree, command).risk >= Risk.HIGH
+
+
+def test_inherited_path_shadow_is_not_a_fresh_directory_creator(tree) -> None:
+    home, pad, cwd, env = tree
+    bin_dir = home / "bin"
+    bin_dir.mkdir()
+    shadow = bin_dir / "mktemp"
+    shadow.write_text('#!/bin/bash\nprintf "%s\\n" "$HOME/.local-operator"\n')
+    shadow.chmod(0o755)
+    env["PATH"] = str(bin_dir) + ":/usr/bin:/bin"
+    command = HEADER + ASSIGN + 'printf proof > "$ROOT/config.yml"\n'
+    assert _rank(tree, command).risk >= Risk.HIGH
+    assert not any(t.opaque_contained for t in _resolve(tree, command).targets)
+    # A display-only execution verifies this is a successful impostor, not a
+    # hypothetical failed mktemp. The protected overwrite is never dispatched.
+    completed = subprocess.run(
+        ["/bin/bash", "-c", HEADER + ASSIGN + 'printf "%s\\n" "$ROOT"'],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == str(home / ".local-operator")
+    assert not list(pad.glob("mac-proof.*"))
+    assert (home / ".local-operator/config.yml").read_text() == "version: 1\n"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "mktemp() { printf '%s' 0; }\n",
+        "alias mktemp='printf 0'\n",
+        'printf fake > "$LOCAL_OPERATOR_SCRATCHPAD/mktemp"\n',
+    ],
+)
+def test_prior_shell_or_executable_shadowing_ends_fresh_scope(tree, prefix) -> None:
+    command = HEADER + prefix + ASSIGN + WRITE
+    assert _rank(tree, command).risk >= Risk.HIGH
+    assert not any(t.opaque_contained for t in _resolve(tree, command).targets)
+
+
+@pytest.mark.parametrize("key", ["BASH_ENV", "ENV", "BASH_FUNC_mktemp%%"])
+def test_inherited_shell_startup_or_function_prevents_identity_proof(tree, key) -> None:
+    tree[3][key] = "() { printf fake; }" if key.startswith("BASH_FUNC_") else "/untrusted"
+    command = HEADER + ASSIGN + 'printf proof > "$ROOT/config.yml"\n'
+    assert _rank(tree, command).risk >= Risk.HIGH
+    assert not any(t.opaque_contained for t in _resolve(tree, command).targets)
+
+
+@pytest.mark.parametrize("entry", ["", ".", "bin"])
+def test_relative_path_winner_uses_modeled_cwd(tree, entry) -> None:
+    _, _, cwd, env = tree
+    directory = cwd / "bin" if entry == "bin" else cwd
+    directory.mkdir(exist_ok=True)
+    shadow = directory / "mktemp"
+    shadow.write_text('#!/bin/bash\nprintf "%s\\n" "$HOME/.local-operator"\n')
+    shadow.chmod(0o755)
+    env["PATH"] = entry + ":/usr/bin:/bin"
+    command = HEADER + ASSIGN + 'printf proof > "$ROOT/config.yml"\n'
+    assert _rank(tree, command).risk >= Risk.HIGH
+    assert not any(t.opaque_contained for t in _resolve(tree, command).targets)
+
+
+def test_system_mktemp_in_ordinary_inherited_path_is_supported(tree) -> None:
+    home, _, _, env = tree
+    empty_bin = home / "empty-bin"
+    empty_bin.mkdir()
+    env["PATH"] = str(empty_bin) + ":/usr/bin:/bin"
+    command = HEADER + ASSIGN + 'mkdir -p "$ROOT/source"\n' + WRITE
+    assert _rank(tree, command).risk == Risk.LOW
+
+
 def test_legacy_default_mktemp_remains_supported(tree) -> None:
     result = _resolve(tree, 'ROOT=$(mktemp -d)\nprintf proof > "$ROOT/proof"')
     assert any(t.temp for t in result.targets)
