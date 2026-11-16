@@ -85,6 +85,7 @@ def test_register_writes_the_record_and_answers_the_shape() -> None:
         "last_seen_at",
         "name",
         "platform",
+        "push_handle_digest",
         "registered_at",
     ]
     assert record["device_id"] == payload["device_id"]
@@ -388,9 +389,16 @@ def test_delete_works_for_any_device_in_the_registry() -> None:
     """The stolen-phone case: one caller may revoke another device (ADR §4)."""
     client = _client()
     keep = client.post("/api/push/register", json=PAYLOAD).json()["device_id"]
+    # A different PHONE: its own install id AND its own push token. Sharing the
+    # token would make it the same installation under a forked id, which the
+    # registry retires (``test_push_device_dedupe.py``).
     stolen = client.post(
         "/api/push/register",
-        json={**PAYLOAD, "install_id": "00000000-1111-2222-3333-444444444444"},
+        json={
+            **PAYLOAD,
+            "install_id": "00000000-1111-2222-3333-444444444444",
+            "token": "apns-token-stolen-phone-1a2b3c",
+        },
     ).json()["device_id"]
     response = client.delete(f"/api/push/devices/{stolen}")
     assert response.status_code == 200 and response.json() == {"ok": True}
