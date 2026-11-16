@@ -327,6 +327,7 @@ def host_snapshot() -> dict[str, Any]:
     ).stdout.strip()
     env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
     env.pop("LOCAL_OPERATOR_CONFIG_DIR", None)
+    env.update(NO_NOTIFY_CHILD_ENV)
     status = subprocess.run(
         ["lop", "browser", "status"], capture_output=True, text=True, env=env, timeout=60
     ).stdout
@@ -344,12 +345,29 @@ def host_snapshot() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+#: The notification kill switch every child of this harness carries. WHY: the
+#: harness drives scripted sessions (the inner run, the node and operator roles,
+#: the bridge daemon, ``lop`` probes, and Chrome, whose env is built from the
+#: same mapping) whose replies must never reach the operator's real lock screen.
+#: It is set here rather than inherited because ``_child_env`` builds a filtered
+#: mapping, and a builder that strips families cannot rely on the ambient env.
+#: Literal rather than ``harness_child_env``: that helper also injects the
+#: nested-session allowance, which this harness does not ask for. The name must
+#: stay equal to ``local_operator.tui.notify.ENV_DISABLE`` (pinned by
+#: ``tests/unit/scripts/test_node_browser_harness.py``); it is not imported at
+#: module level because this file keeps ``local_operator`` imports function-local
+#: (the inner run repoints ``LOCAL_OPERATOR_CONFIG_DIR`` before it imports), and
+#: ``tui.notify`` pulls the terminal and settings modules in with it.
+NO_NOTIFY_CHILD_ENV = {"LOCAL_OPERATOR_NO_NOTIFICATIONS": "1"}
+
+
 def _child_env(**extra: str) -> dict[str, str]:
     env = {
         k: v
         for k, v in os.environ.items()
         if not k.startswith(("CMUX_", "LOP_", "LOCAL_OPERATOR_CONFIG_DIR", "XPC_"))
     }
+    env.update(NO_NOTIFY_CHILD_ENV)
     env.update(extra)
     return env
 

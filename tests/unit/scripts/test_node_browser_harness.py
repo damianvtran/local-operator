@@ -557,3 +557,26 @@ def test_expired_refusal_needs_the_expiry_sentence() -> None:
         }
     )
     assert not harness.expired_refused({"connected": True, "ok": False, "error": "TimeoutError"})
+
+
+def test_every_child_env_carries_the_notification_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The harness drives scripted sessions, so no child may notify the operator.
+
+    ``_child_env`` is the mapping the inner run, the node/operator roles, the
+    bridge daemon and Chrome are built from. It is a FILTERED copy, so the gate
+    must be set by the builder rather than inherited: here the ambient switch
+    is removed first, and an ``extra`` override must not drop it either. The
+    literal is pinned to the product's one definition so a rename cannot leave
+    these children silently un-gated.
+    """
+    from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+
+    monkeypatch.delenv(ENV_DISABLE, raising=False)
+    monkeypatch.setenv("CMUX_SURFACE_ID", "synthetic")
+
+    env = harness._child_env(LOCAL_OPERATOR_CONFIG_DIR="/synthetic/node")
+
+    assert harness.NO_NOTIFY_CHILD_ENV == {ENV_DISABLE: ENV_DISABLE_VALUE}
+    assert env[ENV_DISABLE] == ENV_DISABLE_VALUE
+    assert env["LOCAL_OPERATOR_CONFIG_DIR"] == "/synthetic/node"
+    assert "CMUX_SURFACE_ID" not in env
