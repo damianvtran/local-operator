@@ -329,8 +329,9 @@ def test_system_prompt_and_guide_scope_finality_and_keep_import_a_reroute() -> N
 
     prompt = " ".join(render_template("system.md", {}).split())
     assert (
-        "`BLOCKED by guardrail` is final for that effect on those targets, by any "
-        "route: report it. Fresh work of your own is not a reroute."
+        "`BLOCKED by guardrail`: final per effect/target, any route (report it), "
+        "till the operator's own `ask` reply names the exact path or a newer guard. "
+        "Fresh work is no reroute."
     ) in prompt
     root = Path(prov.__file__).resolve().parents[1]
     guide = " ".join((root / "guides" / "guardrails" / "GUIDE.md").read_text().split())
