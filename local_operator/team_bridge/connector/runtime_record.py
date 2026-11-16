@@ -32,12 +32,17 @@ answers). The write rules keep the record naming the process that matters:
   (or is ours) — a newer process refused by a frozen older holder must not
   hide that holder, which is exactly the receiver ``status`` has to name;
 * after the singleton is acquired, always write (``singleton: held``): that
-  process is now the one serving this config dir;
+  process is now the one serving this config dir, and it re-asserts that
+  record while it holds the lock (:func:`keep_own_record`), because a starter
+  that lost the start race can overwrite it and then remove its own;
 * on a clean exit, remove the record only when it still names our pid.
 
 A SIGKILL'd receiver leaves its record behind; the reader checks liveness (and,
-where ``ps`` answers, that the pid is still a receiver, so a reused pid is not
-mistaken for one) and reports "has exited" rather than a running build.
+where ``ps`` answers, that the pid is still a receiver for THIS config dir, so a
+reused pid is not mistaken for one) and reports "has exited" rather than a
+running build. A receiver started by a version older than this module writes
+no record at all; ``status`` pairs a missing (or exited) record with the
+service manager's ``loaded`` state to say a restart is needed (``no_record``).
 
 SHAPE. Small JSON beside the bridge store, atomic replace, the same disposable
 side-file pattern as ``wake_diagnostics.json``: not a ``state.sqlite3`` table,
@@ -129,26 +134,79 @@ def record_start(config_dir: Path | str, *, started_at: float) -> None:
 
     Forks ``ps`` (generation and peer liveness) once per process start, before
     any network call — the same one-shot cost the start path already pays.
+
+    The facts are computed BEFORE the existing record is read (review m1): the
+    ``ps`` fork in :func:`_own_facts` takes tens of ms, and reading first left
+    that whole window between "no live peer" and our write, long enough for a
+    concurrent starter to take the singleton, write ``held``, and be
+    overwritten by us. Read-then-replace is now microseconds apart; the
+    holder's :func:`keep_own_record` closes what remains.
+    """
+
+    path = record_path(config_dir)
+    try:
+        facts = _own_facts(started_at=started_at, singleton=SINGLETON_WAITING)
+        existing = _read(path)
+        if existing is not None and existing["pid"] != os.getpid():
+            if _receiver_alive(existing["pid"], config_dir) is not False:
+                return
+        _write(path, facts)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("bridge connector runtime record skipped: %s", type(error).__name__)
+
+
+def record_singleton_held(config_dir: Path | str, *, started_at: float) -> dict[str, Any] | None:
+    """After the singleton is acquired: this process now serves the config dir.
+
+    Returns the facts written so :func:`keep_own_record` can re-assert them
+    without forking ``ps`` again; ``None`` when they could not be computed.
+    """
+
+    try:
+        facts = _own_facts(started_at=started_at, singleton=SINGLETON_HELD)
+        _write(record_path(config_dir), facts)
+        return facts
+    except Exception as error:  # noqa: BLE001
+        logger.warning("bridge connector runtime record skipped: %s", type(error).__name__)
+        return None
+
+
+def ensure_own_record(config_dir: Path | str, facts: dict[str, Any]) -> bool:
+    """Holder only: rewrite ``facts`` when the record is missing or names another pid.
+
+    The lock makes this process THE receiver for the config dir, so a missing
+    or foreign record is always wrong here: a starter that lost the race
+    (review m1) overwrote ours and then removed its own on exit. Returns
+    whether it rewrote. One small file read when nothing is wrong; never raises.
     """
 
     path = record_path(config_dir)
     try:
         existing = _read(path)
-        if existing is not None and existing["pid"] != os.getpid():
-            if _receiver_alive(existing["pid"]) is not False:
-                return
-        _write(path, _own_facts(started_at=started_at, singleton=SINGLETON_WAITING))
-    except Exception as error:  # noqa: BLE001
-        logger.warning("bridge connector runtime record skipped: %s", type(error).__name__)
+        if existing is not None and existing["pid"] == os.getpid():
+            return False
+        _write(path, {**facts, "recorded_at": time.time()})
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
-def record_singleton_held(config_dir: Path | str, *, started_at: float) -> None:
-    """After the singleton is acquired: this process now serves the config dir."""
+#: How often the holder re-checks its record. Not a timeout: it bounds only how
+#: long ``status`` can show "no details recorded" after the start race above,
+#: a human diagnostic, against one ~200-byte read per period.
+KEEP_RECORD_INTERVAL_S = 30.0
 
-    try:
-        _write(record_path(config_dir), _own_facts(started_at=started_at, singleton=SINGLETON_HELD))
-    except Exception as error:  # noqa: BLE001
-        logger.warning("bridge connector runtime record skipped: %s", type(error).__name__)
+
+async def keep_own_record(
+    config_dir: Path | str, facts: dict[str, Any], *, interval: float = KEEP_RECORD_INTERVAL_S
+) -> None:
+    """Holder's background task: :func:`ensure_own_record` every ``interval`` until cancelled."""
+
+    import asyncio
+
+    while True:
+        await asyncio.sleep(interval)
+        ensure_own_record(config_dir, facts)
 
 
 def clear_own_record(config_dir: Path | str) -> None:
@@ -163,13 +221,43 @@ def clear_own_record(config_dir: Path | str) -> None:
         pass
 
 
-def _receiver_alive(pid: int) -> bool | None:
-    """``True`` live receiver, ``False`` gone (or a reused pid), ``None`` unsure.
+def _serves(argv: str, config_dir: Path | str) -> bool | None:
+    """Does a receiver's ``ps`` argv serve THIS config dir? ``None`` = cannot tell.
 
-    ``ps`` confirms the pid is still running the receiver module, so a pid the
-    kernel handed to an unrelated process after a SIGKILL is not reported as a
-    running build. Where ``ps`` cannot answer (Windows, a sandbox) liveness
-    alone decides, failing toward "alive" like :func:`procstate.pid_alive`.
+    Review m4(b): a pid reused by a receiver for ANOTHER ``--config-dir`` must
+    not be reported with this record's version. ``--config-dir`` is a required
+    argument of the receiver, so the argv always names it; ``ps`` joins argv
+    with spaces, so a config path containing a space cannot be split back out
+    reliably — that case answers "cannot tell" rather than a false "gone".
+    """
+
+    from local_operator.team_bridge.connector import reap
+
+    root = Path(config_dir)
+    spellings = {str(root)}
+    try:
+        spellings.add(str(root.resolve()))
+    except (OSError, ValueError):
+        pass
+    padded = f"{argv} "
+    if any(f"--config-dir {s} " in padded or f"--config-dir={s} " in padded for s in spellings):
+        return True
+    if reap._same_config(argv, root):
+        return True
+    if any(" " in s for s in spellings):
+        return None
+    return False
+
+
+def _receiver_alive(pid: int, config_dir: Path | str) -> bool | None:
+    """``True`` proven live receiver for ``config_dir``, ``False`` gone, ``None`` unsure.
+
+    ``ps`` confirms the pid is still running the receiver module for this
+    config dir, so a pid the kernel handed to an unrelated process (or to a
+    receiver serving another store) after a SIGKILL is not reported as this
+    record's running build. Where ``ps`` cannot answer (Windows, a sandbox) a
+    live pid is UNPROVEN — ``None``, never ``True``: the running line still
+    shows, but no restart verdict is claimed for it (review m4(a)).
     """
 
     from local_operator.procstate import pid_liveness
@@ -182,11 +270,16 @@ def _receiver_alive(pid: int) -> bool | None:
     from local_operator.team_bridge.connector import reap
 
     if not reap._is_posix():
-        return alive
+        return None
     process = reap._read_process(pid)
     if process is None:
-        return alive
-    return reap._is_connector(process.argv)
+        return None
+    if not reap._is_connector(process.argv):
+        return False
+    serves = _serves(process.argv, config_dir)
+    if serves is False:
+        return False
+    return True if serves and alive is True else None
 
 
 def running_receiver(config_dir: Path | str) -> dict[str, Any] | None:
@@ -195,17 +288,22 @@ def running_receiver(config_dir: Path | str) -> dict[str, Any] | None:
     Adds ``alive`` (``True``/``False``/``None`` = could not tell),
     ``installed_version`` (this reading process's — i.e. the installed ``lop``'s
     — version), ``generation_stale`` (``update.generation_staleness_of_process``,
-    tri-state, only for a live pid) and ``restart_needed``: ``True`` only when
-    the receiver is live AND either its version differs from a known installed
-    version or its generation is provably not ``current``. Unknown stays
-    ``False`` — status must not print a verdict it did not earn.
+    tri-state, only for a live pid), ``restart_reason`` and ``restart_needed``.
+    A cause is ``version_mismatch`` (the recorded version differs from a known
+    installed version) or else ``replaced_build`` (same version, but the
+    generation is provably not ``current`` — an update replaced the files under
+    it). ``restart_needed`` is ``True`` only for a cause on a PROVEN live
+    receiver, ``None`` (unknown) for a cause on a pid whose liveness or
+    identity could not be proven, else ``False`` — status must not print a
+    verdict it did not earn. ``restart_reason`` is set whenever
+    ``restart_needed`` is not ``False``.
     """
 
     record = _read(record_path(config_dir))
     if record is None:
         return None
     pid = record["pid"]
-    alive = _receiver_alive(pid)
+    alive = _receiver_alive(pid, config_dir)
     try:
         from local_operator.update import installed_version
 
@@ -223,6 +321,16 @@ def running_receiver(config_dir: Path | str) -> dict[str, Any] | None:
     running_version = record.get("version") if isinstance(record.get("version"), str) else ""
     version_mismatch = bool(running_version and installed and running_version != installed)
     consent = record.get("consent_versions")
+    reason: str | None = None
+    if version_mismatch:
+        reason = "version_mismatch"
+    elif stale is True:
+        reason = "replaced_build"
+    if alive is False or reason is None:
+        restart_needed: bool | None = False
+        reason = None
+    else:
+        restart_needed = True if alive is True else None
     return {
         "pid": pid,
         "version": running_version,
@@ -240,5 +348,6 @@ def running_receiver(config_dir: Path | str) -> dict[str, Any] | None:
         "installed_version": installed,
         "version_mismatch": version_mismatch,
         "generation_stale": stale,
-        "restart_needed": alive is not False and (version_mismatch or stale is True),
+        "restart_needed": restart_needed,
+        "restart_reason": reason,
     }

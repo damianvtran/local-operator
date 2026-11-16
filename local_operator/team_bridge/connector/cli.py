@@ -226,9 +226,34 @@ def _running_receiver(root: Path) -> dict[str, Any] | None:
         return None
 
 
-def _running_lines(running: dict[str, Any] | None) -> list[Any]:
+def _restart_verdict(
+    running: dict[str, Any] | None, *, loaded: bool
+) -> tuple[bool | None, str | None]:
+    """``(restart_needed, restart_reason)`` for the whole status, human and JSON alike.
+
+    ``no_record`` (review M1/C2): the service manager holds a receiver, yet no
+    live receiver has recorded itself. Every receiver started by a version
+    older than ``runtime_record`` is exactly that — the teammate's 0.102.4
+    launchd receiver this feature exists for — and so is one that replaced a
+    record's (now exited) pid without writing its own. Only a restart onto the
+    installed code makes it record, so that IS the verdict, not "none".
+    Otherwise the record's own verdict stands (``version_mismatch`` /
+    ``replaced_build``, ``None`` when liveness could not be proven).
+    """
+
+    if loaded and (running is None or running["alive"] is False):
+        return True, "no_record"
+    if running is None:
+        return False, None
+    return running["restart_needed"], running["restart_reason"]
+
+
+def _running_lines(running: dict[str, Any] | None, *, loaded: bool) -> list[Any]:
     """The human lines for :func:`_running_receiver`; versions/pids verbatim."""
 
+    restart_needed, reason = _restart_verdict(running, loaded=loaded)
+    if reason == "no_record":
+        return [_k.status_running_unrecorded()]
     if running is None:
         return [_k.status_running_none()]
     version = running["version"] or "—"
@@ -249,11 +274,21 @@ def _running_lines(running: dict[str, Any] | None) -> list[Any]:
             versions=", ".join(running["consent_versions"]) or "—",
         )
     )
-    # ONE line for both causes (a different version, or a generation an update
-    # has replaced): the remedy is the same restart, and fewer keys means less
-    # per-locale audit. The JSON keeps the two causes apart for scripts.
-    if running["restart_needed"]:
-        lines.append(_k.status_restart_needed(installed=running["installed_version"] or "—"))
+    # One line per cause (review C1/E1): "a different version" would contradict
+    # the version printed just above when the cause is a replaced build at the
+    # SAME version. Neither line names a command: ``receiver install`` returns
+    # ``current`` without restarting an unchanged, registered launchd job or an
+    # active systemd unit (install.py ``_install_launchd`` / ``_install_systemd``),
+    # and on launchd ``remove`` then ``install`` refuses to re-write the plist
+    # from a source checkout without the stable shim (``_source_checkout_refusal``),
+    # which would leave the receiver stopped. No single command is a verified
+    # restart on every supported host, so the line ends at "restart it".
+    # ``None`` (unproven liveness) prints nothing: no verdict it did not earn.
+    installed = running["installed_version"] or "—"
+    if restart_needed is True and reason == "version_mismatch":
+        lines.append(_k.status_restart_needed(installed=installed))
+    elif restart_needed is True and reason == "replaced_build":
+        lines.append(_k.status_restart_needed_replaced(installed=installed))
     return lines
 
 
@@ -270,6 +305,8 @@ def _status(root: Path, *, as_json: bool) -> int:
     screening = read_screening_status(root)
     woke_nobody = _woke_nobody(root)
     running = _running_receiver(root)
+    loaded = state == install.STATE_LOADED
+    restart_needed, restart_reason = _restart_verdict(running, loaded=loaded)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
@@ -303,6 +340,11 @@ def _status(root: Path, *, as_json: bool) -> int:
                     # version, generation, consent set, start) plus
                     # ``restart_needed``; ``None`` = no receiver recorded.
                     "running": running,
+                    # The status-wide verdict: ``running``'s own, or
+                    # ``no_record`` when the service manager holds a receiver
+                    # that never recorded itself (see _restart_verdict).
+                    "restart_needed": restart_needed,
+                    "restart_reason": restart_reason,
                 }
             )
         )
@@ -310,7 +352,7 @@ def _status(root: Path, *, as_json: bool) -> int:
     t = _tr()
     print(t(_k.status_supervisor(name=install.supervisor_name())))
     print(t(_k.status_state(state=state)))
-    for line in _running_lines(running):
+    for line in _running_lines(running, loaded=loaded):
         print(t(line))
     print(t(_k.status_enrolment(state=enrolment)))
     print(t(_k.status_config_dir(path=str(root))))

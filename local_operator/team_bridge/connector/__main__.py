@@ -392,7 +392,14 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
     # ``TeamBridgeClient._auth_store``). Values are never read or logged here.
     # The singleton is ours: this process now serves the config dir, so its
     # record wins over whatever an earlier holder left.
-    _runtime.record_singleton_held(config_dir, started_at=_PROCESS_STARTED_WALL_S)
+    held_facts = _runtime.record_singleton_held(config_dir, started_at=_PROCESS_STARTED_WALL_S)
+    # ...and keeps it named while it serves: a starter that lost the start race
+    # can overwrite this record and then remove its own (review m1).
+    keeper = (
+        asyncio.create_task(_runtime.keep_own_record(config_dir, held_facts))
+        if held_facts is not None
+        else None
+    )
     auth_store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
     try:
         while owner is not None:
@@ -422,6 +429,8 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
                 stop=stop,
             )
     finally:
+        if keeper is not None:
+            keeper.cancel()
         auth_store.close()
         _runtime.clear_own_record(config_dir)
         lock.release()

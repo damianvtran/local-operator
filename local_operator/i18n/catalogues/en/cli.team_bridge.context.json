@@ -267,7 +267,12 @@
   "cli.team_bridge.status.running_none": {
     "role": "lop team-bridge CLI output",
     "tone": "terse, plain English, operator-facing",
-    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Shown when no receiver has recorded itself on this machine (never started, or stopped cleanly)."
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Shown only when the service manager does NOT report a receiver running and no receiver recorded itself: none was ever started, or it stopped cleanly."
+  },
+  "cli.team_bridge.status.running_unrecorded": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Shown when the service manager reports a receiver running but that receiver recorded no details about itself (pid, version, build). Receivers started by app versions older than this feature never record them, so this usually means an old receiver is still running: a restart is needed, and after it the details appear. 'them' refers to the details."
   },
   "cli.team_bridge.status.running_exited": {
     "role": "lop team-bridge CLI output",
@@ -282,6 +287,11 @@
   "cli.team_bridge.status.restart_needed": {
     "role": "lop team-bridge CLI output",
     "tone": "terse, plain English, operator-facing",
-    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number. Shown when the background receiver still runs different code than the installed app (an older version, or an install copy an update has since replaced); it must restart to pick up the installed code."
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number. Shown when the background receiver runs a DIFFERENT version than the installed app (the line above shows the version it runs); it must restart to load the installed version. A same-version replaced build has its own line (restart_needed_replaced)."
+  },
+  "cli.team_bridge.status.restart_needed_replaced": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number, usually the SAME as the running version on the line above. Shown when the receiver runs the same version number, but an update has since replaced the installed files it started from; 'the last update' means the most recent update of the app. It must restart to load the installed code. Do not say the version differs."
   }
 }

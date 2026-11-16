@@ -212,6 +212,10 @@ def status_restart_needed(*, installed: str) -> Msg:
     return Msg("cli.team_bridge.status.restart_needed", {"installed": installed})
 
 
+def status_restart_needed_replaced(*, installed: str) -> Msg:
+    return Msg("cli.team_bridge.status.restart_needed_replaced", {"installed": installed})
+
+
 def status_running(*, pid: str, version: str, started: str) -> Msg:
     return Msg(
         "cli.team_bridge.status.running",
@@ -232,6 +236,10 @@ def status_running_exited(*, pid: str, version: str) -> Msg:
 
 def status_running_none() -> Msg:
     return Msg("cli.team_bridge.status.running_none", {})
+
+
+def status_running_unrecorded() -> Msg:
+    return Msg("cli.team_bridge.status.running_unrecorded", {})
 
 
 def status_screening(*, held: str, breaker: str, rejected: str) -> Msg:

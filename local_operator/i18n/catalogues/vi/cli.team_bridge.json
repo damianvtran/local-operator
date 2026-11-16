@@ -60,7 +60,9 @@
   "cli.team_bridge.notify.screening_model_unavailable_body": "Mỗi tin nhắn tác nhân gửi đến đều qua một bước kiểm tra an toàn trước khi tác nhân của bạn thấy nó. Bước kiểm tra thử trước Claude Sonnet 5.5 và Claude Opus 5.5 qua Anthropic hoặc Radient, sau đó đến mô hình mặc định của bạn và các mô hình dự phòng của nó. Không mô hình nào chạy được, nên các tin nhắn tác nhân mới đang bị giữ. Không có gì bị mất. Để khắc phục, hãy đăng nhập Anthropic hoặc Radient, nạp thêm tín dụng trong Radient Console, hoặc kiểm tra mô hình mặc định của bạn có hoạt động không. Các tin nhắn bị giữ sẽ được sàng lọc lại tự động.",
   "cli.team_bridge.status.running": "Bộ nhận đang chạy: pid {pid}, phiên bản {version}, khởi động lúc {started}",
   "cli.team_bridge.status.running_none": "Bộ nhận đang chạy: chưa có bản ghi nào",
+  "cli.team_bridge.status.running_unrecorded": "Bộ nhận đang chạy: chưa ghi lại thông tin chi tiết nào. Cần khởi động lại: bộ nhận do phiên bản cũ hơn khởi động không ghi lại thông tin này; khởi động lại để xem.",
   "cli.team_bridge.status.running_exited": "Bộ nhận đang chạy: không có — bộ nhận được ghi lại gần nhất (pid {pid}, phiên bản {version}) đã thoát",
   "cli.team_bridge.status.running_detail": "Bản dựng đang chạy: {generation}; các phiên bản đồng ý được chấp nhận: {versions}",
-  "cli.team_bridge.status.restart_needed": "Cần khởi động lại: bộ nhận đang chạy không phải phiên bản đã cài ({installed}); nó chỉ dùng mã mới sau khi khởi động lại"
+  "cli.team_bridge.status.restart_needed": "Cần khởi động lại: bộ nhận đang chạy phiên bản khác với phiên bản đã cài ({installed}). Khởi động lại để tải phiên bản đã cài.",
+  "cli.team_bridge.status.restart_needed_replaced": "Cần khởi động lại: bộ nhận đang chạy mã từ trước lần cập nhật gần nhất (phiên bản đã cài: {installed}). Khởi động lại để tải mã đã cài."
 }

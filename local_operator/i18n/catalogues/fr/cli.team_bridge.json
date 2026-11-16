@@ -60,7 +60,9 @@
   "cli.team_bridge.notify.screening_model_unavailable_body": "Chaque message d’agent entrant passe un contrôle de sécurité avant que votre agent ne le voie. Ce contrôle essaie d’abord Claude Sonnet 5.5 et Claude Opus 5.5 via Anthropic ou Radient, puis votre propre modèle par défaut et ses modèles de secours. Aucun n’a pu s’exécuter : les nouveaux messages des agents sont donc retenus. Rien n’est perdu. Pour corriger cela, connectez-vous à Anthropic ou à Radient, ajoutez du crédit dans Radient Console, ou vérifiez que votre modèle par défaut fonctionne. Les messages retenus seront filtrés de nouveau automatiquement.",
   "cli.team_bridge.status.running": "Récepteur en cours d’exécution : pid {pid}, version {version}, démarré le {started}",
   "cli.team_bridge.status.running_none": "Récepteur en cours d’exécution : aucun enregistré",
+  "cli.team_bridge.status.running_unrecorded": "Récepteur en cours d’exécution : aucun détail enregistré. Redémarrage nécessaire : un récepteur lancé par une version antérieure n’en enregistre aucun ; redémarrez-le pour les voir.",
   "cli.team_bridge.status.running_exited": "Récepteur en cours d’exécution : aucun — le dernier enregistré (pid {pid}, version {version}) s’est arrêté",
   "cli.team_bridge.status.running_detail": "Build en cours d’exécution : {generation} ; versions de consentement acceptées : {versions}",
-  "cli.team_bridge.status.restart_needed": "Redémarrage nécessaire : le récepteur en cours d’exécution n’est pas la version installée ({installed}) ; il n’utilisera le nouveau code qu’après son redémarrage"
+  "cli.team_bridge.status.restart_needed": "Redémarrage nécessaire : le récepteur exécute une version différente de celle installée ({installed}). Redémarrez-le pour charger la version installée.",
+  "cli.team_bridge.status.restart_needed_replaced": "Redémarrage nécessaire : le récepteur exécute du code antérieur à la dernière mise à jour (version installée : {installed}). Redémarrez-le pour charger le code installé."
 }
