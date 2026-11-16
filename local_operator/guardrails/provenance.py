@@ -2984,10 +2984,23 @@ class FinishedForeign:
 
     def warning(self, root: str) -> str:
         """The short steering note a LOW from this route carries (``GuardOutcome.warnings``)."""
+        # Facts follow the proof actually used (#3992 author's constraint 3):
+        # a squash merge reads "content already on origin", an unread forge
+        # never claims "no open PR".
+        merged = (
+            "HEAD's content already in origin's default branch (merged by content)"
+            if "merged-by-content" in self.reasons
+            else "merged into origin's default branch"
+        )
+        pr = (
+            "PR state unread (forge unavailable)"
+            if "forge-unread" in self.reasons
+            else "no open PR"
+        )
         return (
             f"Guardrail {_DANGEROUS_DELETE}: finished worktree {root} removed without review — "
-            "registered linked tree, HEAD on its branch and merged into origin's default "
-            "branch, no open PR, no running owner, clean with no ignored files. "
+            f"registered linked tree, HEAD on its branch and {merged}, "
+            f"{pr}, no running owner, clean with no ignored files. "
             # Q4 on PR #3992: the ref lives in the primary checkout, which an
             # enclosing delete in the same call may remove too, so the note
             # states the condition instead of promising the ref survives.
@@ -3108,21 +3121,35 @@ def finished_foreign_worktree(
     proc = _git_proc(["merge-base", "--is-ancestor", head, advertised], real)
     if proc is None or proc.returncode not in (0, 1):
         return unknown("ancestry-unknown", state)
+    merged_fact = "merged-on-origin"
     if proc.returncode == 1:
-        return no("not-merged", state)
+        # Squash/rebase merge (node-2 census 2026-11-15: approval-provenance,
+        # github-default-repos #3842, copy-wipe-dispatch-identity #3948,
+        # mobility-link-drop #3855 — all squash-merged, so no ancestry). HEAD's
+        # CONTENT must already be in the advertised tip, which the local ref
+        # was just shown to equal; a local commit after the squash fails it.
+        if not content_merged(real, head, advertised):
+            return no("not-merged", state)
+        merged_fact = "merged-by-content"
     if activity is None:
         activity = worktree_activity(real, session_id)
     if activity.pr_state == "open":
         return no("open-pr", state)
     if activity.pr_state != "none" or activity.branch != ref[len("refs/heads/") :]:
         return unknown("pr-unknown", state)
+    pr_fact = "no-open-pr"
     if activity.git_merged:
-        # Convergence with PR #4024: its ``_git_fallback`` reports ``none``
-        # from git ancestry when the forge lookup FAILED. That is sound for the
-        # caller's own trees, but here the forge reading is one of the foreign
-        # facts that must be positively read (unreadable foreign facts fail
-        # closed), so a ``none`` that git inferred is not "no open PR".
-        return unknown("pr-unknown", state)
+        # The forge lookup FAILED and ``_git_fallback`` inferred ``none`` from
+        # git. That is still NOT "no open PR" (#3992: an unread forge stays
+        # unknown), so the fact is named for what was proven instead: HEAD's
+        # content is already on origin's ADVERTISED default tip (checked
+        # above, ancestry or tree-equality), so nothing on this tree is
+        # unlanded — a PR still open on these commits would propose nothing
+        # main lacks. WHY accept it (operator, ask a-798d, 2026-11-15:
+        # "these requests should not require human approval"): on node-2 gh
+        # fails or times out, and every finished foreign tree went to the
+        # judge. A KNOWN open PR still refuses above (CRITICAL in ``_rank``).
+        pr_fact = "forge-unread"
     # Race re-check (review R4 on PR #3992): the forge lookup above can take
     # up to the ``gh`` timeout, so the clean / no-ignored / not-busy facts read
     # at the start are re-read with the same helper just before answering. A
@@ -3137,7 +3164,147 @@ def finished_foreign_worktree(
         return unknown("state-moved", state)
     if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
         return unknown("head-moved", state)
-    return FinishedForeign("safe", _FINISHED_FACTS, state, activity)
+    facts_out = tuple(
+        merged_fact if f == "merged-on-origin" else pr_fact if f == "no-open-pr" else f
+        for f in _FINISHED_FACTS
+    )
+    return FinishedForeign("safe", facts_out, state, activity)
+
+
+def _running_session_ids() -> set[str]:
+    """Session ids the registry reads as ``live`` or ``wedged``; RAISES when unreadable.
+
+    ``strict`` scan, no reaping (a guard check never moves another session's
+    record): an incomplete registry is "unknown", never "everyone ended".
+    """
+    from local_operator.session.runtime import registry
+
+    running: set[str] = set()
+    for rec, state in registry.scan(None, reap=False, strict=True):
+        sid = str(getattr(rec, "session_id", "") or "")
+        if not sid:
+            raise OSError("session record without an id")
+        if state in ("live", "wedged"):
+            running.add(sid)
+    return running
+
+
+def _creators_inside(real: str) -> set[str] | None:
+    """Creators of every ledger row strictly INSIDE ``real``; ``None`` if unreadable.
+
+    Range scan on the indexed ``path`` column (``real + "/"`` up to
+    ``real + "0"``, the next byte after ``/``), so no LIKE escaping.
+    """
+    try:
+        conn = _connect(ledger_path(), create=False)
+        if conn is None:
+            return None
+        try:
+            return {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT DISTINCT creator FROM created WHERE path > ? AND path < ?",
+                    (real + os.sep, real + chr(ord(os.sep) + 1)),
+                )
+            }
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def _nested_repository(real: str) -> str | None:
+    """Why ``real`` may hold a repository of its own (not a linked worktree), or ``None``.
+
+    A ``.git`` DIRECTORY anywhere in the bounded walk is a clone or ``git
+    init`` whose commits may exist nowhere else; a ``.git`` FILE is a linked
+    worktree's pointer, which :func:`classify._reached_worktrees` already held
+    to its own bar. An exhausted walk cannot rule one out, so it counts.
+    """
+    seen = 0
+    stack: list[tuple[str, int]] = [(real, 0)]
+    while stack:
+        current, depth = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            return f"unreadable directory {current}"
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return "too many entries to rule out a nested repository"
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                return f"unreadable entry {entry.path}"
+            if entry.name == ".git" and is_dir:
+                return f"nested repository at {current}"
+            if is_dir and depth < _WALK_DEPTH:
+                stack.append((entry.path, depth + 1))
+    return None
+
+
+def finished_rig(path: str, session_id: str) -> tuple[str | None, str]:
+    """``(fact, "")`` when a ``$HOME`` rig is finished work another session left; else ``(None, why)``.
+
+    WHY (node-2 census, 2026-11-15, v0.105.3; operator, ask a-798d: "these
+    requests should not require human approval and shouldn't be blocked by
+    guardrails in the future"): 17 ``~/qa-*`` rigs were refused with "No
+    operator ask answer names <path>" although the sessions that built them
+    had ended. A top-level ``$HOME`` directory is HIGH because it may be the
+    operator's own data; a directory the creation ledger records as made by
+    an agent session that has ENDED is that session's leftover, not data.
+
+    Every fact is positively established, else ``None`` (the judge decides):
+    - a ledger row records exactly this directory (same inode generation),
+      by a session other than the caller (the caller's own rig already has
+      the ledger LOW). NO row \u2014 a pre-ledger or hand-made directory \u2014 never
+      qualifies: only the judge can tell a rig from the operator's data;
+    - every creator of that row AND of every row inside it is NOT running per
+      a strict registry read (unreadable registry/ledger: unknown);
+    - no live process outside the caller's family has its cwd inside
+      (:func:`cwd_holders`; an unreadable inventory is busy);
+    - it is not a repository itself and holds no ``.git`` directory
+      (:func:`_nested_repository`) \u2014 a clone's unpushed commits may exist
+      nowhere else. Linked worktrees inside are ranked by the caller first
+      (``_reached_worktrees``), each held to the finished-worktree bar.
+    Location (direct child of ``$HOME``, never the state root, secrets or
+    install layout) is the caller's check: those are CRITICAL before this.
+    """
+    real = os.path.realpath(path)
+    if not os.path.isdir(real) or os.path.islink(path):
+        return None, "not a directory"
+    creators = set(recorded_creators(real))
+    if not creators:
+        return None, "no creation ledger row for this directory"
+    if session_id and session_id in creators:
+        return None, "created by this session"
+    inside = _creators_inside(real)
+    if inside is None:
+        return None, "creation ledger unreadable"
+    try:
+        running = _running_session_ids()
+    except Exception:  # noqa: BLE001 \u2014 an unreadable registry is unknown, not ended
+        return None, "session registry unreadable"
+    live = sorted((creators | (inside - {session_id})) & running)
+    if live:
+        return None, "creating session still running: " + ", ".join(live)
+    if os.path.lexists(os.path.join(real, ".git")) or is_primary_checkout(real):
+        return None, "a git repository root"
+    nested = _nested_repository(real)
+    if nested:
+        return None, nested
+    holders = cwd_holders(real, session_id)
+    if holders is None:
+        return None, "live-process scan unavailable"
+    foreign_holders = [h.describe() for h in holders if not h.family]
+    if foreign_holders:
+        return None, "in use by " + ", ".join(foreign_holders)
+    return (
+        "finished work: rig recorded by ended session "
+        + ", ".join(sorted(creators))
+        + "; no running creator, no live holder, no nested repository"
+    ), ""
 
 
 def _git_fallback(real: str, branch: str, unknown: WorktreeActivity) -> WorktreeActivity:
@@ -3255,6 +3422,10 @@ def git_merged(path: str, branch: str) -> tuple[bool, str]:
         timeout=_LS_REMOTE_TIMEOUT_S,
     )
     source = "read from origin"
+    # The local copy of origin's default branch as it stood BEFORE any fetch
+    # below: the squash proof only counts against a ref that already equals
+    # what origin advertises (#3992 author's constraint, 2026-11-15).
+    pre_fetch_local: str | None = None
     if listing is not None:
         for line in listing.splitlines():
             left, _, name = line.partition("\t")
@@ -3264,6 +3435,8 @@ def git_merged(path: str, branch: str) -> tuple[bool, str]:
                 default_tip = left.strip()
             elif name == f"refs/heads/{branch}":
                 remote_tip = left.strip()
+        if default:
+            pre_fetch_local = _local_ref(real, f"refs/remotes/origin/{default}")
         if default and default_tip and not _has_commit(real, default_tip):
             _git_net(
                 ["fetch", "--no-tags", "--quiet", "origin", f"refs/heads/{default}"],
@@ -3285,15 +3458,67 @@ def git_merged(path: str, branch: str) -> tuple[bool, str]:
             return False, "no default branch ref for origin"
     if not _has_commit(real, default_tip):
         return False, f"origin/{default} tip {default_tip[:9]} not fetched"
+    # Squash/rebase proof (:func:`content_merged`) is held to a stricter bar
+    # than ancestry: only against the tip origin ADVERTISED just now, and only
+    # when the local ``refs/remotes/origin/<default>`` already equalled it
+    # before any fetch. An unreachable origin (already-fetched refs) or a
+    # stale/mismatched local ref leaves a squash-merged branch unproven, never
+    # merged: a tree-equality against an old snapshot of main says nothing
+    # about whether the content is on origin NOW.
+    squash_ok = listing is not None and pre_fetch_local == default_tip
+    squashed = False
     if not _is_ancestor(real, tip, default_tip):
-        return False, f"branch tip {tip[:9]} is not in origin/{default} ({source})"
+        if not (squash_ok and content_merged(real, tip, default_tip)):
+            return False, f"branch tip {tip[:9]} is not in origin/{default} ({source})"
+        squashed = True
     if remote_tip and remote_tip != tip:
-        if not _has_commit(real, remote_tip) or not _is_ancestor(real, remote_tip, default_tip):
+        if not _has_commit(real, remote_tip) or not (
+            _is_ancestor(real, remote_tip, default_tip)
+            or (squash_ok and content_merged(real, remote_tip, default_tip))
+        ):
             return False, (
                 f"origin/{branch} at {remote_tip[:9]} has commits not proven in "
                 f"origin/{default} ({source})"
             )
+    if squashed:
+        return True, (
+            f"merged by content: branch tip {tip[:9]}'s content is already in "
+            f"origin/{default} (squash/rebase merge; merging it changes nothing; {source})"
+        )
     return True, f"branch tip {tip[:9]} is in origin/{default} ({source})"
+
+
+def content_merged(real: str, tip: str, default_tip: str) -> bool:
+    """Is every change on ``tip`` already in ``default_tip``'s tree? (squash/rebase merges)
+
+    WHY (node-2 field census, 2026-11-15, v0.105.3): the operator squash-merges
+    PRs, so a merged branch's tip is NEVER an ancestor of ``origin/main``.
+    approval-provenance was refused from its own session with "tip 78c35f517
+    not in origin/main", and 5 more worktrees read "git did not prove it
+    merged" when the ``gh`` lookup timed out on the node — every one of them
+    finished work.
+
+    Proof: ``git merge-tree --write-tree <default> <tip>`` performs the
+    three-way merge in the object store (no index, no working tree, no ref
+    written; at most unreferenced loose objects that ``git gc`` prunes) and
+    prints the result tree. Callers pass the tree's CURRENT HEAD as ``tip``:
+    a local commit made after the squashed one changes the merge result, so
+    it is unproven (#3992 author's constraint 2). If that tree equals
+    ``<default>^{tree}``, merging the branch would change NOTHING — its
+    content is already on the default branch. A later revert on main makes the
+    merge re-apply the change (tree differs: not proven); main editing the
+    same lines afterwards conflicts (exit 1: not proven). Any error, timeout
+    or a git too old for ``--write-tree`` (pre-2.38) is also "not proven":
+    this only ever ADDS a proof, so failing closed leaves the old ranking.
+    Local objects only, never a fetch: ``default_tip`` must already be local
+    (:func:`git_merged` checks ``_has_commit`` first).
+    """
+    merged = _git(["merge-tree", "--write-tree", default_tip, tip], real)
+    base = _git(["rev-parse", "--verify", "--quiet", f"{default_tip}^{{tree}}"], real)
+    if merged is None or base is None:
+        return False
+    first = merged.splitlines()[0].strip() if merged.strip() else ""
+    return bool(first) and first == base.strip()
 
 
 def _ignored_unregenerable(real: str) -> bool:
@@ -3778,6 +4003,51 @@ def ask_answer_covers(
     return False
 
 
+#: Trailing words a typed whole-set first clause may carry that only restate
+#: the approval: "Remove all as recommended", "Remove all I give approval".
+_WHOLE_SET_TAIL_RE = re.compile(
+    r"(?i)(?:\s+(?:as\s+(?:recommended|suggested|proposed|planned)|i\s+give\s+(?:my\s+)?approval"
+    r"|i\s+approve|approved|please|now))*\W*"
+)
+#: Where a typed answer's FIRST clause ends for :func:`_typed_whole_set`: the
+#: clause breaks the decline check uses, plus a comma and " and ".
+_TYPED_FIRST_CLAUSE_RE = re.compile(r"(?i)\s*(?:,|;|\band\b)\s*")
+
+
+def _typed_whole_set(answer: str) -> bool:
+    """Does a typed answer approve the WHOLE question by its first clause?
+
+    WHY (node-2, 2026-11-15, ask a-798d): Damian typed "Remove all I give
+    approval, and check in with Aida to make sure that we're pushing along the
+    tuning to guidance, these requests should not require human approval and
+    shouldn't be blocked by guardrails in the future" (and, on another lane,
+    "Remove all as recommended, and send to Aida ..."). Only a BARE yes
+    (``_BARE_AFFIRM_RE``) used to settle a typed answer, so both approved
+    nothing deterministically and the judge refused. The first clause is a
+    whole-set approval ("Remove all", "Delete them"); the rest is an
+    instruction to someone else, not a condition on the delete.
+
+    Narrow on purpose: the first clause must fullmatch ``_WHOLE_SET_OPTION_RE``
+    (plus approval-restating words), and NOTHING anywhere in the answer may
+    decline or carve out (``_DECLINE_RE``, ``_CARVE_OUT_RE``, "but not"), so
+    "Remove all except qa-push", "Remove only the worktrees", "Remove all but
+    keep X" and "No" approve nothing here. (``_kept_answer`` already vetoes
+    most of those; this re-checks so the rule holds on its own.)
+    """
+    if _DECLINE_RE.search(answer) or _CARVE_OUT_RE.search(answer):
+        return False
+    if re.search(r"(?i)\bbut\s+not\b", answer):
+        return False
+    head = _CLAUSE_BREAK_RE.split(answer, maxsplit=1)[0]
+    head = _TYPED_FIRST_CLAUSE_RE.split(head, maxsplit=1)[0]
+    m = _WHOLE_SET_OPTION_RE.match(head)
+    if m is None or not m.group(0).strip():
+        return False
+    # The tail starts where the whole-set words end (``_WHOLE_SET_OPTION_RE``'s
+    # trailing ``\W*`` would swallow the space the tail needs as a boundary).
+    return bool(_WHOLE_SET_TAIL_RE.fullmatch(head[len(m.group(0).rstrip()) :]))
+
+
 def _approved_text(
     q: Mapping[str, Any],
     opts: Sequence[Mapping[str, Any]],
@@ -3814,7 +4084,7 @@ def _approved_text(
     ]
     if len(affirmed) != len(picked):
         return []
-    if typed and not all(_BARE_AFFIRM_RE.fullmatch(v) for v in typed):
+    if typed and not all(_BARE_AFFIRM_RE.fullmatch(v) or _typed_whole_set(v) for v in typed):
         # A qualified typed answer is the judge's to read (R1-B2); the
         # question text is never approved by it, nor are picks beside it.
         return []
