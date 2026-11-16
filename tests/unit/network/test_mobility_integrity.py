@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,12 @@ from local_operator.session.placement import (
     read_stamp,
     write_handoff_entry,
 )
+from tests.unit.network.mobility_failure_observer import (
+    TARGET,
+    MobilityFailureObserver,
+    emit_before_cleanup,
+    observe_failure,
+)
 from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures
     SESSION,
     Devices,
@@ -55,6 +62,22 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures
     pair,
 )
 from tests.unit.network.test_relay_e2e import _pair_settled, serve_shaped_relay
+
+
+@pytest.fixture(autouse=True)
+def mobility_failure_observer(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> MobilityFailureObserver | None:
+    """Autouse ordering installs observation before the ordinary pair fixture.
+
+    Other mobility cells retain their existing fixtures and have no wrappers.
+    The observer does not emit during teardown: stop may already be blocked then.
+    """
+    if request.node.name != TARGET:
+        return None
+    observer = MobilityFailureObserver()
+    observer._safe(observer.install, monkeypatch)
+    return observer
 
 
 def _transcript_with_scratchpad(
@@ -383,8 +406,11 @@ def test_damage_after_the_ready_handshake_is_never_promoted(
 # ---------------------------------------------------------------------------
 
 
+@observe_failure
 def test_a_relay_start_recovers_a_stale_handoff_and_frees_the_owner_s_session(
-    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+    pair: Devices,  # noqa: F811 — the imported fixture
+    monkeypatch: pytest.MonkeyPatch,
+    mobility_failure_observer: MobilityFailureObserver,
 ) -> None:
     """A fresh relay on a root a dead one left an entry in settles it by itself.
 
@@ -429,6 +455,9 @@ def test_a_relay_start_recovers_a_stale_handoff_and_frees_the_owner_s_session(
             server_a.root
         ), "a relay start left a stale handoff entry in place"
     finally:
+        # A failing assertion must leave evidence before stop (or fixture teardown)
+        # can block. The observer never replaces the exception being unwound.
+        emit_before_cleanup(mobility_failure_observer, sys.exc_info()[1])
         fresh.stop()
 
     # And the guard no longer speaks for it: the engage gets as far as its own
