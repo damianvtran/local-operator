@@ -2853,6 +2853,38 @@ def test_a_local_run_classifies_the_diff_instead_of_running_everything(
         }, f"a `{event}` run must not be gated (D5): {values!r}"
 
 
+# #4074: the ONE `if:` coverage-report may carry. It has no status-check
+# function, so GitHub still ANDs it with an implicit `success()` and the job
+# inherits a skipped/failed `test` (no `always()` override). It only adds the
+# lane filter so an `affected` run does not combine one partial shard artifact
+# and fail `--fail-under`. Exact match, not a substring/`always` denylist, so
+# `|| true`, a status function or a looser mode comparison cannot slip in.
+_COVERAGE_REPORT_AFFECTED_IF = "needs.test.outputs.lane != 'affected'"
+
+
+def _coverage_report_if_is_approved(expression: str) -> bool:
+    return expression == _COVERAGE_REPORT_AFFECTED_IF
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "",
+        "always()",
+        "always() && needs.test.outputs.lane != 'affected'",
+        "needs.test.outputs.lane != 'affected' || true",
+        "needs.test.outputs.lane == 'full'",
+        "needs.test.outputs.lane != 'unknown'",
+        "success() || needs.test.outputs.lane != 'affected'",
+    ],
+)
+def test_coverage_report_guard_rejects_unapproved_if_expressions(
+    expression: str,
+) -> None:
+    """Negative control for A14: only the exact lane filter passes the guard."""
+    assert not _coverage_report_if_is_approved(expression)
+
+
 def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None:
     """A14. `coverage-report` must not get an `always()`.
 
@@ -2863,7 +2895,7 @@ def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None
     `needs: test` and acquires no status-check function. That is the deliberate
     "do nothing" answer to the whole gating change, which is why it is pinned.
 
-    Mutation that must fail this: add `if: always()`.
+    Mutation that must fail this: add `if: always()` or widen the lane filter.
     """
     expression = _if("coverage-report")
     scope = _scope()
@@ -2871,9 +2903,11 @@ def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None
         f"coverage-report grew `always()` (if: {expression!r}); a combine over "
         "zero shard artifacts goes red on a docs-only PR"
     )
-    assert expression == "", (
-        f"coverage-report grew an `if:` ({expression!r}); it is supposed to "
-        "inherit the skip from `needs: test`"
+    assert _coverage_report_if_is_approved(expression), (
+        f"coverage-report's `if:` ({expression!r}) is not the one approved "
+        f"expression {_COVERAGE_REPORT_AFFECTED_IF!r}; anything else either "
+        "breaks the inherited skip or lets the affected lane publish partial "
+        "coverage"
     )
     assert _needs("coverage-report") == {
         "test"

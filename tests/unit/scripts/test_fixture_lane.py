@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,9 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _commit(repo: Path, files: dict[str, str | None]) -> str:
+# Mapping, not dict: dict is invariant in its value type, so a caller's
+# dict[str, str] literal is rejected; these helpers only read the mapping.
+def _commit(repo: Path, files: Mapping[str, str | None]) -> str:
     for rel, text in files.items():
         path = repo / rel
         if text is None:
@@ -63,8 +66,8 @@ READER_SRC = {
 
 def _plan(
     repo: Path,
-    before: dict[str, str | None],
-    after: dict[str, str | None],
+    before: Mapping[str, str | None],
+    after: Mapping[str, str | None],
     event: str = "pull_request",
     readers: bool = True,
 ):

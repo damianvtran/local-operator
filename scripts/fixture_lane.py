@@ -342,7 +342,9 @@ def plan(root: Path, *, event: str, base: str, head: str) -> tuple[str, list[str
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(
+        description=(__doc__ or "Conservative fixture-only affected-lane planner").splitlines()[0]
+    )
     ap.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME", ""))
     ap.add_argument("--base", required=True)
     ap.add_argument("--head", default="HEAD")
