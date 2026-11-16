@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "cli.team_bridge",
-  "history_sha256": "9b909b7cd6af9a3f8f12608e4157c5d3d2b9fbdc88f3cb0f488464ab985e05af",
+  "history_sha256": "52f3b3426aadf4175820426e622f3895fbbb27737e9163fae6c93d1f843f81c4",
   "entries": [
     {
       "locale": "es",
@@ -55,6 +55,26 @@
       },
       "status": "passed",
       "note": "Independent i18n audit of PR #4096 (receiver status running-build lines) at head 1482f62f8a37 + auditor fixes, en source_sha256 4e0c44eef58370be9a5f7ac9297cc5fad449b637626442750a4c19a4d60b63b5. Scope: 5 added keys status.running, status.running_none, status.running_exited, status.running_detail, status.restart_needed versus origin/main; the other 59 keys unchanged since the PR #3444 passed row and not re-audited. Checked against en context notes, glossary and the locale style guide: names the process actually running as recorded by itself; none recorded vs recorded-but-exited kept distinct; build = installed copy the process started from; consent identifiers and versions verbatim; restart required to pick up installed code. Mechanical: key parity 64/64; placeholder sets identical to en ({pid},{version},{started},{generation},{versions},{installed}); no plural/select in new keys; NFC; no Cf/bidi controls. es: S1 MINOR fixed by auditor: running_detail 'Build en ejecución' -> 'Compilación en ejecución' (catalogue term for the installed build, 26 uses incl. cli.services_help.status). tú register unaffected (no address). Unresolved blocker/major: 0. Single independent semantic audit; not a second high-visibility audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "2555250374c3a583d1edec1434d6246db86ce504972d8665faf36ef755855d40",
+      "translator": {
+        "agent": "coder — PR #4096 translator re-draft (radientdev job 8a2fa5e8903d)",
+        "model": "anthropic/claude-opus-5-5 per remediation comment 6905469046 (coder self-report; not independently verified by this auditor)",
+        "date": "2026-11-15"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 2 (radientdev task, session 65a8b33245e3), independent of the translators (cc8d17acb1bf, 8a2fa5e8903d) and of the round-1 auditor (3330de428371 / session 45a2df262985)",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 2 of PR #4096 at head 016ff7885222 (scope d7cf5e9ff727..016ff7885222), en source_sha256 2555250374c3a583d1edec1434d6246db86ce504972d8665faf36ef755855d40. Scope: changed key status.restart_needed (different version), new keys status.restart_needed_replaced (same version, files replaced by the last update; must not say the version differs) and status.running_unrecorded (service manager reports a receiver loaded but it recorded no details; restart needed), plus the context-note-only change of status.running_none (text unchanged; still means nothing loaded and nothing recorded). Separation step: re-reviewed round-1 auditor fixes S1/F1/F2/H1/R1/U1/Z1 from d7cf5e9ff727 and confirmed them against the style guide and catalogue usage (R1 and the restart clauses of F2/H1/U1 are superseded by the re-drafted restart_needed). Other 59 keys unchanged since the round-1 / PR #3444 passed rows and not re-audited. Mechanical: key parity 66/66; placeholders identical to en ({installed} only in the restart keys, none in running_unrecorded); no plural/select in scope; NFC; no Cf/bidi controls; each key rendered in-locale through messages.render_record with installed=9.9.9 (source_locale = locale). es: tú register (reinícialo); 'Compilación' (S1) matches the es catalogue term (compilación ~30 uses, build untranslated nowhere in prose). replaced key adds 'versión instalada:' to label the version number: faithful. No findings. Auditor edits: none. Unresolved blocker/major: 0. Single independent semantic audit; not a second high-visibility audit."
     }
   ]
 }
