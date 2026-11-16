@@ -1031,10 +1031,16 @@ after that 30-second bound. Revoke and panic invalidate the source cache; existi
 borrower permission leases are not extended by this cache.
 
 The whole source lookup is bounded at 12 seconds, above `gh`'s own 10-second
-subprocess timeout. An owner lookup/budget timeout is `owner_busy`, not a claim
-that too many requests arrived. GitHub borrowing and explicit `credential
-refresh github` retry **once**, after 250 ms, with a 14-second control budget per
-ask; other credential families keep their existing bounds. An ordinary borrow
+subprocess timeout. This is a caller bound, including designation enumeration:
+a slow cold listing may outlast it, but the ONE worker finishes warming the
+existing enumeration cache; callers never spawn replacements or wait indefinitely.
+A GitHub lookup/budget timeout travels as `rate_limited` plus `reason: owner_busy`,
+so older borrowers keep their held grant. Upgraded borrowers show `owner_busy`
+and honest timeout copy, not a claim that too many requests arrived. Other
+families retain their existing codes. GitHub borrowing and explicit `credential
+refresh github` retry **once**, after 250 ms. Ordinary GitHub borrowing allows at
+least 14 seconds per control ask; explicit refresh retains its existing 75-second
+window because App minting is outside the bounded gh lane. An ordinary borrow
 may instead use its **still-current permission lease** during proactive refresh;
 an expired lease, answered deny, revoke, panic or forced refresh never gets that
 fallback. This is not a new offline lease or refresh authority.

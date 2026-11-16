@@ -23,7 +23,9 @@ from local_operator.network.credentials import github
 # Successful owner grant latency observed in the incident: n=98, p90=.7s,
 # max=3.2s. Keep the whole-read deadline ABOVE gh's existing 10s subprocess
 # bound, so a real subprocess failure retains github_gh_unusable. The outer
-# bound additionally covers hosts-file/program lookup and the isolated lane.
+# bound additionally covers hosts-file/program lookup AND cold designation
+# listing. This caps caller latency, not total background HTTP work: the one
+# worker may finish warming the existing enumeration cache after a timeout.
 SOURCE_TIMEOUT_S = 12.0
 # Shorter than the existing 900s permission lease; logout/account-file edits
 # invalidate immediately, and keychain-only changes are observed within 30s.
@@ -107,6 +109,8 @@ class GithubSource:
         self._future: concurrent.futures.Future[Any] | None = None
         self._thread: threading.Thread | None = None
         self._epoch = 0
+        self._started = 0.0
+        self._started_wall = 0.0
         self._deadline = 0.0
         self._wall_deadline = 0.0
         self._closed = False
@@ -116,6 +120,12 @@ class GithubSource:
         self._clock = time.monotonic
         self._wall_clock = time.time
         self._cached_wall = 0.0
+
+    def diagnostics(self) -> dict[str, int]:
+        """Age of the one retained flight; never a token, path or task argument."""
+        with self._lock:
+            age = max(self._clock() - self._started, self._wall_clock() - self._started_wall, 0)
+            return {"flight_age_ms": int(age * 1000) if self._future is not None else 0}
 
     def invalidate(self) -> None:
         with self._lock:
@@ -132,8 +142,10 @@ class GithubSource:
             if future is None or future.done():
                 future = concurrent.futures.Future()
                 self._future = future
-                self._deadline = time.monotonic() + SOURCE_TIMEOUT_S
-                self._wall_deadline = self._wall_clock() + SOURCE_TIMEOUT_S
+                self._started = self._clock()
+                self._started_wall = self._wall_clock()
+                self._deadline = self._started + SOURCE_TIMEOUT_S
+                self._wall_deadline = self._started_wall + SOURCE_TIMEOUT_S
                 epoch = self._epoch
                 self._thread = threading.Thread(
                     # Preserve the owner's existing scope/audit context while
@@ -144,8 +156,8 @@ class GithubSource:
                     daemon=True,
                 )
                 self._thread.start()
-            wall_deadline = self._wall_deadline
-            remaining = min(self._deadline - time.monotonic(), wall_deadline - self._wall_clock())
+            deadline, wall_deadline = self._deadline, self._wall_deadline
+            remaining = min(deadline - self._clock(), wall_deadline - self._wall_clock())
         if remaining <= 0:
             raise SourceBusy("the in-flight GitHub login read already timed out")
         try:
@@ -160,7 +172,7 @@ class GithubSource:
             # Darwin's monotonic clock can exclude sleep. A resumed owner must
             # not deliver a flight or cache whose wall bound already ran out
             # while its lid was closed. A backwards step fails closed too.
-            if self._wall_clock() >= wall_deadline:
+            if self._clock() >= deadline or self._wall_clock() >= wall_deadline:
                 raise SourceBusy("the GitHub source read exceeded its wall deadline")
             if (
                 result[1] == github.SOURCE_GH

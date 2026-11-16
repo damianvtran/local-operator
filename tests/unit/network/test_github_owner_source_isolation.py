@@ -106,9 +106,9 @@ def test_whole_read_timeout_is_single_flight_and_never_starts_replacement_worker
         try:
             for _ in range(3):
                 detail = _ask(rig)
-                assert detail["kind"] == "error" and detail["code"] == "owner_busy", detail.get(
-                    "code"
-                )
+                assert detail["kind"] == "error" and detail["code"] == "rate_limited"
+                assert detail["reason"] == "owner_busy"
+            assert any("flight_age_ms" in r.message for r in caplog.records)
             assert len(calls) == 1
             # Revoke while an abandoned read is still running. Its result must
             # not warm the next epoch's cache or be returned to a new caller.
@@ -346,7 +346,11 @@ def test_real_two_relay_refresh_recovers_one_source_deadline(
     def answer(*args: Any, **kwargs: Any) -> Any:
         detail = original(*args, **kwargs)
         codes.append(detail.get("code", detail.get("kind")))
-        if detail.get("code") == "owner_busy" and recover:
+        if (
+            detail.get("code") == "rate_limited"
+            and detail.get("reason") == "owner_busy"
+            and recover
+        ):
             release.set()
         return detail
 
@@ -369,12 +373,12 @@ def test_real_two_relay_refresh_recovers_one_source_deadline(
             assert rc == 1 and refusal["code"] == "owner_busy"
             assert "could not finish reading" in refusal["message"]
             assert "too many credential requests" not in refusal["message"]
-            assert codes == ["owner_busy", "owner_busy"]
+            assert codes == ["rate_limited", "rate_limited"]
             print("REAL_REFRESH_REFUSAL", refusal)
             return
         receipt = _lop_network_json("credential", "refresh", "github")
         assert receipt["ok"] is True and "access_token" not in receipt
-        assert codes == ["owner_busy", "grant"]
+        assert codes == ["rate_limited", "grant"]
         assert len(reads) == 1
         print(
             "REAL_REFRESH_RESULT",
@@ -419,7 +423,8 @@ def test_owner_budget_timeout_names_only_default_executor_occupants(
         monkeypatch.setattr(rig.broker, "_resolve_once", resolver)
         rig.broker._op_deadline_s = owner_mod.HANDLER_WAIT_MARGIN_S + 1
         try:
-            assert _ask(rig)["code"] == "owner_busy"
+            wire = _ask(rig)
+            assert wire["code"] == "rate_limited" and wire["reason"] == "owner_busy"
             records = [
                 r.message for r in caplog.records if "credential owner budget expired" in r.message
             ]
@@ -531,3 +536,191 @@ def test_isolated_source_preserves_the_owners_context(
         finally:
             marker.reset(token)
         assert observed and all(observed), "off-loop probing must preserve the owner's context"
+
+
+def test_budget_timeout_keeps_a_base_shaped_borrowers_held_grant(
+    borrower: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network.credentials import client as client_mod
+    from local_operator.network.credentials.types import BrokerError, Grant
+
+    b = borrower
+    held = b.client.request_grant_sync("github", session_id="legacy")
+    assert isinstance(held, Grant)
+
+    async def timeout(**kwargs: Any) -> Any:
+        raise TimeoutError("synthetic owner budget")
+
+    monkeypatch.setattr(b.rig.broker, "_resolve_once", timeout)
+    wire = _ask(b.rig, for_session="legacy-budget")
+    # Base borrowers do not understand the additive reason. Preserve their
+    # actual transient-code set, not the new build's owner_busy exemption.
+    monkeypatch.setattr(
+        client_mod,
+        "_TRANSIENT_REFUSALS",
+        frozenset({"internal", "rate_limited", "quota_blocked", "unsupported"}),
+    )
+    legacy = BrokerError.from_detail({k: v for k, v in wire.items() if k != "reason"})
+    b.client._held_or(legacy, "github", "legacy", force_refresh=False)
+    kept = b.client.grants.peek("github", "legacy") is held
+    assert kept, "a base-shaped borrower must retain its already-held grant"
+    assert wire["code"] == "rate_limited" and wire["reason"] == "owner_busy"
+
+
+def test_new_borrower_normalizes_the_additive_busy_reason_and_retries_once(borrower: Any) -> None:
+    from local_operator.network.credentials.types import BrokerError
+
+    b = borrower
+    b.response[0] = {
+        "kind": "error",
+        "key": "github",
+        "code": "rate_limited",
+        "reason": "owner_busy",
+    }
+    result = b.client.request_grant_sync("github", session_id="new", force_refresh=True)
+    assert isinstance(result, BrokerError) and result.code == "owner_busy"
+    assert "could not finish reading" in result.message
+    assert "too many credential requests" not in result.message
+    assert len(b.calls) == 2
+    row = b.client.state.observation("github")
+    assert row is not None and row["status"] == "rate_limited" and row["reason"] == "owner_busy"
+    remembered = b.client.cached_refusal("github")
+    assert remembered is not None and remembered.code == "owner_busy"
+
+
+def test_panic_evicts_the_raw_cache_before_the_async_revoke_worker(
+    env: Any, github_api: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.network import relay
+
+    with _owner_for(env, github_api, github_mod.SOURCE_GH, monkeypatch=monkeypatch) as rig:
+        assert _ask(rig)["kind"] == "grant"
+        assert rig.broker._github_source._token
+        # A structural dispatch host, not a second listening relay/test server.
+        server: Any = SimpleNamespace(**{owner_mod._BROKER_ATTR: rig.broker})
+        entered, release = threading.Event(), threading.Event()
+
+        def revoke(*args: Any) -> None:
+            entered.set()
+            assert release.wait(3)
+
+        monkeypatch.setattr(owner_mod, "revoke_lent_on_panic", revoke)
+        worker = relay.RelayServer._revoke_lent_on_panic(server, "n_gh")
+        try:
+            assert entered.wait(2)
+            cache_empty = not rig.broker._github_source._token
+            assert cache_empty, "panic must evict memory before the blocked worker"
+        finally:
+            release.set()
+            worker.join(2)
+        assert not worker.is_alive()
+
+
+@pytest.mark.asyncio
+async def test_source_deadline_and_flight_age_share_the_injected_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.network.credentials import github_source
+
+    source = github_source.GithubSource()
+    clock = [100.0]
+    source._clock = lambda: clock[0]
+    source._wall_clock = lambda: 100.0
+    entered, release = threading.Event(), threading.Event()
+
+    def read(*args: Any) -> str:
+        entered.set()
+        assert release.wait(3)
+        return ""
+
+    monkeypatch.setattr(github_mod, "resolve_source", read)
+    first = asyncio.create_task(source.resolve(None, None))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        clock[0] += 13
+        assert source.diagnostics()["flight_age_ms"] == 13_000
+        with pytest.raises(github_source.SourceBusy):
+            await source.resolve(None, None)
+        release.set()
+        with pytest.raises(github_source.SourceBusy):
+            await first
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+        source.close()
+
+
+def test_explicit_refresh_retains_the_app_budget_and_busy_status_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from argparse import Namespace
+
+    from local_operator.network import cli
+    from local_operator.network.credentials import BROKER_OP_DEADLINE_S
+    from local_operator.network.types import MeshRefusal
+
+    calls = []
+
+    def ask(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"kind": "error", "key": "github", "code": "not_a_holder"}
+
+    monkeypatch.setattr(cli, "_relay_answer", ask)
+    with pytest.raises(MeshRefusal):
+        cli._cmd_credential_refresh(Namespace(key="github"))
+    assert len(calls) == 1 and calls[0]["timeout"] == BROKER_OP_DEADLINE_S
+    assert cli._refusal_words("owner_busy", "owner") == "owner is busy — try again shortly"
+
+
+@pytest.mark.parametrize("key", ["anthropic", "mcp:https://synthetic.invalid/mcp"])
+def test_other_family_budget_timeouts_keep_their_existing_code(
+    env: Any, github_api: Any, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    from tests.unit.network.test_credentials_github import BORROWER_DEVICE, OWNER_DEVICE
+
+    with _owner_for(env, github_api, github_mod.SOURCE_GH, monkeypatch=monkeypatch) as rig:
+        rig.document.declare(
+            key,
+            owner_device=OWNER_DEVICE,
+            owner_device_name="owner",
+            provider=key,
+            identity_label="",
+            by=OWNER_DEVICE,
+        )
+        rig.document.grant(key, BORROWER_DEVICE, scope="device", by=OWNER_DEVICE)
+        rig.document.save()
+
+        async def timeout(**kwargs: Any) -> Any:
+            raise TimeoutError("synthetic owner budget")
+
+        monkeypatch.setattr(rig.broker, "_resolve_once", timeout)
+        wire = _ask(rig, key=key, provider=key)
+        assert wire["code"] == "rate_limited" and "reason" not in wire
+
+
+def test_missing_designation_is_an_explicit_refusal_not_an_assertion(
+    env: Any, github_api: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network.credentials.types import BrokerError
+    from tests.unit.network.test_credentials_github import BORROWER_DEVICE
+
+    with _owner_for(env, github_api, github_mod.SOURCE_GH, monkeypatch=monkeypatch) as rig:
+
+        async def missing(*args: Any) -> Any:
+            return github_mod.SOURCE_GH, "synthetic-not-a-credential", None
+
+        monkeypatch.setattr(rig.broker._github_source, "resolve", missing)
+        result = rig.broker._loop.submit(
+            rig.broker._resolve_github(
+                key="github",
+                provider="github",
+                for_session="synthetic",
+                holder_scope="device",
+                by=BORROWER_DEVICE,
+            ),
+            timeout=2,
+        )
+        assert isinstance(result, BrokerError) and result.code == "internal"
+        assert "scope could not be verified" in result.message

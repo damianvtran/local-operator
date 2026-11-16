@@ -901,7 +901,7 @@ class MeshCredentialBroker:
                 key,
                 provider,
                 by,
-                "owner_busy",
+                "owner_busy" if github_app.is_github_key(key) else "rate_limited",
                 "this device could not finish checking the login in time; retry shortly",
                 retry_after_ms=30_000,
             )
@@ -1705,7 +1705,10 @@ class MeshCredentialBroker:
             denied = self._github_timeout_denial(key, by)
             if denied is not None:
                 return denied
-            logger.warning("credential GitHub source deadline: %s", self._loop.diagnostics())
+            logger.warning(
+                "credential GitHub source deadline: %s",
+                {**self._loop.diagnostics(), **self._github_source.diagnostics()},
+            )
             return BrokerError(
                 code="owner_busy",
                 retry_after_ms=250,
@@ -1782,7 +1785,12 @@ class MeshCredentialBroker:
                         minter=self._lender().minter,
                     ),
                 )
-            assert designated is not None  # both supported source arms resolve policy
+            if designated is None:
+                return BrokerError(
+                    code="internal",
+                    message="GitHub repository scope could not be verified",
+                    **common,
+                )  # both supported source arms resolve policy
             refusal = self._github_designation_refusal(
                 designated,
                 limit=github_app.MAX_DESIGNATED_REPOSITORIES,
@@ -3768,6 +3776,19 @@ def _caused_by_invalid_grant(exc: BaseException | None) -> bool:
         seen.add(id(current))
         current = current.__cause__ or current.__context__
     return False
+
+
+def invalidate_github_source_on_panic(server: Any, network_id: str) -> None:
+    """Evict memory synchronously; never wait for remote token DELETE or auth.db.
+
+    The trust fence already holds. Read only the existing, matching broker so
+    panic neither starts a broker nor evicts an unrelated network's login cache.
+    """
+    broker = getattr(server, _BROKER_ATTR, None)
+    if broker is not None and (not network_id or broker.network_id == network_id):
+        source = getattr(broker, "_github_source", None)
+        if source is not None:  # An older/custom broker has no raw cache to evict.
+            source.invalidate()
 
 
 def revoke_lent_on_panic(server: Any, network_id: str) -> int:

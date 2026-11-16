@@ -746,7 +746,9 @@ class MeshCredentialClient:
         row = self.state.observation(key, now=now)
         if row is None:
             return None
-        # ``reason`` is deliberately NOT read back here. The observation document
+        # Only the CLOSED owner_busy marker is read back, never stored prose.
+        # It keeps shared state legible to old runtimes (status=rate_limited).
+        # Every other ``reason`` is deliberately NOT read back. The observation document
         # carries the field for a diagnostic to read, but the sentence a person sees
         # is rendered at the point of use from the CODE (``messages.py``) — and a
         # borrower that echoed a stored string would be presenting one device's
@@ -784,8 +786,16 @@ class MeshCredentialClient:
             # cache was the owner's pool. Rebuilt without the marker, a 0-remainder
             # cached refusal read as the holder's exclusion again and a concurrent
             # ask rendered the borrower's own cooldowns for it.
-            reason=QUOTA_REASON_POOL_DEPLETED if status == "quota_blocked" else "",
-        )
+            reason=(
+                QUOTA_REASON_POOL_DEPLETED
+                if status == "quota_blocked"
+                else (
+                    "owner_busy"
+                    if status == "rate_limited" and row.get("reason") == "owner_busy"
+                    else ""
+                )
+            ),
+        ).as_borrower_error()
 
     def _remember(self, key: str, error: BrokerError) -> None:
         if error.code in _HOLDABLE_REFUSALS and self.state.held_policy_refusal(
@@ -797,10 +807,13 @@ class MeshCredentialClient:
         ttl = error.cache_ttl_ms
         if ttl == NO_RETRY:
             ttl = UNSUPPORTED_OBSERVATION_MS
+        # A new relay and an older session can share this document. Preserve
+        # the old transient status on DISK as well as on the wire; otherwise the
+        # older process could still interpret a normalized code as a new fence.
         self.state.observe(
             key,
-            error.code,
-            reason="",
+            "rate_limited" if error.code == "owner_busy" else error.code,
+            reason="owner_busy" if error.code == "owner_busy" else "",
             owner_device=error.owner_device or self.owner_of(key),
             retry_after_ms=ttl,
             # WHAT THE OWNER SAID, IF ANYTHING (review round 2, M2): ``ttl`` above
@@ -3785,7 +3798,7 @@ class MeshCredentialClient:
         if detail.get("kind") == "grant":
             grant = self._bounded(Grant.from_detail(detail))
             return self._adopt_online(grant, key, session_id, request_stamp, selection=selection)
-        refused = BrokerError.from_detail(detail)
+        refused = BrokerError.from_detail(detail).as_borrower_error()
         # THE COOLDOWN EXPLANATION FIRST (#3616 review m1): when a resting sibling
         # was excluded too, its return time is the wait that is actually true for
         # this ask; the hold's "try again in about 5 min" would be wrong for it.
@@ -3836,7 +3849,7 @@ class MeshCredentialClient:
             grant = Grant.from_detail(detail)
             result = self._adopt_online(grant, key, "", request_stamp, cache=False)
             return self._detail_error(result) if isinstance(result, BrokerError) else detail
-        error = self._render(BrokerError.from_detail(detail), key, label)
+        error = self._render(BrokerError.from_detail(detail).as_borrower_error(), key, label)
         if excluded and error.is_holder_exclusion:
             # The answer to the HOLDER'S exclusion, not an owner-side state (review
             # round 1, m1): the holder's cooldowns are the record, and caching this
