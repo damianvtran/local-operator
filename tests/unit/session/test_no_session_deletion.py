@@ -4702,6 +4702,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Deletes only a marked eval fixture with both owned directories; protected "
         "operator/session roots are refused before removal",
     ),
+    # Heavy-job lease holder records. The only production directory is
+    # `heavy_lease.lease_dir()` (`<config_dir>/run/heavy-jobs`, passed by
+    # tools/builtin.py and services.py); try_acquire builds the record path as
+    # `directory / f"slot-{slot}.json"` with an integer slot, and _write_record's
+    # temp is that name plus `.<pid>.<id>.tmp`. No session id enters either path.
+    (
+        "local_operator/heavy_lease.py::Lease.release",
+        "<path>.unlink",
+        "Removes only this lease's run/heavy-jobs/slot-<int>.json holder record FILE; "
+        "the path never carries a session id, and unlink rejects directories.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "os.replace",
+        "Publishes the run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp regular file over "
+        "slot-<int>.json; os.replace rejects a directory target.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "<path>.unlink",
+        "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
+        "temp FILE; unlink rejects directories.",
+    ),
 )
 
 

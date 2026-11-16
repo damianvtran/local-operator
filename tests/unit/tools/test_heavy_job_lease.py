@@ -19,11 +19,16 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from local_operator import heavy_lease
+
+if TYPE_CHECKING:
+    from local_operator.harness.types import AgentToolUpdate, ToolResult
 
 pytestmark = pytest.mark.skipif(not heavy_lease.supported(), reason="flock is POSIX-only")
 
@@ -340,7 +345,7 @@ _HOLDER = textwrap.dedent("""
 """)
 
 
-def _spawn_holder(directory: Path, log: Path, hold: float, session: str) -> subprocess.Popen:
+def _spawn_holder(directory: Path, log: Path, hold: float, session: str) -> subprocess.Popen[bytes]:
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
     return subprocess.Popen(
         [sys.executable, "-c", _HOLDER, str(directory), str(log), str(hold), session],
@@ -356,7 +361,7 @@ def _wait_for(path: Path, timeout: float = 8.0) -> None:
         time.sleep(0.02)
 
 
-def _reap(proc: subprocess.Popen) -> None:
+def _reap(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is None:
         os.killpg(proc.pid, signal.SIGKILL)
     proc.wait(timeout=5)
@@ -463,8 +468,27 @@ def lease_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return heavy_lease.lease_dir()
 
 
-def _text(result) -> str:  # noqa: ANN001 - ToolResult
+def _text(result: ToolResult) -> str:
     return "".join(getattr(block, "text", "") for block in result.content)
+
+
+def _bash(
+    args: dict[str, Any], on_update: Callable[[AgentToolUpdate], None] | None = None
+) -> ToolResult:
+    """Run the real guarded ``execute_bash`` to completion from synchronous test code.
+
+    ``@_guard`` publishes ``execute_bash`` as ``ToolExecutor`` (returning
+    ``Awaitable[ToolResult]``), which ``asyncio.run`` rejects as a non-coroutine;
+    awaiting it inside a coroutine is what the harness does with it (same shape as
+    tests/unit/network/test_tool.py's ``_run_call``). The import stays lazy, as in
+    the tests themselves, so ``lease_env`` has configured the environment first.
+    """
+    from local_operator.tools import builtin
+
+    async def call() -> ToolResult:
+        return await builtin.execute_bash("t", args, None, on_update, None)
+
+    return asyncio.run(call())
 
 
 async def _until_free(directory: Path) -> None:
@@ -479,13 +503,11 @@ async def _until_free(directory: Path) -> None:
 
 
 def test_non_heavy_command_never_waits(lease_env: Path) -> None:
-    from local_operator.tools import builtin
-
     held = heavy_lease.try_acquire(lease_env, 1, session_id="other", command="pnpm build")
     assert held is not None
     try:
         started = time.monotonic()
-        result = asyncio.run(builtin.execute_bash("t", {"command": "printf quick"}))
+        result = _bash({"command": "printf quick"})
         elapsed = time.monotonic() - started
     finally:
         held.release()
@@ -497,14 +519,10 @@ def test_non_heavy_command_never_waits(lease_env: Path) -> None:
 
 
 def test_heavy_command_is_refused_when_the_slot_stays_held(lease_env: Path) -> None:
-    from local_operator.tools import builtin
-
     held = heavy_lease.try_acquire(lease_env, 1, session_id="sess-xyz", command="pnpm build")
     assert held is not None
     try:
-        result = asyncio.run(
-            builtin.execute_bash("t", {"command": "printf ran", "memory_mb": 2048})
-        )
+        result = _bash({"command": "printf ran", "memory_mb": 2048})
     finally:
         held.release()
     text = _text(result)
@@ -522,13 +540,13 @@ def test_heavy_command_queues_then_runs_and_releases(lease_env: Path, tmp_path: 
     # holder released" is checked against the holder's recorded end.
     started_cmd = f"{sys.executable} -c 'import time; print(\"started\", time.time())'"
     holder = _spawn_holder(lease_env, log, 1.2, "first-session")
-    updates: list = []
+    updates: list[AgentToolUpdate] = []
     try:
         _wait_for(tmp_path / "h.log.held")
 
-        async def run() -> object:
+        async def run() -> ToolResult:
             result = await builtin.execute_bash(
-                "t", {"command": started_cmd, "memory_mb": 2048}, None, updates.append
+                "t", {"command": started_cmd, "memory_mb": 2048}, None, updates.append, None
             )
             await _until_free(lease_env)
             return result
@@ -552,7 +570,6 @@ def test_kill_switch_disables_the_lease(lease_env: Path) -> None:
     from local_operator import settings_io
     from local_operator.config import ConfigManager
     from local_operator.paths import config_dir
-    from local_operator.tools import builtin
 
     settings_io.write_setting(
         ConfigManager(config_dir()), settings_io.BY_KEY["bash.heavy_jobs.enabled"], False
@@ -560,9 +577,7 @@ def test_kill_switch_disables_the_lease(lease_env: Path) -> None:
     held = heavy_lease.try_acquire(lease_env, 1, session_id="other", command="pnpm build")
     assert held is not None
     try:
-        result = asyncio.run(
-            builtin.execute_bash("t", {"command": "printf ran", "memory_mb": 2048})
-        )
+        result = _bash({"command": "printf ran", "memory_mb": 2048})
     finally:
         held.release()
     assert not result.is_error and "ran" in _text(result)
@@ -624,8 +639,11 @@ def test_release_frees_the_slot_even_while_a_child_holds_a_duplicate(tmp_path: P
     """
     directory = tmp_path / "heavy-jobs"
     lease = heavy_lease.try_acquire(directory, 1, command="pnpm build")
-    assert lease is not None and lease.fileno() is not None
-    child = subprocess.Popen(["sleep", "30"], pass_fds=(lease.fileno(),), start_new_session=True)
+    assert lease is not None
+    # Bind once: pyright cannot carry a narrowing across a second method call.
+    fd = lease.fileno()
+    assert fd is not None
+    child = subprocess.Popen(["sleep", "30"], pass_fds=(fd,), start_new_session=True)
     try:
         assert heavy_lease.try_acquire(directory, 1) is None
         lease.release()
@@ -686,7 +704,6 @@ def test_killed_harness_keeps_the_slot_until_its_command_exits(
 
 def test_queue_wait_is_not_capped_by_the_command_timeout(lease_env: Path, tmp_path: Path) -> None:
     """K2: the queue limit is separate from `timeout`, which starts at spawn."""
-    from local_operator.tools import builtin
 
     os.environ[heavy_lease.HEAVY_JOBS_WAIT_SECONDS_ENV] = "10"
     log = tmp_path / "k2.log"
@@ -694,11 +711,7 @@ def test_queue_wait_is_not_capped_by_the_command_timeout(lease_env: Path, tmp_pa
     try:
         _wait_for(tmp_path / "k2.log.held")
         started = time.monotonic()
-        result = asyncio.run(
-            builtin.execute_bash(
-                "t", {"command": "printf ran-after-queue", "memory_mb": 2048, "timeout": 1}
-            )
-        )
+        result = _bash({"command": "printf ran-after-queue", "memory_mb": 2048, "timeout": 1})
         elapsed = time.monotonic() - started
         assert holder.wait(timeout=10) == 0
     finally:
@@ -709,13 +722,10 @@ def test_queue_wait_is_not_capped_by_the_command_timeout(lease_env: Path, tmp_pa
 
 def test_heavy_command_cannot_drop_its_memory_cap_per_call(lease_env: Path) -> None:
     """R3: `memory_mb=0` on a heavy command is treated as unset."""
-    from local_operator.tools import builtin
 
     probe = "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB"
-    heavy = asyncio.run(
-        builtin.execute_bash("t", {"command": f"{probe}; false && pnpm build", "memory_mb": 0})
-    )
-    light = asyncio.run(builtin.execute_bash("t", {"command": probe, "memory_mb": 0}))
+    heavy = _bash({"command": f"{probe}; false && pnpm build", "memory_mb": 0})
+    light = _bash({"command": probe, "memory_mb": 0})
     assert "mem=0" in _text(light)  # control: a normal command may still opt out
     assert "mem=" in _text(heavy) and "mem=0" not in _text(heavy), _text(heavy)
 
@@ -725,19 +735,14 @@ def test_operator_memory_switch_still_wins_and_is_announced(lease_env: Path) -> 
     from local_operator import settings_io
     from local_operator.config import ConfigManager
     from local_operator.paths import config_dir
-    from local_operator.tools import builtin
 
     settings_io.write_setting(
         ConfigManager(config_dir()), settings_io.BY_KEY["bash.memory.enabled"], False
     )
-    updates: list = []
-    result = asyncio.run(
-        builtin.execute_bash(
-            "t",
-            {"command": "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB; false && pnpm build"},
-            None,
-            updates.append,
-        )
+    updates: list[AgentToolUpdate] = []
+    result = _bash(
+        {"command": "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB; false && pnpm build"},
+        updates.append,
     )
     assert "mem=0" in _text(result)
     lines = [u.details.get("heavy_job_queue") for u in updates if u.details]
@@ -749,7 +754,6 @@ def test_operator_memory_switch_still_wins_and_is_announced(lease_env: Path) -> 
 
 def test_spawn_passes_the_lease_descriptor(lease_env: Path) -> None:
     """Q1 wiring: the command sees the lock description as an open descriptor."""
-    from local_operator.tools import builtin
 
     lock = lease_env / "slot-0.lock"
     # A probe that finds an inherited fd pointing at the slot lock.
@@ -761,7 +765,7 @@ def test_spawn_passes_the_lease_descriptor(lease_env: Path) -> None:
     )
     if not Path("/proc/self/fd").exists():
         pytest.skip("fd-to-path probe needs /proc")
-    result = asyncio.run(builtin.execute_bash("t", {"command": probe}))
+    result = _bash({"command": probe})
     assert "inherited 1" in _text(result), _text(result)
 
 
@@ -769,24 +773,19 @@ def test_build_chained_with_a_server_takes_no_slot_keeps_its_cap_and_says_so(
     lease_env: Path,
 ) -> None:
     """R2-1 / Q4: with the slot held elsewhere, it runs at once, capped, with a note."""
-    from local_operator.tools import builtin
 
     held = heavy_lease.try_acquire(lease_env, 1, session_id="other", command="pnpm build")
     assert held is not None
-    updates: list = []
+    updates: list[AgentToolUpdate] = []
     try:
-        result = asyncio.run(
-            builtin.execute_bash(
-                "t",
-                {
-                    # `false &&` keeps pnpm from running; the classifier sees both.
-                    "command": "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB;"
-                    " false && pnpm build && pnpm dev",
-                    "memory_mb": 0,
-                },
-                None,
-                updates.append,
-            )
+        result = _bash(
+            {
+                # `false &&` keeps pnpm from running; the classifier sees both.
+                "command": "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB;"
+                " false && pnpm build && pnpm dev",
+                "memory_mb": 0,
+            },
+            updates.append,
         )
         # No slot taken: the other session's lease is untouched and still the only one.
         assert [h.session_id for h in heavy_lease.read_holders(lease_env)] == ["other"]
@@ -806,8 +805,9 @@ def test_inherited_lock_descriptor_is_read_only(tmp_path: Path) -> None:
     """R2-2: a confined command inheriting the fd cannot write through it."""
     directory = tmp_path / "heavy-jobs"
     lease = heavy_lease.try_acquire(directory, 1, command="pnpm build")
-    assert lease is not None and lease.fileno() is not None
+    assert lease is not None
     fd = lease.fileno()
+    assert fd is not None
     try:
         probe = subprocess.run(
             ["sh", "-c", f"printf x >&{fd} && echo wrote || echo refused"],
