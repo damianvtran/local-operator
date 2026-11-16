@@ -1511,8 +1511,8 @@ changes cut a release's bytes:
 bytes (all files, yanked too), cadence (releases first uploaded in the last 30
 days / 30), bytes per release (pure + macOS wheel; with only the pure wheel,
 pure x2 + 0.16 MiB) and `runway_days = (cap - used) / (bytes_per_release x
-cadence)`. Under **60 days** it warns: the retention decision goes to Damian
-then. Under **21 days** it fails `release-gate.yml` (before the tag) and
+cadence)`. Under **60 days** it warns: the retention decision goes to the
+operator then. Under **21 days** it fails `release-gate.yml` (before the tag) and
 `publish.yml` `release-build`. `ci.yml` `packaging-smoke-build` passes
 `--runway-warn-only`, so a low runway never blocks an unrelated PR. A PyPI
 outage or malformed JSON only warns.
@@ -1547,7 +1547,7 @@ wheel growth of 0.189 MiB/day, ~63 days, reaching the cap around
 **2027-01-18**.
 
 **Retention is the operator's decision.** When the runway warning fires
-(<60 days), take the retention decision to Damian; the release gate fails at
+(<60 days), take the retention decision to the operator; the release gate fails at
 <21 days. Suggested policy: keep every release from the last ~30 days and the
 last patch of every minor. Deleting a PyPI release is a manual, irreversible
 operator action on pypi.org; agents never delete releases or files.

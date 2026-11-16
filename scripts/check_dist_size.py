@@ -26,7 +26,7 @@ JSON from PyPI and computes::
     runway_days      = (PROJECT_CAP - used) / (bytes_per_release * cadence)
 
 Under :data:`RUNWAY_WARN_DAYS` (60) it prints a ``::warning::`` — the retention
-decision is Damian's and should reach him with time to make it. Under
+decision is the operator's and should reach them with time to make it. Under
 :data:`RUNWAY_FAIL_DAYS` (21) it exits 1 on the release path (``release-gate.yml``
 before the tag, ``publish.yml`` ``release-build``), where the bytes are spent;
 ``ci.yml`` passes ``--runway-warn-only`` so a low runway never blocks an unrelated PR.
@@ -215,7 +215,7 @@ def runway(
     print(f"PyPI runway: {days:.1f} days at this rate, cap reached ~{when}")
     message = (
         f"PyPI runway is {days:.1f} days (cap reached ~{when}); a PyPI retention "
-        "decision is Damian's (see scripts/check_dist_size.py and AGENTS.md)"
+        "decision is the operator's (see scripts/check_dist_size.py and AGENTS.md)"
     )
     if fail_below is not None and days < fail_below:
         return [message]

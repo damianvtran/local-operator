@@ -487,7 +487,7 @@ def test_under_21_days_fails_and_names_the_retention_owner(tmp_path: Path) -> No
     payload = _payload(used=27 * GIB, recent=180)
     assert _days(payload, 34 * SIZE["MIB"] + int(0.16 * SIZE["MIB"])) < 21
     problems = _runway([wheel], payload)
-    assert len(problems) == 1 and "retention decision is Damian's" in problems[0]
+    assert len(problems) == 1 and "retention decision is the operator's" in problems[0]
 
 
 def test_warn_only_never_fails_under_21_days(
@@ -526,7 +526,7 @@ def test_main_wires_runway_and_warn_only(
     }
     monkeypatch.setitem(SIZE["main"].__globals__, "fetch_pypi_json", lambda: payload)
     assert SIZE["main"](["--runway", str(tmp_path)]) == 1
-    assert "retention decision is Damian's" in capsys.readouterr().err
+    assert "retention decision is the operator's" in capsys.readouterr().err
     assert SIZE["main"](["--runway-warn-only", str(tmp_path)]) == 0
     assert SIZE["main"]([str(tmp_path)]) == 0  # no flag: no PyPI read at all
     with pytest.raises(SystemExit):

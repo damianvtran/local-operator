@@ -458,10 +458,9 @@ jobs:
   #
   # THE BUILD IS DELIBERATELY ONCE. The wheel is `py3-none-any`, so every
   # interpreter installs byte-identical code; rebuilding per version would test
-  # the builder three times and the artifact zero extra times. PR builds omit
-  # the pnpm mobile bundle (cheap, and the bundle is not what this regression
-  # class is about); the publish gate in publish.yml installs the exact release
-  # artifact, which does include it.
+  # the builder three times and the artifact zero extra times. The job builds
+  # the pnpm mobile bundle too, so the PR wheel has the release shape (same
+  # contents and size class as the artifact publish.yml installs and gates).
   #
   # Gate: the `packaging` flag, which is NOT `unit`. `unit` answers "must the
   # test suite run", and it is true for a tests-only diff; this job answers
