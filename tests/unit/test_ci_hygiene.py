@@ -1168,7 +1168,9 @@ def _audit_unit_serial_wiring(steps: list[dict[str, Any]], env: dict[str, Any]) 
         problems.append("the ordinary run does not deselect $SERIAL_CONTROLS")
     if "--cov-append" in ordinary_run or ".coverage." in ordinary_run:
         problems.append("the ordinary run must not append or rename coverage data")
-    if serial.get("if") != "matrix.shard == 0":
+    # #4074: shard 0 only, and not on the affected lane (it would run six
+    # unrelated fixtures for up to 7 minutes beside a handful of targets).
+    if serial.get("if") != "matrix.shard == 0 && needs.changes.outputs.lane != 'affected'":
         problems.append(f"the serial step must run on shard 0 only, has if={serial.get('if')!r}")
     if serial.get("continue-on-error"):
         problems.append("the serial step must not continue-on-error")
@@ -2851,6 +2853,38 @@ def test_a_local_run_classifies_the_diff_instead_of_running_everything(
         }, f"a `{event}` run must not be gated (D5): {values!r}"
 
 
+# #4074: the ONE `if:` coverage-report may carry. It has no status-check
+# function, so GitHub still ANDs it with an implicit `success()` and the job
+# inherits a skipped/failed `test` (no `always()` override). It only adds the
+# lane filter so an `affected` run does not combine one partial shard artifact
+# and fail `--fail-under`. Exact match, not a substring/`always` denylist, so
+# `|| true`, a status function or a looser mode comparison cannot slip in.
+_COVERAGE_REPORT_AFFECTED_IF = "needs.test.outputs.lane != 'affected'"
+
+
+def _coverage_report_if_is_approved(expression: str) -> bool:
+    return expression == _COVERAGE_REPORT_AFFECTED_IF
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "",
+        "always()",
+        "always() && needs.test.outputs.lane != 'affected'",
+        "needs.test.outputs.lane != 'affected' || true",
+        "needs.test.outputs.lane == 'full'",
+        "needs.test.outputs.lane != 'unknown'",
+        "success() || needs.test.outputs.lane != 'affected'",
+    ],
+)
+def test_coverage_report_guard_rejects_unapproved_if_expressions(
+    expression: str,
+) -> None:
+    """Negative control for A14: only the exact lane filter passes the guard."""
+    assert not _coverage_report_if_is_approved(expression)
+
+
 def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None:
     """A14. `coverage-report` must not get an `always()`.
 
@@ -2861,7 +2895,7 @@ def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None
     `needs: test` and acquires no status-check function. That is the deliberate
     "do nothing" answer to the whole gating change, which is why it is pinned.
 
-    Mutation that must fail this: add `if: always()`.
+    Mutation that must fail this: add `if: always()` or widen the lane filter.
     """
     expression = _if("coverage-report")
     scope = _scope()
@@ -2869,9 +2903,11 @@ def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None
         f"coverage-report grew `always()` (if: {expression!r}); a combine over "
         "zero shard artifacts goes red on a docs-only PR"
     )
-    assert expression == "", (
-        f"coverage-report grew an `if:` ({expression!r}); it is supposed to "
-        "inherit the skip from `needs: test`"
+    assert _coverage_report_if_is_approved(expression), (
+        f"coverage-report's `if:` ({expression!r}) is not the one approved "
+        f"expression {_COVERAGE_REPORT_AFFECTED_IF!r}; anything else either "
+        "breaks the inherited skip or lets the affected lane publish partial "
+        "coverage"
     )
     assert _needs("coverage-report") == {
         "test"
@@ -4258,6 +4294,22 @@ def test_full_suite_changes_job_matches_ci() -> None:
         "python3 scripts/gate_merge_base.py apply",
     ]
     full["steps"] = [s for s in full["steps"] if s not in gate_steps]
+    # #4074: the affected-lane planner step and its `lane*` outputs are the
+    # third and last full-suite-only addition. Pinned exactly (one step, the
+    # five outputs) so the strip cannot hide a drifting classifier.
+    lane_steps = [s for s in full["steps"] if s.get("id") == "lane"]
+    assert len(lane_steps) == 1 and "scripts/fixture_lane.py" in lane_steps[0]["run"]
+    full["steps"] = [s for s in full["steps"] if s not in lane_steps]
+    lane_outputs = sorted(k for k in full["outputs"] if k.startswith("lane"))
+    assert lane_outputs == [
+        "lane",
+        "lane_planner_base",
+        "lane_planner_blob",
+        "lane_reason",
+        "lane_targets",
+    ]
+    for key in lane_outputs:
+        del full["outputs"][key]
     assert full == _pr_jobs()["changes"]
 
 
@@ -4312,7 +4364,11 @@ def test_every_full_suite_checkout_is_rebuilt_on_the_run_main_tip() -> None:
         "id": "gate_base",
         "run": "python3 scripts/gate_merge_base.py resolve",
     }
-    assert jobs["test"]["outputs"] == {"gate_base": "${{ needs.changes.outputs.gate_base }}"}
+    assert jobs["test"]["outputs"] == {
+        "gate_base": "${{ needs.changes.outputs.gate_base }}",
+        # #4074: pass-through so `coverage-report` (needs: test only) can skip itself
+        "lane": "${{ needs.changes.outputs.lane }}",
+    }
     # The greppable per-job line the requester asked for, and the comment
     # that tells a log reader how to check it.
     from scripts import gate_merge_base
