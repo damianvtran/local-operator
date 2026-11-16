@@ -43,11 +43,30 @@ contents and RECORD's own row stays empty. The new wheel is written to a tempora
 in the same directory and moved over the original, so an interrupted run leaves the
 original wheel, never a truncated one.
 
+ZOPFLI DEFLATE, and why it is safe. Every member is stored as standard DEFLATE
+(method 8, what every ``zipfile``/pip/installer already reads), but the DEFLATE stream
+is produced by zopfli rather than zlib. zopfli searches far harder for the shortest
+encoding of the SAME bytes; it is lossless by construction and changes only ZIP
+framing, never a byte that lands in ``site-packages``. Measured on the 0.105.3 slim
+wheel (CI run 43783144948): 18,348,918 -> 17,698,969 bytes (-649,949, 0.62 MiB) at one
+iteration, about 185 s of CPU on one Apple-silicon core, byte-identical across two
+independent runs. More iterations buy little: on a 1.5 MB sample, 15 iterations saved
+only ~11% more than 1 for ~1.7x the CPU, so ``_ZOPFLI_ITERATIONS`` stays at 1. Members
+are compressed in parallel worker processes (``--jobs``); each stream depends only on
+its member's bytes, so the parallel result is byte-identical to the serial one.
+
+zopfli is a hard dependency, pinned with hashes in ``scripts/slim_wheel-requirements.txt``
+for the CI/release jobs and in the ``dev`` extra for the tests. There is deliberately no
+silent zlib fallback: a release that quietly lost 0.6 MiB of headroom would first show
+up as a red size budget, or not at all. After writing, the temporary wheel is re-read
+and every member must decompress to exactly the bytes intended, with a matching CRC and
+the zopfli stream's exact compressed size, or the run fails closed as above.
+
 IDEMPOTENT: a second run finds only kept comments and rewrites identical bytes.
 
 Usage::
 
-    slim_wheel.py dist/local_operator-<v>-py3-none-any.whl
+    slim_wheel.py [--jobs N] dist/local_operator-<v>-py3-none-any.whl
 
 Prints the wheel's size before and after.
 """
@@ -57,6 +76,8 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import contextlib
+import functools
 import hashlib
 import io
 import os
@@ -65,12 +86,20 @@ import sys
 import tempfile
 import tokenize
 import zipfile
+import zlib
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-# Spend build CPU, not the fixed PyPI storage budget: level 9 changes only ZIP
-# framing, never runtime bytes/docstrings. Pass it on each ZipInfo write as well;
-# those entries do not inherit ZipFile's default compression level.
-_COMPRESSION_LEVEL = 9
+import zopfli.zopfli
+
+# Spend build CPU, not the fixed PyPI storage budget (see "ZOPFLI DEFLATE" above).
+_ZOPFLI_ITERATIONS = 1
+
+# zopfli's Python binding emits a zlib container: a 2-byte header and a 4-byte
+# Adler-32 trailer around the raw DEFLATE stream a ZIP member carries.
+_ZLIB_HEADER = 2
+_ZLIB_TRAILER = 4
 
 #: Comments a tool other than the compiler reads from installed code. Matched against
 #: the comment token's text, so ``#noqa`` and ``#  type: ignore`` both count.
@@ -140,6 +169,94 @@ def slim_module(name: str, data: bytes) -> bytes:
     return out
 
 
+def _zopfli_streams(payloads: Sequence[bytes], jobs: int) -> list[bytes]:
+    """The raw DEFLATE stream of each payload, in order.
+
+    The worker is ``functools.partial`` over zopfli's C function, not a function of this
+    module: the tests load this file with ``runpy``, whose functions cannot be pickled
+    into a worker process, while a builtin pickles by its import path.
+    """
+    compress = functools.partial(zopfli.zopfli.compress, numiterations=_ZOPFLI_ITERATIONS)
+    if jobs <= 1 or len(payloads) <= 1:
+        wrapped = [compress(data) for data in payloads]
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            # Chunked so ~3,000 small members do not pay one IPC round trip each.
+            wrapped = list(pool.map(compress, payloads, chunksize=16))
+    return [z[_ZLIB_HEADER:-_ZLIB_TRAILER] for z in wrapped]
+
+
+class _PrecompressedDeflate:
+    """Stands in for ``zlib.compressobj`` inside ``zipfile``: emits a ready stream.
+
+    ``zipfile`` still computes the CRC and the uncompressed size from the bytes it is
+    given, so only the compressed bytes come from here; ``flush`` refuses a payload
+    whose length differs from the one the stream was made for, so a stream can never be
+    attached to the wrong member silently.
+    """
+
+    def __init__(self, stream: bytes, size: int) -> None:
+        self._stream, self._size, self._seen = stream, size, 0
+
+    def compress(self, data: bytes) -> bytes:
+        self._seen += len(data)
+        return b""
+
+    def flush(self) -> bytes:
+        if self._seen != self._size:
+            raise SlimError(f"zopfli stream for {self._size} bytes given {self._seen}")
+        return self._stream
+
+
+@contextlib.contextmanager
+def _zopfli_deflate(streams: list[tuple[bytes, int]]) -> Iterator[None]:
+    """Make each DEFLATE member written in this block use the next stream, in order.
+
+    ``zipfile`` has no public way to write a precompressed member, so this swaps its
+    module-level ``_get_compressor`` (the same seam the tests already observe) for the
+    duration of the write only, and restores it even on failure. Every stream must be
+    consumed exactly once; anything else means the hook was bypassed (a changed
+    ``zipfile``) and the wheel would silently carry zlib output.
+    """
+    original = getattr(zipfile, "_get_compressor")
+    pending = iter(streams)
+
+    def precompressed(compress_type: int, compresslevel: int | None = None) -> object:
+        if compress_type != zipfile.ZIP_DEFLATED:
+            return original(compress_type, compresslevel)
+        try:
+            stream, size = next(pending)
+        except StopIteration:
+            raise SlimError("more DEFLATE members written than zopfli streams") from None
+        return _PrecompressedDeflate(stream, size)
+
+    setattr(zipfile, "_get_compressor", precompressed)
+    try:
+        yield
+    finally:
+        setattr(zipfile, "_get_compressor", original)
+    if next(pending, None) is not None:
+        raise SlimError("zopfli streams left unused: zipfile bypassed the compressor hook")
+
+
+def _verify_written(path: Path, expected: list[tuple[str, bytes, int]]) -> None:
+    """Fail closed unless ``path`` holds exactly ``expected`` (name, bytes, deflated size)."""
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        if [i.filename for i in infos] != [name for name, _, _ in expected]:
+            raise SlimError("the written wheel's member list differs from the intended one")
+        for info, (name, data, deflated) in zip(infos, expected):
+            if info.compress_type != zipfile.ZIP_DEFLATED or info.compress_size != deflated:
+                raise SlimError(f"{name}: not stored as the zopfli DEFLATE stream")
+            try:
+                # read() also checks the stream against the stored CRC.
+                intact = info.CRC == zlib.crc32(data) and archive.read(info) == data
+            except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
+                raise SlimError(f"{name}: does not decompress: {exc}") from exc
+            if not intact:
+                raise SlimError(f"{name}: does not decompress to the intended bytes")
+
+
 def _record_row(path: str, data: bytes) -> tuple[str, str, str]:
     # Same row shape as packaging/macos/make_macos_wheel.py: urlsafe base64 sha256
     # without padding, then the byte size.
@@ -147,8 +264,10 @@ def _record_row(path: str, data: bytes) -> tuple[str, str, str]:
     return path, f"sha256={digest}", str(len(data))
 
 
-def slim_wheel(wheel: Path) -> tuple[int, int]:
+def slim_wheel(wheel: Path, jobs: int = 1) -> tuple[int, int]:
     """Rewrite ``wheel`` in place; return its (before, after) size in bytes.
+
+    ``jobs`` worker processes run zopfli; the output is identical for any value.
 
     Every module is slimmed and verified BEFORE anything is written, so a failure
     raises :class:`SlimError` with the original wheel untouched.
@@ -174,23 +293,24 @@ def slim_wheel(wheel: Path) -> tuple[int, int]:
 
     record = "".join(",".join(_record_row(info.filename, data)) + "\n" for info, data in written)
     record += f"{record_name},,\n"
+    source_record = next(i for i in infos if i.filename == record_name)
+    members = list(written)
+    members.append((source_record, record.encode()))
+    streams = _zopfli_streams([data for _, data in members], jobs)
 
     fd, tmp_name = tempfile.mkstemp(dir=wheel.parent, prefix=".slim-", suffix=".whl")
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
-            for info, data in written:
+        sized = [(stream, len(data)) for stream, (_, data) in zip(streams, members)]
+        with _zopfli_deflate(sized), zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+            # RECORD is last, as wheel builders write it, with the source entry's metadata.
+            for info, data in members:
                 out = zipfile.ZipInfo(info.filename, date_time=info.date_time)
                 out.external_attr = info.external_attr
                 out.compress_type = zipfile.ZIP_DEFLATED
-                dst.writestr(out, data, compresslevel=_COMPRESSION_LEVEL)
-            # RECORD last, as wheel builders write it, with the source entry's metadata.
-            source_record = next(i for i in infos if i.filename == record_name)
-            out = zipfile.ZipInfo(record_name, date_time=source_record.date_time)
-            out.external_attr = source_record.external_attr
-            out.compress_type = zipfile.ZIP_DEFLATED
-            dst.writestr(out, record, compresslevel=_COMPRESSION_LEVEL)
+                dst.writestr(out, data)
+        _verify_written(tmp, [(i.filename, d, len(s)) for (i, d), s in zip(members, streams)])
         # mkstemp creates 0600 and os.replace keeps the temp file's mode, so without
         # this a slimmed wheel would be owner-only (measured: -rw------- after vs
         # -rw-r--r-- before). Keep the source wheel's permission bits.
@@ -206,10 +326,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Strip comments from a built py3-none-any wheel, in place, verified"
     )
     parser.add_argument("wheels", nargs="+", type=Path, help="py3-none-any wheel(s)")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="zopfli worker processes (default: CPU count; output is identical for any N)",
+    )
     args = parser.parse_args(argv)
     for wheel in args.wheels:
         try:
-            before, after = slim_wheel(wheel)
+            before, after = slim_wheel(wheel, jobs=args.jobs)
         except SlimError as exc:
             print(f"::error::slim_wheel: {exc}", file=sys.stderr)
             return 1

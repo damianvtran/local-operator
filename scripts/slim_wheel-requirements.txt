@@ -1,0 +1,26 @@
+# The one build-time dependency of scripts/slim_wheel.py: zopfli, which writes the
+# wheel's DEFLATE streams (lossless; ~0.6 MiB smaller than zlib level 9 — see the
+# script's "ZOPFLI DEFLATE" section). Installed by the jobs that slim a wheel:
+# ci.yml packaging-smoke-build, release-gate.yml and publish.yml release-build.
+#
+# Hash-pinned because publish.yml's wheel is uploaded to PyPI irreversibly: a
+# swapped zopfli could write arbitrary member bytes, so pip must refuse anything
+# but these exact artifacts (pip enables --require-hashes once any hash is given;
+# the workflows pass it explicitly too). Keep the version equal to the `dev`
+# extra's pin in pyproject.toml. Regenerate with:
+#   echo 'zopfli==X.Y.Z' | uv pip compile --generate-hashes --universal \
+#     --python-version 3.12 --no-header - -o scripts/slim_wheel-requirements.txt
+zopfli==0.4.3 \
+    --hash=sha256:0087c9a6f0c8a052be0f6d1a9bb71b6caffdd3e10201d6d6166e28d482cebe6d \
+    --hash=sha256:47604eee5c6704bdf0e94d8391fe3b74ddb2abd84128fbcfdc3ee0fc265feaef \
+    --hash=sha256:62248dbf8dbcbd588ee194b210e5be9fa80bce29641f55599d6d394bd2a9d8a3 \
+    --hash=sha256:628c3e941752880b3491db8d44163d0aedb221944e22a17187ff7fc549b050f6 \
+    --hash=sha256:769875152d0625c46707bcca57d4b2233fe653482067acd55fbf6ec525cb9bdc \
+    --hash=sha256:7e9703ca6e7ef66c8d05e0826b6f558b680c9db8206f84f05a3ee93430a12e42 \
+    --hash=sha256:7fa3c35193475290e3f007bbcdebdbae64ba2f012d75c632da0d727e1da50d5e \
+    --hash=sha256:88f4fbe429aad72bc206275d81fab11a097e0f951a5848d1f51083c37ea73073 \
+    --hash=sha256:921c2c9907f4364963848da5ad194b46d68865e07fdb975d04fd09bc42d47357 \
+    --hash=sha256:d3a50f91a13cea9bafe025de8fd87a005eb26de02a4f0c193127ddbf23ac8ebe \
+    --hash=sha256:d4f51dd1ab5312e837e2091284e0d9f1a138188f2e65812f9a5799dc02c45f94 \
+    --hash=sha256:eb0c9c1d40a8cb1d58762d7e57290ccb753e0828c4d01be8acb59aae5d0ca206 \
+    --hash=sha256:f2e0adcf7d36c6fd0dd36cc771ef7f0c5803a05666feafcd90d7170174a4148e

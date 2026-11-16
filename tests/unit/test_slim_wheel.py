@@ -17,6 +17,7 @@ import io
 import runpy
 import traceback
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -64,22 +65,91 @@ def _read(wheel: Path) -> dict[str, bytes]:
         return {name: zf.read(name) for name in zf.namelist()}
 
 
-def test_every_member_uses_maximum_lossless_deflate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ZipInfo writes must opt in too: ZipFile's default alone does not cover them."""
-    wheel = _build_wheel(tmp_path, {"demo/__init__.py": MODULE.encode()})
-    compressor = getattr(zipfile, "_get_compressor")
-    calls: list[tuple[int, int | None]] = []
+def _structured_payload() -> bytes:
+    # Structured resource text, where zopfli measurably beats zlib level 9; a tiny
+    # repeated string compresses identically under both and would miss a regression.
+    return b"".join(
+        f'{{"id":{i},"label":"runtime resource","enabled":{str(i % 3 == 0).lower()}}}\n'.encode()
+        for i in range(4000)
+    )
 
-    def observed(compression: int, compresslevel: int | None = None) -> Any:
-        calls.append((compression, compresslevel))
-        return compressor(compression, compresslevel)
 
-    monkeypatch.setattr(zipfile, "_get_compressor", observed)
+def _zlib9(data: bytes) -> bytes:
+    deflater = zlib.compressobj(9, zlib.DEFLATED, -15)
+    return deflater.compress(data) + deflater.flush()
+
+
+def test_every_member_is_a_zopfli_stream_of_the_identical_bytes(tmp_path: Path) -> None:
+    """Each member carries zopfli's DEFLATE of exactly its bytes: same CRC, same content.
+
+    The compressed size must equal zopfli's own stream for that member (so the hook
+    really wrote it, rather than zipfile silently falling back to zlib) and be smaller
+    than zlib level 9 — the reason the dependency exists.
+    """
+    payload = _structured_payload()
+    wheel = _build_wheel(tmp_path, {"demo/__init__.py": MODULE.encode(), "demo/data.json": payload})
+    with zipfile.ZipFile(wheel) as archive:
+        original_crc = archive.getinfo("demo/data.json").CRC
     SLIM["slim_wheel"](wheel)
     with zipfile.ZipFile(wheel) as archive:
-        assert calls == [(zipfile.ZIP_DEFLATED, 9)] * len(archive.infolist())
+        for info in archive.infolist():
+            data = archive.read(info)
+            assert info.compress_type == zipfile.ZIP_DEFLATED
+            assert info.CRC == zlib.crc32(data)
+            assert info.compress_size == len(SLIM["_zopfli_streams"]([data], 1)[0])
+        json_info = archive.getinfo("demo/data.json")
+        assert archive.read(json_info) == payload
+        assert json_info.CRC == original_crc, "a non-.py member's bytes changed"
+        assert json_info.compress_size < len(_zlib9(payload))
+
+
+def test_output_is_byte_identical_across_runs_and_job_counts(tmp_path: Path) -> None:
+    """Determinism: serial, parallel and repeated runs write the same wheel bytes."""
+    members = {
+        "demo/__init__.py": MODULE.encode(),
+        "demo/data.json": _structured_payload(),
+        "demo/empty.txt": b"",
+        "demo/tool.sh": b"#!/bin/sh\necho ok\n",
+    }
+    # One source wheel, copied: _build_wheel stamps RECORD with the current time.
+    source = _build_wheel(tmp_path, members).read_bytes()
+    outputs = []
+    for jobs in (1, 2, 1):
+        directory = tmp_path / f"run{len(outputs)}"
+        directory.mkdir()
+        wheel = directory / "demo-1.0-py3-none-any.whl"
+        wheel.write_bytes(source)
+        SLIM["slim_wheel"](wheel, jobs=jobs)
+        outputs.append(wheel.read_bytes())
+    assert outputs[0] == outputs[1] == outputs[2]
+    # And a second pass over a slimmed wheel rewrites it byte for byte.
+    SLIM["slim_wheel"](wheel, jobs=2)
+    assert wheel.read_bytes() == outputs[2]
+
+
+def test_a_corrupt_stream_fails_closed_and_leaves_the_wheel_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read-back check, not luck, keeps a bad DEFLATE stream out of the wheel."""
+    wheel = _build_wheel(tmp_path, {"demo/data.json": _structured_payload()})
+    original = wheel.read_bytes()
+    streams = SLIM["_zopfli_streams"]
+
+    def corrupted(payloads: list[bytes], jobs: int) -> list[bytes]:
+        # Valid DEFLATE of different bytes: decodes cleanly, so only the content/CRC
+        # comparison can catch it.
+        return [
+            _zlib9(data[::-1]) if data else stream
+            for data, stream in zip(payloads, streams(payloads, jobs))
+        ]
+
+    monkeypatch.setitem(SLIM["slim_wheel"].__globals__, "_zopfli_streams", corrupted)
+    with pytest.raises(SLIM["SlimError"], match="decompress"):
+        SLIM["slim_wheel"](wheel)
+    assert wheel.read_bytes() == original
+    assert not list(tmp_path.glob(".slim-*"))
+    hook = getattr(zipfile, "_get_compressor")
+    assert hook.__module__ == "zipfile", "the compressor hook leaked"
 
 
 def test_strips_comments_and_keeps_shebang_coding_pragmas_and_docstrings() -> None:
@@ -167,31 +237,6 @@ def test_slims_the_wheel_in_place_with_a_valid_record(tmp_path: Path) -> None:
     SLIM["slim_wheel"](wheel)
     assert _read(wheel) == members
     assert not list(tmp_path.glob(".slim-*")), "the temporary wheel was left behind"
-
-
-def test_repack_uses_maximum_lossless_compression(tmp_path: Path) -> None:
-    # Structured resources distinguish level 9 from the default level 6; a
-    # tiny repeated string would compress identically and miss the regression.
-    payload = b"".join(
-        f'{{"id":{i},"label":"runtime resource","enabled":true}}\n'.encode() for i in range(4000)
-    )
-    expected_sizes = {}
-    for level in (6, 9):
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("data.json", payload, compresslevel=level)
-        with zipfile.ZipFile(buffer) as archive:
-            expected_sizes[level] = archive.getinfo("data.json").compress_size
-    assert expected_sizes[9] < expected_sizes[6]
-
-    wheel = _build_wheel(
-        tmp_path, {"demo/__init__.py": b'VALUE = "runtime"\n', "demo/data.json": payload}
-    )
-    original = _read(wheel)
-    SLIM["slim_wheel"](wheel)
-    assert _read(wheel) == original
-    with zipfile.ZipFile(wheel) as archive:
-        assert archive.getinfo("demo/data.json").compress_size == expected_sizes[9]
 
 
 def test_the_slimmed_wheel_keeps_the_source_wheels_permissions(tmp_path: Path) -> None:

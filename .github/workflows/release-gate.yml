@@ -258,6 +258,7 @@ jobs:
           # module cannot be verified AST- and line-identical), within the PR-side
           # budget: 17.5 MiB, the release's 18 minus the release-only assets this
           # wheel lacks (see scripts/check_dist_size.py).
+          python -m pip install --require-hashes -r scripts/slim_wheel-requirements.txt
           python scripts/slim_wheel.py dist/release-gate/local_operator-*-py3-none-any.whl
           python scripts/check_dist_size.py --budget-mib 17.5 dist/release-gate
 

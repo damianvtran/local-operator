@@ -262,6 +262,11 @@ dev = [
     # Capture glyph origins must follow grapheme clusters, not codepoints.
     "regex>=2025.7.29",
     "pip-audit",
+    # scripts/slim_wheel.py writes the release wheel's DEFLATE streams with zopfli;
+    # the dev extra carries it so tests/unit/test_slim_wheel.py runs in CI's unit
+    # jobs. Same version as the hash-pinned scripts/slim_wheel-requirements.txt
+    # the packaging jobs install: bump both together.
+    "zopfli==0.4.3",
     # Independent decoder used to verify our own PNG encoder's output.
     "pillow",
     # Direct, not via the lsp extra: CI installs dev and must exercise the

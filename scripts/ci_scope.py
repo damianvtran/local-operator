@@ -234,6 +234,9 @@ CLI_SANITY_SCRIPTS = frozenset({"scripts/check_streaming_contract.py"})
 PACKAGING_SCRIPTS = frozenset(
     {
         "scripts/slim_wheel.py",
+        # The slimmer's hash-pinned zopfli: a version bump changes every DEFLATE
+        # stream in the wheel, so it must rebuild and re-check it.
+        "scripts/slim_wheel-requirements.txt",
         "scripts/check_dist_size.py",
         "scripts/smoke_wheel.py",
     }

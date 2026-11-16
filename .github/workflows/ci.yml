@@ -499,6 +499,7 @@ jobs:
       # keyagent-macos job, after the tag exists (see scripts/check_dist_size.py).
       - name: Slim the wheel and check its size budget
         run: |
+          python -m pip install --require-hashes -r scripts/slim_wheel-requirements.txt
           python scripts/slim_wheel.py dist/packaging-smoke/local_operator-*-py3-none-any.whl
           python scripts/check_dist_size.py --budget-mib 17.5 dist/packaging-smoke
 

@@ -252,6 +252,7 @@ jobs:
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         run: |
           set -euo pipefail
+          python -m pip install --require-hashes -r scripts/slim_wheel-requirements.txt
           python scripts/slim_wheel.py dist/local_operator-*-py3-none-any.whl
           mkdir -p sdist
           mv dist/*.tar.gz sdist/
