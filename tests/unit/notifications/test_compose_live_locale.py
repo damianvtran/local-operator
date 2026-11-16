@@ -68,8 +68,8 @@ def test_a_live_switch_reaches_every_fallback_the_composer_and_push_read(
     assert unknown.status == want["status"]
     assert unknown.body == want["body"]
     assert gate_body(UNKNOWN_KIND, "", "") == want["body"]
-    alert = push_payload.completion_alert(UNKNOWN_KIND, 1)
-    assert alert[push_payload.ALERT_BODY_FIELD].startswith(want["body"])
+    alert = push_payload.completion_alert(UNKNOWN_KIND)
+    assert alert[push_payload.ALERT_BODY_FIELD] == want["body"]
 
     # Non-vacuity: where the locale genuinely differs from English, the text
     # that came out is not the English that was bound at import.

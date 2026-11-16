@@ -240,7 +240,7 @@
   "wire.settings.display_nerd_icons.label": "Nerd Font ग्लिफ़",
   "wire.settings.display_notification_session_name.choice.false.description": "बैनर पर नाम न दिखाएँ",
   "wire.settings.display_notification_session_name.choice.true.description": "सत्र का नाम दिखाएँ",
-  "wire.settings.display_notification_session_name.help": "सत्र का नाम, आख़िरी पंक्ति और त्रुटि के कारण बैनर पर दिखते हैं, लॉक स्क्रीन पर भी।",
+  "wire.settings.display_notification_session_name.help": "सत्र का नाम, आख़िरी पंक्ति और त्रुटि के कारण बैनर पर दिखते हैं, लॉक स्क्रीन पर भी और जुड़े हुए फ़ोनों की सूचनाओं में भी, जो उन तक Radient की पुश सेवा के ज़रिए पहुँचती हैं।",
   "wire.settings.display_notification_session_name.label": "सूचना में सत्र नाम",
   "wire.settings.display_notifications.choice.false.description": "कभी सूचना न दें",
   "wire.settings.display_notifications.choice.true.description": "फ़ोकस में न हो तो सूचना दें",
