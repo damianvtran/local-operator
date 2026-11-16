@@ -514,6 +514,8 @@ def test_status_reports_unsafe_v2_directory_without_following_it(tmp_path):
     assert report["namespace_entries"][tx.V2_OPERATION_DIR] == 0
     with pytest.raises(tx.InstallTransactionError, match="unsafe"):
         tx.start_operation(root, baseline="A", target="B", route="default-cli")
+    # Q1: counted before the legacy directory is created, so nothing is left behind.
+    assert not (root / tx.OPERATION_DIR).exists()
 
 
 def test_legacy_only_boundary_is_unchanged(tmp_path):

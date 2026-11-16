@@ -102,27 +102,58 @@ MAX_RECOVERY_RECORD_BYTES = 64 * 1024
 #: 4 KiB record parsed successfully there and then reached callers that recurse
 #: over it (``copy.deepcopy``, ``json.dumps``) and do not expect RecursionError.
 MAX_RECOVERY_RECORD_DEPTH = 32
-_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
-_JSON_BRACKET = re.compile(r"[\[\]{}]")
+#: Only the characters that change string/escape/depth state. A single-char
+#: class cannot backtrack, so ``finditer`` is one linear pass. (A string-masking
+#: ``re.sub`` was quadratic on an unterminated string of escaped quotes: 13.4 s
+#: for 65,533 B in review round 1, M1.)
+_JSON_STRUCTURE = re.compile(r'["\\\[\]{}]')
+
+
+def _within_depth(text: str) -> bool:
+    """One linear scan: is no container nested deeper than the bound?
+
+    Tracks in-string and escape state so brackets inside strings are not
+    structure. A backslash inside a string escapes exactly the next character,
+    whichever it is. Malformed input can only make this stricter or leave it to
+    ``json.loads`` to refuse; it never accepts what the parser would reject.
+    """
+    depth = 0
+    in_string = False
+    escaped_at = -1
+    for match in _JSON_STRUCTURE.finditer(text):
+        at = match.start()
+        if at == escaped_at:
+            continue
+        character = match.group()
+        if in_string:
+            if character == "\\":
+                escaped_at = at + 1
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_RECOVERY_RECORD_DEPTH:
+                return False
+        elif character in "]}":
+            depth -= 1
+    return True
 
 
 def parse_record_bytes(data: bytes) -> dict[str, Any] | None:
     """Decode one bounded recovery record; ``None`` for anything not trustworthy.
 
     Shared by every recovery reader so the byte, encoding and nesting bounds
-    cannot drift between the live reader and the dry-run classifier. Brackets
-    inside JSON strings are not structure, so strings are masked first; an
-    unterminated string leaves its brackets counted, which can only refuse.
+    cannot drift between the live reader and the dry-run classifier. The depth
+    check runs BEFORE ``json.loads`` and is linear in the input.
     """
     if len(data) > MAX_RECOVERY_RECORD_BYTES:
         return None
     try:
         text = data.decode("utf-8")
-        depth = 0
-        for bracket in _JSON_BRACKET.findall(_JSON_STRING.sub("", text)):
-            depth += 1 if bracket in "[{" else -1
-            if depth > MAX_RECOVERY_RECORD_DEPTH:
-                return None
+        if not _within_depth(text):
+            return None
         value = json.loads(text)
     except (ValueError, RecursionError):
         return None
@@ -495,14 +526,17 @@ def start_operation(root: Path, *, baseline: str, target: str, route: str) -> Up
     identifier = uuid.uuid4().hex
     with transaction(root, operation="register durable update operation") as held:
         held.validate(root)
-        path = _operation_path(root, identifier, create=True)
         # Bound namespace growth without deleting unknown/unfinished operations.
         # v2 entries count too: otherwise each protocol would see its own 256 and
         # together they would form the second capacity pool the cap forbids.
+        # Counted BEFORE the legacy directory is created, so a refusal (full, or
+        # an unsafe v2 directory) leaves no new directory behind (round 1, Q1);
+        # creating an empty directory adds no entry, so the count is unchanged.
         if active_recovery_entries(root) >= RecoveryCapacityError.active_limit:
             raise RecoveryCapacityError(
                 "update recovery records are at capacity; inspect pending operations"
             )
+        path = _operation_path(root, identifier, create=True)
         _persist_operation(
             path,
             {

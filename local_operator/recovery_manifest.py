@@ -28,12 +28,15 @@ CONSTRAINTS, deliberately enforced here:
 * Both run ONLY from an explicit manifest whose digest the caller passes as the
   reviewed ``approved_sha256``, and both preflight every entry before writing:
   bytes must match the reviewed hashes, and every path must resolve (after
-  ``..`` and symlink resolution) inside ``.update-operations/`` or
-  ``.update-operations-v2/`` of the given root. Any failure refuses the run.
+  ``..`` and symlink resolution) inside the LEGACY ``.update-operations/`` of
+  the reviewed root (never ``.update-operations-v2/``: that namespace is only
+  written through the fenced protocol). Restore must target the reviewed
+  manifest's own ``root``, which must already exist. Any failure refuses the
+  run before anything is written or locked.
 
 Callers are tests over synthetic roots today; nothing in the CLI invokes this,
-and nothing discovers a live root implicitly: the root is always an argument
-(or the reviewed manifest's own ``root``).
+and nothing discovers a live root implicitly: capture uses the reviewed
+manifest's ``root``, and restore's ``root`` argument must equal it.
 A live dry run is a separate, explicitly authorised read-only step.
 """
 
@@ -272,10 +275,14 @@ def dry_run_manifest(root: Path, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> d
     }
 
 
-#: The ONLY directories a manifest may read from or restore into. Checked by
-#: name AND after resolution, so neither ``..`` nor a symlinked namespace
-#: directory can redirect capture/restore elsewhere.
-_NAMESPACES = (_tx.OPERATION_DIR, _tx.V2_OPERATION_DIR)
+#: The ONLY directory a manifest may read from or restore into: the LEGACY
+#: namespace. Checked by name AND after resolution, so neither ``..`` nor a
+#: symlinked namespace directory can redirect capture/restore elsewhere. The v2
+#: namespace is deliberately excluded for BOTH directions (review round 1, M3):
+#: restoring there would plant a v2 record without ``start_operation``, the
+#: fence or the shared cap, and capture never needs it because
+#: :func:`dry_run_manifest` only ever emits legacy candidates.
+_NAMESPACES = (_tx.OPERATION_DIR,)
 
 
 def _relpath_ok(relpath: object) -> bool:
@@ -324,7 +331,7 @@ def _verify_manifest(manifest: dict[str, Any], approved_sha256: str) -> list[dic
             or not isinstance(restore.get("bytes"), int)
             or not isinstance(restore.get("mtime_ns"), int)
             or not isinstance(restore.get("mode"), int)
-            or not 0 <= restore["mode"] <= 0o7777
+            or not 0 <= restore["mode"] <= 0o777
         ):
             raise ManifestError("manifest restore transaction is malformed; nothing was changed")
         entries.append(entry)
@@ -355,30 +362,75 @@ def _contained(root: Path, relpath: str) -> tuple[Path, Path]:
     return directory, target
 
 
-def _write_exclusive(directory: Path, name: str, data: bytes, mode: int, mtime_ns: int) -> bool:
-    """Publish ``name`` only if absent: temp + hard link, never replace."""
-    staged = directory / f".{uuid.uuid4().hex}.restore.tmp"
-    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+def _write_exclusive(
+    directory: Path,
+    name: str,
+    data: bytes,
+    mode: int,
+    mtime_ns: int,
+    *,
+    expected: tuple[int, int] | None = None,
+) -> bool:
+    """Publish ``name`` only if absent: temp + hard link, never replace.
+
+    Every operation goes through ONE directory descriptor opened with
+    ``O_NOFOLLOW`` (``openat``-style, as ``_persist_operation`` does), so a
+    directory swapped after the path checks cannot redirect the write: a symlink
+    refuses at open, and ``expected`` (device, inode) from the preflight refuses
+    a different real directory. Mode and mtime are set on the file descriptor.
+
+    Crash window (review round 1, N2): a crash between ``link`` and the staging
+    unlink leaves the published record with ``st_nlink == 2`` plus a
+    ``.restore.tmp`` name. That FAILS CLOSED: ``read_record`` refuses a
+    multiply-linked record, and the leftover counts toward the shared cap until
+    an operator removes it, so nothing is silently trusted or freed.
+    """
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(staged, mode)
-        os.utime(staged, ns=(mtime_ns, mtime_ns))
+        handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ManifestError(f"cannot open {directory} without following links") from exc
+    staged = f".{uuid.uuid4().hex}.restore.tmp"
+    try:
+        info = os.fstat(handle)
+        if info.st_uid != os.getuid() or (
+            expected is not None and (info.st_dev, info.st_ino) != expected
+        ):
+            raise ManifestError(f"directory changed after its checks: {directory}")
+        descriptor = os.open(
+            staged,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=handle,
+        )
         try:
-            os.link(staged, directory / name)
-        except FileExistsError:
-            return False
-        return True
-    finally:
-        # Our own staging name only; the published name is the second link.
-        staged.unlink(missing_ok=True)
-        handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(handle)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fchmod(stream.fileno(), mode)
+                os.utime(stream.fileno(), ns=(mtime_ns, mtime_ns))
+                os.fsync(stream.fileno())
+            try:
+                os.link(staged, name, src_dir_fd=handle, dst_dir_fd=handle)
+            except FileExistsError:
+                return False
+            return True
         finally:
-            os.close(handle)
+            # Our own staging name only; the published name is the second link.
+            try:
+                os.unlink(staged, dir_fd=handle)
+            except FileNotFoundError:
+                pass
+            os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
+def _identity(directory: Path) -> tuple[int, int] | None:
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino
 
 
 def capture_content(
@@ -424,48 +476,80 @@ def capture_content(
     return report
 
 
+def _restore_plan(
+    entries: list[dict[str, Any]], store: Path, root: Path
+) -> tuple[list[tuple[dict[str, Any], Path, Path, bytes]], list[str]]:
+    """Check EVERY entry without writing; return (to write, already present).
+
+    Run twice: once lock-free (so a refusal creates nothing, not even
+    ``install.lock``) and again under the root transaction, because the first
+    pass is only advice until the lock is held.
+    """
+    plan: list[tuple[dict[str, Any], Path, Path, bytes]] = []
+    already: list[str] = []
+    for entry in entries:
+        restore = entry["restore"]
+        relpath = restore["relpath"]
+        directory, target = _contained(root, relpath)
+        content = _read_exact(store / restore["content_sha256"])
+        if (
+            content is None
+            or hashlib.sha256(content[0]).hexdigest() != restore["content_sha256"]
+            or len(content[0]) != restore["bytes"]
+        ):
+            raise ManifestError(f"stored bytes do not match the reviewed manifest: {relpath}")
+        if target.exists():
+            present = _read_exact(target)
+            if present is None or present[0] != content[0]:
+                raise ManifestError(f"a different record already exists: {relpath}")
+            already.append(relpath)
+            continue
+        plan.append((restore, directory, target, content[0]))
+    return plan, already
+
+
 def restore_manifest(
     manifest: dict[str, Any], store: Path, root: Path, *, approved_sha256: str
 ) -> dict[str, Any]:
     """Recreate missing records exactly; never overwrite, never delete.
 
-    Runs under the existing root transaction so it serialises with cooperating
-    install writers, and preflights EVERY entry before writing any: store bytes
-    must match the reviewed digest and size, targets must resolve inside the
-    root's operation namespaces, and an existing target must be byte-identical
-    (``already_present``) -- a different one refuses the whole restore.
+    ``root`` must be the reviewed manifest's own root after resolution (review
+    round 1, M2): a manifest approved for one install root may not recreate
+    records in another. The root must already exist; it is never created.
+    Every entry is preflighted lock-free first (Q2), so a refusal, or a run with
+    nothing to write, leaves the root byte-for-byte untouched. Only then is the
+    existing root transaction taken, the preflight repeated under it, and the
+    missing records written.
     """
     entries = _verify_manifest(manifest, approved_sha256)
     store = Path(store).expanduser().absolute()
     root = _tx.canonical_root(root)
+    if root != _tx.canonical_root(Path(manifest["root"])):
+        raise ManifestError("restore root is not the reviewed manifest's root; nothing was changed")
+    try:
+        root_info = root.lstat()
+    except FileNotFoundError as exc:
+        raise ManifestError("restore root does not exist; nothing was created") from exc
+    if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.getuid():
+        raise ManifestError("restore root is unsafe; nothing was changed")
+    plan, already = _restore_plan(entries, store, root)
+    if not plan:
+        return {"restored": [], "already_present": already}
     report: dict[str, list[str]] = {"restored": [], "already_present": []}
     with _tx.transaction(root, operation="restore recovery manifest") as held:
         held.validate(root)
-        plan: list[tuple[dict[str, Any], Path, Path, bytes]] = []
-        for entry in entries:
-            restore = entry["restore"]
-            relpath = restore["relpath"]
-            directory, target = _contained(root, relpath)
-            content = _read_exact(store / restore["content_sha256"])
-            if (
-                content is None
-                or hashlib.sha256(content[0]).hexdigest() != restore["content_sha256"]
-                or len(content[0]) != restore["bytes"]
-            ):
-                raise ManifestError(f"stored bytes do not match the reviewed manifest: {relpath}")
-            if target.exists():
-                present = _read_exact(target)
-                if present is None or present[0] != content[0]:
-                    raise ManifestError(f"a different record already exists: {relpath}")
-                report["already_present"].append(relpath)
-                continue
-            plan.append((restore, directory, target, content[0]))
+        plan, report["already_present"] = _restore_plan(entries, store, root)
         for restore, directory, target, data in plan:
             if not directory.exists() and not directory.is_symlink():
                 directory.mkdir(mode=0o700)
             _contained(root, restore["relpath"])
             if not _write_exclusive(
-                directory, target.name, data, restore["mode"], restore["mtime_ns"]
+                directory,
+                target.name,
+                data,
+                restore["mode"],
+                restore["mtime_ns"],
+                expected=_identity(directory),
             ):
                 raise ManifestError(f"record appeared during restore: {restore['relpath']}")
             check = _read_exact(target)

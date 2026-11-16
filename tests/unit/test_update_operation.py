@@ -80,6 +80,35 @@ def test_recovery_reader_enforces_its_own_nesting_bound(tmp_path):
     assert tx.parse_record_bytes(_nested(tx.MAX_RECOVERY_RECORD_DEPTH + 1)) is None
 
 
+def test_depth_scan_is_linear_on_an_unterminated_escaped_quote_run():
+    """Round 1, M1: a string-masking regex took 13.4 s on exactly this shape.
+
+    65,533 B, under the 64 KiB cap: one quote then 32,766 escaped quotes, never
+    closed. The single-pass scanner refuses it in milliseconds; the bound below
+    is ~100x the measured cost so a slow CI host cannot flake, yet far under
+    the quadratic behaviour it guards against.
+    """
+    import time
+
+    data = b'"' + b'\\"' * 32766
+    assert len(data) == 65_533
+    started = time.perf_counter()
+    assert tx.parse_record_bytes(data) is None
+    assert time.perf_counter() - started < 2.0
+    wrapped = b'{"s":' + data + b"}"
+    started = time.perf_counter()
+    assert tx.parse_record_bytes(wrapped) is None
+    assert time.perf_counter() - started < 2.0
+
+
+def test_escaped_backslash_ends_before_the_closing_quote():
+    """``"\\\\"`` is a closed string: brackets after it are structure again."""
+    deep = b'{"s":"\\\\","x":' + b"[" * 40 + b"0" + b"]" * 40 + b"}"
+    assert tx.parse_record_bytes(deep) is None
+    shallow = b'{"s":"\\\\","x":[[0]]}'
+    assert tx.parse_record_bytes(shallow) == {"s": "\\", "x": [[0]]}
+
+
 def test_recovery_reader_ignores_brackets_inside_strings(tmp_path):
     value = {"detail": "[[[[" * 40 + '\\"{{{{' * 20, "operation_id": "0" * 32}
     record = tmp_path / "strings.json"

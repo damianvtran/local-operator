@@ -161,6 +161,11 @@ def _rel(index: int, namespace: str = tx.OPERATION_DIR) -> str:
     return f"{namespace}/{_id(index)}.json"
 
 
+def _archive(path: Path) -> None:
+    """Simulate a LATER, separately approved archive of a synthetic record."""
+    path.unlink()
+
+
 def test_matching_reviewed_manifest_round_trip_is_lossless(root, tmp_path):
     path = _legacy(root, _id(1), receipts=[{"unit": "serve", "state": "pending"}])
     os.chmod(path, 0o600)
@@ -173,20 +178,51 @@ def test_matching_reviewed_manifest_round_trip_is_lossless(root, tmp_path):
     assert captured["captured"] == [_rel(1)]
     assert _snapshot(root) == before, "capture never touches the source"
 
-    # Simulate a later operator-approved archive elsewhere: the record is absent.
-    restored_root = tmp_path / "restored"
-    report = rm.restore_manifest(
-        manifest, store, restored_root, approved_sha256=_approved(manifest)
-    )
-    target = restored_root / tx.OPERATION_DIR / f"{_id(1)}.json"
-    assert report["restored"] == [_rel(1)]
-    assert target.read_bytes() == original
-    assert target.stat().st_mtime_ns == 1_600_000_000_000_000_001
-    assert target.stat().st_mode & 0o7777 == 0o600
-    assert [p.name for p in target.parent.iterdir() if p.name.endswith(".tmp")] == []
+    _archive(path)
+    report = rm.restore_manifest(manifest, store, root, approved_sha256=_approved(manifest))
+    assert report == {"restored": [_rel(1)], "already_present": []}
+    assert path.read_bytes() == original
+    assert path.stat().st_mtime_ns == 1_600_000_000_000_000_001
+    assert path.stat().st_mode & 0o7777 == 0o600 and path.stat().st_nlink == 1
+    assert [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")] == []
 
-    again = rm.restore_manifest(manifest, store, restored_root, approved_sha256=_approved(manifest))
-    assert again == {"restored": [], "already_present": [_rel(1)]}
+
+def test_noop_restore_takes_no_lock_and_changes_nothing(root, tmp_path):
+    """Q2: everything already present -> lock-free preflight returns early."""
+    _legacy(root, _id(1))
+    manifest = rm.dry_run_manifest(root)
+    store = tmp_path / "store"
+    rm.capture_content(manifest, store, approved_sha256=_approved(manifest))
+    before = _snapshot(root)
+    report = rm.restore_manifest(manifest, store, root, approved_sha256=_approved(manifest))
+    assert report == {"restored": [], "already_present": [_rel(1)]}
+    assert _snapshot(root) == before
+    assert not (root / tx.LOCK_NAME).exists()
+
+
+def test_restore_refuses_a_root_other_than_the_reviewed_one(root, tmp_path):
+    """M2: a manifest reviewed for one root cannot recreate records in another."""
+    _legacy(root, _id(1))
+    manifest = rm.dry_run_manifest(root)
+    store = tmp_path / "store"
+    rm.capture_content(manifest, store, approved_sha256=_approved(manifest))
+    other = tmp_path / "other-root"
+    other.mkdir()
+    with pytest.raises(rm.ManifestError, match="not the reviewed manifest's root"):
+        rm.restore_manifest(manifest, store, other, approved_sha256=_approved(manifest))
+    assert list(other.iterdir()) == []
+
+
+def test_restore_refuses_a_missing_root_without_creating_it(root, tmp_path):
+    """Q2: the reviewed root is gone -> refuse; never create it or its lock."""
+    _legacy(root, _id(1))
+    manifest = rm.dry_run_manifest(root)
+    store = tmp_path / "store"
+    rm.capture_content(manifest, store, approved_sha256=_approved(manifest))
+    os.rename(root, tmp_path / "moved-root")
+    with pytest.raises(rm.ManifestError, match="does not exist"):
+        rm.restore_manifest(manifest, store, root, approved_sha256=_approved(manifest))
+    assert not root.exists()
 
 
 def test_unreviewed_or_resigned_manifest_is_refused(root, tmp_path):
@@ -207,6 +243,16 @@ def test_unreviewed_or_resigned_manifest_is_refused(root, tmp_path):
     assert not (tmp_path / "store").exists() and not (tmp_path / "x").exists()
 
 
+def test_setuid_or_sticky_mode_is_refused(root, tmp_path):
+    """N1: records are 0600; no special bits even in a reviewed manifest."""
+    _legacy(root, _id(1))
+    manifest = json.loads(json.dumps(rm.dry_run_manifest(root)))
+    manifest["candidates"][0]["restore"]["mode"] = 0o4600
+    _resign(manifest)
+    with pytest.raises(rm.ManifestError, match="malformed"):
+        rm.restore_manifest(manifest, tmp_path / "store", root, approved_sha256=_approved(manifest))
+
+
 def test_hash_mismatch_on_disk_refuses_capture_before_any_write(root, tmp_path):
     _legacy(root, _id(1))
     path = _legacy(root, _id(2))
@@ -218,17 +264,18 @@ def test_hash_mismatch_on_disk_refuses_capture_before_any_write(root, tmp_path):
 
 
 def test_hash_mismatch_in_store_refuses_restore_without_writing(root, tmp_path):
-    _legacy(root, _id(1))
+    path = _legacy(root, _id(1))
     manifest = rm.dry_run_manifest(root)
     store = tmp_path / "store"
     rm.capture_content(manifest, store, approved_sha256=_approved(manifest))
     digest = manifest["candidates"][0]["sha256"]
     os.chmod(store / digest, 0o600)
     (store / digest).write_text("{}")
-    target_root = tmp_path / "restored"
+    _archive(path)
+    before = _snapshot(root)
     with pytest.raises(rm.ManifestError, match="do not match"):
-        rm.restore_manifest(manifest, store, target_root, approved_sha256=_approved(manifest))
-    assert not (target_root / tx.OPERATION_DIR).exists()
+        rm.restore_manifest(manifest, store, root, approved_sha256=_approved(manifest))
+    assert _snapshot(root) == before, "refused before the lock: not even install.lock"
 
 
 def test_restore_never_overwrites_a_different_record(root, tmp_path):
@@ -238,10 +285,10 @@ def test_restore_never_overwrites_a_different_record(root, tmp_path):
     rm.capture_content(manifest, store, approved_sha256=_approved(manifest))
     path = root / tx.OPERATION_DIR / f"{_id(1)}.json"
     path.write_text(json.dumps({"operation_id": _id(1), "phase": "failed"}))
-    changed = path.read_bytes()
+    before = _snapshot(root)
     with pytest.raises(rm.ManifestError, match="different record"):
         rm.restore_manifest(manifest, store, root, approved_sha256=_approved(manifest))
-    assert path.read_bytes() == changed
+    assert _snapshot(root) == before
 
 
 @pytest.mark.parametrize(
@@ -253,6 +300,8 @@ def test_restore_never_overwrites_a_different_record(root, tmp_path):
         f"{tx.OPERATION_DIR}/nested/{_id(1)}.json",
         f"/{tx.OPERATION_DIR}/{_id(1)}.json",
         f"{tx.OPERATION_DIR}/{_id(1)}.txt",
+        # M3: the v2 namespace is never a restore/capture target.
+        f"{tx.V2_OPERATION_DIR}/{_id(1)}.json",
     ],
 )
 def test_outside_namespace_path_refuses_even_when_reviewed(root, tmp_path, relpath):
@@ -289,50 +338,65 @@ def test_symlinked_namespace_escape_refuses_capture_and_restore(root, tmp_path):
     path = _legacy(root, _id(1))
     manifest = rm.dry_run_manifest(root)
     reviewed = _approved(manifest)
+    store = tmp_path / "store"
+    rm.capture_content(manifest, store, approved_sha256=reviewed)
     outside = tmp_path / "outside-ns"
     outside.mkdir(mode=0o700)
     (outside / path.name).write_bytes(path.read_bytes())
     os.chmod(outside / path.name, 0o600)
-    moved = tmp_path / "moved-ns"
-    os.rename(root / tx.OPERATION_DIR, moved)
+    os.rename(root / tx.OPERATION_DIR, tmp_path / "moved-ns")
     os.symlink(outside, root / tx.OPERATION_DIR)
     with pytest.raises(rm.ManifestError, match="escapes the install root"):
-        rm.capture_content(manifest, tmp_path / "store", approved_sha256=reviewed)
-    assert not (tmp_path / "store").exists()
+        rm.capture_content(manifest, tmp_path / "store2", approved_sha256=reviewed)
+    assert not (tmp_path / "store2").exists()
 
-    # Restore side: a real store, a target root whose namespace is a symlink.
-    os.unlink(root / tx.OPERATION_DIR)
-    os.rename(moved, root / tx.OPERATION_DIR)
-    store = tmp_path / "store"
-    rm.capture_content(manifest, store, approved_sha256=reviewed)
-    target_root = tmp_path / "restored"
-    target_root.mkdir()
     escape = tmp_path / "escape"
     escape.mkdir(mode=0o700)
-    os.symlink(escape, target_root / tx.OPERATION_DIR)
+    os.unlink(root / tx.OPERATION_DIR)
+    os.symlink(escape, root / tx.OPERATION_DIR)
     with pytest.raises(rm.ManifestError, match="escapes the install root"):
-        rm.restore_manifest(manifest, store, target_root, approved_sha256=reviewed)
+        rm.restore_manifest(manifest, store, root, approved_sha256=reviewed)
     assert list(escape.iterdir()) == []
 
 
 def test_symlinked_target_file_refuses_restore(root, tmp_path):
-    _legacy(root, _id(1))
+    path = _legacy(root, _id(1))
     manifest = rm.dry_run_manifest(root)
     store = tmp_path / "store"
     rm.capture_content(manifest, store, approved_sha256=_approved(manifest))
-    target_root = tmp_path / "restored"
-    (target_root / tx.OPERATION_DIR).mkdir(parents=True, mode=0o700)
+    _archive(path)
     victim = tmp_path / "victim.json"
-    os.symlink(victim, target_root / tx.OPERATION_DIR / f"{_id(1)}.json")
+    os.symlink(victim, path)
     with pytest.raises(rm.ManifestError, match="escapes its operation directory"):
-        rm.restore_manifest(manifest, store, target_root, approved_sha256=_approved(manifest))
+        rm.restore_manifest(manifest, store, root, approved_sha256=_approved(manifest))
     assert not victim.exists()
 
 
-def test_v2_namespace_target_is_accepted_by_the_path_check(root, tmp_path):
-    """Both operation namespaces are inside the boundary; nothing else is."""
-    assert rm._relpath_ok(_rel(1, tx.V2_OPERATION_DIR))
+def test_write_exclusive_refuses_a_swapped_directory(tmp_path):
+    """M5: the write goes through one O_NOFOLLOW directory fd, so a namespace
+    swapped AFTER the path checks cannot redirect it -- a symlink refuses at
+    open, a different real directory refuses on (device, inode)."""
+    real = tmp_path / "ns"
+    real.mkdir(mode=0o700)
+    checked = (real.lstat().st_dev, real.lstat().st_ino)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    os.rename(real, tmp_path / "ns-original")
+    os.symlink(outside, real)
+    with pytest.raises(rm.ManifestError):
+        rm._write_exclusive(real, f"{_id(1)}.json", b"{}", 0o600, 1, expected=checked)
+    assert list(outside.iterdir()) == []
+    os.unlink(real)
+    real.mkdir(mode=0o700)
+    with pytest.raises(rm.ManifestError, match="changed after its checks"):
+        rm._write_exclusive(real, f"{_id(1)}.json", b"{}", 0o600, 1, expected=checked)
+    assert list(real.iterdir()) == []
+
+
+def test_only_the_legacy_namespace_passes_the_path_check():
+    """M3: restore may never plant a v2 record outside its fence and cap."""
     assert rm._relpath_ok(_rel(1))
+    assert not rm._relpath_ok(_rel(1, tx.V2_OPERATION_DIR))
     assert not rm._relpath_ok(f".update-operations-v3/{_id(1)}.json")
 
 
