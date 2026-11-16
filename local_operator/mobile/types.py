@@ -743,6 +743,11 @@ class TranscriptEntry:
     # when the artifact carried one (absence renders reduced, never a
     # synthesized zero).
     videos: list[dict[str, Any]] = field(default_factory=list)
+    # Retained input documents, with a family-specific index like images and
+    # videos. No origin/stored path or digest grants byte access: the session
+    # attachment route resolves this row+index at its owner. Sparse on wire so
+    # ordinary rows and older readers keep their existing byte-shaped contract.
+    files: list[dict[str, Any]] = field(default_factory=list)
     # assistant rows stream: ``final`` flips true on message_end
     final: bool = True
     # Settled streaming is not the same as complete representation: transport
@@ -794,6 +799,8 @@ class TranscriptEntry:
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        if not self.files:
+            data.pop("files", None)
         # SPARSE: each condensation fact goes out only when it differs from its
         # default. The fields are defaulted-and-omitted rather than
         # ``None``-valued because every reader's rule is "unknown is absent",

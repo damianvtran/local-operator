@@ -1247,6 +1247,45 @@ class NotificationStore:
 
         return self._read(body, [], "unread_with_key_prefix")
 
+    def undismissed_with_key_prefix(
+        self, prefix: str, *, containing: str = "", limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Undismissed items whose ``key`` starts with ``prefix``, read or not, oldest first.
+
+        :meth:`unread_with_key_prefix` without the unread filter, for a namespace
+        whose rows must be RETIRED by an outside fact even after the person read
+        them: a forwarded ask row the operator opened is still "asking" until it
+        is dismissed, so once the node no longer lists the ask the settle must
+        reach it too (PR #4082 review round 1, R1-1 — a read row was never
+        retired, and a later relay re-raised an answered card as live).
+        ``containing`` narrows the match to keys that also hold that substring
+        after the prefix, so read rows of OTHER kinds in the same namespace
+        (forwarded notices, which stay undismissed for good) cannot crowd the
+        wanted rows out of ``limit``. Both are matched literally. Read-only.
+        """
+        if not prefix:
+            return []
+
+        def _escape(text: str) -> str:
+            return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+        pattern = (
+            f"{_escape(prefix)}%{_escape(containing)}%" if containing else f"{_escape(prefix)}%"
+        )
+        params = (pattern, max(1, int(limit)))
+
+        def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [
+                _row_dict(row)
+                for row in conn.execute(
+                    f"SELECT {_ITEM_COLUMNS} FROM items WHERE key LIKE ? ESCAPE '\\' "
+                    "AND dismissed_at IS NULL ORDER BY created_at, id LIMIT ?",
+                    params,
+                )
+            ]
+
+        return self._read(body, [], "undismissed_with_key_prefix")
+
     def find_by_key(self, key: str) -> list[dict[str, Any]]:
         """Every item holding ``key``, across all sessions (dismissed ones included).
 

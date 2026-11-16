@@ -422,6 +422,7 @@ def test_install_registers_the_tick_step_once():
 
 
 def test_every_advertised_op_capability_has_a_registered_handler(rig):
+    from local_operator.mobile import remote_sessions
     from local_operator.network import relay, wire
     from local_operator.network.credentials import owner
     from local_operator.network.types import OP_CAPABILITY
@@ -468,6 +469,11 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # The remote peek (network/peek.py) is a real new peer op, not a pure feature:
         # advertising it promises an owner that answers ``net_session_peek``.
         wire.SESSION_PEEK_V1: "net_session_peek",
+        # The owner-folded mobile read adds no op: it gates a ``mobile_session_read``
+        # mode on the existing history op (``RelayServer._op_session_history`` hands
+        # it to ``mobile.remote_sessions.owner_read``), so advertising it promises an
+        # owner whose ``net_session_history`` handler folds the projection itself.
+        remote_sessions.READ_CAPABILITY: "net_session_history",
         # Change pushes gate a receiving mode on the existing membership op;
         # advertising them promises that its handler understands bound snapshots.
         wire.MEMBER_LIST_PUSH_V1: "net_member_list",

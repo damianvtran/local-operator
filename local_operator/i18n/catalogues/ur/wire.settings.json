@@ -240,7 +240,7 @@
   "wire.settings.display_nerd_icons.label": "Nerd Font گلفس",
   "wire.settings.display_notification_session_name.choice.false.description": "بینرز پر نام نہ رکھیں",
   "wire.settings.display_notification_session_name.choice.true.description": "سیشن کا نام دکھائیں",
-  "wire.settings.display_notification_session_name.help": "بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات آتی ہیں، لاک اسکرین بھی شامل۔",
+  "wire.settings.display_notification_session_name.help": "بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات آتی ہیں، لاک اسکرین اور جوڑے ہوئے فونز کی اطلاعات بھی شامل، جو ان تک Radient کی push سروس کے ذریعے پہنچتی ہیں۔",
   "wire.settings.display_notification_session_name.label": "اطلاعات میں سیشن کے نام",
   "wire.settings.display_notifications.choice.false.description": "کبھی اطلاع نہ دیں",
   "wire.settings.display_notifications.choice.true.description": "غیر فوکسڈ ہونے پر اطلاع دیں",

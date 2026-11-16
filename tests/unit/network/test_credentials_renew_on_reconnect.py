@@ -18,6 +18,7 @@ Also the two observability items: the grant receipt fields in
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -311,17 +312,246 @@ def test_note_grant_persists_the_grant_end_and_hold(tmp_path: Any) -> None:
     assert row["last_grant_held_offline"] is True and row["last_grant_hold_until_ms"] == 8_500
 
 
+# -- held-serve receipt identity (E01) ----------------------------------------
+
+_HELD_FIELDS = (
+    "last_held_grant_id",
+    "last_held_grant_expires_at_ms",
+    "last_held_grant_hold_until_ms",
+)
+
+
+def _grant_row(state: PlacementState, grant_id: str, expires: int, hold: int) -> None:
+    state.note_grant(
+        "openai", grant_id, owner_device="d_owner", grant_expires_at_ms=expires, hold_until_ms=hold
+    )
+
+
+def _held(state: PlacementState, grant_id: str, expires: int, hold: int) -> None:
+    state.note_held_serve("openai", hold, grant_id=grant_id, grant_expires_at_ms=expires)
+
+
+def _row(state: PlacementState) -> dict[str, Any]:
+    return state._observations["openai"]  # noqa: SLF001
+
+
+def test_held_serve_of_the_latest_grant_updates_both_receipts(tmp_path: Any) -> None:
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _grant_row(state, "g", 283, 9_000)
+    _held(state, "g", 283, 9_000)
+    row = _row(state)
+    assert (row["last_grant_id"], row["last_grant_expires_at_ms"]) == ("g", 283)
+    assert row["last_grant_held_offline"] is True and row["last_grant_hold_until_ms"] == 9_000
+    assert [row[f] for f in _HELD_FIELDS] == ["g", 283, 9_000]
+
+
+def test_held_serve_of_an_older_grant_does_not_mark_the_latest_borrow(tmp_path: Any) -> None:
+    """G -> R -> H(G): the measured mixed row (R's id/expiry with G's hold)."""
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _grant_row(state, "g", 283, 9_000)
+    _grant_row(state, "r", 280, 8_000)
+    at = _row(state)["last_grant_at"]
+    _held(state, "g", 283, 9_000)
+    row = _row(state)
+    assert (row["last_grant_id"], row["last_grant_expires_at_ms"]) == ("r", 280)
+    assert row["last_grant_held_offline"] is False and row["last_grant_hold_until_ms"] == 8_000
+    assert row["last_grant_at"] == at and row["status"] == "active"
+    assert [row[f] for f in _HELD_FIELDS] == ["g", 283, 9_000]
+
+
+def test_held_serve_of_the_renewal_marks_it(tmp_path: Any) -> None:
+    """G -> R -> H(R): the served grant IS the latest borrow."""
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _grant_row(state, "g", 283, 9_000)
+    _grant_row(state, "r", 280, 8_000)
+    _held(state, "r", 280, 8_000)
+    row = _row(state)
+    assert row["last_grant_held_offline"] is True and row["last_grant_hold_until_ms"] == 8_000
+    assert [row[f] for f in _HELD_FIELDS] == ["r", 280, 8_000]
+
+
+def test_renewal_then_session_grant_then_held_is_coherent(tmp_path: Any) -> None:
+    """R -> G -> H(G)."""
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _grant_row(state, "r", 280, 8_000)
+    _grant_row(state, "g", 283, 9_000)
+    _held(state, "g", 283, 9_000)
+    row = _row(state)
+    assert row["last_grant_id"] == "g" and row["last_grant_held_offline"] is True
+    assert [row[f] for f in _HELD_FIELDS] == ["g", 283, 9_000]
+
+
+def test_a_later_borrow_keeps_the_held_history_but_owns_the_legacy_fields(
+    tmp_path: Any,
+) -> None:
+    """G -> H(G) -> R: R's note_grant must not erase the only held receipt."""
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _grant_row(state, "g", 283, 9_000)
+    _held(state, "g", 283, 9_000)
+    _grant_row(state, "r", 280, 8_000)
+    row = _row(state)
+    assert row["last_grant_id"] == "r" and row["last_grant_expires_at_ms"] == 280
+    assert row["last_grant_held_offline"] is False and row["last_grant_hold_until_ms"] == 8_000
+    assert [row[f] for f in _HELD_FIELDS] == ["g", 283, 9_000]
+    state.clear("openai")
+    assert "openai" not in state._observations  # noqa: SLF001 — clear drops the receipt
+
+
+def test_held_serve_with_no_row_is_a_no_op(tmp_path: Any) -> None:
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _held(state, "g", 283, 9_000)
+    assert state._observations == {}  # noqa: SLF001
+
+
+def test_legacy_two_argument_held_serve_is_unchanged(tmp_path: Any) -> None:
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _grant_row(state, "g", 283, 9_000)
+    state.note_held_serve("openai", 8_500)
+    row = _row(state)
+    assert row["last_grant_held_offline"] is True and row["last_grant_hold_until_ms"] == 8_500
+    assert not any(f in row for f in _HELD_FIELDS)
+
+
+def test_held_receipt_survives_persist_and_refusal_with_fences_intact(tmp_path: Any) -> None:
+    state = PlacementState("net-synthetic", root=tmp_path)
+    _grant_row(state, "g", 283, 9_000)
+    _grant_row(state, "r", 280, 8_000)
+    _held(state, "g", 283, 9_000)
+    state.save()
+    reloaded = PlacementState.load("net-synthetic", tmp_path)
+    reloaded.observe("openai", "owner_offline", owner_device="d_owner")
+    row = _row(reloaded)
+    assert [row[f] for f in _HELD_FIELDS] == ["g", 283, 9_000]
+    assert row["last_grant_id"] == "r" and row["status"] == "owner_offline"
+    reloaded.observe("openai", "not_a_holder", owner_device="d_owner")
+    fence = _row(reloaded)["held_fence"]
+    assert fence and [_row(reloaded)[f] for f in _HELD_FIELDS] == ["g", 283, 9_000]
+    _grant_row(reloaded, "g2", 300, 9_500)
+    assert _row(reloaded)["held_fence"] == fence
+    # A row persisted before this field existed loads and behaves as before.
+    legacy = PlacementState("net-synthetic-old", root=tmp_path)
+    _grant_row(legacy, "g", 283, 9_000)
+    legacy.save()
+    old = PlacementState.load("net-synthetic-old", tmp_path)
+    assert not any(f in _row(old) for f in _HELD_FIELDS)
+
+
+def test_two_real_clients_on_one_root_keep_the_served_grant_dated(tmp_path: Any) -> None:
+    """The measured D2 shape: a session (G) and the relay's renewal (R), one file.
+
+    Two REAL ``MeshCredentialClient`` objects share one ``placement.state.json`` (as
+    a session and its relay do). G is saved, R is saved after it, the session serves
+    G from the hold, then a late R-class borrow lands. No relay or network.
+    """
+    import dataclasses
+
+    from local_operator.network.credentials.types import CredentialRef
+
+    key = "synthetic-key"
+    ref = CredentialRef(
+        owner_device="dev-owner",
+        owner_device_name="owner",
+        provider=key,
+        kind="oauth",
+        credential_id=1,
+    )
+
+    def grant(grant_id: str, expires: int, hold: int) -> Grant:
+        return Grant(
+            access_token="SYNTH-NOT-A-SECRET",
+            kind="bearer",
+            token_expires_at_ms=expires + 100_000,
+            grant_expires_at_ms=expires,
+            credential_ref=ref,
+            served_by="dev-owner",
+            grant_id=grant_id,
+            hold_until_ms=hold,
+        )
+
+    def make() -> MeshCredentialClient:
+        return MeshCredentialClient(root=tmp_path, self_device="dev-self", network_id="net-synth")
+
+    def persisted() -> dict[str, Any]:
+        return PlacementState.load("net-synth", tmp_path)._observations[key]  # noqa: SLF001
+
+    session, relay = make(), make()
+    g, r = grant("grant_G", 283, 9_000), grant("grant_R", 280, 8_000)
+    session._remember_grant(key, g)  # noqa: SLF001
+    relay._remember_grant(key, r)  # noqa: SLF001
+    served = dataclasses.replace(g, held_offline=True)
+    served.held_until_ms = 9_000  # the hold the session's serve reports
+    session._note_held_serve(key, served)  # noqa: SLF001
+    row = persisted()
+    assert (row["last_grant_id"], row["last_grant_expires_at_ms"]) == ("grant_R", 280)
+    assert row["last_grant_held_offline"] is False and row["last_grant_hold_until_ms"] == 8_000
+    assert [row[f] for f in _HELD_FIELDS] == ["grant_G", 283, 9_000]
+    # A late renewal save after the held serve keeps the held receipt.
+    relay._remember_grant(key, grant("grant_R2", 290, 8_500))  # noqa: SLF001
+    row = persisted()
+    assert row["last_grant_id"] == "grant_R2" and row["last_grant_held_offline"] is False
+    assert [row[f] for f in _HELD_FIELDS] == ["grant_G", 283, 9_000]
+
+
+def _renew_workers_of(server: Any) -> list[threading.Thread]:
+    """Live holder-renewal workers started by THIS relay (``member_renew``).
+
+    The thread NAME is global to the process, so a name-only predicate could wait on
+    another network's worker left by an earlier cell. The worker's target args are
+    ``(server, owner, keys)`` (renew_push.member_renew), and ``Thread._args`` is kept
+    exactly while the thread runs, so matching ``args[0] is server`` scopes the wait
+    to this mesh's own relay. CPython-private, but a finished thread is not alive and
+    needs no scoping, so the failure mode is "not found", never a wrong join.
+    """
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name == "mesh-credential-renew-ask"
+        and t.is_alive()
+        and (getattr(t, "_args", None) or (None,))[0] is server
+    ]
+
+
 def test_a_held_serve_is_dated_in_the_state_file(mesh: Any, borrowed: Any) -> None:  # noqa: F811
+    """The held serve is dated by the grant ACTUALLY served (E01).
+
+    The relay's background renewal (R) can save a newer grant onto the row the
+    session's own grant (G) is on, so the grant the hold serves may be R, not the
+    fixture's G. Every assertion therefore compares against the served ``held``
+    and the recorded ids, never against G alone.
+    """
     client, grant = borrowed
     _stop_owner(mesh)
+    # CLOSE THE WRITER SET, NUDGE STILL ENABLED. After ``_stop_owner`` no new worker
+    # can start (``member_renew`` needs a frame over a live link) but one already
+    # running can still save R onto the row. Wait for that event, not a clock; the
+    # default budget is a backstop for a hung dial, which is bounded by the relay's
+    # own ensure-link budget (an offline owner is refused, it is not waited on).
+    assert net_fixtures.wait_for(lambda: not _renew_workers_of(mesh.b))
     assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 100)
+    renewal = renew_push.held_renewal(mesh.b, STUB_PROVIDER, _owner_id(mesh))
     held = _ask(client)
     assert isinstance(held, Grant) and held.held_offline, held
+    known = {grant.grant_id} | ({renewal["grant_id"]} if renewal else set())
+    known_expiry = {grant.grant_id: grant.grant_expires_at_ms}
+    if renewal:
+        known_expiry[renewal["grant_id"]] = renewal["grant_expires_at_ms"]
+    assert held.grant_id in known
+    assert held.grant_expires_at_ms == known_expiry[held.grant_id]
     state = PlacementState.load(mesh.network_id, mesh.b.root)
     row = state._observations[STUB_PROVIDER]  # noqa: SLF001
-    assert row["last_grant_expires_at_ms"] == grant.grant_expires_at_ms
-    assert row["last_grant_held_offline"] is True
-    assert row["last_grant_hold_until_ms"] == held.held_until_ms
+    # The new receipt: exactly what was served.
+    assert row["last_held_grant_id"] == held.grant_id
+    assert row["last_held_grant_expires_at_ms"] == held.grant_expires_at_ms
+    assert row["last_held_grant_hold_until_ms"] == held.held_until_ms
+    # The latest borrow is one of the grants this test knows, and its legacy row is
+    # its OWN: held only when it is the grant that was served.
+    assert row["last_grant_id"] in known
+    assert row["last_grant_expires_at_ms"] == known_expiry[row["last_grant_id"]]
+    if row["last_grant_id"] == held.grant_id:
+        assert row["last_grant_held_offline"] is True
+        assert row["last_grant_hold_until_ms"] == held.held_until_ms
+    else:
+        assert row["last_grant_held_offline"] is False
 
 
 def test_ready_for_this_device_answers_locally(mesh: Any) -> None:  # noqa: F811

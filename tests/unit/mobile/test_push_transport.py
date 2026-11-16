@@ -361,7 +361,12 @@ def test_the_register_forward_never_carries_preferences(login: int) -> None:
                 "environment": "production",
                 "app_version": "1.0.0 (449)",
                 "install_id": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
-                "preferences": {"enabled": True, "completions": False, "errors": True},
+                "preferences": {
+                    "enabled": True,
+                    "completions": False,
+                    "errors": True,
+                    "previews": False,
+                },
             },
         )
         assert answer.status_code == 200, answer.text
@@ -374,12 +379,14 @@ def test_the_register_forward_never_carries_preferences(login: int) -> None:
     assert "preferences" not in sent["device"]
     assert all("preferences" not in row for row in sent["devices"])
     assert b"preferences" not in request.content
+    assert b"previews" not in request.content
     # ...while the machine DID keep them, for the emit gate.
     stored = json.loads((config_dir() / push_devices.PUSH_DEVICES_STORE_NAME).read_text())
     assert stored["devices"][0]["preferences"] == {
         "enabled": True,
         "completions": False,
         "errors": True,
+        "previews": False,
     }
 
 
@@ -703,7 +710,6 @@ def test_a_lane_worker_counts_the_listing_not_the_lifetime_census(
     completions in the store, a listing count of 3 — the banner must say 3."""
     from local_operator.mobile.push_payload import ALERT_BODY_FIELD, ALERT_FIELD
     from local_operator.session.attention import AttentionStore
-    from local_operator.tui.notify import BODIES
 
     store = AttentionStore()
     for index in range(40):
@@ -716,9 +722,7 @@ def test_a_lane_worker_counts_the_listing_not_the_lifetime_census(
     lane.worker.tick()
     body = _emitted_completion(cloud)
     assert body["count"] == 3
-    assert body[ALERT_FIELD][ALERT_BODY_FIELD] == (
-        f"{BODIES['complete']} · 3 conversations need you"
-    )
+    assert "need" not in body[ALERT_FIELD][ALERT_BODY_FIELD], "the count is a field, not text"
     # Negative control: the census the lane used to fall back to.
     assert lane.worker._store_count() == 41
 
@@ -856,6 +860,78 @@ def test_a_failed_push_count_refresh_is_retried_on_the_next_scan(
     assert "push count refresh failed" in caplog.text
 
 
+def test_a_deferred_revision_read_only_skips_to_the_next_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#3989 m1: the store may answer ``AttentionReadDeferred`` while a writer
+    holds it. That read sits inside the refresh's guard, so it is logged, the
+    revision stays unrecorded, and the next scan rebuilds."""
+    from local_operator.mobile.daemon import MobileDaemon
+    from local_operator.session.attention import AttentionReadDeferred, AttentionStore
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    builds: list[int] = []
+
+    async def summaries() -> list[dict[str, Any]]:
+        builds.append(1)
+        return []
+
+    daemon.table.summaries = summaries  # type: ignore[method-assign]
+    reads = [0]
+
+    def revision(_self: object) -> tuple[int, int, int]:
+        reads[0] += 1
+        if reads[0] == 1:
+            raise AttentionReadDeferred("attention store stayed busy through 2 attempts")
+        return (1, 0, 0)
+
+    monkeypatch.setattr(AttentionStore, "revision", revision)
+
+    async def go() -> None:
+        await daemon._refresh_push_count()  # deferred: must not raise
+        assert builds == []
+        await daemon._refresh_push_count()
+
+    asyncio.run(go())
+    assert builds == [1]
+    assert daemon._push_count_revision == (1, 0, 0)
+    assert "push count refresh failed" in caplog.text
+
+
+def test_the_push_count_rebuild_bypasses_the_listing_ttl_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3989 Q-1: ``summaries()`` answers from a 1 s cache, so a rebuild at a
+    new revision must drop that cache first or the count can lag the badge."""
+    from local_operator.mobile.daemon import MobileDaemon
+
+    revision = _pin_revision(monkeypatch)
+    daemon = MobileDaemon(port=0, password="pw123")
+    order: list[str] = []
+    real_invalidate = daemon.table.invalidate_summaries_cache
+
+    def invalidate() -> None:
+        order.append("invalidate")
+        real_invalidate()
+
+    async def summaries() -> list[dict[str, Any]]:
+        order.append("build")
+        return []
+
+    daemon.table.invalidate_summaries_cache = invalidate  # type: ignore[method-assign]
+    daemon.table.summaries = summaries  # type: ignore[method-assign]
+
+    async def go() -> None:
+        await daemon._refresh_push_count()
+        await daemon._refresh_push_count()  # unchanged revision: nothing
+        revision[0] = (2, 0, 0)
+        await daemon._refresh_push_count()
+
+    asyncio.run(go())
+    assert order == ["invalidate", "build", "invalidate", "build"]
+
+
 def test_the_daemon_adopts_the_table_the_lane_reads() -> None:
     from local_operator.mobile.daemon import MobileDaemon, SessionTable
 
@@ -902,18 +978,21 @@ def test_a_completion_published_after_the_scans_revision_read_is_counted(
     from local_operator.mobile.daemon import MobileDaemon
     from local_operator.mobile.push_payload import ALERT_BODY_FIELD, ALERT_FIELD
     from local_operator.session.attention import AttentionStore
-    from local_operator.tui.notify import BODIES
 
     store = AttentionStore()
+    # #3989 n1: one conversation already unread BEFORE the lane arms (so it is
+    # never pushed itself), which makes the expected count 2 rather than 1 —
+    # a 1 here would otherwise be indistinguishable from the worker's floor.
+    store.publish("session/seeded", str(uuid.uuid4()), "entry-seeded", "complete")
     daemon = MobileDaemon(port=0, password="pw123")
     cloud = Cloud(_accepted())
     lane = _armed_lane(login, cloud, daemon.table.listing_unread_count, monkeypatch)
     builds = _listing_over_the_store(daemon, lane)
 
     async def go() -> None:
-        # The previous pass: nothing unread, snapshot built, baseline tick.
+        # The previous pass: one unread, snapshot built, baseline tick.
         await daemon._refresh_push_count()
-        assert daemon.table.listing_unread_count() == 0
+        assert daemon.table.listing_unread_count() == 1
         assert await asyncio.to_thread(lane.worker.tick) == []
         # THIS pass: its start-of-scan read, then the mid-scan completion.
         scan_start = await asyncio.to_thread(store.revision)
@@ -926,11 +1005,10 @@ def test_a_completion_published_after_the_scans_revision_read_is_counted(
     asyncio.run(go())
     assert builds == [1, 1], "the fresh revision must trigger a rebuild"
     body = _emitted_completion(cloud)
-    assert body["count"] == 1
+    assert body["count"] == 2, "the snapshot was rebuilt after the mid-scan completion"
     assert body["conversation"]
-    alert = body[ALERT_FIELD][ALERT_BODY_FIELD]
-    assert alert == f"{BODIES['complete']} · 1 conversation needs you"
-    assert "0 conversations" not in alert
+    # No count line in the banner since #3990 (operator: descriptive banner).
+    assert "need" not in body[ALERT_FIELD][ALERT_BODY_FIELD]
 
 
 def test_a_completion_published_after_the_refresh_never_reads_zero(
@@ -942,7 +1020,6 @@ def test_a_completion_published_after_the_refresh_never_reads_zero(
     from local_operator.mobile.daemon import MobileDaemon
     from local_operator.mobile.push_payload import ALERT_BODY_FIELD, ALERT_FIELD
     from local_operator.session.attention import AttentionStore
-    from local_operator.tui.notify import BODIES
 
     store = AttentionStore()
     daemon = MobileDaemon(port=0, password="pw123")
@@ -962,6 +1039,4 @@ def test_a_completion_published_after_the_refresh_never_reads_zero(
     asyncio.run(go())
     body = _emitted_completion(cloud)
     assert body["count"] == 1
-    assert body[ALERT_FIELD][ALERT_BODY_FIELD] == (
-        f"{BODIES['complete']} · 1 conversation needs you"
-    )
+    assert "need" not in body[ALERT_FIELD][ALERT_BODY_FIELD], "the count is a field, not text"

@@ -839,6 +839,19 @@ class MeshCredentialBroker:
         #     an id the owner does not have hides nothing.
         peer_excluded = peer_credential_ids(frame.get("exclude_credential_ids"))
         if peer_excluded:
+            # Q5 (#3066): a departed row must not turn an otherwise permitted env
+            # share into a missing login. Normalize only this request's cooldown
+            # inputs against CURRENT owner inventory; never rewrite the holder's
+            # durable rests or relax derived/account-denied/affinity restrictions.
+            # Unlike _row_stamps, failure must be distinguishable from EMPTY:
+            # unknown inventory keeps every exclusion and the restricted cascade.
+            try:
+                current_ids = self._auth_store_instance().current_credential_ids(provider)
+            except Exception:  # noqa: BLE001 — unknown inventory must narrow, never broaden
+                pass
+            else:
+                if current_ids is not None:
+                    peer_excluded = tuple(row for row in peer_excluded if row in current_ids)
             excluded_ids = tuple(sorted(set(excluded_ids) | set(peer_excluded)))
 
         # 2e. THE BORROWER'S SELECTION INPUTS, so a remote session is load-balanced
@@ -1078,6 +1091,11 @@ class MeshCredentialBroker:
                     # THIS resolve only (nothing is blocked or repointed): they are
                     # neither picked nor refreshed on a peer's behalf.
                     exclude_credential_ids=excluded_ids or None,
+                    # m3 (#3066): env precedes stored API keys in the ordinary
+                    # cascade. Under a real row exclusion, skip NON-row tiers
+                    # before resolving, not by retrying a refused ambient winner.
+                    # Keep the post-resolve id0 guard as a fail-closed backstop.
+                    persisted_kinds=(frozenset({"oauth", "api_key"}) if excluded_ids else None),
                 )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key, by=by, for_session=for_session)

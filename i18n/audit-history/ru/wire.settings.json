@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "33095593a45c919eb26ee4ba0134cc24c30ed99e9bad291b991caccb3b082fef",
+  "history_sha256": "4c94ef5ac47dd731ad8d35a498493cec112853873859df2df7750612028f6658",
   "entries": [
     {
       "locale": "ru",
@@ -411,6 +411,194 @@
         }
       ],
       "note": "Independent merged-source binding2 audit 2026-11-15, 187b766ab67d, openai/gpt-6.1-sol, no fallback. Actual source 99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64; exact disjoint parent-key composition (2 remote cache + 2 offline-hold keys), semantics/context freshly read, remaining 865 keys carried by verified fresh parent evidence. No translations/history rewritten. Evidence: i18n/audits/evidence/ru/wire.settings/merged-compat2-187b766ab67d-da012724/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "413b00d1f41ccf1377d2320cc7c7a4c375a675ad5c7985ba736c9030659bfb51",
+      "translator": {
+        "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-15"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team, role task), session d62d8ba8b744",
+        "session": "d62d8ba8b744",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "#3990 r1 2026-11-15 i18n-auditor d62d8ba8b744 (anthropic/claude-opus-5-5, no fallback): 1 changed key re-audited — wire.settings.display_notification_session_name.help against en 413b00d1f41c (en delta 2baf6804bc41→413b00d1f41c is exactly that key, 9b03f267dd87). Rest of the namespace byte-identical to the bytes that carried the passed 2baf6804bc41 receipt (2836bc0ee89f..9b03f267dd87 no diff; 9b03f267..66ce330d one line). Semantic fidelity: desktop banners, lock screen, paired phones' notifications, delivery through Radient's push service — all present. Terms: баннеры, экран блокировки, сопряжённые телефоны (corpus), push-сервис Radient (corpus 'push-устройств'); participle 'доставляемые' agrees with уведомления, 'на них' = phones; ё kept. No ICU placeholders (parity 0=0); length within the locale's wire.settings help range. Findings: none. 0 open blocker/major. Target bytes sha256 c8d3259635aadc8f019d6de01150b5f2ca7b79ac4ca368ae57783fbefa7fd6d8. Single independent audit only: docs/I18N.md step 3 asks a second independent audit for high-visibility copy — not performed in this receipt."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "413b00d1f41ccf1377d2320cc7c7a4c375a675ad5c7985ba736c9030659bfb51",
+      "translator": {
+        "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-15"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team, role task), session d62d8ba8b744",
+        "session": "d62d8ba8b744",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "#3990 r1 2026-11-15 i18n-auditor d62d8ba8b744 (anthropic/claude-opus-5-5, no fallback): 1 changed key re-audited — wire.settings.display_notification_session_name.help against en 413b00d1f41c (en delta 2baf6804bc41→413b00d1f41c is exactly that key, 9b03f267dd87). Rest of the namespace byte-identical to the bytes that carried the passed 2baf6804bc41 receipt (2836bc0ee89f..9b03f267dd87 no diff; 9b03f267..66ce330d one line). Semantic fidelity: desktop banners, lock screen, paired phones' notifications, delivery through Radient's push service — all present. Terms: баннеры, экран блокировки, сопряжённые телефоны (corpus), push-сервис Radient (corpus 'push-устройств'); participle 'доставляемые' agrees with уведомления, 'на них' = phones; ё kept. No ICU placeholders (parity 0=0); length within the locale's wire.settings help range. Findings: none. 0 open blocker/major. Target bytes sha256 c8d3259635aadc8f019d6de01150b5f2ca7b79ac4ca368ae57783fbefa7fd6d8. Single independent audit only: docs/I18N.md step 3 asks a second independent audit for high-visibility copy — not performed in this receipt. Second independent audit complete in this row (see second_audit), 2026-11-15.",
+      "second_audit": {
+        "status": "passed",
+        "agent": "copy-reviewer (radientdev team member, second independent i18n-auditor; not the translator and not the first auditor)",
+        "session": "937c6ecbae86",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.display_notification_session_name.help at en source 413b00d1f41c, target bytes c8d3259635aa; PR #3990 at 51f41a416a52 (translation 66ce330dd739)",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "first_audit_session": "d62d8ba8b744",
+        "note": "0 blocker/0 major, 0 nit. Verdict formed before reading the first-audit note. Safety meaning checked for a user deciding whether to keep the setting on: the text says session name, last line and error causes reach the lock screen and paired phones, and that phone delivery goes through Radient's push service. Fidelity: all four elements present; 'доставляемые на них через push-сервис Radient' makes the Radient relay to paired phones explicit. сессия per glossary; сопряжённых matches corpus (сопряжённый браузер); включая + accusative agrees; neutral register. No ICU placeholders (0=0); no Cf/bidi controls; copy_scan 0 findings. Same model family as translator and first auditor (claude-opus-5-5): disclosed."
+      }
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "f5c40bc8a0762c3ffa8fea5ca6ab7c377f9fba8644fefed9153d760823a05da7",
+      "target_sha256": "2b11291c044a25cd57c237da6435266bed53531950671293adbbf0e8a8a6d5f6",
+      "translator": {
+        "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-15"
+      },
+      "composition_translators": [
+        {
+          "side": "feature (PR #3990)",
+          "provenance": {
+            "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none (as relayed by the manager)",
+            "date": "2026-11-15"
+          },
+          "keys": [
+            "wire.settings.display_notification_session_name.help"
+          ]
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12"
+          },
+          "composition_translators": [
+            {
+              "side": "feature",
+              "provenance": {
+                "agent": "coder (PR #3872 core implementer, lopdev)",
+                "session": "f4c08c15c058",
+                "model": "anthropic/claude-opus-5-5",
+                "date": "2026-11-12"
+              },
+              "additional_reported": null
+            },
+            {
+              "side": "main",
+              "provenance": {
+                "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+                "model": "anthropic/claude-opus-5-5",
+                "fallback": "none (as relayed by the manager)",
+                "date": "2026-11-13"
+              },
+              "additional_reported": null
+            }
+          ],
+          "keys": [
+            "wire.settings.desktop_remote_files_cache_bytes.help",
+            "wire.settings.desktop_remote_files_cache_bytes.label"
+          ]
+        }
+      ],
+      "auditor": {
+        "agent": "copy-reviewer (radientdev team, role task) — merged-source binding audit for PR #3990; not a translator or first/second auditor of either parent change in this session",
+        "session": "5b334e35ef01",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "uncommitted merge cb85fcb96216 into 2bf600c2edc8, staged tree 6c436a4d7646",
+        "parent_revisions": [
+          "2bf600c2edc81a0273b722515d0604a00e99b564",
+          "cb85fcb96216c14f43c5c35e2472609c59dd4ccd"
+        ],
+        "common_base": "058c3c456abd654ac600752bcb12b12af3e82b12",
+        "evidence": "i18n/audits/evidence/ru/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json",
+        "evidence_sha256": "877af955337a6ba911b703815ecfdc7f9298c247ad9cf4856867923f6bc204ca",
+        "parent_receipts": [
+          {
+            "side": "feature (PR #3990)",
+            "source_sha256": "413b00d1f41ccf1377d2320cc7c7a4c375a675ad5c7985ba736c9030659bfb51",
+            "target_sha256": "c8d3259635aadc8f019d6de01150b5f2ca7b79ac4ca368ae57783fbefa7fd6d8",
+            "receipt_canonical_sha256": "2d4f48d69d1b982928ebf71a273059797f68b006882fe358b6b40b8f3c5c078e",
+            "first_audit_receipt_canonical_sha256": "42d54f6859cde30bd99bd8230434159dc847dc7720e4393e675eb4b8ed09724a",
+            "keys": [
+              "wire.settings.display_notification_session_name.help"
+            ],
+            "auditor_session": "d62d8ba8b744",
+            "second_audit_session": "937c6ecbae86"
+          },
+          {
+            "side": "main",
+            "source_sha256": "99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64",
+            "target_sha256": "e11c92135087ebd6453b795772431ab219af241d25999584019d6905df44a721",
+            "receipt_canonical_sha256": "033a5bfb419f9a71221e2db6b8965f120670c9a73555571b511740cefb810c09",
+            "keys": [
+              "wire.settings.desktop_remote_files_cache_bytes.help",
+              "wire.settings.desktop_remote_files_cache_bytes.label"
+            ],
+            "auditor_session": "187b766ab67d",
+            "evidence": "i18n/audits/evidence/ru/wire.settings/merged-compat2-187b766ab67d-da012724/record.json",
+            "evidence_sha256": "6ce90a432e50ec6c971ed11bbad36bfd204f8548d48c0992ce440556fe33cace"
+          }
+        ]
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "copy-reviewer (radientdev team member, second independent i18n-auditor; not the translator and not the first auditor)",
+        "session": "937c6ecbae86",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.display_notification_session_name.help at en source 413b00d1f41c, target bytes c8d3259635aa; PR #3990 at 51f41a416a52 (translation 66ce330dd739)",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "first_audit_session": "d62d8ba8b744",
+        "note": "0 blocker/0 major, 0 nit. Verdict formed before reading the first-audit note. Safety meaning checked for a user deciding whether to keep the setting on: the text says session name, last line and error causes reach the lock screen and paired phones, and that phone delivery goes through Radient's push service. Fidelity: all four elements present; 'доставляемые на них через push-сервис Radient' makes the Radient relay to paired phones explicit. сессия per glossary; сопряжённых matches corpus (сопряжённый браузер); включая + accusative agrees; neutral register. No ICU placeholders (0=0); no Cf/bidi controls; copy_scan 0 findings. Same model family as translator and first auditor (claude-opus-5-5): disclosed.",
+        "retained_from": "PR #3990 parent receipt (source 413b00d1); covers only wire.settings.display_notification_session_name.help, carried unchanged into this source — not a second audit of this binding"
+      },
+      "retained_upstream_findings": [],
+      "note": "Merged-source binding 2026-11-15, copy-reviewer session 5b334e35ef01 (anthropic/claude-opus-5-5, no fallback). Source f5c40bc8a076 = base 2baf6804bc41 + PR #3990 delta (1 key: display_notification_session_name.help; passed d62d8ba8b744 + second audit 937c6ecbae86) + main delta (2 keys: desktop_remote_files_cache_bytes.label/help; passed binding2 187b766ab67d, openai/gpt-6.1-sol). Exact key-disjoint value composition in en and ru; 866 other keys byte-identical to base. No translation changed, no history rewritten, no new native review claimed. Single binding audit only. Evidence: i18n/audits/evidence/ru/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json"
     },
     {
       "locale": "ru",

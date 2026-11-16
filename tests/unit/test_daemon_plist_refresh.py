@@ -717,6 +717,16 @@ def _rig(
     about five daemons rather than six.
     """
     _layout(tmp_path, monkeypatch, running=running, current=current, pointer=pointer)
+    # Model the pre-upgrade installation before recording CURRENT plists. The
+    # old installer already plants its shim; leaving it out here makes the new
+    # repair child's reconciliation introduce a Program change, testing a plist
+    # rewrite instead of the build-only restart this rig is meant to isolate.
+    monkeypatch.setattr(update_mod, "install_kind", lambda: InstallKind.UV_TOOL)
+    if pointer:
+        shim = update_mod.daemon_image_path()
+        shim.parent.mkdir(parents=True)
+        shim.write_text(update_mod._DAEMON_SHIM)
+        shim.chmod(0o755)
     for _name, (_module, path, render, _label) in targets.items():
         path.write_bytes(plistlib.dumps(render()))
 
@@ -741,10 +751,6 @@ def _rig(
         return tmp_path / "lop" / "generations" / running
 
     monkeypatch.setattr(update_mod, "stale_generation_of_process", probe)
-    # The child's own refusal guard: only an installed distribution may repair a
-    # daemon, and a worktree venv must be refused here (that incident is pinned
-    # in tests/unit/test_update.py).
-    monkeypatch.setattr(update_mod, "install_kind", lambda: InstallKind.UV_TOOL)
     return calls
 
 

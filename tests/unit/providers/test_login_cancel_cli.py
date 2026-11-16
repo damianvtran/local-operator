@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import re
 import socket
 import sys
 from typing import Any
@@ -219,12 +220,32 @@ sys.path.insert(0, {root!r})
 import webbrowser
 webbrowser.open = lambda *a, **k: True
 from local_operator.providers.auth_cli import run_login
+# TEST-ONLY port isolation (child process only; production stays (54545,)).
+# Anthropic requires its allowlisted 54545 and refuses to fall back, so on a
+# shared runner/dev box any incumbent on 54545 makes the login exit 1 before
+# the prompt and this lifecycle test never reaches its Ctrl+C. Point the child
+# at {callback_port} (0 = OS-assigned) and report the port the REAL listener
+# actually bound, so the parent asserts on that instead of a literal.
+import local_operator.providers.oauth.anthropic as _anthropic
+from local_operator.providers.oauth.callback_server import OAuthCallbackFlow
+_anthropic.CALLBACK_PORT = {callback_port}
+_real_listen = OAuthCallbackFlow._listen
+async def _listen_and_report(self, port):
+    await _real_listen(self, port)  # the real bind; nothing is stubbed
+    print("BOUND_PORT=%d" % self.bound_port, flush=True)
+OAuthCallbackFlow._listen = _listen_and_report
 from local_operator.providers.auth_store import AuthStore
 print("READY", flush=True)
 code = run_login({provider!r}, None, AuthStore(os.path.join(cfg, "auth.db")))
 print("EXIT_CODE=%d" % code, flush=True)
 raise SystemExit(code)
 """
+
+
+def _bound_port_of(output: bytes) -> int | None:
+    """The port the child's real listener bound, from its ``BOUND_PORT=`` line."""
+    match = re.search(rb"BOUND_PORT=(\d+)", output)
+    return int(match.group(1)) if match else None
 
 
 def _listener_is_up(port: int) -> bool:
@@ -259,11 +280,20 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
     import time
 
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-    script = _CHILD.format(root=root, provider=provider)
+    script = _CHILD.format(root=root, provider=provider, callback_port=0)
 
     env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
     env["TERM"] = "xterm-256color"
     env.pop("NO_COLOR", None)
+
+    # An owned ephemeral listener held for the WHOLE run: the fixed-port design
+    # failed whenever something else sat on the callback port, so the port-0
+    # child must bind and cancel regardless. Never the real 54545 (startup
+    # recovery would GET /cancel whatever holds it).
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    holder_port = holder.getsockname()[1]
 
     pid, fd = pty.fork()
     if pid == 0:  # child
@@ -316,8 +346,14 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
             "the login never reached its prompt, so there was nothing pending to "
             f"cancel:\n{bytes(output).decode(errors='replace')}"
         )
+        bound_port = _bound_port_of(bytes(output))
         if provider == "anthropic":
-            assert _listener_is_up(54545), (
+            assert bound_port, (
+                "the loopback listener never reported a bound port, so a fast "
+                f"'cancel' would prove nothing about releasing it:\n{bytes(output)!r}"
+            )
+            assert bound_port != holder_port, "the child must bind its own port"
+            assert _listener_is_up(bound_port), (
                 "the loopback listener was never bound, so a fast 'cancel' would "
                 "prove nothing about releasing it"
             )
@@ -361,9 +397,10 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
             # The listener the cancel was supposed to tear down is really gone,
             # which is what makes an immediate retry possible.
             released_by = time.monotonic() + 10
-            while _listener_is_up(54545) and time.monotonic() < released_by:
+            assert bound_port is not None
+            while _listener_is_up(bound_port) and time.monotonic() < released_by:
                 time.sleep(0.1)
-            assert not _listener_is_up(54545), "the loopback listener outlived the cancel"
+            assert not _listener_is_up(bound_port), "the loopback listener outlived the cancel"
     finally:
         try:
             os.kill(pid, signal_module.SIGKILL)
@@ -371,6 +408,52 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
         except (ProcessLookupError, ChildProcessError):
             pass
         os.close(fd)
+        holder.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix subprocess/pty parity")
+def test_an_occupied_callback_port_fails_before_the_prompt(tmp_path: Any) -> None:
+    """Discriminating control for the fixture's port isolation.
+
+    Reproduces the CI failure shape (fixed port busy -> "Login failed" -> exit
+    1, prompt never shown) against a port THIS test owns: an ephemeral
+    listener held for the whole run. It deliberately never touches the real
+    54545 — startup recovery sends ``GET /cancel`` to whatever holds the port,
+    which could cancel an unrelated developer's live login. Holding the socket
+    (rather than probe/close/rebind) leaves no TOCTOU window. A port-0 child
+    (the lifecycle fixture) must still bind in the same circumstances, which
+    the lifecycle test above proves.
+    """
+    import subprocess
+
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    try:
+        busy = holder.getsockname()[1]
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        script = _CHILD.format(root=root, provider="anthropic", callback_port=busy)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        combined = " ".join((result.stdout + result.stderr).split())
+        assert result.returncode == 1, combined
+        assert "EXIT_CODE=1" in result.stdout
+        # The SPECIFIC busy-port failure (callback_server's "Port N is required
+        # ... but is already in use"), naming OUR held port — not just any exit 1.
+        assert "Login failed" in combined, combined
+        assert f"Port {busy} is required for the Anthropic login" in combined, combined
+        assert "already in use" in combined, combined
+        assert "empty to cancel" not in combined
+        assert "BOUND_PORT=" not in result.stdout
+    finally:
+        holder.close()
 
 
 def test_the_terminal_guard_restores_attributes_it_snapshotted(monkeypatch) -> None:

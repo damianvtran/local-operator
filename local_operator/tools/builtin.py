@@ -37451,6 +37451,18 @@ async def execute_notify(
             f"refused: keys starting with `{ASK_NOTICE_PREFIX}` are reserved for forwarded "
             "questions; nothing was posted. Use a different key.",
         )
+    from local_operator.notifications.remote_attention import NOTICE_PREFIX
+
+    if params.key.strip().startswith(f"{NOTICE_PREFIX}:"):
+        # PR #4082 review round 1, R1-3: the namespace the remote-attention
+        # watcher writes forwarded rows under (and the ``ask`` relay re-raises
+        # as attested node cards); a session must not mint a lookalike in it.
+        return _error(
+            tool_call_id,
+            "notify",
+            f"refused: keys starting with `{NOTICE_PREFIX}:` are reserved for notices "
+            "forwarded from other devices; nothing was posted. Use a different key.",
+        )
     door = getattr(context, "notify_inbox", None) if context is not None else None
     if door is None:
         return _error(

@@ -817,6 +817,31 @@ def test_q1_the_prefix_query_matches_literally(tmp_path: Path) -> None:
     ]
 
 
+def test_r1_1_the_undismissed_prefix_query_keeps_read_rows_and_matches_literally(
+    tmp_path: Path,
+) -> None:
+    """``undismissed_with_key_prefix`` (PR #4082 R1-1) returns READ rows too, never
+    dismissed ones, and matches ``prefix``/``containing`` literally."""
+    store = NotificationStore(tmp_path)
+    for key in (
+        "remote-notice:d_x:s1:remote-ask:a1",
+        "remote-notice:d_x:s1:remote-askXa2",
+        "remote-notice:d_x:s1:deploy",
+        "remote-notice:d_x:s1:remote-ask:a3",
+    ):
+        store.notify("s1", title=key, key=key)
+    rows = {r["key"]: r for r in store.undismissed_with_key_prefix("remote-notice:")}
+    read, gone = (
+        rows["remote-notice:d_x:s1:remote-ask:a1"],
+        rows["remote-notice:d_x:s1:remote-ask:a3"],
+    )
+    store.apply("read", ids=[(read["id"], read["revision"])])
+    store.apply("dismiss", ids=[(gone["id"], gone["revision"])])
+    asks = store.undismissed_with_key_prefix("remote-notice:", containing=":remote-ask:")
+    assert [(r["key"], r["read"]) for r in asks] == [("remote-notice:d_x:s1:remote-ask:a1", True)]
+    assert store.undismissed_with_key_prefix("remote_notice:") == []
+
+
 # ---------------------------------------------------------------------------
 # Round 2 remediation
 # ---------------------------------------------------------------------------
@@ -1553,6 +1578,32 @@ def test_q2_the_notify_tool_refuses_a_remote_ask_key() -> None:
     result = asyncio.run(notify())
     text = json.dumps(getattr(result, "content", str(result)), default=str)
     assert "reserved" in text and ra.ASK_NOTICE_PREFIX in text
+
+
+def test_r1_3_the_notify_tool_refuses_a_remote_notice_key() -> None:
+    """PR #4082 review round 1, R1-3: ``remote-notice:`` is the watcher's own
+    namespace — the ``ask`` relay re-raises a row under it as an attested node
+    card — so a session may not mint a lookalike there either."""
+    import json
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    async def door(**_kwargs: Any) -> str:
+        raise AssertionError("a reserved key reached the inbox")
+
+    context = ToolContext(cwd=".", notify_inbox=door)
+    key = ra.notice_key("d_member", "s1", f"{ra.ASK_NOTICE_PREFIX}x")
+
+    async def notify() -> Any:
+        return await builtin.execute_notify(
+            "call-1", {"title": "Answer me?", "key": key}, None, None, context
+        )
+
+    result = asyncio.run(notify())
+    text = json.dumps(getattr(result, "content", str(result)), default=str)
+    assert "refused" in text and "reserved" in text and f"{ra.NOTICE_PREFIX}:" in text
+    assert "nothing was posted" in text
 
 
 # ---------------------------------------------------------------------------
