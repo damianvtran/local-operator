@@ -17,7 +17,8 @@ so using it is fresh work, not a reroute. Copying or importing the blocked mater
 there by another route is still a reroute.
 
 A refusal reopens in exactly two ways: (i) the operator answers an `ask` **in this
-session, on their own surface** (terminal, TUI, desktop) naming the exact full path —
+session or a parent or child session in its task tree, on their own surface**
+(terminal, TUI, desktop) naming the exact full path —
 then retry the same command once; that settles it even when an earlier call on the
 path was refused, for a dirty tree too (the operator saw the path and chose to discard
 it), unless the branch has an open PR (still refused) or another running owner or live
@@ -137,16 +138,18 @@ session made. Everything CRITICAL is still refused.
   not your own) a PR state nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed
   or timed out), goes to the judge with those facts. When `gh`/`glab` fails,
   git decides instead: one bounded `git ls-remote origin` (8 s; plus a bounded
-  `git fetch` of the default branch if its tip is not local), or the
+  objects-only `git fetch` of the default branch if its tip is not local, which
+  moves no ref), or the
   already-fetched refs if origin cannot be reached. The PR state reads "none"
   only when the branch tip is an ancestor of `origin/<default>` AND the
   remote branch, if any, is too; a squash-merged branch, a remote branch with
   newer commits, or stale refs that do not prove it stay unknown — except a
-  squash/rebase merge proven **by content**: `git merge-tree --write-tree
-  origin/<default> <tip>` yields exactly `origin/<default>`'s tree (merging
-  the branch changes nothing), checked only against the tip origin advertised
-  just now and only when your local `origin/<default>` already equalled it; a
-  conflict, error, timeout or stale ref is not a proof. The facts say which
+  squash/rebase merge proven **by content**: every path the branch changed
+  since its merge-base is identical (same blob) in `origin/<default>` and the
+  tip — object ids only, no merge driver runs — checked only against the tip
+  origin advertised just now and only when your local `origin/<default>`
+  already equalled it; a path main changed again, an error or a stale ref is
+  not a proof. The facts say which
   proof was used ("merged by content …"). An interrupted delete can leave a half-removed tree
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the

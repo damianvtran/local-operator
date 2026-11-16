@@ -561,3 +561,222 @@ async def test_protected_targets_stay_refused(home: Path, repo: Path, target: st
     assert outcome.blocked
     if target != "~/repo":
         assert outcome.risk == "critical"
+
+
+# -- PR #4098 round 1 remediation ------------------------------------------------------
+#
+# Security review https://github.com/damianvtran/local-operator/pull/4098#issuecomment-6905345731
+# and QA https://github.com/damianvtran/local-operator/pull/4098#issuecomment-6905405873.
+
+#: Review B1: answers that name the whole set first and then carve out,
+#: keep, hold, condition or retract. None may approve the question text.
+B1_CARVE_OUTS = [
+    "Remove all but es",
+    "Remove all, not es",
+    "Remove all, save es",
+    "Remove all, es should be kept",
+    "Remove all, hold es",
+    "Remove all, unless dirty",
+    "Remove all - hold on",
+    "Remove all, I changed my mind",
+    "Remove all, then restore es",
+    "Remove all, wait",
+    "Remove all, if they are merged",
+    "Remove all, only the clean ones",
+    "Remove all and tell Aida, unless it is dirty",
+    "Remove all and tell Aida to keep the logs",
+    "Remove all, and check in with Aida about es first",
+    "Remove all, and send to Aida; actually no",
+]
+
+
+@pytest.mark.parametrize("answer", B1_CARVE_OUTS)
+def test_b1_carve_out_typed_answers_approve_nothing(home: Path, answer: str) -> None:
+    _ask(home, "a-b101", "Remove ~/repo/.worktrees/es and ~/repo/.worktrees/fr (dirty)?", answer)
+    words = prov.verified_ask(ME, "a-b101")
+    assert words is None or not words.approved, (answer, words and words.approved)
+
+
+@pytest.mark.parametrize(
+    "answer", [ANSWER_1, ANSWER_2, "Remove all", "Delete them.", "Remove all as recommended"]
+)
+def test_b1_whole_set_answers_still_approve(home: Path, answer: str) -> None:
+    """Damian's two real answers (a-798d and the sibling lane) must keep approving."""
+    question = "Remove ~/repo/.worktrees/es and ~/repo/.worktrees/fr (dirty)?"
+    _ask(home, "a-b102", question, answer)
+    words = prov.verified_ask(ME, "a-b102")
+    assert words is not None and question in words.approved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", B1_CARVE_OUTS[:4])
+async def test_b1_carve_out_never_settles_the_excluded_dirty_tree(
+    home: Path, repo: Path, answer: str
+) -> None:
+    """The reviewer's end-to-end repro: the excluded dirty, unmerged tree stays judged."""
+    es = _branch_tree(home, repo, "es")
+    fr = _branch_tree(home, repo, "fr")
+    (es / "wip.txt").write_text("uncommitted\n")
+    _ask(home, "a-b103", f"Remove {es} and {fr} (dirty)?", answer)
+    judge = _Judge()
+    outcome = await _check(
+        home, f"git -C {repo} worktree remove --force {es}", judge, _operator("a-b103")
+    )
+    assert outcome.blocked, answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", [("Keep them", "desktop"), (None, "desktop")])
+async def test_m1_untrusted_yes_never_masks_a_later_decline_or_lapse(
+    home: Path, repo: Path, second: tuple[str | None, str]
+) -> None:
+    """Review M1: the a-2432 exemption needs EVERY ask reaching the path to be an untrusted yes."""
+    wt = _squashed_tree(home, repo, "masked")
+    _ask(home, "a-1111", f"Remove {wt}?", "Remove all", surface="remote")
+    _ask(home, "a-2222", f"Remove {wt}?", second[0], surface=second[1])
+    outcome = await _check(home, f"git -C {repo} worktree remove {wt}", _Judge("ALLOW"))
+    assert outcome is not None and outcome.blocked
+
+
+def test_m2_clone_below_the_walk_depth_keeps_the_rig_guarded(home: Path) -> None:
+    """Review M2: a walk that stops with directories left cannot rule a clone out."""
+    rig = _rig(home, "qa-deep")
+    deep = rig / "home" / "src" / "github.com" / "org" / "repo"
+    deep.mkdir(parents=True)
+    _git("init", "-q", str(deep), cwd=home)
+    verdict = _rank(home, f"rm -rf {rig}")
+    assert verdict.risk is not Risk.LOW, verdict.reasons
+    # Control: an equally deep tree with no clone is still finished work —
+    # the walk sees all of it (entry-capped, not depth-capped).
+    plain = _rig(home, "qa-deep-plain")
+    (plain / "home" / "src" / "github.com" / "org" / "notes" / "x").mkdir(parents=True)
+    assert _rank(home, f"rm -rf {plain}").risk is Risk.LOW
+
+
+def test_m2_exhausted_walk_keeps_the_rig_guarded(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = _rig(home, "qa-wide")
+    for n in range(5):
+        (rig / f"d{n}").mkdir()
+    monkeypatch.setattr(prov, "_WALK_ENTRIES", 3)
+    assert "too many entries" in (prov._nested_repository(os.path.realpath(rig)) or "")
+
+
+def test_m2_mount_point_inside_a_rig_keeps_it_guarded(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m2: a filesystem mounted inside a rig is not the rig's to delete."""
+    rig = _rig(home, "qa-mount")
+    (rig / "mnt").mkdir()
+    root_dev = os.stat(rig).st_dev
+    real_dev = prov._entry_dev
+    monkeypatch.setattr(
+        prov,
+        "_entry_dev",
+        lambda entry: root_dev + 1 if entry.name == "mnt" else real_dev(entry),
+    )
+    assert "mount point" in (prov._nested_repository(os.path.realpath(rig)) or "")
+    assert _rank(home, f"rm -rf {rig}").risk is not Risk.LOW
+
+
+def test_m1_merge_driver_cannot_forge_merged_by_content(home: Path, repo: Path) -> None:
+    """Review m1: a repo-configured merge driver must neither run nor prove a squash."""
+    (repo / "CHANGELOG").write_text("one\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-qm", "changelog", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    wt = _branch_tree(home, repo, "driver")
+    (wt / "CHANGELOG").write_text("one\nbranch-only entry\n")
+    _git("commit", "-qam", "branch changelog", cwd=wt)
+    _squash_merge(repo, "driver")
+    # main later rewrites CHANGELOG, dropping the branch's entry: NOT merged.
+    (repo / "CHANGELOG").write_text("rewritten\n")
+    _git("commit", "-qam", "rewrite changelog", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    pwned = home / "pwned"
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "attributes").write_text("CHANGELOG merge=keep\n")
+    _git("config", "merge.keep.driver", f"touch {pwned}; true", cwd=repo)
+    tip = _git("rev-parse", "fix/driver", cwd=repo).strip()
+    main = _git("rev-parse", "origin/main", cwd=repo).strip()
+    assert not prov.content_merged(str(wt), tip, main)
+    assert not pwned.exists(), "the guard ran a repo-configured merge driver"
+
+
+def test_m1_content_proof_still_holds_for_a_plain_squash(home: Path, repo: Path) -> None:
+    wt = _squashed_tree(home, repo, "plain")
+    tip = _git("rev-parse", "fix/plain", cwd=repo).strip()
+    main = _git("rev-parse", "origin/main", cwd=repo).strip()
+    assert prov.content_merged(str(wt), tip, main)
+
+
+def test_m4_network_git_never_reaches_a_credential_helper(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m4: ls-remote/fetch disable credential helpers, prompts and askpass."""
+    seen: dict[str, Any] = {}
+
+    class _Proc:
+        returncode = 0
+        pid = 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            return "", ""
+
+    def _popen(args: list[str], **kw: Any) -> _Proc:
+        seen["args"], seen["env"] = args, kw.get("env") or {}
+        return _Proc()
+
+    monkeypatch.setattr(prov.subprocess, "Popen", _popen)
+    prov._git_net(["ls-remote", "origin"], str(home), timeout=1)
+    joined = " ".join(seen["args"])
+    assert "credential.helper=" in joined
+    assert seen["env"].get("GIT_TERMINAL_PROMPT") == "0"
+    assert seen["env"].get("GIT_ASKPASS") == "/bin/false"
+
+
+def test_q1_stale_ref_gives_the_same_answer_twice_and_moves_no_ref(home: Path, repo: Path) -> None:
+    """QA Q1: the squash proof never fetches its way into a different second answer."""
+    wt = _squashed_tree(home, repo, "twice")
+    # origin advances from another clone: the advertised tip is not local and
+    # the local origin/main is stale (QA row l), so the guard WOULD fetch.
+    other = home / "other"
+    _git("clone", "-q", str(home / "origin.git"), str(other), cwd=home)
+    (other / "b.txt").write_text("elsewhere\n")
+    _git("add", ".", cwd=other)
+    _git("commit", "-qm", "elsewhere", cwd=other)
+    _git("push", "-q", "origin", "main", cwd=other)
+
+    def refs() -> str:
+        return _git("for-each-ref", cwd=repo)
+
+    before = refs()
+    first = prov.git_merged(str(wt), "fix/twice")
+    second = prov.git_merged(str(wt), "fix/twice")
+    assert first == second and not first[0], (first, second)
+    assert refs() == before
+
+
+@pytest.mark.asyncio
+async def test_q2_squash_merged_low_is_journaled(
+    home: Path, repo: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """QA Q2: every finished-work LOW leaves a guardrail.verdict line."""
+    import logging
+
+    wt = _squashed_tree(home, repo, "journal")
+    caplog.set_level(logging.INFO, logger="local_operator.guardrails.check")
+    outcome = await _check(home, f"git -C {repo} worktree remove {wt}", _Judge())
+    assert not outcome.blocked
+    lines = [r.getMessage() for r in caplog.records if "guardrail.verdict" in r.getMessage()]
+    assert any("risk=low" in ln and "merged" in ln for ln in lines), lines
+
+
+def test_n1_refusal_text_names_the_task_tree_the_code_reads() -> None:
+    """Review n1: lineage (parent/child) asks reopen a refusal, and the text says so."""
+    from local_operator.guardrails.check import REFUSAL_SCOPE
+
+    assert "parent or child session in its task tree" in REFUSAL_SCOPE

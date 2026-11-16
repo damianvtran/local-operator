@@ -3213,18 +3213,40 @@ def _creators_inside(real: str) -> set[str] | None:
         return None
 
 
+def _entry_dev(entry: os.DirEntry[str]) -> int:
+    """The device an entry lives on (a seam: tests stand in a mount point)."""
+    return entry.stat(follow_symlinks=False).st_dev
+
+
 def _nested_repository(real: str) -> str | None:
     """Why ``real`` may hold a repository of its own (not a linked worktree), or ``None``.
 
     A ``.git`` DIRECTORY anywhere in the bounded walk is a clone or ``git
     init`` whose commits may exist nowhere else; a ``.git`` FILE is a linked
     worktree's pointer, which :func:`classify._reached_worktrees` already held
-    to its own bar. An exhausted walk cannot rule one out, so it counts.
+    to its own bar. ``None`` only when the walk saw EVERYTHING: an exhausted
+    walk cannot rule one out, so it counts.
+
+    No depth cap here (review M2, PR #4098): the shared ``_WALK_DEPTH`` (4)
+    stopped this walk early and answered "no repository" with directories
+    left unscanned, while scratch-HOME rigs nest clones at
+    ``home/src/github.com/<org>/<repo>``. A depth cap that reported "too
+    deep" instead would send most real rigs (``home/.local-operator/
+    sessions/<id>/…``) back to the judge, so the walk is bounded by
+    ``_WALK_ENTRIES`` alone — exhausting it still counts — and stays finite
+    without one: symlinks are never followed, and (review m2) a directory on
+    another device than the rig is refused, never entered (a mounted volume
+    is not the rig's to delete, and BSD ``rm -rf`` without ``-x`` would
+    descend into it).
     """
+    try:
+        root_dev = os.stat(real).st_dev
+    except OSError:
+        return f"unreadable directory {real}"
     seen = 0
-    stack: list[tuple[str, int]] = [(real, 0)]
+    stack: list[str] = [real]
     while stack:
-        current, depth = stack.pop()
+        current = stack.pop()
         try:
             entries = list(os.scandir(current))
         except OSError:
@@ -3235,12 +3257,16 @@ def _nested_repository(real: str) -> str | None:
         for entry in entries:
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
+                dev = _entry_dev(entry) if is_dir else root_dev
             except OSError:
                 return f"unreadable entry {entry.path}"
             if entry.name == ".git" and is_dir:
                 return f"nested repository at {current}"
-            if is_dir and depth < _WALK_DEPTH:
-                stack.append((entry.path, depth + 1))
+            if not is_dir:
+                continue
+            if dev != root_dev:
+                return f"mount point at {entry.path}"
+            stack.append(entry.path)
     return None
 
 
@@ -3347,14 +3373,19 @@ def _git_net(args: Sequence[str], cwd: str, *, timeout: float) -> str | None:
     ssh can prompt for a password or passphrase inside a guard check, and a
     timeout kills the WHOLE group (``git-remote-https``/``ssh`` children
     included), not just the git parent. Read-only on the working tree: callers
-    pass only ``ls-remote`` and a ``fetch`` that writes remote-tracking refs
-    and ``FETCH_HEAD`` in the common dir.
+    pass only ``ls-remote`` and a ``fetch`` that writes objects only (no
+    remote-tracking ref, no ``FETCH_HEAD``: :func:`git_merged`).
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    # Review m4 (PR #4098): no credential helper, no prompt, no askpass, so
+    # an https origin never reaches the keychain (the system gitconfig sets
+    # ``credential.helper=osxkeychain`` here) — the same posture as the
+    # ``finished_foreign_worktree`` ls-remote. Unauthenticated reads only.
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS="/bin/false")
+    env.pop("SSH_ASKPASS", None)
     try:
         proc = subprocess.Popen(
-            ["git", "-C", cwd, *args],
+            ["git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-C", cwd, *args],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -3438,8 +3469,23 @@ def git_merged(path: str, branch: str) -> tuple[bool, str]:
         if default:
             pre_fetch_local = _local_ref(real, f"refs/remotes/origin/{default}")
         if default and default_tip and not _has_commit(real, default_tip):
+            # Objects only (QA Q1, PR #4098): ``--refmap=`` stops the
+            # opportunistic update of ``refs/remotes/origin/<default>`` and
+            # ``--no-write-fetch-head`` leaves FETCH_HEAD, so no ref moves.
+            # The ancestry proof below reads the advertised SHA itself; the
+            # squash proof needs the local ref to have equalled it BEFORE this
+            # call, and since this fetch never moves that ref, a second call
+            # gives the same answer as the first (preview == check).
             _git_net(
-                ["fetch", "--no-tags", "--quiet", "origin", f"refs/heads/{default}"],
+                [
+                    "fetch",
+                    "--no-tags",
+                    "--quiet",
+                    "--refmap=",
+                    "--no-write-fetch-head",
+                    "origin",
+                    f"refs/heads/{default}",
+                ],
                 real,
                 timeout=_FETCH_TIMEOUT_S,
             )
@@ -3498,27 +3544,60 @@ def content_merged(real: str, tip: str, default_tip: str) -> bool:
     merged" when the ``gh`` lookup timed out on the node — every one of them
     finished work.
 
-    Proof: ``git merge-tree --write-tree <default> <tip>`` performs the
-    three-way merge in the object store (no index, no working tree, no ref
-    written; at most unreferenced loose objects that ``git gc`` prunes) and
-    prints the result tree. Callers pass the tree's CURRENT HEAD as ``tip``:
-    a local commit made after the squashed one changes the merge result, so
-    it is unproven (#3992 author's constraint 2). If that tree equals
-    ``<default>^{tree}``, merging the branch would change NOTHING — its
-    content is already on the default branch. A later revert on main makes the
-    merge re-apply the change (tree differs: not proven); main editing the
-    same lines afterwards conflicts (exit 1: not proven). Any error, timeout
-    or a git too old for ``--write-tree`` (pre-2.38) is also "not proven":
+    Proof, by object ids only (review m1, PR #4098): every path the branch
+    changed since its merge-base with ``<default>``
+    (``diff-tree <merge-base> <tip>``) must be IDENTICAL — same blob and mode,
+    or absent on both — in ``<default>`` and ``<tip>`` (``diff-tree <tip>
+    <default>`` lists none of them). The first version ran ``git merge-tree
+    --write-tree``, which executes any repo-configured merge driver
+    (``merge.<name>.driver`` mapped by an attribute): it ran a planted
+    command, and a common ``merge=ours``-style driver made an unmerged
+    CHANGELOG edit read "merged by content". ``diff-tree`` plumbing with
+    ``--name-only`` runs no driver, textconv or external diff.
+
+    Callers pass the tree's CURRENT HEAD as ``tip``: a local commit made
+    after the squashed one changes a path main does not have, so it is
+    unproven (#3992 author's constraint 2). A later revert on main, or main
+    editing a branch-changed path again afterwards, leaves that path
+    different: not proven (stricter than a merge would be, on purpose — it
+    goes to the judge or the forge lookup). Any error is also "not proven":
     this only ever ADDS a proof, so failing closed leaves the old ranking.
     Local objects only, never a fetch: ``default_tip`` must already be local
     (:func:`git_merged` checks ``_has_commit`` first).
     """
-    merged = _git(["merge-tree", "--write-tree", default_tip, tip], real)
-    base = _git(["rev-parse", "--verify", "--quiet", f"{default_tip}^{{tree}}"], real)
-    if merged is None or base is None:
+    base = _git_quiet(["merge-base", default_tip, tip], real)
+    if base is None or not base.strip():
         return False
-    first = merged.splitlines()[0].strip() if merged.strip() else ""
-    return bool(first) and first == base.strip()
+    changed = _git_quiet(
+        [
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--name-only",
+            base.strip(),
+            tip,
+        ],
+        real,
+    )
+    differs = _git_quiet(
+        ["diff-tree", "-r", "-z", "--no-renames", "--no-ext-diff", "--name-only", tip, default_tip],
+        real,
+    )
+    if changed is None or differs is None:
+        return False
+    return not ({p for p in changed.split("\0") if p} & {p for p in differs.split("\0") if p})
+
+
+def _git_quiet(args: Sequence[str], real: str) -> str | None:
+    """:func:`_git` with repo-configured programs switched off (review m1, PR #4098).
+
+    ``core.fsmonitor`` and hooks are the configured executables a read-only
+    probe could otherwise start; the object-store reads that use this need
+    neither.
+    """
+    return _git(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], real)
 
 
 def _ignored_unregenerable(real: str) -> bool:
@@ -4007,7 +4086,7 @@ def ask_answer_covers(
 #: the approval: "Remove all as recommended", "Remove all I give approval".
 _WHOLE_SET_TAIL_RE = re.compile(
     r"(?i)(?:\s+(?:as\s+(?:recommended|suggested|proposed|planned)"
-    r"|i\s+give\s+(?:my\s+)?approval|i\s+approve|approved|please|now))*\W*"
+    r"|i\s+give\s+(?:my\s+)?approval|i\s+approve|approved|please|now))*"
 )
 #: The ONLY first clauses :func:`_typed_whole_set` accepts: a removal verb over
 #: the whole set ("Remove all", "Delete them", "Remove all 34"). A bare "yes"/
@@ -4025,13 +4104,59 @@ _NARROWING_RE = re.compile(
     r"(?i)\b(?:just|minus|stays?|remains?|apart\s+from|other\s+than|save\s+for|besides"
     r"|aside\s+from|without)\b"
 )
-#: Where a typed answer's FIRST clause ends for :func:`_typed_whole_set`: the
-#: clause breaks the decline check uses, plus a comma and " and ".
-_TYPED_FIRST_CLAUSE_RE = re.compile(r"(?i)\s*(?:,|;|\band\b)\s*")
+#: How the whole-set head may end before a hand-off clause: ", and", ",",
+#: ";", ". " or " and " (also "and also"). A bare " - " or "but" is not one.
+_HANDOFF_BREAK_RE = re.compile(r"(?i)\s*(?:[,;.]\s*(?:and\s+)?|\s+and\s+)(?:also\s+)?")
+#: The ONLY clauses allowed after a whole-set head (review B1, PR #4098): an
+#: instruction to tell or involve SOMEONE ELSE, which is the shape of both
+#: real answers ("check in with Aida …", "send to Aida …"). Anything else
+#: after the head — "es should be kept", "I changed my mind", "then restore
+#: es" — is not on this list, so the judge reads it.
+_HANDOFF_RE = re.compile(
+    r"(?i)(?:check\s+in\s+with|send\s+(?:(?:it|this|that|them)\s+)?to|tell|ping|message"
+    r"|notify|loop\s+in|follow\s+up\s+with|report\s+(?:(?:it|this|back)\s+)?to"
+    r"|let\s+\w+\s+know|cc)\s+\S"
+)
+#: Words that, anywhere in a hand-off clause, may bend the delete itself:
+#: exclusion, keeping, condition, ordering, retraction. Their presence sends
+#: the answer to the judge even when they were meant for the hand-off — the
+#: safe direction ("tell Aida, unless it is dirty", "… about es first").
+_HANDOFF_QUALIFIER_RE = re.compile(
+    r"(?i)\b(?:but|except|excluding|unless|if|only|save|keep|kept|keeping|hold|wait|stop"
+    r"|cancel|skip|leave|instead|restore|undo|revert|first|before|after|until|once|then"
+    r"|later|mind|actually|scratch|no|nope|never|nothing|none|retract)\b"
+)
+#: A negation inside a hand-off clause counts only when it can bend the
+#: delete: "don't remove", "not es", "not the dirty one", a bare "not". The
+#: real answer's "should not require human approval" / "shouldn't be blocked"
+#: / "doesn't get blocked" is a statement about the guard: a modal or
+#: auxiliary verb, the negation, then a verb that is not a removal verb.
+_NEGATION_RE = re.compile(r"(?i)\b(?:not\b|\w*n['\u2019]t\b)")
+_HARMLESS_NEGATION_RE = re.compile(
+    r"(?i)\b(?:should|would|could|does|did|is|are|was|were|will|must|need|can|has|have)"
+    r"(?:\s+not|n['\u2019]t)\s+(?!(?:delete|remove|rm|wipe|discard|clean|touch|do|go|happen|run)\b)"
+    r"(?:be|get|require|need|have|block|ask|stop|prompt|wait|hold|pause)\b"
+)
 
 
-def _typed_whole_set(answer: str) -> bool:
-    """Does a typed answer approve the WHOLE question by its first clause?
+def _names_question_path(answer: str, question: str) -> bool:
+    """Does the answer spell any path, or any path basename, the question lists?
+
+    Any path-ish word in the answer counts (the operator pointed at
+    something specific); so does a question path's basename as a whole word
+    ("Remove all but es" for ``…/.worktrees/es``).
+    """
+    if _PATHISH.search(answer):
+        return True
+    for m in _PATHISH.finditer(question):
+        base = os.path.basename(m.group(1).rstrip("/.:?!"))
+        if base and re.search(rf"(?i)(?<![\w.-]){re.escape(base)}(?![\w-])", answer):
+            return True
+    return False
+
+
+def _typed_whole_set(answer: str, question: str = "") -> bool:
+    """Does a typed answer approve the WHOLE question? An allow-shape, not a deny-list.
 
     WHY (node-2, 2026-11-15, ask a-798d): Damian typed "Remove all I give
     approval, and check in with Aida to make sure that we're pushing along the
@@ -4039,30 +4164,53 @@ def _typed_whole_set(answer: str) -> bool:
     shouldn't be blocked by guardrails in the future" (and, on another lane,
     "Remove all as recommended, and send to Aida ..."). Only a BARE yes
     (``_BARE_AFFIRM_RE``) used to settle a typed answer, so both approved
-    nothing deterministically and the judge refused. The first clause is a
-    whole-set approval ("Remove all", "Delete them"); the rest is an
-    instruction to someone else, not a condition on the delete.
+    nothing deterministically and the judge refused.
 
-    Narrow on purpose: the first clause must be a removal verb over the whole
-    set (``_TYPED_WHOLE_SET_RE``, plus approval-restating words), and NOTHING
-    anywhere in the answer may decline, narrow or carve out (``_DECLINE_RE``,
-    ``_NARROWING_RE``, ``_CARVE_OUT_RE``, "but not"), so
-    "Remove all except qa-push", "Remove only the worktrees", "Remove all but
-    keep X" and "No" approve nothing here. (``_kept_answer`` already vetoes
-    most of those; this re-checks so the rule holds on its own.)
+    WHY an allow-shape (review B1, PR #4098): the first version vetoed known
+    carve-out words and ignored the rest, so "Remove all, save es", "Remove
+    all, es should be kept" and "Remove all, I changed my mind" approved the
+    whole question — and that settled a dirty, unmerged tree with no judge.
+    Now the answer must be EXACTLY:
+
+    1. a removal verb over the whole set (``_TYPED_WHOLE_SET_RE``) plus only
+       approval-restating words (``_WHOLE_SET_TAIL_RE``), then either
+    2. nothing, or a clause break (``_HANDOFF_BREAK_RE``) and a hand-off to
+       someone else (``_HANDOFF_RE``: "check in with", "send to", "tell" …),
+       whose text carries no qualifier word (``_HANDOFF_QUALIFIER_RE``) and
+       no negation except a modal statement about something other than the
+       removal (``_HARMLESS_NEGATION_RE``: "should not require approval");
+    3. and nowhere names a path, or a question path's basename.
+
+    Anything else returns False: the answer still reaches the judge as the
+    operator's words (``OperatorWords.text``), so a missed approval costs one
+    judge call, never a wrong delete.
     """
     if _DECLINE_RE.search(answer) or _CARVE_OUT_RE.search(answer):
         return False
-    if re.search(r"(?i)\bbut\s+not\b", answer) or _NARROWING_RE.search(answer):
+    if _NARROWING_RE.search(answer) or _names_question_path(answer, question):
         return False
-    head = _CLAUSE_BREAK_RE.split(answer, maxsplit=1)[0]
-    head = _TYPED_FIRST_CLAUSE_RE.split(head, maxsplit=1)[0]
-    m = _TYPED_WHOLE_SET_RE.match(head)
+    m = _TYPED_WHOLE_SET_RE.match(answer)
     if m is None or not m.group(0).strip():
         return False
-    # The tail starts where the whole-set words end (``_WHOLE_SET_OPTION_RE``'s
-    # trailing ``\W*`` would swallow the space the tail needs as a boundary).
-    return bool(_WHOLE_SET_TAIL_RE.fullmatch(head[len(m.group(0).rstrip()) :]))
+    # The restating words start where the whole-set words end (the head's
+    # trailing ``\W*`` would swallow the clause break the hand-off needs).
+    rest = answer[len(m.group(0).rstrip()) :]
+    tail = _WHOLE_SET_TAIL_RE.match(rest)
+    rest = rest[tail.end() if tail else 0 :]
+    if re.fullmatch(r"[\s.!]*", rest):
+        return True
+    brk = _HANDOFF_BREAK_RE.match(rest)
+    if brk is None:
+        return False
+    clause = rest[brk.end() :]
+    if not _HANDOFF_RE.match(clause) or _HANDOFF_QUALIFIER_RE.search(clause):
+        return False
+    # Every negation must sit inside a harmless modal statement.
+    harmless = [h.span() for h in _HARMLESS_NEGATION_RE.finditer(clause)]
+    return all(
+        any(a <= n.start() and n.end() <= b for a, b in harmless)
+        for n in _NEGATION_RE.finditer(clause)
+    )
 
 
 def _approved_text(
@@ -4101,7 +4249,10 @@ def _approved_text(
     ]
     if len(affirmed) != len(picked):
         return []
-    if typed and not all(_BARE_AFFIRM_RE.fullmatch(v) or _typed_whole_set(v) for v in typed):
+    if typed and not all(
+        _BARE_AFFIRM_RE.fullmatch(v) or _typed_whole_set(v, str(q.get("question") or ""))
+        for v in typed
+    ):
         # A qualified typed answer is the judge's to read (R1-B2); the
         # question text is never approved by it, nor are picks beside it.
         return []
