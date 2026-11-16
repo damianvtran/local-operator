@@ -3693,10 +3693,12 @@ Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
 - **Rows:** open refused (`origin_not_allowed`), card raised, wrong-key
   signature, plain `ask_respond`, the agent's own unsigned decide, signed Approve
   (`lop browser sites --json` allows the origin), open succeeds, light/dark
-  screenshots both rendered (a loading-spinner frame does not count) and differ,
-  signed Deny (origin in the denied list, open still refused), an answer after
-  the extension entry is gone (`BLOCKED`, not `PASS`, when the withdrawal did
-  not take). Results: `results.md`/`results.json`, PNGs and logs in the run
+  screenshots differ, each taken only once the story rendered in its theme (the
+  tape polls `snapshot` for the story root, then checks the PNG's content and
+  page-background luminance; a spinner frame is "not rendered"), signed Deny
+  (origin in the `--json` denied list, open still refused), and a late signed
+  Approve after the AGENT withdrew its request with its own `cancel_access`
+  (`BLOCKED`, not `PASS`, unless the extension answered `cancelled`). Results: `results.md`/`results.json`, PNGs and logs in the run
   directory. LOOK at both PNGs before citing them; a sha256 alone is not proof.
 - **Not covered:** the card's trip over two mesh relays into the operator's
   inbox, and the desktop `/answers` HTTP route itself (the operator attaches over

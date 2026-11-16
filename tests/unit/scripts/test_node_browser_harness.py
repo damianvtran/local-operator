@@ -129,3 +129,77 @@ def test_a_loading_frame_does_not_count_as_a_rendered_theme(tmp_path: Path) -> N
 
     assert harness.rendered_fraction(spinner_path) < harness.RENDERED_MIN_FRACTION
     assert harness.rendered_fraction(story_path) >= harness.RENDERED_MIN_FRACTION
+
+
+def _frame(path: Path, background: tuple[int, int, int], *, content: bool) -> Path:
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (780, 493), background)
+    if content:
+        draw = ImageDraw.Draw(image)
+        for top in range(40, 480, 20):
+            draw.rectangle((30, top, 300, top + 8), fill=(128, 64, 200))
+    image.save(path)
+    return path
+
+
+def _request_with_tool_text(text: str) -> object:
+    from types import SimpleNamespace
+
+    block = SimpleNamespace(text=text)
+    return SimpleNamespace(messages=[SimpleNamespace(role="tool", content=[block])])
+
+
+def _tool_call_name_and_args(turn: list[object]) -> tuple[str, dict[str, object]]:
+    import json
+
+    call = next(event for event in turn if getattr(event, "name", None))
+    return str(getattr(call, "id")), json.loads(getattr(call, "argument_delta"))
+
+
+def test_a_capture_snapshots_then_screenshots_once_the_story_root_is_there(
+    tmp_path: Path,
+) -> None:
+    """Run 6's spinner fix: no screenshot counts until the story has rendered."""
+    import asyncio
+
+    shot = tmp_path / "dark.png"
+    capture = harness.Capture("dark", str(shot))
+
+    async def drive() -> list[str]:
+        ids = []
+        turn = await capture.next_turn(_request_with_tool_text(""))
+        assert turn is not None
+        ids.append(_tool_call_name_and_args(turn)[0])
+        # The snapshot found the story root: the next call is the screenshot.
+        turn = await capture.next_turn(_request_with_tool_text("heading 'Approvals'"))
+        assert turn is not None
+        call_id, args = _tool_call_name_and_args(turn)
+        ids.append(call_id)
+        assert args == {"action": "screenshot", "path": str(shot)}
+        _frame(shot, (20, 22, 28), content=True)
+        assert await capture.next_turn(_request_with_tool_text("saved")) is None
+        return ids
+
+    ids = asyncio.run(drive())
+    assert ids[0].startswith("snap_dark_") and ids[1].startswith("shot_dark_")
+    assert capture.outcome["rendered"] is True
+    assert capture.outcome["background_luminance"] < harness.DARK_MAX_LUMINANCE
+
+
+def test_a_capture_that_never_renders_its_theme_records_not_rendered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A light page (or a spinner) captured for the DARK story never counts."""
+    import asyncio
+
+    monkeypatch.setattr(harness, "RENDER_WAIT_S", 0.0)
+    shot = _frame(tmp_path / "dark.png", (242, 237, 227), content=True)
+    capture = harness.Capture("dark", str(shot))
+    capture._phase = "shot"  # a screenshot was just taken
+    capture._started = 1.0  # long ago: the wait is spent
+
+    assert asyncio.run(capture.next_turn(_request_with_tool_text("saved"))) is None
+    assert capture.outcome["rendered"] is False
+    assert "not rendered" in capture.outcome["error"]
+    assert capture.outcome["background_luminance"] > harness.LIGHT_MIN_LUMINANCE

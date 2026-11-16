@@ -192,9 +192,7 @@ def host_snapshot() -> dict[str, Any]:
         ["lop", "browser", "status"], capture_output=True, text=True, env=env, timeout=60
     ).stdout
     identity = [
-        line.rstrip()
-        for line in status.splitlines()
-        if line.strip().startswith(IDENTITY_PREFIXES)
+        line.rstrip() for line in status.splitlines() if line.strip().startswith(IDENTITY_PREFIXES)
     ]
     hashes = {str(REAL_POLICY): _sha(REAL_POLICY)}
     for anchor in sorted(REAL_ANCHOR_DIR.glob("*.json")):
@@ -422,11 +420,10 @@ def _write_policy(policy_dir: Path, extension_id: str, update: Path, **extra: An
 
 def _extension_source() -> tuple[str, Path, str]:
     """The extension id, CRX and version the live node runs (read only)."""
-    import re
-
     # The passwd home, not ``$HOME``: the inner run points HOME at the node's
     # scratch root, and the installed CRX lives under the real account.
     import pwd
+    import re
 
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     update = real_home / ".local-operator/browser/extension/update.xml"
@@ -439,39 +436,154 @@ def _extension_source() -> tuple[str, Path, str]:
     return appid.group(1), Path(codebase.group(1)), version.group(1)
 
 
-def _turns(urls: dict[str, str], shots: dict[str, str]) -> list[list[Any]]:
-    """The scripted model: one tape, indexed by model CALL (see ScriptedStream)."""
-    from tests.e2e.harness import text_turn, tool_call_turn
+def _call(call_id: str, args: dict[str, Any]) -> list[Any]:
+    from tests.e2e.harness import tool_call_turn
 
-    def call(n: int, args: dict[str, Any]) -> list[Any]:
-        return tool_call_turn(
-            text=f"step {n}", tool_name="browser", tool_call_id=f"call_{n}", arguments=args
+    return tool_call_turn(
+        text=f"step {call_id}", tool_name="browser", tool_call_id=call_id, arguments=args
+    )
+
+
+class Capture:
+    """A screenshot step that waits for the story to RENDER before it counts.
+
+    WHY. Run 6 captured Storybook's loading spinner for the dark story: ``open``
+    returns at document load and Storybook renders afterwards, so the frame was
+    taken too early and the two hashes differed for the wrong reason. The
+    browser tool has no wait-for-selector action, so the tape polls the way a
+    model would: ``snapshot`` (the story root's "Approvals" heading must be in
+    the accessibility tree), then ``screenshot``, then check the PNG itself —
+    enough non-background pixels (:func:`rendered_fraction`) and the theme's
+    own page background (:func:`background_luminance`: dark < 100, light > 180).
+    Anything short of that sleeps a second and tries again, up to
+    ``RENDER_WAIT_S``; a timeout records ``rendered: False`` and the row FAILS
+    with "not rendered" rather than citing a spinner.
+    """
+
+    def __init__(self, theme: str, path: str) -> None:
+        self.theme = theme
+        self.path = path
+        self.outcome: dict[str, Any] = {"theme": theme, "rendered": False, "attempts": 0}
+        self._started = 0.0
+        self._phase = "snapshot"
+
+    def _ready(self) -> bool:
+        frame = Path(self.path)
+        if not frame.exists():
+            return False
+        fraction = rendered_fraction(frame)
+        luminance = background_luminance(frame)
+        self.outcome.update(
+            rendered_fraction=round(fraction, 4), background_luminance=round(luminance, 1)
+        )
+        themed = (
+            luminance < DARK_MAX_LUMINANCE
+            if self.theme == "dark"
+            else (luminance > LIGHT_MIN_LUMINANCE)
+        )
+        return fraction >= RENDERED_MIN_FRACTION and themed
+
+    async def next_turn(self, request: Any) -> list[Any] | None:
+        """The next model turn for this step, or ``None`` when the step is done."""
+        if not self._started:
+            self._started = time.monotonic()
+        attempt = self.outcome["attempts"]
+        if self._phase == "shot":
+            if self._ready():
+                self.outcome["rendered"] = True
+                return None
+            self._phase = "snapshot"
+        elif self._phase == "check":
+            text = _last_tool_text(request)
+            self.outcome["story_root_seen"] = "Approvals" in text
+            if self.outcome["story_root_seen"]:
+                self._phase = "shot"
+                return _call(
+                    f"shot_{self.theme}_{attempt}", {"action": "screenshot", "path": self.path}
+                )
+            self._phase = "snapshot"
+        if time.monotonic() - self._started > RENDER_WAIT_S:
+            self.outcome["error"] = f"not rendered within {RENDER_WAIT_S:.0f} s"
+            return None
+        if attempt:
+            await asyncio.sleep(1.0)
+        self.outcome["attempts"] = attempt + 1
+        self._phase = "check"
+        return _call(
+            f"snap_{self.theme}_{attempt + 1}", {"action": "snapshot", "search": "Approvals"}
         )
 
-    return [
-        # Prompt 1: the open is refused, then the card is raised.
-        call(1, {"action": "open", "url": urls["light"]}),
-        call(2, {"action": "request_access", "url": urls["light"]}),
-        text_turn("asked the operator"),
-        # Prompt 2 (after the operator approved): open, screenshot light and dark.
-        call(3, {"action": "open", "url": urls["light"]}),
-        call(4, {"action": "screenshot", "path": shots["light"]}),
-        call(5, {"action": "open", "url": urls["dark"]}),
-        call(6, {"action": "screenshot", "path": shots["dark"]}),
-        text_turn("captured both themes"),
-        # Prompt 3: a second origin, which the operator will DENY.
-        call(7, {"action": "open", "url": urls["deny"]}),
-        call(8, {"action": "request_access", "url": urls["deny"]}),
-        text_turn("asked about the second origin"),
-        # Prompt 4 (after the deny): the open must still be refused.
-        call(9, {"action": "open", "url": urls["deny"]}),
-        text_turn("denied as expected"),
-        # Prompt 5: a third origin whose extension entry is withdrawn before
-        # the operator answers (the stand-in for an expired card).
-        call(10, {"action": "open", "url": urls["expire"]}),
-        call(11, {"action": "request_access", "url": urls["expire"]}),
-        text_turn("asked about the third origin"),
-    ]
+
+def _last_tool_text(request: Any) -> str:
+    for message in reversed(getattr(request, "messages", None) or ()):
+        if getattr(message, "role", "") == "tool":
+            return " ".join(str(getattr(block, "text", "") or "") for block in message.content)
+    return ""
+
+
+class PollingTape:
+    """The scripted model: fixed turns plus :class:`Capture` steps.
+
+    Same contract as ``tests.e2e.harness.ScriptedStream`` (one turn per model
+    call, ``(request, signal) -> async iterator``), but a capture step decides
+    its next call from the previous tool result, like a model reading its own
+    screenshots. A call past the end raises, as ScriptedStream does.
+    """
+
+    def __init__(self, steps: list[Any]) -> None:
+        self.steps = list(steps)
+        self.captures = {step.theme: step for step in steps if isinstance(step, Capture)}
+
+    def __call__(self, request: Any, signal: Any = None) -> Any:
+        async def gen() -> Any:
+            while self.steps:
+                step = self.steps[0]
+                if isinstance(step, Capture):
+                    turn = await step.next_turn(request)
+                    if turn is None:
+                        self.steps.pop(0)
+                        continue
+                else:
+                    turn = self.steps.pop(0)
+                for event in turn:
+                    yield event
+                return
+            raise RuntimeError("the harness tape ran out: an unexpected extra model call")
+
+        return gen()
+
+
+def _tape(urls: dict[str, str], shots: dict[str, str]) -> PollingTape:
+    from tests.e2e.harness import text_turn
+
+    return PollingTape(
+        [
+            # Prompt 1: the open is refused, then the card is raised.
+            _call("call_1", {"action": "open", "url": urls["light"]}),
+            _call("call_2", {"action": "request_access", "url": urls["light"]}),
+            text_turn("asked the operator"),
+            # The turn the APPROVE starts (answer delivery): open, capture both themes.
+            _call("call_3", {"action": "open", "url": urls["light"]}),
+            Capture("light", shots["light"]),
+            _call("call_5", {"action": "open", "url": urls["dark"]}),
+            Capture("dark", shots["dark"]),
+            text_turn("captured both themes"),
+            # Prompt 3: a second origin, which the operator will DENY.
+            _call("call_7", {"action": "open", "url": urls["deny"]}),
+            _call("call_8", {"action": "request_access", "url": urls["deny"]}),
+            text_turn("asked about the second origin"),
+            # The turn the DENY starts: the open must still be refused.
+            _call("call_9", {"action": "open", "url": urls["deny"]}),
+            text_turn("denied as expected"),
+            # Prompt 5: a third origin whose request the AGENT withdraws with its
+            # own identity (``cancel_access`` from this session's tool context,
+            # which also withdraws the card) before the operator's late answer.
+            _call("call_10", {"action": "open", "url": urls["expire"]}),
+            _call("call_11", {"action": "request_access", "url": urls["expire"]}),
+            _call("call_12", {"action": "cancel_access", "url": urls["expire"]}),
+            text_turn("withdrew the third request"),
+        ]
+    )
 
 
 def _tool_results(session: Any) -> list[dict[str, Any]]:
@@ -547,6 +659,16 @@ def _has_result(session: Any, call_id: str) -> bool:
 def _open_site_ask(session: Any, origin: str) -> dict[str, Any] | None:
     queue = session.ask_queue()
     for record in reversed(queue.open_records() if queue else []):
+        for question in record.get("questions") or ():
+            if (question.get("site") or {}).get("origin") == origin:
+                return record
+    return None
+
+
+def _site_ask(session: Any, origin: str) -> dict[str, Any] | None:
+    """The newest site card for ``origin`` in ANY status (a withdrawn one too)."""
+    queue = session.ask_queue()
+    for record in reversed(queue.records() if queue else []):
         for question in record.get("questions") or ():
             if (question.get("site") or {}).get("origin") == origin:
                 return record
@@ -629,9 +751,30 @@ def rendered_fraction(path: Path) -> float:
 #: 0.0006 and the rendered light story at 0.0616.
 RENDERED_MIN_FRACTION = 0.01
 
+#: Page-background luminance (Rec. 601) of the frame's corner. Run 6's light
+#: story measured (242, 237, 227) -> ~238; the dark bound is set well below
+#: mid-grey. Not yet measured on a rendered dark frame — run 7 records it.
+DARK_MAX_LUMINANCE = 100.0
+LIGHT_MIN_LUMINANCE = 180.0
+#: How long a capture waits for the story to render. Run 6's light frame had
+#: rendered by the time ``open`` returned; 20 s is a backstop for a slow first
+#: paint, not an expected latency.
+RENDER_WAIT_S = 20.0
 
-def _operator(root: Path, key_root: Path, node_root: Path, sid: str, ask: dict[str, Any],
-              word: str, mode: str) -> dict[str, Any]:
+
+def background_luminance(path: Path) -> float:
+    """Luminance of the frame's bottom-right pixel: the theme's page background."""
+    from PIL import Image
+
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+    red, green, blue = rgb.getpixel((rgb.width - 1, rgb.height - 1))
+    return 0.299 * red + 0.587 * green + 0.114 * blue
+
+
+def _operator(
+    root: Path, key_root: Path, node_root: Path, sid: str, ask: dict[str, Any], word: str, mode: str
+) -> dict[str, Any]:
     """Run ONE operator decision in a separate process with its own config root."""
     ask_file = root / f"ask-{uuid.uuid4().hex[:8]}.json"
     ask_file.write_text(json.dumps(ask))
@@ -733,7 +876,15 @@ async def inner(args: argparse.Namespace) -> int:
     session_box: dict[str, Any] = {}
     try:
         return await _inner_flow(
-            args, root, results, group, node_root, op_root, bad_root, shots, native_reads,
+            args,
+            root,
+            results,
+            group,
+            node_root,
+            op_root,
+            bad_root,
+            shots,
+            native_reads,
             session_box,
         )
     finally:
@@ -776,8 +927,16 @@ async def _inner_flow(
     ports = {name: _free_port() for name in ("light", "deny", "expire")}
     for name, port in ports.items():
         group.spawn(
-            [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1",
-             "--directory", str(storybook)],
+            [
+                sys.executable,
+                "-m",
+                "http.server",
+                str(port),
+                "--bind",
+                "127.0.0.1",
+                "--directory",
+                str(storybook),
+            ],
             log=root / f"http-{name}.log",
             env=env,
         )
@@ -790,8 +949,13 @@ async def _inner_flow(
     }
 
     group.spawn(
-        [sys.executable, "-m", "local_operator.browser_bridge.daemon", "--port",
-         str(REAL_BRIDGE_PORT)],
+        [
+            sys.executable,
+            "-m",
+            "local_operator.browser_bridge.daemon",
+            "--port",
+            str(REAL_BRIDGE_PORT),
+        ],
         log=root / "bridge-daemon.log",
         env=env,
     )
@@ -812,10 +976,12 @@ async def _inner_flow(
     results.row(
         "policy carries the SYNTHETIC anchor + node id",
         "operatorKeyId == synthetic key id",
-        {k: (v[:16] + "…" if isinstance(v, str) and len(v) > 40 else v)
-         for k, v in approval.items()},
-        approval.get(site_approval.POLICY_KEY_ID) == results.data["facts"][
-            "synthetic_operator_key_id"],
+        {
+            k: (v[:16] + "…" if isinstance(v, str) and len(v) > 40 else v)
+            for k, v in approval.items()
+        },
+        approval.get(site_approval.POLICY_KEY_ID)
+        == results.data["facts"]["synthetic_operator_key_id"],
     )
     policy_dir = REAL_POLICY_DIR  # the bind-mounted scratch dir, inside the namespace
     _write_policy(policy_dir, extension_id, update, approval=approval)
@@ -877,8 +1043,9 @@ async def _inner_flow(
     done = await _until(paired, PAIR_BACKSTOP_S, step=1.0)
     # The code is removed as soon as it was used, as node_host setup does.
     _write_policy(policy_dir, extension_id, update, approval=approval)
-    results.row("policy pairing code pairs the extension", "paired_connected_count>=1",
-                done, bool(done))
+    results.row(
+        "policy pairing code pairs the extension", "paired_connected_count>=1", done, bool(done)
+    )
     if not done:
         return 2
     if args.preflight:
@@ -890,7 +1057,7 @@ async def _inner_flow(
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.tools.builtin import build_browser_tool
-    from tests.e2e.harness import ScriptedStream, build_session
+    from tests.e2e.harness import build_session
 
     tool = build_browser_tool(None)
     if tool is None:
@@ -899,7 +1066,7 @@ async def _inner_flow(
     sid = uuid.uuid4().hex[:12]
     session_dir = node_root / "sessions" / sid
     session_dir.mkdir(parents=True)
-    stream = ScriptedStream(_turns(urls, shots))
+    stream = _tape(urls, shots)
     session = build_session(session_dir, stream, tools=[tool], cwd=node_root)
     loop = asyncio.get_running_loop()
     handle = ServingSessionHandle(session, loop, cwd=str(node_root))
@@ -919,18 +1086,21 @@ async def _inner_flow(
     results.row(
         "first open refused: origin_not_allowed",
         "is_error, details.error_code == origin_not_allowed",
-        {"error_code": refused_open["details"].get("error_code"),
-         "text": refused_open["text"][:160]},
-        refused_open["error"]
-        and refused_open["details"].get("error_code") == "origin_not_allowed",
+        {
+            "error_code": refused_open["details"].get("error_code"),
+            "text": refused_open["text"][:160],
+        },
+        refused_open["error"] and refused_open["details"].get("error_code") == "origin_not_allowed",
     )
     ask = _open_site_ask(session, origin)
     results.row(
         "request_access raises the signed site card (site:v1:)",
         "open ask with a site:v1: question for the origin",
-        {"ask": (ask or {}).get("ask_id"),
-         "question_id": ((ask or {}).get("questions") or [{}])[0].get("question_id", "")[:24],
-         "result": _last_result(session, "call_2")["text"][:200]},
+        {
+            "ask": (ask or {}).get("ask_id"),
+            "question_id": ((ask or {}).get("questions") or [{}])[0].get("question_id", "")[:24],
+            "result": _last_result(session, "call_2")["text"][:200],
+        },
         bool(ask),
     )
     if not ask:
@@ -940,23 +1110,35 @@ async def _inner_flow(
 
     # --- negative controls before the real decision -----------------------
     wrong = await asyncio.to_thread(
-        _operator, root, bad_root, node_root, sid, ask, approve_word, "signed")
+        _operator, root, bad_root, node_root, sid, ask, approve_word, "signed"
+    )
     results.row(
         "wrong-key operator signature refused",
         "decide refused, ask still open, origin not granted",
-        {"verdict": wrong, "ask": _ask_status(session, ask_id),
-         "allowed": _allowed(node_root, origin)},
-        wrong.get("connected") and (not wrong.get("ok")) and _ask_status(session, ask_id) == "open"
+        {
+            "verdict": wrong,
+            "ask": _ask_status(session, ask_id),
+            "allowed": _allowed(node_root, origin),
+        },
+        wrong.get("connected")
+        and (not wrong.get("ok"))
+        and _ask_status(session, ask_id) == "open"
         and not _allowed(node_root, origin),
     )
     plain = await asyncio.to_thread(
-        _operator, root, op_root, node_root, sid, ask, approve_word, "plain")
+        _operator, root, op_root, node_root, sid, ask, approve_word, "plain"
+    )
     results.row(
         "plain ask_respond from the operator surface is not the decision",
         "refused, ask still open, origin not granted",
-        {"verdict": plain, "ask": _ask_status(session, ask_id),
-         "allowed": _allowed(node_root, origin)},
-        plain.get("connected") and (not plain.get("ok")) and _ask_status(session, ask_id) == "open"
+        {
+            "verdict": plain,
+            "ask": _ask_status(session, ask_id),
+            "allowed": _allowed(node_root, origin),
+        },
+        plain.get("connected")
+        and (not plain.get("ok"))
+        and _ask_status(session, ask_id) == "open"
         and not _allowed(node_root, origin),
     )
     question = ask["questions"][0]
@@ -964,14 +1146,18 @@ async def _inner_flow(
     results.row(
         "agent's own unsigned decide (node-local, no operator signature) refused",
         "extension refuses (unsigned_decision), origin not granted",
-        {"verdict": agent, "ask": _ask_status(session, ask_id),
-         "allowed": _allowed(node_root, origin)},
+        {
+            "verdict": agent,
+            "ask": _ask_status(session, ask_id),
+            "allowed": _allowed(node_root, origin),
+        },
         (not agent.get("ok")) and not _allowed(node_root, origin),
     )
 
     # --- the real decision ----------------------------------------------
     approved = await asyncio.to_thread(
-        _operator, root, op_root, node_root, sid, ask, approve_word, "signed")
+        _operator, root, op_root, node_root, sid, ask, approve_word, "signed"
+    )
     sites_after = _sites(node_root)
     allowed_after = _allowed(node_root, origin)
     results.row(
@@ -980,8 +1166,10 @@ async def _inner_flow(
         {"verdict": approved, "ask": _ask_status(session, ask_id), "sites": sites_after[:300]},
         bool(approved.get("ok")) and allowed_after,
     )
+    # ``call_5`` is the dark ``open``; the turn then polls the dark capture, so
+    # "call_5 recorded and the turn lock free" means both captures settled.
     resumed = await _continue_after_answer(
-        session, "call_3", "call_6", "now open it and capture both themes"
+        session, "call_3", "call_5", "now open it and capture both themes"
     )
     results.fact("resumed_after_approve", resumed)
     opened = _last_result(session, "call_3")
@@ -992,23 +1180,27 @@ async def _inner_flow(
         not opened["error"],
     )
     digests: dict[str, str] = {}
-    content: dict[str, float] = {}
+    outcomes: dict[str, dict[str, Any]] = {}
     for theme in ("light", "dark"):
         path = Path(shots[theme])
         digests[theme] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
-        content[theme] = round(rendered_fraction(path), 4) if path.exists() else 0.0
+        outcomes[theme] = dict(stream.captures[theme].outcome)
     results.fact(
         "screenshots",
-        {k: {"path": shots[k], "sha256": v, "rendered_fraction": content[k]}
-         for k, v in digests.items()},
+        {k: {"path": shots[k], "sha256": v, **outcomes[k]} for k, v in digests.items()},
     )
+    rendered = all(outcome["rendered"] for outcome in outcomes.values())
     results.row(
-        "light and dark screenshots both rendered and differ",
-        f"two PNGs, each rendered_fraction >= {RENDERED_MIN_FRACTION}, different sha256",
-        {"sha256": digests, "rendered_fraction": content},
-        all(digests.values())
-        and digests["light"] != digests["dark"]
-        and min(content.values()) >= RENDERED_MIN_FRACTION,
+        "light and dark screenshots rendered in their themes and differ",
+        "story root seen; rendered_fraction >= "
+        f"{RENDERED_MIN_FRACTION}; background luminance dark < {DARK_MAX_LUMINANCE:.0f}, "
+        f"light > {LIGHT_MIN_LUMINANCE:.0f}; different sha256",
+        {
+            "sha256": digests,
+            "captures": outcomes,
+            **({} if rendered else {"error": "not rendered"}),
+        },
+        rendered and all(digests.values()) and digests["light"] != digests["dark"],
     )
 
     # --- deny ---------------------------------------------------------------
@@ -1030,8 +1222,7 @@ async def _inner_flow(
         results.row(
             "deny: signed Deny keeps the origin out and the open refused",
             "decided; origin in sites' denied list, not allowed; open still refused",
-            {"verdict": denied, "lists": lists, "open": again["details"],
-             "resumed": resumed_deny},
+            {"verdict": denied, "lists": lists, "open": again["details"], "resumed": resumed_deny},
             bool(denied.get("ok"))
             and deny_origin in lists["denied"]
             and deny_origin not in lists["allowed"]
@@ -1040,36 +1231,41 @@ async def _inner_flow(
         )
 
     # --- expired card (entry withdrawn before the answer) -------------------
+    # Run 6 withdrew with a bare harness ``cancel_access`` that carried no
+    # requester identity, so the extension (which binds an entry to
+    # ``session:<id>``) kept it and rightly honoured the late Approve. The AGENT
+    # now withdraws through its own browser tool (``call_12``), the same
+    # identity-carrying path that raised it; the extension answers
+    # ``state: cancelled`` and the tool withdraws the card with it. Only then
+    # does the operator answer, from the card it had been shown.
     expire_origin = base["expire"]
     await session.prompt("try the third origin")
-    expire_ask = _open_site_ask(session, expire_origin)
+    expire_ask = _site_ask(session, expire_origin)
+    withdrawal = _last_result(session, "call_12")
     if expire_ask is None:
-        results.row("expired: card raised", "open ask", _last_result(session, "call_11"), False)
+        results.row("expired: card raised", "an ask", _last_result(session, "call_11"), False)
     else:
-        from local_operator.browser_bridge.backend import BridgeClient
-
-        # The extension entry must be GONE before the answer for this row to
-        # mean anything. Run 6 showed a bare harness ``cancel_access`` (no
-        # requester identity) did not withdraw it — the late Approve was then
-        # rightly honoured — so the withdrawal's own reply gates the verdict.
-        try:
-            withdrawn: Any = await BridgeClient().call("cancel_access", {"url": urls["expire"]})
-        except Exception as error:  # noqa: BLE001 — recorded, and the row is BLOCKED
-            withdrawn = {"error": f"{type(error).__name__}: {error}"}
-        gone = isinstance(withdrawn, dict) and bool(
-            withdrawn.get("cancelled") or withdrawn.get("removed") or withdrawn.get("ok")
+        details = withdrawal["details"] or {}
+        gone = (
+            not withdrawal["error"]
+            and details.get("state") == "cancelled"
+            and str(expire_ask["ask_id"]) in (details.get("withdrawn_asks") or ())
         )
         late = await asyncio.to_thread(
             _operator, root, op_root, node_root, sid, expire_ask, approve_word, "signed"
         )
+        allowed_late = _allowed(node_root, expire_origin)
         results.row(
-            "expired card: a signed Approve after the entry is gone grants nothing",
-            "entry withdrawn first; then refused; origin not allowed",
-            {"withdrawn": withdrawn, "verdict": late,
-             "allowed": _allowed(node_root, expire_origin)},
-            bool(late.get("connected"))
-            and (not late.get("ok"))
-            and not _allowed(node_root, expire_origin),
+            "expired card: a signed Approve after the entry is withdrawn grants nothing",
+            "agent cancel_access -> state cancelled + card withdrawn; "
+            "then the signed Approve is refused; origin not allowed",
+            {
+                "withdrawal": {"error": withdrawal["error"], "details": details},
+                "ask": _ask_status(session, str(expire_ask["ask_id"])),
+                "verdict": late,
+                "allowed": allowed_late,
+            },
+            bool(late.get("connected")) and (not late.get("ok")) and not allowed_late,
             blocked=not gone,
         )
     results.row(
@@ -1173,8 +1369,14 @@ def security_control(args: argparse.Namespace) -> int:
         [sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=60
     ).stdout.strip()
     grep = subprocess.run(
-        ["git", "grep", "-n", r"install_fixture_anchor\|_ANCHOR_ROOT_OVERRIDE =",
-         "--", "local_operator/"],
+        [
+            "git",
+            "grep",
+            "-n",
+            r"install_fixture_anchor\|_ANCHOR_ROOT_OVERRIDE =",
+            "--",
+            "local_operator/",
+        ],
         capture_output=True,
         text=True,
         cwd=REPO,
