@@ -12,6 +12,8 @@ import binascii
 import hashlib
 import logging
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -404,11 +406,20 @@ def resolve_supplement_file(
     try:
         if not resolved_path.is_file():
             return SUPPLEMENT_MISSING
-        size = resolved_path.stat().st_size
-        if size > SUPPLEMENT_FILE_MAX_BYTES:
+        # The pre-read stat is the fingerprint: a second, post-read stat would turn
+        # bytes already read into a 404 if the file were unlinked in between (the
+        # local route never did that), and the bytes-backed media never re-checks it.
+        before = resolved_path.stat()
+        if before.st_size > SUPPLEMENT_FILE_MAX_BYTES:
             return SUPPLEMENT_TOO_LARGE
+        fingerprint = (before.st_ino, before.st_size, before.st_mtime_ns)
+        # Every policy check above has already run for THIS request; the memo only
+        # skips re-reading and re-hashing bytes whose stat identity is unchanged.
+        memo_key = (str(directory), job, index, str(resolved_path), fingerprint)
+        cached = _resolved_file_memo_get(memo_key)
+        if cached is not None:
+            return cached
         data = resolved_path.read_bytes()
-        after = resolved_path.stat()
     except OSError:
         return SUPPLEMENT_MISSING
     if len(data) > SUPPLEMENT_FILE_MAX_BYTES:
@@ -416,13 +427,44 @@ def resolve_supplement_file(
     mime = SUPPLEMENT_FILE_TYPES.get(resolved_path.suffix.lower())
     if mime is None:
         return SUPPLEMENT_MISSING
-    return SessionMedia(
+    media = SessionMedia(
         mime,
         hashlib.sha256(data).hexdigest(),
         len(data),
         data=data,
-        fingerprint=(after.st_ino, after.st_size, after.st_mtime_ns),
+        fingerprint=fingerprint,
     )
+    _resolved_file_memo_put(memo_key, media)
+    return media
+
+
+#: Owner-side memo for :func:`resolve_supplement_file` (security review S-3). A mesh
+#: viewer re-resolves per 512 KiB chunk, so without it one 10 MB download costs ~20
+#: full reads + sha256s, and a ``length=1`` viewer can scale that per byte. Keyed by
+#: the session directory, job, index, resolved path AND the pre-read stat identity
+#: ``(st_ino, st_size, st_mtime_ns)``: a rewrite changes the stat, misses the memo,
+#: re-hashes, and the new sha256 fails ``expected_media_id`` (``remote_media_changed``)
+#: exactly as before. Bounded to a few entries (each <= 10 MB) so the owner never
+#: holds more than ~40 MB; a lock because resolvers run on worker threads.
+_RESOLVED_FILE_MEMO_ENTRIES = 4
+_resolved_file_memo: OrderedDict[tuple[Any, ...], SessionMedia] = OrderedDict()
+_resolved_file_memo_lock = threading.Lock()
+
+
+def _resolved_file_memo_get(key: tuple[Any, ...]) -> SessionMedia | None:
+    with _resolved_file_memo_lock:
+        media = _resolved_file_memo.get(key)
+        if media is not None:
+            _resolved_file_memo.move_to_end(key)
+        return media
+
+
+def _resolved_file_memo_put(key: tuple[Any, ...], media: SessionMedia) -> None:
+    with _resolved_file_memo_lock:
+        _resolved_file_memo[key] = media
+        _resolved_file_memo.move_to_end(key)
+        while len(_resolved_file_memo) > _RESOLVED_FILE_MEMO_ENTRIES:
+            _resolved_file_memo.popitem(last=False)
 
 
 def journal_references_component(payload: bytes, digest: str) -> bool:

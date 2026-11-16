@@ -6863,6 +6863,7 @@ def build_app(daemon: MobileDaemon):
         headers: dict[str, str],
         *,
         mime: Callable[[str], str] = lambda declared: declared,
+        buffer_cap: int | None = None,
     ) -> Response:
         """Stream one owner blob to HTTP with Range, one bounded mesh chunk at a time.
 
@@ -6871,11 +6872,24 @@ def build_app(daemon: MobileDaemon):
         ``mime`` maps the PEER'S declared type to the one this viewer will serve —
         the supplement routes never let a peer choose ``text/html`` at this origin.
         Refusals raise; callers map them through ``remote_failure``.
+
+        ``buffer_cap`` switches to collect-then-send for a body with a known cap
+        (featured files, 10 MB): a streamed body has already sent ``200`` before a
+        later chunk can be refused, so a mid-transfer mutation or grant revoke would
+        reach the phone as a short read, not the ``409``/``403`` the contract names.
+        Collecting the requested window first (every chunk still its own
+        re-authorized, identity-checked frame) lets those refusals be real statuses.
+        A peer-declared ``total`` over the cap is ``413 remote_too_large`` HERE: the
+        owner applies the same cap, but the viewer does not trust the owner to.
+        Uncapped bodies (retained media, sounds) keep streaming; there a mid-stream
+        refusal is a truncated body (docs/mobile.md).
         """
         from local_operator.network.sync import SYNC_CHUNK_BYTES
 
         metadata, first_byte = await fetch(offset=0, length=1, expected_media_id=None)
         total = metadata["total"]
+        if buffer_cap is not None and total > buffer_cap:
+            raise RemoteSessionError("remote_too_large", 413)
         served_mime = mime(metadata["mime"])
         window = _range_window(request.headers.get("range", ""), total)
         headers = {"Accept-Ranges": "bytes", **headers}
@@ -6905,9 +6919,30 @@ def build_app(daemon: MobileDaemon):
                 )
                 if reply["total"] != total or reply["mime"] != metadata["mime"]:
                     raise RemoteSessionError("remote_media_changed", 409)
+                if buffer_cap is not None and not data:
+                    # A hostile/broken owner answering empty would spin forever
+                    # while nothing has been sent; refuse instead.
+                    raise RemoteSessionError("remote_media_changed", 409)
                 yield data
                 offset += len(data)
 
+        if buffer_cap is not None:
+            # Bounded by buffer_cap (checked above); any refusal raises before a
+            # single header leaves, so the caller answers a real status.
+            body = bytearray()
+            async for part in chunks():
+                body.extend(part)
+                if len(body) > buffer_cap:
+                    raise RemoteSessionError("remote_too_large", 413)
+            if len(body) != max(0, end - start + 1):
+                # Over/under-long replies would contradict Content-Length.
+                raise RemoteSessionError("remote_media_changed", 409)
+            return Response(
+                bytes(body),
+                status_code=206 if window is not None else 200,
+                media_type=served_mime,
+                headers=headers,
+            )
         return SessionEventResponse(
             chunks(),
             status_code=206 if window is not None else 200,
@@ -6960,6 +6995,7 @@ def build_app(daemon: MobileDaemon):
         this relay's cookie-bearing origin.
         """
         from local_operator.mobile.remote_sessions import async_supplement_chunk
+        from local_operator.session.media import SUPPLEMENT_FILE_MAX_BYTES
 
         headers = {
             **_SUPPLEMENT_POLICY,
@@ -6984,7 +7020,16 @@ def build_app(daemon: MobileDaemon):
 
         try:
             return _supplement_response(
-                await remote_ranged_response(request, fetch, headers, mime=served)
+                await remote_ranged_response(
+                    request,
+                    fetch,
+                    headers,
+                    mime=served,
+                    # Featured files have the local 10 MB cap, so they are collected
+                    # before sending (refusals stay statuses); sounds have no cap and
+                    # keep streaming, as retained media does.
+                    buffer_cap=SUPPLEMENT_FILE_MAX_BYTES if kind == "file" else None,
+                )
             )
         except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
             return _supplement_response(remote_failure(exc))

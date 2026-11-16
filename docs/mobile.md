@@ -618,6 +618,19 @@ exactly as the owner's own phone would read it.
   Both peers validate the shape; 512 KiB chunks under the history reply budget; the
   answer binds session, ref, index, kind, sha256 identity, MIME and total, and later
   chunks must match that identity (a changed file is `remote_media_changed`).
+- **Featured files are collected, then sent; sounds stream.** A featured file is
+  capped at 10 MB, so the viewer fetches every chunk of the requested window
+  (each still its own re-authorized, identity-checked frame) BEFORE it sends a
+  header: a file rewritten or a grant revoked mid-transfer is a real `409
+  remote_media_changed` / `403 remote_forbidden`, never a short `200`. A declared
+  total over the cap is `413 remote_too_large` at the viewer too — it does not
+  trust the owner's cap. Sounds (and retained media) have no cap and keep
+  streaming: once their `200`/`206` is sent, a later refusal can only end the body
+  early, so **a short read on a streamed body must be treated as
+  `remote_media_changed`** — discard it, never concatenate a retry onto it.
+- **Range differs by transport, not policy.** A remote featured file honours
+  `Range` (`206`/`416`); a LOCAL conversation's featured-file route answers `200`
+  with the whole body (pre-existing, unchanged here). Clients must accept either.
 - **Capability.** `mobile-session-supplements-v1`, checked by the viewer before
   forwarding AND by the owner before serving. An owner without it is
   `409 remote_unsupported` ("Update <owner>").

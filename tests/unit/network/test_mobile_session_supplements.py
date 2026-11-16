@@ -12,11 +12,15 @@ allowlist — with cwd taken only from the OWNER's own registry record.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from local_operator.harness.types import Message
@@ -367,6 +371,115 @@ def test_view_grant_revoked_between_chunks(
     assert caught.value.code == "remote_forbidden" and caught.value.status == 403
 
 
+# --- HTTP contract over a REAL socket: refusals between chunks are statuses -------
+
+
+@contextlib.contextmanager
+def _socket_client(viewer: relay.RelayServer, monkeypatch: Any) -> Iterator[httpx.Client]:
+    """The viewer's phone app on a real uvicorn socket, logged in.
+
+    A TestClient cannot show the round-1 defect (R1/QA-1): it is the HTTP framing —
+    a ``200`` already on the wire before a later chunk is refused — that matters, so
+    these cases read real bytes off a real listener, as the phone does.
+    """
+    import threading
+
+    import uvicorn
+
+    from local_operator.mobile.daemon import MobileDaemon, build_app
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(viewer.root))
+    app = build_app(MobileDaemon(port=0, password="test-only"))
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=0, log_level="critical", lifespan="off")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        for _ in range(2000):
+            if server.started:
+                break
+            time.sleep(0.01)
+        assert server.started, "uvicorn did not start"
+        port = server.servers[0].sockets[0].getsockname()[1]
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60) as client:
+            client.post("/login", data={"password": "test-only"})
+            yield client
+    finally:
+        server.should_exit = True
+        thread.join(timeout=30)
+
+
+def _after_second_chunk(monkeypatch: Any, act: Any) -> list[dict[str, Any]]:
+    """Run ``act`` once the viewer has fetched bytes beyond the first-byte probe."""
+    real = remote_sessions.async_supplement_chunk
+    calls: list[dict[str, Any]] = []
+
+    async def wrapped(*args: Any, **fields: Any) -> Any:
+        calls.append(fields)
+        reply = await real(*args, **fields)
+        if len(calls) == 2:
+            await asyncio.to_thread(act)
+        return reply
+
+    monkeypatch.setattr(remote_sessions, "async_supplement_chunk", wrapped)
+    return calls
+
+
+def test_http_file_rewritten_between_chunks_is_409_not_a_short_200(
+    peer_pair: Any, monkeypatch: Any, tmp_path: Path
+) -> None:
+    server_a, server_b, _host, _port = peer_pair
+    _dialable_devices(peer_pair, monkeypatch)
+    seeded = _seed(server_b, tmp_path / "work", monkeypatch)
+    with _socket_client(server_a, monkeypatch) as client:
+        control = client.get(f"/api/sessions/{SESSION}/supplements/{JOB}/file?i={F_PAD}")
+        assert control.status_code == 200 and control.content == PAD_BYTES
+        calls = _after_second_chunk(
+            monkeypatch,
+            lambda: (seeded["pad"] / "chart.csv").write_bytes(b"rewritten" + PAD_BYTES),
+        )
+        response = client.get(f"/api/sessions/{SESSION}/supplements/{JOB}/file?i={F_PAD}")
+    assert len(calls) == 3  # probe, first full chunk, the refused one
+    assert response.status_code == 409, response.status_code
+    assert response.json()["code"] == "remote_media_changed"
+    assert PAD_BYTES[:64] not in response.content
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_http_grant_revoked_between_chunks_is_403_not_a_short_200(
+    peer_pair: Any, monkeypatch: Any, tmp_path: Path
+) -> None:
+    from tests.unit.network.test_relay_e2e import _pair_settled
+
+    server_a, server_b, _host, _port = peer_pair
+    server_b.bind()
+    server_b.bind_control()
+    server_b.start()
+    record, _host, _port = _pair_settled(
+        peer_pair,
+        monkeypatch,
+        role="read",
+        settings=relay.NetworkSettings(port=server_b.settings.port, listen_address="127.0.0.1"),
+    )
+    _seed(server_a, tmp_path / "work", monkeypatch)
+
+    def revoke() -> None:
+        with store.mutate(record.network_id, server_a.root) as current:
+            relay.set_member_capabilities(
+                current, device_id=server_b.identity.device_id, revoke=("view",)
+            )
+            store.save(current, server_a.root)
+
+    calls = _after_second_chunk(monkeypatch, revoke)
+    with _socket_client(server_b, monkeypatch) as client:
+        response = client.get(f"/api/sessions/{SESSION}/supplements/{JOB}/file?i={F_PAD}")
+    assert len(calls) == 3
+    assert response.status_code == 403, response.status_code
+    assert response.json()["code"] == "remote_forbidden"
+    assert PAD_BYTES[:64] not in response.content
+
+
 # --- unit: both peers' validate_read, the viewer MIME re-check --------------------
 
 
@@ -486,3 +599,47 @@ def test_json_frame_shape_is_stable() -> None:
     assert SUPPLEMENTS_CAPABILITY == wire.MOBILE_SESSION_SUPPLEMENTS_V1
     assert SUPPLEMENTS_CAPABILITY in wire.LINK_CAPABILITIES
     assert json.dumps(SUPPLEMENTS_CAPABILITY) == '"mobile-session-supplements-v1"'
+
+
+def test_viewer_caps_a_hostile_declared_file_total(monkeypatch: Any, tmp_path: Path) -> None:
+    """S-1: a peer declaring a featured file over 10 MB is 413 at the viewer, unread."""
+    import base64
+
+    from starlette.testclient import TestClient
+
+    from local_operator.mobile.daemon import MobileDaemon, build_app
+    from local_operator.session.media import SUPPLEMENT_FILE_MAX_BYTES
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    row = SessionRow(id=SESSION, mtime=0.0, name="s", owner_device="owner-device")
+    offsets: list[int] = []
+
+    async def hostile(_root: Any, _row: Any, purpose: str, **fields: Any) -> dict[str, Any]:
+        offsets.append(fields["offset"])
+        return {
+            "mobile_session_read": 1,
+            "session_id": SESSION,
+            "ref": fields["ref"],
+            "index": fields["index"],
+            "kind": fields["kind"],
+            "media_id": "e" * 64,
+            "mime": "audio/mpeg" if fields["kind"] == "sound" else "text/plain",
+            "total": SUPPLEMENT_FILE_MAX_BYTES + 1,
+            "offset": fields["offset"],
+            "data_b64": base64.b64encode(b"x" * fields["length"]).decode(),
+        }
+
+    monkeypatch.setattr(remote_sessions, "resolve_owner", lambda *_a: row)
+    monkeypatch.setattr(remote_sessions, "async_mesh_read", hostile)
+    client = TestClient(build_app(MobileDaemon(port=0, password="test-only")))
+    client.post("/login", data={"password": "test-only"})
+    refused = _file(client, 0)
+    assert refused.status_code == 413 and refused.json()["code"] == "remote_too_large"
+    assert offsets == [0]  # only the metadata probe; no body was pulled
+    # Sounds have no local cap, so the same declared total still serves a Range.
+    sound = client.get(
+        f"/api/sessions/{SESSION}/sound",
+        params={"digest": "f" * 32},
+        headers={"Range": "bytes=0-3"},
+    )
+    assert sound.status_code == 206 and sound.content == b"xxxx"
