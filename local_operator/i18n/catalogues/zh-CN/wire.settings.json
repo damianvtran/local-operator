@@ -240,7 +240,7 @@
   "wire.settings.display_nerd_icons.label": "Nerd Font字形",
   "wire.settings.display_notification_session_name.choice.false.description": "横幅上不出现名称",
   "wire.settings.display_notification_session_name.choice.true.description": "在横幅中标注会话名",
-  "wire.settings.display_notification_session_name.help": "会话名称、最后一行与错误原因会出现在横幅上，锁屏界面也包括在内。",
+  "wire.settings.display_notification_session_name.help": "会话名称、最后一行与错误原因会出现在横幅上，包括锁屏界面和已配对手机的通知；这些通知经由Radient的推送服务送达手机。",
   "wire.settings.display_notification_session_name.label": "通知中的会话名称",
   "wire.settings.display_notifications.choice.false.description": "从不通知",
   "wire.settings.display_notifications.choice.true.description": "未聚焦时通知",

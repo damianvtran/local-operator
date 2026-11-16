@@ -36,6 +36,7 @@ the globs in ``pyproject.toml`` are written to (see the note beside them).
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -250,9 +251,12 @@ def test_relay_web_unit_tests_are_kept_out_of_the_wheel() -> None:
     silently reach a ``.test.ts(x)`` anywhere else in the package."""
     assert sorted(_excluded_patterns()) == [
         "*.context.json",
+        "*.node-check.mjs",
         "*.parity.json",
         "*.test.ts",
         "*.test.tsx",
+        "*check-condense-parity-*.mjs",
+        "*contrast-contract.mjs",
     ]
     globs = _package_data_globs()
     tests = [relative for relative in _tree_files() if relative.endswith((".test.ts", ".test.tsx"))]
@@ -493,3 +497,75 @@ def test_the_web_tree_mirrors_every_root_ignore_rule_it_can_defeat() -> None:
         "match wins), or a path the root ignores becomes visible here. Missing: "
         + ", ".join(missing)
     )
+
+
+#: The package.json scripts the installed `lop mobile install` repair runs:
+#: `pnpm build` and its npm lifecycle hooks. Everything else in `scripts` is a
+#: developer/CI check run from a git checkout.
+BUILD_LIFECYCLE = ("prebuild", "build", "postbuild")
+
+#: A static relative import between the `.mjs` scripts (`from "./x.mjs"`).
+SCRIPT_IMPORT_RE = re.compile(r"""from\s+['"]\./(?P<name>[^'"]+\.mjs)['"]""")
+
+
+def _build_chain_scripts() -> set[str]:
+    """Every `scripts/*.mjs` the installed rebuild executes, derived from
+    package.json (`node scripts/<x>.mjs` in a build-lifecycle command) plus the
+    transitive closure of their static `./` imports."""
+    commands = json.loads((WEB / "package.json").read_text(encoding="utf-8"))["scripts"]
+    pending = [
+        name
+        for hook in BUILD_LIFECYCLE
+        for name in re.findall(r"node\s+scripts/([\w.-]+\.mjs)", commands.get(hook, ""))
+    ]
+    reached: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        source = (WEB / "scripts" / name).read_text(encoding="utf-8")
+        pending.extend(match["name"] for match in SCRIPT_IMPORT_RE.finditer(source))
+    return reached
+
+
+def test_check_only_relay_scripts_stay_out_and_the_build_chain_ships() -> None:
+    """The check-only `.mjs` scripts were dropped to keep the wheel under the
+    17.5 MiB PR budget (pyproject's exclude-package-data note). Pin both
+    directions: every script `pnpm build` reaches still ships (a missing one
+    breaks the installed repair that clears the phone's 503), the five
+    check-only scripts do not, and no shipped source imports one of them."""
+    globs = _package_data_globs()
+    chain = _build_chain_scripts()
+    # Sensitivity: the derivation must find the known chain, or this is vacuous.
+    assert {
+        "check-i18n.mjs",
+        "generate-theme-css.mjs",
+        "palette-source.mjs",
+        "inline-mark.mjs",
+        "check-bundle.mjs",
+    } <= chain
+    for name in chain:
+        assert _shipped(f"mobile/web/scripts/{name}", globs), name
+    dropped = {
+        "check-condense-parity-latest.mjs",
+        "check-condense-parity-pinned.mjs",
+        "check-condense-parity-pinned.node-check.mjs",
+        "check-i18n.node-check.mjs",
+        "contrast-contract.mjs",
+    }
+    assert not dropped & chain
+    for name in dropped:
+        assert (WEB / "scripts" / name).is_file(), name
+        assert not _shipped(f"mobile/web/scripts/{name}", globs), name
+    # The patterns match by basename across the whole package: pin that the
+    # dropped names exist nowhere else under local_operator/.
+    for pattern in ("*check-condense-parity-*.mjs", "*.node-check.mjs", "*contrast-contract.mjs"):
+        hits = [
+            path.relative_to(PACKAGE_DIR).as_posix()
+            for path in PACKAGE_DIR.rglob("*.mjs")
+            if fnmatch.fnmatchcase(path.name, pattern) and "node_modules" not in path.parts
+        ]
+        assert hits and all(hit.startswith("mobile/web/scripts/") for hit in hits), hits
+    importers = [spec for _importer, spec in _imported_specs() if Path(spec).name in dropped]
+    assert not importers, importers

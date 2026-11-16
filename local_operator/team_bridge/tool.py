@@ -692,6 +692,18 @@ def _failure_text(failure: BaseException) -> str:
                 value = _refusal_token(details.get(key)).split(";")[0].strip()
                 if value:
                     pairs.append(f"{key}={value}")
+            # The ids a report can quote to find this block: the client
+            # correlation id the request carried, and Cloudflare's ray when the
+            # edge answered through it. The client fullmatches each against its
+            # own exact shape (``_TRACE_ROOT``, ``_CF_RAY``); neither names what
+            # tripped the block. A value that is not one token is DROPPED, not
+            # joined: gluing a spaced value together would quote an id that
+            # never existed (review R1-3).
+            for key, label in (("trace", "trace"), ("cf_ray", "cf_ray")):
+                raw = details.get(key)
+                value = _refusal_token(raw)
+                if value and value == raw and " " not in value:
+                    pairs.append(f"{label}={value}")  # i18n: ignore machine footer token
     if not pairs:
         return str(failure)
     return f"{failure} [refusal {' '.join(pairs)}]"

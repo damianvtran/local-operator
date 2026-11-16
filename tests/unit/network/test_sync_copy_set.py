@@ -1352,6 +1352,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         2,
         "``run/ui-browser`` and its host record ``host.json``",
     ),
+    "local_operator/ui_browser/backend.py": (
+        1,
+        "``HEALTH_FAILURE_LOG_NAME`` ('browser-health.log') is the per-DEVICE record of "
+        "failed UI-host health probes, written under ``paths.log_dir()`` beside the other "
+        "machine logs; never inside a session directory, and device-local by design (it "
+        "describes this machine's load and this machine's desktop app pid/port)",
+    ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
         4,

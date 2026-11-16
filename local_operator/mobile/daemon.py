@@ -5504,13 +5504,23 @@ class MobileDaemon:
         completion published in that window would otherwise be counted against
         a snapshot that predates it. The window left (this read to the tick's
         collect) is closed by the worker flooring a completion's count at 1.
+
+        The revision read sits INSIDE the guard (#3989 review m1): the store can
+        answer ``AttentionReadDeferred`` while a writer holds it, and that must
+        only skip this refresh to the next scan, never escape into the scan
+        loop. The listing cache is invalidated before the rebuild (#3989 QA
+        Q-1): ``summaries()`` answers from its ``SUMMARIES_CACHE_TTL_S`` cache,
+        so a rebuild "at" the new revision could otherwise return a listing
+        built before it, and the push count would lag the badge by up to a
+        second while this method records the new revision as done.
         """
         from local_operator.session.attention import AttentionStore
 
-        revision = await asyncio.to_thread(AttentionStore().revision)
-        if revision == self._push_count_revision:
-            return
         try:
+            revision = await asyncio.to_thread(AttentionStore().revision)
+            if revision == self._push_count_revision:
+                return
+            self.table.invalidate_summaries_cache()
             await self.table.summaries()
         except Exception:  # noqa: BLE001 — a push fault must not cost the tick
             logger.warning("push count refresh failed", exc_info=True)
@@ -7398,6 +7408,13 @@ def build_app(daemon: MobileDaemon):
                 # /api/push/register`` refuses unknown fields, so an older
                 # daemon would refuse the whole registration.
                 "push_preferences": {"available": True},
+                # ``preferences.previews`` (session name + reply preview in the
+                # completion banner) is accepted. Separate from
+                # ``push_preferences`` because a daemon that shipped that
+                # capability without this key refuses ``previews`` as an
+                # unknown field, failing the whole registration; the app sends
+                # the key only when this capability is present.
+                "push_previews": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".

@@ -2266,6 +2266,27 @@ class AuthStore:
             return creds
         return [c for c in creds if c.disabled_cause is None]
 
+    def current_credential_ids(self, provider: str) -> frozenset[int] | None:
+        """Enabled owner-row ids, or None when inventory is not authoritative.
+
+        A mesh cooldown can name a row that disappeared since the holder saw it.
+        Dropping such an exclusion is safe only after a successful CURRENT read:
+        list_credentials intentionally maps a missing connection to [], whereas
+        policy must distinguish that unknown from a verified empty pool. Read
+        metadata only; choosing a cascade needs no decrypted bearer payloads.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None or (self._read_only and self.read_only_sidecar_present()):
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT id FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL",
+                (self._storage_id(provider),),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        return frozenset(int(row[0]) for row in rows)
+
     def credential_identity_digest(self) -> tuple[tuple[Any, ...], ...] | None:
         """Which credentials exist and whether each can authorize, and nothing else.
 
@@ -5754,6 +5775,7 @@ class AuthStore:
         model_id: str = "",
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
+        persisted_kinds: frozenset[str] | None = None,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -5769,8 +5791,14 @@ class AuthStore:
         :attr:`~local_operator.harness.types.ChatRequest.isolated`.
         ``exclude_keys`` / ``exclude_credential_ids`` hide the rows they name
         from THIS resolve alone — see :meth:`_resolve`.
+        ``persisted_kinds`` opts into the existing stored-row-only cascade. A
+        broker hiding owner rows must reach an eligible stored API key rather
+        than stop at an ambient winner that its safety backstop must discard.
+        None preserves the ordinary cascade, including override short-circuiting.
         """
-        if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
+        if persisted_kinds is None and (
+            self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
+        ):
             return None
         key, row = await self._resolve(
             provider,
@@ -5780,6 +5808,7 @@ class AuthStore:
             model_id=model_id,
             exclude_keys=exclude_keys,
             exclude_credential_ids=exclude_credential_ids,
+            persisted_kinds=persisted_kinds,
         )
         if key is None:
             return None

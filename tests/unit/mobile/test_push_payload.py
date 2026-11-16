@@ -16,14 +16,18 @@ lives in ``test_push_wire_contract.py``.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import importlib
 import json
 import re
+import textwrap
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from local_operator import resume
 from local_operator.mobile import push_credentials, push_handles, push_payload
 from local_operator.mobile.push_payload import (
     ALERT_BODY_FIELD,
@@ -50,8 +54,20 @@ from local_operator.mobile.push_payload import (
     emit_body,
     push_sound,
 )
+from local_operator.notifications import compose
 from local_operator.notifications.sound import DEFAULT_SOUND_ID, sound_ids
-from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_subtitle
+from local_operator.redaction_shapes import REDACTION_MARKER
+from local_operator.tui.notify import (
+    APP_NAME,
+    BACKGROUND_FALLBACK_TITLE,
+    BACKGROUND_SNIPPET_MAX_CHARS,
+    BODIES,
+    BODY_COMPLETE,
+    CONTEXT_MIXED,
+    CONTEXTS,
+    MAX_TITLE_CHARS,
+    digest_subtitle,
+)
 
 #: ``tests/unit/mobile/<this file>`` -> the repo root, where the shared
 #: contract tree lives. Derived from the file rather than the cwd so the suite
@@ -69,6 +85,93 @@ _TYPES: dict[str, type] = {
     "list[str]": list,
     "list[object]": list,
 }
+
+
+@pytest.fixture(autouse=True)
+def _names_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every cell runs with ``display.notification_session_name`` OFF by default.
+
+    Since 2026-11-14 the completion alert is the desktop composer's output, which
+    reads that switch; the filed literals are the PRIVATE form (app name + house
+    sentence), the one form that is a fixed string. Pinning the switch here keeps
+    the goldens independent of the developer's own settings. Cells about the
+    named form opt back in with :func:`_names_on`.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: False)
+
+
+def _names_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+
+
+def _session(root: Path, *, assistant: str = "", title: str = "") -> Path:
+    """A session directory in the shapes ``resume.py`` reads (as test_compose's).
+
+    Real files rather than a stubbed composer, so these cells prove the push says
+    what the desktop composer says for the SAME directory.
+    """
+    session = root / "sessions" / "abcdef123456"
+    session.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = [
+        {
+            "id": "user-1",
+            "ts": 1.0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": "do the thing"}]},
+        }
+    ]
+    if assistant:
+        rows.append(
+            {
+                "id": "assistant-1",
+                "ts": 2.0,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "assistant",
+                    "content": [{"text": assistant}],
+                },
+            }
+        )
+    (session / "transcript.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    if title:
+        (session / "title.json").write_text(
+            json.dumps({"text": title, "user_set": True, "names": [title]}), encoding="utf-8"
+        )
+    return session
+
+
+def _incident(session: Path, raw: str) -> None:
+    """Append the ``session_incident`` record a classified failure journals.
+
+    The shape ``incidents.py`` writes (as test_compose's helper): compose reads
+    ``details.raw`` as an ``error`` banner's failure line, which can quote a
+    prompt fragment, a path or an account id — the riskiest text a push can
+    carry (security review r1, S-4).
+    """
+    row = {
+        "id": "incident-1",
+        "ts": 3.0,
+        "type": "message",
+        "payload": {
+            "kind": "custom",
+            "custom_type": "session_incident",
+            "details": {"text": f"rendered: {raw}", "raw": raw},
+        },
+    }
+    with (session / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+#: Every string the PRIVATE alert may carry: the house vocabulary, nothing else.
+def _house_strings() -> set[str]:
+    return (
+        set(BODIES.values())
+        | set(CONTEXTS.values())
+        | {CONTEXT_MIXED, BACKGROUND_FALLBACK_TITLE, APP_NAME}
+    )
 
 
 def _fixture(name: str) -> dict[str, Any]:
@@ -137,9 +240,9 @@ def _without_alert(value: dict[str, Any]) -> dict[str, Any]:
     The deny list is scanned by KEY NAME and forbids ``title``/``body`` as payload
     fields. Since the lane's ruling the machine composes the user-visible alert,
     and that object is the one place those two keys legitimately appear. Its
-    CONTENT stays checked: :func:`_check_alert` asserts it is the house text plus
-    the count, so removing it from the name scan does not loosen the rule that no
-    name, snippet or error line may travel.
+    CONTENT stays checked: :func:`_check_alert` asserts a filed literal is the
+    private form (app name + house sentence), so removing it from the name scan
+    does not loosen what the fixtures promise when the privacy switch is off.
     """
     return {key: item for key, item in value.items() if key != ALERT_FIELD}
 
@@ -148,8 +251,8 @@ def _check_alert(value: dict[str, Any], fixture: dict[str, Any], *, where: str) 
     """The alert's own allow-list, and the two facts about its text."""
     alert = value[ALERT_FIELD]
     _check_shape(alert, fixture["alert_required"], {}, where=f"{where}.{ALERT_FIELD}")
-    assert alert[ALERT_TITLE_FIELD] == APP_NAME, f"{where}: the title is the product's own name"
-    assert " · " in alert[ALERT_BODY_FIELD], f"{where}: the body is <house constant> · <count>"
+    assert alert[ALERT_TITLE_FIELD] == APP_NAME, f"{where}: the private title is the app name"
+    assert alert[ALERT_BODY_FIELD] in _house_strings(), f"{where}: the private body is house text"
 
 
 def _walk_keys(value: object) -> list[str]:
@@ -271,9 +374,7 @@ def test_the_completion_payload_and_emit_body_equal_the_filed_literals() -> None
         "fixture's allow-list in the same change"
     )
     _check_alert(payload, fixture, where="emit-completion")
-    assert payload[ALERT_FIELD] == completion_alert(
-        COMPLETION_INPUT["kind"], COMPLETION_INPUT["count"]
-    )
+    assert payload[ALERT_FIELD] == completion_alert(COMPLETION_INPUT["kind"])
 
     body = emit_body(payload, DEVICE_ROWS)
     # Both sides of the block, against the block's own allow-list FIRST, so a
@@ -350,7 +451,7 @@ def test_the_digest_payload_equals_the_filed_literals_with_and_without_exclude()
     assert without == fixture["exclude_absent_payload"]
     assert "exclude" not in without
     _check_alert(with_exclude, fixture, where="emit-digest")
-    assert with_exclude[ALERT_FIELD] == digest_alert(DIGEST_INPUT["kinds"], DIGEST_INPUT["count"])
+    assert with_exclude[ALERT_FIELD] == digest_alert(DIGEST_INPUT["kinds"])
 
     body = emit_body(with_exclude, DEVICE_ROWS)
     _check_block(body["devices"], fixture, where="emit-digest.body.devices")
@@ -403,8 +504,8 @@ def test_the_alert_allow_list_bites_in_both_directions() -> None:
     accept it, and one dropped must be dropped there too.
     """
     for name, alert in (
-        ("emit-completion.json", completion_alert("complete", 2)),
-        ("emit-digest.json", digest_alert(["complete", "complete"], 2)),
+        ("emit-completion.json", completion_alert("complete")),
+        ("emit-digest.json", digest_alert(["complete", "complete"])),
     ):
         fixture = _fixture(name)
         required = fixture["alert_required"]
@@ -417,61 +518,569 @@ def test_the_alert_allow_list_bites_in_both_directions() -> None:
             _check_shape({ALERT_TITLE_FIELD: APP_NAME}, required, {}, where="mutated")
 
 
-def test_the_alert_is_the_house_text_and_the_count_and_nothing_else() -> None:
-    """The machine composes the user-visible text, so this is the privacy cell.
+def test_a_named_completion_is_the_desktop_composers_title_and_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's request (2026-11-14): say which session, preview the turn.
 
-    Every string the alert can carry is the product's own: the app name, a house
-    sentence for the outcome, and the §3.2 count. A name, a snippet or a
-    provider's error line has no way in — which is why the builder takes a KIND
-    and a COUNT and no free text at all.
+    Asserted as EQUALITY with what the desktop composer returns for the same
+    directory, so the phone and the desktop cannot drift into two formatters.
     """
-    alert = completion_alert("complete", 2)
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="Migrated 14 tables.", title="Quota reporting fix")
+    composed = compose("complete", session_dir=session)
+
+    alert = completion_alert("complete", session_dir=session, previews=True)
+
+    assert alert == {ALERT_TITLE_FIELD: composed.title, ALERT_BODY_FIELD: composed.body}
     assert alert == {
-        ALERT_TITLE_FIELD: APP_NAME,
-        ALERT_BODY_FIELD: f"{BODIES['complete']} · 2 conversations need you",
+        ALERT_TITLE_FIELD: "Quota reporting fix",
+        ALERT_BODY_FIELD: "Migrated 14 tables.",
     }
-    assert completion_alert("error", 5)[ALERT_BODY_FIELD] == (
-        f"{BODIES['error']} · 5 conversations need you"
+    assert _fixture("emit-completion.json")["alert_named_example"] == alert
+    # No count phrase any more — the count stays a payload field only.
+    assert "need" not in alert[ALERT_BODY_FIELD]
+
+
+#: Text the fixture session carries in every place a banner could quote it:
+#: the name, the last reply, and an ``error``'s incident ``details.raw``.
+_LEAK_NAME = "Project Falcon"
+_LEAK_REPLY = "Secret plan: rotate the keys"
+_LEAK_FAILURE = "quota exhausted for acct-7731 while reading /Users/alice/payroll.xlsx"
+
+
+def _leaky_session(root: Path) -> Path:
+    session = _session(root, assistant=_LEAK_REPLY, title=_LEAK_NAME)
+    _incident(session, _LEAK_FAILURE)
+    return session
+
+
+def _emit_bytes(session: Path, kind: str, *, previews: bool) -> tuple[dict[str, Any], bytes]:
+    payload = completion_payload(
+        **{**COMPLETION_INPUT, "kind": kind, "session_dir": session, "previews": previews}
     )
-    # The singular: a count of one is the common case for a completion push, and
-    # "1 conversations need you" is prose no surface should ship.
-    assert completion_alert("complete", 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    raw = json.dumps(emit_body(payload, DEVICE_ROWS), ensure_ascii=False).encode("utf-8")
+    return payload, raw
+
+
+def _assert_generic(payload: dict[str, Any], raw: bytes, kind: str) -> None:
+    """The P2 guard, re-scoped (security review r1, S-1/S-4): GENERIC unless allowed.
+
+    The alert is the house constants for the kind — the product name over the
+    house sentence, no count line — and no name, reply snippet, failure text or
+    session id appears anywhere in the serialised emit.
+    """
+    assert payload[ALERT_FIELD] == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: BODIES.get(kind, BODY_COMPLETE),
+    }
+    leaks = (_LEAK_NAME, _LEAK_REPLY, "rotate the keys", _LEAK_FAILURE, "acct-7731", "abcdef123456")
+    for leaked in leaks:
+        assert leaked.encode("utf-8") not in raw, (kind, leaked)
+
+
+@pytest.mark.parametrize("kind", PUSH_KINDS)
+def test_with_previews_off_no_session_text_reaches_the_emit_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A phone with previews off: generic, even with the desktop switch ON.
+
+    ``previews=False`` is what the worker passes when any live phone resolves
+    ``preferences.previews`` to false; the desktop flag cannot override it.
+    """
+    _names_on(monkeypatch)
+    payload, raw = _emit_bytes(_leaky_session(tmp_path), kind, previews=False)
+    _assert_generic(payload, raw, kind)
+
+
+@pytest.mark.parametrize("kind", PUSH_KINDS)
+def test_with_names_off_no_session_text_reaches_the_emit_bytes(tmp_path: Path, kind: str) -> None:
+    """The desktop switch off (the autouse default here): generic, even with previews on.
+
+    Every kind, and ``error`` in particular: its failure line comes from the
+    incident's ``details.raw`` and is gated by the same desktop switch.
+    """
+    session = _leaky_session(tmp_path)
+    payload, raw = _emit_bytes(session, kind, previews=True)
+    _assert_generic(payload, raw, kind)
+    composed = compose(kind, session_dir=session)  # type: ignore[arg-type]
+    assert payload[ALERT_FIELD] == {
+        ALERT_TITLE_FIELD: composed.title,
+        ALERT_BODY_FIELD: composed.body,
+    }
+    if kind == "complete":
+        assert _fixture("emit-completion.json")["alert_private"] == payload[ALERT_FIELD]
+
+
+def test_previews_default_to_generic_for_a_caller_that_does_not_claim_consent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``previews`` defaults False on both builders, so forgetting it cannot leak."""
+    _names_on(monkeypatch)
+    session = _leaky_session(tmp_path)
+    payload = completion_payload(**{**COMPLETION_INPUT, "session_dir": session})
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    _assert_generic(payload, raw, COMPLETION_INPUT["kind"])
+    assert completion_alert("complete", session_dir=session) == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: BODY_COMPLETE,
+    }
+
+
+def test_with_both_switches_on_an_error_carries_its_failure_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The positive control for the matrix above: the leak strings DO reach the
+    bytes when both consents hold, so their absence there is the gate's doing."""
+    _names_on(monkeypatch)
+    _payload, raw = _emit_bytes(_leaky_session(tmp_path), "error", previews=True)
+    assert _LEAK_NAME.encode() in raw
+    assert _LEAK_FAILURE.encode() in raw
+
+
+def test_the_generic_alert_is_the_house_text_and_nothing_else() -> None:
+    """The house-constant cell, restored for the generic form (S-1).
+
+    Every string a generic alert carries is the product's own: the app name and
+    the house sentence for the outcome. No count line (operator, 2026-11-14) —
+    the count rides the payload's ``count`` field only.
+    """
+    for kind in PUSH_KINDS:
+        alert = completion_alert(kind)
+        assert alert == {
+            ALERT_TITLE_FIELD: APP_NAME,
+            ALERT_BODY_FIELD: BODIES.get(kind, BODY_COMPLETE),
+        }
+        assert set(alert.values()) <= _house_strings()
+        assert "need" not in alert[ALERT_BODY_FIELD]
+    assert completion_alert("not-a-kind")[ALERT_BODY_FIELD] == BODY_COMPLETE
+    payload = completion_payload(**{**COMPLETION_INPUT, "count": None})
+    assert payload["count"] == 0, "an unknown count travels as 0 (wire_count)"
+
+
+#: A vendor-prefixed OpenAI-style key and a bearer token, assembled at runtime so
+#: this file does not itself carry a credential-shaped literal.
+_FAKE_KEY = "sk-" + "proj-" + "Z9" * 24
+_FAKE_BEARER = "eyJhbGciOiJIUzI1NiJ9." + "a1B2c3D4" * 5
+
+
+def test_credential_shaped_text_is_scrubbed_before_it_leaves_the_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-2: a reply quoting a key or a Bearer header never reaches the emit bytes."""
+    _names_on(monkeypatch)
+    session = _session(
+        tmp_path,
+        assistant=f"Set OPENAI_API_KEY={_FAKE_KEY} then send Authorization: Bearer {_FAKE_BEARER}",
+        title=f"Key {_FAKE_KEY}",
+    )
+    payload, raw = _emit_bytes(session, "complete", previews=True)
+    assert _FAKE_KEY.encode() not in raw
+    assert _FAKE_BEARER.encode() not in raw
+    assert "[redacted]" in payload[ALERT_FIELD][ALERT_BODY_FIELD]
+    # The failure line goes through the same pass.
+    failing = _session(tmp_path / "e", assistant="x", title="Deploy")
+    _incident(failing, f"401 from provider: Authorization: Bearer {_FAKE_BEARER}")
+    _payload, raw = _emit_bytes(failing, "error", previews=True)
+    assert _FAKE_BEARER.encode() not in raw
+    # Scrubbed BEFORE the empty-check: a string that is only a secret still
+    # yields a non-empty alert string.
+    assert push_payload._bounded_alert_text(_FAKE_KEY, "house")
+
+
+#: High-entropy credentials for the straddle sweep, built at runtime (no
+#: credential-shaped literal in this file) and non-repeating, so any 8-character
+#: window of one is evidence of THAT secret rather than of a repeated filler.
+_ENTROPY = "Qm7Xv2Lr9KpT4wZc8NbF3hJd6YsG1aEu5RtV0oPiMnBq"
+_STRADDLE_SECRETS = {
+    "github-pat": "ghp_" + _ENTROPY[:36],
+    "openai-project-key": "sk-" + "proj-" + _ENTROPY + _ENTROPY[::-1][:4],
+    "bare-jwt": (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        + ".eyJzdWIiOiJ1c2VyLTc3MzEiLCJlbWFpbCI6ImFAYi5jIn0"
+        + "."
+        + _ENTROPY[:43]
+    ),
+}
+
+
+def _fragments(secret: str, width: int = 8) -> set[str]:
+    return {secret[start : start + width] for start in range(len(secret) - width + 1)}
+
+
+@pytest.mark.parametrize("field", ["title", "body", "failure"])
+@pytest.mark.parametrize("shape", sorted(_STRADDLE_SECRETS))
+def test_a_secret_straddling_compose_s_clamp_leaves_no_fragment_in_the_emit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str, field: str
+) -> None:
+    """S-6 (security review r2; QA Q-1): compose clamps the title at 80 and the
+    snippet/failure line at 120. Scrubbing only AFTER that cut let a token cut
+    mid-way slip past its own pattern (up to ~20 chars of ``ghp_``, a JWT's
+    header and claims). The secret is slid across padding 20-139 — both sides
+    of both cuts — through the real ``completion_payload`` → ``emit_body`` bytes,
+    and no 8-character window of it may survive anywhere in them."""
+    _names_on(monkeypatch)
+    secret = _STRADDLE_SECRETS[shape]
+    fragments = _fragments(secret)
+    for pad in range(20, 140):
+        # Words then a space, so the secret starts on a word boundary exactly at
+        # ``pad`` — the position a real reply quoting a key would put it.
+        padding = ("note " * 40)[: pad - 1] + " "
+        text = padding + secret + " and the rest of the line"
+        root = tmp_path / f"{field}-{pad}"
+        if field == "title":
+            session, kind = _session(root, assistant="Done.", title=text), "complete"
+        elif field == "body":
+            session, kind = _session(root, assistant=text, title="Deploy"), "complete"
+        else:
+            session, kind = _session(root, assistant="x", title="Deploy"), "error"
+            _incident(session, text)
+        _payload, raw = _emit_bytes(session, kind, previews=True)
+        decoded = raw.decode("utf-8")
+        leaked = sorted(fragment for fragment in fragments if fragment in decoded)
+        assert not leaked, (shape, field, pad, leaked[:3])
+
+
+#: The four invisible characters security review r3 (S-8) split a token with:
+#: zero-width space, LRM, ARABIC LETTER MARK and RLO.
+_SPLITTERS = ("\u200b", "\u200e", "\u061c", "\u202e")
+
+
+@pytest.mark.parametrize("field", ["title", "body", "failure"])
+@pytest.mark.parametrize("splitter", _SPLITTERS)
+@pytest.mark.parametrize("shape", ["github-pat", "openai-project-key"])
+def test_a_secret_split_by_an_invisible_character_leaves_no_fragment_in_the_emit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str, splitter: str, field: str
+) -> None:
+    """S-8 (security review r3): stripping invisibles AFTER scrubbing rejoined a
+    token the scrubber had seen only in pieces. Each piece here is 7 characters —
+    too short for any shape and below this sweep's 8-character evidence window —
+    so a leak can only appear if something glues the pieces back together after
+    the scrub. Driven through the real ``completion_payload`` → ``emit_body``
+    bytes, at offsets on both sides of compose's 80/120 cuts."""
+    _names_on(monkeypatch)
+    secret = _STRADDLE_SECRETS[shape]
+    split = splitter.join(secret[start : start + 7] for start in range(0, len(secret), 7))
+    fragments = _fragments(secret)
+    for pad in (20, 60, 100):
+        text = ("note " * 40)[: pad - 1] + " " + split + " and the rest of the line"
+        root = tmp_path / f"{field}-{pad}"
+        if field == "title":
+            session, kind = _session(root, assistant="Done.", title=text), "complete"
+        elif field == "body":
+            session, kind = _session(root, assistant=text, title="Deploy"), "complete"
+        else:
+            session, kind = _session(root, assistant="x", title="Deploy"), "error"
+            _incident(session, text)
+        _payload, raw = _emit_bytes(session, kind, previews=True)
+        decoded = raw.decode("utf-8")
+        leaked = sorted(fragment for fragment in fragments if fragment in decoded)
+        assert not leaked, (shape, hex(ord(splitter)), field, pad, leaked[:3])
+
+
+#: The compose MODULE (the package re-exports a ``compose`` function under the
+#: same name), for its private snippet helpers.
+_COMPOSE = importlib.import_module("local_operator.notifications.compose")
+
+
+def _spy_scrub_lengths(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the length of every text compose hands the scrubber."""
+    seen: list[int] = []
+    real = _COMPOSE._scrubbed
+
+    def _spy(text: str) -> str:
+        seen.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(_COMPOSE, "_scrubbed", _spy)
+    return seen
+
+
+def test_the_snippet_scrub_is_bounded_and_matches_the_whole_text_scrub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N-3: a long reply is scrubbed only up to the shown head plus the margin,
+    and the snippet is IDENTICAL to scrubbing everything — including a secret
+    straddling the 120 cut, swept across it like the S-6 sweep."""
+    seen = _spy_scrub_lengths(monkeypatch)
+    secret = _STRADDLE_SECRETS["github-pat"]
+    tail = " and the rest of the line" + " more prose here" * 2000  # ~32 k chars
+    for pad in range(90, 140, 7):
+        raw = ("note " * 40)[: pad - 1] + " " + secret + tail
+        seen.clear()
+        snippet = _COMPOSE._scrubbed_snippet(raw, BACKGROUND_SNIPPET_MAX_CHARS)
+        assert seen and max(seen) < 5_000 < len(raw), (pad, seen)
+        whole_scrub = _COMPOSE._scrubbed(raw)
+        whole = _COMPOSE._keep_markers_whole(
+            resume._condense(whole_scrub, BACKGROUND_SNIPPET_MAX_CHARS),
+            " ".join(whole_scrub.split()),
+        )
+        assert snippet == whole, pad
+        assert not [fragment for fragment in _fragments(secret) if fragment in snippet]
+
+
+def test_the_snippet_scrub_falls_back_to_the_whole_text_when_redaction_eats_the_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded window is only trusted while the shown text sits at least
+    half the margin from its edge. A run of tokens each redacted to a 10-char
+    marker shrinks the window past that, so the whole reply is scrubbed."""
+    seen = _spy_scrub_lengths(monkeypatch)
+    tokens = " ".join(
+        "ghp_" + (_ENTROPY[index % 8 :] + _ENTROPY)[:36] for index in range(300)
+    )  # ~12 k chars that redact to ~3 k
+    raw = "short intro " + tokens
+    snippet = _COMPOSE._scrubbed_snippet(raw, BACKGROUND_SNIPPET_MAX_CHARS)
+    assert len(raw) in seen, seen
+    assert "ghp_" not in snippet
+
+
+@pytest.mark.parametrize("budget_field", ["title", "body"])
+def test_a_cut_inside_a_redaction_marker_drops_the_partial_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget_field: str
+) -> None:
+    """Q-2 (QA r2): the 80/120 cut landing inside the redaction marker must not
+    leave a broken marker such as its first 8 characters; the cut backs up to
+    before the marker. A literal marker prefix the user typed at the cut is left
+    alone (positive control below)."""
+    _names_on(monkeypatch)
+    marker = REDACTION_MARKER
+    secret = _STRADDLE_SECRETS["github-pat"]
+    budget = MAX_TITLE_CHARS if budget_field == "title" else BACKGROUND_SNIPPET_MAX_CHARS
+    hit = 0
+    for pad in range(budget - len(marker) - 2, budget + 2):
+        # Glued with "(" rather than a space: ``_condense`` already backs a cut
+        # up to a nearby space, so only a marker glued to its word reaches the
+        # cut intact — the case that showed the broken marker.
+        text = "x" * pad + "(" + secret + " tail words"
+        root = tmp_path / str(pad)
+        if budget_field == "title":
+            shown = compose("complete", session_dir=_session(root, assistant="ok", title=text))
+            value = shown.title
+        else:
+            shown = compose("complete", session_dir=_session(root, assistant=text, title="T"))
+            value = shown.body.removesuffix("…")
+        start = pad + 1
+        if start < budget < start + len(marker):
+            hit += 1
+        assert not any(value.endswith(marker[:k]) for k in range(1, len(marker))), (pad, value)
+    assert hit, "the sweep never put the cut inside the marker"
+    # Positive control: user text that merely LOOKS like a marker prefix is kept.
+    assert _COMPOSE._marker_safe_cut("a" * 10 + marker[:3], 13) == 13
+
+
+#: A PEM-SHAPED block the size of an RSA-8192 key (~6.4 KB of body), longer than
+#: the N-3 margin. NOT a key: non-repeating base64 filler (sha256 digests of the
+#: integers) between real armour lines, assembled at runtime so this file carries
+#: no credential-shaped literal. Non-repeating, so any 8-character run of the body
+#: in the output is evidence of THIS block.
+_LONG_PEM_BODY = "\n".join(
+    textwrap.wrap(
+        "".join(
+            base64.b64encode(hashlib.sha256(str(i).encode()).digest()).decode().rstrip("=")
+            for i in range(160)
+        )[:6400],
+        64,
+    )
+)
+_LONG_PEM = (
+    "-----" + "BEGIN PRIVATE KEY-----\n" + _LONG_PEM_BODY + "\n-----END PRIVATE KEY" + "-----"
+)
+
+
+def test_a_pem_key_longer_than_the_scrub_window_never_reaches_the_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-9 (security review r4): the N-3 window held the BEGIN line but not the
+    END of an 8192-bit-sized key, so the window scrub left the block whole and
+    its header and first body line reached the push bytes and the toast. A
+    surviving multi-line opener now forces the whole-reply scrub."""
+    _names_on(monkeypatch)
+    raw = "Here is the key:\n" + _LONG_PEM + "\nDone."
+    # Preconditions: the block outruns the window, and a whole-text scrub
+    # matches this shape (so the fallback has something to fall back to).
+    assert len(_LONG_PEM) > _COMPOSE._SCRUB_MARGIN_CHARS + BACKGROUND_SNIPPET_MAX_CHARS
+    assert "BEGIN PRIVATE KEY" not in _COMPOSE._scrubbed(raw)
+    body_runs = {run for line in _LONG_PEM_BODY.splitlines() for run in _fragments(line)}
+    session = _session(tmp_path, assistant=raw, title="Deploy")
+    composed = compose("complete", session_dir=session)
+    assert "BEGIN PRIVATE KEY" not in composed.body
+    assert not [run for run in body_runs if run in composed.body]
+    assert REDACTION_MARKER in composed.body
+    _payload, emitted = _emit_bytes(session, "complete", previews=True)
+    text = emitted.decode("utf-8")
+    assert "BEGIN PRIVATE KEY" not in text
+    assert not [run for run in body_runs if run in text]
+
+
+def test_compose_scrubs_before_its_own_clamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix is at the SOURCE: the desktop toast (compose's other readers)
+    gets the scrubbed text too, not only the push. A ``ghp_`` token starting at
+    column 100 of the reply straddles the 120 cut and must be gone from compose
+    itself, before ``_bounded_alert_text`` ever runs."""
+    _names_on(monkeypatch)
+    secret = _STRADDLE_SECRETS["github-pat"]
+    session = _session(tmp_path, assistant=("note " * 20)[:99] + " " + secret, title="Deploy")
+    composed = compose("complete", session_dir=session)
+    assert composed.body_is_snippet
+    assert not [fragment for fragment in _fragments(secret) if fragment in composed.body]
+
+
+def test_bidi_and_zero_width_characters_are_stripped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-3: no reordering/invisible format characters on a lock screen."""
+    # U+061C ARABIC LETTER MARK is a strong RTL implicit mark like RLM (S-7).
+    spoofers = (
+        "\u061c\u200b\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff"
+    )
+    cleaned = push_payload._bounded_alert_text(f"Title \u202eevil\u202c{spoofers}x", "house")
+    assert cleaned == "Title evilx"
+    assert not set(cleaned) & set(spoofers)
+    assert push_payload._bounded_alert_text("left\u061cright", "house") == "leftright"
+    # ZWNJ (Urdu/Hindi orthography) and ZWJ (emoji sequences) are kept.
+    assert push_payload._bounded_alert_text("a\u200cb\u200dc", "house") == "a\u200cb\u200dc"
+    # Only spoofers: falls back rather than sending an empty string.
+    assert push_payload._bounded_alert_text(spoofers, "house") == "house"
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="done \u202egnp.exe\u202c", title="Name\u200b\u202e")
+    alert = completion_alert("complete", session_dir=session, previews=True)
+    assert not set("".join(alert.values())) & set(spoofers)
+
+
+def test_a_long_final_message_is_clamped_well_formed_and_under_the_cloud_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 2,000-char reply: the body stays inside validateAlert's 1-200 code points."""
+    _names_on(monkeypatch)
+    long_reply = ("word " * 400).strip()
+    assert len(long_reply) >= 1999
+    session = _session(tmp_path, assistant=long_reply, title="T" * 500)
+
+    alert = completion_alert("complete", session_dir=session, previews=True)
+
+    for field in (ALERT_TITLE_FIELD, ALERT_BODY_FIELD):
+        text = alert[field]
+        assert 1 <= len(text) <= push_payload.ALERT_TEXT_MAX_CHARS, (field, len(text))
+        assert text == text.strip()
+        assert not any(ord(ch) < 32 for ch in text)
+    assert alert[ALERT_BODY_FIELD].startswith("word word")
+
+
+def test_the_clamp_cuts_on_a_grapheme_boundary_with_an_ellipsis() -> None:
+    """Above 200 code points: cut whole graphemes, end with one ellipsis.
+
+    Compose's own budgets (80/120) keep its output under 200 today, so the clamp
+    is exercised directly: a family emoji (5 code points, one grapheme) sits
+    across the cut and must survive whole or not at all.
+    """
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    text = "a" * 197 + family + "tail"
+    clamped = push_payload._bounded_alert_text(text, "fallback")
+
+    assert len(clamped) <= push_payload.ALERT_TEXT_MAX_CHARS
+    assert clamped.endswith("\u2026")
+    assert clamped == "a" * 197 + "\u2026", "the family emoji is dropped whole, never split"
+    assert not clamped[:-1].endswith("\u200d")
+    # Within the bound: untouched.
+    assert push_payload._bounded_alert_text("short", "fallback") == "short"
+
+
+@pytest.mark.parametrize("preview", ["", "   ", "\x00\x01"])
+def test_an_empty_or_missing_preview_falls_back_and_is_never_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preview: str
+) -> None:
+    """Empty text is refused by the cloud, so every string falls back to house text."""
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant=preview)
+    alert = completion_alert("complete", session_dir=session, previews=True)
+    assert alert[ALERT_BODY_FIELD] == BODY_COMPLETE
+    assert alert[ALERT_TITLE_FIELD] == BACKGROUND_FALLBACK_TITLE
+
+    # No directory at all: compose's nameless fallback, still non-empty.
+    missing = completion_alert(
+        "complete", session_dir=tmp_path / "sessions" / "gone", previews=True
+    )
+    assert all(missing.values())
+    # And the clamp itself never returns "" whatever it is handed.
+    assert push_payload._bounded_alert_text(preview, "") == APP_NAME
+    assert push_payload._bounded_alert_text(preview, "house") == "house"
+
+
+def test_a_compose_failure_degrades_to_the_house_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    """compose promises never to raise; a push must not fail even if it does."""
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("compose exploded")
+
+    monkeypatch.setattr("local_operator.notifications.compose", boom)
+    assert completion_alert("error", previews=True) == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: BODIES["error"],
+    }
+
+
+def test_other_kinds_take_whatever_compose_produces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """error / interrupted / closed / retired: compose's own text, unedited."""
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="All 412 tests pass.", title="CI fix")
+    for kind in PUSH_KINDS:
+        composed = compose(kind, session_dir=session)  # type: ignore[arg-type]
+        alert = completion_alert(kind, session_dir=session, previews=True)
+        assert alert == {ALERT_TITLE_FIELD: composed.title, ALERT_BODY_FIELD: composed.body}
+        if kind != "complete":
+            # Snippet is complete-only (compose's rule): an errored turn's last
+            # line must not read as a success on a lock screen.
+            assert "412" not in alert[ALERT_BODY_FIELD]
     # An unknown kind takes the composer's own default rather than inventing one.
-    assert completion_alert("not-a-kind", 1)[ALERT_BODY_FIELD].startswith(BODY_COMPLETE)
+    assert completion_alert("not-a-kind", previews=True)[ALERT_BODY_FIELD] == BODY_COMPLETE
+
+
+def test_a_worst_case_emit_stays_well_under_the_apns_4kb_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both strings at their 200-code-point cap, in 4-byte characters, plus the block.
+
+    APNs refuses a payload over 4,096 bytes; the cloud wraps this alert in its
+    envelope, so the machine's whole emit must leave generous headroom.
+    """
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="\U0001f600" * 2000, title="\U0001f600" * 2000)
+    payload = completion_payload(
+        **{
+            **COMPLETION_INPUT,
+            "session_dir": session,
+            "previews": True,
+            "sound_custom": "c_" + "0" * 16,
+        }
+    )
+    size = len(json.dumps(emit_body(payload, DEVICE_ROWS), ensure_ascii=False).encode("utf-8"))
+    assert size < 2048, size
 
 
 def test_the_digest_alert_says_the_sets_state_and_never_a_fixed_one() -> None:
-    """A coalesced batch speaks for a SET, so it must not claim one member's state."""
-    uniform = digest_alert(["error"] * 3, 3)
-    assert (
-        uniform[ALERT_BODY_FIELD] == f"{digest_subtitle(['error'] * 3)} · 3 conversations need you"
-    )
-    assert uniform[ALERT_TITLE_FIELD] == APP_NAME
+    """A coalesced batch speaks for a SET, so it names no session and prints no count."""
+    uniform = digest_alert(["error"] * 3)
+    assert uniform == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: digest_subtitle(["error"] * 3),
+    }
 
-    mixed = digest_alert(["complete", "error"], 2)[ALERT_BODY_FIELD]
-    assert mixed.startswith("Mixed outcomes"), mixed
+    mixed = digest_alert(["complete", "error"])[ALERT_BODY_FIELD]
+    assert mixed == CONTEXT_MIXED
 
-    # Kinds that could not be read make NO claim (review round 2, R2-4): the house
-    # answers an uncharacterisable set with an empty subtitle, and a push cannot
-    # send an empty body, so the phrase is dropped rather than replaced by
-    # "Task complete" — which is the claim this vocabulary exists to refuse.
-    unreadable = digest_alert([], 2)[ALERT_BODY_FIELD]
-    assert unreadable == "2 conversations need you"
-    assert not unreadable.startswith(BODY_COMPLETE)
-
-
-def test_the_filed_count_one_alerts_are_the_builders_singular() -> None:
-    """R2-3's amendment, filed rather than only asserted.
-
-    The ruled template is `<count> conversations need you`; a count of one is the
-    common case for a completion push, so the machine spells the singular. Both
-    fixtures carry that literal (`alert_count_one`) so no reader of this tree — or
-    of the freeze — only ever sees the plural.
-    """
-    assert _fixture("emit-completion.json")["alert_count_one"] == completion_alert("complete", 1)
-    assert _fixture("emit-digest.json")["alert_count_one"] == digest_alert(["complete"], 1)
-    assert completion_alert("complete", 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
-    assert digest_alert(["complete"], 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    # Kinds that could not be read make NO outcome claim (review round 2, R2-4):
+    # "A session finished" is true of any digest, "Task complete" is not.
+    unreadable = digest_alert([])
+    assert unreadable[ALERT_BODY_FIELD] == BACKGROUND_FALLBACK_TITLE
+    assert not unreadable[ALERT_BODY_FIELD].startswith(BODY_COMPLETE)
+    assert _fixture("emit-digest.json")["alert_unreadable"] == unreadable
+    for alert in (uniform, unreadable):
+        assert "need" not in alert[ALERT_BODY_FIELD]
 
 
 def test_the_report_block_allow_list_rejects_an_extra_or_mistyped_row() -> None:
