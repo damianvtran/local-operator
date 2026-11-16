@@ -1360,6 +1360,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "describes this machine's load and this machine's desktop app pid/port)",
     ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
+    "local_operator/server/utils/desktop_sessions.py": (
+        1,
+        "``RESYNC_MARKER`` ('resync') is a desktop-stream WIRE frame type: the bridge "
+        "queues it in place of a history frame too large for a subscriber's queue, and "
+        "the subscriber loop answers it with a resync snapshot. It names a message on "
+        "the socket, never a file, so it is no entry of a session directory",
+    ),
     "local_operator/server/utils/desktop_feed.py": (
         4,
         "the agent and team directories the desktop app reads (the profile store), plus "

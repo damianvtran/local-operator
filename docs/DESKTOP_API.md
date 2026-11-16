@@ -2242,7 +2242,13 @@ watermark: `unseen` and the sidebar mark survive it untouched.
 
 A cold reconnect, HTTP restart, detached interval, expired replay cursor or future
 cursor requires a gap snapshot. One live shared bridge retains at most256frames
-and8MiB; each subscriber has the same backlog bounds. Overflow emits `gap` and
+and8MiB; each subscriber has the same backlog bounds. A SINGLE frame larger than
+8MiB (e.g. a recovery `history_delta` spanning a huge journal) is never queued,
+retained for replay or used to close anyone: each opened subscriber instead
+receives, in that frame's place and on the same connection, an in-band `gap`
+followed by a fresh `snapshot` (frames behind it at or below the snapshot's `seq`
+are superseded, newer ones follow it), and a reconnect whose cursor predates it
+gets `open{gap:true}`. Overflow emits `gap` and
 closes instead of silently losing semantic events — and an OVERFLOW is only
 reached by a subscriber that has already been served its snapshot. A subscriber
 that has not opened yet is never disconnected for backlog: the frames it would
@@ -3234,7 +3240,8 @@ to.
   most once per tick; the connection's first read is a baseline, so a
   reconnect replays nothing.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
-  overflow emits `gap` and closes.
+  overflow emits `gap` and closes. A single frame over 8 MiB resyncs in band
+  instead (`gap` + fresh `snapshot`, connection kept).
 
 ### The polling cadence
 
