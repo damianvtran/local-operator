@@ -38,6 +38,26 @@ def test_long_keyword_signature_wraps_without_losing_required_parameters(i18n_ge
     compile(module, "demo.py", "exec")
 
 
+def test_long_placeholder_mapping_explodes_one_pair_per_line(i18n_generate) -> None:
+    """A mapping too long even on its own line is exploded Black-style.
+
+    wire.github.readiness_list (six placeholders) emitted a 105-column mapping
+    line that failed flake8 E501; a hand-wrap would be rejected by the drift
+    gate, so the generator itself must emit the lint-clean shape.
+    """
+    import ast
+
+    key = "demo.readiness_list"
+    text = "{form} {last} {count, number} {source} {pointer} {head}"
+    module = i18n_generate._render_keys_module("demo", {key: text})
+    assert all(len(line) <= 100 for line in module.splitlines())
+    assert '            "pointer": pointer,\n' in module
+    tree = ast.parse(module)
+    call = next(node for node in ast.walk(tree) if isinstance(node, ast.Dict))
+    assert [k.value for k in call.keys] == ["form", "last", "count", "source", "pointer", "head"]
+    compile(module, "demo.py", "exec")
+
+
 def test_long_placeholder_free_name_stays_valid_source(i18n_generate) -> None:
     """The OTHER long-header shape: no placeholders at all (agent review C1-2).
 

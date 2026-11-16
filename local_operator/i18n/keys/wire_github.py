@@ -165,7 +165,14 @@ def readiness_list(
 ) -> Msg:
     return Msg(
         "wire.github.readiness_list",
-        {"form": form, "last": last, "count": count, "source": source, "pointer": pointer, "head": head},
+        {
+            "form": form,
+            "last": last,
+            "count": count,
+            "source": source,
+            "pointer": pointer,
+            "head": head,
+        },
     )
 
 
