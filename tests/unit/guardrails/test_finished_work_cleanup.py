@@ -356,8 +356,13 @@ def test_rig_with_live_row_inside_is_high(home: Path) -> None:
 
 
 def test_rig_holding_a_clone_is_high(home: Path) -> None:
-    rig = _rig(home, "qa-clone")
+    rig = _rig(home, "qa-clone", creator=None)
     _git("init", "-q", str(rig / "clone"), cwd=home)
+    # Record the completed creating command, as production does. Linux's
+    # ctime generation changes when the child is added; recording earlier
+    # tests an expired ledger row, not the nested-repository safety bar.
+    _record(home, rig, kind="mkdir")
+    assert prov.recorded_creators(str(rig)) == [DONE]
     verdict = _rank(home, f"rm -rf {rig}")
     assert verdict.risk is Risk.HIGH
     assert "nested repository" in verdict.reasons[0]
@@ -642,16 +647,23 @@ async def test_m1_untrusted_yes_never_masks_a_later_decline_or_lapse(
 
 def test_m2_clone_below_the_walk_depth_keeps_the_rig_guarded(home: Path) -> None:
     """Review M2: a walk that stops with directories left cannot rule a clone out."""
-    rig = _rig(home, "qa-deep")
+    rig = _rig(home, "qa-deep", creator=None)
     deep = rig / "home" / "src" / "github.com" / "org" / "repo"
     deep.mkdir(parents=True)
     _git("init", "-q", str(deep), cwd=home)
+    # The creation ledger is written after the whole command, including its
+    # nested directories; this preserves the ctime witness on Linux too.
+    _record(home, rig, kind="mkdir")
+    assert prov.recorded_creators(str(rig)) == [DONE]
     verdict = _rank(home, f"rm -rf {rig}")
     assert verdict.risk is not Risk.LOW, verdict.reasons
+    assert "nested repository" in verdict.reasons[0]
     # Control: an equally deep tree with no clone is still finished work —
     # the walk sees all of it (entry-capped, not depth-capped).
-    plain = _rig(home, "qa-deep-plain")
+    plain = _rig(home, "qa-deep-plain", creator=None)
     (plain / "home" / "src" / "github.com" / "org" / "notes" / "x").mkdir(parents=True)
+    _record(home, plain, kind="mkdir")
+    assert prov.recorded_creators(str(plain)) == [DONE]
     assert _rank(home, f"rm -rf {plain}").risk is Risk.LOW
 
 
