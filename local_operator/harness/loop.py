@@ -6724,6 +6724,8 @@ class AgentLoop:
                 "call_id": call.id,
                 "arguments": item.args,
                 "cwd": execution_context.cwd,
+                # Cleared when this executor returns: see ``EXECUTION_SOURCE``.
+                "executing": True,
             }
             if config.file_provenance is not None:
                 await config.file_provenance("executing", call, native_source)
@@ -6735,6 +6737,7 @@ class AgentLoop:
                     call.id, item.args, signal, on_update, execution_context
                 )
             finally:
+                native_source["executing"] = False
                 if execution_token is not None:
                     EXECUTION_SOURCE.reset(execution_token)
             if config.file_provenance is not None:

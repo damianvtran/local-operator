@@ -2854,11 +2854,11 @@ class Transcript:
                 provenance_pending.extend(pending)
             return rows
 
-        def finish(rows: list[TranscriptEntry]) -> None:
+        def finish(rows: list[TranscriptEntry], source: tuple[int, int, float]) -> None:
             if provenance_pending:
                 from local_operator.session.file_provenance import finish_batch
 
-                finish_batch(self, rows, provenance_pending)
+                finish_batch(self, rows, provenance_pending, end=source[1])
 
         return await self._commit(
             build, preserve_mtime=preserve_mtime, _file_finish=finish if _file_captures else None
@@ -3123,7 +3123,7 @@ class Transcript:
         build: Callable[[], list[TranscriptEntry]],
         *,
         preserve_mtime: bool = False,
-        _file_finish: Callable[[list[TranscriptEntry]], None] | None = None,
+        _file_finish: Callable[[list[TranscriptEntry], tuple[int, int, float]], None] | None = None,
     ) -> list[TranscriptEntry]:
         """Serialize writes and acknowledge only after durable publication.
 
@@ -3143,7 +3143,7 @@ class Transcript:
                 if _file_finish is not None:
                     # Same worker/shield/order lock: cancellation cannot expose
                     # an unlogged proof or abandon finalization halfway through.
-                    _file_finish(rows)
+                    _file_finish(rows, source)
                 return rows, source
 
             worker = asyncio.create_task(asyncio.to_thread(write))

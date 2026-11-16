@@ -30,6 +30,9 @@ FRESH = object()
 CONTINUATION = object()
 # Only the actual native executor sets this context. Async registration carries
 # it privately; persisted roster dictionaries and wait/peek replays cannot.
+# asyncio tasks created during the call COPY the context, so the value outlives
+# the call in them; the loop flips the shared dict's ``executing`` to False when
+# the executor returns and ``AsyncJobManager.start`` honours only a live one.
 EXECUTION_SOURCE: ContextVar[dict[str, Any] | None] = ContextVar(
     "file_provenance_execution", default=None
 )
@@ -162,7 +165,9 @@ def user_admission(authority: Any, operation: str = "prompt") -> UserAdmission |
 
 
 def valid_admission(value: Any) -> bool:
-    return value is None or isinstance(value, UserAdmission) and value._seal is _SEAL
+    # ``None`` is NOT an admission (R1, PR #4108): a caller that forgot to pass
+    # one must yield no ``user`` proof rather than silently capture as the owner.
+    return isinstance(value, UserAdmission) and value._seal is _SEAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +275,7 @@ def argument_candidates(tool: str, args: Mapping[str, Any]) -> Iterable[Candidat
             SHELL_SCAN_MAX_CHARS,
             _shell_tokens,
             bash_effects,
-            literal_bash_inputs,
+            literal_bash_scan,
         )
 
         command = args["command"]
@@ -290,9 +295,15 @@ def argument_candidates(tool: str, args: Mapping[str, Any]) -> Iterable[Candidat
             for token in unsafe:
                 yield Candidate(token, "shell_unsafe_lexical")
             return
-        for index, output in enumerate(bash_effects(command).outputs):
-            yield Candidate(output, f"shell_output:{index}")
-        for index, path in enumerate(literal_bash_inputs(command)):
+        scan = literal_bash_scan(command)
+        # The shared output grammar is a Highlights heuristic: it models subshells and
+        # functions and is blind to pushd/HOME/prefix-assignment state (QA-Q1, PR #4108).
+        # Its outputs are attested only when the fail-closed literal walk proved every
+        # piece of shell state it relied on; otherwise they are unknown, never guessed.
+        if scan.exact:
+            for index, output in enumerate(bash_effects(command).outputs):
+                yield Candidate(output, f"shell_output:{index}")
+        for index, path in enumerate(scan.inputs):
             yield Candidate(path, f"shell_literal:{index}")
     elif tool == "eval" and isinstance(args.get("code"), str):
         from local_operator.supplements.candidates import literal_eval_paths
@@ -711,7 +722,9 @@ def prepare_batch(
         return rows, []
 
 
-def finish_batch(transcript: Any, rows: list[Any], pending: list[dict[str, Any]]) -> None:
+def finish_batch(
+    transcript: Any, rows: list[Any], pending: list[dict[str, Any]], *, end: int | None = None
+) -> None:
     """Finalize only after the exact source/receipt fsync, without target restat.
 
     This runs in the same cancellation-shielded worker as the ordinary write.
@@ -720,9 +733,11 @@ def finish_batch(transcript: Any, rows: list[Any], pending: list[dict[str, Any]]
     if not pending:
         return
     try:
-        offset = transcript.path.stat().st_size - sum(
-            len((row.to_json() + "\n").encode()) for row in rows
-        )
+        # ``end`` is the writer descriptor's own post-fsync size (R4, PR #4108),
+        # so spans never come from a path re-stat; the digest check still fails
+        # closed if they were ever wrong.
+        size = transcript.path.stat().st_size if end is None else end
+        offset = size - sum(len((row.to_json() + "\n").encode()) for row in rows)
         spans = {}
         for row in rows:
             raw = (row.to_json() + "\n").encode()

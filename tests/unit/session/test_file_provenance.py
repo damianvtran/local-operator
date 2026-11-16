@@ -331,3 +331,27 @@ async def test_actual_tool_completion_binds_new_result_id_and_originating_call(r
         )
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r4_finish_batch_spans_come_from_the_writer_not_a_path_restat(rig):
+    # R4 (PR #4108): a path re-stat after the write can observe another size (a
+    # replaced file, a concurrent append). Spans must use the writer's own fstat.
+    from pathlib import PosixPath
+
+    target = rig.work / "spans.txt"
+    target.write_text("v1")
+    await append_live(rig, "warm up the journal")
+
+    class LyingStat(PosixPath):
+        def stat(self, *args, **kwargs):
+            real = os.stat(self, *args, **kwargs)
+            fields = list(real)
+            fields[6] += 7  # st_size
+            return os.stat_result(fields)
+
+    rig.transcript.path = LyingStat(rig.transcript.path)
+    await append_live(rig, str(target))
+    proof_ids = ids(rig.transcript)
+    assert proof_ids
+    assert F.lookup_proof(rig.root, rig.directory.name, proof_ids[-1]) is not None

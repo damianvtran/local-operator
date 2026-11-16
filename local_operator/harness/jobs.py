@@ -1506,7 +1506,10 @@ class AsyncJobManager:
         from local_operator.session.file_provenance import EXECUTION_SOURCE
 
         source = EXECUTION_SOURCE.get()
-        if source is not None and type != "task":
+        # ``executing`` gates on the call still running (R2, PR #4108): a task
+        # spawned inside the tool inherits this ContextVar's dict and may start
+        # a job long after the call returned; that job is not this call's.
+        if source is not None and source.get("executing") and type != "task":
             import copy
 
             job._file_source = copy.deepcopy(source)

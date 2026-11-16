@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -141,7 +142,14 @@ async def test_serving_frozen_tuple_survives_queue_wait_without_restat(rig, monk
 
     monkeypatch.setattr(session, "_capture_file_input", capture)
     try:
-        await handle.prompt(str(target), command_id="queued-native", wait_complete=True)
+        await handle.prompt(
+            str(target),
+            command_id="queued-native",
+            wait_complete=True,
+            # An explicit local admission: since R1 a missing one never captures,
+            # which would make this restat assertion pass vacuously.
+            _file_admission=F.user_admission(_ConnectionAuthority(), "prompt"),
+        )
         assert ids(rig.transcript)
         assert all(p is None for p in proofs(rig)), "old identity must not refresh at drain/commit"
     finally:
@@ -400,4 +408,237 @@ async def test_eval_path_literal_not_write_content_is_real_completion_evidence(r
         assert completed and all(p["file"]["path"] == str(target) for p in completed)
         assert decoy.read_text() == "not named as a file"
     finally:
+        await session.dispose()
+
+
+# -- PR #4108 round-1 remediation -------------------------------------------------------
+
+
+def _bash_session(rig, command, call_id="qa-shell"):
+    """A Session whose bash tool runs ``command`` in a REAL shell at the rig's cwd."""
+    import subprocess
+
+    async def shell(call_id, args, signal, update, context):
+        done = subprocess.run(
+            ["bash", "-c", args["command"]],
+            cwd=context.cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return ToolResult(
+            tool_call_id=call_id,
+            tool_name="bash",
+            content=[TextContent(text=done.stdout + done.stderr)],
+        )
+
+    tool = AgentTool(name="bash", parameters={"type": "object"}, execute=shell)
+    return make_session(
+        rig,
+        [
+            [
+                StreamToolCallDelta(
+                    index=0,
+                    id=call_id,
+                    name="bash",
+                    argument_delta=json.dumps({"command": command}),
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ],
+        [tool],
+    )
+
+
+def _qa_q1_case(rig, shape):
+    """(command, decoy) for one QA-Q1 repro; the decoy is the file the parser USED to name."""
+    home = rig.work.parent  # the rig's HOME
+    elsewhere = rig.work.parent / "elsewhere"
+    elsewhere.mkdir(exist_ok=True)
+    if shape == "pushd":
+        decoy = rig.work / "inside.txt"
+        return f"pushd {elsewhere} >/dev/null; cat inside.txt", decoy
+    if shape == "export-home":
+        decoy = home / "notes" / "home.txt"
+        decoy.parent.mkdir(exist_ok=True)
+        return f"export HOME={elsewhere}; cat ~/notes/home.txt", decoy
+    decoy = rig.work / "cold.txt"
+    return f'F={decoy} cat "$F"', decoy
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["pushd", "export-home", "prefix-assignment"])
+async def test_qa_q1_shell_never_attests_a_file_the_command_did_not_touch(rig, shape):
+    command, decoy = _qa_q1_case(rig, shape)
+    decoy.write_text("QA-DECOY-CONTENT")
+    session = _bash_session(rig, command)
+    try:
+        await session.prompt("run it")
+        results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        # The real shell did not open the decoy (it failed on another path).
+        assert "No such file" in results[-1].content[0].text
+        attested = [p for p in proofs(rig) if p and p["file"]["path"] == str(decoy)]
+        assert attested == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_qa_q1_control_plain_relative_cat_still_attests(rig):
+    # Positive control for the three repros above: same rig, same decoy, plain read.
+    target = rig.work / "inside.txt"
+    target.write_text("QA-CONTROL")
+    session = _bash_session(rig, "cat inside.txt")
+    try:
+        await session.prompt("run it")
+        attested = {
+            p["source_class"] for p in proofs(rig) if p and p["file"]["path"] == str(target)
+        }
+        assert "tool_completion" in attested
+    finally:
+        await session.dispose()
+
+
+def test_r1_none_is_not_an_admission():
+    assert not F.valid_admission(None)
+    fake = SimpleNamespace(_capture_file_input=lambda text, command_id: "ticket")
+    assert F.admitted_ticket(fake, "x", "cmd", None, False) is None
+
+
+@pytest.mark.asyncio
+async def test_r1_handle_prompt_without_admission_captures_nothing(rig):
+    target = rig.work / "unadmitted.txt"
+    target.write_text("v1")
+    session = make_session(rig, [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(rig.work), config_dir=rig.root
+    )
+    try:
+        await handle.prompt(str(target), command_id="no-admission", wait_complete=True)
+        assert [p for p in proofs(rig) if p and p["source_class"] == "user"] == []
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r1_headless_prompt_passes_an_explicit_local_admission(rig):
+    target = rig.work / "headless.txt"
+    target.write_text("v1")
+    session = make_session(rig, [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(rig.work), config_dir=rig.root
+    )
+    try:
+        assert await handle.run_headless_prompt(str(target))
+        users = [p for p in proofs(rig) if p and p["source_class"] == "user"]
+        assert users and users[0]["file"]["path"] == str(target)
+    finally:
+        await handle.dispose()
+
+
+def test_r1_in_process_admission_uses_the_frame_authority():
+    from local_operator.session.runtime.serving import _file_admission_for
+
+    assert F.valid_admission(_file_admission_for("local", (), "prompt"))
+    assert F.valid_admission(_file_admission_for("remote", {"prompt"}, "prompt"))
+    # Relayed/unknown locality and a remote caller lacking the op: no admission.
+    assert not F.valid_admission(_file_admission_for(None, (), "prompt"))
+    assert not F.valid_admission(_file_admission_for("remote", {"steer"}, "prompt"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locality, issues", [("local", True), (None, False)])
+async def test_r1_action_receipt_admission_follows_the_slash_frame(rig, locality, issues):
+    target = rig.work / "receipt.txt"
+    target.write_text("v1")
+    session = make_session(rig, [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(rig.work), config_dir=rig.root
+    )
+    receipt = SimpleNamespace(kind="notice", data={"type": "team_attached", "request": str(target)})
+    try:
+        await handle._complete_unconsumed_action(
+            receipt, None, None, locality=locality, capabilities=frozenset()
+        )
+        # The receipt's turn is admitted without waiting; bound the wait for its row.
+        for _ in range(500):
+            if not session.is_streaming and any(
+                getattr(m, "role", "") == "user" for m in session.history()
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert any(getattr(m, "role", "") == "user" for m in session.history())
+        users = [p for p in proofs(rig) if p and p["source_class"] == "user"]
+        assert bool(users) is issues
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r3_refused_prompt_drops_its_frozen_admission(rig):
+    from local_operator.session.errors import TurnInFlight
+    from local_operator.session.runtime.server import _ConnectionAuthority
+
+    target = rig.work / "refused.txt"
+    target.write_text("v1")
+    session = make_session(rig)
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(rig.work), config_dir=rig.root
+    )
+    handle._prompt_queue.append(object())  # busy: wait_for_turn=False must refuse
+    try:
+        with pytest.raises(TurnInFlight):
+            await handle.prompt(
+                str(target),
+                command_id="refused-native",
+                wait_for_turn=False,
+                _file_admission=F.user_admission(_ConnectionAuthority(), "prompt"),
+            )
+        assert "refused-native" not in session._file_owner().admissions
+    finally:
+        handle._prompt_queue.clear()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r2_job_started_after_its_call_returned_carries_no_source(rig):
+    late_start, started = asyncio.Event(), asyncio.Event()
+    held = {}
+
+    async def spawner(call_id, args, signal, update, context):
+        async def late():
+            # Inherits this call's context copy, but runs after the call returned.
+            await late_start.wait()
+            held["id"] = context.jobs.register("bash", "late", lambda *a: asyncio.sleep(0))
+            started.set()
+
+        held["task"] = asyncio.create_task(late())
+        return ToolResult(tool_call_id=call_id, tool_name="bash", content=[TextContent(text="ok")])
+
+    tool = AgentTool(name="bash", parameters={"type": "object"}, execute=spawner)
+    session = make_session(
+        rig,
+        [
+            [
+                StreamToolCallDelta(
+                    index=0,
+                    id="spawner-call",
+                    name="bash",
+                    argument_delta=json.dumps({"command": "cat late.txt"}),
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ],
+        [tool],
+    )
+    try:
+        await session.prompt("spawn")
+        late_start.set()
+        await started.wait()
+        job = session.jobs._jobs[held["id"]]
+        assert job._file_source is None
+    finally:
+        late_start.set()
         await session.dispose()
