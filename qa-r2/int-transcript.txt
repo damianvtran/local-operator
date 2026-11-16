@@ -1,0 +1,17 @@
+# int.sh (interrupt test) output, 2026-11-16, head 57ffcb775
+launcher=3466370 start=02:05:39Z
+unit=nbh-20261116T020539-fa17ee.scope nprocs=11
+3466585 /usr/bin/timeout 600 unshare -Urmn sh -c mount --bind .../scratchpad/nbh-int-r2/policy ...
+3466842 /opt/google/chrome/chrome --headless=new --user-data-dir=.../scratchpad/nbh-int-r2/chrome-profile ...
+tmp before INT: /tmp/nbh-20261116T020539-fa17ee-x1lkhv9r
+rows so far: 4
+SIGINT -> 3466370 at 02:06:53Z
+launcher rc=130 exited=02:06:55Z
+scope procs still alive: 0        (kill -0 over all 11 cgroup.procs captured 3 s before SIGINT)
+scope grep rc=1                   (systemctl --user list-units --type=scope --all | grep nbh-|run-: empty)
+Unit nbh-20261116T020539-fa17ee.scope could not be found.
+cgroup dir gone
+tmp after: []
+pgrep (node_browser_harness|browser_bridge.daemon --port|http.server|chrome-profile|nbh-): only 3290711 (live :4099 daemon)
+bridge-daemon.log (harness daemon 3466748): "Application shutdown complete." / "Finished server process [3466748]"; kill -0 3466748 -> gone; kill -0 3466842 (Chrome) -> gone
+journal: 02:06:53 Stopping nbh-20261116T020539-fa17ee.scope ... 02:06:54 Stopped

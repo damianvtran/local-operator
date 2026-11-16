@@ -1,0 +1,17 @@
+INFO:     Started server process [3466748]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4099 (Press CTRL+C to quit)
+INFO:     127.0.0.1:50298 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50312 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42178 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48960 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58406 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57566 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57578 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:35956 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49216 - "POST /pairing/codes HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [3466748]

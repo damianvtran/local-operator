@@ -1,0 +1,189 @@
+{
+  "rows": [
+    {
+      "row": "namespace masks the real managed policy",
+      "expected": "/etc/opt/chrome/policies/managed/local-operator.json absent",
+      "actual": "exists=False; visible=[]",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real bridge 127.0.0.1:4099 unreachable before harness daemon",
+      "expected": "connect refused",
+      "actual": "refused=True",
+      "verdict": "PASS"
+    },
+    {
+      "row": "harness bridge daemon healthy (inside netns)",
+      "expected": "health ok",
+      "actual": "{\"status\": \"ok\", \"proto\": 1, \"extension_connected\": false, \"paired\": false, \"browser\": \"\", \"downloads_dir\": \"/home/ec2-user/.local-operator/sessions/93530a6e5b51/scratchpad/node-browser-harness-20261116T020349/node/browser/downloads\", \"current_url\": \"\", \"current_title\": \"\", \"extension_unresponsive\": false, \"extension_version\": \"\", \"extension_proto\": 0, \"extension_expected_version\": \"0.1.27\", \"extension_update_available\": false, \"link_attached\": false, \"link_silent_s\": 0.0, \"takeover_within_s\": null, \"driven_tabs\": [], \"pending_origin\": \"\", \"driver_extension_id\": \"\", \"standby_extension_ids\": [], \"standby_labels\": [], \"unlisted_extension_count\": 0, \"authorized_extension_ids\": [], \"driver_label\": \"\", \"driver_short_id\": \"\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "policy carries the SYNTHETIC anchor + node id",
+      "expected": "operatorKeyId == synthetic key id",
+      "actual": "{\"headlessNode\": true, \"operatorAnchorPoint\": \"04785b82a1fcb495\\u2026\", \"operatorKeyId\": \"7ae3bbd5d733627a7f70e05649d977bf\", \"nodeDeviceId\": \"d_f8823dc35db327b0479704c907ec6495\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "extension force-installed and connected unpaired",
+      "expected": "a pairing code minted for it",
+      "actual": "{\"codes\": 1, \"chrome_alive\": true}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "policy pairing code pairs the extension",
+      "expected": "paired_connected_count>=1",
+      "actual": "{\"ok\": true, \"codes\": [], \"connected_count\": 1, \"paired_connected_count\": 1, \"expected_extension_version\": \"0.1.27\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "first open refused: origin_not_allowed",
+      "expected": "is_error, details.error_code == origin_not_allowed",
+      "actual": "{\"error_code\": \"origin_not_allowed\", \"text\": \"site http://127.0.0.1:32973 is not allowed yet. Call browser action='request_access' url=http://127.0.0.1:32973/iframe.html?id=browser-approvals-dock--approved&\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "request_access raises the signed site card (site:v1:)",
+      "expected": "open ask with a site:v1: question for the origin",
+      "actual": "{\"ask\": \"a-4a4c\", \"question_id\": \"site:v1:63737c7730c0aefa\", \"result\": \"asked the operator to allow http://127.0.0.1:32973 on this node (ask\\na-4a4c).\\nNobody can click this headless browser: the operator approves or denies\\non their own device, signed with their operator ke\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "wrong-key operator signature refused",
+      "expected": "decide refused at the authority seam (refused_old_signer), ask still open, origin not granted",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"RuntimeError: This device can't answer a node's site request. Answer it from Local Operator on your own computer (the app or lop), updated to the latest release \\u2014 not from a phone or the node itself. The card stays open until it times out, so you can answer it once you've updated.\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "plain ask_respond from the operator surface is not the decision",
+      "expected": "refused at the authority seam (refused_old_signer), ask still open, origin not granted",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"RuntimeError: This device can't answer a node's site request. Answer it from Local Operator on your own computer (the app or lop), updated to the latest release \\u2014 not from a phone or the node itself. The card stays open until it times out, so you can answer it once you've updated.\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "agent's own unsigned decide (node-local, no operator signature) refused",
+      "expected": "extension refuses (unsigned_decision), origin not granted",
+      "actual": "{\"verdict\": {\"ok\": false, \"error\": \"The node's browser refused this answer: it was not signed with your operator key. Nothing was approved. Answer from Local Operator on your own computer (the app or lop), not from the node or a phone.\", \"code\": \"unsigned_decision\"}, \"ask\": \"open\", \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "operator's signed Approve lands on the node",
+      "expected": "decided; ask answered; `lop browser sites` lists the origin",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": true, \"detail\": \"decided\"}, \"ask\": \"answered\", \"sites\": \"Allowed (exact origin):\\n  http://127.0.0.1:32973\\nRemove one exact origin's decision with: lop browser sites --revoke ORIGIN\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "open succeeds after approval",
+      "expected": "no error",
+      "actual": "{\"resumed\": \"auto (answer delivery)\", \"text\": \"Opened browser surface bridge:1978606488:03084f8ac3a44c469c9be81640cdef68 on the browser extension: Storybook \\u2014 http://127.0.0.1:32973/iframe.html?id=browser-approvals-dock--approved&args=theme:localO\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "light and dark screenshots rendered in their themes and differ",
+      "expected": "story root seen; rendered_fraction >= 0.01; background luminance dark < 100, light > 180; different sha256",
+      "actual": "{\"sha256\": {\"light\": \"d46200971fa6a578bdc4ab4e74a7f977255e67a8edd5c365cac774a8433985e6\", \"dark\": \"72d91bb036ec5f08b8c304c629d51013478c1601ac072cb82230f260d56a0778\"}, \"captures\": {\"light\": {\"theme\": \"light\", \"rendered\": true, \"attempts\": 1, \"story_root_seen\": true, \"rendered_fraction\": 0.0616, \"background_luminance\": 237.4}, \"dark\": {\"theme\": \"dark\", \"rendered\": true, \"attempts\": 1, \"story_root_seen\": true, \"rendered_fraction\": 0.065, \"background_luminance\": 27.1}}}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "deny: signed Deny keeps the origin out and the open refused",
+      "expected": "decided; origin in sites' denied list, not allowed; open still refused",
+      "actual": "{\"verdict\": {\"connected\": true, \"ok\": true, \"detail\": \"decided\"}, \"lists\": {\"allowed\": [\"http://127.0.0.1:32973\"], \"denied\": [\"http://127.0.0.1:42917\"]}, \"open\": {\"error_code\": \"origin_not_allowed\"}, \"resumed\": \"auto (answer delivery)\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "expired card: a signed Approve after the entry is withdrawn grants nothing",
+      "expected": "agent cancel_access -> extension answers state cancelled; then the signed Approve is refused as expired (refused_expired); origin not allowed",
+      "actual": "{\"withdrawal\": {\"error\": false, \"details\": {\"origin\": \"http://127.0.0.1:49071\", \"state\": \"cancelled\", \"pending_count\": 0}}, \"ask\": \"open\", \"verdict\": {\"connected\": true, \"ok\": false, \"error\": \"RuntimeError: This site request expired before your answer reached the node's browser. The agent has to ask again.\"}, \"allowed\": false}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "no native /etc anchor read in the node process",
+      "expected": "0",
+      "actual": "0",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real /etc policy + anchor hashes unchanged",
+      "expected": "{\"/etc/opt/chrome/policies/managed/local-operator.json\": \"71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834\", \"/etc/local-operator/operators/1000.json\": \"66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11\"}",
+      "actual": "{\"/etc/opt/chrome/policies/managed/local-operator.json\": \"71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834\", \"/etc/local-operator/operators/1000.json\": \"66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "live node Chrome PID unchanged",
+      "expected": "\"MainPID=70988\"",
+      "actual": "\"MainPID=70988\"",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real `lop browser status` paired identity unchanged",
+      "expected": "[\"extension connected: yes\", \"paired:              yes\", \"identities:          1 authorised\", \"                     - Chrome extension 0.1.27.11 (lofpppoc\\u2026) driving\", \"port:                4099\"]",
+      "actual": "[\"extension connected: yes\", \"paired:              yes\", \"identities:          1 authorised\", \"                     - Chrome extension 0.1.27.11 (lofpppoc\\u2026) driving\", \"port:                4099\"]",
+      "verdict": "PASS"
+    }
+  ],
+  "facts": {
+    "synthetic_operator_key_id": "7ae3bbd5d733627a7f70e05649d977bf",
+    "node_device_id": "d_f8823dc35db327b0479704c907ec6495",
+    "extension": {
+      "id": "lofpppoceigbphankfepghkakdjmefep",
+      "crx": "/home/ec2-user/.local-operator/browser/extension/local-operator-0.1.27.11.crx",
+      "version": "0.1.27.11"
+    },
+    "chrome_sandbox": "sandboxed",
+    "session_id": "0d7e113b6e3e",
+    "resumed_after_approve": "auto (answer delivery)",
+    "screenshots": {
+      "light": {
+        "path": "/home/ec2-user/.local-operator/sessions/93530a6e5b51/scratchpad/node-browser-harness-20261116T020349/light.png",
+        "sha256": "d46200971fa6a578bdc4ab4e74a7f977255e67a8edd5c365cac774a8433985e6",
+        "theme": "light",
+        "rendered": true,
+        "attempts": 1,
+        "story_root_seen": true,
+        "rendered_fraction": 0.0616,
+        "background_luminance": 237.4
+      },
+      "dark": {
+        "path": "/home/ec2-user/.local-operator/sessions/93530a6e5b51/scratchpad/node-browser-harness-20261116T020349/dark.png",
+        "sha256": "72d91bb036ec5f08b8c304c629d51013478c1601ac072cb82230f260d56a0778",
+        "theme": "dark",
+        "rendered": true,
+        "attempts": 1,
+        "story_root_seen": true,
+        "rendered_fraction": 0.065,
+        "background_luminance": 27.1
+      }
+    },
+    "chrome_profile_removed": true,
+    "native_anchor_reads": 0
+  },
+  "host_before": {
+    "hashes": {
+      "/etc/opt/chrome/policies/managed/local-operator.json": "71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834",
+      "/etc/local-operator/operators/1000.json": "66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11"
+    },
+    "live_chrome": "MainPID=70988",
+    "browser_status_identity": [
+      "extension connected: yes",
+      "paired:              yes",
+      "identities:          1 authorised",
+      "                     - Chrome extension 0.1.27.11 (lofpppoc\u2026) driving",
+      "port:                4099"
+    ]
+  },
+  "host_after": {
+    "hashes": {
+      "/etc/opt/chrome/policies/managed/local-operator.json": "71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834",
+      "/etc/local-operator/operators/1000.json": "66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11"
+    },
+    "live_chrome": "MainPID=70988",
+    "browser_status_identity": [
+      "extension connected: yes",
+      "paired:              yes",
+      "identities:          1 authorised",
+      "                     - Chrome extension 0.1.27.11 (lofpppoc\u2026) driving",
+      "port:                4099"
+    ]
+  },
+  "inner_rc": 0
+}

@@ -1,0 +1,7 @@
+2026-11-16T02:08:50Z
+71a6112bee9e8926a3351125ca7488cf24f605e057c2b3f2d9a91c5654ecd834  /etc/opt/chrome/policies/managed/local-operator.json
+66686dc2c143519c8232b6f17e40be0b85f61d0046892f67fdfbd4f1e354fc11  /etc/local-operator/operators/1000.json
+MainPID=3469610
+status rc=0 sha=efb228062549ab2375f830cecaff2cf4c6ba326f031a42cc4b50a8d4d2f374fb
+identity sha=f68380ca74d5f32b293b2a46ae2632680d7ca898a93b3462cfd25d4718dc9dcf  -
+LISTEN 0 2048 127.0.0.1:4099 0.0.0.0:* users:(("Local Operator",pid=3290711,fd=7)) 

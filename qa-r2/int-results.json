@@ -1,0 +1,38 @@
+{
+  "rows": [
+    {
+      "row": "namespace masks the real managed policy",
+      "expected": "/etc/opt/chrome/policies/managed/local-operator.json absent",
+      "actual": "exists=False; visible=[]",
+      "verdict": "PASS"
+    },
+    {
+      "row": "real bridge 127.0.0.1:4099 unreachable before harness daemon",
+      "expected": "connect refused",
+      "actual": "refused=True",
+      "verdict": "PASS"
+    },
+    {
+      "row": "harness bridge daemon healthy (inside netns)",
+      "expected": "health ok",
+      "actual": "{\"status\": \"ok\", \"proto\": 1, \"extension_connected\": false, \"paired\": false, \"browser\": \"\", \"downloads_dir\": \"/home/ec2-user/.local-operator/sessions/93530a6e5b51/scratchpad/nbh-int-r2/node/browser/downloads\", \"current_url\": \"\", \"current_title\": \"\", \"extension_unresponsive\": false, \"extension_version\": \"\", \"extension_proto\": 0, \"extension_expected_version\": \"0.1.27\", \"extension_update_available\": false, \"link_attached\": false, \"link_silent_s\": 0.0, \"takeover_within_s\": null, \"driven_tabs\": [], \"pending_origin\": \"\", \"driver_extension_id\": \"\", \"standby_extension_ids\": [], \"standby_labels\": [], \"unlisted_extension_count\": 0, \"authorized_extension_ids\": [], \"driver_label\": \"\", \"driver_short_id\": \"\"}",
+      "verdict": "PASS"
+    },
+    {
+      "row": "policy carries the SYNTHETIC anchor + node id",
+      "expected": "operatorKeyId == synthetic key id",
+      "actual": "{\"headlessNode\": true, \"operatorAnchorPoint\": \"045a83070e364497\\u2026\", \"operatorKeyId\": \"63a08f3c623df2fd0543e41123104f50\", \"nodeDeviceId\": \"d_086925bfc971a8476bb57db6d1025344\"}",
+      "verdict": "PASS"
+    }
+  ],
+  "facts": {
+    "synthetic_operator_key_id": "63a08f3c623df2fd0543e41123104f50",
+    "node_device_id": "d_086925bfc971a8476bb57db6d1025344",
+    "extension": {
+      "id": "lofpppoceigbphankfepghkakdjmefep",
+      "crx": "/home/ec2-user/.local-operator/browser/extension/local-operator-0.1.27.11.crx",
+      "version": "0.1.27.11"
+    },
+    "chrome_sandbox": "sandboxed"
+  }
+}
