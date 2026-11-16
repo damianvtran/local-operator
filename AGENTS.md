@@ -1008,6 +1008,45 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
 
+### Never install packages or copy manifests into `~` or another non-repo root
+
+Run package-manager installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`/`uv pip`)
+**only inside a repository, or inside an isolated scratch project that has its
+own manifest**. Never with the working directory in `~`, the scratchpad root,
+or any other directory that is not a project; never copy a `package.json`,
+lockfile or `pnpm-workspace.yaml` into one.
+
+**Why.** npm and pnpm do not install "here": they walk up to the nearest
+ancestor holding a `package.json` (or `node_modules`) and install *there*. A
+one-off `npm install <lib>` run from a manifest-less directory under `~` lands
+in `~/package.json`, `~/package-lock.json` and `~/node_modules`. That has
+happened repeatedly on this host (September–November 2026: several pnpm and npm
+installs, most recently a subagent fetching one library for an interop test).
+The damage outlives the install: a stray `~/package.json` carrying a
+`packageManager` pin makes pnpm in **every** directory under `~` self-switch to
+that version, recursively, until the memory guard kills it — breaking unrelated
+repositories.
+
+**A one-off dependency** (a test that needs a library directory, a script's
+helper) gets its own scratch project:
+
+```sh
+mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe" && cd "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe"
+npm init -y                       # the manifest that stops the walk-up
+npm prefix                        # MUST print this directory, not ~ or a parent
+npm install jose@6
+# or, without cd: npm install --prefix "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe" jose@6
+```
+
+For pnpm, check `pnpm root` resolves to `<that dir>/node_modules` before
+installing. If the prefix/root prints `~` or any ancestor, stop: the install
+would write there.
+
+**Found a stray manifest in `~`** (`package.json`, a lockfile, `node_modules`)?
+Report the paths and what you know of their origin. Do not delete or move them
+unless the operator names those paths — other tools may be resolving through
+them right now.
+
 ### One stash list is shared by every worktree of a clone
 
 Worktrees share one `.git`, so `refs/stash` — and the `stash@{n}` index that
