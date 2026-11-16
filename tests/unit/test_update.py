@@ -6201,11 +6201,18 @@ def test_the_nothing_to_install_exit_queues_no_roll(
     assert rollouts.latest_active(root=root) is None
 
 
-def test_perform_upgrade_never_collects_previous_generations(
+def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The PyPI tail, like the shared snapshot tail, must never collect A."""
-    collections: list[dict[str, Any]] = []
+    """The PyPI tail hands the promoted build to the ONE reclaim step (2026-11-16).
+
+    Automatic collection replaced the frozen tail after a fleet node reached 113
+    generations; it must go through ``reclaim_after_promotion`` (the guarded
+    ``lop install prune`` policy) with the caller's ``on_prune`` reporter, and
+    never call ``prune_generations`` directly from this tail.
+    """
+    reclaims: list[tuple[Path | None, Any]] = []
+    direct: list[dict[str, Any]] = []
     notices: list[Any] = []
     generation = tmp_path / "owned-generation"
     generation.mkdir()
@@ -6219,8 +6226,11 @@ def test_perform_upgrade_never_collects_previous_generations(
 
     monkeypatch.setattr(update_mod, "install_into_generation", install)
     monkeypatch.setattr(
-        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+        update_mod,
+        "reclaim_after_promotion",
+        lambda promoted, *, on_prune=None: reclaims.append((promoted, on_prune)),
     )
+    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: direct.append(kwargs))
     assert (
         update_mod.perform_upgrade(
             target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
@@ -6241,7 +6251,8 @@ def test_perform_upgrade_never_collects_previous_generations(
             },
         )
     ]
-    assert collections == [] and notices == []
+    assert reclaims == [(generation, notices.append)]
+    assert direct == []
 
 
 def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
@@ -6249,9 +6260,9 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
 ) -> None:
     order: list[Any] = []
     monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
-    # Automatic collection is frozen: promotion does not retire loaded A roots.
-    # Recording calls (rather than raising in a best-effort prune) detects even
-    # a swallowed GC failure being attempted by this snapshot/shared tail.
+    # No ``promoted_generation`` means this run promoted nothing, so the shared
+    # reclaim must not prune. Recording calls (rather than raising in a
+    # best-effort prune) detects even a swallowed attempt.
     collections: list[dict[str, Any]] = []
     monkeypatch.setattr(
         update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
@@ -6290,6 +6301,51 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
         "via": "snapshot",
         "roll": False,
     }, order
+
+
+def test_the_snapshot_tail_reclaims_the_promoted_build_before_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``lop-update`` lands on this tail; it must prune like the PyPI path (2026-11-16).
+
+    The reclaim gets THIS run's promoted generation and the CLI printer, and runs
+    right after the ``current`` line — before services, the roll and the report —
+    so the removals print where the PyPI path prints them (design review D4).
+    """
+    order: list[Any] = []
+    promoted = tmp_path / "promoted"
+    monkeypatch.setattr(update_mod, "_print_current_generation", lambda: order.append("current"))
+    monkeypatch.setattr(
+        update_mod,
+        "reclaim_after_promotion",
+        lambda generation, *, on_prune=None: order.append(("reclaim", generation, on_prune)),
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "_run_services_tail",
+        lambda services: order.append("services") or update_mod.StageReport(),
+    )
+    monkeypatch.setattr(update_mod, "_roll_after_update", lambda **kwargs: order.append("roll"))
+    monkeypatch.setattr(update_mod, "_emit_update_report", lambda **kwargs: order.append("report"))
+    assert (
+        update_mod._generation_upgrade(
+            0,
+            install_version="0.28.0",
+            target="0.28.0",
+            roll=False,
+            before_version="0.27.0",
+            via="snapshot",
+            promoted_generation=promoted,
+        )
+        == 0
+    )
+    assert order == [
+        "current",
+        ("reclaim", promoted, update_mod._print_prune_notice),
+        "services",
+        "roll",
+        "report",
+    ], order
 
 
 def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(

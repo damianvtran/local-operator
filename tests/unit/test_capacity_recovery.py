@@ -8,6 +8,8 @@ retained.
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -318,3 +320,185 @@ def test_an_unresolvable_free_reading_is_treated_as_over(home: Path, monkeypatch
     reading = capacity_recovery.measure_capacity(max_generations=100, min_free_bytes=1)
     assert reading.free_bytes == -1
     assert reading.threshold == "free"
+
+
+# -- the automatic prune after promotion (operator decision, 2026-11-16) --------
+#
+# A fleet node reached 113 generations (~8.6 GB) because the promotion tail only
+# RECORDED capacity pressure and nothing consumed the record. The tail now runs
+# ``lop install prune``'s own policy (``update.reclaim_after_promotion``). These
+# drive that real tail over real generations built by the fake uv, and pin the
+# properties the operator asked for: the count is bounded, current/held/running
+# trees survive, every doubt keeps trees, the switch works, and a failing
+# reclaim never fails the update.
+
+
+def _write_update_settings(home: Path, values: dict[str, object] | str) -> None:
+    """Write ``values.update`` into THIS test's ``config.yml`` (never a real one).
+
+    ``config_dir()`` follows ``$HOME`` here because conftest scrubs
+    ``LOCAL_OPERATOR_CONFIG_DIR``; the assert makes a regression in that isolation
+    fail loudly instead of writing the developer's config.
+    """
+    import yaml
+
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    assert home in root.parents, root
+    root.mkdir(parents=True, exist_ok=True)
+    body = (
+        values
+        if isinstance(values, str)
+        else yaml.safe_dump({"values": {"update": values}}, sort_keys=True)
+    )
+    path = root / "config.yml"
+    path.write_text(body, encoding="utf-8")
+    # ``read_config_values`` memoises a parse per (inode, size, mtime_ns, ...),
+    # and two rewrites inside one coarse clock tick can share all of them. A
+    # strictly increasing explicit mtime makes every rewrite a new key.
+    _CONFIG_WRITES.append(None)
+    stamp = time.time_ns() + len(_CONFIG_WRITES) * 1_000_000_000
+    os.utime(path, ns=(stamp, stamp))
+
+
+_CONFIG_WRITES: list[None] = []
+
+
+def _promote(version: str) -> Path:
+    """One real promotion (fake uv build + pointer flip), then the shared tail."""
+    from tests.unit.test_install_generations import _install
+
+    generation = _install(version)
+    update_mod.reclaim_after_promotion(generation)
+    return generation
+
+
+def _on_disk() -> list[Path]:
+    return sorted(
+        path
+        for path in update_mod.generations_dir().iterdir()
+        if path.is_dir() and not path.is_symlink()
+    )
+
+
+def test_n_plus_five_updates_leave_at_most_n_plus_refs_generations(home: Path) -> None:
+    """(a) The count is bounded by keep + referenced + current, update after update."""
+    keep = update_mod.DEFAULT_KEEP_GENERATIONS
+    held = _promote("0.52.0")
+    _session_record(home / ".local-operator", held)
+    promoted = [held]
+    for index in range(1, keep + 6):
+        promoted.append(_promote(f"0.52.{index}"))
+        # Bounded after EVERY update, not only at the end: one held root, the
+        # pointer's target, and at most ``keep`` unreferenced survivors.
+        assert len(_on_disk()) <= keep + 1 + 1, [path.name for path in _on_disk()]
+    survivors = _on_disk()
+    assert len(survivors) == keep + 2, [path.name for path in survivors]
+    assert update_mod.current_generation() == promoted[-1].resolve()
+    assert promoted[-1].is_dir(), "the build just promoted is never removed"
+    assert held.is_dir(), "a session-referenced generation is never removed"
+
+
+def test_current_held_and_running_generations_are_never_removed(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) keep=0 is the harshest setting; the three protected trees still survive."""
+    _write_update_settings(home, {"auto_prune": True, "keep_generations": 0})
+    running = _install_only("0.52.0")
+    # The updater imports from the tree it is replacing, which no record names.
+    monkeypatch.setattr(update_mod, "_running_generation", lambda: running.resolve())
+    held = _install_only("0.52.1")
+    _session_record(home / ".local-operator", held)
+    doomed = _promote("0.52.2")
+    current = _promote("0.52.3")
+    assert running.is_dir(), "the tree this process runs from was removed"
+    assert held.is_dir(), "a session-referenced generation was removed"
+    assert current.is_dir() and update_mod.current_generation() == current.resolve()
+    # The control that proves keep=0 was really in force: the unprotected one went.
+    assert not doomed.exists()
+
+
+def test_an_unreadable_census_retains_everything(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(c) An incomplete record read proves nothing by omission: nothing goes."""
+    _write_update_settings(home, {"keep_generations": 0})
+    generations = [_install_only(f"0.52.{index}") for index in range(3)]
+    incomplete = update_mod.ReferencedTrees(
+        roots=(), complete=False, gaps=("a session record could not be read",)
+    )
+    monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: incomplete)
+    newest = _install_only("0.52.9")
+    plan = update_mod.reclaim_after_promotion(newest)
+    assert plan is not None and plan.references_complete is False
+    assert plan.removed == ()
+    assert all(path.is_dir() for path in [*generations, newest])
+
+
+def test_an_unreadable_config_or_a_foreign_pointer_retains_everything(home: Path) -> None:
+    """(c) Unknown policy or a pointer this run does not own: no prune at all."""
+    _write_update_settings(home, {"keep_generations": 0})
+    generations = [_install_only(f"0.52.{index}") for index in range(3)]
+    # A torn/unparseable config: the switch may be off, so nothing is removed.
+    _write_update_settings(home, "values: [unterminated\n")
+    newest = _install_only("0.52.8")
+    assert update_mod.reclaim_after_promotion(newest) is None
+    # A pointer that no longer names the promoted build (another actor flipped
+    # it): this run does not own the decision.
+    _write_update_settings(home, {"keep_generations": 0})
+    assert update_mod.reclaim_after_promotion(generations[0]) is None
+    assert all(path.is_dir() for path in [*generations, newest])
+
+
+def test_auto_prune_off_removes_nothing(home: Path) -> None:
+    """(d) Negative control: the same updates with the switch off keep every tree."""
+    _write_update_settings(home, {"auto_prune": False, "keep_generations": 0})
+    generations = [_promote(f"0.52.{index}") for index in range(4)]
+    assert all(path.is_dir() for path in generations)
+    assert len(_on_disk()) == 4
+    # A hand-edited non-boolean is someone trying to stop it: it reads as OFF.
+    _write_update_settings(home, {"auto_prune": "no", "keep_generations": 0})
+    _promote("0.52.9")
+    assert len(_on_disk()) == 5
+
+
+def test_a_reclaim_failure_does_not_fail_the_update(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(e) The build is already current; a failing prune is logged, not raised."""
+
+    def _boom(**_kwargs: object) -> object:
+        raise update_mod.UpdateError("another install mutation owns the root")
+
+    monkeypatch.setattr(update_mod, "prune_generations", _boom)
+    reported: list[object] = []
+    generation = _install_only("0.52.0")
+    assert update_mod.reclaim_after_promotion(generation, on_prune=reported.append) is None
+    assert reported == []
+    assert generation.is_dir()
+
+    # And through the real PyPI tail: perform_upgrade still returns the target.
+    monkeypatch.setattr(update_mod, "install_into_generation", lambda *_a, **_k: generation)
+    assert (
+        update_mod.perform_upgrade(target="0.52.0", kind=update_mod.InstallKind.UV_TOOL) == "0.52.0"
+    )
+
+
+def test_the_policy_reader_defaults_and_rejects_bad_values(home: Path) -> None:
+    """Missing keys read the defaults; a bad keep reads the default, never 0."""
+    default = update_mod.AutoPrunePolicy(enabled=True, keep=update_mod.DEFAULT_KEEP_GENERATIONS)
+    _write_update_settings(home, {})
+    assert update_mod.auto_prune_policy() == default
+    for bad in (-1, True, "3", 1.5):
+        _write_update_settings(home, {"keep_generations": bad})
+        assert update_mod.auto_prune_policy() == default, bad
+    _write_update_settings(home, {"keep_generations": 5})
+    assert update_mod.auto_prune_policy() == update_mod.AutoPrunePolicy(enabled=True, keep=5)
+
+
+def _install_only(version: str) -> Path:
+    """A promotion WITHOUT the tail, for tests that call the tail themselves."""
+    from tests.unit.test_install_generations import _install
+
+    return _install(version)

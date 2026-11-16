@@ -972,6 +972,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.mesh_updates_description()),
     ),
+    # What THIS device's update does with its older install generations
+    # (``update.auto_prune`` / ``update.keep_generations``). Its own section, not
+    # ``mesh_updates``: that one is about rolling OTHER members. LIVE is honest:
+    # ``update.auto_prune_policy`` re-reads config.yml at every promotion tail
+    # (PyPI, snapshot and mesh), and no ``Session`` holds either key.
+    Section(
+        "updates",
+        _t(_ws.updates_title()),
+        Scope.LIVE,
+        _t(_ws.updates_description()),
+    ),
     # PREVIEW, and its own section, LIVE — all three are decisions, not defaults.
     #
     # LIVE is honest: the switch is read from ``config.yml`` on every capability
@@ -5537,6 +5548,41 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1.0,
         maximum=3650.0,
         help=(_t(_ws.network_audit_max_age_days_help())),
+    ),
+    # THE POST-UPDATE PRUNE (operator decision 2026-11-16, after a fleet node
+    # reached 113 generations / ~8.6 GB with automatic collection frozen). Both
+    # are read by ``update.auto_prune_policy`` and drive
+    # ``update.reclaim_after_promotion``, which is ``lop install prune``'s own
+    # guarded ``prune_generations``: the current build, the updater's running
+    # tree and every record-named root are never removed, whatever these say.
+    # Defaults are LITERALS mirroring ``install_defaults``
+    # (DEFAULT_AUTO_PRUNE_GENERATIONS / DEFAULT_KEEP_GENERATIONS);
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins the pair.
+    Setting(
+        key="update.auto_prune",
+        path=("update", "auto_prune"),
+        section="updates",
+        label=_t(_ws.update_auto_prune_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_ws.update_auto_prune_choice_true_description()),
+            _t(_ws.update_auto_prune_choice_false_description()),
+        ),
+        help=_t(_ws.update_auto_prune_help()),
+    ),
+    # 0 is legal (keep only what is current or in use); the ceiling is a sanity
+    # bound, not a policy — each generation is a whole venv (~80-140 MB).
+    Setting(
+        key="update.keep_generations",
+        path=("update", "keep_generations"),
+        section="updates",
+        label=_t(_ws.update_keep_generations_label()),
+        kind=Kind.INT,
+        default=2,
+        help=_t(_ws.update_keep_generations_help()),
+        minimum=0,
+        maximum=100,
     ),
     # THE SWITCH (S3b; mesh-update-propagation.md §5): auto-roll is reachable
     # only when this reads ``auto``. A per-run ``lop update --no-roll``

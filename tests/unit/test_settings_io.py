@@ -84,6 +84,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_CHECK_INTERVAL_MIN,
     )
     from local_operator.i18n.resolve import DEFAULT_LANGUAGE
+    from local_operator.install_defaults import (
+        DEFAULT_AUTO_PRUNE_GENERATIONS,
+        DEFAULT_KEEP_GENERATIONS,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -320,6 +324,10 @@ def _consumer_defaults() -> dict[str, object]:
         # default and the code default cannot drift.
         "subagents.slim_child_knowledge": DEFAULT_SLIM_CHILD_KNOWLEDGE,
         "subagents.max_team_depth": DEFAULT_MAX_TEAM_DEPTH,
+        # The post-update prune: ``update.auto_prune_policy`` falls back to these
+        # when the keys are absent; the registry carries literals.
+        "update.auto_prune": DEFAULT_AUTO_PRUNE_GENERATIONS,
+        "update.keep_generations": DEFAULT_KEEP_GENERATIONS,
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,

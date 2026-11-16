@@ -75,9 +75,17 @@ def test_each_candidate_gets_fresh_reference_read(candidates, monkeypatch):
     remove.assert_called_once_with(paths[0])
 
 
-def test_mesh_promotion_does_not_collect_generations():
+def test_mesh_promotion_reclaims_only_through_the_shared_tail():
+    """Mesh deletion goes through ``update.reclaim_after_promotion``, never directly.
+
+    The census-veto guarantees above live in ``prune_generations``; the mesh path
+    must reach it only through the one shared tail (2026-11-16), so it cannot skip
+    the policy's pointer, running-tree, record and keep-margin protections.
+    """
+    promoted = object()
     module = SimpleNamespace(
-        install_into_generation=Mock(),
+        install_into_generation=Mock(return_value=promoted),
+        reclaim_after_promotion=Mock(),
         prune_generations=Mock(),
         referenced_install_roots=Mock(),
         prune_notice_lines=Mock(return_value=[]),
@@ -86,5 +94,6 @@ def test_mesh_promotion_does_not_collect_generations():
     )
     meshupdate._install_generation("0.0.0", runner=Mock(), update_mod=module)
     module.install_into_generation.assert_called_once()
+    module.reclaim_after_promotion.assert_called_once_with(promoted)
     module.prune_generations.assert_not_called()
     module.referenced_install_roots.assert_not_called()

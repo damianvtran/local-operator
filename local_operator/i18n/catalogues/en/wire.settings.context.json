@@ -347,5 +347,53 @@
     "note": "'Unaddressed' means a message NOT addressed to the user's own agent — chatter in a room, or an agent mentioning it in passing — as opposed to a person writing to it directly. Keep the label short; the help carries the definition. No ICU arguments.",
     "role": "Settings row label",
     "tone": "concise, neutral"
+  },
+  "wire.settings.update_auto_prune.choice.false.description": {
+    "role": "description of the 'off' choice",
+    "tone": "terse fragment",
+    "width": "about 40 cells",
+    "note": "Nothing is deleted automatically; the user runs `lop install prune` themselves."
+  },
+  "wire.settings.update_auto_prune.choice.true.description": {
+    "role": "description of the 'on' choice",
+    "tone": "terse fragment",
+    "width": "about 40 cells",
+    "note": "Says what is always kept: the current install, installs a session still uses, and the few newest unused ones."
+  },
+  "wire.settings.update_auto_prune.help": {
+    "role": "settings row help",
+    "tone": "plain",
+    "width": "one line, about 72 cells",
+    "note": "Keep `lop install prune` verbatim: the automatic pass follows exactly that command's rules. No ICU arguments."
+  },
+  "wire.settings.update_auto_prune.label": {
+    "role": "settings row label in the updates section",
+    "tone": "terse, lowercase like its neighbours",
+    "width": "short label column",
+    "note": "An on/off switch: delete old unused install generations automatically after each update."
+  },
+  "wire.settings.update_keep_generations.help": {
+    "role": "settings row help",
+    "tone": "plain",
+    "width": "one or two short sentences",
+    "note": "Must keep the guarantee: the current install and installs in use are always kept regardless of this number. No ICU arguments."
+  },
+  "wire.settings.update_keep_generations.label": {
+    "role": "settings row label for a number",
+    "tone": "terse, lowercase",
+    "width": "short label column",
+    "note": "The number of newest UNUSED installs kept after each prune (default 2; 0 is allowed)."
+  },
+  "wire.settings.updates.description": {
+    "role": "settings section description",
+    "tone": "plain",
+    "width": "one or two sentences",
+    "note": "'installs' = install generations (whole copies of the app kept side by side). Keep `lop update` verbatim. No ICU arguments."
+  },
+  "wire.settings.updates.title": {
+    "role": "settings section title",
+    "tone": "terse",
+    "width": "short section header",
+    "note": "The section for what a local update does with older install generations on THIS device; not the mesh roll (that is 'Mesh updates')."
   }
 }

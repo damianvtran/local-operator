@@ -971,8 +971,9 @@ def preserve_publication(generation: Path, nonce: str) -> None:
     that raised (pointer never written) must NOT be marked exposed. Its caller
     (``install_into_generation``) enforces that ordering; this function only
     records the boundary. Failed exposure stays protected; successful completion
-    removes the attempt normally, while rolling automatic GC remains frozen for
-    all loaded roots.
+    removes the attempt normally; the post-promotion prune
+    (``update.reclaim_after_promotion``) still keeps every root a record names,
+    the running tree and the keep margin.
     """
     path = generation / ATTEMPT_NAME
     record = read_record(path)
