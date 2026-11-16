@@ -3845,7 +3845,9 @@ class _Walker:
         raw_words, redirects = scan(text)
         # Arithmetic and parameter-assignment expansion can mutate bindings even
         # inside otherwise harmless words. We do not model their shell lvalues.
-        if "((" in text or re.search(r"\$\{[^}]*[:+?=-]", text):
+        # Bash's legacy $[...] form has the same assignment side effects as
+        # $((...)); neither may leave a fresh-directory proof on a stale value.
+        if "((" in text or "$[" in text or re.search(r"\$\{[^}]*[:+?=-]", text):
             self._forget_fresh_directories()
         st = self.state
         words: list[Expanded] = []

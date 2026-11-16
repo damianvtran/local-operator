@@ -224,6 +224,50 @@ def test_shell_mutators_end_all_fresh_binding_proofs(tree, mutation) -> None:
         assert _rank(tree, command).risk >= Risk.HIGH
 
 
+@pytest.mark.parametrize("binding", ["ROOT", "COPY"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        'echo "$[{binding}=0]"',
+        'printf %s "$[{binding}=0]"',
+        'echo "$(({binding}=0))"',
+        'printf %s "$(({binding}=0))"',
+        "(({binding}=0)) || true",
+    ],
+)
+def test_arithmetic_binding_mutation_cannot_hide_numeric_symlink(tree, binding, mutation) -> None:
+    home, _, cwd, env = tree
+    state = home / ".local-operator"
+    (cwd / "0").symlink_to(state, target_is_directory=True)
+    prefix = HEADER + ASSIGN
+    if binding == "COPY":
+        prefix += 'COPY="$ROOT"\n'
+    prefix += mutation.format(binding=binding) + "\n"
+    command = prefix + f'printf proof > "${binding}/config.yml"\n'
+    # Preview the dangerous suffix only; execute a display-only prefix to prove
+    # Bash really changes the binding to the numeric symlink destination.
+    report = preview_tool_call(
+        "bash",
+        {"command": command},
+        CallContext(cwd=str(cwd), env=env, scratchpad=str(tree[1]), session_id=SID),
+        settings=GuardSettings(enabled=False),
+    )
+    assert report.builtin_risk in {"HIGH", "CRITICAL"}
+    assert not any(t.opaque_contained for t in _resolve(tree, command).targets)
+    completed = subprocess.run(
+        ["/bin/bash", "-c", prefix + f'printf "\\nresolved=%s\\n" "${binding}"'],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.endswith("\nresolved=0\n")
+    assert (cwd / "0/config.yml").resolve() == state / "config.yml"
+    assert (state / "config.yml").read_text() == "version: 1\n"
+
+
 def test_inherited_path_shadow_is_not_a_fresh_directory_creator(tree) -> None:
     home, pad, cwd, env = tree
     bin_dir = home / "bin"
