@@ -16,6 +16,7 @@ import pytest
 
 from local_operator.harness.types import (
     AgentTool,
+    Message,
     StreamEndEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -24,7 +25,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session import file_provenance as F
 from local_operator.session.runtime.server import RuntimeServer, _ConnectionAuthority
-from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.runtime.serving import ServingSessionHandle, _PromptCommand
 from tests.unit.session.test_file_provenance import ids, make_session
 from tests.unit.session.test_file_provenance import rig as _provenance_rig
 
@@ -300,7 +301,11 @@ async def test_native_job_freezes_at_first_completion_before_delayed_delivery(ri
         release.set()
         await delivering.wait()
         completed = [p for p in proofs(rig) if p and p["source_class"] == "job_completion"]
-        assert session.jobs.get(held["id"]).latest_details["path"] == str(target)
+        job = session.jobs.get(held["id"])
+        assert job is not None
+        assert job.latest_details is not None
+        assert job.latest_details["path"] == str(target)
+        opaque: str | None = None
         if source == "structured":
             assert completed
             opaque = completed[0]["id"]
@@ -313,6 +318,7 @@ async def test_native_job_freezes_at_first_completion_before_delayed_delivery(ri
         delivered.set()
         await task
         if source == "structured":
+            assert opaque is not None
             assert F.lookup_proof(rig.root, rig.directory.name, opaque) is None
         else:
             assert proofs(rig) == []
@@ -557,6 +563,10 @@ async def test_r2_1_shell_commands_never_mint_against_real_bash(rig, command, ex
     try:
         await session.prompt("run it")
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        # The real bash fixture returns a text tool result; assert its shape
+        # rather than filtering away an unexpected row or multimodal payload.
+        assert isinstance(results[-1], Message)
+        assert isinstance(results[-1].content[0], TextContent)
         # This output comes from real bash with distinct per-path contents, not
         # provenance code; in the CRLF case bash also reports a failed cd.
         assert results[-1].content[0].text.startswith(("CONTROL\n" if prefix else "") + expected)
@@ -576,6 +586,10 @@ async def test_shell_plain_lf_never_mints(rig):
     try:
         await session.prompt("run it")
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        # The real bash fixture returns a text tool result; assert its shape
+        # rather than filtering away an unexpected row or multimodal payload.
+        assert isinstance(results[-1], Message)
+        assert isinstance(results[-1].content[0], TextContent)
         assert results[-1].content[0].text == "LF-CONTROL"
         assert proofs(rig) == []
     finally:
@@ -605,7 +619,7 @@ async def test_r2_2_prompt_spool_owns_ticket_only_after_success(rig, monkeypatch
 
     monkeypatch.setattr(handle, "_spool_for_successor", spool)
     if window == "updating":
-        handle._updating = True
+        handle._updating = "synthetic-build-pair"
     else:
         handle._retiring_cause = "synthetic drain"
         handle._draining = True
@@ -624,7 +638,7 @@ async def test_r2_2_prompt_spool_owns_ticket_only_after_success(rig, monkeypatch
         assert handle._command_reservations.reserve(command_id, kind="prompt")
         handle._command_reservations.reject(command_id)
     finally:
-        handle._updating = False
+        handle._updating = ""
         handle._retiring_cause = ""
         handle._draining = False
         await handle.dispose()
@@ -695,6 +709,10 @@ async def test_qa_q1_shell_never_attests_a_file_the_command_did_not_touch(rig, s
     try:
         await session.prompt("run it")
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        # The real bash fixture returns a text tool result; assert its shape
+        # rather than filtering away an unexpected row or multimodal payload.
+        assert isinstance(results[-1], Message)
+        assert isinstance(results[-1].content[0], TextContent)
         # The real shell did not open the decoy (it failed on another path).
         assert "No such file" in results[-1].content[0].text
         assert proofs(rig) == []
@@ -711,6 +729,10 @@ async def test_plain_literal_shell_command_never_mints(rig):
     try:
         await session.prompt("run it")
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        # The real bash fixture returns a text tool result; assert its shape
+        # rather than filtering away an unexpected row or multimodal payload.
+        assert isinstance(results[-1], Message)
+        assert isinstance(results[-1].content[0], TextContent)
         assert results[-1].content[0].text == "QA-CONTROL"
         assert proofs(rig) == []
     finally:
@@ -803,7 +825,15 @@ async def test_r3_refused_prompt_drops_its_frozen_admission(rig):
     handle = ServingSessionHandle(
         session, asyncio.get_running_loop(), cwd=str(rig.work), config_dir=rig.root
     )
-    handle._prompt_queue.append(object())  # busy: wait_for_turn=False must refuse
+    # Model a real queued prompt so the refusal exercises production queue shape.
+    handle._prompt_queue.append(
+        _PromptCommand(
+            command_id="already-queued",
+            text="busy",
+            images=None,
+            admitted=asyncio.get_running_loop().create_future(),
+        )
+    )
     try:
         with pytest.raises(TurnInFlight):
             await handle.prompt(
@@ -889,6 +919,10 @@ async def test_r3_shell_commands_never_mint_with_existing_decoys(
     try:
         await session.prompt("run it")
         results = [m for m in session.history() if getattr(m, "role", "") == "tool"]
+        # The real bash fixture returns a text tool result; assert its shape
+        # rather than filtering away an unexpected row or multimodal payload.
+        assert isinstance(results[-1], Message)
+        assert isinstance(results[-1].content[0], TextContent)
         actual = results[-1].content[0].text
         if expected:
             assert actual == expected
@@ -936,7 +970,7 @@ async def test_r3_committed_spool_cancellation_conservatively_drops_ticket(
         await await_spool_write(write)
 
     monkeypatch.setattr(handle, "_spool_for_successor", spool)
-    handle._updating = window == "updating"
+    handle._updating = "synthetic-build-pair" if window == "updating" else ""
     handle._draining = window == "draining"
     handle._retiring_cause = "synthetic drain" if handle._draining else ""
     admission = F.user_admission(_ConnectionAuthority(), "prompt")
@@ -958,6 +992,7 @@ async def test_r3_committed_spool_cancellation_conservatively_drops_ticket(
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        handle._updating = handle._draining = False
+        handle._updating = ""
+        handle._draining = False
         handle._retiring_cause = ""
         await handle.dispose()
