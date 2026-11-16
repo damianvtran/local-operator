@@ -172,7 +172,14 @@ def _generation_name(root: Path, value: object) -> tuple[str | None, bool]:
 
 
 def _exclusion(record: dict[str, Any], root: Path, referenced: set[str]) -> str | None:
-    if record.get("phase") in _PREPARED_PHASES:
+    phase = record.get("phase")
+    # A non-string phase (list/dict from a corrupt or foreign writer) is not a
+    # phase this classifier understands, and an unhashable one would raise in
+    # the frozenset test below. Fail closed: exclude it, never a candidate
+    # (review R1 / QA Q1 on #4126).
+    if phase is not None and not isinstance(phase, str):
+        return "uncertain_phase"
+    if phase in _PREPARED_PHASES:
         return "prepared_ref"
     names: list[str] = []
     for field in ("candidate", "current"):
@@ -664,8 +671,6 @@ def retirable_sealed_v2(root: Path, *, keep: int) -> list[tuple[str, Path]]:
 
     The newest ``keep`` qualifying records (by seal time) stay live.
     """
-    from local_operator import fenced_operation as _v2
-
     root = _tx.canonical_root(root)
     directory = root / _V2_DIR
     if not directory.exists() and not directory.is_symlink():
@@ -687,24 +692,52 @@ def retirable_sealed_v2(root: Path, *, keep: int) -> list[tuple[str, Path]]:
                 continue
             path = directory / entry.name
             record = _tx.read_record(path)
-            if (
-                record is None
-                or record.get("protocol") != _tx.V2_PROTOCOL
-                or record.get("operation_id") != identifier
-                or not isinstance(record.get("sealed"), dict)
-                or record.get("phase") in _PREPARED_PHASES
-                or _v2.seal_blockers(record, root)
-            ):
-                continue
-            sealed_at = record["sealed"].get("sealed_at")
-            if not isinstance(sealed_at, (int, float)) or isinstance(sealed_at, bool):
-                continue
-            if _v2_generations_protected(root, record, referenced, pointers):
-                continue
-            found.append((float(sealed_at), identifier, path))
+            try:
+                sealed_at = _retirable_v2_seal(root, record, identifier, referenced, pointers)
+            except Exception:  # noqa: BLE001
+                # Any shape the checks below did not anticipate (an unhashable
+                # writer role inside ``seal_blockers``, a non-list field) makes
+                # THIS record protected, never the whole rotation a failure
+                # (review R1 on #4126): fail closed per record.
+                sealed_at = None
+            if sealed_at is not None:
+                found.append((sealed_at, identifier, path))
     found.sort()
     retire = found[: max(0, len(found) - max(0, keep))]
     return [(identifier, path) for _sealed_at, identifier, path in retire]
+
+
+def _retirable_v2_seal(
+    root: Path,
+    record: dict[str, Any] | None,
+    identifier: str,
+    referenced: set[str],
+    pointers: list[Path],
+) -> float | None:
+    """The record's seal time when it may retire, else ``None`` (kept live).
+
+    Split out of :func:`retirable_sealed_v2` so its caller can treat ANY
+    exception here as "protected" for this one record. A non-string phase is
+    refused explicitly (an unhashable one would raise in the frozenset test).
+    """
+    from local_operator import fenced_operation as _v2
+
+    if (
+        record is None
+        or record.get("protocol") != _tx.V2_PROTOCOL
+        or record.get("operation_id") != identifier
+        or not isinstance(record.get("sealed"), dict)
+        or not isinstance(record.get("phase"), str)
+        or record["phase"] in _PREPARED_PHASES
+        or _v2.seal_blockers(record, root)
+    ):
+        return None
+    sealed_at = record["sealed"].get("sealed_at")
+    if not isinstance(sealed_at, (int, float)) or isinstance(sealed_at, bool):
+        return None
+    if _v2_generations_protected(root, record, referenced, pointers):
+        return None
+    return float(sealed_at)
 
 
 def _pointer_realpaths(root: Path) -> list[Path] | None:

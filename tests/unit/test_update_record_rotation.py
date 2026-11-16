@@ -86,7 +86,7 @@ def _fill_sealed(root: Path, count: int, base: float = 1000.0) -> list[str]:
     return ids
 
 
-def _write_legacy(root: Path, phase: str = "partial", candidate: str = "", age: float = 2 * _DAY):
+def _write_legacy(root: Path, phase: Any = "partial", candidate: str = "", age: float = 2 * _DAY):
     """A legacy record shaped like the incident's, with an mtime ``age`` seconds old."""
     directory = root / tx.OPERATION_DIR
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -470,3 +470,168 @@ def test_rotation_and_aging_never_touch_a_sibling_archive_outside_the_root(tmp_p
     aged = _rotate(root, _T0 + 365 * _DAY)["aged"]
     assert len(aged) == 100 - 32
     assert _tree(tmp_path / "lop-record-archive") == before
+
+
+# --- Review round 1 remediation on #4126 (R1/Q1, R2, R3) ---------------------------
+
+
+def _malformed_records(root: Path) -> list[Path]:
+    """Records whose shapes made a classifier RAISE at 4674330 (review R1, QA Q1)."""
+    return [
+        _write_v2(root, _sealed_record(uuid.uuid4().hex, 1, phase=[])),
+        _write_v2(root, _sealed_record(uuid.uuid4().hex, 2, phase={"step": "partial"})),
+        _write_v2(
+            root,
+            _sealed_record(
+                uuid.uuid4().hex,
+                3,
+                writers={"b" * 32: {"role": ["coordinator"], "epoch": 1, "state": "finished"}},
+            ),
+        ),
+        _write_legacy(root, phase={"step": "partial"}),
+    ]
+
+
+def test_malformed_records_never_block_admission_below_the_cap(tmp_path):
+    root = _root(tmp_path)
+    malformed = _malformed_records(root)
+    before = {path: _fingerprint(path) for path in malformed}
+    tx.start_operation(root, baseline="A", target="B", route="latest")
+    v2.start_operation(root, baseline="A", target="B", route="default-cli")
+    assert {path: _fingerprint(path) for path in malformed} == before
+    assert _archived(root) == []
+
+
+def test_malformed_records_stay_live_while_the_rest_rotates_at_the_threshold(tmp_path, monkeypatch):
+    """At >= 240 the legacy classifier runs too: a dict phase is EXCLUDED, not a crash."""
+    monkeypatch.setattr(tx, "ROTATION_KEEP_SEALED", 0)
+    root = _root(tmp_path)
+    malformed = _malformed_records(root)
+    before = {path: _fingerprint(path) for path in malformed}
+    good_v2 = _write_v2(root, _sealed_record(uuid.uuid4().hex, 4))
+    good_legacy = _write_legacy(root)
+    for _ in range(tx.LEGACY_MIGRATION_THRESHOLD):
+        _write_legacy(root, phase="queued")
+    assert tx.active_recovery_entries(root) >= tx.LEGACY_MIGRATION_THRESHOLD
+    manifest = manifest_mod.dry_run_manifest(root)
+    assert {"relpath": f"{tx.OPERATION_DIR}/{malformed[-1].name}", "reason": "uncertain_phase"} in (
+        manifest["excluded"]
+    )
+    tx.start_operation(root, baseline="A", target="B", route="latest")
+    assert {path: _fingerprint(path) for path in malformed} == before
+    archived_ids = {name.split(".")[2] for name in _archived(root)}
+    assert archived_ids == {good_v2.stem, good_legacy.stem}
+
+
+def test_any_rotation_error_is_logged_below_the_cap_and_chained_at_it(tmp_path, monkeypatch):
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("unhashable type: 'list'")
+
+    monkeypatch.setattr(manifest_mod, "retirable_sealed_v2", broken)
+    root = _root(tmp_path)
+    tx.start_operation(root, baseline="A", target="B", route="latest")
+    v2.start_operation(root, baseline="A", target="B", route="default-cli")
+    for _ in range(254):
+        _write_legacy(root, phase="prepared")
+    for admit in (tx.start_operation, v2.start_operation):
+        with pytest.raises(tx.RecoveryCapacityError) as caught:
+            admit(root, baseline="A", target="B", route="latest")
+        assert str(caught.value) == _SENTENCE
+        assert caught.value.code == "update_recovery_capacity"
+        assert isinstance(caught.value.__cause__, TypeError)
+
+
+def _status_without_lock(root: Path, monkeypatch: Any) -> dict[str, Any]:
+    with monkeypatch.context() as patched:
+        for name in ("transaction", "owner_alive", "_archive_moves", "_move_entry"):
+            patched.setattr(tx, name, lambda *_a, **_k: pytest.fail(f"status called {name}"))
+        return tx.recovery_capacity_status(root)
+
+
+def test_capacity_status_agrees_with_admission(tmp_path, monkeypatch):
+    """Review R2: ``at_limit``/``retirable_entries`` predict admission, read-only."""
+    root = _root(tmp_path)
+    _fill_sealed(root, 256)
+    before = _tree(root)
+    report = _status_without_lock(root, monkeypatch)
+    assert _tree(root) == before
+    assert report["observed_entries"] == 256
+    assert report["retirable_entries"] == 256 - tx.ROTATION_KEEP_SEALED
+    assert report["protected_entries"] == tx.ROTATION_KEEP_SEALED
+    assert report["at_limit"] is False and report["mutation_performed"] is False
+    v2.start_operation(root, baseline="A", target="B", route="default-cli")
+
+    # Legacy at the cap: old candidates are retirable, fresh ones (grace) are not.
+    old_root = _root(tmp_path / "old")
+    for _ in range(256):
+        _write_legacy(old_root)
+    report = _status_without_lock(old_root, monkeypatch)
+    assert (report["retirable_entries"], report["at_limit"]) == (256, False)
+    tx.start_operation(old_root, baseline="A", target="B", route="latest")
+
+    fresh_root = _root(tmp_path / "fresh")
+    for _ in range(256):
+        _write_legacy(fresh_root, age=60)
+    report = _status_without_lock(fresh_root, monkeypatch)
+    assert (report["retirable_entries"], report["at_limit"]) == (0, True)
+    with pytest.raises(tx.RecoveryCapacityError):
+        tx.start_operation(fresh_root, baseline="A", target="B", route="latest")
+
+    # Rotation off: status and admission both fall back to the raw count.
+    monkeypatch.setattr(tx, "RECORD_ROTATION_ENABLED", False)
+    disabled_root = _root(tmp_path / "disabled")
+    _fill_sealed(disabled_root, 256)
+    report = _status_without_lock(disabled_root, monkeypatch)
+    assert (report["retirable_entries"], report["at_limit"]) == (0, True)
+    with pytest.raises(tx.RecoveryCapacityError):
+        v2.start_operation(disabled_root, baseline="A", target="B", route="default-cli")
+
+
+def test_archive_aging_runs_even_when_legacy_migration_fails(tmp_path, monkeypatch):
+    """Review R3: a persistent migration failure must not suspend the archive bound."""
+    root = _root(tmp_path)
+    _fill_sealed(root, tx.ROTATION_KEEP_SEALED + 8)
+    assert len(_rotate(root, _T0)["v2_archived"]) == 8
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        raise manifest_mod.ManifestError("simulated persistent legacy refusal")
+
+    monkeypatch.setattr(manifest_mod, "archive_candidates", refused)
+    for _ in range(tx.LEGACY_MIGRATION_THRESHOLD):
+        _write_legacy(root)
+    with pytest.raises(manifest_mod.ManifestError, match="simulated"):
+        _rotate(root, _T0 + tx.ARCHIVE_MAX_AGE_S + 5)
+    assert _archived(root) == []
+
+
+def test_count_trim_inside_one_batch_drops_the_oldest_records_first(tmp_path, monkeypatch):
+    """QA Q4: one rotation stamps a batch alike; the trim must follow record age, not uuid."""
+    monkeypatch.setattr(tx, "ROTATION_KEEP_SEALED", 0)
+    monkeypatch.setattr(tx, "ARCHIVE_MAX_ENTRIES", 5)
+    root = _root(tmp_path)
+    ids = [uuid.uuid4().hex for _ in range(8)]
+    for index, identifier in enumerate(ids):
+        path = _write_v2(root, _sealed_record(identifier, 1000.0 + index))
+        stamp = int((_T0 - 3600 + index) * 1e9)
+        os.utime(path, ns=(stamp, stamp))
+    report = _rotate(root, _T0)
+    assert len(report["v2_archived"]) == 8
+    assert sorted(name.split(".")[2] for name in report["aged"]) == sorted(ids[:3])
+    assert sorted(name.split(".")[2] for name in _archived(root)) == sorted(ids[3:])
+
+
+def test_status_stays_a_bounded_read_past_the_cap(tmp_path, monkeypatch):
+    """R2 must not undo the 256-record read bound on an overflowing (flooded) store."""
+    root = _root(tmp_path)
+    _fill_sealed(root, 300)
+    original = tx.read_record
+    reads: list[Path] = []
+
+    def counted(path: Path) -> Any:
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(tx, "read_record", counted)
+    report = tx.recovery_capacity_status(root)
+    assert report["scan_complete"] is False and len(reads) == 256
+    assert report["at_limit"] is True and report["retirable_entries"] == 0

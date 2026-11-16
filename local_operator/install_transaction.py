@@ -699,6 +699,14 @@ def _archive_moves(
     return moved
 
 
+def _mtime_ns(path: Path) -> int:
+    """A sort key only; an entry that vanished or cannot be stat'ed sorts first."""
+    try:
+        return path.lstat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 def _age_archive(root: Path, now: float) -> list[str]:
     """Bound the archive by age, then by count; return the names removed.
 
@@ -713,10 +721,17 @@ def _age_archive(root: Path, now: float) -> list[str]:
     if directory is None:
         return []
     now_ms = int(now * 1000)
-    ordered = sorted((stamp, name) for stamp, _tag, name in _archive_index(directory).values())
-    expired = [name for stamp, name in ordered if now_ms - stamp > ARCHIVE_MAX_AGE_S * 1000]
+    # Order by archive stamp, then by the record's OWN mtime (rename preserves
+    # it: the last write, i.e. the seal for v2 or the last advance for legacy).
+    # One rotation stamps a whole batch alike, so without the mtime the count
+    # trim inside a batch would follow uuid order, i.e. be random (QA Q4, #4126).
+    ordered = sorted(
+        (stamp, _mtime_ns(directory / name), name)
+        for stamp, _tag, name in _archive_index(directory).values()
+    )
+    expired = [name for stamp, _m, name in ordered if now_ms - stamp > ARCHIVE_MAX_AGE_S * 1000]
     gone = set(expired)
-    kept = [name for _stamp, name in ordered if name not in gone]
+    kept = [name for _stamp, _m, name in ordered if name not in gone]
     overflow = kept[: max(0, len(kept) - ARCHIVE_MAX_ENTRIES)]
     drop = expired + overflow
     if not drop:
@@ -775,23 +790,60 @@ def rotate_for_admission(
     root = canonical_root(root)
     held.validate(root)
     clock = time.time() if now is None else now
-    retirable = _manifest.retirable_sealed_v2(root, keep=ROTATION_KEEP_SEALED)
-    report["v2_archived"] = _archive_moves(root, V2_OPERATION_DIR, retirable, clock)
-    if active_recovery_entries(root) >= LEGACY_MIGRATION_THRESHOLD:
-        manifest = _manifest.dry_run_manifest(root)
-        if not manifest["root_uncertain"] and manifest["candidates"]:
-            # The digest binds the moves to exactly the bytes just classified;
-            # approval itself is the standing operator policy quoted above.
-            result = _manifest.archive_candidates(
-                manifest,
-                approved_sha256=manifest["manifest_sha256"],
-                now=clock,
-                min_age_s=LEGACY_MIGRATION_GRACE_S,
-            )
-            report["legacy_archived"] = result["archived"]
-    report["aged"] = _age_archive(root, clock)
+    try:
+        retirable = _manifest.retirable_sealed_v2(root, keep=ROTATION_KEEP_SEALED)
+        report["v2_archived"] = _archive_moves(root, V2_OPERATION_DIR, retirable, clock)
+        if active_recovery_entries(root) >= LEGACY_MIGRATION_THRESHOLD:
+            manifest = _manifest.dry_run_manifest(root)
+            if not manifest["root_uncertain"] and manifest["candidates"]:
+                # The digest binds the moves to exactly the bytes just classified;
+                # approval itself is the standing operator policy quoted above.
+                result = _manifest.archive_candidates(
+                    manifest,
+                    approved_sha256=manifest["manifest_sha256"],
+                    now=clock,
+                    min_age_s=LEGACY_MIGRATION_GRACE_S,
+                )
+                report["legacy_archived"] = result["archived"]
+    finally:
+        # Aging runs even when a step above raised (review R3 on #4126): the
+        # archive's 512/30-day bound must not depend on every admission's
+        # migration succeeding, or a persistent legacy refusal would let v2
+        # retirements grow the archive without limit. The step's exception
+        # still propagates to ``_admit`` after this.
+        report["aged"] = _age_archive(root, clock)
     held.validate(root)
     return report
+
+
+def _retirable_estimate(root: Path, observed: int, now: float) -> int:
+    """How many entries the next admission's rotation would retire; read-only.
+
+    The status dry run's half of review R2 on #4126: it runs the SAME selection
+    functions as :func:`rotate_for_admission` (``retirable_sealed_v2``, then
+    the legacy classifier only when the remainder is at the migration
+    threshold, minus the grace-window deferrals), without a lock and without
+    moving anything. Any failure answers 0, which is what admission does when
+    rotation fails: it proceeds on the unrotated count.
+    """
+    if not RECORD_ROTATION_ENABLED:
+        return 0
+    from local_operator import recovery_manifest as _manifest
+
+    try:
+        v2 = len(_manifest.retirable_sealed_v2(root, keep=ROTATION_KEEP_SEALED))
+        legacy = 0
+        if observed - v2 >= LEGACY_MIGRATION_THRESHOLD:
+            manifest = _manifest.dry_run_manifest(root)
+            if not manifest["root_uncertain"]:
+                legacy = sum(
+                    1
+                    for candidate in manifest["candidates"]
+                    if now - candidate["mtime_ns"] / 1e9 >= LEGACY_MIGRATION_GRACE_S
+                )
+    except Exception:  # noqa: BLE001
+        return 0
+    return v2 + legacy
 
 
 def _admit(root: Path, held: Transaction) -> None:
@@ -807,9 +859,15 @@ def _admit(root: Path, held: Transaction) -> None:
     failure: Exception | None = None
     try:
         rotate_for_admission(root, held)
-    except (InstallTransactionError, OSError) as exc:
+    except Exception as exc:  # noqa: BLE001
+        # Broad on purpose (review R1 / QA Q1 on #4126): a malformed record can
+        # raise TypeError/KeyError/ValueError from a classifier, and NO rotation
+        # defect may become a refusal the base build would not have made.
+        # BaseException (KeyboardInterrupt, SystemExit) still propagates.
         failure = exc
         _log.warning("update record rotation failed; checking the cap without it: %s", exc)
+        # Whatever failed, the lock must still be ours before admission writes.
+        held.validate(root)
     if active_recovery_entries(root) >= RecoveryCapacityError.active_limit:
         if failure is not None:
             raise RecoveryCapacityError(_CAPACITY_SENTENCE) from failure
@@ -1168,9 +1226,13 @@ def recovery_capacity_status(root: Path) -> dict[str, Any]:
     unfinished writes, so this diagnostic can never disagree with the refusal it
     explains. At most 256 entries are inspected in total, plus one overflow
     sentinel with an explicit incomplete-scan flag; no historical scan or
-    liveness probe can turn unknown entries into available slots. A v2 record,
-    sealed or not, still occupies its slot. This API does not authorize a live
-    migration or claim to recover legacy capacity.
+    liveness probe can turn unknown entries into available slots. Every entry
+    occupies its slot NOW; ``retirable_entries`` is how many of them the next
+    admission's rotation would archive (the same selection functions, run
+    read-only), and ``at_limit`` is admission's decision after that rotation.
+    The one way the two can still differ is a rotation that fails while moving
+    (e.g. an unsafe archive directory): admission then refuses on the unrotated
+    count. This API itself never moves, migrates or locks anything.
     """
     limit = RecoveryCapacityError.active_limit
     counts: dict[str, int] = {}
@@ -1208,16 +1270,26 @@ def recovery_capacity_status(root: Path) -> dict[str, Any]:
             else:
                 reason = "new_protocol_sealed" if record.get("sealed") else "new_protocol_open"
         counts[reason] = counts.get(reason, 0) + 1
+    # What admission's rotation would free first (review R2 on #4126), from the
+    # same selection functions, read-only. Without it a store of 256 sealed v2
+    # records reads "at limit" while ``start_operation`` admits.
+    # Only on a COMPLETE scan: the estimate reads each candidate record, and a
+    # store past the bound must stay a bounded read (256 records + sentinel).
+    # Such a store is reported at the limit without an estimate -- admission
+    # can never have produced it, so only a flood or foreign writer reaches it.
+    retirable = 0
+    if complete:
+        retirable = min(observed, _retirable_estimate(root, observed, time.time()))
     return {
         "active_limit": limit,
         "observed_entries": observed,
         "namespace_entries": namespaces,
-        # The same comparison admission makes; with an incomplete scan the
-        # observed count is a lower bound that already reaches the limit.
-        "at_limit": observed >= limit,
+        # The comparison admission makes AFTER rotation; with an incomplete scan
+        # the observed count is a lower bound that already reaches the limit.
+        "at_limit": observed - retirable >= limit,
         "scan_complete": complete,
-        "protected_entries": observed,
-        "retirable_entries": 0,
+        "protected_entries": observed - retirable,
+        "retirable_entries": retirable,
         "protected_reasons": counts,
         "mutation_performed": False,
     }
