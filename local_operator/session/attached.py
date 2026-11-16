@@ -9814,6 +9814,15 @@ class AttachedSession:
                             # an eager cold open does, so the replay below carries
                             # only rows that became durable after the paint.
                             await self.hydrate_deferred_history()
+                            # The hydrate seeded ``_cold_painted_ids`` for
+                            # ``_load_frontend_history``'s cold-gap replay, which
+                            # this branch never runs: the suffix replay below IS
+                            # the gap measurement. Left set, a later
+                            # ``_load_frontend_history`` on this facade (a
+                            # degraded resync, a late windowless sync) would
+                            # measure against the stale set and re-emit rows
+                            # painted live after this recovery (#4023 R1-m1).
+                            self._cold_painted_ids = None
                             history = (
                                 await self._read_transcript(through_id=frontend.live_cursor)
                                 if frontend.live_cursor is not None
