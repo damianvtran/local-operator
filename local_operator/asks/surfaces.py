@@ -173,6 +173,41 @@ def consent_bearing(surface: str | None) -> bool | None:
 APP_SIGNATURE_PROOF = "app-signature"
 
 
+class ProvenSurface(str):
+    """A stamped surface label that also names HOW it was proved (``proof``).
+
+    WHY A ``str`` SUBCLASS. The label travels from the dispatch arm through the
+    serving handle and the session to ``AskQueue`` as a plain ``by: str`` (and
+    ``by or "remote"`` keeps the object), so carrying the proof on the label
+    persists it beside the stamp (agent review round 1, R1-m3) without
+    widening four signatures. Everything that compares or prints the label
+    still sees the bare string; :func:`by_record` is the one reader of
+    ``proof``. The guard reads ``answered_by.surface`` only, so ``proof`` is an
+    additive audit field and never consent by itself.
+    """
+
+    proof: str
+
+    def __new__(cls, label: str, proof: str) -> "ProvenSurface":
+        made = super().__new__(cls, label)
+        made.proof = proof
+        return made
+
+
+def by_record(by: str) -> dict[str, str]:
+    """The ``by`` map an ask event records for a stamped label.
+
+    ``{"surface": by}`` as before, plus ``"proof"`` when the label carries one
+    (:class:`ProvenSurface`). ``str(by)`` drops the subclass so the event row
+    serialises as the plain label it always was.
+    """
+    record = {"surface": str(by)}
+    proof = getattr(by, "proof", None)
+    if isinstance(proof, str) and proof:
+        record["proof"] = proof
+    return record
+
+
 def stamp_answer_surface(
     *,
     proved: bool,

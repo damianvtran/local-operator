@@ -45,14 +45,25 @@ WHAT "VERIFIED" MEANS (all must hold, see :meth:`AppAttestVerifier.verify`):
    shows node mode, ``NODE_OPTIONS`` and ``--inspect`` off and asar integrity
    on (:data:`REQUIRED_FUSES`). Without this a NEW main executable next to an
    OLD same-team framework would pass step 2.
-5. TOCTOU guard for step 4: every file it read and every directory between
-   ``Contents`` and that file has a ``ctime`` older than the peer's start time.
-   Unprivileged code cannot set ``ctime``, and renaming a staged directory into
-   place bumps both the moved directory's and its parent's.
+5. TOCTOU guard for step 4, run on EVERY verify and never cached: every entry
+   under ``Contents`` (``os.walk``, symlinks not followed, any unreadable
+   directory a refusal) has a ``ctime`` older than the peer's start time.
+   Unprivileged code cannot set ``ctime``, an in-place write bumps the file's
+   own, and renaming a staged directory into place bumps both the moved
+   directory's and its parent's. It covers the WHOLE tree, not just the files
+   step 4's fuse read touches, because the cached nested check vouches for all
+   of it: helper apps, framework resources, ``app.asar.unpacked`` (agent review
+   round 1, R1-M1: a helper overwritten in place after the first check stayed
+   ``ok`` while a guard over four files looked on).
 
 Step 4 costs 1.6-3.3 s (one measurement each, warm cache, design note), so its
-result is cached per ``(pid, pidversion, ctime snapshot)``; later checks of the
-same process pay only steps 1-3 and the stats.
+result is cached per ``(pid, pidversion, bundle)``. That cache is sound only
+because step 5 runs after it on every call: the cached check saw the tree as it
+was at some moment after launch, and a ctime older than launch on every entry
+proves nothing has changed since. The walk measured 2355 entries in 0.04-0.23 s
+on the installed 0.57.8 app (5 runs, this Mac, 2026-11-16) and runs in the
+listener's worker thread with the rest of ``verify`` (``asyncio.to_thread``),
+never on the event loop.
 
 WHAT THIS DOES NOT DECIDE. Whether the app was in a state where a PERSON
 clicked (visible window, no CDP, no dev driver) is decided by the app's main
@@ -86,6 +97,7 @@ import logging
 import mmap
 import os
 import socket
+import stat
 import struct
 import sys
 import threading
@@ -143,17 +155,14 @@ REQUIRED_FUSES: Mapping[int, int] = {
 }
 
 _FRAMEWORK_BINARY = "Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
-#: Files whose content the static check and fuse read depend on. ``Contents``
-#: downward only: the bundle ROOT gains xattrs after launch (``com.apple.macl``
-#: from TCC, LaunchServices' last-used date), which bump its ctime with no code
-#: change, and the root itself cannot be swapped under a running process (the
-#: main executable is resolved by vnode, so a renamed bundle moves with it).
-_GUARDED_FILES = (
-    "Contents/Info.plist",
-    "Contents/_CodeSignature/CodeResources",
-    "Contents/Resources/app.asar",
-    _FRAMEWORK_BINARY,
-)
+
+#: Where every runtime's attestation socket lives, under the config root:
+#: ``<config>/run/attest/<session_id>.sock``. This is the CONTRACT the desktop
+#: app dials (UI PR #3, design note "socket path"); pinned by
+#: ``test_the_runtime_binds_the_contract_path``. Its own namespace, not
+#: ``run/mobile`` (QA round 1, Q1: the default ``run_dir`` namespace put the
+#: socket where no app would look).
+ATTEST_RUN_DIRNAME = "run/attest"
 
 #: Unix socket paths are capped at 104 bytes on macOS (``sun_path``); keep a
 #: margin so a long config dir degrades to "no listener" rather than a bind error.
@@ -269,16 +278,29 @@ def fuses_hardened(wires: list[bytes]) -> bool:
     return True
 
 
-def ctime_snapshot(bundle: Path) -> tuple[tuple[str, float], ...]:
-    """``ctime`` of each guarded file and every directory from ``Contents`` to it."""
-    seen: dict[str, float] = {}
-    for rel in _GUARDED_FILES:
-        parts = Path(rel).parts
-        for depth in range(1, len(parts) + 1):
-            sub = str(Path(*parts[:depth]))
-            if sub not in seen:
-                seen[sub] = os.lstat(bundle / sub).st_ctime
-    return tuple(sorted(seen.items()))
+def _raise(exc: OSError) -> None:
+    raise exc
+
+
+def newest_ctime(bundle: Path) -> float:
+    """The newest ``ctime`` of ``Contents`` and every entry beneath it.
+
+    ``Contents`` downward only: the bundle ROOT gains xattrs after launch
+    (``com.apple.macl`` from TCC, LaunchServices' last-used date), which bump
+    its ctime with no code change, and the root itself cannot be swapped under
+    a running process (the main executable is resolved by vnode, so a renamed
+    bundle moves with it). ``lstat`` throughout and ``followlinks=False``: a
+    symlink's own ctime is what a swap changes. ``os.walk`` swallows listing
+    errors by default; ``_raise`` makes an unreadable directory a refusal.
+    """
+    root = bundle / "Contents"
+    newest = os.lstat(root).st_ctime
+    for parent, dirs, files in os.walk(root, onerror=_raise, followlinks=False):
+        for name in (*dirs, *files):
+            ctime = os.lstat(os.path.join(parent, name)).st_ctime
+            if ctime > newest:
+                newest = ctime
+    return newest
 
 
 def bundle_of(main_executable: str) -> Path | None:
@@ -298,13 +320,14 @@ class AppAttestVerifier:
         backend: SecurityBackend | None = None,
         *,
         read_fuses: Callable[[str], list[bytes]] = fuse_wires,
-        snapshot: Callable[[Path], tuple[tuple[str, float], ...]] = ctime_snapshot,
+        newest_ctime: Callable[[Path], float] = newest_ctime,
     ) -> None:
         self._backend = backend
         self._read_fuses = read_fuses
-        self._snapshot = snapshot
+        self._newest_ctime = newest_ctime
         self._lock = threading.Lock()
-        #: (pid, pidversion, snapshot) -> static verdict reason ("" = ok).
+        #: (pid, pidversion, bundle) -> static verdict reason ("" = ok). Sound
+        #: only with the whole-tree ctime walk after it on every call (step 5).
         self._static_cache: dict[tuple[Any, ...], str] = {}
 
     def _get_backend(self) -> SecurityBackend:
@@ -344,10 +367,7 @@ class AppAttestVerifier:
         bundle = bundle_of(facts.main_executable)
         if bundle is None:
             return Verdict(False, "bundle-layout", pid)
-        snap = self._snapshot(bundle)
-        if any(ctime >= started for _, ctime in snap):
-            return Verdict(False, "modified-after-launch", pid)
-        key = (pid, pidversion, str(bundle), snap)
+        key = (pid, pidversion, str(bundle))
         with self._lock:
             cached = self._static_cache.get(key)
         if cached is None:
@@ -360,6 +380,11 @@ class AppAttestVerifier:
                 self._static_cache[key] = cached
         if cached:
             return Verdict(False, cached, pid)
+        # AFTER the static result, cached or fresh, on every call (R1-M1): a
+        # change made before or during the static check, or at any time since
+        # a cached one, carries a ctime at or after launch and is caught here.
+        if self._newest_ctime(bundle) >= started:
+            return Verdict(False, "modified-after-launch", pid)
         return Verdict(True, "ok", pid)
 
     def _static_reason(self, backend: SecurityBackend, bundle: Path) -> str:
@@ -554,27 +579,72 @@ def normalize_answers(raw: Any) -> dict[str, list[str]]:
     return {str(key): [str(item) for item in (value or [])] for key, value in raw.items()}
 
 
-def image_digests(images: Any) -> list[str]:
-    """Sorted SHA-256 hex of each image's base64-DECODED bytes (wire ``images``).
+#: One attested image: ``(question_id, mime_type, sha256 hex)``.
+ImageKey = tuple[str, str, str]
 
-    The contract with the app: main hashes the bytes it forwards. Order is not
-    part of the answer, so the multiset is compared sorted.
+
+def image_digests(images: Any) -> list[ImageKey]:
+    """Sorted ``(question_id, mime_type, sha256)`` of each wire ``images`` entry.
+
+    The contract with the app: main hashes the base64-DECODED bytes it forwards
+    and attests each image with the question it answers and its MIME type, the
+    same three fields ``_answer_attachment_kwargs`` stores. Binding the digest
+    alone let a tampered serve move an attested picture to another question or
+    relabel its type (agent review round 1, R1-m1). Order is not part of the
+    answer, so the multiset is compared sorted. ``str()`` mirrors the dispatch
+    arm's own coercion, so the two sides normalise identically.
     """
-    out: list[str] = []
+    out: list[ImageKey] = []
     for item in images or []:
-        data = item.get("data_b64") if isinstance(item, Mapping) else None
+        if not isinstance(item, Mapping):
+            out.append(("", "", "\x00invalid"))
+            continue
         try:
-            blob = base64.b64decode(str(data or ""), validate=False)
+            blob = base64.b64decode(str(item.get("data_b64") or ""), validate=False)
         except (binascii.Error, ValueError):
             blob = b"\x00invalid"
-        out.append(hashlib.sha256(blob).hexdigest())
+        out.append(
+            (
+                str(item.get("question_id") or ""),
+                str(item.get("mime_type") or ""),
+                hashlib.sha256(blob).hexdigest(),
+            )
+        )
+    return sorted(out)
+
+
+def attested_images(raw: Any) -> list[ImageKey] | None:
+    """The app frame's ``images`` as sorted keys; ``None`` for any bad shape.
+
+    Wire shape: ``[{"question_id": str, "mime_type": str, "sha256": hex}]``.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    out: list[ImageKey] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            return None
+        question_id, mime_type, digest = (
+            item.get("question_id"),
+            item.get("mime_type"),
+            item.get("sha256"),
+        )
+        if not (
+            isinstance(question_id, str) and isinstance(mime_type, str) and isinstance(digest, str)
+        ):
+            return None
+        out.append((question_id, mime_type, digest.lower()))
     return sorted(out)
 
 
 @dataclass
 class _Pending:
     answers: dict[str, list[str]]
-    images: list[str]
+    images: list[ImageKey]
+    #: The dismissal's free-text reason (R1-m1); ``""`` for every other act.
+    reason: str
     expires_at: float
 
 
@@ -594,16 +664,39 @@ class AttestationTable:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def record(
-        self, session_id: str, ask_id: str, act: str, answers: Any, images: list[str]
+        self,
+        session_id: str,
+        ask_id: str,
+        act: str,
+        answers: Any,
+        images: list[ImageKey],
+        reason: str = "",
     ) -> None:
         key = (session_id, ask_id, act)
-        row = _Pending(normalize_answers(answers), sorted(images), self.clock() + self.ttl_s)
+        now = self.clock()
+        row = _Pending(normalize_answers(answers), sorted(images), reason, now + self.ttl_s)
         with self._lock:
+            # Prune EVERY key's expired rows here (R1-n2): ``consume`` only
+            # touches its own key, so an attested-but-never-answered ask would
+            # otherwise keep its deque for the life of the process. Linear in
+            # the live rows, which only a verified app can create.
+            for stale_key in list(self._rows):
+                live = [p for p in self._rows[stale_key] if p.expires_at > now]
+                if live:
+                    self._rows[stale_key] = deque(live, maxlen=MAX_PENDING_PER_ASK)
+                else:
+                    del self._rows[stale_key]
             pending = self._rows.setdefault(key, deque(maxlen=MAX_PENDING_PER_ASK))
             pending.append(row)
 
     def consume(
-        self, session_id: str, ask_id: str, act: str, answers: Any, images: list[str]
+        self,
+        session_id: str,
+        ask_id: str,
+        act: str,
+        answers: Any,
+        images: list[ImageKey],
+        reason: str = "",
     ) -> bool:
         """Spend the newest unexpired attestation matching this content, if any.
 
@@ -620,7 +713,11 @@ class AttestationTable:
             live = deque((p for p in pending if p.expires_at > now), maxlen=MAX_PENDING_PER_ASK)
             hit = None
             for candidate in reversed(live):
-                if candidate.answers == want_answers and candidate.images == want_images:
+                if (
+                    candidate.answers == want_answers
+                    and candidate.images == want_images
+                    and candidate.reason == reason
+                ):
                     hit = candidate
                     break
             if hit is not None:
@@ -635,9 +732,11 @@ class AttestationTable:
 # -- the listener --------------------------------------------------------------
 
 
-def socket_path(run_root: Path, session_id: str) -> Path:
-    """``<config>/run/attest/<session_id>.sock``: where the app dials this runtime."""
-    return run_root / "attest" / f"{session_id}.sock"
+def socket_path(attest_dir: Path, session_id: str) -> Path:
+    """``<attest_dir>/<session_id>.sock``; the runtime passes
+    ``run_dir(config_root, ATTEST_RUN_DIRNAME)``, so the bound path is
+    ``<config>/run/attest/<session_id>.sock``, where the app dials."""
+    return attest_dir / f"{session_id}.sock"
 
 
 class AttestService:
@@ -646,9 +745,12 @@ class AttestService:
     Protocol (newline-JSON, each line capped at 64 KiB): on accept the runtime
     verifies the peer and writes ``{"ok":true}`` or ``{"ok":false,"reason":…}``
     (then closes). A verified peer then sends any number of
-    ``{"op":"ask_attest","session_id","ask_id","act","answers","image_sha256"}``
+    ``{"op":"ask_attest","session_id","ask_id","act","answers","images","reason"}``
     frames; each is re-verified (cheap after the first: the static result is
     cached) and answered ``{"ok":true}`` or ``{"ok":false,"reason":…}``.
+    ``images`` is ``[{"question_id","mime_type","sha256"}]`` (respond only);
+    ``reason`` is the dismissal's free text exactly as serve will forward it
+    (dismiss only; absent or ``null`` for none). Both are bound, R1-m1.
 
     Squatting the path is denial of service only and fails closed: the frame
     carries no secret, so a fake listener learns an answer the operator chose.
@@ -669,20 +771,29 @@ class AttestService:
         self._server: asyncio.AbstractServer | None = None
         self._connections = 0
         self._writers: set[asyncio.StreamWriter] = set()
-        self._inode = 0
+        self._ident: tuple[int, int] = (0, 0)
         self.path: Path | None = None
 
-    async def start(self, run_root: Path) -> Path | None:
-        """Bind 0600 in a 0700 dir; ``None`` (logged) when this host cannot."""
-        path = socket_path(run_root, self.session_id)
+    async def start(self, attest_dir: Path) -> Path | None:
+        """Bind ``<attest_dir>/<sid>.sock`` 0600 in a 0700 leaf; ``None`` (logged)
+        when this host cannot. The runtime passes ``<config>/run/attest``."""
+        path = socket_path(attest_dir, self.session_id)
         if len(os.fsencode(str(path))) > MAX_SOCKET_PATH:
             logger.info("attest: socket path too long (%d bytes); no listener", len(str(path)))
             return None
         # The 0700 DIRECTORY is the access control (no umask dance: umask is
         # process-wide and this process has other threads creating files). The
         # socket's own 0600 is belt and braces for a reader of the path alone.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
+        # ``lstat`` + ``S_ISDIR`` before the chmod (R1-n1): a pre-created
+        # symlink at the leaf would otherwise redirect both the chmod and the
+        # bind. Same-uid only, so denial of service at worst; refused anyway.
+        attest_dir.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(attest_dir, 0o700)
+        if not stat.S_ISDIR(os.lstat(attest_dir).st_mode):
+            logger.warning("attest: %s is not a directory; no listener", attest_dir)
+            return None
+        os.chmod(attest_dir, 0o700)
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
         self._server = await asyncio.start_unix_server(
@@ -690,7 +801,8 @@ class AttestService:
         )
         os.chmod(path, 0o600)
         self.path = path
-        self._inode = os.lstat(path).st_ino
+        bound = os.lstat(path)
+        self._ident = (bound.st_dev, bound.st_ino)
         return path
 
     async def close(self) -> None:
@@ -707,7 +819,8 @@ class AttestService:
             # Unlink only OUR socket: a successor runtime for the same session
             # (a cwd move, an update retire) may already have bound this path.
             with contextlib.suppress(FileNotFoundError):
-                if os.lstat(self.path).st_ino == self._inode:
+                now = os.lstat(self.path)
+                if (now.st_dev, now.st_ino) == self._ident:
                     self.path.unlink()
 
     async def _verdict(self, token: bytes) -> Verdict:
@@ -756,6 +869,19 @@ class AttestService:
             writer.close()
 
     async def _frame(self, token: bytes, line: bytes) -> dict[str, Any]:
+        """One frame's reply; ANY exception is ``bad-frame`` (R1-m2, fail closed).
+
+        Without this a malformed body that slipped past the shape checks (a
+        ``TypeError`` in the table's normalisation) escaped as an unhandled
+        ``client_connected_cb`` exception instead of a refusal.
+        """
+        try:
+            return await self._frame_inner(token, line)
+        except Exception:  # noqa: BLE001 — a refusal, never an escape
+            logger.debug("attest: frame raised", exc_info=True)
+            return {"ok": False, "reason": "bad-frame"}
+
+    async def _frame_inner(self, token: bytes, line: bytes) -> dict[str, Any]:
         try:
             frame = json.loads(line)
         except ValueError:
@@ -767,8 +893,11 @@ class AttestService:
         ask_id, act = str(frame.get("ask_id") or ""), str(frame.get("act") or "")
         if not ask_id or act not in ATTEST_ACTS:
             return {"ok": False, "reason": "bad-frame"}
-        images = frame.get("image_sha256") or []
-        if not isinstance(images, list) or not all(isinstance(d, str) for d in images):
+        images = attested_images(frame.get("images"))
+        reason = frame.get("reason")
+        if images is None or not (reason is None or isinstance(reason, str)):
+            return {"ok": False, "reason": "bad-frame"}
+        if not isinstance(frame.get("answers", {}), (dict, type(None))):
             return {"ok": False, "reason": "bad-frame"}
         # RE-VERIFIED PER FRAME, not trusted from the accept: the process could
         # have changed state since (it is cheap; the static half is cached).
@@ -777,6 +906,13 @@ class AttestService:
             logger.info("attest: peer=%s verdict=refused reason=%s", verdict.pid, verdict.reason)
             return {"ok": False, "reason": f"peer:{verdict.reason}"}
         self.table.record(
-            self.session_id, ask_id, act, frame.get("answers"), [d.lower() for d in images]
+            self.session_id,
+            ask_id,
+            act,
+            frame.get("answers"),
+            images,
+            # Only a dismissal carries one; the server forwards it as
+            # ``str(reason)`` when truthy, so ``""`` and ``None`` both mean none.
+            str(reason or "") if act == "dismiss" else "",
         )
         return {"ok": True}

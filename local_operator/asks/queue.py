@@ -60,6 +60,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from local_operator.asks import policy, render, store
 from local_operator.asks.surfaces import (
     UNVERIFIED,
+    by_record,
     minted_here,
     note_minted,
     weakest_surface,
@@ -1053,7 +1054,7 @@ class AskQueue:
             "kind": store.EVENT_ANSWERED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": by_record(by),
             "answers": cleaned,
         }
         if refs:
@@ -1154,7 +1155,7 @@ class AskQueue:
             "kind": store.EVENT_REVISED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": by_record(by),
             "answers": cleaned,
             # The ``at`` of the write this supersedes: the newest revision's when
             # one exists, else the first answer's. Naming it keeps the log a chain
@@ -1516,7 +1517,7 @@ class AskQueue:
             "kind": store.EVENT_DECLINED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": by_record(by),
         }
         if not store.append_event(self.session_dir, payload):
             return {"ok": False, "error": "the decline could not be recorded."}
@@ -1568,7 +1569,7 @@ class AskQueue:
             "kind": store.EVENT_DISMISSED,
             "ask_id": ask_id,
             "at": now,
-            "by": {"surface": by},
+            "by": by_record(by),
             "reason": reason or store.DISMISS_REASON_DEFAULT,
         }
         if not store.append_event(self.session_dir, payload):

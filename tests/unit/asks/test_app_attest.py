@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -93,7 +94,7 @@ def _verifier(
     return AppAttestVerifier(
         backend,
         read_fuses=lambda path: list(_HARDENED_WIRE if wires is None else wires),
-        snapshot=lambda bundle: (("Contents", ctime), ("Contents/Info.plist", ctime)),
+        newest_ctime=lambda bundle: ctime,
     )
 
 
@@ -196,6 +197,43 @@ def test_the_static_check_is_cached_per_process_and_snapshot() -> None:
     assert backend.static_calls == 2
 
 
+def test_r1_m1_an_in_place_write_to_a_helper_after_the_first_verify_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Regression, agent review round 1 R1-M1, on the REAL ``newest_ctime``.
+
+    The cached nested check vouched for the whole bundle while the old guard
+    stat'ed four files, so a helper overwritten in place after the first verify
+    stayed ``ok`` (reviewer repro: second verify ``ok``, static calls 1).
+    """
+    bundle = _bundle(tmp_path)
+    time.sleep(0.05)
+    backend = _Backend(
+        GuestFacts(0, 0, _GOOD_FLAGS, frozenset(), str(bundle / "Contents/MacOS/X")),
+        start=time.time(),
+    )
+    time.sleep(0.05)
+    verifier = AppAttestVerifier(backend, read_fuses=lambda path: list(_HARDENED_WIRE))
+    assert verifier.verify(_token()) == app_attest.Verdict(True, "ok", _PID)
+    (bundle / _HELPER).write_bytes(b"attacker")
+    second = verifier.verify(_token())
+    assert second == app_attest.Verdict(False, "modified-after-launch", _PID)
+    assert backend.static_calls == 1  # refused although the static verdict was cached
+
+
+def test_an_unreadable_directory_in_the_bundle_is_a_refusal(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads 000 directories")
+    bundle = _bundle(tmp_path)
+    locked = bundle / "Contents/Frameworks"
+    os.chmod(locked, 0)
+    try:
+        with pytest.raises(PermissionError):
+            app_attest.newest_ctime(bundle)
+    finally:
+        os.chmod(locked, 0o755)
+
+
 def test_any_backend_exception_is_a_refusal() -> None:
     class _Raises(_Backend):
         def guest_facts(self, token: bytes) -> GuestFacts:
@@ -229,16 +267,32 @@ def test_fuse_wires_reads_every_slice(tmp_path: Path) -> None:
     assert app_attest.fuse_wires(str(blob)) == [b"010011011", b""]
 
 
-def test_ctime_snapshot_covers_contents_downward(tmp_path: Path) -> None:
+_HELPER = "Contents/Frameworks/X Helper (Renderer).app/Contents/MacOS/X Helper (Renderer)"
+
+
+def _bundle(tmp_path: Path) -> Path:
     bundle = tmp_path / "X.app"
-    for rel in app_attest._GUARDED_FILES:
+    for rel in ("Contents/Info.plist", "Contents/MacOS/X", _HELPER, _FRAMEWORK_REL):
         (bundle / rel).parent.mkdir(parents=True, exist_ok=True)
-        (bundle / rel).write_bytes(b"")
-    names = {name for name, _ in app_attest.ctime_snapshot(bundle)}
-    assert (
-        "Contents" in names and "Contents/Frameworks/Electron Framework.framework/Versions" in names
-    )
-    assert "" not in names and "." not in names  # the bundle root itself is excluded
+        (bundle / rel).write_bytes(b"genuine")
+    return bundle
+
+
+_FRAMEWORK_REL = "Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+
+
+def test_newest_ctime_walks_the_whole_contents_tree(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    before = app_attest.newest_ctime(bundle)
+    time.sleep(0.02)
+    # A nested file no fixed list named, written in place: the walk sees it.
+    (bundle / _HELPER).write_bytes(b"attacker")
+    assert app_attest.newest_ctime(bundle) > before
+    # The bundle ROOT is excluded (TCC/LaunchServices xattrs bump it).
+    settled = app_attest.newest_ctime(bundle)
+    time.sleep(0.02)
+    os.chmod(bundle, 0o755)
+    assert app_attest.newest_ctime(bundle) == settled
     assert app_attest.bundle_of(_EXE) == Path("/Applications/Local Operator.app")
     assert app_attest.bundle_of("/Applications/X.app/Contents/Resources/python3") is None
 
@@ -268,10 +322,50 @@ def test_table_is_single_use_content_bound_and_expires() -> None:
     assert not table.consume("s", "a-1", "respond", {"q1": ["Yes"]}, [])
 
 
-def test_image_digests_bind_the_decoded_bytes() -> None:
+def test_image_digests_bind_question_mime_and_decoded_bytes() -> None:
+    """R1-m1: the digest alone let an attested picture move to another question."""
     png = b"\x89PNG fake"
-    wire = [{"question_id": "q1", "data_b64": base64.b64encode(png).decode(), "mime_type": "x"}]
-    assert app_attest.image_digests(wire) == [hashlib.sha256(png).hexdigest()]
+    digest = hashlib.sha256(png).hexdigest()
+    wire = [
+        {"question_id": "q1", "data_b64": base64.b64encode(png).decode(), "mime_type": "image/png"}
+    ]
+    assert app_attest.image_digests(wire) == [("q1", "image/png", digest)]
+    table = AttestationTable()
+    attested = app_attest.attested_images(
+        [{"question_id": "q1", "mime_type": "image/png", "sha256": digest.upper()}]
+    )
+    assert attested is not None and attested == app_attest.image_digests(wire)
+    for moved in (
+        [{**wire[0], "question_id": "q2"}],
+        [{**wire[0], "mime_type": "image/jpeg"}],
+    ):
+        table.record("s", "a", "respond", {"q1": ["x"], "q2": ["y"]}, attested)
+        assert not table.consume(
+            "s", "a", "respond", {"q1": ["x"], "q2": ["y"]}, app_attest.image_digests(moved)
+        )
+    assert table.consume(
+        "s", "a", "respond", {"q1": ["x"], "q2": ["y"]}, app_attest.image_digests(wire)
+    )
+    assert app_attest.attested_images([{"question_id": "q1", "sha256": digest}]) is None
+    assert app_attest.attested_images("x") is None
+
+
+def test_a_dismissal_binds_its_reason() -> None:
+    table = AttestationTable()
+    table.record("s", "a", "dismiss", {}, [], "not needed")
+    assert not table.consume("s", "a", "dismiss", {}, [], "injected")
+    assert not table.consume("s", "a", "dismiss", {}, [])
+    assert table.consume("s", "a", "dismiss", {}, [], "not needed")
+
+
+def test_record_prunes_every_expired_row() -> None:
+    """R1-n2: an attested-but-never-answered ask no longer keeps its row."""
+    clock = _Clock()
+    table = AttestationTable(clock=clock)
+    table.record("s", "never-answered", "respond", {"q1": ["Yes"]}, [])
+    clock.now = app_attest.ATTESTATION_TTL_S + 1
+    table.record("s", "other", "respond", {"q1": ["Yes"]}, [])
+    assert list(table._rows) == [("s", "other", "respond")]
 
 
 # -- the listener protocol (injected token + verifier) --------------------------
@@ -326,13 +420,29 @@ async def test_listener_records_frames_only_for_a_verified_peer(short_root: Path
         "ask_id": "a-1",
         "act": "respond",
         "answers": {"q1": ["Yes"]},
-        "image_sha256": [],
+        "images": [],
     }
-    replies = await _dial(path, [frame, {**frame, "session_id": "other"}, {**frame, "act": "x"}])
+    replies = await _dial(
+        path,
+        [
+            frame,
+            {**frame, "session_id": "other"},
+            {**frame, "act": "x"},
+            # R1-m2: passes the shape checks, then raises TypeError inside the
+            # table's normalisation; a refusal, not an escaped exception, and
+            # the connection stays usable.
+            {**frame, "answers": {"q1": 5}},
+            {**frame, "images": [{"question_id": "q1"}]},
+            {**frame, "reason": 5},
+        ],
+    )
     assert replies == [
         {"ok": True},
         {"ok": True},
         {"ok": False, "reason": "wrong-session"},
+        {"ok": False, "reason": "bad-frame"},
+        {"ok": False, "reason": "bad-frame"},
+        {"ok": False, "reason": "bad-frame"},
         {"ok": False, "reason": "bad-frame"},
     ]
     assert good.table.consume("sid-1", "a-1", "respond", {"q1": ["Yes"]}, [])
@@ -361,6 +471,46 @@ async def test_a_successors_socket_is_not_unlinked_by_the_retiring_runtime(
     assert path is not None and path.exists()
     await new.close()
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_binds_the_contract_path(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: the app dials ``<config>/run/attest/<sid>.sock``.
+
+    Driven through the REAL ``RuntimeServer._start_attest_listener`` so the
+    namespace it passes to ``run_dir`` is what is pinned; UI PR #3 implements
+    exactly this path, so a change here must change the app too.
+    """
+    from local_operator.session.runtime.server import RuntimeServer
+
+    monkeypatch.setattr(app_attest, "supported", lambda: True)
+    server = types.SimpleNamespace(
+        _record=types.SimpleNamespace(session_id="sidQ1"), _config_root=short_root, _attest=None
+    )
+    await RuntimeServer._start_attest_listener(server)  # type: ignore[arg-type]
+    try:
+        assert server._attest is not None
+        assert server._attest.path == short_root / "run" / "attest" / "sidQ1.sock"
+        assert oct((short_root / "run" / "attest").stat().st_mode & 0o777) == "0o700"
+        assert not (short_root / "run" / "mobile").exists()
+    finally:
+        if server._attest is not None:
+            await server._attest.close()
+
+
+@pytest.mark.asyncio
+async def test_a_symlinked_attest_dir_binds_nothing(short_root: Path) -> None:
+    """R1-n1: the leaf is ``lstat``-checked, so a planted symlink is not followed."""
+    elsewhere = short_root / "elsewhere"
+    elsewhere.mkdir(mode=0o755)
+    (short_root / "run").mkdir()
+    (short_root / "run" / "attest").symlink_to(elsewhere)
+    service = AttestService("sid-l", verifier=_FixedVerifier(True))
+    assert await service.start(short_root / "run" / "attest") is None
+    assert oct(elsewhere.stat().st_mode & 0o777) == "0o755"  # not chmod'ed through
+    assert list(elsewhere.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -409,9 +559,53 @@ async def test_an_attested_answer_is_desktop_and_lifts_the_delete(home: Any) -> 
     )
     assert reply.surface == "desktop"
     assert surfaces.consent_bearing(reply.surface) is True
-    assert rig.record()["answered_by"] == {"surface": "desktop"}
+    # R1-m3: the proof is persisted beside the stamp, not only logged.
+    assert rig.record()["answered_by"] == {"surface": "desktop", "proof": "app-signature"}
     outcome, judge_calls = await rig.guard()
     assert outcome is not None and outcome.blocked is False and judge_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unproven_revision_drops_the_persisted_proof(home: Any) -> None:  # noqa: F811
+    rig = _Rig(*home, tag="PRF")
+    table = _attest_rig(rig)
+    table.record(rig.session_id, rig.ask_id, "respond", {"q1": ["No"]}, [])
+    await rig.dispatch(
+        "ask_respond", {"ask_id": rig.ask_id, "answers": {"q1": ["No"]}}, _LOCAL_UNPROVEN
+    )
+    await rig.dispatch(
+        "ask_revise", {"ask_id": rig.ask_id, "answers": {"q1": ["Yes"]}}, _LOCAL_UNPROVEN
+    )
+    # Weakest surface AND no signature over words nobody attested.
+    assert rig.record()["answered_by"] == {"surface": "unverified"}
+
+
+@pytest.mark.asyncio
+async def test_a_dismiss_with_an_unattested_reason_is_unverified(home: Any) -> None:  # noqa: F811
+    rig = _Rig(*home, tag="DIS")
+    # The wire admits only ``moot``/``answered_in_chat``; a tampered serve
+    # swapping one for the other is exactly what binding the reason refuses.
+    table = _attest_rig(rig)
+    table.record(rig.session_id, rig.ask_id, "dismiss", {}, [], "moot")
+    reply = await rig.dispatch(
+        "ask_dismiss", {"ask_id": rig.ask_id, "reason": "answered_in_chat"}, _LOCAL_UNPROVEN
+    )
+    assert reply.surface == "unverified"
+    # The operator's attestation is intact for the reason they chose.
+    assert table.consume(rig.session_id, rig.ask_id, "dismiss", {}, [], "moot")
+
+
+def test_a_malformed_frame_stamps_unverified_instead_of_raising() -> None:
+    """R1-m2: ``consume``'s normalisation raising must not escape the stamp."""
+    from local_operator.session.runtime.server import _ask_answer_stamp
+
+    server = types.SimpleNamespace(
+        _handle=None,
+        _attest=types.SimpleNamespace(session_id="s", table=AttestationTable()),
+    )
+    for frame in ({"answers": {"q1": 5}}, {"answers": {}, "images": 5}):
+        label = _ask_answer_stamp(server, "ask_respond", frame, _LOCAL_UNPROVEN, ask_id="a")
+        assert label == "unverified"
 
 
 @pytest.mark.asyncio

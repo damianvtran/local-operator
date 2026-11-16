@@ -228,6 +228,10 @@ def _stamp_ask_answer(
         minted,
         authority.operator_proved,
     )
+    if any(used):
+        # Persisted as ``answered_by.proof`` beside the stamp (R1-m3), so the
+        # audit trail says WHY this answer is ``desktop`` without the log.
+        return _surfaces.ProvenSurface(stamped, _surfaces.APP_SIGNATURE_PROOF)
     return stamped
 
 
@@ -2313,15 +2317,22 @@ def _ask_answer_stamp(
     def attested() -> bool:
         if attest is None or act is None:
             return False
-        return bool(
-            attest.table.consume(
-                attest.session_id,
-                ask_id,
-                act,
-                frame.get("answers") if act in ("respond", "revise") else {},
-                image_digests(frame.get("images")) if act == "respond" else [],
+        try:
+            return bool(
+                attest.table.consume(
+                    attest.session_id,
+                    ask_id,
+                    act,
+                    frame.get("answers") if act in ("respond", "revise") else {},
+                    image_digests(frame.get("images")) if act == "respond" else [],
+                    # The SAME coercion the dismiss arm forwards with (R1-m1):
+                    # an injected reason is content nobody attested.
+                    str(frame.get("reason") or "") if act == "dismiss" else "",
+                )
             )
-        )
+        except Exception:  # noqa: BLE001 — R1-m2: a malformed frame is unattested
+            logger.debug("attest: consume raised for ask=%r", ask_id, exc_info=True)
+            return False
 
     # One stamping + log seam (``_stamp_ask_answer``, incident a-48e3's
     # ``%r``-quoted line) for every wire answer, attested or not.
@@ -4283,6 +4294,9 @@ class RuntimeServer:
     async def _start_attest_listener(self) -> None:
         """Bind ``<config>/run/attest/<session_id>.sock`` on macOS (F2).
 
+        The path is the app's dial contract (``app_attest.ATTEST_RUN_DIRNAME``),
+        pinned by ``test_the_runtime_binds_the_contract_path``.
+
         Under this runtime's own config root (the one the record is published
         in), so an isolated config never shares a listener with the operator's.
         Any failure is logged and leaves ``_attest`` unset: answers then stamp
@@ -4296,7 +4310,8 @@ class RuntimeServer:
             from local_operator.session.runtime.registry import run_dir
 
             service = app_attest.AttestService(str(self._record.session_id))
-            if await service.start(run_dir(self._config_root)) is not None:
+            attest_dir = run_dir(self._config_root, app_attest.ATTEST_RUN_DIRNAME)
+            if await service.start(attest_dir) is not None:
                 self._attest = service
         except Exception:  # noqa: BLE001 — additive, never a boot gate
             logger.warning("attest: listener not started", exc_info=True)
