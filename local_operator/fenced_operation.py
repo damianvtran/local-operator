@@ -59,7 +59,6 @@ from local_operator.install_transaction import (
     OCCURRENCE_KINDS,
     OCCURRENCE_TERMINALS,
     InstallTransactionError,
-    RecoveryCapacityError,
 )
 
 #: Defined in ``install_transaction`` so the read-only capacity dry run shares it.
@@ -228,10 +227,9 @@ def start_operation(root: Path, *, baseline: str, target: str, route: str) -> Wr
     with _tx.transaction(root, operation="register fenced update operation") as held:
         held.validate(root)
         # Capacity first, so a refusal does not even create the v2 directory.
-        if active_recovery_entries(root) >= RecoveryCapacityError.active_limit:
-            raise RecoveryCapacityError(
-                "update recovery records are at capacity; inspect pending operations"
-            )
+        # The SAME gate as legacy admission (rotation, then the shared cap), so
+        # neither path can retire records the other would protect.
+        _tx._admit(root, held)
         path = _v2_path(root, identifier, create=True)
         _tx._persist_operation(
             path,
@@ -669,13 +667,32 @@ def operation_status(root: Path, identifier: str) -> dict[str, Any] | None:
     root = _tx.canonical_root(root)
     path = _v2_path(root, identifier)
     if not path.exists() and not path.is_symlink():
-        return None
+        return _archived_status(root, identifier)
     record = _load(path, identifier)
     return {
         **copy.deepcopy(record),
         "writer": None,
         "seal_blockers": [] if record.get("sealed") else seal_blockers(record, root),
     }
+
+
+def _archived_status(root: Path, identifier: str) -> dict[str, Any] | None:
+    """A rotated (archived) sealed record, read in place; ``None`` when absent.
+
+    Rotation moves only SEALED records whose generations nothing points at, but
+    those generations may still carry their observer locator. Without this,
+    :func:`observe_generation` on such a generation would report a false
+    "identity disagrees" instead of the finished operation. Read-only: no lock,
+    no restore, no rotation; ``archived: True`` tells the caller where it is.
+    """
+    archive = _tx._archive_directory(root, create=False)
+    found = _tx._archive_index(archive).get(identifier)
+    if archive is None or found is None or found[1] != "v2":
+        return None
+    record = _load(archive / found[2], identifier)
+    if not isinstance(record.get("sealed"), dict):
+        raise FencedOperationError("archived update operation is not sealed; preserve it")
+    return {**copy.deepcopy(record), "writer": None, "seal_blockers": [], "archived": True}
 
 
 def observe_generation(generation: Path) -> dict[str, Any] | None:
