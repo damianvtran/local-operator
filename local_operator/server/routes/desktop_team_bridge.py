@@ -663,6 +663,12 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
     # malformed id and an absent message are deliberately indistinguishable, so
     # this path cannot be probed for which ids exist.
     "message_not_found": (404, "Message not found."),
+    # The approvals decide under retained-history standing: reads are fine, a
+    # decision is new outbound work and needs the feature on (approvals.py).
+    "bridge_off": (
+        409,
+        "agent messages are turned off on this machine; turn them on to decide requests",
+    ),
 }
 
 
@@ -4703,3 +4709,243 @@ async def discard_hold(
     """Sign the person's Discard: the sender is told it was not delivered."""
 
     return await _decide_hold(request, response, message_id, body, config_manager, "discard")
+
+
+# -- approvals: pending requests, human batch decide, the decision ledger ----
+#
+# The desktop half of the approvals flow (TEAM-BRIDGE.md §10.2–§10.4); the
+# harness logic, and the WHY of each rule, live in ``team_bridge/approvals.py``.
+#
+# DECIDE AUTHORITY IS HUMAN-ONLY, and this router is where that is enforced at
+# the process edge. Every route here sits behind ``require_desktop`` (the
+# router-wide dependency): the desktop bearer AND an allowlisted Origin, the
+# same door the ask card's signed ``bridge_decide`` answer takes. A model never
+# holds that bearer — ``agent_shell.DAEMON_BEARER_ENVS`` strips
+# ``LOCAL_OPERATOR_DESKTOP_TOKEN`` from every agent shell — and no tool imports
+# ``team_bridge.approvals``, so the batch decide below is reachable only from a
+# person's explicit selection in the desktop UI.
+
+#: Query names the two approvals reads accept; anything else is refused, not
+#: dropped (the inbox read's closed-table rule).
+_APPROVALS_LIST_PARAMS = frozenset({"expected_account_id", "after", "limit"})
+_APPROVALS_LEDGER_PARAMS = frozenset({"expected_account_id", "after", "limit", "role"})
+
+
+class ApprovalsQuery(_Strict):
+    """The approvals reads' query, grammar-checked before any I/O."""
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    after: str | None = Field(default=None, max_length=512)
+    limit: int = Field(default=50, ge=1, le=100)
+    role: Literal["made", "requested"] = "made"
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "ApprovalsQuery":
+        from local_operator.team_bridge.read_context import CURSOR_PATTERN
+
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if self.after is not None and re.fullmatch(CURSOR_PATTERN, self.after) is None:
+            raise ValueError("after is outside the accepted grammar")
+        return self
+
+
+class ApprovalDecisionIn(_Strict):
+    """One explicitly selected item: a request id and the human's word."""
+
+    message_id: str = Field(min_length=1, max_length=80)
+    decision: Literal["approve", "deny"]
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "ApprovalDecisionIn":
+        from local_operator.team_bridge.read_context import MESSAGE_ID_PATTERN
+
+        if re.fullmatch(MESSAGE_ID_PATTERN, self.message_id) is None:
+            raise ValueError("message_id is outside the accepted grammar")
+        return self
+
+
+class ApprovalsDecideIn(_Strict):
+    """The batch body. ``items`` is bounded here (≤50, §10.2) before any lookup.
+
+    No "all" flag exists and none may be added: §10.2's select-and-approve is
+    per item, so the client names every request the human selected.
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    items: list[ApprovalDecisionIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "ApprovalsDecideIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        return self
+
+
+def _approvals_query(request: Request, accepted: frozenset[str]) -> ApprovalsQuery:
+    from pydantic import ValidationError
+
+    params = request.query_params
+    if set(params) - accepted or any(len(params.getlist(name)) != 1 for name in params):
+        _raise_read("invalid_request")
+    try:
+        return ApprovalsQuery.model_validate(dict(params))
+    except ValidationError:
+        _raise_read("invalid_request")
+
+
+async def _approvals_context(config_manager: ConfigManager, expected_account_id: str) -> Any:
+    """The committed owner + pinned access the captured account names (read rules)."""
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        ReadRefused,
+        resolve_read_context,
+        wire_for,
+    )
+
+    wire = wire_for(config_manager.config_dir)
+    try:
+        context = await resolve_read_context(
+            config_manager.config_dir, expected_account_id=expected_account_id, wire=wire
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
+    return wire, context
+
+
+@router.get("/v1/desktop/team-bridge/requests", response_model=CRUDResponse[Any])
+async def list_requests(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """Pending requests addressed to me, with ``pending_count`` ("N requests waiting").
+
+    Reference fields only (``approvals.request_rows``): ids, request state and
+    expiry, the hub-resolved sender identity, and the local ask the item joins
+    to. No body, no screening rationale. ``pending_count`` counts THIS page;
+    ``next_cursor`` non-null means more are waiting beyond it.
+    """
+
+    from local_operator.team_bridge import approvals
+
+    query = _approvals_query(request, _APPROVALS_LIST_PARAMS)
+    wire, context = await _approvals_context(config_manager, query.expected_account_id)
+    page = await _conversation_reply(
+        wire.requests(
+            tenant_id=context.tenant_id,
+            state="pending",
+            after=query.after,
+            limit=query.limit,
+            access=context.access,
+        )
+    )
+    rows = approvals.request_rows(
+        page.get("items") or [],
+        approvals.bridge_asks_by_message(config_manager.config_dir),
+        tenant_id=context.tenant_id,
+    )
+    return reply(
+        {
+            "tenant_id": context.tenant_id,
+            "items": rows,
+            "pending_count": len(rows),
+            "next_cursor": page.get("next_cursor"),
+        }
+    )
+
+
+@router.post("/v1/desktop/team-bridge/requests/decide", response_model=CRUDResponse[Any])
+async def decide_requests(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """Decide the human's EXPLICIT selection (≤50); per-item results, submitted order.
+
+    Refused WHOLE before any lookup or hub call: a malformed body, more than 50
+    items, a duplicate id (``invalid_request``, 422). Otherwise each item gets
+    ``{message_id, decision, sent, ask_settled, status | error}``; only items
+    whose local ask and owner binding verify are sent, in ONE hub batch call.
+    """
+
+    from local_operator.team_bridge import approvals
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+
+    _refuse_write_scope(request)
+    if request.query_params:
+        _raise_read("invalid_request")
+    try:
+        raw = await request.json()
+    except ValueError:
+        _raise_read("invalid_request")
+    # The ≤50 bound is checked on the RAW list, before model validation, so an
+    # oversized body is refused by its size alone (and its items never parsed).
+    if isinstance(raw, Mapping) and isinstance(raw.get("items"), list):
+        if len(raw["items"]) > approvals.BATCH_MAX:
+            raise HTTPException(
+                422,
+                {
+                    "code": "invalid_request",
+                    "message": INVALID_READ_QUERY,
+                    "details": {"field": "items", "rule": "max_items", "max": approvals.BATCH_MAX},
+                },
+            )
+    try:
+        body = ApprovalsDecideIn.model_validate(raw)
+        selection = approvals.parse_selection(item.model_dump() for item in body.items)
+    except ValueError:
+        _raise_read("invalid_request")
+    wire, context = await _approvals_context(config_manager, body.expected_account_id)
+    if getattr(context, "read_only", False):
+        # Retained-history standing (the local switch is off) reads; it never
+        # decides — a decision is new outbound work under the owner's authority.
+        _raise_read("bridge_off")
+    try:
+        results = await approvals.decide_selection(
+            wire,
+            selection,
+            config_dir=Path(config_manager.config_dir),
+            owner=context.owner,
+            access=context.access,
+            expected_account_id=body.expected_account_id,
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    return reply({"results": results})
+
+
+@router.get("/v1/desktop/team-bridge/decisions", response_model=CRUDResponse[Any])
+async def list_decisions(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """The decision ledger (§10.4): who asked, who decided, the decision, when.
+
+    ``role`` is ``made`` (default) or ``requested``; cursor-paginated (≤100).
+    References only — the decider's note and the body hash stay on the hub.
+    """
+
+    from local_operator.team_bridge import approvals
+
+    query = _approvals_query(request, _APPROVALS_LEDGER_PARAMS)
+    wire, context = await _approvals_context(config_manager, query.expected_account_id)
+    page = await _conversation_reply(
+        wire.decisions(
+            tenant_id=context.tenant_id,
+            role=query.role,
+            after=query.after,
+            limit=query.limit,
+            access=context.access,
+        )
+    )
+    return reply(
+        {
+            "tenant_id": context.tenant_id,
+            "role": query.role,
+            "items": approvals.ledger_rows(page.get("items") or []),
+            "next_cursor": page.get("next_cursor"),
+        }
+    )
