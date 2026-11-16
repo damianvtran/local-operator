@@ -269,7 +269,9 @@ def test_legacy_store_at_256_is_archived_and_admission_succeeds(tmp_path):
     restored = tx.restore_archived(root, identifier)
     assert restored == candidates[0]
     assert _fingerprint(restored) == prints[identifier]
-    assert tx.operation_status(root, identifier)["operation_id"] == identifier
+    legacy_status = tx.operation_status(root, identifier)
+    assert legacy_status is not None
+    assert legacy_status["operation_id"] == identifier
     with pytest.raises(tx.InstallTransactionError, match="no archived"):
         tx.restore_archived(root, identifier)
 
@@ -441,8 +443,12 @@ def test_observers_never_rotate_and_can_read_an_archived_seal(tmp_path, monkeypa
     with monkeypatch.context() as patched:
         for name in ("rotate_for_admission", "_archive_moves", "_age_archive", "_move_entry"):
             patched.setattr(tx, name, forbidden)
-        assert v2.observe_generation(generation)["sealed"]
-        assert v2.operation_status(root, context.operation_id)["writer"] is None
+        observed = v2.observe_generation(generation)
+        assert observed is not None
+        assert observed["sealed"]
+        live_status = v2.operation_status(root, context.operation_id)
+        assert live_status is not None
+        assert live_status["writer"] is None
         tx.recovery_capacity_status(root)
         tx.active_recovery_entries(root)
     assert _tree(root) == before
@@ -451,6 +457,7 @@ def test_observers_never_rotate_and_can_read_an_archived_seal(tmp_path, monkeypa
     _rotate(root, _now())
     assert not (root / tx.V2_OPERATION_DIR / f"{context.operation_id}.json").exists()
     status = v2.observe_generation(generation)
+    assert status is not None
     assert status["archived"] is True and status["writer"] is None and status["sealed"]
 
 
