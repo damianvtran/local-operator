@@ -2722,7 +2722,8 @@ async def _acquire_heavy_lease(
 
     Returns the held :class:`heavy_lease.Lease`, a tool error when the bounded
     wait ran out (it names the holder and the remedies) or the turn was aborted
-    while queued, or None when the command is not heavy, the lease is off
+    while queued, or None when the command is not heavy, is heavy but also
+    starts a long-running server (a note is printed instead), the lease is off
     (``bash.heavy_jobs.enabled: false``) or the host has no ``flock`` (Windows).
 
     Memory cap: a heavy command cannot opt out per call. ``execute_bash``
@@ -2744,6 +2745,24 @@ async def _acquire_heavy_lease(
         return None
     settings = await asyncio.to_thread(heavy_lease.configured_settings)
     if not settings.enabled:
+        return None
+    if heavy.long_lived:
+        # `pnpm build && pnpm dev`: a lease would be held for the server's whole
+        # life (hours), so no slot is taken; the memory cap still applies (see
+        # `execute_bash`). Silent was the PR #4104 R2-1 defect: the build ran
+        # beside a leased one with no signal, so say how to make it queue.
+        if on_update is not None:
+            line = (
+                f"heavy build in a line that also starts a long-running server ({heavy.reason}):"
+                " not queued; run the build as its own command so it waits for the"
+                " heavy-job slot"
+            )
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
         return None
     session_id = (getattr(context, "session_id", None) if context else None) or os.environ.get(
         "LOCAL_OPERATOR_SESSION_ID", ""
@@ -4816,10 +4835,14 @@ async def execute_bash(
     # inherit credentials. This preserves the existing fail-closed first read.
     # Still resolve BEFORE spawn: a cooperative runner can immediately start a
     # separate PG outside our group accounting. Reuse this Budget for both guards.
-    # Heavy-job classification is pure and cheap, so it runs here, before the
-    # budget: a heavy command's `memory_mb <= 0` ("no cap for this call") is
-    # treated as unset, so it gets the configured budget (PR #4104 R3). The
-    # operator's `bash.memory.enabled=false` is untouched and still wins.
+    # Heavy-job classification runs here, before the budget: a heavy command's
+    # `memory_mb <= 0` ("no cap for this call") is treated as unset, so it gets
+    # the configured budget (PR #4104 R3), including a heavy line that also
+    # starts a server and so takes no slot (R2-1). It is not pure: for a
+    # package-manager command it reads the nearest package.json. That stays
+    # synchronous because the read is small and bounded (one stat walk up the
+    # tree, files over 1 MB skipped, any error means "unknown"), cheaper than a
+    # thread hop. The operator's `bash.memory.enabled=false` still wins.
     heavy_class = heavy_lease.is_heavy(params.command, params.memory_mb, cwd=_safe_cwd(context))
     budget_override = params.memory_mb
     if heavy_class is not None and budget_override is not None and budget_override <= 0:

@@ -140,6 +140,11 @@ class HeavyClass:
     """Why a command counts as heavy, as a short human-readable label."""
 
     reason: str
+    #: The line also starts a watcher/server (``pnpm build && pnpm dev``): it
+    #: is still heavy, so it keeps the memory cap, but it takes NO slot, since
+    #: the lease would last as long as the server (PR #4104 R2-1). The caller
+    #: prints a note telling the agent to run the build on its own so it queues.
+    long_lived: bool = False
 
 
 @dataclass(frozen=True)
@@ -152,10 +157,21 @@ class Holder:
     command: str
     started_at: float
     pgid: int | None = None
+    #: False when the harness pid is dead and only the command's group keeps
+    #: the record live (a harness SIGKILLed mid-build): the pid alone would
+    #: point an operator at a process that no longer exists (PR #4104 QA note).
+    harness_alive: bool = True
 
     def who(self) -> str:
-        """``<session>/<pid>`` when the session is known, else ``pid N``."""
-        return f"{self.session_id}/{self.pid}" if self.session_id else f"pid {self.pid}"
+        """``<session>/<pid>`` when the session is known, else ``pid N``.
+
+        Adds ``(harness gone; command pgid N still running)`` when the
+        orphaned command group, not the named harness, holds the slot.
+        """
+        who = f"{self.session_id}/{self.pid}" if self.session_id else f"pid {self.pid}"
+        if not self.harness_alive and self.pgid is not None:
+            who += f" (harness gone; command pgid {self.pgid} still running)"
+        return who
 
 
 def supported() -> bool:
@@ -229,17 +245,65 @@ _NODE_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "vite", "electron-
     "next",
 }
 #: Recursion bound for `bash -c`, package.json script bodies and wrappers that
-#: re-dispatch: deep enough for `bash -c 'pnpm build'` → `electron-vite build`,
-#: and it stops a script that calls itself (`"build": "pnpm build"`).
-_MAX_DEPTH = 4
+#: re-dispatch. Cycles (`"build": "pnpm build"`) are stopped by a visited set of
+#: (package dir, script), so this bound only limits honest nesting; 4 was too
+#: shallow (`run_bounded.py -- bash -c "pnpm full"` over a three-script chain
+#: fell off it, PR #4104 R2-3). Past it, :func:`_shallow_guess` decides from
+#: tokens, never "light" by default.
+_MAX_DEPTH = 8
 #: package.json files larger than this are not read (a cheap read by contract).
 _PACKAGE_JSON_MAX_BYTES = 1_000_000
 
 #: Sentinel verdict: the segment is a watcher or a server that runs until it is
 #: stopped. It never takes the slot (it would pin the machine's only slot for
 #: hours while using little memory), and a command line containing one is not
-#: leased at all, because the lease would last as long as the watcher.
+#: leased at all, because the lease would last as long as the watcher. When the
+#: same line also runs a heavy segment, see :data:`_HEAVY_LONG_LIVED`.
 _LONG_LIVED = "\0long-lived"
+#: Prefix verdict: heavy (the suffix is the reason) AND long-lived, as in
+#: ``pnpm build && pnpm dev``. The build still needs the memory cap, yet a lease
+#: would last as long as the server, so the caller takes no slot and tells the
+#: agent to split the build out (PR #4104 R2-1).
+_HEAVY_LONG_LIVED = "\0heavy-long-lived:"
+#: Tools matched by :func:`_shallow_guess` past the recursion bound.
+_SHALLOW_HEAVY_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "electron-vite"} | {
+    "webpack",
+    "rollup",
+}
+
+_Seen = frozenset[tuple[str | None, str]]
+
+
+def _unpack(verdict: str | None) -> tuple[str | None, bool]:
+    """``(heavy reason or None, long-lived?)`` for any verdict string."""
+    if verdict is None:
+        return None, False
+    if verdict == _LONG_LIVED:
+        return None, True
+    if verdict.startswith(_HEAVY_LONG_LIVED):
+        return verdict[len(_HEAVY_LONG_LIVED) :], True
+    return verdict, False
+
+
+def _shallow_guess(command: str) -> str | None:
+    """Token-only verdict once the recursion bound is reached (PR #4104 R2-3).
+
+    A false negative is what the lease exists to prevent, so a chain too deep
+    to resolve is judged by its words: a known heavy tool, or a package-manager
+    script whose NAME is a build/test/typecheck. No package.json is read here.
+    """
+    words = command.split()
+    for index, word in enumerate(words):
+        name = os.path.basename(word.strip("'\""))
+        if name in _SHALLOW_HEAVY_TOOLS:
+            return name
+        if name in _PACKAGE_MANAGERS:
+            rest = [w.strip("'\"") for w in words[index + 1 :] if not w.startswith("-")]
+            if rest[:1] in (["run"], ["run-script"]):
+                rest = rest[1:]
+            if rest and _PM_HEAVY_SCRIPT.match(rest[0]):
+                return f"{name} {rest[0]}"
+    return None
 
 
 def _segments(command: str) -> list[list[str]]:
@@ -386,20 +450,29 @@ def _package_scripts(directory: str | None) -> dict[str, str] | None:
     return None
 
 
-def _classify_command(command: str, cwd: str | None, depth: int) -> str | None:
-    """Heavy reason, :data:`_LONG_LIVED`, or None for a whole command line."""
+def _classify_command(
+    command: str, cwd: str | None, depth: int, seen: _Seen = frozenset()
+) -> str | None:
+    """Heavy reason, :data:`_LONG_LIVED`, a :data:`_HEAVY_LONG_LIVED` verdict,
+    or None for a whole command line.
+
+    Every segment is classified: a long-lived segment no longer hides a heavy
+    one beside it (``pnpm build && pnpm dev`` is heavy AND long-lived).
+    """
     if depth > _MAX_DEPTH:
-        return None
+        return _shallow_guess(command)
     heavy: str | None = None
+    long_lived = False
     for segment in _segments(command):
         if segment[0] in ("cd", "pushd"):
             cwd = _cd(cwd, segment[1:])
             continue
-        verdict = _classify_segment(segment, cwd, depth)
-        if verdict == _LONG_LIVED:
-            return _LONG_LIVED
+        reason, lived = _unpack(_classify_segment(segment, cwd, depth, seen))
+        long_lived = long_lived or lived
         if heavy is None:
-            heavy = verdict
+            heavy = reason
+    if long_lived:
+        return _HEAVY_LONG_LIVED + heavy if heavy else _LONG_LIVED
     return heavy
 
 
@@ -424,7 +497,9 @@ def _shell_c_string(args: list[str]) -> str | None:
     return None
 
 
-def _classify_pm(program: str, args: list[str], cwd: str | None, depth: int) -> str | None:
+def _classify_pm(
+    program: str, args: list[str], cwd: str | None, depth: int, seen: _Seen = frozenset()
+) -> str | None:
     """``pnpm|npm|yarn|bun …``: classify what it really runs."""
     pkg_dir, elsewhere = cwd, False
     i = 0
@@ -447,7 +522,7 @@ def _classify_pm(program: str, args: list[str], cwd: str | None, depth: int) -> 
                 j += 1
                 break
             j += 2 if rest[j] in ("-p", "--package") else 1
-        return _classify_segment(rest[j:], pkg_dir, depth + 1) if rest[j:] else None
+        return _classify_segment(rest[j:], pkg_dir, depth + 1, seen) if rest[j:] else None
     explicit_run = sub in ("run", "run-script")
     if explicit_run:
         j = 0
@@ -471,18 +546,21 @@ def _classify_pm(program: str, args: list[str], cwd: str | None, depth: int) -> 
         return _LONG_LIVED
     scripts = None if elsewhere else _package_scripts(pkg_dir)
     body = scripts.get(script) if scripts else None
+    if (pkg_dir, script) in seen:
+        body = None  # a script that (indirectly) calls itself: judge it by name
     if body is not None:
-        verdict = _classify_command(body, pkg_dir, depth + 1)
-        if verdict == _LONG_LIVED:
-            return _LONG_LIVED
-        if verdict is not None:
+        verdict = _classify_command(body, pkg_dir, depth + 1, seen | {(pkg_dir, script)})
+        reason, lived = _unpack(verdict)
+        if lived:
+            return _HEAVY_LONG_LIVED + f"{program} {script}" if reason else _LONG_LIVED
+        if reason is not None:
             return f"{program} {script}"
     if _PM_HEAVY_SCRIPT.match(script):
         return f"{program} {script}"
     if body is None and not explicit_run and program != "npm":
         # No script by that name: pnpm/yarn/bun run the local binary, so
         # `pnpm vitest run` is vitest and `pnpm tsc --noEmit` is tsc.
-        return _classify_segment([script, *extra], pkg_dir, depth + 1)
+        return _classify_segment([script, *extra], pkg_dir, depth + 1, seen)
     return None
 
 
@@ -509,9 +587,11 @@ def _task_names(args: list[str]) -> list[str]:
     return names
 
 
-def _classify_segment(tokens: list[str], cwd: str | None, depth: int = 0) -> str | None:
+def _classify_segment(
+    tokens: list[str], cwd: str | None, depth: int = 0, seen: _Seen = frozenset()
+) -> str | None:
     if depth > _MAX_DEPTH:
-        return None
+        return _shallow_guess(" ".join(tokens))
     tokens = _strip_wrappers(tokens)
     if not tokens:
         return None
@@ -524,15 +604,15 @@ def _classify_segment(tokens: list[str], cwd: str | None, depth: int = 0) -> str
         return None
     if program in _SHELLS:
         script = _shell_c_string(args)
-        return _classify_command(script, cwd, depth + 1) if script is not None else None
+        return _classify_command(script, cwd, depth + 1, seen) if script is not None else None
     if program == "run_bounded.py" or (
         _PYTHON.fullmatch(program) and args[:1] and os.path.basename(args[0]) == "run_bounded.py"
     ):
         # The bounded runner AGENTS.md prescribes for heavy runs: `… -- <cmd>`.
         rest = args[args.index("--") + 1 :] if "--" in args else []
-        return _classify_segment(rest, cwd, depth + 1) if rest else None
+        return _classify_segment(rest, cwd, depth + 1, seen) if rest else None
     if program in _PACKAGE_MANAGERS:
-        verdict = _classify_pm(program, args, cwd, depth)
+        verdict = _classify_pm(program, args, cwd, depth, seen)
         if verdict is not None or program != "bun":
             return verdict
     if program in ("node", "bun", "deno"):
@@ -545,7 +625,7 @@ def _classify_segment(tokens: list[str], cwd: str | None, depth: int = 0) -> str
         if script_at is not None:
             tool = re.sub(r"\.(c|m)?js$", "", os.path.basename(args[script_at]))
             if tool in _NODE_TOOLS:
-                return _classify_segment([tool, *args[script_at + 1 :]], cwd, depth + 1)
+                return _classify_segment([tool, *args[script_at + 1 :]], cwd, depth + 1, seen)
         return None
     first = _positionals(args)[:1]
     if program in ("vite", "electron-vite"):
@@ -636,7 +716,9 @@ def is_heavy(
     Watchers and servers are never heavy (``--watch``, ``tsc -w``, ``vitest
     watch|dev``, ``jest --watchAll``, ``esbuild --serve``, ``vite`` dev, and
     scripts named ``dev``/``serve``/``start``/``watch``/``*:watch``): they run
-    until stopped, so a lease would pin the machine's slot for hours.
+    until stopped, so a lease would pin the machine's slot for hours. A line
+    that runs a heavy segment AND one of those (``pnpm build && pnpm dev``) is
+    heavy with ``long_lived=True``: capped, but never leased.
     ``--help``/``--version`` anywhere is informational, never heavy.
 
     A caller-declared ``memory_mb`` at or above :data:`HEAVY_MEMORY_MB_THRESHOLD`
@@ -644,10 +726,10 @@ def is_heavy(
     """
     if memory_mb is not None and memory_mb >= HEAVY_MEMORY_MB_THRESHOLD:
         return HeavyClass(f"memory_mb={int(memory_mb)}")
-    verdict = _classify_command(command, cwd, 0)
-    if verdict is None or verdict == _LONG_LIVED:
+    reason, long_lived = _unpack(_classify_command(command, cwd, 0))
+    if reason is None:
         return None
-    return HeavyClass(verdict)
+    return HeavyClass(reason, long_lived=long_lived)
 
 
 # -- slot sizing ------------------------------------------------------------
@@ -848,7 +930,10 @@ def try_acquire(
     directory.mkdir(parents=True, exist_ok=True)
     for slot in range(max(1, slots)):
         lock_path = directory / f"slot-{slot}.lock"
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o600)
+        # Read-only: flock needs no write access (Linux and macOS), and the
+        # leased command inherits this descriptor, so a sandboxed read-tier
+        # shell must not get a writable fd outside its sandbox (PR #4104 R2-2).
+        fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -894,7 +979,8 @@ def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
         if slots is not None and slot >= slots:
             continue
         pgid = raw.get("pgid")
-        if not _pid_alive(pid) and not (isinstance(pgid, int) and _group_alive(pgid)):
+        harness_alive = _pid_alive(pid)
+        if not harness_alive and not (isinstance(pgid, int) and _group_alive(pgid)):
             continue
         holders.append(
             Holder(
@@ -904,6 +990,7 @@ def read_holders(directory: Path, slots: int | None = None) -> list[Holder]:
                 command=str(raw.get("command") or ""),
                 started_at=float(raw.get("started_at") or 0.0),
                 pgid=pgid if isinstance(pgid, int) else None,
+                harness_alive=harness_alive,
             )
         )
     return holders

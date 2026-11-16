@@ -11,7 +11,9 @@ Every cell uses an isolated config dir and a small wait so it stays fast.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -135,8 +137,19 @@ LONG_LIVED = [
     "turbo watch build",
     "turbo run dev",
     "bash -c 'pnpm dev'",
-    # A command line that also starts a watcher lives as long as the watcher.
-    "pnpm build && pnpm dev",
+]
+
+#: A heavy segment AND a watcher/server on one line (R2-1 / QA Q4): heavy, so
+#: the memory cap applies, but long-lived, so no slot is taken (the lease would
+#: last as long as the server). QA round-2 shapes plus the reviewer's.
+HEAVY_LONG_LIVED = [
+    ("pnpm build && pnpm dev", "pnpm build"),
+    ("pnpm build; pnpm dev", "pnpm build"),
+    ("pnpm build && pnpm dev &", "pnpm build"),
+    ("pnpm build && pnpm start", "pnpm build"),
+    ("pnpm build && pnpm preview", "pnpm build"),
+    ("pnpm build && vite preview", "pnpm build"),
+    ("bash -c 'pnpm build && pnpm dev'", "pnpm build"),
 ]
 
 NOT_HEAVY = [
@@ -189,6 +202,49 @@ def test_incident_shapes_are_heavy(command: str, reason: str) -> None:
 @pytest.mark.parametrize("command", LONG_LIVED)
 def test_watchers_and_dev_servers_never_take_the_slot(command: str) -> None:
     assert heavy_lease.is_heavy(command) is None, command
+
+
+@pytest.mark.parametrize("command,reason", HEAVY_LONG_LIVED)
+def test_build_chained_with_a_server_is_heavy_but_long_lived(command: str, reason: str) -> None:
+    assert heavy_lease.is_heavy(command) == heavy_lease.HeavyClass(reason, long_lived=True)
+
+
+def test_build_chained_with_a_server_resolves_through_package_json(tmp_path: Path) -> None:
+    """R2-1 through script bodies: `start` = `electron-vite preview` is a server."""
+    cwd = str(_ui_repo(tmp_path))
+    assert heavy_lease.is_heavy("pnpm build && pnpm start", cwd=cwd) == heavy_lease.HeavyClass(
+        "pnpm build", long_lived=True
+    )
+    assert heavy_lease.is_heavy("pnpm build && pnpm lint", cwd=cwd) == heavy_lease.HeavyClass(
+        "pnpm build"
+    )
+
+
+def test_deep_wrapper_chains_stay_heavy(tmp_path: Path) -> None:
+    """R2-3: the prescribed runner around `bash -c` over a 3-script chain is heavy."""
+    repo = tmp_path / "ui"
+    repo.mkdir()
+    (repo / "package.json").write_text(
+        '{"scripts": {"full": "bash -c \'pnpm compile\'", "compile": "pnpm run build:all",'
+        ' "build:all": "electron-vite build", "self": "pnpm other", "other": "pnpm self"}}'
+    )
+    cwd = str(repo)
+    assert heavy_lease.is_heavy("pnpm full", cwd=cwd) == heavy_lease.HeavyClass("pnpm full")
+    wrapped = 'python3 scripts/run_bounded.py --mem 4000 -- bash -c "pnpm full"'
+    assert heavy_lease.is_heavy(wrapped, cwd=cwd) == heavy_lease.HeavyClass("pnpm full")
+    # A cycle terminates (visited set) and is judged by name: neither is heavy.
+    assert heavy_lease.is_heavy("pnpm self", cwd=cwd) is None
+
+
+def test_past_the_depth_bound_the_token_rule_decides() -> None:
+    """R2-3: falling off the recursion bound guesses from tokens, not "light"."""
+    nested = "pnpm build"
+    for _ in range(heavy_lease._MAX_DEPTH + 2):
+        nested = f"bash -c {shlex.quote(nested)}"
+    assert heavy_lease.is_heavy(nested) == heavy_lease.HeavyClass("pnpm build")
+    assert heavy_lease._shallow_guess("bash -c 'pnpm lint'") is None
+    assert heavy_lease._shallow_guess("x -- npm run test:unit") == "npm test:unit"
+    assert heavy_lease._shallow_guess("'node_modules/.bin/esbuild' x") == "esbuild"
 
 
 def _ui_repo(root: Path) -> Path:
@@ -707,3 +763,95 @@ def test_spawn_passes_the_lease_descriptor(lease_env: Path) -> None:
         pytest.skip("fd-to-path probe needs /proc")
     result = asyncio.run(builtin.execute_bash("t", {"command": probe}))
     assert "inherited 1" in _text(result), _text(result)
+
+
+def test_build_chained_with_a_server_takes_no_slot_keeps_its_cap_and_says_so(
+    lease_env: Path,
+) -> None:
+    """R2-1 / Q4: with the slot held elsewhere, it runs at once, capped, with a note."""
+    from local_operator.tools import builtin
+
+    held = heavy_lease.try_acquire(lease_env, 1, session_id="other", command="pnpm build")
+    assert held is not None
+    updates: list = []
+    try:
+        result = asyncio.run(
+            builtin.execute_bash(
+                "t",
+                {
+                    # `false &&` keeps pnpm from running; the classifier sees both.
+                    "command": "echo mem=$LOCAL_OPERATOR_RESOLVED_MEMORY_MB;"
+                    " false && pnpm build && pnpm dev",
+                    "memory_mb": 0,
+                },
+                None,
+                updates.append,
+            )
+        )
+        # No slot taken: the other session's lease is untouched and still the only one.
+        assert [h.session_id for h in heavy_lease.read_holders(lease_env)] == ["other"]
+    finally:
+        held.release()
+    text = _text(result)
+    assert not result.is_error and "HEAVY JOB" not in text, text
+    assert "mem=" in text and "mem=0" not in text, text
+    lines = [u.details.get("heavy_job_queue") for u in updates if u.details]
+    assert lines == [
+        "heavy build in a line that also starts a long-running server (pnpm build): not"
+        " queued; run the build as its own command so it waits for the heavy-job slot"
+    ], lines
+
+
+def test_inherited_lock_descriptor_is_read_only(tmp_path: Path) -> None:
+    """R2-2: a confined command inheriting the fd cannot write through it."""
+    directory = tmp_path / "heavy-jobs"
+    lease = heavy_lease.try_acquire(directory, 1, command="pnpm build")
+    assert lease is not None and lease.fileno() is not None
+    fd = lease.fileno()
+    try:
+        probe = subprocess.run(
+            ["sh", "-c", f"printf x >&{fd} && echo wrote || echo refused"],
+            pass_fds=(fd,),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert probe.stdout.strip() == "refused", probe
+        assert (directory / "slot-0.lock").stat().st_size == 0
+        assert heavy_lease.try_acquire(directory, 1) is None  # the read-only fd still locks
+    finally:
+        lease.release()
+    after = heavy_lease.try_acquire(directory, 1)  # explicit unlock still frees it
+    assert after is not None
+    after.release()
+
+
+def test_status_names_the_orphaned_command_group(tmp_path: Path) -> None:
+    """QA note: dead harness, live command group -> status points at the group."""
+    directory = tmp_path / "heavy-jobs"
+    directory.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    group = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        (directory / "slot-0.json").write_text(
+            json.dumps(
+                {
+                    "slot": 0,
+                    "pid": dead.pid,
+                    "session_id": "syn-orphan",
+                    "command": "pnpm build",
+                    "started_at": time.time(),
+                    "pgid": group.pid,
+                }
+            )
+        )
+        line = heavy_lease.status_line(directory, 1)
+        expected = f"syn-orphan/{dead.pid} (harness gone; command pgid {group.pid} still running)"
+        assert expected in line, line
+    finally:
+        os.killpg(group.pid, signal.SIGKILL)
+        group.wait()
+    # A live harness is named as before, with no suffix.
+    live = heavy_lease.Holder(0, os.getpid(), "s", "pnpm build", 0.0, pgid=os.getpid())
+    assert live.who() == f"s/{os.getpid()}"
