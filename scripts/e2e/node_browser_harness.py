@@ -697,7 +697,10 @@ class Capture:
 
 
 def _last_tool_text(request: Any) -> str:
-    for message in reversed(getattr(request, "messages", None) or ()):
+    # Typed as list[Any]: a bare ``or ()`` fallback makes pyright infer the
+    # element type of the empty tuple (Never) and reject ``message.content``.
+    messages: list[Any] = list(getattr(request, "messages", None) or ())
+    for message in reversed(messages):
         if getattr(message, "role", "") == "tool":
             return " ".join(str(getattr(block, "text", "") or "") for block in message.content)
     return ""
@@ -976,14 +979,30 @@ def rendered_fraction(path: Path) -> float:
         rgb = image.convert("RGB")
     width, height = rgb.size
     pixels = rgb.load()
-    background = pixels[width - 1, height - 1]
+    # ``load()`` is typed Optional for lazily-decoded images; after convert()
+    # the data is in memory, so None here would be a Pillow contract break.
+    assert pixels is not None
+    background = _rgb_pixel(pixels[width - 1, height - 1])
     total = differing = 0
     for y in range(0, height, 2):
         for x in range(0, width, 2):
             total += 1
-            if sum(abs(a - b) for a, b in zip(pixels[x, y], background)) > 30:
+            if sum(abs(a - b) for a, b in zip(_rgb_pixel(pixels[x, y]), background)) > 30:
                 differing += 1
     return differing / total if total else 0.0
+
+
+def _rgb_pixel(value: Any) -> tuple[int, int, int]:
+    """Narrow a Pillow pixel read to an RGB triple.
+
+    WHY. Pillow types pixel access as ``float | tuple[int, ...] | None``
+    because the shape depends on the image mode at runtime; every caller here
+    reads an image already ``convert("RGB")``-ed, so anything but a 3-tuple is
+    a broken invariant, not a value to coerce.
+    """
+    assert isinstance(value, tuple) and len(value) == 3, value
+    red, green, blue = value
+    return int(red), int(green), int(blue)
 
 
 #: Between the two frames measured in run 6 (n=1 each): the loading spinner at
@@ -1007,7 +1026,7 @@ def background_luminance(path: Path) -> float:
 
     with Image.open(path) as image:
         rgb = image.convert("RGB")
-    red, green, blue = rgb.getpixel((rgb.width - 1, rgb.height - 1))
+    red, green, blue = _rgb_pixel(rgb.getpixel((rgb.width - 1, rgb.height - 1)))
     return 0.299 * red + 0.587 * green + 0.114 * blue
 
 
@@ -1598,8 +1617,10 @@ async def operator_role(args: argparse.Namespace) -> int:
             _emit({"ok": True, "detail": str(verdict)})
         return 0
     finally:
+        # AttachClient.close() is synchronous teardown; awaiting its None
+        # only raised a TypeError that the suppress swallowed.
         with contextlib.suppress(Exception):
-            await client.close()
+            client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1664,7 +1685,7 @@ def security_control(args: argparse.Namespace) -> int:
 
 
 def parse(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--harness", action="store_true", help="required: confirm the run")
     parser.add_argument("--root", default="")
     parser.add_argument(
