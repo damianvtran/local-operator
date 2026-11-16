@@ -4127,6 +4127,18 @@ def _freeze_state_jobs(
     return state.model_copy(update={"jobs": _FrozenSequence(jobs)})
 
 
+def freeze_new_store_state(state: FrontendSessionState) -> FrontendSessionState:
+    """The canonical object a NEW :class:`FrontendStateStore` holds for ``state``.
+
+    A pure function of ``state``: it deep-copies and freezes, and writes nothing
+    shared. That is what lets a caller pay it on a worker thread and hand the
+    result to ``FrontendStateStore(state, frozen=...)``, provided nothing else
+    holds ``state`` while the worker reads it (the desktop's cold open builds
+    ``state`` locally and publishes nothing until the store exists).
+    """
+    return _freeze_state_jobs(state.model_copy(deep=True))
+
+
 def _freeze_retained_rows(rows: Iterable[Any]) -> _FrozenSequence:
     """Freeze one job's retained window into the immutable rows canonical state holds.
 
@@ -5829,6 +5841,26 @@ class SnapshotJobs:
     def __init__(self, values: Iterable[JobState] = ()) -> None:
         self.replace(values)
 
+    @staticmethod
+    def detach(values: Iterable[JobState]) -> dict[int, tuple[JobState, JobState]]:
+        """The detached copies :meth:`replace` would make, as a :meth:`prime` argument.
+
+        Pure (reads ``values``, writes nothing shared), so a caller can pay it on
+        a worker thread: on the desktop's cold open of a 2,000-job session these
+        copies were ~0.24 s on the serving loop (PR #4012, QA round 1, Q1).
+        """
+        return {id(value): (value, _public_job(value)) for value in values}
+
+    def prime(self, detached: dict[int, tuple[JobState, JobState]]) -> None:
+        """Seed :meth:`replace`'s reuse cache with copies built by :meth:`detach`.
+
+        Only a hint: ``replace`` reuses an entry only when its source is the
+        IDENTICAL object it is handed (``kept[0] is value``), so a primed copy
+        can never stand in for a different row, and an unused entry is dropped
+        by the next ``replace``.
+        """
+        self._detached = {**getattr(self, "_detached", {}), **detached}
+
     def replace(self, values: Iterable[JobState]) -> None:
         # Canonical jobs already own recursively immutable retained payloads.
         # Route copies through the public detacher instead of asking Pydantic to
@@ -6775,6 +6807,30 @@ def _job_lifecycle(jobs: Sequence[JobState]) -> tuple[tuple[str, str, bool], ...
     return tuple((job.id, job.status, job.queued) for job in jobs)
 
 
+def _resolve_process_cpu_clock(clock: Any = time) -> Callable[[], float]:
+    """The process-CPU-seconds reader for the slow-apply diagnostic's wall-vs-CPU split.
+
+    Prefers ``clock_gettime(CLOCK_PROCESS_CPUTIME_ID)`` because the read is paid
+    on EVERY apply, slow or not: on this macOS host (load ~60)
+    ``process_time`` measured ~2.2 us a read against ~0.9 us for the
+    ``clock_gettime`` form (best of 5 x 200k). Both ``clock_gettime`` and the
+    constant are Unix-only (absent on Windows CPython), so this falls back to
+    :func:`time.process_time` -- the same quantity -- rather than raising on
+    every apply there (review R1-B1). Resolved once at import, like the guards
+    in ``network/credentials/client.py`` and ``session/runtime/boot_cost.py``,
+    so the per-apply cost stays a single call. ``clock`` is injectable only so
+    a test can resolve against a Windows-shaped ``time`` module.
+    """
+    clock_id = getattr(clock, "CLOCK_PROCESS_CPUTIME_ID", None)
+    if clock_id is None or not hasattr(clock, "clock_gettime"):
+        return cast("Callable[[], float]", clock.process_time)
+    gettime = clock.clock_gettime
+    return lambda: gettime(clock_id)
+
+
+_process_cpu_s: Callable[[], float] = _resolve_process_cpu_clock()
+
+
 class FrontendStateStore:
     """Atomic snapshot/update store shared by local and remote sessions.
 
@@ -6783,10 +6839,17 @@ class FrontendStateStore:
     one reducer and a strict sequence suitable for gap detection.
     """
 
-    def __init__(self, state: FrontendSessionState) -> None:
+    def __init__(
+        self, state: FrontendSessionState, *, frozen: FrontendSessionState | None = None
+    ) -> None:
         # The ONE assignment outside ``_install``: nothing else can see this
         # store yet, so there is no race to take the lock against.
-        self._state = _freeze_state_jobs(state.model_copy(deep=True))
+        #
+        # ``frozen`` is :func:`freeze_new_store_state` of ``state``, already
+        # paid by the caller -- on a worker thread, for the desktop's cold open
+        # of a large session, where this copy-and-freeze of a 2,000-job roster
+        # was ~0.5 s held on the serving loop (PR #4012, QA round 1, Q1).
+        self._state = frozen if frozen is not None else freeze_new_store_state(state)
         self._peer_display_fold: Any = None
         self._peer_display_pending: list[dict[str, Any]] = []
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
@@ -6881,6 +6944,30 @@ class FrontendStateStore:
     def state(self) -> FrontendSessionState:
         return self._public_state(self._state)
 
+    def state_reference(self) -> FrontendSessionState:
+        """The CANONICAL state object itself, O(1), for a reader that clones it elsewhere.
+
+        WHY THIS EXISTS: ``state`` deep-copies every job and usage row ON THE
+        CALLER'S THREAD, and the desktop snapshot route called it on the serving
+        event loop, then serialized the clone there too. On a large session that
+        was 70-195 s with the loop held (``serve-stall-5183.log``, 2026-11-15:
+        ``_public_state`` and ``sync_wire_payload`` -> ``model_dump`` on MAIN),
+        so ``/health`` timed out and the watchdog restarted ``lop serve``.
+
+        WHY HANDING OUT THE OWNING OBJECT IS SAFE HERE, when ``read_field``
+        refuses anything but scalars: the one caller (the desktop snapshot,
+        ``server/utils/desktop_sessions._wire_state_of``) only SERIALIZES it, on
+        a worker thread, and never keeps or mutates it. Every write to this
+        store INSTALLS A NEW OBJECT (``_install``; ``_fold_live_event`` and the
+        other shallow arms copy the lists they change) and nothing assigns into
+        ``self._state`` in place, so the object returned here never changes after
+        it is read. Taken under
+        ``_publish_lock`` for the same reason :meth:`_join` takes its reference
+        there: one consistent object, never a field-by-field mix of two states.
+        """
+        with self._publish_lock:
+            return self._state
+
     def running_task_count(self) -> int:
         """Running, un-queued ``task`` children, without cloning the state.
 
@@ -6896,6 +6983,18 @@ class FrontendStateStore:
             for job in self._state.jobs
             if job.type == "task" and job.status == "running" and not job.queued
         )
+
+    def live_events_copy(self) -> list[Any]:
+        """A caller-owned copy of ``live_events`` alone, without the whole-state clone.
+
+        The sibling of :meth:`attention_copy`, for the same reason: the facade's
+        ``_finish_sync`` read ``state.live_events`` through ``state`` -- a deep
+        copy of every job and usage row -- once per bind, and on the desktop's
+        cold open of a 2,000-job session that clone was ~0.27 s on the serving
+        loop (PR #4012, QA round 1, Q1). The deep copy is the same one
+        ``_public_state`` gives this field, so a caller sees identical values.
+        """
+        return copy.deepcopy(list(self._state.live_events))
 
     def attention_copy(self) -> dict[str, Any]:
         """A caller-owned copy of ``attention`` alone, without the whole-state clone.
@@ -7289,6 +7388,7 @@ class FrontendStateStore:
         freeze — and the section is taken on the serving loop by every joiner in
         that window.
         """
+        started, cpu_started = time.perf_counter(), _process_cpu_s()
         frozen = self._freeze_for_install(state)
         subscribers = self._install(frozen)
         self._rebuild_derived(state)
@@ -7297,8 +7397,116 @@ class FrontendStateStore:
             sequence=state.sequence,
             changes=state.model_dump(mode="json"),
         )
+        self._fan_out(subscribers, update, started, cpu_started, "replace")
+
+    # --- Slow-apply diagnostic -------------------------------------------------
+    #
+    # WHY: the 2026-11-15 delta fan-out study (lop-performance
+    # docs/2026-11-15-delta-fanout/report.md) found a freeze-once fan-out POC
+    # cut roster-replacement CPU from 91 ms to 13 ms at 8 subscribers, but it
+    # was NO-SHIP because the LIVE subscriber count per store is unknown, and
+    # the multi-second stalls it measured tracked host contention (wall
+    # 1,724 ms vs CPU 91 ms) rather than work. Its step 1 is "instrument
+    # first": this line records, only for a slow apply, how many subscribers
+    # the fan-out paid for and how wall time splits from process CPU, so the
+    # next decision rests on production numbers instead of a synthetic bench.
+    #
+    # CONSTRAINTS: zero behaviour change and no extra copies -- the timing
+    # wraps the existing loop and reads only names and counts off the update.
+    # The under-threshold cost is the clock reads alone (perf_counter at start,
+    # before and after the fan-out, plus one process-CPU read at start; ~1.1 us
+    # total, see ``_process_cpu_s``). The line carries changed-field NAMES and
+    # counts only, never values: changes hold conversation content. (lop's
+    # own tool-output view may mask ``key=value``-shaped text such as this
+    # line when an agent reads it; the product log file is written unmasked.)
+    # Rate-limited per store so a stalled
+    # host emitting a slow delta every tick yields one line per window with a
+    # suppressed count, not a log flood. Class attributes rather than
+    # ``__init__`` assignments so the first instance write shadows them and
+    # construction is untouched.
+    _SLOW_APPLY_THRESHOLD_S: Final[float] = 0.050
+    _SLOW_APPLY_LOG_INTERVAL_S: Final[float] = 5.0
+    _slow_apply_logged_at: float = float("-inf")
+    _slow_apply_suppressed: int = 0
+
+    def _fan_out(
+        self,
+        subscribers: list[Callable[[FrontendUpdate], None]],
+        update: FrontendUpdate,
+        started: float,
+        cpu_started: float,
+        site: str,
+    ) -> None:
+        """Deliver ``update`` to ``subscribers`` and log the apply if it was slow.
+
+        ``started``/``cpu_started`` are the ``perf_counter``/``_process_cpu_s``
+        readings taken when the caller's apply began, so "reducer" below is
+        everything from there to the fan-out (reduce, freeze, install) and
+        "fan-out" is the per-subscriber copy and callback loop.
+        """
+        fanout_started = time.perf_counter()
         for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
+        finished = time.perf_counter()
+        if finished - started > self._SLOW_APPLY_THRESHOLD_S:
+            self._log_slow_apply(
+                update,
+                site,
+                len(subscribers),
+                reducer_s=fanout_started - started,
+                fanout_s=finished - fanout_started,
+                cpu_s=_process_cpu_s() - cpu_started,
+                now=finished,
+            )
+
+    def _log_slow_apply(
+        self,
+        update: FrontendUpdate,
+        site: str,
+        subscriber_count: int,
+        *,
+        reducer_s: float,
+        fanout_s: float,
+        cpu_s: float,
+        now: float,
+    ) -> None:
+        if now - self._slow_apply_logged_at < self._SLOW_APPLY_LOG_INTERVAL_S:
+            self._slow_apply_suppressed += 1
+            return
+        suppressed, self._slow_apply_suppressed = self._slow_apply_suppressed, 0
+        self._slow_apply_logged_at = now
+        # Developer diagnostic, English and i18n-exempt (AGENTS.md: log lines
+        # are not user-visible copy). ``changes`` keys are logged only when they
+        # are declared ``FrontendSessionState`` fields: ``apply_update`` takes
+        # any key off the wire, so an undeclared one is counted
+        # (``fields_other``), never named, keeping "names only" a local
+        # guarantee rather than a trust in the leader (review R1-m1).
+        # ``job_deltas`` is ``{"upserted": [rows], "removed": [ids],
+        # "roster_size": n, "order": [ids]}``; the count is the job ROWS it
+        # moves (upserted + removed), the roster-size dimension the reducer cost
+        # scales with -- not its 1-4 dict keys (review R1-M1). Job ids are
+        # counted, never listed.
+        declared = FrontendSessionState.model_fields
+        field_names = sorted(key for key in update.changes if key in declared)
+        logger.warning(
+            "frontend state: slow apply site=%s session=%s subscribers=%d "
+            "fields=%s fields_other=%d job_deltas=%d appends=%d degraded=%s "
+            "wall_ms=%.1f reducer_ms=%.1f fanout_ms=%.1f cpu_ms=%.1f suppressed=%d",
+            site,
+            self._state.session_id,
+            subscriber_count,
+            ",".join(field_names) or "-",
+            len(update.changes) - len(field_names),
+            len(update.job_deltas.get("upserted") or ())
+            + len(update.job_deltas.get("removed") or ()),
+            sum(len(rows) for rows in update.job_trajectory_appends.values()),
+            update.degraded,
+            (reducer_s + fanout_s) * 1000,
+            reducer_s * 1000,
+            fanout_s * 1000,
+            cpu_s * 1000,
+            suppressed,
+        )
 
     def apply_update(self, update: FrontendUpdate) -> FrontendSessionState:
         """Apply ``update`` and return a whole caller-owned clone of the result.
@@ -7340,6 +7548,7 @@ class FrontendStateStore:
         in-process subscriber and the resync path must see the same event, or
         the two disagree about whether state is trustworthy.
         """
+        started, cpu_started = time.perf_counter(), _process_cpu_s()
         if update.epoch != self._state.epoch or update.sequence != self._state.sequence + 1:
             raise ValueError("frontend update is not the next state sequence")
         if update.degraded:
@@ -7362,8 +7571,7 @@ class FrontendStateStore:
             subscribers = self._install(
                 self._state.model_copy(update={"sequence": update.sequence})
             )
-            for subscriber in subscribers:
-                subscriber(update.model_copy(deep=True))
+            self._fan_out(subscribers, update, started, cpu_started, "apply-degraded")
             return
         # The roster is copied PER ROW below, and only for rows that changed: a
         # whole-``changes`` deep copy was ~2.5 ms of a 252-row delta on its own,
@@ -7593,8 +7801,7 @@ class FrontendStateStore:
                 if job.id in bodies or (job.id in recorded and recorded[job.id][1] is job)
             }
         self._todo_sequences = todo_sequences
-        for subscriber in subscribers:
-            subscriber(update.model_copy(deep=True))
+        self._fan_out(subscribers, update, started, cpu_started, "apply")
 
     def _reusable_job(
         self, job_id: str, prior: JobState | None, received: Any, update: FrontendUpdate
@@ -7709,6 +7916,7 @@ class FrontendStateStore:
         return False
 
     def mutate(self, **changes: Any) -> FrontendUpdate | None:
+        started, cpu_started = time.perf_counter(), _process_cpu_s()
         normalized: dict[str, Any] = {}
         wire_changes: dict[str, Any] = {}
         trajectory_appends: dict[str, list[dict[str, Any]]] = {}
@@ -7888,8 +8096,7 @@ class FrontendStateStore:
             job_trajectory_replacements=trajectory_replacements,
             job_todo_updates=todo_updates,
         )
-        for subscriber in subscribers:
-            subscriber(update.model_copy(deep=True))
+        self._fan_out(subscribers, update, started, cpu_started, "mutate")
         return update
 
     def subscribe(self, callback: Callable[[FrontendUpdate], None]) -> FrontendSubscription:
@@ -7939,14 +8146,24 @@ class FrontendStateStore:
         """
         return self._join(callback, internal=True)
 
+    def subscribe_updates(self, callback: Callable[[FrontendUpdate], None]) -> Callable[[], None]:
+        """``subscribe`` for a caller that never reads the joining snapshot.
+
+        Returns only the unsubscribe. The desktop bridge subscribes to relay
+        UPDATES and paints its first frame from its own off-loop snapshot
+        (``DesktopSessionBridge.snapshot``), so the caller-owned clone ``_join``
+        builds for ``sync`` was thrown away -- ~0.28 s on the serving loop for
+        a 2,000-job roster on every cold open (PR #4012, QA round 1, Q1).
+        Same admit step under ``_publish_lock``, so delivery is unchanged: every
+        update installed after registration, exactly once, in order.
+        """
+        _state_ref, unsubscribe = self._register(callback, internal=False)
+        return unsubscribe
+
     def _join(
         self, callback: Callable[[FrontendUpdate], None], *, internal: bool = False
     ) -> FrontendSubscription:
-        with self._publish_lock:
-            self._subscribers.append(callback)
-            if internal:
-                self._internal_subscribers.add(callback)
-            state_ref = self._state
+        state_ref, unsubscribe = self._register(callback, internal=internal)
         state = self._public_state(state_ref)
         sync = FrontendSync(
             epoch=state.epoch,
@@ -7954,6 +8171,17 @@ class FrontendStateStore:
             snapshot=state,
             live_cursor=state.history_cursor,
         )
+        return FrontendSubscription(sync=sync, unsubscribe=unsubscribe)
+
+    def _register(
+        self, callback: Callable[[FrontendUpdate], None], *, internal: bool
+    ) -> tuple[FrontendSessionState, Callable[[], None]]:
+        """The atomic admit: append ``callback`` and take the state reference together."""
+        with self._publish_lock:
+            self._subscribers.append(callback)
+            if internal:
+                self._internal_subscribers.add(callback)
+            state_ref = self._state
 
         def unsubscribe() -> None:
             with self._publish_lock:
@@ -7965,7 +8193,7 @@ class FrontendStateStore:
                     if internal:
                         self._internal_subscribers.discard(callback)
 
-        return FrontendSubscription(sync=sync, unsubscribe=unsubscribe)
+        return state_ref, unsubscribe
 
     @classmethod
     def from_session(cls, session: Any) -> "FrontendStateStore":

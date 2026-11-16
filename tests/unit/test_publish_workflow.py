@@ -827,3 +827,90 @@ def test_release_audit_gate_validates_the_event_parent(workflow: str) -> None:
                 if "run" in step:
                     step["run"] = step["run"].replace(" --audit-base HEAD^", "")
         assert expected in problems(altered)
+
+
+# --- PR-side wheels are built in the release shape -------------------------------------
+# ci.yml's packaging-smoke-build and release-gate.yml's release-artifact enforce the
+# 23.25 MiB PR budget. They must build the phone bundle BEFORE `python -m build`, as
+# publish.yml does, or the wheel they measure lacks dist/ and keeps the ~1.0 MB of web
+# build inputs slim_wheel.py drops only when dist/ is present (scripts/slim_wheel.py).
+
+WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+
+
+def _bundle_order_problems(steps: list[dict[str, Any]]) -> list[str]:
+    def first(predicate: Any) -> int | None:
+        return next((n for n, step in enumerate(steps) if predicate(step)), None)
+
+    def runs(text: str) -> Any:
+        return lambda step: text in str(step.get("run", ""))
+
+    bundle = first(
+        lambda step: "pnpm build" in str(step.get("run", ""))
+        and "pnpm install --frozen-lockfile" in str(step.get("run", ""))
+        and (
+            step.get("working-directory") == "local_operator/mobile/web"
+            or "cd local_operator/mobile/web" in str(step.get("run", ""))
+        )
+    )
+    build = first(runs("python -m build"))
+    slim = first(runs("scripts/slim_wheel.py"))
+    size = first(runs("scripts/check_dist_size.py --budget-mib 23.25"))
+    problems = []
+    if bundle is None:
+        problems.append("no mobile web bundle build")
+    if build is None or slim is None or size is None:
+        problems.append("build/slim/size step missing")
+    if bundle is not None and build is not None and bundle > build:
+        problems.append("bundle built after python -m build")
+    if not any(
+        "local_operator/mobile/web/dist/index.html" in str(step.get("run", "")) for step in steps
+    ):
+        problems.append("no bundle-in-wheel assert")
+    if any("if" in step for step in steps[: (build or 0) + 1]):
+        problems.append("a build step is conditional")
+    return problems
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job"),
+    [("ci.yml", "packaging-smoke-build"), ("release-gate.yml", "release-artifact")],
+)
+def test_pr_side_wheels_build_the_phone_bundle_before_the_wheel(workflow: str, job: str) -> None:
+    doc = yaml.safe_load((WORKFLOWS / workflow).read_text())
+    assert _bundle_order_problems(doc["jobs"][job]["steps"]) == []
+
+
+def test_the_bundle_order_checker_catches_a_missing_or_late_bundle() -> None:
+    doc = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
+    steps = doc["jobs"]["packaging-smoke-build"]["steps"]
+    bundle = next(n for n, step in enumerate(steps) if "pnpm build" in str(step.get("run", "")))
+    without = steps[:bundle] + steps[bundle + 1 :]
+    assert "no mobile web bundle build" in _bundle_order_problems(without)
+    late = without + [steps[bundle]]
+    assert "bundle built after python -m build" in _bundle_order_problems(late)
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job", "flag"),
+    [
+        # The release path FAILS under 21 days of PyPI cap runway (where bytes are
+        # spent); PR CI only warns, so a low runway never blocks an unrelated PR.
+        ("release-gate.yml", "release-artifact", "--runway "),
+        ("publish.yml", "release-build", "--runway\n"),
+        ("ci.yml", "packaging-smoke-build", "--runway-warn-only "),
+    ],
+)
+def test_the_cap_runway_is_checked_on_the_release_path_and_warned_on_prs(
+    workflow: str, job: str, flag: str
+) -> None:
+    steps = yaml.safe_load((WORKFLOWS / workflow).read_text())["jobs"][job]["steps"]
+    lines = [
+        line.strip() + "\n"
+        for step in steps
+        for line in str(step.get("run", "")).splitlines()
+        if "scripts/check_dist_size.py" in line
+    ]
+    assert lines and any(flag in line for line in lines), lines
+    if flag != "--runway-warn-only ":
+        assert not any("--runway-warn-only" in line for line in lines)

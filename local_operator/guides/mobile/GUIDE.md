@@ -136,6 +136,13 @@ status` reports the bundle state (`built` / `buildable` /
 `missing-sources`). If a machine shows that 503, the fix is `lop mobile
 install` again, not a hand-built bundle.
 
+A published wheel ships only the built `dist/`, not the web sources it was
+built from (`scripts/slim_wheel.py` drops them to keep the wheel under its
+PyPI size budget), so `install` can rebuild the bundle only in a source
+checkout, an editable install or a wheel built locally without a bundle. A
+pip/uv install that reports `missing-sources` has lost its shipped `dist/`;
+reinstall the package (`lop update`) rather than expecting a rebuild.
+
 On a machine without launchd (Linux, a container, a CI runner):
 
 ```bash

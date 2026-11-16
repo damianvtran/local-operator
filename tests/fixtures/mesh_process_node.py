@@ -20,50 +20,10 @@ from pathlib import Path
 # not tests, and a wheel must never silently substitute another source revision.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-def install_fixture_anchor(root: Path) -> dict[str, int]:
-    """One synthetic OS boundary for BOTH loader bindings, never host fallback.
-
-    operator imports/reexports load_anchor before this helper runs. Patching
-    only trust left its authority report reading the real host anchor: Darwin
-    could pass via an installed anchor while clean Linux truthfully refused.
-    Native aliases must instead trip this guard BEFORE any OS path is read.
-    """
-    from local_operator import operator
-    from local_operator.operator import trust
-
-    public_anchor = root / "fixture-owned-anchor.json"
-
-    def os_anchor(uid=None):
-        # Hardware/root-owned-OS installation is explicitly synthetic. Signature
-        # math and all network authority verification remain production code.
-        anchor = (
-            trust.OperatorAnchor.from_json(json.loads(public_anchor.read_text()))
-            if public_anchor.exists()
-            else None
-        )
-        return trust.AnchorLoad(
-            anchor=anchor,
-            path=public_anchor,
-            root_owned=anchor is not None,
-            reason="fixture OS boundary",
-            exists=anchor is not None,
-        )
-
-    reads = {"native_anchor_reads": 0}
-    # Existing test-only path seam also fences any path-construction alias;
-    # it is never a product environment override or an installed host anchor.
-    trust._ANCHOR_ROOT_OVERRIDE = root / "forbidden-native-anchor"
-
-    def forbidden_native_path(uid=None):
-        reads["native_anchor_reads"] += 1
-        raise AssertionError("fixture attempted a native OS anchor read")
-
-    trust.anchor_path = forbidden_native_path
-    trust.load_anchor = os_anchor
-    operator.load_anchor = os_anchor
-    assert operator.authority_level_load.__globals__["load_anchor"] is os_anchor
-    return reads
+# Re-exported: the seam moved to ``anchor_fixture`` so the node-browser harness
+# shares it; existing ``from tests.fixtures.mesh_process_node import ...`` users
+# keep working unchanged.
+from tests.fixtures.anchor_fixture import install_fixture_anchor  # noqa: E402,F401
 
 
 def main() -> None:

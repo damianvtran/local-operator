@@ -291,7 +291,7 @@ SUPPORTED_DELETE_PATHS = (
     # Operator escalation 2026-11-11: the old "or ask the operator" here sent
     # agents to the operator about their OWN finished worktrees. Removing what
     # you created is yours to do; asking is only for what you did not create.
-    "Supported: for a path you created (this session or its subagents), remove it "
+    "Supported: for a path you created (this session, its parents or its subagents), remove it "
     "yourself by its exact path — `git worktree remove <exact path>` for a linked "
     "worktree (commit or push what you want to keep first), or the literal path the "
     "creating call named; never ask the operator about your own worktrees or scratch. "
@@ -712,7 +712,12 @@ class _Approved:
 
 
 def ledger_record(
-    path: str, session_id: str, stop: tuple[str, ...], state_roots: tuple[str, ...] = ()
+    path: str,
+    session_id: str,
+    stop: tuple[str, ...],
+    state_roots: tuple[str, ...] = (),
+    *,
+    family: bool = True,
 ) -> Any:
     """The creation-ledger row proving this session (or its subagent) made ``path``.
 
@@ -725,7 +730,8 @@ def ledger_record(
     the ledger's own, so the two bars cannot drift apart.
     Only harness-written tool-call records reach the ledger (and writing it is
     CRITICAL), so no message text — Team Bridge, peer, hub, web, file content
-    — can make a path pass here.
+    — can make a path pass here. ``family=False`` admits only this session's
+    own rows, as ``escalate_asked_targets`` does (QA Q1, PR #3964).
     """
     from local_operator.guardrails import provenance as prov
     from local_operator.guardrails.classify import _under
@@ -751,7 +757,7 @@ def ledger_record(
         return None
     if any(_under(real, os.path.realpath(r)) for r in (state_root, *state_roots)):
         return None
-    record = prov.owned_record(real, session_id)
+    record = prov.owned_record(real, session_id, family=family)
     if record is None:
         return None
     if prov.is_primary_checkout(real) and not (record.kind == "clone" and record.path == real):
@@ -1131,7 +1137,11 @@ def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
     ``_dangerous_delete`` refuses it without a judge.
 
     Exempt, as before: this session's own directory/scratchpad and anything its
-    creation ledger records (``classify._owned_by_session``). CRITICAL rows and
+    OWN creation ledger rows record (``classify._owned_by_session`` with
+    ``family=False``). Family ownership (PR #3964) deliberately does not
+    exempt (QA Q1): an unanswered ask binds the asker, its parent and its
+    subagents (#3966), so a child must not delete a path its parent recorded
+    while the parent's ask naming that path is unanswered. CRITICAL rows and
     already-HIGH rows are left as they are. Matching is
     :func:`provenance.ask_reaches` (equal, under or above a named path; globs
     and brace lists expanded) — wide on purpose, since a match only refuses.
@@ -1182,7 +1192,7 @@ def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
         reals = [entry] if entry is not None else [os.path.realpath(p) for p in spelled]
         if any(r == o or r.startswith(o.rstrip("/") + "/") for r in reals for o in own):
             continue
-        if _owned_by_session(t, t.path, prot, ctx.session_id) is not None:
+        if _owned_by_session(t, t.path, prot, ctx.session_id, family=False) is not None:
             continue
         # Field case a-2432 (node-2, 2026-11-15): the operator answered "All
         # 34 paths listed" from the desktop's remote view; the answer is
@@ -1413,7 +1423,15 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             if not_consent and path in destroying
             else None
         )
-        if refusing is not None and refusing[1] and not ids and record is None and not named:
+        # Only the caller's OWN ledger row lifts the refusal (QA Q1, PR
+        # #3964): an unanswered ask binds the whole family (#3966), so a
+        # parent's or child's row for the path it asked about cannot.
+        own_record = (
+            record
+            if refusing is None or record is None
+            else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots), family=False)
+        )
+        if refusing is not None and refusing[1] and not ids and own_record is None and not named:
             lapsed_only[path] = _not_consent_fact(refusing[0])
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
@@ -1450,7 +1468,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
                             "session's uncommitted scratch"
                         )
         facts.append(
-            f"{path}: created by this session or its subagents: "
+            f"{path}: created by this session, its parents or its subagents: "
             + (", ".join(ids) if ids else "no history evidence")
             # Live case 2026-11-11: compaction had dropped the creating calls,
             # the ledger still had the row, and the judge was never told.

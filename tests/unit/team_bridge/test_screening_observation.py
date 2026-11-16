@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -346,6 +347,9 @@ async def _admit(client: Any, observation: ScreeningObservation | None, **extra:
     )
 
 
+_MINTED_TRACE = re.compile(r"Root=1-[0-9a-f]{8}-[0-9a-f]{24}")
+
+
 def _same_request_but_the_block(with_block: httpx.Request, without: httpx.Request) -> None:
     assert (with_block.method, str(with_block.url)) == (without.method, str(without.url))
     loaded = json.loads(with_block.content)
@@ -358,8 +362,17 @@ def _same_request_but_the_block(with_block: httpx.Request, without: httpx.Reques
     # block-less body up to its closing brace is reproduced verbatim.
     assert without.content.endswith(b"}")
     assert with_block.content.startswith(without.content[:-1])
-    headers = {k: v for k, v in with_block.headers.items() if k != "content-length"}
-    assert headers == {k: v for k, v in without.headers.items() if k != "content-length"}
+    # The trace id is minted fresh per request (``tb_client.new_trace_header``),
+    # so it can never be equal across two requests: compare every OTHER header,
+    # and pin the trace's own contract — both carry the minted shape, and they
+    # differ (QA Q-1).
+    volatile = {"content-length", tb_client.TRACE_HEADER.lower()}
+    headers = {k: v for k, v in with_block.headers.items() if k not in volatile}
+    assert headers == {k: v for k, v in without.headers.items() if k not in volatile}
+    traces = [r.headers.get(tb_client.TRACE_HEADER, "") for r in (with_block, without)]
+    for trace in traces:
+        assert _MINTED_TRACE.fullmatch(trace), trace
+    assert traces[0] != traces[1]
 
 
 @pytest.mark.asyncio

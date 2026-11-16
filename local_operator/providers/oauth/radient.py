@@ -136,11 +136,7 @@ class RadientOAuthFlow(OAuthCallbackFlow):
         # Capture the actual exchange destination, not a later config/default
         # lookup. Only the published canonical issuer-to-hub contract is known.
         self._token_url = TOKEN_URL
-        self._hub = (
-            DEFAULT_RADIENT_API_BASE_URL
-            if self._token_url == DEFAULT_RADIENT_API_BASE_URL + "/auth/oauth/token"
-            else None
-        )
+        self._hub = canonical_hub_for_token_url(self._token_url)
 
     async def generate_auth_url(self, state: str, redirect_uri: str) -> str:
         verifier, challenge = create_pkce_pair()
@@ -219,48 +215,9 @@ class RadientOAuthFlow(OAuthCallbackFlow):
 
         expires_at = int(time.time() * 1000) + expires_in * 1000 - EXPIRY_SKEW_MS
 
-        # The committed server contract (8c2a35ac, MeHandlerEcho) authenticates
-        # this fresh bearer, loads its account, and returns matching IDs. JWT
-        # labels are display metadata only, never the account admission proof.
-        async def _profile(client: httpx.AsyncClient) -> httpx.Response:
-            return await client.get(
-                hub + "/me",
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=10.0,
-                follow_redirects=False,
-            )
-
-        try:
-            if self._http is not None:
-                profile = await _profile(self._http)
-            else:
-                async with httpx.AsyncClient() as client:
-                    profile = await _profile(client)
-            if self._signal is not None and self._signal.aborted:
-                raise LoginCancelledError(self._signal.reason or "Login cancelled")
-            if profile.status_code != 200:
-                raise LoginError(
-                    f"Radient identity verification failed: HTTP {profile.status_code}"
-                )
-            body = profile.json()
-            result = body.get("result") if isinstance(body, dict) else None
-            identity = result.get("identity") if isinstance(result, dict) else None
-            account = result.get("account") if isinstance(result, dict) else None
-            account_id = identity.get("account_id") if isinstance(identity, dict) else None
-            actual_id = account.get("id") if isinstance(account, dict) else None
-            if (
-                not isinstance(account_id, str)
-                or not account_id.strip()
-                or account_id != account_id.strip()
-                or account_id != actual_id
-            ):
-                raise LoginError(
-                    "Radient identity verification returned an invalid account binding"
-                )
-        except (httpx.HTTPError, ValueError) as failure:
-            if self._signal is not None and self._signal.aborted:
-                raise LoginCancelledError(self._signal.reason or "Login cancelled") from failure
-            raise LoginError("Radient identity verification did not complete") from failure
+        account_id = await verify_canonical_account(
+            access_token, http_client=self._http, signal=self._signal
+        )
 
         refresh_token = data.get("refresh_token")
         credentials = {
@@ -281,6 +238,72 @@ class RadientOAuthFlow(OAuthCallbackFlow):
             "scope": data.get("scope", ""),
         }
         return _VerifiedRadientLogin(credentials, self._signal, _LOGIN_ISSUER)
+
+
+def canonical_hub_for_token_url(token_url: str) -> str | None:
+    """The one published token-issuer to API-hub binding, with no URL guessing."""
+    return (
+        DEFAULT_RADIENT_API_BASE_URL
+        if token_url == DEFAULT_RADIENT_API_BASE_URL + "/auth/oauth/token"
+        else None
+    )
+
+
+async def verify_canonical_account(
+    access_token: str,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+    signal: AbortSignal | None = None,
+) -> str:
+    """Authenticate one local bearer at canonical /me; never a label/JWT proof.
+
+    Shared by login exchange and dormant file-device approval so neither
+    can diverge on redirects, response status, or exact account identity.
+    This returns an account id, NOT the single-use login completion issuer.
+    Callers still own exact-row/incarnation checks around the network await.
+    """
+    hub = DEFAULT_RADIENT_API_BASE_URL
+
+    # The committed server contract (8c2a35ac, MeHandlerEcho) authenticates
+    # this fresh bearer, loads its account, and returns matching IDs. JWT
+    # labels are display metadata only, never the account admission proof.
+    async def _profile(client: httpx.AsyncClient) -> httpx.Response:
+        return await client.get(
+            hub + "/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10.0,
+            follow_redirects=False,
+        )
+
+    try:
+        if http_client is not None:
+            profile = await _profile(http_client)
+        else:
+            async with httpx.AsyncClient() as client:
+                profile = await _profile(client)
+        if signal is not None and signal.aborted:
+            raise LoginCancelledError(signal.reason or "Login cancelled")
+        if profile.status_code != 200:
+            raise LoginError(f"Radient identity verification failed: HTTP {profile.status_code}")
+        body = profile.json()
+        result = body.get("result") if isinstance(body, dict) else None
+        identity = result.get("identity") if isinstance(result, dict) else None
+        account = result.get("account") if isinstance(result, dict) else None
+        account_id = identity.get("account_id") if isinstance(identity, dict) else None
+        actual_id = account.get("id") if isinstance(account, dict) else None
+        if (
+            not isinstance(account_id, str)
+            or not account_id.strip()
+            or account_id != account_id.strip()
+            or account_id != actual_id
+        ):
+            raise LoginError("Radient identity verification returned an invalid account binding")
+    except (httpx.HTTPError, ValueError) as failure:
+        if signal is not None and signal.aborted:
+            raise LoginCancelledError(signal.reason or "Login cancelled") from failure
+        raise LoginError("Radient identity verification did not complete") from failure
+
+    return account_id
 
 
 def identity_from_token_response(data: dict[str, Any]) -> dict[str, Any]:

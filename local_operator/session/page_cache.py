@@ -155,8 +155,9 @@ def retained_bytes(value: object, limit: int) -> int | None:
     seen: set[int] = set()
     total = 0
     # LEVEL BY LEVEL, AND THE COMMON TYPES BY EXACT ``type`` FIRST
-    # (conversation-first-paint R5, 2026-10-27). This runs on the event loop in
-    # every page-cache ``put``, before the open's snapshot: 9-16 ms for a 100-200
+    # (conversation-first-paint R5, 2026-10-27). This ran on the event loop in
+    # every page-cache ``put`` (since PR #4012 the serving read sizes in its
+    # worker; see ``_read_and_publish``), before the open's snapshot: 9-16 ms for a 100-200
     # row page of the 51.7 MB fixture, 12 ms median under load. A page is almost
     # entirely ``dict``/``list``/``str`` from ``json.loads``, so an exact-type
     # test settles nearly every object before the generic ``isinstance`` chain
@@ -340,8 +341,27 @@ class TranscriptPageCache:
         # per switch rather than once per request, which is the whole point.
         return cached[0]
 
+    @property
+    def admit_limit(self) -> int:
+        """The accounted-byte ceiling one entry is sized against (``retained_bytes``'s limit)."""
+        return self._byte_cap - _PAGE_CACHE_ALLOWANCE
+
     def put(self, key: PageKey, page: TranscriptPage) -> None:
-        size = retained_bytes((key, page), self._byte_cap - _PAGE_CACHE_ALLOWANCE)
+        """Size ``page`` on the CALLING thread, then admit it.
+
+        The serving path does not use this: ``_read_and_publish`` sizes the page
+        in its read worker and calls :meth:`put_sized`, because the walk is the
+        biggest CPU step a cold page read put on the loop (see there).
+        """
+        self.put_sized(key, page, retained_bytes((key, page), self.admit_limit))
+
+    def put_sized(self, key: PageKey, page: TranscriptPage, size: int | None) -> None:
+        """Admit ``page`` at an already-measured ``size`` (``None`` = over :attr:`admit_limit`).
+
+        ``size`` must be ``retained_bytes((key, page), self.admit_limit)`` for
+        THIS cache, measured on the same unmutated page; the byte bound is only
+        as honest as that figure.
+        """
         if size is None:
             self.oversize += 1
             return
@@ -435,17 +455,35 @@ async def _read_and_publish(
     façade takes the stat before the read and this takes it again after, and only
     an unchanged ``(st_ino, st_size)`` is cached. This runs in the task's own
     frame, on the loop, after ``to_thread`` returns — never inside the closure.
+
+    THE ADMISSION SIZE IS MEASURED IN THE WORKER, not on the loop (PR #4012
+    gate, full-suite run 43701985694). ``retained_bytes`` walks every object of
+    the page in Python; on the cold-open guard's 2,000-job fixture it was the
+    WHOLE worst loop tick -- 41-57 ms of loop-thread CPU, 98-100 ms under
+    ``--cov`` line tracing, 323 ms on a CI coverage shard -- while every other
+    loop callback of the open stayed under 16 ms. The page is freshly decoded
+    and referenced only by this worker until it returns, and the key is frozen,
+    so the identity-keyed walk is as safe here as on the loop. Sizing BEFORE
+    the re-stat wastes one walk when the file moved, which is the rare case;
+    the walk is bounded by ``admit_limit`` either way.
     """
-    page = await asyncio.to_thread(
-        read_transcript_page,
-        directory,
-        before_id=before_id,
-        through_id=through_id,
-        around_id=around_id,
-        before=before,
-        after=after,
-        limit=limit,
-    )
+    cache = _PAGE_CACHE
+
+    def read_and_size() -> tuple[TranscriptPage, int | None]:
+        page = read_transcript_page(
+            directory,
+            before_id=before_id,
+            through_id=through_id,
+            around_id=around_id,
+            before=before,
+            after=after,
+            limit=limit,
+        )
+        if key is None:
+            return page, None
+        return page, retained_bytes((key, page), cache.admit_limit)
+
+    page, size = await asyncio.to_thread(read_and_size)
     if (
         key is not None
         and page_key(
@@ -459,7 +497,7 @@ async def _read_and_publish(
         )
         == key
     ):
-        _PAGE_CACHE.put(key, page)
+        cache.put_sized(key, page, size)
     return page
 
 

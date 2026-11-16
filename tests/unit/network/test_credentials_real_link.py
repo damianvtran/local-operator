@@ -32,7 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import time
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 
@@ -422,6 +422,12 @@ def test_a_static_key_revoke_says_the_copy_never_expires(
 _MISSING = object()
 
 
+class _RetryReportFields(TypedDict, total=False):
+    # Only this wire key may carry malformed values. An unrestricted **dict
+    # could also bind control_request's typed local options (report_timeout).
+    retry_after_ms: object
+
+
 def test_a_report_with_a_garbled_retry_value_is_answered_not_crashed(mesh: Any) -> None:
     """QA round 2: a non-numeric ``retry_after_ms`` crashed the BORROWER's leg-1 handler.
 
@@ -437,7 +443,7 @@ def test_a_report_with_a_garbled_retry_value_is_answered_not_crashed(mesh: Any) 
     assert found is not None
     # ``10**400`` travels as a 401-digit JSON integer (review round 4, R4-M1).
     for value in ("abc", -5, 10**18, 10**400, "nan", [1], _MISSING):
-        extra = {} if value is _MISSING else {"retry_after_ms": value}
+        extra: _RetryReportFields = {} if value is _MISSING else {"retry_after_ms": value}
         reply = relay.control_request(
             found,
             "credential_report",

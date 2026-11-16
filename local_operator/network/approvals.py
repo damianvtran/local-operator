@@ -94,12 +94,17 @@ KIND_LOCAL_AUTHORITY = "local_authority"
 #: from each other's runner or card text.
 KIND_PROFILE_SAVE = "profile_save"
 KIND_OPERATOR_DEVICE_PAIR = "operator_device_pair"
+#: Dormant owner-local file authority: neither credential consent nor enrollment.
+#: Its provider enforces authenticated incoming-key provenance and installed
+#: presence at every mutation boundary; no existing generic signer can mint it.
+KIND_FILE_DEVICE_APPROVAL = "file_device_approval"
 KINDS: tuple[str, ...] = (
     KIND_DEVICE_ONBOARD,
     KIND_LOCAL_AUTHORITY,
     KIND_PROFILE_SAVE,
     enrollment.KIND,
     KIND_OPERATOR_DEVICE_PAIR,
+    KIND_FILE_DEVICE_APPROVAL,
 )
 
 #: The envelope block each kind files, and therefore the block ``request_digest`` binds in
@@ -113,6 +118,7 @@ _SUBJECT_BLOCKS: dict[str, str] = {
     KIND_LOCAL_AUTHORITY: "machine",
     # A profile save names a LOCAL target (row id, name, scope), not a device.
     KIND_PROFILE_SAVE: "machine",
+    KIND_FILE_DEVICE_APPROVAL: "machine",
 }
 
 STATE_REQUESTED = "requested"
@@ -376,6 +382,10 @@ def _write_record(record: Mapping[str, Any], root: Path | None = None) -> Path:
     """
     from local_operator.network import store
 
+    if record.get("kind") == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import require_write
+
+        require_write(record, root)
     selected = _namespace(str(record["approval_id"]))
     ensure_approvals_dir(root, enrollment_only=selected)
     payload = enrollment.encode(record) if selected else dict(record)
@@ -701,7 +711,9 @@ def load_record(
 #: imported from disk by ``profile_proposals.import_legacy`` — so every mesh
 #: listing (desktop Mesh tray, event-feed badge, ``lop network approvals``, the
 #: phone pairing budget) hides them at the source rather than per reader.
-NON_MESH_KINDS: frozenset[str] = frozenset({KIND_PROFILE_SAVE})
+# The file provider has no reviewed UI yet. Keep its private dormant cards out
+# of generic Mesh listings/badges; registration must not expose a new interaction.
+NON_MESH_KINDS: frozenset[str] = frozenset({KIND_PROFILE_SAVE, KIND_FILE_DEVICE_APPROVAL})
 
 
 def list_records(
@@ -878,7 +890,18 @@ def _pair_filing_guard(record: Mapping[str, Any], root: Path | None) -> None:
 #: Per-kind validators run INSIDE ``create_request``, before the record is written.
 #: A kind absent here files with the envelope checks alone (its payload is validated by
 #: whichever op signs it); a kind present is refused here rather than at the signer.
-_FILING_GUARDS: dict[str, Any] = {KIND_OPERATOR_DEVICE_PAIR: _pair_filing_guard}
+def _file_filing_guard(record: Mapping[str, Any], root: Path | None) -> None:
+    # Keep the legacy approval store import-light. The new kind alone reaches
+    # its closed listener/native-account/presence provenance validator.
+    from local_operator.network.file_device_approval import require_filing_shape
+
+    require_filing_shape(record, root)
+
+
+_FILING_GUARDS: dict[str, Any] = {
+    KIND_OPERATOR_DEVICE_PAIR: _pair_filing_guard,
+    KIND_FILE_DEVICE_APPROVAL: _file_filing_guard,
+}
 
 
 def create_request(
@@ -1074,8 +1097,13 @@ def signed_payload(
 
     if APPROVAL_DOMAIN != APPROVAL_DOMAIN_LITERAL:  # pragma: no cover — a drift guard
         raise MeshRefusal("approval_invalid", "the approval domain tag drifted between modules")
+    domain = enrollment.DECISION_DOMAIN if kind == enrollment.KIND else APPROVAL_DOMAIN
+    if kind == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import DECISION_DOMAIN
+
+        domain = DECISION_DOMAIN
     return (
-        (enrollment.DECISION_DOMAIN if kind == enrollment.KIND else APPROVAL_DOMAIN)
+        domain
         + _lp(str(kind))
         + _lp(str(request_id))
         + _lp(str(request_digest))
@@ -1136,6 +1164,10 @@ def sign_decision(
     # rather than the process default; those routes also refuse a backend whose root is not
     # the ambient one (``enrollment.bound_profile``), so the two cannot name different keys.
     root = config_root if config_root is not None else config_dir()
+    if kind == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import require_signing
+
+        require_signing(request_id, request_digest, root)
     signer = None
     try:
         signer = load_signer(config_root=root, backend_name=resolve_backend_name(root))
@@ -1152,7 +1184,22 @@ def sign_decision(
             KEY_DID_NOT_SIGN if _anchor_installed() else NO_SIGNING_SURFACE_SENTENCE,
         )
     try:
-        return sign_message(signer, message, timeout=None).sig
+        signature = sign_message(signer, message, timeout=None).sig
+        if kind == KIND_FILE_DEVICE_APPROVAL:
+            # A successful gesture does not excuse a changed account/key/link or
+            # installed anchor while the prompt was open. No disk lock is held.
+            from local_operator.network.file_device_approval import (
+                _refuse,
+                prepare_current,
+                require_current,
+            )
+
+            current = _find_by_request_id(request_id, root)
+            if current is None or current.get("request_digest") != request_digest:
+                raise _refuse("file_approval_intent_changed")
+            prepare_current(current, root)
+            require_current(current, root)
+        return signature
     except KeyBackendError as exc:
         # The key exists and did not sign (a dismissed prompt). No exception text in the
         # sentence: it can carry paths and OS jargon (UX U4).
@@ -1359,7 +1406,17 @@ def _record_decision(
     displayed and validated BEFORE its prompt (no lock spans the OS prompt). ``changed``
     is that surface's own refusal for a mismatch; the enrollment card's is the default.
     """
-    with _record_lock(approval_id, root):
+    lock = _record_lock(approval_id, root)
+    if (
+        decision == "approve"
+        and _load_raw(approval_id, root).get("kind") == KIND_FILE_DEVICE_APPROVAL
+    ):
+        # The new kind alone performs local-control preflight BEFORE acquiring
+        # a mutation lock. Its inner guards do only local immutable/CAS reads.
+        from local_operator.network.file_device_approval import decision_lock
+
+        lock = decision_lock(approval_id, root)
+    with lock:
         record = _load_raw(approval_id, root)
         # RECOMPUTED, not only the stored field (agent review #3002 round 1, R1): an edit to
         # ``what`` inside the prompt window that leaves the ``request_digest`` field alone
@@ -1441,6 +1498,12 @@ def _record_decision(
                 from local_operator.operator import pair_op
 
                 pair_op.require_acked(record)
+            if str(record.get("kind")) == KIND_FILE_DEVICE_APPROVAL:
+                from local_operator.network.file_device_approval import require_current
+
+                # Local checks only under this record lock: canonical /me ran
+                # before the prompt and is checked again before state activation.
+                require_current(record, root)
 
         decided = float(decided_at if decided_at is not None else moment)
         signature: dict[str, Any] | None = None
@@ -2221,6 +2284,10 @@ def verify_for_run(approval_id: str, *, root: Path | None = None) -> dict[str, A
             "the decision signature no longer verifies against this machine's operator "
             "key; the approval will not be executed — file a new request",
         )
+    if record.get("kind") == KIND_FILE_DEVICE_APPROVAL:
+        from local_operator.network.file_device_approval import require_current
+
+        require_current(record, root)
     return presented(record)
 
 

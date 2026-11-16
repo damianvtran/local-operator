@@ -130,6 +130,7 @@ from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NET_PAIR_OPS,
+    ControlRequestTimeout,
     Granted,
     LinkContext,
     LinkPhase,
@@ -8345,6 +8346,16 @@ class RelayServer:
             # see that memory batches are being turned away and why. The cause is the
             # refusal code where the audit vocabulary knows it (``bad_memory`` is
             # registered for exactly this path); anything else is a policy answer.
+            from local_operator.mcp.redaction import values as redaction_values
+            from local_operator.redaction_shapes import scrub_secrets
+
+            # This handler already passed the authorizer. An op-only "policy"
+            # row hid runtime-dial failures as if membership had been denied.
+            # Persist the actual code and one-line peer-safe explanation instead.
+            # Scrub known in-memory values and credential shapes BEFORE the audit
+            # writer truncates it; a cut credential must not evade redaction.
+            # Neither scrubber retrieves credentials or reads a secret store.
+            reason = " ".join(scrub_secrets(refusal.sentence, redaction_values()).split())
             self.audit.record(
                 AuditEvent(
                     event="authorisation_refused",
@@ -8357,7 +8368,11 @@ class RelayServer:
                     # ``granted`` is real on every production path; the getattr keeps
                     # the refusal-shape unit tests (which pass None to prove the
                     # branch reads neither the link nor the grant) honest.
-                    detail={"op": getattr(granted, "action", "")},
+                    detail={
+                        "op": getattr(granted, "action", ""),
+                        "refusal_code": refusal.code,
+                        "reason": reason,
+                    },
                 )
             )
             return wire.error_from(refusal, req)
@@ -10650,11 +10665,20 @@ class RelayServer:
             # OWNER so refs, compaction and forward cursors have local semantics.
             from local_operator.mobile.remote_sessions import (
                 READ_CAPABILITY,
+                SUPPLEMENTS_CAPABILITY,
                 owner_read,
             )
 
             if READ_CAPABILITY not in link.capabilities:
                 raise MeshRefusal("unsupported", READ_CAPABILITY)
+            # Supplement bytes are their own negotiated feature: checked HERE too,
+            # not only by the viewer, so a viewer that skipped its own check still
+            # cannot reach a purpose this link never agreed to.
+            if (
+                frame.get("mobile_session_read") == "supplement"
+                and SUPPLEMENTS_CAPABILITY not in link.capabilities
+            ):
+                raise MeshRefusal("unsupported", SUPPLEMENTS_CAPABILITY)
             return owner_read(self.root, session_id, frame)
         journal_order, order_ids = validate_journal_order(
             frame.get("journal_order"), frame.get("order_ids")
@@ -14593,6 +14617,9 @@ class RelayServer:
         """
         from local_operator.network.credentials import owner as owner_mod
 
+        # The raw login cache is local memory: evict it before scheduling the
+        # potentially slow renewal-store/API work, not after that worker finishes.
+        owner_mod.invalidate_github_source_on_panic(self, network_id)
         thread = threading.Thread(
             target=owner_mod.revoke_lent_on_panic,
             args=(self, network_id),
@@ -15202,6 +15229,15 @@ class RelayServer:
             link = self._ensure_link(self._resolve_peer(str(frame.get("peer") or "")))
             if link is not None and "mobile-session-read-v1" not in link.capabilities:
                 raise MeshRefusal("unsupported", "mobile-session-read-v1")
+            # An owner predating supplement bytes is NAMED (409 remote_unsupported,
+            # "Update <owner>") rather than asked a purpose it would refuse as a
+            # protocol error, which the phone could not tell from a real fault.
+            if (
+                mobile_read == "supplement"
+                and link is not None
+                and wire.MOBILE_SESSION_SUPPLEMENTS_V1 not in link.capabilities
+            ):
+                raise MeshRefusal("unsupported", wire.MOBILE_SESSION_SUPPLEMENTS_V1)
             return self._local_peer_call(
                 "net_session_history",
                 str(frame.get("peer") or ""),
@@ -15215,6 +15251,7 @@ class RelayServer:
                         "before_id",
                         "after_id",
                         "entry_id",
+                        "ref",
                         "index",
                         "kind",
                         "offset",
@@ -15773,6 +15810,13 @@ class RelayServer:
                     "phase": link.phase,
                     "frames_in": link.frames_in,
                     "frames_out": link.frames_out,
+                    # Append-only same-owner status. This role is connection
+                    # direction (listener/dialer), NOT MemberRole/admin policy.
+                    # Preserve old rows even for an incomplete link: only the
+                    # new file consumer denies absent/unknown live evidence.
+                    "role": getattr(getattr(link, "result", None), "role", None),
+                    "alive": getattr(link, "alive", None),
+                    "closing": getattr(link, "closing", None),
                 }
                 for link in self.links.values()
             ],
@@ -19193,7 +19237,12 @@ async def async_control_request(
 
 
 def control_request(
-    record: PeerRecord, op: str, *, timeout: float = 5.0, **fields: Any
+    record: PeerRecord,
+    op: str,
+    *,
+    timeout: float = 5.0,
+    report_timeout: bool = False,
+    **fields: Any,
 ) -> dict[str, Any] | None:
     """Dial the relay's loopback control socket and run one op.
 
@@ -19230,6 +19279,10 @@ def control_request(
     """
     try:
         sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
+    except TimeoutError as exc:
+        if report_timeout:
+            raise ControlRequestTimeout(timeout) from exc
+        return None
     except OSError:
         return None
     try:
@@ -19241,7 +19294,15 @@ def control_request(
         )
         sock.sendall(wire.encode_line({"key": record.control_key, "client": "cli"}))
         sock.sendall(wire.encode_line({"op": op, "req": 1, **fields}))
-        return reader.read_frame(timeout)
+        started = time.monotonic()
+        reply = reader.read_frame(timeout)
+        # ``read_frame`` answers ``None`` for BOTH a closed socket and an expired
+        # deadline. Only an opted-in caller asks which: a reply that is still
+        # missing once the whole (unchanged) deadline has elapsed is the timeout;
+        # an early close stays the plain no-answer it always was.
+        if reply is None and report_timeout and time.monotonic() - started >= timeout:
+            raise ControlRequestTimeout(timeout)
+        return reply
     except session_dial.FrameTooLarge as exc:
         raise MeshRefusal(
             "frame_too_large",
@@ -19257,10 +19318,12 @@ def control_request(
             f"({exc.reason}), so whether the op ran is unknown; the relay answered — it is "
             "not a relay that stayed silent.",
         ) from exc
-    except (OSError, ConnectionError, TimeoutError):
-        # NO ANSWER, which is the only condition ``None`` means. A ``LinkCryptoError``
-        # cannot reach here any more: the reader is ``dial.LineReader``, whose failures
-        # are the two named ones above.
+    except TimeoutError as exc:
+        if report_timeout:
+            raise ControlRequestTimeout(timeout) from exc
+        return None
+    except (OSError, ConnectionError):
+        # Non-timeout no-answer cases retain their existing result.
         return None
     finally:
         _close_quietly(sock)

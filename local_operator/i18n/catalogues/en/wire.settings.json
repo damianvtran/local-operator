@@ -240,7 +240,7 @@
   "wire.settings.display_nerd_icons.label": "Nerd Font glyphs",
   "wire.settings.display_notification_session_name.choice.false.description": "keep names off banners",
   "wire.settings.display_notification_session_name.choice.true.description": "name the session",
-  "wire.settings.display_notification_session_name.help": "A session's name, last line and error causes appear on banners, including the lock screen.",
+  "wire.settings.display_notification_session_name.help": "A session's name, last line and error causes appear on banners, including the lock screen and paired phones' notifications, which reach them through Radient's push service.",
   "wire.settings.display_notification_session_name.label": "Notification session names",
   "wire.settings.display_notifications.choice.false.description": "never notify",
   "wire.settings.display_notifications.choice.true.description": "notify when unfocused",

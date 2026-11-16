@@ -709,14 +709,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "~/Library/LaunchAgents, never a session entry",
     ),
     "local_operator/install_transaction.py": (
-        3,
+        6,
         "``install.lock``, ``.install-attempt.json`` and ``.update-operations`` "
         "belong to the node-local INSTALLROOT/generation authority, not a session "
         "directory. Kernel locks and PID/birth-bound build attempts must never "
         "travel with a session move, and ``OPERATION_DIR`` holds the durable "
         "update-operation records for this INSTALLROOT — machine-local recovery "
         "state bound to one install, exactly as untransportable as the lock and "
-        "the attempt file beside it.",
+        "the attempt file beside it. ``V2_OPERATION_DIR`` ('.update-operations-v2') "
+        "is the fenced protocol's record namespace under the SAME INSTALLROOT, and "
+        "``LEGACY_SIDECAR_NAME``/``V2_SIDECAR_NAME`` ('.update-operation.json', "
+        "'.update-operation-v2.json') are sidecars inside an immutable generation "
+        "directory (``<INSTALLROOT>/generations/<name>/``). Both are held here as the "
+        "single source of truth that ``fenced_operation`` and ``recovery_manifest`` "
+        "alias; none is ever an entry of a session directory.",
     ),
     "local_operator/procname.py": (
         4,
@@ -1352,7 +1358,21 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         2,
         "``run/ui-browser`` and its host record ``host.json``",
     ),
+    "local_operator/ui_browser/backend.py": (
+        1,
+        "``HEALTH_FAILURE_LOG_NAME`` ('browser-health.log') is the per-DEVICE record of "
+        "failed UI-host health probes, written under ``paths.log_dir()`` beside the other "
+        "machine logs; never inside a session directory, and device-local by design (it "
+        "describes this machine's load and this machine's desktop app pid/port)",
+    ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
+    "local_operator/server/utils/desktop_sessions.py": (
+        1,
+        "``RESYNC_MARKER`` ('resync') is a desktop-stream WIRE frame type: the bridge "
+        "queues it in place of a history frame too large for a subscriber's queue, and "
+        "the subscriber loop answers it with a resync snapshot. It names a message on "
+        "the socket, never a file, so it is no entry of a session directory",
+    ),
     "local_operator/server/utils/desktop_feed.py": (
         4,
         "the agent and team directories the desktop app reads (the profile store), plus "
