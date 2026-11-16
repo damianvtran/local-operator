@@ -809,8 +809,12 @@ class _Host:
     by that many seconds before answering with the healthy body, ``"hang"`` holds
     the connection open and never answers, and ``"until_retry"`` holds it until a
     SECOND GET arrives (so the first attempt is late by construction, whatever the
-    machine load, rather than by a sleep the load can shorten or stretch). After
-    the script runs out it answers instantly. ``/rpc`` always succeeds and is
+    machine load, rather than by a sleep the load can shorten or stretch). A
+    ``("until_retry", s)`` step does the same and then waits ``s`` more seconds;
+    scripting it for BOTH GETs makes the retry's reply late by ``s`` whichever
+    handler happens to pop first (under load the first attempt's GET can reach
+    the handler after the retry's). After the script runs out it answers
+    instantly. ``/rpc`` always succeeds and is
     counted, so a test can prove the command was (or was not) dispatched.
     """
 
@@ -865,10 +869,15 @@ class _Host:
                 if step == "hang":
                     host._release.wait(timeout=10)
                     return
+                if isinstance(step, tuple):
+                    step, after = step
+                else:
+                    after = 0.0
                 if step == "until_retry":
                     deadline = time.monotonic() + 10
                     while host.gets < 2 and time.monotonic() < deadline:
                         time.sleep(0.01)
+                    step = after
                 if step:
                     time.sleep(float(step))
                 self._reply({"host": "ui", "pid": host.pid, "instance_id": host.instance_id})
@@ -1421,7 +1430,12 @@ async def test_a_retry_slower_than_the_first_budget_but_inside_the_retry_budget_
     # Generous on purpose: this fleet runs at load 70+, which stretches a 1.0 s
     # reply well past 4 s; the assertion is "longer than the first budget acquits".
     monkeypatch.setattr(backend, "HEALTH_RETRY_TIMEOUT_S", 20.0)
-    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang", 1.0])
+    # Order-independent (R1/Q2): a plain ["hang", 1.0] let the RETRY pop "hang"
+    # whenever the 0.3 s first attempt expired before its GET reached the handler,
+    # which failed 4/4 under load. Both steps wait for the second GET, then 1.0 s,
+    # so the retry's reply is 1.0 s late however the two GETs are ordered.
+    late = ("until_retry", 1.0)
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=[late, late])
     try:
         current = publish(tmp_path, port=host.port, instance_id="instance-a")
         probe = await backend.probe_health(current, site="preflight")
@@ -1514,3 +1528,69 @@ async def test_the_durable_failure_log_rolls_to_one_backup_and_never_raises(
     monkeypatch.setattr("local_operator.paths.ensure_log_dir", lambda: tmp_path / "missing" / "x")
     probe = await backend.probe_health(current, site="preflight")
     assert probe.verdict is backend.HealthVerdict.TIMEOUT
+
+
+def test_an_unclamped_retry_reports_the_measured_wait_not_the_first_budget(
+    tmp_path: Path,
+) -> None:
+    """R2/Q3: with the 5 s retry, "within 1.5s over 2 attempts" understated ~7 s.
+
+    Uses the PRODUCTION budgets (no ``HEALTH_RETRY_TIMEOUT_S = _BUDGET`` override),
+    which is exactly the configuration where the first budget stopped describing
+    the wait.
+    """
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    probe = backend.HealthProbe(
+        verdict=backend.HealthVerdict.TIMEOUT,
+        elapsed_s=7.02,
+        attempts=2,
+        budget_s=backend.HEALTH_PROBE_TIMEOUT_S,
+        retry_budget_s=backend.HEALTH_RETRY_TIMEOUT_S,
+        clamped=False,
+    )
+    message = backend._failure_copy(probe, current, None)
+    assert "within 7.0s over 2 attempts" in message, message
+    assert f"within {backend.HEALTH_PROBE_TIMEOUT_S:.1f}s" not in message
+    # A single attempt still states its own budget (that sentence was always true).
+    single = backend.HealthProbe(
+        verdict=backend.HealthVerdict.TIMEOUT,
+        elapsed_s=1.51,
+        attempts=1,
+        budget_s=backend.HEALTH_PROBE_TIMEOUT_S,
+    )
+    assert "within 1.5s over 1 attempt;" in backend._failure_copy(single, current, None)
+
+
+def test_a_writer_that_waited_on_a_roll_appends_to_the_fresh_file_not_the_backup(
+    monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    """R4: two writers rolling together must not rename a fresh file over the backup.
+
+    Deterministic stand-in for the race: while this writer waits on the lock,
+    "writer B" rolls the full log and starts a fresh one. This writer then holds
+    a descriptor to what is now ``.1``; it must notice, reopen the path, and
+    neither roll again (which would clobber B's full backup) nor append to it.
+    """
+    import fcntl
+
+    monkeypatch.setattr(backend, "HEALTH_FAILURE_LOG_MAX_BYTES", 100)
+    health_log_dir.mkdir(parents=True, exist_ok=True)
+    path = health_log_dir / backend.HEALTH_FAILURE_LOG_NAME
+    backup = path.with_name(path.name + ".1")
+    full = b"x" * 200 + b"\n"
+    path.write_bytes(full)
+    real_flock = fcntl.flock
+    rolled: list[bool] = []
+
+    def flock(fd: int, op: int) -> None:
+        if not rolled:
+            rolled.append(True)
+            os.replace(path, backup)  # writer B's roll ...
+            path.write_bytes(b"B\n")  # ... and B's record in the fresh file
+        real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", flock)
+    backend._persist_probe_failure("ui_host_health_probe_failed site=preflight")
+    assert backup.read_bytes() == full, "the full backup was clobbered or appended to"
+    lines = path.read_text().splitlines()
+    assert lines[0] == "B" and len(lines) == 2 and "site=preflight" in lines[1], lines

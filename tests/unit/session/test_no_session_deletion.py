@@ -3513,6 +3513,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
         "never a directory, never under sessions/",
     ),
+    # The UI browser host's health-probe failure log (2026-11-15). Source and
+    # target are `ensure_log_dir()` joined to the fixed basename
+    # `HEALTH_FAILURE_LOG_NAME` and that name + ".1" — no session id, no caller
+    # input — so the rotation can only displace that one log FILE.
+    (
+        "local_operator/ui_browser/backend.py::_open_health_log_for_append",
+        "os.replace",
+        "Rotates the browser-health.log FILE to browser-health.log.1 under log_dir(); "
+        "both names are fixed constants, never a directory, never under sessions/",
+    ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes
     # these from `paths.log_dir()` and an int pid ALONE — never a session id,
     # never a `sessions/` path, never caller input — so neither call can name a

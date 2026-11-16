@@ -58,7 +58,13 @@ logger = logging.getLogger(__name__)
 #: because a second 1.5 s window was no longer than the first. The first attempt
 #: stays at ``HEALTH_PROBE_TIMEOUT_S`` (the healthy path is unchanged and a
 #: refused port still fails at once); the ONE retry gets this longer budget,
-#: which covers 17/18 measured stalls, still clamped to the caller's deadline.
+#: still clamped to the caller's deadline. Counted from the first send
+#: (1.5 + 0.5 backoff + 5.0 = 7 s), that outlasts 17 of the 18 measured
+#: loop stalls (the 17th was 5.24 s). NOT covered, stated rather than implied:
+#: the 14.1 s outlier, and the 16 on-time-but-both-expired cases, which have
+#: no measured reply-latency bound. Sizing above the observed max (~15 s) was
+#: rejected for now because it is also how long a truly hung host takes to be
+#: reported; revisit if ``browser-health.log`` shows retries still expiring.
 HEALTH_RETRY_TIMEOUT_S = 5.0
 
 #: Pause between the two attempts of a probe whose first attempt TIMED OUT.
@@ -554,11 +560,19 @@ def _persist_probe_failure(line: str) -> None:
     A plain ``O_APPEND`` write rather than a logging handler: several session
     runtimes write this file at once, and a single short ``write`` on an
     append-mode descriptor lands whole, without the cross-process rename races
-    a ``RotatingFileHandler`` per process would add. Rolling is a size check
-    and one rename; two processes rolling together at worst lose one backup of
-    a diagnostic, which is acceptable. The line carries no session key (see
-    :class:`HealthProbe`), so the file is safe to hand to support; it is 0600
-    anyway like every other log here.
+    a ``RotatingFileHandler`` per process would add. Rolling (size check +
+    one rename to ``.1``) happens under an exclusive ``flock`` on the log, and
+    a writer that wakes holding a descriptor to a file another writer already
+    rolled reopens the path; without that, two writers rolling together could
+    rename a fresh one-line file over the full 256 KiB backup. Where ``fcntl``
+    is unavailable the roll proceeds unlocked (that race returns, nothing
+    else). The line carries no session key (see :class:`HealthProbe`), so the
+    file is safe to hand to support; it is 0600 anyway like every other log.
+
+    The I/O is synchronous on the event loop, deliberately: it runs only on
+    the failure path, a handful of tiny syscalls in a 0700 local directory.
+    If this ever grows (bigger records, network filesystems), route it through
+    ``asyncio.to_thread`` instead.
     """
     try:
         from local_operator.paths import ensure_log_dir
@@ -567,20 +581,55 @@ def _persist_probe_failure(line: str) -> None:
         if directory is None:
             return
         path = directory / HEALTH_FAILURE_LOG_NAME
-        try:
-            if path.stat().st_size >= HEALTH_FAILURE_LOG_MAX_BYTES:
-                os.replace(path, path.with_name(path.name + ".1"))
-        except FileNotFoundError:
-            pass
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         record = f"{stamp} pid={os.getpid()} {line}\n".encode("utf-8", "replace")
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        fd = _open_health_log_for_append(path)
         try:
             os.write(fd, record)
         finally:
             os.close(fd)
     except Exception:  # noqa: BLE001 - a diagnostic write may never fail the action
         logger.debug("ui_host_health_failure_log_unwritable", exc_info=True)
+
+
+def _open_health_log_for_append(path: Path) -> int:
+    """Open *path* for append, rolling it to ``.1`` first if it is full.
+
+    The size check and the rename run under ``flock`` on the descriptor being
+    rolled. After taking the lock the path is re-stat'ed: if it no longer names
+    the locked inode, another writer rolled it while this one waited, so the
+    descriptor (now pointing at ``.1``) is dropped and the fresh file opened.
+    Bounded to a few passes so a pathological churn cannot spin the loop.
+    """
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        fcntl = None  # type: ignore[assignment]
+    for _ in range(3):
+        fd = os.open(path, flags, 0o600)
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            st = os.fstat(fd)
+            try:
+                same = os.stat(path).st_ino == st.st_ino
+            except FileNotFoundError:
+                same = False
+            if not same:
+                os.close(fd)
+                continue
+            if st.st_size < HEALTH_FAILURE_LOG_MAX_BYTES:
+                return fd  # closing the descriptor later releases the lock
+            os.replace(path, path.with_name(path.name + ".1"))
+        except BaseException:
+            os.close(fd)
+            raise
+        # Rolled under the lock; releasing it (close) lets waiters see the new
+        # inode and reopen. Our own record goes into the fresh file.
+        os.close(fd)
+        return os.open(path, flags, 0o600)
+    return os.open(path, flags, 0o600)
 
 
 def _failure_copy(probe: HealthProbe, current: Any, copy: Any) -> str:
@@ -594,13 +643,19 @@ def _failure_copy(probe: HealthProbe, current: Any, copy: Any) -> str:
     if probe.verdict is HealthVerdict.TIMEOUT and state_store.pid_alive(current.pid):
         plural = "s" if probe.attempts != 1 else ""
         # When the caller's deadline shortened an attempt, "within 1.5s" would claim
-        # more patience than was possible; say what was true instead.
-        window = (
-            "within the time allowed "
-            f"({probe.elapsed_s:.1f}s over {probe.attempts} attempt{plural})"
-            if probe.clamped
-            else f"within {probe.budget_s:.1f}s over {probe.attempts} attempt{plural}"
-        )
+        # more patience than was possible; say what was true instead. Unclamped
+        # with a retry, the attempts had DIFFERENT budgets (1.5 s then 5 s), so the
+        # first budget alone would understate the wait ~4x; report the measured
+        # total, which is what an agent weighing "retry the same command" needs.
+        if probe.clamped:
+            window = (
+                "within the time allowed "
+                f"({probe.elapsed_s:.1f}s over {probe.attempts} attempt{plural})"
+            )
+        elif probe.attempts > 1:
+            window = f"within {probe.elapsed_s:.1f}s over {probe.attempts} attempt{plural}"
+        else:
+            window = f"within {probe.budget_s:.1f}s over {probe.attempts} attempt{plural}"
         return (
             f"the desktop browser host is published (pid {current.pid}, port {current.port}) "
             f"but did not answer the bounded health check {window}; the host may be "
