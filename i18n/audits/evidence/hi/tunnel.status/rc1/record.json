@@ -1,0 +1,38 @@
+{
+  "auditor": {"agent": "i18n-auditor (team lopdev, task brand-au-hi)", "session": "6aee4282cf56", "model": "anthropic/claude-opus-5-5", "actual_model_source": "session system prompt 'Model:' line; no fallback observed", "fallback": null, "independent_from_translator_session": true, "translator": "i18n-translator, anthropic/claude-sonnet-5-5"},
+  "locale": "hi",
+  "namespaces": ["cli.team_bridge", "tunnel.status"],
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "diff_base": "220d39a96667",
+  "audit_date": "2026-11-16",
+  "input_hashes": {
+    "local_operator/i18n/catalogues/hi/cli.team_bridge.json": "49fbb73fe378ba2203954fe1b4b12a8fae1103441126c4cf843f428ec4112d84",
+    "local_operator/i18n/catalogues/hi/tunnel.status.json": "669604bf0be65e41f4c3df1ae4151a1215791ca5b312fad84055fb1c19bfdf68",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.json": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "local_operator/i18n/catalogues/en/tunnel.status.json": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.context.json": "6c4d922a48e5c563d2204ef4fb7dcd8ef8383e5e85d6c1ce3e86d2e7e81e1403",
+    "local_operator/i18n/catalogues/en/tunnel.status.context.json": "b69246da17bb05162c7640506a35e3eed4fab1501fa581818e89df23d339b76b"
+  },
+  "mechanical": {"check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s)", "hi_diff_lines": "4 values changed (exactly the 4 scoped keys), nothing else in hi", "key_sets_equal_en": true, "placeholders": "{url} byte-identical in both detail keys; none elsewhere", "brand_form": "each changed value contains 'Radient Console' exactly once, U+0020 space, no Cf/ZW chars"},
+  "per_key": [
+    {"key": "cli.team_bridge.notify.screening_model_unavailable_body", "verdict": "PASS", "text_fragment": "Radient Console में क्रेडिट जोड़ें", "cells_hi": 376, "cells_en": 454},
+    {"key": "tunnel.status.card_open_console", "verdict": "PASS", "text": "Radient Console में फ़ोन एक्सेस चालू करें", "cells_hi": 31, "budget": "50 incl. icon (en 43)"},
+    {"key": "tunnel.status.tunnel_disabled.detail", "verdict": "PASS", "text": "इस कंप्यूटर का फ़ोन एक्सेस Radient Console में बंद है। इसे {url} पर फिर से चालू करें; यह अपने-आप फिर से जुड़ जाता है।", "cells_hi": 90},
+    {"key": "tunnel.status.tunnel_inactive.detail", "verdict": "PASS", "text_fragment": "अगर यह रुका ही रहे, तो {url} पर Radient Console में इसकी जाँच करें।", "cells_hi": 202},
+    {"key": "tunnel.status.tunnel_disabled.label (open question, unchanged)", "verdict": "ACCEPTABLE as generic; naming recommended (MINOR hi-A1)", "text": "कंसोल में टनल बंद है", "recommended": "Radient Console में टनल बंद है", "cells_current": 14, "cells_recommended": 26, "cells_en": 32}
+  ],
+  "findings": [
+    {"id": "hi-A1", "severity": "MINOR", "key": "tunnel.status.tunnel_disabled.label", "text": "कंसोल में टनल बंद है", "evidence": "Context note says the owner switched it off in the Radient Console. Bare 'कंसोल' in hi is also used for other consoles (wire.console.title 'कंसोल क्षमता', cli.vault.timed_out / revoke_hint, cli.qwencloud_help 'QwenCloud कंसोल'), and the label is printed in a terminal; the paired detail line (gateway.py:589-591) names Radient Console, so the meaning is recoverable — no demonstrated wrong reading.", "fix": "Radient Console में टनल बंद है (26 cells, under en 32)"}
+  ],
+  "out_of_scope_observations": [
+    "Unchanged namespaces still use the transliterated hybrid 'Radient कंसोल': mobile.setup.disabled, .disabled_resume, .title_disabled, .action_add_credit, .action_open_console; wire.errors.media.speech_radient_credit_low; mobile.doctor.tunnel.duplicates. After this PR, the same remedy reads 'Radient Console' in tunnel.status/team_bridge but 'Radient कंसोल' in mobile setup/doctor — a cross-namespace glossary inconsistency (glossary §1 forbids replacing the brand). Not in this diff, so not gating here; should be swept in the same brand programme."
+  ],
+  "counts": {"blocker": 0, "major": 0, "minor": 1, "nit": 0},
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "not_verified": [
+    "No native-speaker review; judgement is LLM reasoning only.",
+    "Cell widths from rich.cells.cell_len (combining Devanagari marks count 0); actual terminal rendering of Devanagari varies by terminal/font and was not rendered or viewed.",
+    "No rendered TUI/desktop/phone frame of the changed strings."
+  ],
+  "ledger": "not recorded — task brief forbids touching ledger/receipts/audit-history in this checkout"
+}
