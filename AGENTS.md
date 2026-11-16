@@ -3668,11 +3668,25 @@ asks or notifications stores to test that, and never loosen the default-deny.
 Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
 
 ```sh
-.venv/bin/python scripts/e2e/node_browser_harness.py --harness            # full flow
-.venv/bin/python scripts/e2e/node_browser_harness.py --harness --preflight  # rig only
+SB=<path to a built storybook-static>   # see "Storybook" below
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB"   # full flow
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB" --preflight  # rig only
 .venv/bin/python scripts/e2e/node_browser_harness.py --harness --security-control \
-  --root "$LOCAL_OPERATOR_SCRATCHPAD/<run dir of a previous run>"
+  --root "$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>"
 ```
+
+- **Storybook (required, `--storybook-dir`):** the screenshots open the
+  `browser-approvals-dock--approved` story from a static Storybook build. In a
+  `local-operator-ui` checkout (or worktree) whose head has that story, run
+  `pnpm build-storybook`; it writes `storybook-static/` at that checkout's root
+  (gitignored). Any existing build that contains the story can be reused; there
+  is no default path, so a missing build is a clean refusal, not a FAIL row.
+- **Where results land:** each run writes
+  `$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>/` (or `--root`, which
+  must be a fresh subdirectory of the scratchpad): `results.md`/`results.json`,
+  `light.png`/`dark.png`, `inner.log` and the Chrome/daemon logs. The last
+  stdout line prints the path. A full run takes about 30 s; the backstop is
+  600 s.
 
 - **What is real:** the installed CRX the live node runs (read only; its version
   is in the results), a fresh headless Chrome profile, the bridge daemon,
@@ -3686,7 +3700,14 @@ Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
   `/etc/opt/chrome/policies/managed` and `/etc/local-operator/operators`, the
   private netns makes the real bridge on `127.0.0.1:4099` unreachable, and the
   inner run aborts if the real policy file is visible. Every root lives under
-  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else.
+  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else. The hidden
+  `--inner`/`--operator` modes re-apply those refusals, refuse outside a
+  private netns holding only `lo`, and refuse any config root that does not
+  resolve under the run root, before writing anything.
+- **Interrupts:** the scope is named `nbh-<stamp>`; on exit, Ctrl-C, SIGTERM or
+  the backstop the launcher runs `systemctl --user stop nbh-<stamp>.scope`
+  (exact cgroup membership) and removes `/tmp/nbh-<stamp>-*`. Only a SIGKILLed
+  launcher can leave the scope; stop it by that name.
 - **Proof it touched nothing:** the launcher hashes the real policy and anchor,
   records the live node Chrome's PID and the paired-identity lines of the real
   `lop browser status` before and after, and fails the run on any difference.

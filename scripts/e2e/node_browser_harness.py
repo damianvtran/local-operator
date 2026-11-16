@@ -4,7 +4,7 @@ WHY THIS EXISTS. A headless mesh node (``lop browser setup --node``) runs the Lo
 Operator extension in a Chrome nobody can see, so a site is approved only by the
 OPERATOR's signature, which the extension re-verifies against the anchor in Chrome
 managed policy (``browser_bridge/site_approval.py``). Proving that end to end used
-to need Damian at his Mac to answer a card. This harness proves it with a
+to need the operator at their own computer to answer a card. This harness proves it with a
 SYNTHETIC operator key, so any agent can re-run it after a change to the node
 browser, the extension, the ask door or the signed ``decide`` frame.
 
@@ -34,7 +34,7 @@ SAFETY ARGUMENT — why a run cannot touch the operator's real node:
 * The inner run lives in private user, mount and network namespaces
   (``unshare -Urmn``). A scratch directory is bind-mounted over
   ``/etc/opt/chrome/policies/managed`` (so Chrome sees ONLY the harness policy,
-  never the machine-wide force-install carrying Damian's key) and an empty one
+  never the machine-wide force-install carrying the operator's key) and an empty one
   over ``/etc/local-operator/operators``. The inner run ABORTS if the real
   ``local-operator.json`` policy is still visible.
 * The private network has only ``lo``: the real bridge daemon on
@@ -53,16 +53,29 @@ SAFETY ARGUMENT — why a run cannot touch the operator's real node:
 * The outer launcher hashes the real policy and anchor, records the live node
   Chrome's PID and the paired-identity lines of the real ``lop browser status``
   before and after, and fails the run if any differ.
-* The whole run is one ``systemd-run --user --scope`` with ``MemoryMax=1536M``
-  and no swap; children are started in their own process groups and reaped by
-  exact group id.
+* The whole run is one named ``systemd-run --user --scope --unit nbh-<stamp>``
+  with ``MemoryMax=1536M`` and no swap; children are started in their own
+  process groups and reaped by exact group id. SIGTERM/SIGINT raise
+  ``SystemExit`` in both the launcher and the inner run so their ``finally``
+  blocks reap, and the launcher always ``systemctl --user stop``s the scope,
+  which kills by exact cgroup membership (Chrome, the daemon, the http
+  servers) even if the inner run died without cleaning up.
+* The hidden ``--inner`` and ``--operator`` modes (spawned by the launcher and
+  by the inner run) apply the SAME launcher refusals first, then refuse unless
+  they run in a network namespace other than the launcher's (inode passed as
+  ``--host-netns``) that holds only ``lo``, with the real policy masked, and
+  unless every config root they use resolves under the run root. They write
+  nothing before those checks pass. So neither can be pointed at the
+  operator's real config root or a live runtime to sign or answer a card.
 
 Run (from a checkout with a .venv; Chrome at /opt/google/chrome/chrome)::
 
-    .venv/bin/python scripts/e2e/node_browser_harness.py --harness
+    .venv/bin/python scripts/e2e/node_browser_harness.py --harness \
+        --storybook-dir <local-operator-ui>/storybook-static
 
 Results land in ``$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>/``
-(``results.json``, ``results.md``, ``light.png``, ``dark.png``).
+(``results.json``, ``results.md``, ``light.png``, ``dark.png``, logs).
+
 """
 
 from __future__ import annotations
@@ -73,6 +86,8 @@ import contextlib
 import hashlib
 import json
 import os
+import pwd
+import re
 import shlex
 import shutil
 import signal
@@ -96,17 +111,24 @@ REAL_ANCHOR_DIR = Path("/etc/local-operator/operators")
 CHROME = Path("/opt/google/chrome/chrome")
 LIVE_UNIT = "local-operator-node-browser.service"
 REAL_BRIDGE_PORT = 4099
-DEFAULT_STORYBOOK = Path.home() / "local-operator-ui/.worktrees/sb-pr1833/storybook-static"
+#: Where Chrome's short private TMPDIR goes (a unix socket path must fit in 108
+#: bytes). A module constant so the cleanup is testable without touching /tmp.
+CHROME_TMP_BASE = Path("/tmp")
+#: The run stamp names the scope unit and the /tmp dir; validated so it can
+#: never smuggle a path separator or glob into either.
+STAMP_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z-]{0,63}$")
 STORY = "iframe.html?id=browser-approvals-dock--approved&args=theme:{theme}"
 #: The ``lop browser status`` lines that identify the operator's REAL pairing.
 IDENTITY_PREFIXES = ("paired:", "identities:", "- ", "extension connected:", "port:")
 
-# Bounds measured on node2, 2026-11-16 (n=1 preflight each; generous by design —
-# these are hang backstops, not latency assertions): daemon health <2 s,
-# extension connect after Chrome start ~5-15 s, policy reload ~5-10 s.
+# Bounds measured on a Linux node, 2026-11-16 (n=1 preflight each; generous by
+# design — these are hang backstops, not latency assertions): daemon health
+# <2 s, extension connect after Chrome start ~5-15 s, policy reload ~5-10 s.
 CONNECT_BACKSTOP_S = 120.0
 PAIR_BACKSTOP_S = 120.0
-RUN_BACKSTOP_S = 900
+# Whole-run backstop. Observed full runs: 27 s (QA round 1) and run 7; 600 s
+# is the shared heavy-slot cap on a node and stays far above that.
+RUN_BACKSTOP_S = 600
 # The answered ask started the agent's turn within ~1 s in run 5; 20 s is the
 # window before the harness nudges it instead. A turn here is 2-4 browser calls
 # against loopback pages; 180 s is a hang backstop, not a latency assertion.
@@ -149,6 +171,123 @@ def refusal(
     if resolved == pad:
         return "refused: use a fresh subdirectory of the scratchpad, not the scratchpad itself"
     return None
+
+
+def real_config_root() -> Path:
+    """The operator's real config root, from the passwd entry, never ``$HOME``.
+
+    The inner run and the operator children run with ``HOME`` repointed into the
+    run root, and any caller can export a different ``HOME``; the passwd home of
+    the real uid is what the live node actually uses. No override exists on
+    purpose: a guard an environment variable can redirect is not a guard.
+    """
+    return Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local-operator"
+
+
+def containment_refusal(root: Path, paths: dict[str, Path]) -> str | None:
+    """Refuse unless every path resolves strictly UNDER the run root.
+
+    ``resolve()`` follows symlinks, so a link inside the run root that points at
+    the real config root resolves outside it and is refused like a plain path.
+    """
+    base = root.resolve()
+    for label, path in paths.items():
+        resolved = path.resolve()
+        if base not in resolved.parents:
+            return f"refused: {label} {resolved} is not under the run root {base}"
+    return None
+
+
+def netns_inode() -> int:
+    return os.stat("/proc/self/ns/net").st_ino
+
+
+def netns_interfaces() -> list[str]:
+    # if_nameindex() asks the kernel over netlink for THIS process's netns;
+    # /sys/class/net would show the namespace /sys was mounted in instead.
+    return [name for _index, name in socket.if_nameindex()]
+
+
+def netns_refusal(
+    *,
+    host_netns: int | None,
+    own_netns: int,
+    interfaces: list[str],
+    harness_netns: int | None = None,
+) -> str | None:
+    """The hidden modes run only inside the launcher's private network namespace.
+
+    Two independent checks, because ``--host-netns`` is a caller-supplied number:
+    the inode must differ from the launcher's, AND the namespace must hold only
+    ``lo`` (a host namespace always has a real interface; ``unshare -n`` gives
+    exactly ``lo``), so the real bridge on 127.0.0.1:4099 and any live runtime's
+    loopback door are unreachable. The operator role additionally must share the
+    inner run's namespace (``harness_netns``).
+    """
+    if not host_netns:
+        return "refused: missing --host-netns; this mode runs only inside the harness namespace"
+    if own_netns == host_netns:
+        return (
+            "refused: this process shares the launcher's network namespace; "
+            "the hidden harness modes run only inside it"
+        )
+    extra = [name for name in interfaces if name != "lo"]
+    if extra:
+        return f"refused: network namespace has {extra}; the harness namespace holds only lo"
+    if harness_netns is not None and own_netns != harness_netns:
+        return "refused: the operator role must run inside the harness run's network namespace"
+    return None
+
+
+def hidden_mode_refusal(args: argparse.Namespace) -> str | None:
+    """Namespace and containment checks for ``--inner``/``--operator``.
+
+    Runs in ``main()`` BEFORE either mode imports a key, opens a socket or writes
+    a file (results.json included), so a refusal leaves nothing behind.
+    """
+    reason = netns_refusal(
+        host_netns=args.host_netns,
+        own_netns=netns_inode(),
+        interfaces=netns_interfaces(),
+        harness_netns=args.harness_netns if args.operator else None,
+    ) or namespace_refusal(REAL_POLICY)
+    if reason:
+        return reason
+    root = Path(args.root)
+    if args.stamp and not STAMP_RE.match(args.stamp):
+        return f"refused: bad --stamp {args.stamp!r}"
+    if args.operator:
+        key_root = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
+        if not key_root or not args.node_root or not args.ask_file:
+            return (
+                "refused: the operator role needs LOCAL_OPERATOR_CONFIG_DIR, --node-root "
+                "and --ask-file"
+            )
+        paths = {
+            "--node-root": Path(args.node_root),
+            "LOCAL_OPERATOR_CONFIG_DIR": Path(key_root),
+            "--ask-file": Path(args.ask_file),
+        }
+    else:
+        paths = {name: root / name for name in ("node", "operator", "wrong-key-operator", "policy")}
+    return containment_refusal(root, paths)
+
+
+def _exit_on_signal(signum: int, _frame: Any) -> None:
+    raise SystemExit(128 + signum)
+
+
+def install_exit_handlers() -> None:
+    """SIGTERM/SIGINT become ``SystemExit`` so ``finally`` blocks still reap.
+
+    Python's default SIGTERM kills the interpreter without unwinding, and the
+    inner run's children sit in their own sessions (``start_new_session``), so
+    a ``timeout`` backstop or a killed launcher used to leak Chrome, the bridge
+    daemon and the http servers. asyncio leaves a non-default SIGINT handler in
+    place, so this also governs Ctrl-C inside ``asyncio.run``.
+    """
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _exit_on_signal)
 
 
 def namespace_refusal(policy_file: Path = REAL_POLICY) -> str | None:
@@ -215,9 +354,59 @@ def _child_env(**extra: str) -> dict[str, str]:
     return env
 
 
+def scope_command(unit: str, script: str) -> list[str]:
+    """The capped, NAMED scope around the namespaces (named so it can be stopped)."""
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "-q",
+        f"--unit={unit}",
+        "-p",
+        "MemoryMax=1536M",
+        "-p",
+        "MemorySwapMax=0",
+        "--",
+        "timeout",
+        str(RUN_BACKSTOP_S),
+        "unshare",
+        "-Urmn",
+        "sh",
+        "-c",
+        script,
+    ]
+
+
+def stop_scope(unit: str) -> None:
+    """Kill whatever is left in the run's scope, by exact cgroup membership.
+
+    Harmless after a clean exit (the scope is already gone: "not loaded"); after
+    Ctrl-C, the backstop or a crash it is what reaps Chrome and the daemon,
+    whose own process groups the launcher's ``killpg`` never reaches.
+    """
+    for verb in ("stop", "reset-failed"):
+        subprocess.run(
+            ["systemctl", "--user", verb, f"{unit}.scope"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+
+def remove_chrome_tmp(stamp: str) -> None:
+    """Remove this run's ``/tmp/nbh-<stamp>-*`` dirs (the inner run's may leak)."""
+    if not STAMP_RE.match(stamp):
+        return
+    for path in CHROME_TMP_BASE.glob(f"nbh-{stamp}-*"):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def outer(args: argparse.Namespace) -> int:
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=True)
+    stamp = f"{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    unit = f"nbh-{stamp}"
     before = host_snapshot()
     policy_mask = root / "policy"
     anchor_mask = root / "anchor-mask"
@@ -232,6 +421,10 @@ def outer(args: argparse.Namespace) -> int:
         str(root),
         "--storybook-dir",
         str(args.storybook_dir),
+        "--stamp",
+        stamp,
+        "--host-netns",
+        str(netns_inode()),
     ] + (["--preflight"] if args.preflight else [])
     script = " && ".join(
         [
@@ -239,38 +432,27 @@ def outer(args: argparse.Namespace) -> int:
             f"mount --bind {shlex.quote(str(anchor_mask))} {REAL_ANCHOR_DIR}",
             "ip link set lo up",
             # Map back to the real uid so Chrome is not "root" and keeps its sandbox.
-            "exec unshare -U --map-user=1000 --map-group=1000 "
+            f"exec unshare -U --map-user={os.getuid()} --map-group={os.getgid()} "
             + " ".join(shlex.quote(a) for a in inner_argv),
         ]
     )
-    command = [
-        "systemd-run",
-        "--user",
-        "--scope",
-        "-q",
-        "-p",
-        "MemoryMax=1536M",
-        "-p",
-        "MemorySwapMax=0",
-        "--",
-        "timeout",
-        str(RUN_BACKSTOP_S),
-        "unshare",
-        "-Urmn",
-        "sh",
-        "-c",
-        script,
-    ]
     log = (root / "inner.log").open("w")
     process = subprocess.Popen(
-        command, stdout=log, stderr=subprocess.STDOUT, env=_child_env(), start_new_session=True
+        scope_command(unit, script),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=_child_env(),
+        start_new_session=True,
     )
     try:
         rc = process.wait()
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+        stop_scope(unit)
+        remove_chrome_tmp(stamp)
         log.close()
     after = host_snapshot()
     results_path = root / "results.json"
@@ -681,6 +863,47 @@ def withdrawal_confirmed(result: dict[str, Any]) -> bool:
     return not result.get("error") and details.get("state") == "cancelled"
 
 
+# Negative-control evaluators. Each asserts the SPECIFIC refusal, not "any
+# failure": a timeout or an unrelated exception inside ``bridge_decide`` must
+# read FAIL, never PASS. The expected sentences are rendered from the product's
+# own i18n keys, so a copy change moves the check with it.
+
+
+def _site_refusal(key: str) -> str:
+    from local_operator.i18n.keys import browser_site_approval as keys
+    from local_operator.i18n.messages import render_resolved
+
+    return str(render_resolved(getattr(keys, key)()))
+
+
+def authority_refused(verdict: dict[str, Any]) -> bool:
+    """The runtime's authority seam refused the answer (wrong key, plain respond).
+
+    The runtime re-words a site answer it cannot admit as ``refused_old_signer``
+    (``server.py`` ``_site_old_signer_refusal``); that is the refusal both the
+    wrong-key signature and the ordinary ``ask_respond`` get.
+    """
+    return bool(
+        verdict.get("connected")
+        and verdict.get("ok") is False
+        and _site_refusal("refused_old_signer") in str(verdict.get("error", ""))
+    )
+
+
+def unsigned_refused(verdict: dict[str, Any]) -> bool:
+    """The extension refused the agent's own decide as ``unsigned_decision``."""
+    return verdict.get("ok") is False and verdict.get("code") == "unsigned_decision"
+
+
+def expired_refused(verdict: dict[str, Any]) -> bool:
+    """The late signed Approve was refused because the entry had expired."""
+    return bool(
+        verdict.get("connected")
+        and verdict.get("ok") is False
+        and _site_refusal("refused_expired") in str(verdict.get("error", ""))
+    )
+
+
 def _site_ask(session: Any, origin: str) -> dict[str, Any] | None:
     """The newest site card for ``origin`` in ANY status (a withdrawn one too)."""
     queue = session.ask_queue()
@@ -789,9 +1012,20 @@ def background_luminance(path: Path) -> float:
 
 
 def _operator(
-    root: Path, key_root: Path, node_root: Path, sid: str, ask: dict[str, Any], word: str, mode: str
+    host_netns: int,
+    root: Path,
+    key_root: Path,
+    node_root: Path,
+    sid: str,
+    ask: dict[str, Any],
+    word: str,
+    mode: str,
 ) -> dict[str, Any]:
-    """Run ONE operator decision in a separate process with its own config root."""
+    """Run ONE operator decision in a separate process with its own config root.
+
+    The child re-applies every guard (``main()``), so it is told the launcher's
+    netns inode and this inner run's, and refuses outside the latter.
+    """
     ask_file = root / f"ask-{uuid.uuid4().hex[:8]}.json"
     ask_file.write_text(json.dumps(ask))
     env = _child_env(
@@ -817,6 +1051,10 @@ def _operator(
             word,
             "--mode",
             mode,
+            "--host-netns",
+            str(host_netns),
+            "--harness-netns",
+            str(netns_inode()),
         ],
         capture_output=True,
         text=True,
@@ -835,13 +1073,11 @@ def _operator(
 
 
 async def inner(args: argparse.Namespace) -> int:
+    # main() already refused unless the namespace, mask and containment checks
+    # hold (hidden_mode_refusal), so this is the first write of the run.
     root = Path(args.root)
+    root.mkdir(parents=True, exist_ok=True)
     results = Results(root / "results.json")
-    aborted = namespace_refusal()
-    if aborted:
-        print(aborted, file=sys.stderr)
-        results.row("namespace masks the real managed policy", "absent", aborted, False)
-        return 2
     results.row(
         "namespace masks the real managed policy",
         f"{REAL_POLICY} absent",
@@ -1016,7 +1252,9 @@ async def _inner_flow(
     # Chrome's singleton socket is a unix socket under TMPDIR, whose path must
     # fit in 108 bytes; the scratchpad path does not (run 1: "Socket path too
     # long"). A short private dir under /tmp, removed with the profile.
-    chrome_tmp = Path(tempfile.mkdtemp(prefix="nbh-", dir="/tmp"))
+    # Named after the run stamp so the launcher can remove it if this process
+    # is killed before its finally runs (remove_chrome_tmp).
+    chrome_tmp = Path(tempfile.mkdtemp(prefix=f"nbh-{args.stamp or 'x'}-", dir=CHROME_TMP_BASE))
     session_box["chrome_tmp"] = chrome_tmp
     chrome_env = {**env, "TMPDIR": str(chrome_tmp)}
     sandbox = "sandboxed"
@@ -1126,34 +1364,33 @@ async def _inner_flow(
 
     # --- negative controls before the real decision -----------------------
     wrong = await asyncio.to_thread(
-        _operator, root, bad_root, node_root, sid, ask, approve_word, "signed"
+        _operator, args.host_netns, root, bad_root, node_root, sid, ask, approve_word, "signed"
     )
     results.row(
         "wrong-key operator signature refused",
-        "decide refused, ask still open, origin not granted",
+        "decide refused at the authority seam (refused_old_signer), ask still open, "
+        "origin not granted",
         {
             "verdict": wrong,
             "ask": _ask_status(session, ask_id),
             "allowed": _allowed(node_root, origin),
         },
-        wrong.get("connected")
-        and (not wrong.get("ok"))
+        authority_refused(wrong)
         and _ask_status(session, ask_id) == "open"
         and not _allowed(node_root, origin),
     )
     plain = await asyncio.to_thread(
-        _operator, root, op_root, node_root, sid, ask, approve_word, "plain"
+        _operator, args.host_netns, root, op_root, node_root, sid, ask, approve_word, "plain"
     )
     results.row(
         "plain ask_respond from the operator surface is not the decision",
-        "refused, ask still open, origin not granted",
+        "refused at the authority seam (refused_old_signer), ask still open, " "origin not granted",
         {
             "verdict": plain,
             "ask": _ask_status(session, ask_id),
             "allowed": _allowed(node_root, origin),
         },
-        plain.get("connected")
-        and (not plain.get("ok"))
+        authority_refused(plain)
         and _ask_status(session, ask_id) == "open"
         and not _allowed(node_root, origin),
     )
@@ -1167,12 +1404,12 @@ async def _inner_flow(
             "ask": _ask_status(session, ask_id),
             "allowed": _allowed(node_root, origin),
         },
-        (not agent.get("ok")) and not _allowed(node_root, origin),
+        unsigned_refused(agent) and not _allowed(node_root, origin),
     )
 
     # --- the real decision ----------------------------------------------
     approved = await asyncio.to_thread(
-        _operator, root, op_root, node_root, sid, ask, approve_word, "signed"
+        _operator, args.host_netns, root, op_root, node_root, sid, ask, approve_word, "signed"
     )
     sites_after = _sites(node_root)
     allowed_after = _allowed(node_root, origin)
@@ -1227,7 +1464,7 @@ async def _inner_flow(
         results.row("deny: card raised", "open ask", _last_result(session, "call_8"), False)
     else:
         denied = await asyncio.to_thread(
-            _operator, root, op_root, node_root, sid, deny_ask, "deny", "signed"
+            _operator, args.host_netns, root, op_root, node_root, sid, deny_ask, "deny", "signed"
         )
         resumed_deny = await _continue_after_answer(
             session, "call_9", "call_9", "open the second origin again"
@@ -1264,20 +1501,29 @@ async def _inner_flow(
         details = withdrawal["details"] or {}
         gone = withdrawal_confirmed(withdrawal)
         late = await asyncio.to_thread(
-            _operator, root, op_root, node_root, sid, expire_ask, approve_word, "signed"
+            _operator,
+            args.host_netns,
+            root,
+            op_root,
+            node_root,
+            sid,
+            expire_ask,
+            approve_word,
+            "signed",
         )
         allowed_late = _allowed(node_root, expire_origin)
         results.row(
             "expired card: a signed Approve after the entry is withdrawn grants nothing",
-            "agent cancel_access -> state cancelled + card withdrawn; "
-            "then the signed Approve is refused; origin not allowed",
+            "agent cancel_access -> extension answers state cancelled; "
+            "then the signed Approve is refused as expired (refused_expired); "
+            "origin not allowed",
             {
                 "withdrawal": {"error": withdrawal["error"], "details": details},
                 "ask": _ask_status(session, str(expire_ask["ask_id"])),
                 "verdict": late,
                 "allowed": allowed_late,
             },
-            bool(late.get("connected")) and (not late.get("ok")) and not allowed_late,
+            expired_refused(late) and not allowed_late,
             blocked=not gone,
         )
     results.row(
@@ -1421,7 +1667,12 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--harness", action="store_true", help="required: confirm the run")
     parser.add_argument("--root", default="")
-    parser.add_argument("--storybook-dir", default=str(DEFAULT_STORYBOOK))
+    parser.add_argument(
+        "--storybook-dir",
+        default="",
+        help="required for a run: a built storybook-static (local-operator-ui "
+        "`pnpm build-storybook`) containing browser-approvals-dock--approved",
+    )
     parser.add_argument("--security-control", action="store_true")
     parser.add_argument(
         "--preflight",
@@ -1435,6 +1686,9 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ask-file", default="", help=argparse.SUPPRESS)
     parser.add_argument("--word", default="approve", help=argparse.SUPPRESS)
     parser.add_argument("--mode", default="signed", help=argparse.SUPPRESS)
+    parser.add_argument("--stamp", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--host-netns", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--harness-netns", type=int, default=None, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -1443,20 +1697,28 @@ def main(argv: list[str] | None = None) -> int:
     scratchpad = os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")
     if not args.root and scratchpad:
         args.root = str(Path(scratchpad) / f"node-browser-harness-{time.strftime('%Y%m%dT%H%M%S')}")
-    real_config = Path(os.path.expanduser("~")) / ".local-operator"
-    if args.operator:
-        # Operator children run with their own config root as HOME/config; the
-        # scratchpad guard was applied by the launcher that spawned them.
-        return asyncio.run(operator_role(args))
+    # EVERY mode, hidden ones included, passes the launcher's refusals first: the
+    # hidden modes are reachable from any shell, so "the launcher already checked"
+    # is no guarantee (agent review round 1 R1-1).
     reason = refusal(
         harness_flag=args.harness,
         root=Path(args.root or "."),
         scratchpad=scratchpad,
-        real_config=Path(os.environ.get("LOCAL_OPERATOR_HARNESS_REAL_CONFIG", real_config)),
+        real_config=real_config_root(),
     )
-    if reason and not args.inner:
+    if not reason and (args.inner or args.operator):
+        reason = hidden_mode_refusal(args)
+    if not reason and not (args.security_control or args.operator or args.storybook_dir):
+        reason = (
+            "refused: pass --storybook-dir <built storybook-static> (local-operator-ui "
+            "`pnpm build-storybook`); see AGENTS.md 'Testing a node browser without the operator'"
+        )
+    if reason:
         print(reason, file=sys.stderr)
         return 2
+    if args.operator:
+        return asyncio.run(operator_role(args))
+    install_exit_handlers()
     if args.inner:
         return asyncio.run(inner(args))
     if args.security_control:
