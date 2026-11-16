@@ -4127,6 +4127,18 @@ def _freeze_state_jobs(
     return state.model_copy(update={"jobs": _FrozenSequence(jobs)})
 
 
+def freeze_new_store_state(state: FrontendSessionState) -> FrontendSessionState:
+    """The canonical object a NEW :class:`FrontendStateStore` holds for ``state``.
+
+    A pure function of ``state``: it deep-copies and freezes, and writes nothing
+    shared. That is what lets a caller pay it on a worker thread and hand the
+    result to ``FrontendStateStore(state, frozen=...)``, provided nothing else
+    holds ``state`` while the worker reads it (the desktop's cold open builds
+    ``state`` locally and publishes nothing until the store exists).
+    """
+    return _freeze_state_jobs(state.model_copy(deep=True))
+
+
 def _freeze_retained_rows(rows: Iterable[Any]) -> _FrozenSequence:
     """Freeze one job's retained window into the immutable rows canonical state holds.
 
@@ -5829,6 +5841,26 @@ class SnapshotJobs:
     def __init__(self, values: Iterable[JobState] = ()) -> None:
         self.replace(values)
 
+    @staticmethod
+    def detach(values: Iterable[JobState]) -> dict[int, tuple[JobState, JobState]]:
+        """The detached copies :meth:`replace` would make, as a :meth:`prime` argument.
+
+        Pure (reads ``values``, writes nothing shared), so a caller can pay it on
+        a worker thread: on the desktop's cold open of a 2,000-job session these
+        copies were ~0.24 s on the serving loop (PR #4012, QA round 1, Q1).
+        """
+        return {id(value): (value, _public_job(value)) for value in values}
+
+    def prime(self, detached: dict[int, tuple[JobState, JobState]]) -> None:
+        """Seed :meth:`replace`'s reuse cache with copies built by :meth:`detach`.
+
+        Only a hint: ``replace`` reuses an entry only when its source is the
+        IDENTICAL object it is handed (``kept[0] is value``), so a primed copy
+        can never stand in for a different row, and an unused entry is dropped
+        by the next ``replace``.
+        """
+        self._detached = {**getattr(self, "_detached", {}), **detached}
+
     def replace(self, values: Iterable[JobState]) -> None:
         # Canonical jobs already own recursively immutable retained payloads.
         # Route copies through the public detacher instead of asking Pydantic to
@@ -6807,10 +6839,17 @@ class FrontendStateStore:
     one reducer and a strict sequence suitable for gap detection.
     """
 
-    def __init__(self, state: FrontendSessionState) -> None:
+    def __init__(
+        self, state: FrontendSessionState, *, frozen: FrontendSessionState | None = None
+    ) -> None:
         # The ONE assignment outside ``_install``: nothing else can see this
         # store yet, so there is no race to take the lock against.
-        self._state = _freeze_state_jobs(state.model_copy(deep=True))
+        #
+        # ``frozen`` is :func:`freeze_new_store_state` of ``state``, already
+        # paid by the caller -- on a worker thread, for the desktop's cold open
+        # of a large session, where this copy-and-freeze of a 2,000-job roster
+        # was ~0.5 s held on the serving loop (PR #4012, QA round 1, Q1).
+        self._state = frozen if frozen is not None else freeze_new_store_state(state)
         self._peer_display_fold: Any = None
         self._peer_display_pending: list[dict[str, Any]] = []
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
@@ -6905,6 +6944,30 @@ class FrontendStateStore:
     def state(self) -> FrontendSessionState:
         return self._public_state(self._state)
 
+    def state_reference(self) -> FrontendSessionState:
+        """The CANONICAL state object itself, O(1), for a reader that clones it elsewhere.
+
+        WHY THIS EXISTS: ``state`` deep-copies every job and usage row ON THE
+        CALLER'S THREAD, and the desktop snapshot route called it on the serving
+        event loop, then serialized the clone there too. On a large session that
+        was 70-195 s with the loop held (``serve-stall-5183.log``, 2026-11-15:
+        ``_public_state`` and ``sync_wire_payload`` -> ``model_dump`` on MAIN),
+        so ``/health`` timed out and the watchdog restarted ``lop serve``.
+
+        WHY HANDING OUT THE OWNING OBJECT IS SAFE HERE, when ``read_field``
+        refuses anything but scalars: the one caller (the desktop snapshot,
+        ``server/utils/desktop_sessions._wire_state_of``) only SERIALIZES it, on
+        a worker thread, and never keeps or mutates it. Every write to this
+        store INSTALLS A NEW OBJECT (``_install``; ``_fold_live_event`` and the
+        other shallow arms copy the lists they change) and nothing assigns into
+        ``self._state`` in place, so the object returned here never changes after
+        it is read. Taken under
+        ``_publish_lock`` for the same reason :meth:`_join` takes its reference
+        there: one consistent object, never a field-by-field mix of two states.
+        """
+        with self._publish_lock:
+            return self._state
+
     def running_task_count(self) -> int:
         """Running, un-queued ``task`` children, without cloning the state.
 
@@ -6920,6 +6983,18 @@ class FrontendStateStore:
             for job in self._state.jobs
             if job.type == "task" and job.status == "running" and not job.queued
         )
+
+    def live_events_copy(self) -> list[Any]:
+        """A caller-owned copy of ``live_events`` alone, without the whole-state clone.
+
+        The sibling of :meth:`attention_copy`, for the same reason: the facade's
+        ``_finish_sync`` read ``state.live_events`` through ``state`` -- a deep
+        copy of every job and usage row -- once per bind, and on the desktop's
+        cold open of a 2,000-job session that clone was ~0.27 s on the serving
+        loop (PR #4012, QA round 1, Q1). The deep copy is the same one
+        ``_public_state`` gives this field, so a caller sees identical values.
+        """
+        return copy.deepcopy(list(self._state.live_events))
 
     def attention_copy(self) -> dict[str, Any]:
         """A caller-owned copy of ``attention`` alone, without the whole-state clone.
@@ -8071,14 +8146,24 @@ class FrontendStateStore:
         """
         return self._join(callback, internal=True)
 
+    def subscribe_updates(self, callback: Callable[[FrontendUpdate], None]) -> Callable[[], None]:
+        """``subscribe`` for a caller that never reads the joining snapshot.
+
+        Returns only the unsubscribe. The desktop bridge subscribes to relay
+        UPDATES and paints its first frame from its own off-loop snapshot
+        (``DesktopSessionBridge.snapshot``), so the caller-owned clone ``_join``
+        builds for ``sync`` was thrown away -- ~0.28 s on the serving loop for
+        a 2,000-job roster on every cold open (PR #4012, QA round 1, Q1).
+        Same admit step under ``_publish_lock``, so delivery is unchanged: every
+        update installed after registration, exactly once, in order.
+        """
+        _state_ref, unsubscribe = self._register(callback, internal=False)
+        return unsubscribe
+
     def _join(
         self, callback: Callable[[FrontendUpdate], None], *, internal: bool = False
     ) -> FrontendSubscription:
-        with self._publish_lock:
-            self._subscribers.append(callback)
-            if internal:
-                self._internal_subscribers.add(callback)
-            state_ref = self._state
+        state_ref, unsubscribe = self._register(callback, internal=internal)
         state = self._public_state(state_ref)
         sync = FrontendSync(
             epoch=state.epoch,
@@ -8086,6 +8171,17 @@ class FrontendStateStore:
             snapshot=state,
             live_cursor=state.history_cursor,
         )
+        return FrontendSubscription(sync=sync, unsubscribe=unsubscribe)
+
+    def _register(
+        self, callback: Callable[[FrontendUpdate], None], *, internal: bool
+    ) -> tuple[FrontendSessionState, Callable[[], None]]:
+        """The atomic admit: append ``callback`` and take the state reference together."""
+        with self._publish_lock:
+            self._subscribers.append(callback)
+            if internal:
+                self._internal_subscribers.add(callback)
+            state_ref = self._state
 
         def unsubscribe() -> None:
             with self._publish_lock:
@@ -8097,7 +8193,7 @@ class FrontendStateStore:
                     if internal:
                         self._internal_subscribers.discard(callback)
 
-        return FrontendSubscription(sync=sync, unsubscribe=unsubscribe)
+        return state_ref, unsubscribe
 
     @classmethod
     def from_session(cls, session: Any) -> "FrontendStateStore":

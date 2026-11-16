@@ -41,7 +41,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # The annotation is all that is needed — ``from __future__ import
     # annotations`` above makes every annotation in this file a string, and a
     # Protocol member's type is never evaluated at runtime.
-    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        FrontendUpdate,
+    )
 
     # Same shape, same reason: ``mark_goal_done`` returns the settled entry, and
     # naming the real type keeps the caller's ``entry`` from degrading to ``Any``
@@ -758,7 +762,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 154 public members and a POSITIVE
+    than stylistic. This protocol carries 156 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -848,7 +852,14 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     through it, so a facade without them could not revert a save at all, 154
     once the Team Bridge approval card needed ``bridge_latched`` and
     ``bridge_taint_latch`` declared rather than duck-probed — a rename would
-    otherwise have silently defaulted the latch read), so
+    otherwise have silently defaulted the latch read, 156 once the desktop
+    bridge needed ``frontend_state_reference`` and ``subscribe_frontend_updates``
+    — ``serve`` builds a large session's cold snapshot from the canonical
+    reference on a worker and relays updates without the joining clone; serve
+    still reads them through ``getattr``, so a rename there degrades silently to
+    the slow on-loop path, and what catches it is the census test in
+    ``test_viewer_protocol.py``, which reads those ``getattr`` literals and fails
+    on a probe of an undeclared name — not the declaration alone), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -2084,6 +2095,33 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Only the argument every session can honour is declared. The owner
         version also accepts ``display_window`` (it can capture a signed page
         of its own transcript); a host that needs that holds the owner type.
+        """
+        ...
+
+    # The desktop bridge's clone-free pair (PR #4012). ``serve`` probes both by
+    # ``getattr`` on the remote it bridges (``utils/desktop_sessions.py``) so
+    # the cold snapshot is built from the canonical REFERENCE on a worker thread
+    # and the bridge relays updates without the joining sync's whole-state
+    # clone on the serving loop. Viewer-only by construction: only a facade
+    # mirrors an owner's store across the socket and is bridged to a desktop
+    # client this way; an owner ``Session`` is served by its runtime instead.
+
+    def frontend_state_reference(self) -> tuple[FrontendStateStore, FrontendSessionState]:
+        """The store and its canonical state object, WITHOUT the clone.
+
+        The reference is shared, not copied: read it only where the store's
+        ``state_reference`` contract allows (a worker that never mutates it).
+        Raises like ``frontend_state`` when the store has not synchronized.
+        """
+        ...
+
+    def subscribe_frontend_updates(
+        self, handler: Callable[[FrontendUpdate], None]
+    ) -> Callable[[], None]:
+        """``subscribe_frontend`` without the joining snapshot; returns the unsubscribe.
+
+        For a subscriber that paints from its own snapshot and only relays
+        updates, so no whole-state clone is built on the serving loop for it.
         """
         ...
 
