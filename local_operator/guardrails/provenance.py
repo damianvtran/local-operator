@@ -4460,9 +4460,11 @@ class UnansweredAsk:
     text: str
     #: Why it is not consent, for the judge fact and the refusal text.
     label: str = ""
-    #: What a trusted operator answer approved without a judge
-    #: (``OperatorWords.approved``); a path it reaches is consented, not
-    #: blocked (:func:`ask_consents`). Empty for every non-answer.
+    #: What a trusted operator answer FIRMLY approved without a judge
+    #: (``OperatorWords.firm``: picks and exact-path answers, never a typed
+    #: whole-set approval, which only ``check._ask_approval`` may read); a
+    #: path it reaches is consented, not blocked (:func:`ask_consents`).
+    #: Empty for every non-answer.
     approved: str = ""
     #: ``created_at`` (ms) of the ask; :data:`ASK_ESCALATION_MAX_AGE_MS` bounds it.
     created_at: int = 0
@@ -4593,7 +4595,11 @@ def unanswered_asks(
                         if words is not None
                         else _not_consent_label(record, status)
                     ),
-                    approved=words.approved if words is not None else "",
+                    # FIRM only (review round 3 M2, PR #4098): a typed
+                    # whole-set approval is consent only where
+                    # ``check._ask_approval`` proves the target recoverable,
+                    # so ``ask_consents`` must never read it.
+                    approved=words.firm if words is not None else "",
                     answer=words,
                     created_at=int(record.get("created_at") or 0),
                     never_answered=status in _UNANSWERED_LABEL,

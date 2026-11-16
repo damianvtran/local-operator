@@ -548,7 +548,69 @@ def _ask_settles_git_root(path: str, session_id: str) -> str | None:
         return None
 
 
-def _typed_set_recoverable(path: str, session_id: str) -> str | None:
+def _typed_guarded(path: str, session_id: str, env: Mapping[str, str] | None) -> bool:
+    """Is ``path`` (as spelled, or resolved) inside the harness's own protected state?
+
+    WHY (review round 3 M1, PR #4098): the state root, config files, secrets
+    dirs, the creation ledger and the install layout must NEVER be removed on
+    the strength of a typed answer, whatever the ledger says about them: a
+    session that may write there could also claim any of it as its own. The
+    same roots the classifier protects (``classify._protected``) plus the
+    ledger's own state root (as ``ledger_record`` reads it), so the bars
+    cannot drift. Unresolvable roots read as guarded.
+    """
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import _protected, _under
+
+    try:
+        prot = _protected(dict(env) if env is not None else dict(os.environ), None, session_id)
+        roots = {
+            *prot.state_roots,
+            *prot.config_files,
+            *prot.secrets_dirs,
+            *prot.ledger_files,
+            *prot.install_roots,
+            str(prov.ledger_path().parent.parent),
+        }
+    except Exception:  # noqa: BLE001 — unknown roots: guard everything
+        logger.debug("typed whole-set guard roots unreadable", exc_info=True)
+        return True
+    spelled = {os.path.normpath(path), os.path.realpath(path)}
+    resolved = {os.path.realpath(r) for r in roots} | {os.path.normpath(r) for r in roots}
+    return any(_under(p, r) for p in spelled for r in resolved)
+
+
+def _typed_file_recoverable(real: str, session_id: str) -> str | None:
+    """A fact phrase when the ledger proves a non-directory is agent output, else ``None``.
+
+    WHY (review round 3 M1): "nothing below it to lose" was wrong for a file —
+    the file itself is lost (``rm -f ~/.local-operator/config.yaml`` settled
+    with no judge). A file is recoverable only as an agent's own output: the
+    creation ledger (same inode generation) records it as made by THIS
+    session or its family (``owned_record``, which also covers anything
+    inside a directory this session made), or exactly it as made by a
+    session that has ENDED (strict registry read, as ``finished_rig``). An
+    unrecorded file — ``~/thesis.docx`` — is unknown content: the judge.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    if prov.owned_record(real, session_id) is not None:
+        return "typed whole-set answer; file this session created (creation ledger)"
+    creators = set(prov.recorded_creators(real))
+    if not creators:
+        return None
+    try:
+        running = prov._running_session_ids()
+    except Exception:  # noqa: BLE001 — an unreadable registry is unknown, not ended
+        return None
+    if creators & running:
+        return None
+    return "typed whole-set answer; file an ended session created (creation ledger)"
+
+
+def _typed_set_recoverable(
+    path: str, session_id: str, env: Mapping[str, str] | None = None
+) -> str | None:
     """A fact phrase when a TYPED whole-set answer may settle ``path`` alone, else ``None``.
 
     WHY (review B2 on PR #4098, manager decision: defence in depth). Layer 1
@@ -568,7 +630,13 @@ def _typed_set_recoverable(path: str, session_id: str) -> str | None:
       unknown content: only the judge can tell a rig from the operator's own
       data), and a full bounded walk finds no repository, no linked
       worktree and no mount inside (``_nested_repository(worktrees=True)``);
-    - anything else (a file, a symlink entry): nothing below it to lose.
+    - a symlink entry: removing it loses only the link;
+    - anything else (a regular file, a fifo, ...): only a creation-ledger
+      row proving it is agent output (:func:`_typed_file_recoverable`).
+
+    Nothing under the harness's state root, config, secrets, ledger or
+    install layout ever settles here (:func:`_typed_guarded`, review round 3
+    M1), checked before every other rule.
 
     Damian's real cases keep settling: clean merged trees and agent-made rigs
     with no repositories inside. A PICKED option or an exact-path pick is not
@@ -577,9 +645,13 @@ def _typed_set_recoverable(path: str, session_id: str) -> str | None:
     from local_operator.guardrails import provenance as prov
 
     try:
-        if os.path.islink(path) or not os.path.isdir(path):
-            return "typed whole-set answer; not a directory"
+        if _typed_guarded(path, session_id, env):
+            return None
+        if os.path.islink(path):
+            return "typed whole-set answer; symlink entry (only the link goes)"
         real = os.path.realpath(path)
+        if not os.path.isdir(path):
+            return _typed_file_recoverable(real, session_id)
         if _git_bearing(path):
             if ".git" in Path(path).parts:
                 return None
@@ -599,6 +671,37 @@ def _typed_set_recoverable(path: str, session_id: str) -> str | None:
     except Exception:  # noqa: BLE001 — unreadable facts keep the judge
         logger.debug("typed whole-set recoverability check failed", exc_info=True)
         return None
+
+
+def _ask_approval(
+    answers: Sequence[Any],
+    path: str,
+    session_id: str,
+    *,
+    names: Callable[[str], bool],
+    env: Mapping[str, str] | None = None,
+) -> tuple[Any, str] | None:
+    """``(answer, fact)`` for the trusted answer whose approval consents to ``path``.
+
+    THE one reader of a typed whole-set approval (review round 3 M2, PR
+    #4098): the judge-skipping settlement (``DeleteCase._approving_ask``)
+    and the escalation subtraction (``_ask_block``) both decide here, so a
+    typed answer cannot count as consent on one path and not the other.
+
+    A firm approval (``OperatorWords.firm``: a picked label or an exact-path
+    answer) that ``names`` reaches wins, fact ``""``. A path reached only
+    through ``typed_set`` consents only when :func:`_typed_set_recoverable`
+    returns a fact; else ``None``, and the judge reads the operator's words.
+    """
+    answers = [w for w in answers if w is not None and w.approved]
+    for w in answers:
+        if names(w.firm):
+            return w, ""
+    typed = next((w for w in answers if w.typed_set and names(w.approved)), None)
+    if typed is None:
+        return None
+    fact = _typed_set_recoverable(path, session_id, env)
+    return (typed, fact) if fact is not None else None
 
 
 @dataclass(frozen=True)
@@ -710,15 +813,14 @@ class DeleteCase:
         goes with it (review B2); its fact is returned for the basis line.
         ``(None, "")`` = no deterministic approval: the judge decides.
         """
-        words = [w for w in self.operator.words if w.ask_id and w.approved]
-        for w in words:
-            if self._named_by(path, _Approved(w.firm)):
-                return w, ""
-        for w in words:
-            if self._named_by(path, _Approved(w.approved)):
-                fact = _typed_set_recoverable(path, self.session_id)
-                return (w, fact) if fact is not None else (None, "")
-        return None, ""
+        hit = _ask_approval(
+            [w for w in self.operator.words if w.ask_id],
+            path,
+            self.session_id,
+            names=lambda text: self._named_by(path, _Approved(text)),
+            env=self.env,
+        )
+        return hit if hit is not None else (None, "")
 
     def evidence_basis(self) -> str:
         """The basis when re-verified creation evidence ALONE covers every target.
@@ -930,6 +1032,8 @@ def _ask_block(
     cwd: str | None,
     stop: Sequence[str],
     escalating: bool,
+    session_id: str = "",
+    env: Mapping[str, str] | None = None,
 ) -> tuple[Any, bool] | None:
     """The non-consenting ask that blocks ``path``, and whether it refuses outright.
 
@@ -949,8 +1053,19 @@ def _ask_block(
     (``node_modules`` inside a worktree the operator said to delete). When the
     answer reaches the path only through an unpicked option, it goes to the
     judge with the fact, and the verifier refuses the citation (review R2-m6).
+
+    Consent is :func:`_ask_approval`, the same reader the judge-skipping
+    settlement uses (review round 3 M2): a path the answer reaches only
+    through a TYPED whole-set approval consents only when recoverable;
+    otherwise it goes to the judge with the operator's words — never the
+    ``ask_answer_covers`` shortcut, which would leave a LOW target (an
+    unrecorded ``~/thesis.docx``) at its base rank with no judge at all.
     """
     from local_operator.guardrails import provenance as prov
+
+    def consents(text: str) -> bool:
+        hit = prov.ask_reach(text, path, home=home, cwd=cwd, protected=stop)
+        return hit is not None and hit[0] in ("exact", "under")
 
     now = int(time.time() * 1000)
     judge_only = None
@@ -961,6 +1076,11 @@ def _ask_block(
         if reach is None:
             continue
         if prov.ask_consents(a, path, home=home, cwd=cwd, protected=stop):
+            continue  # firm approval only (``UnansweredAsk.approved``)
+        if a.answer is not None and a.answer.typed_set and consents(a.answer.approved):
+            if _ask_approval([a.answer], path, session_id, names=consents, env=env):
+                continue
+            judge_only = judge_only or (a, False)
             continue
         kind, named = reach
         answered = a.answer is not None and (
@@ -1087,7 +1207,14 @@ def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
                 for p in spelled
                 if (
                     found := _ask_block(
-                        blocking, p, home=home, cwd=ctx.cwd, stop=stop, escalating=True
+                        blocking,
+                        p,
+                        home=home,
+                        cwd=ctx.cwd,
+                        stop=stop,
+                        escalating=True,
+                        session_id=ctx.session_id,
+                        env=ctx.env,
                     )
                 )
                 is not None
@@ -1261,10 +1388,28 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         # HIGH (``escalate_asked_targets``). The FACT is not age-bounded: it
         # only informs a judge that runs anyway. The refusal is bounded, and
         # limited to destroying ops and non-broad reaches (review R1-M2).
-        fact_hit = _ask_block(lapsed, path, home=home, cwd=ctx.cwd, stop=stop, escalating=False)
+        fact_hit = _ask_block(
+            lapsed,
+            path,
+            home=home,
+            cwd=ctx.cwd,
+            stop=stop,
+            escalating=False,
+            session_id=ctx.session_id,
+            env=ctx.env,
+        )
         not_consent = _not_consent_fact(fact_hit[0]) if fact_hit is not None else ""
         refusing = (
-            _ask_block(lapsed, path, home=home, cwd=ctx.cwd, stop=stop, escalating=True)
+            _ask_block(
+                lapsed,
+                path,
+                home=home,
+                cwd=ctx.cwd,
+                stop=stop,
+                escalating=True,
+                session_id=ctx.session_id,
+                env=ctx.env,
+            )
             if not_consent and path in destroying
             else None
         )

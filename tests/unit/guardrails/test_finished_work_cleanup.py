@@ -996,3 +996,92 @@ async def test_q3_decline_refusal_names_the_declining_ask(home: Path, repo: Path
     assert outcome is not None and outcome.blocked
     first = outcome.text.strip().splitlines()[0]
     assert "a-2222" in first and "a-1111" not in first, first
+
+
+# -- review round 3 (PR #4098): typed whole-set answers on FILES and the escalation path ----
+
+#: The reviewer's misparse: layer 1 reads it as a whole-set yes, though the
+#: operator excluded something. Layer 2 must keep anything unrecoverable.
+MISS = "Remove all, and tell Aida hers is off limits"
+
+
+@pytest.mark.asyncio
+async def test_m1_typed_answer_never_settles_the_config_file(home: Path) -> None:
+    """M1 repro: ``rm -f ~/.local-operator/config.yaml`` was allowed with 0 judge calls."""
+    cfg = home / ".local-operator" / "config.yaml"
+    cfg.write_text("version: 1\n")
+    _ask_typed(home, "a-m101", f"Remove {cfg} and {home}/other.md?", MISS)
+    judge = _Judge()
+    outcome = await _check(home, f"rm -f {cfg}", judge, _operator("a-m101"))
+    assert outcome is not None and outcome.blocked, outcome and outcome.text
+    assert cfg.exists()
+
+
+@pytest.mark.parametrize("relative", [".local-operator/config.yaml", ".local-operator/notes"])
+def test_m1_state_root_never_settles_by_typed_answer_even_when_recorded(
+    home: Path, relative: str
+) -> None:
+    """The explicit guard: under the state root/config/secrets, no ledger row helps."""
+    from local_operator.guardrails.check import _typed_set_recoverable
+
+    target = home / relative
+    if relative.endswith("notes"):
+        target.mkdir()
+    else:
+        target.write_text("x\n")
+    _record(home, target, kind="mkdir", creator=ME)
+    assert _typed_set_recoverable(str(target), ME) is None
+
+
+@pytest.mark.asyncio
+async def test_m2_typed_answer_never_settles_an_unrecorded_file_on_escalation(
+    home: Path,
+) -> None:
+    """M2 repro: ``~/thesis.docx`` named by an ask, typed misparse -> allowed, no judge."""
+    thesis = home / "thesis.docx"
+    thesis.write_text("chapter 1\n")
+    _ask_typed(home, "a-m201", f"Remove {thesis} and {home}/other.md?", MISS)
+    judge = _Judge()
+    outcome = await _check(home, f"rm -f {thesis}", judge, _operator("a-m201"))
+    assert outcome is not None and outcome.blocked, outcome and outcome.text
+    assert judge.prompts and MISS in judge.prompts[-1]  # the judge read his words
+    assert thesis.exists()
+
+
+@pytest.mark.asyncio
+async def test_m2_picked_keep_them_still_blocks_the_file(home: Path) -> None:
+    thesis = home / "thesis.docx"
+    thesis.write_text("chapter 1\n")
+    _ask(home, "a-m202", f"Remove {thesis} and {home}/other.md?", "Keep them")
+    outcome = await _check(home, f"rm -f {thesis}", _Judge("ALLOW"), _operator("a-m202"))
+    assert outcome is not None and outcome.blocked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [MISS, ANSWER_1, ANSWER_2])
+async def test_m1_typed_answer_settles_a_file_an_ended_session_recorded(
+    home: Path, answer: str
+) -> None:
+    """A file the ledger records as an ENDED session's output is that session's leftover."""
+    out = home / "unique-results.csv"
+    out.write_text("a,b\n")
+    _record(home, out, kind="file", creator=DONE)
+    _ask_typed(home, "a-m103", f"Remove {out} and {home}/other.md?", answer)
+    judge = _Judge()
+    outcome = await _check(home, f"rm -f {out}", judge, _operator("a-m103"))
+    assert outcome is not None and not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_m1_typed_answer_never_settles_a_file_a_running_session_recorded(
+    home: Path,
+) -> None:
+    out = home / "live-results.csv"
+    out.write_text("a,b\n")
+    _record(home, out, kind="file", creator=LIVE)
+    _ask_typed(home, "a-m104", f"Remove {out} and {home}/other.md?", MISS)
+    judge = _Judge()
+    outcome = await _check(home, f"rm -f {out}", judge, _operator("a-m104"))
+    assert outcome is not None and outcome.blocked
+    assert judge.prompts and MISS in judge.prompts[-1]
