@@ -7448,6 +7448,27 @@ class ServingSessionHandle(SessionHandle):
         await self._session.reconcile_asks()
         return "answered"
 
+    def ask_minted_here(self, ask_id: str) -> bool:
+        """Whether this runtime process minted ``ask_id`` (F2 Part C).
+
+        Read by the runtime's answer stamp OFF the session loop, so it reads
+        only the session id and the process-local minted set
+        (``asks/surfaces``). It must NOT call ``Session.ask_queue()`` there:
+        that getter constructs the queue lazily, and racing the session loop's
+        own construction could leave two queues. A session double with no
+        ``session_id`` is asked through its queue instead; neither reads
+        ``True`` for an ask this process did not mint (fail-closed).
+        """
+        from local_operator.asks.surfaces import minted_here
+
+        session_id = getattr(self._session, "session_id", None)
+        if isinstance(session_id, str) and session_id:
+            return minted_here(session_id, ask_id)
+        getter = getattr(self._session, "ask_queue", None)
+        queue = getter() if callable(getter) else None
+        probe = getattr(queue, "minted_here", None)
+        return bool(probe(ask_id)) if callable(probe) else False
+
     @_on_session_loop
     async def ask_respond(
         self,
