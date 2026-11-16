@@ -100,6 +100,15 @@ if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
     from local_operator.providers.usage import QuotaHealth, UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
 
+from local_operator.providers.account_selection_trace import (
+    SelectionExplanation,
+    capture_selection,
+    record_demotion,
+    record_order,
+    selected_reason,
+    selection_active,
+)
+
 logger = logging.getLogger("local_operator.providers.auth_store")
 
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
@@ -966,6 +975,10 @@ class OAuthAccess:
     #: the row. A mesh borrower carries the OWNER's ref here; its own synthetic
     #: credential id must never be hashed into one.
     account_ref: str | None = None
+    # Owner-local audit observation, never routing/identity equality evidence.
+    selection: SelectionExplanation | None = dataclasses.field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
 
 
 def default_db_path() -> Path:
@@ -4910,7 +4923,7 @@ class AuthStore:
             self._tentative_credential_id(ordered, provider, session_id),
         }
         preferred = [r for r in ordered if r.id not in movable]
-        return preferred + [r for r in ordered if r.id in movable]
+        return record_demotion(preferred + [r for r in ordered if r.id in movable])
 
     def configure_account_selection_policy(self, policy: str) -> None:
         from local_operator.providers.account_policy import ACCOUNT_SELECTION_POLICIES
@@ -5142,14 +5155,22 @@ class AuthStore:
             provider_key = f"{provider}:any"
             start = self._round_robin.get(provider_key, 0) % len(rows)
             self._round_robin[provider_key] = start + 1
-            return rows[start:] + rows[:start]
+            return record_order(rows[start:] + rows[:start], "round_robin")
         eligible_ids = reset_ranked_ids(candidates, session_id, tie_order=tie_order)
         anchored_id = self._affinity_credential_id(rows, provider, session_id, model_id)
         if anchored_id is not None:
-            return [by_id[anchored_id], *(row for row in rows if row.id != anchored_id)]
+            return record_order(
+                [by_id[anchored_id], *(row for row in rows if row.id != anchored_id)],
+                "affinity",
+                fallback_basis="affinity_fallback",
+            )
         tentative = self._tentative_credential_id(rows, provider, session_id)
         if tentative is not None:
-            return [by_id[tentative], *(row for row in rows if row.id != tentative)]
+            return record_order(
+                [by_id[tentative], *(row for row in rows if row.id != tentative)],
+                "request_pick",
+                fallback_basis="request_fallback",
+            )
         # Outside the one-request boundary, a pointer is not successful
         # inference and cannot turn expiry into indefinite account binding.
         from local_operator.providers.account_affinity import current_selection_policy
@@ -5158,7 +5179,7 @@ class AuthStore:
             self, "_account_selection_policy", "reset-soonest"
         )
         if policy == "reset-soonest":
-            return [by_id[cid] for cid in eligible_ids]
+            return record_order([by_id[cid] for cid in eligible_ids], "reset_rank")
         # Eligibility precedes EVERY preference, including fair spread.
         # Preserve reserve as last resort rather than inventing a hard ban.
         ordered = []
@@ -5176,7 +5197,7 @@ class AuthStore:
                     else self._hash_order(sorted(group, key=lambda row: row.id), session_id or "")
                 )
             )
-        return ordered
+        return record_order(ordered, "headroom_rank" if policy == "headroom" else "fair_hash")
 
     def _reset_candidates(
         self, rows: list[StoredCredential], provider: str, model_id: str
@@ -5800,18 +5821,31 @@ class AuthStore:
             self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
         ):
             return None
-        key, row = await self._resolve(
-            provider,
-            session_id,
-            force_refresh=force_refresh,
-            read_only=read_only,
-            model_id=model_id,
-            exclude_keys=exclude_keys,
-            exclude_credential_ids=exclude_credential_ids,
-            persisted_kinds=persisted_kinds,
-        )
+        # An inherited ContextVar value is a shared object, not a deep copy.
+        # Give EACH getter a collector so nested provider lookups or parallel
+        # getters under one opt-in cannot overwrite the returning row's rank.
+        # Ordinary callers remain unobserved; no selector is invoked twice.
+        with capture_selection(enabled=selection_active()):
+            key, row = await self._resolve(
+                provider,
+                session_id,
+                force_refresh=force_refresh,
+                read_only=read_only,
+                model_id=model_id,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
+                persisted_kinds=persisted_kinds,
+            )
+            # Refresh may skip a candidate and re-read the successful row. Bind
+            # its creation stamp, not a mutable pointer or a fresh ranking read.
+            reason = selected_reason(row)
         if key is None:
             return None
+        selection = (
+            SelectionExplanation(credential_identity(row) if row is not None else None, reason)
+            if reason is not None
+            else None
+        )
         if row is not None and row.credential_type == "oauth":
             data = row.data
             return OAuthAccess(
@@ -5825,6 +5859,7 @@ class AuthStore:
                 raw=data,
                 account_created_at=row.created_at,
                 account_ref=self._account_ref_for_row(row),
+                selection=selection,
             )
         from local_operator.providers.local import LOCAL_PROVIDER_IDS
 
@@ -5840,6 +5875,7 @@ class AuthStore:
             api_endpoint=endpoint if isinstance(endpoint, str) else None,
             account_created_at=row.created_at if row is not None else 0,
             account_ref=self._account_ref_for_row(row) if row is not None else None,
+            selection=selection,
         )
 
     async def get_catalogue_access(

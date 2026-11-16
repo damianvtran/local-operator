@@ -1559,6 +1559,29 @@ before an incident review, not after. `identity rotate` replaces the device key
 and announces the new device id to peers (the old id is stale from then on): it
 is for a suspected key compromise, and the previous id is gone for good.
 
+**Why an account was lent.** The owner's existing `credential.grant` audit record
+adds `account_label` and `ranked_reason`; inspect them with `lop network log --json`
+(or the normal text/export views). The label is owner-local display metadata,
+possibly an email, or null if unknown. It is not a new account identifier and is
+never attached to the peer's grant. Existing `credential_id`, `policy`, `scope`,
+`sub`, and latency fields are unchanged.
+
+`ranked_reason` is a bounded machine scalar `basis:ordinal`, not prose or a
+candidate list. The ordinal is the **actual served row's position in the final
+eligible ordering within its winning credential tier**, not a global best across
+OAuth, login keys, environment and fallback tiers. Bases are `reset_rank`,
+`headroom_rank`, `fair_hash`, `round_robin`, `affinity`, `request_pick`, and
+`demotion_preference` (an observed change in the final stable partition).
+`affinity_fallback` / `request_fallback` mean an earlier preferred row was not
+served: the sibling is not falsely called the anchor/request pick. For example,
+`reset_rank:2` is the second row in that ordering, not a claim it was the earliest
+reset overall. Eligibility filtering precedes ranking, so a sole remaining row
+is rank 1 even if excluded siblings exist. A path that does not rank says
+`unranked`, with no fabricated ordinal. This is a snapshot of the existing pick,
+not a second selector invocation, usage fetch or new routing policy; coalesced
+requests keep their own outcome's explanation. It uses normal audit retention
+and batching, not a separate journal or new power-loss durability promise.
+
 **What is not implemented in this build**, so nothing above should be promised as
 existing:
 
