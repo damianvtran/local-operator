@@ -92,6 +92,83 @@ def test_a_fresh_scratchpad_subdirectory_is_accepted(layout: dict[str, Path]) ->
     )
 
 
+@pytest.mark.parametrize("subtree", ["browser", "networks", "sessions/live", "notifications.db"])
+def test_misset_scratchpad_cannot_bless_real_stores(layout: dict[str, Path], subtree: str) -> None:
+    pad = layout["real"] / subtree
+    reason = harness.refusal(
+        harness_flag=True, root=pad / "run", scratchpad=str(pad), real_config=layout["real"]
+    )
+    assert reason is not None and "inside the real config root" in reason
+
+
+def test_mesh_preflight_rejects_drive_member_before_signed_browser_dispatch() -> None:
+    from local_operator.network.types import (
+        MemberRecord,
+        NetworkRecord,
+        capabilities_for_role,
+    )
+    from scripts.e2e.node_browser_mesh import require_operator_member
+
+    record = NetworkRecord(network_id="n_synthetic", name="synthetic")
+    member = MemberRecord(
+        device_id="d_synthetic",
+        name="operator",
+        role="drive",
+        capabilities=sorted(capabilities_for_role("drive")),
+    )
+    record.members = [member]
+    with pytest.raises(RuntimeError, match="approve"):
+        require_operator_member(record, member.device_id)
+    member.capabilities = sorted(capabilities_for_role("admin"))
+    assert "approve" in require_operator_member(record, member.device_id)
+    record.members = []
+    with pytest.raises(RuntimeError, match="not an active mesh member"):
+        require_operator_member(record, member.device_id)
+
+
+def test_retirement_reads_dismissed_rows_from_the_real_notification_store(tmp_path: Path) -> None:
+    from local_operator.notifications.store import NotificationStore
+    from scripts.e2e.node_browser_mesh import MeshRig
+
+    root = tmp_path / "synthetic-operator"
+    rig = MeshRig(tmp_path / "node", root)
+    rig.node_id = "d_synthetic_node"
+    key = "remote-notice:d_synthetic_node:synthetic_sid:remote-ask:a-retired"
+    store = NotificationStore(root)
+    created = store.notify("synthetic_sid", title="Synthetic site card", key=key)
+    store.apply("dismiss", ids=[(created.item_id, created.revision)], via="remote-attention")
+    # This is the actual API distinction behind run2's three false FAIL rows:
+    # "all" still excludes dismissed records. Keep the failing old observation
+    # alongside the corrected real helper query, not a mock with invented rows.
+    old_items, _ = store.list_items(state="all", limit=100)
+    assert old_items == []
+    found = rig.notice("synthetic_sid", "a-retired")
+    assert found["count"] == 1
+    assert found["items"][0]["key"] == key
+    assert found["items"][0]["dismissed_at"]
+    assert found["items"][0]["dismissed_via"] == "remote-attention"
+
+
+def test_remote_notice_assertion_names_the_node_session_and_ask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.e2e.node_browser_mesh import MeshRig
+
+    rig = MeshRig(tmp_path / "node", tmp_path / "operator")
+    rig.node_id = "d_synthetic_node"
+    expected = "remote-notice:d_synthetic_node:synthetic_sid:remote-ask:a-synthetic"
+    items = [
+        {"session_id": "synthetic_sid", "key": expected},
+        {"session_id": "other_sid", "key": expected},
+        {"session_id": "synthetic_sid", "key": expected.replace("d_synthetic_node", "d_other")},
+    ]
+    monkeypatch.setattr(rig, "observe", lambda: items)
+    result = rig.notice("synthetic_sid", "a-synthetic")
+    assert result == {"expected_key": expected, "count": 1, "items": [items[0]]}
+    items.append(dict(items[0]))
+    assert rig.notice("synthetic_sid", "a-synthetic")["count"] == 2
+
+
 def test_a_visible_real_policy_aborts_the_inner_run(tmp_path: Path) -> None:
     policy = tmp_path / "local-operator.json"
     assert harness.namespace_refusal(policy) is None
@@ -376,6 +453,23 @@ def test_the_netns_refusal_needs_every_check() -> None:
     assert "operator role" in str(harness.netns_refusal(**ok, harness_netns=HARNESS_NETNS + 1))
 
 
+def test_operator_relay_root_cannot_be_a_symlink_to_live_config(
+    layout: dict[str, Path],
+    harness_netns: None,
+    no_mode_runs: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = layout["pad"] / "run"
+    root.mkdir()
+    (root / "operator").symlink_to(layout["real"], target_is_directory=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(layout["pad"]))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root / "wrong-key-operator"))
+    assert harness.main(_hidden_argv("--operator", root, root / "node", root / "ask.json")) == 2
+    assert "operator relay root" in capsys.readouterr().err
+    assert not (root / "ask.json").exists()
+
+
 def test_a_hidden_mode_passing_every_check_runs(
     layout: dict[str, Path],
     harness_netns: None,
@@ -540,6 +634,23 @@ def test_unsigned_refusal_needs_the_unsigned_decision_code() -> None:
     assert harness.unsigned_refused(actual)
     assert not harness.unsigned_refused({**actual, "code": "bridge_unreachable"})
     assert not harness.unsigned_refused({"ok": False, "error": "TimeoutError"})
+
+
+def test_member_withdrawal_requires_the_real_http_queue_refusal() -> None:
+    from local_operator.asks.render import refusal_copy
+
+    actual = {
+        "connected": True,
+        "ok": False,
+        "http_status": 409,
+        "surface": "desktop-http-remote-session",
+        "error": refusal_copy({"status": "withdrawn"}),
+    }
+    assert harness.withdrawn_refused(actual)
+    assert not harness.withdrawn_refused({**actual, "http_status": 503})
+    assert not harness.withdrawn_refused({**actual, "surface": "direct-attach"})
+    assert not harness.withdrawn_refused({**actual, "error": _rendered("refused_old_signer")})
+    assert not harness.withdrawn_refused({**actual, "error": "TimeoutError"})
 
 
 def test_expired_refusal_needs_the_expiry_sentence() -> None:
