@@ -1,0 +1,22 @@
+# audit.log — actual command output, auditor session e73cdb50a745, 2026-11-16
+# worktree HEAD: 80a55b20802ed13a7379fef90644f2345b63066a
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+rc=0
+$ sha256sum (inputs)
+8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea  local_operator/i18n/catalogues/en/cli.failures.json
+b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f  local_operator/i18n/catalogues/en/cli.failures.context.json
+7014901c52628bb6d158068e37d347b58b1d307d3636fc98275618c2894e5254  local_operator/i18n/catalogues/fr/cli.failures.json
+$ mechanical parity script (inline python)
+keys en 5 fr 5 added [] dropped []
+cli.failures.error_line placeholders_equal True ['message', 'prog'] plural_in_source False
+cli.failures.required placeholders_equal True ['names'] plural_in_source False
+cli.failures.invalid_choice placeholders_equal True ['argument', 'choices', 'value'] plural_in_source False
+cli.failures.invalid_command placeholders_equal True ['command', 'group'] plural_in_source False
+cli.failures.github_borrow_timeout placeholders_equal True ['owner', 'seconds'] plural_in_source False
+target 'L’identifiant GitHub de {owner} n’a pas été reçu dans les {seconds} s\u202f; relancer la commande'
+non-ascii [(1, '0x2019'), (33, '0x2019'), (40, '0xe9'), (42, '0xe9'), (46, '0xe7'), (69, '0x202f')]
+space_before_semicolon 0x202f space_number_unit 0x20
+contains GitHub True
+cells en 83 fr 92
+rc=0

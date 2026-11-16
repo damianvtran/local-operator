@@ -130,6 +130,7 @@ from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NET_PAIR_OPS,
+    ControlRequestTimeout,
     Granted,
     LinkContext,
     LinkPhase,
@@ -19236,7 +19237,12 @@ async def async_control_request(
 
 
 def control_request(
-    record: PeerRecord, op: str, *, timeout: float = 5.0, **fields: Any
+    record: PeerRecord,
+    op: str,
+    *,
+    timeout: float = 5.0,
+    report_timeout: bool = False,
+    **fields: Any,
 ) -> dict[str, Any] | None:
     """Dial the relay's loopback control socket and run one op.
 
@@ -19273,6 +19279,10 @@ def control_request(
     """
     try:
         sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
+    except TimeoutError as exc:
+        if report_timeout:
+            raise ControlRequestTimeout(timeout) from exc
+        return None
     except OSError:
         return None
     try:
@@ -19284,7 +19294,15 @@ def control_request(
         )
         sock.sendall(wire.encode_line({"key": record.control_key, "client": "cli"}))
         sock.sendall(wire.encode_line({"op": op, "req": 1, **fields}))
-        return reader.read_frame(timeout)
+        started = time.monotonic()
+        reply = reader.read_frame(timeout)
+        # ``read_frame`` answers ``None`` for BOTH a closed socket and an expired
+        # deadline. Only an opted-in caller asks which: a reply that is still
+        # missing once the whole (unchanged) deadline has elapsed is the timeout;
+        # an early close stays the plain no-answer it always was.
+        if reply is None and report_timeout and time.monotonic() - started >= timeout:
+            raise ControlRequestTimeout(timeout)
+        return reply
     except session_dial.FrameTooLarge as exc:
         raise MeshRefusal(
             "frame_too_large",
@@ -19300,10 +19318,12 @@ def control_request(
             f"({exc.reason}), so whether the op ran is unknown; the relay answered — it is "
             "not a relay that stayed silent.",
         ) from exc
-    except (OSError, ConnectionError, TimeoutError):
-        # NO ANSWER, which is the only condition ``None`` means. A ``LinkCryptoError``
-        # cannot reach here any more: the reader is ``dial.LineReader``, whose failures
-        # are the two named ones above.
+    except TimeoutError as exc:
+        if report_timeout:
+            raise ControlRequestTimeout(timeout) from exc
+        return None
+    except (OSError, ConnectionError):
+        # Non-timeout no-answer cases retain their existing result.
         return None
     finally:
         _close_quietly(sock)

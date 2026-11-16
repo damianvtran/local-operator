@@ -2,5 +2,6 @@
   "cli.failures.error_line": "{prog}: خرابی: {message}",
   "cli.failures.required": "درج ذیل آرگومنٹس درکار ہیں: {names}",
   "cli.failures.invalid_choice": "آرگومنٹ {argument}: غلط انتخاب: {value} ({choices} میں سے چنیں)",
-  "cli.failures.invalid_command": "{group} کی کمانڈ درست نہیں: {command}"
+  "cli.failures.invalid_command": "{group} کی کمانڈ درست نہیں: {command}",
+  "cli.failures.github_borrow_timeout": "{owner} سے GitHub کریڈینشل {seconds} سیکنڈ کے اندر موصول نہیں ہوئی؛ کمانڈ دوبارہ چلائیں"
 }

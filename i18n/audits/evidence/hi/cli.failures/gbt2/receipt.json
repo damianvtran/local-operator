@@ -1,0 +1,37 @@
+{
+  "locale": "hi",
+  "namespace": "cli.failures",
+  "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+  "translator": {
+    "agent": "i18n-translator (timeout-hi)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "fallback_model": "anthropic/claude-opus-5-5"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (audit2-hi)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-16",
+    "result": "passed",
+    "findings": 1,
+    "unresolved_blocker_major": 0,
+    "session": "de3fcb4a492b",
+    "actual_model_source": "harness model-switch notice in auditor session: started openai/gpt-6.1-sol, fallback anthropic/claude-opus-5-5 (HTTP 429) before judgement"
+  },
+  "status": "passed",
+  "note": "hi cli.failures (5 keys, new github_borrow_timeout) fresh independent audit gbt2 passed: 0 blocker/major, 1 minor (H1: नहीं पहुँचा/के भीतर more exact). Evidence: i18n/audits/evidence/hi/cli.failures/gbt2/record.json",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/hi/cli.failures/gbt2/record.json",
+      "sha256": "fa800dcdf1a0c9f17c008a3bb1b9bb9256bea60c83f4474a4332bc2af22870e6"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.failures/gbt2/report.md",
+      "sha256": "c0f2c24bd51e9dfe9b82a22b846d92c38138e125c454b821e92cf8774bfc566a"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.failures/gbt2/audit.log",
+      "sha256": "dc0df2f1efbbc17caa20b068b79e66d0dbf261094fe93d7a103813ddf4e88c01"
+    }
+  ]
+}

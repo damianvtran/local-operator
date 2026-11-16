@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "audit_id": "gbt2",
+  "round": 1,
+  "locale": "vi",
+  "namespace": "cli.failures",
+  "audit_date": "2026-11-16",
+  "key_count": 5,
+  "auditor": {
+    "agent": "i18n-auditor (audit2-vi)",
+    "session": "99e712d49b8f",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_agent": "i18n-translator (timeout-vi)",
+    "translator_session": null,
+    "translator_model": "openai/gpt-6.1-sol",
+    "translator_fallback_model": "anthropic/claude-opus-5-5",
+    "translator_date": "2026-11-16",
+    "translator_provenance_source": "reported by parent session",
+    "actual_model_source": "session started on openai/gpt-6.1-sol; provider HTTP 429 after the first (blocked, no-output) tool call triggered a host [model switch] to anthropic/claude-opus-5-5, which performed all substantive audit work",
+    "independence_note": "Did not translate these strings; no earlier audit records for this key consulted. Same model families as the translator; independence is by session. No native-speaker or rendered-frame certification."
+  },
+  "source_audit_revision": "80a55b20802ed13a7379fef90644f2345b63066a",
+  "base_revision": "f0689a27c",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.json",
+      "sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.context.json",
+      "sha256": "b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/cli.failures.json",
+      "sha256": "81539ebce3b4185aefeec8b9b6159e4df4aa62dde82e8577317b9f04e1f7da47"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/cli.failures/gbt2/report.md",
+      "sha256": "4f53d98956cbea7d0aeaf5611df5cb396933a9d460009d66fa9e088f606c18dd"
+    },
+    "findings.json": {
+      "path": "i18n/audits/evidence/vi/cli.failures/gbt2/findings.json",
+      "sha256": "212cf52a0f3c7ffc9df8c054734bee3a95d69d1c6290505f282e36b73d4bab6a"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/cli.failures/gbt2/audit.log",
+      "sha256": "38e70e0516d8cad110baef3b8a8de4e3be03995e04ff24bba4c95e6e75c11cf9"
+    },
+    "parity.py.txt": {
+      "path": "i18n/audits/evidence/vi/cli.failures/gbt2/parity.py.txt",
+      "sha256": "1ec672eda032b4b5df5640c0fdbcf3109faec34b8571982b30410a93083eac6e"
+    },
+    "ledger.log": {
+      "path": "i18n/audits/evidence/vi/cli.failures/gbt2/ledger.log",
+      "sha256": "230dabc209d7205b10f87355150f7b4d47ee7c69bbcbe9f67f78da1eccc56d27"
+    },
+    "receipt.json": {
+      "path": "i18n/audits/evidence/vi/cli.failures/gbt2/receipt.json",
+      "sha256": "4f20b75258318401fbd92704c2ba439a91af56988cff7e3d72f22b18bfa209f1"
+    }
+  },
+  "audit_notes_not_execution_log": "report.md and findings.json are auditor judgement; audit.log holds actual check.py (rc=0) and parity script output; ledger.log holds actual history-sha and append --dry-run output (rc=0). No --apply run.",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "gbt2-m1",
+      "gbt2-n1",
+      "gbt2-n2",
+      "gbt2-n3"
+    ]
+  },
+  "limits": "no rendered frame, no human native-speaker review, no runtime exercise"
+}

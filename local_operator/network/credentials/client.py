@@ -62,6 +62,7 @@ from local_operator.network.credentials.types import (
     NO_RETRY,
     PEER_BROKER_OP,
     QUOTA_REASON_POOL_DEPLETED,
+    BorrowTimeout,
     BrokerError,
     CredentialPlacementEntry,
     Grant,
@@ -70,6 +71,7 @@ from local_operator.network.credentials.types import (
     is_device_bound_provider,
     is_mcp_key,
 )
+from local_operator.network.types import ControlRequestTimeout
 
 logger = logging.getLogger("local_operator.network.credentials.client")
 
@@ -1168,6 +1170,7 @@ class MeshCredentialClient:
         # the owner then has nothing else to lend.
         refresh_hidden, refresh_held = self._refresh_hold_selection(key)
         excluded = sorted({int(row["credential_id"]) for row in resting} | set(refresh_hidden))
+        timed_out: float | None = None
         try:
             from local_operator.network import store
             from local_operator.network.relay import control_request
@@ -1205,6 +1208,7 @@ class MeshCredentialClient:
                     if key == "github"
                     else self.deadline_s
                 ),
+                report_timeout=key == "github",
                 # ``credential_key``, never ``key``: the control socket's FIRST frame
                 # already uses ``key`` for the control key (``control_request`` sends
                 # it), and a second field of the same name in the op frame is a
@@ -1216,6 +1220,11 @@ class MeshCredentialClient:
                 force_refresh=bool(force_refresh),
                 **extra,
             )
+        except ControlRequestTimeout as exc:
+            # Preserve the existing offline/held/policy path. Only its local cause
+            # is new; no wire code, timer, lease or token decision changes here.
+            reply = None
+            timed_out = exc.timeout_s
         except Exception as exc:  # noqa: BLE001 — a broker bug must not fail a turn
             return BrokerError(
                 code="internal",
@@ -1235,6 +1244,8 @@ class MeshCredentialClient:
             refresh_held=refresh_held,
         )
         if isinstance(outcome, BrokerError):
+            if timed_out is not None:
+                outcome = BorrowTimeout(**dataclasses.asdict(outcome), timeout_s=timed_out)
             return self._held_or(
                 outcome,
                 key,

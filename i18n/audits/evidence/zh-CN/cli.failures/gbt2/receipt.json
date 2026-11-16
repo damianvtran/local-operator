@@ -1,0 +1,25 @@
+{
+ "locale": "zh-CN",
+ "namespace": "cli.failures",
+ "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+ "translator": {
+  "agent": "i18n-translator (timeout-zh-CN)",
+  "model": "openai/gpt-6.1-sol",
+  "fallback": "anthropic/claude-opus-5-5 during the run (as reported by parent)",
+  "date": "2026-11-16"
+ },
+ "auditor": {
+  "agent": "audit2-zh (independent translation auditor subagent)",
+  "session": "1c05d7f1365f",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "primary openai/gpt-6.1-sol switched to anthropic/claude-opus-5-5 (HTTP 429) before catalogue reading",
+  "date": "2026-11-16",
+  "result": "passed",
+  "findings": 1,
+  "unresolved_blocker_major": 0,
+  "minor": 0,
+  "nit": 1
+ },
+ "status": "passed",
+ "note": "zh-CN cli.failures gbt2 2026-11-16 @80a55b208: 5/5 keys, independent pass (auditor fallback model claude-opus-5-5). 0 blocker/major, 1 NIT (N1 error_line colon). zh sha b66092ad. Record: i18n/audits/evidence/zh-CN/cli.failures/gbt2/record.json"
+}
