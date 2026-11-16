@@ -76,6 +76,7 @@ _PROVIDERS: tuple[str, ...] = (
     "local_operator.network.credentials.desktop_approval",
     "local_operator.operator.pair_op",
     "local_operator.profile_approval",
+    "local_operator.network.file_device_approval",
 )
 
 
