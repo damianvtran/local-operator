@@ -1523,3 +1523,61 @@ async def test_a_declined_carriage_past_the_late_window_is_refused_typed(
         is False
     )
     await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("word", ["approve", "deny"])
+async def test_the_card_refuses_while_a_desktop_batch_word_is_unconfirmed(
+    tmp_path: Path, isolated_config: Path, word: str
+) -> None:
+    """PR #4099 exit 7: one word per ask across the card and the approvals list.
+
+    A desktop approvals batch recorded ``approve`` for this ask and the hub has
+    not confirmed it (503). The card may neither contradict it nor repeat it:
+    ``decided_from_list``, refused BEFORE any ask-log write (the log is
+    byte-unchanged), the batch intent untouched and the admitted grant
+    withdrawn. Fails if the door's ledger check is removed: the card would
+    append ``answered`` and its consumption would find the batch row and send
+    nothing (round 2's R2-1 split).
+    """
+
+    from local_operator.team_bridge.decide_intents import (
+        BATCH_CONSUMPTION_PREFIX,
+        DecideIntents,
+    )
+
+    session = await _session(tmp_path)
+    ask_id = _enqueue_bridge_ask(session, issuance_key=f"iss-p1-batch-{word}")
+    intents = DecideIntents(tmp_path)
+    batch, created = intents.record(
+        session.bridge_runtime.key(),
+        ask_id=ask_id,
+        question_id=MESSAGE_ID,
+        word="approve",
+        generation="5",
+        consumption_row_id=f"{BATCH_CONSUMPTION_PREFIX}0123456789abcdef",
+    )
+    assert created
+    intents.mark_transient(batch.intent_id, "messaging_unavailable")
+    log = asks_store.session_dir(tmp_path, session.session_id) / asks_store.ASKS_LOG_NAME
+    before = log.read_bytes()
+    mint_bridge_decide_grant(
+        session_id=session.session_id, ask_id=ask_id, question_id=MESSAGE_ID, word=word
+    )
+
+    refused = session.bridge_decide(ask_id, MESSAGE_ID, word)
+
+    assert refused["ok"] is False, refused
+    assert refused["code"] == "decided_from_list"
+    assert refused["error"] == render_mod.BATCH_PENDING_COPY
+    assert log.read_bytes() == before
+    after = intents.get(batch.intent_id)
+    assert (after.state, after.word, after.consumption_row_id) == (
+        "pending",
+        "approve",
+        batch.consumption_row_id,
+    )
+    assert not bridge_decide_grant_seen(
+        session_id=session.session_id, ask_id=ask_id, question_id=MESSAGE_ID, word=word
+    )
+    await session.dispose()

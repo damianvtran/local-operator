@@ -465,6 +465,15 @@ BATCH_DECIDE_VIA = "team_bridge_batch_decide"
 #: The card's refusal for a request already decided from the approvals list.
 BATCH_DECIDED_COPY = "you already decided this request from the desktop's approvals list."
 
+#: The card's refusal while a desktop approvals-list decision for the request is
+#: recorded but not yet confirmed by the hub (``Session.bridge_decide``, code
+#: ``decided_from_list``; PR #4099 design (c)). One word per ask: the card may
+#: neither repeat nor contradict it, and the list is where it is sent again.
+BATCH_PENDING_COPY = (
+    "you already decided this request from the desktop's approvals list and it has "
+    "not been confirmed yet — select it there again to send it."
+)
+
 
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).

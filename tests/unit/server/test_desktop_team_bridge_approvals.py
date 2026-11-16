@@ -280,6 +280,17 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         thread.join(10)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_prompt_state():
+    """The challenge store and the prompt gate are process-global: reset per test."""
+
+    from local_operator.team_bridge import approvals
+
+    approvals.reset_for_tests()
+    yield
+    approvals.reset_for_tests()
+
+
 def _raise_ask(root: Path, message_id: str, *, session_id: str = COS, owner=None) -> str:
     """Queue a bridge ask exactly as the connector does (keyed-idempotent door)."""
 
@@ -782,6 +793,11 @@ def test_a_host_without_a_presence_key_cannot_batch_decide(world) -> None:
     )
     assert authorize.status_code == 409
     assert authorize.json()["detail"]["code"] == "operator_presence_required"
+    # QA round 2, Q3: one sentence for any count (this selection has ONE item).
+    assert authorize.json()["detail"]["message"] == (
+        "deciding from the approvals list needs operator authority with Touch ID on this "
+        "machine; answer the request on its card instead"
+    )
     decided = _decide(world, items, proof=proof)
     assert decided.status_code == 409
     assert decided.json()["detail"]["code"] == "operator_presence_required"
@@ -814,37 +830,332 @@ def test_drop_after_commit_is_settled_from_the_ledger_on_the_next_list(world) ->
     assert _intent_states(world.root) == {"bmsg_a": "sent"}
 
 
-def test_an_unsent_batch_is_re_sent_by_the_next_signed_batch(world) -> None:
-    ask_a = _raise_ask(world.root, "bmsg_a")
-    ask_b = _raise_ask(world.root, "bmsg_b")
+def _answer_on_card(root: Path, message_id: str, ask_id: str, word: str) -> None:
+    """The card's ask-log write (``AskQueue.respond``), as QA round 2 drove it."""
+
+    from local_operator.asks.queue import AskQueue
+    from tests.unit.asks.test_queue import FakeSession
+
+    queue = AskQueue(FakeSession(), config_dir=root, session_id=COS)
+    outcome = queue.respond(ask_id, {f"bridge-{message_id}": [word]}, by="operator")
+    assert outcome.get("ok") is True, outcome
+
+
+def _fail_one_batch(world, message_id: str, word: str) -> None:
+    """A signed batch the hub answers 503 without committing (S-7/R2-1 setup)."""
+
     world.hub.fail_batch = True
-    failed = _decide(world, _items(("bmsg_a", "approve")))
-    assert failed.status_code >= 500
-    assert _intent_states(world.root) == {"bmsg_a": "pending"}
-    assert world.hub.pending == ["bmsg_a", "bmsg_b", "bmsg_c"]  # nothing committed
-
-    # A list read never POSTs: the hub still has bmsg_a pending.
+    failed = _decide(world, _items((message_id, word)))
+    assert failed.status_code >= 500, failed.text
     world.hub.fail_batch = False
-    world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
-    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
+    assert _intent_states(world.root) == {message_id: "pending"}
 
-    # The next human-signed batch carries the leftover with its FROZEN word.
-    result = _decide(world, _items(("bmsg_b", "deny"))).json()["result"]
-    assert result["results"][0]["status"] == "denied"
-    assert result["recovered"] == [
+
+def _sent_pairs(world) -> list[tuple[str, str]]:
+    return [
+        (d["message_id"], d["decision"])
+        for call in _hub_calls(world.hub, "/v1/messaging/requests/decide")
+        for d in call["body"]["decisions"]
+    ]
+
+
+def test_an_unsent_batch_word_is_never_carried_by_another_batch(world) -> None:
+    """R2-1 / S-7 repro (exit 5): no implicit carriage outside the signed digest.
+
+    Round 2 re-sent the failed ``approve`` under a later batch signed over
+    ``bmsg_b`` alone, after the card had said deny. Now the card's deny is
+    refused (``decided_from_list``: the door consults exactly the row asserted
+    below; the door itself is pinned in ``test_tb02_p1_provenance``), the ask
+    stays open, and the unrelated batch carries nothing. Fails if the leftover
+    loop comes back: the hub would receive ``bmsg_a`` a second time, approved.
+    """
+
+    from local_operator.team_bridge import approvals
+    from local_operator.team_bridge.decide_intents import DecideIntents
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    _raise_ask(world.root, "bmsg_b")
+    _fail_one_batch(world, "bmsg_a", "approve")
+    unconfirmed = DecideIntents(world.root).unconfirmed_batch_intent(
+        approvals._owner_key(world.owner), ask_a, "bmsg_a"
+    )
+    assert unconfirmed is not None and unconfirmed.word == "approve"  # the card refuses
+    assert _ask_status(world.root, COS, ask_a) == "open"
+
+    response = _decide(world, _items(("bmsg_b", "deny")))
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert set(result) == {"results"}  # no ``recovered`` field any more
+    assert [r["message_id"] for r in result["results"]] == ["bmsg_b"]
+    last = _hub_calls(world.hub, "/v1/messaging/requests/decide")[-1]
+    assert [d["message_id"] for d in last["body"]["decisions"]] == ["bmsg_b"]
+    # The only POST that ever named bmsg_a is the one the hub refused with 503.
+    assert [mid for mid, _w in _sent_pairs(world)].count("bmsg_a") == 1
+    assert "bmsg_a" in world.hub.pending  # the hub never decided it
+    assert _ask_status(world.root, COS, ask_a) == "open"
+
+
+def test_a_conflicting_reselection_is_refused_at_authorize_before_the_prompt(
+    world, monkeypatch
+) -> None:
+    """Exit 6a (P5): the other word is refused before any mint or prompt."""
+
+    from local_operator.team_bridge import approvals
+
+    _raise_ask(world.root, "bmsg_a")
+    _fail_one_batch(world, "bmsg_a", "approve")
+    signed: list[str] = []
+    real = approvals.sign_selection
+    monkeypatch.setattr(
+        approvals, "sign_selection", lambda *a, **k: signed.append("x") or real(*a, **k)
+    )
+    refused = world.http.post(
+        AUTHORIZE,
+        json={"expected_account_id": ACC, "items": _items(("bmsg_a", "deny"))},
+        headers=AUTH,
+    )
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert detail["code"] == "earlier_decision_unconfirmed"
+    assert detail["details"] == {"items": [{"message_id": "bmsg_a", "unsent_decision": "approve"}]}
+    assert signed == []
+    assert approvals._challenges == {}
+
+
+def test_decide_refuses_a_conflicting_selection_whole_with_zero_hub_calls(world) -> None:
+    """Exit 6b: a VALID proof over a conflicting selection changes nothing."""
+
+    from local_operator.team_bridge import approvals
+
+    _raise_ask(world.root, "bmsg_a")
+    _raise_ask(world.root, "bmsg_b")
+    _fail_one_batch(world, "bmsg_a", "approve")
+    calls_before = len(_hub_calls(world.hub, "/v1/messaging/requests/decide"))
+    selection = [
+        approvals.Selection("bmsg_a", "deny"),
+        approvals.Selection("bmsg_b", "approve"),
+    ]
+    # A proof minted outside ``/authorize``'s check (the daemon's own primitives).
+    digest = approvals.selection_digest(account_id=ACC, tenant_id="tnt_1", selection=selection)
+    challenge = approvals.mint_challenge(account_id=ACC, tenant_id="tnt_1", digest=digest)
+    signature = approvals.sign_selection(world.root, challenge=challenge, digest=digest)
+    refused = _decide(
+        world,
+        _items(("bmsg_a", "deny"), ("bmsg_b", "approve")),
+        proof={"challenge": challenge, **signature},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "earlier_decision_unconfirmed"
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == calls_before
+    assert _intent_states(world.root) == {"bmsg_a": "pending"}  # no bmsg_b row written
+
+
+def test_a_list_row_carries_its_unsent_decision_and_only_that_word_sends(world) -> None:
+    """Exit 9: the row shows the frozen word; selecting it sends it, signed."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    _raise_ask(world.root, "bmsg_b")
+    _fail_one_batch(world, "bmsg_a", "approve")
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    rows = {r["message_id"]: r for r in listed.json()["result"]["items"]}
+    assert rows["bmsg_a"]["unsent_decision"] == "approve"
+    assert rows["bmsg_b"]["unsent_decision"] is None
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1  # the list never POSTs
+
+    resent = _decide(world, _items(("bmsg_a", "approve")))
+    assert resent.status_code == 200, resent.text
+    assert resent.json()["result"]["results"][0]["status"] == "approved"
+    assert _sent_pairs(world)[-1] == ("bmsg_a", "approved")
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
+    assert _intent_states(world.root) == {"bmsg_a": "sent"}
+
+
+def test_a_card_answer_between_record_and_post_is_not_sent(world, monkeypatch) -> None:
+    """Exit 8: the fold is re-checked after the intent is recorded, before the POST."""
+
+    from local_operator.team_bridge import decide_intents
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    real_record = decide_intents.DecideIntents.record
+
+    def record_then_card(self, *args, **kwargs):
+        recorded = real_record(self, *args, **kwargs)
+        _answer_on_card(world.root, "bmsg_a", ask_a, "deny")  # lands after the record
+        return recorded
+
+    monkeypatch.setattr(decide_intents.DecideIntents, "record", record_then_card)
+    response = _decide(world, _items(("bmsg_a", "approve")))
+    assert response.status_code == 200, response.text
+    (result,) = response.json()["result"]["results"]
+    assert result["sent"] is False and result["error"] == "answered_on_card"
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+    assert _intent_states(world.root) == {"bmsg_a": "refused"}
+    assert _ask_status(world.root, COS, ask_a) == "answered"
+
+
+# --- S-6 / S-8: the prompt gate and the published prompt state ---------------
+
+
+def _post_authorize(world, items, **extra):
+    return world.http.post(
+        AUTHORIZE, json={"expected_account_id": ACC, "items": items, **extra}, headers=AUTH
+    )
+
+
+def _dismissing_signer(monkeypatch) -> list[str]:
+    """``sign_challenge`` as a dismissed Touch ID sheet; returns the call log."""
+
+    from local_operator.operator import sign as sign_mod
+    from local_operator.operator.keychain import KeyBackendError
+
+    calls: list[str] = []
+
+    def dismissed(**kwargs):
+        calls.append(kwargs["challenge"])
+        raise KeyBackendError("the person dismissed the sheet")
+
+    monkeypatch.setattr(sign_mod, "sign_challenge", dismissed)
+    return calls
+
+
+def test_a_concurrent_authorize_is_refused_while_a_prompt_is_up(world, monkeypatch) -> None:
+    """Exit 1: single-flight — one signer call, one live challenge, a 429 for the rest."""
+
+    from local_operator.operator import sign as sign_mod
+    from local_operator.team_bridge import approvals
+
+    _raise_ask(world.root, "bmsg_a")
+    entered, release = threading.Event(), threading.Event()
+    calls: list[str] = []
+    real = sign_mod.sign_challenge
+
+    def blocking(**kwargs):
+        calls.append(kwargs["challenge"])
+        entered.set()
+        assert release.wait(10)
+        return real(**kwargs)
+
+    monkeypatch.setattr(sign_mod, "sign_challenge", blocking)
+    first: dict[str, Any] = {}
+    worker = threading.Thread(
+        target=lambda: first.update(r=_post_authorize(world, _items(("bmsg_a", "approve"))))
+    )
+    worker.start()
+    try:
+        assert entered.wait(10)
+        second = _post_authorize(world, _items(("bmsg_a", "approve")))
+        assert second.status_code == 429, second.text
+        assert second.json()["detail"]["code"] == "operator_prompt_in_flight"
+        assert len(calls) == 1
+        assert len(approvals._challenges) == 1
+    finally:
+        release.set()
+        worker.join(10)
+    assert first["r"].status_code == 200, first["r"].text
+
+
+def test_dismissed_prompts_never_exhaust_the_challenge_store(world, monkeypatch) -> None:
+    """Exit 2 (S-8): 65 dismissals, then a real prompt still mints and signs."""
+
+    from local_operator.operator import sign as sign_mod
+    from local_operator.team_bridge import approvals
+
+    _raise_ask(world.root, "bmsg_a")
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(approvals, "_gate_clock", lambda: clock.now)
+    real = sign_mod.sign_challenge
+    calls = _dismissing_signer(monkeypatch)
+    for _ in range(65):
+        refused = _post_authorize(world, _items(("bmsg_a", "approve")))
+        assert refused.json()["detail"]["code"] == "operator_signature_unavailable"
+        clock.now += approvals.PROMPT_COOLDOWN_MAX_S + 1  # step past the cool-down
+    assert len(calls) == 65
+    assert approvals._challenges == {}
+    monkeypatch.setattr(sign_mod, "sign_challenge", real)
+    assert _post_authorize(world, _items(("bmsg_a", "approve"))).status_code == 200
+
+
+def test_a_dismissal_starts_a_doubling_cooldown_that_success_resets(world, monkeypatch) -> None:
+    """Exit 3: 10 s, doubling to a 60 s cap; refused calls never reach the signer."""
+
+    from local_operator.operator import sign as sign_mod
+    from local_operator.team_bridge import approvals
+
+    _raise_ask(world.root, "bmsg_a")
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(approvals, "_gate_clock", lambda: clock.now)
+    real = sign_mod.sign_challenge
+    dismissed = _dismissing_signer(monkeypatch)
+    item = _items(("bmsg_a", "approve"))
+
+    assert _post_authorize(world, item).status_code == 409  # dismissal 1 at t=1000
+    clock.now += 5
+    early = _post_authorize(world, item)
+    assert early.status_code == 429, early.text
+    assert early.json()["detail"]["code"] == "operator_prompt_cooldown"
+    assert early.json()["detail"]["details"] == {"retry_after_s": 5}
+    assert early.headers["retry-after"] == "5"
+    assert len(dismissed) == 1  # the refused call never prompted
+    clock.now += 6  # +11 s: prompts again (and is dismissed: window doubles)
+    assert _post_authorize(world, item).json()["detail"]["code"] == "operator_signature_unavailable"
+    windows = []
+    for _ in range(4):
+        clock.now += 1
+        windows.append(
+            _post_authorize(world, item).json()["detail"]["details"]["retry_after_s"] + 1
+        )
+        clock.now += windows[-1]
+        assert _post_authorize(world, item).status_code == 409
+    assert windows == [20, 40, 60, 60]
+
+    monkeypatch.setattr(sign_mod, "sign_challenge", real)
+    clock.now += 61
+    assert _post_authorize(world, item).status_code == 200  # success resets
+    _dismissing_signer(monkeypatch)
+    assert _post_authorize(world, item).status_code == 409
+    clock.now += 11
+    assert _post_authorize(world, item).status_code == 409  # 10 s again, not 120
+
+
+def test_each_prompt_is_published_on_the_desktop_feed(world, monkeypatch) -> None:
+    """Exit 4: ``team_bridge_authorize`` frames name what the prompt is for."""
+
+    frames: list[dict[str, Any]] = []
+    world.http.app.state.desktop_feed = SimpleNamespace(
+        publish_team_bridge_authorize=lambda payload: frames.append(payload)
+    )
+    _raise_ask(world.root, "bmsg_a")
+    ok = _post_authorize(
+        world, _items(("bmsg_a", "approve"), ("bmsg_zz", "deny")), client_ref="c0ffee"
+    )
+    assert ok.status_code == 200, ok.text
+    assert [f["state"] for f in frames] == ["prompting", "signed"]
+    first = frames[0]
+    assert set(first) == {"authorize_id", "client_ref", "state", "items"}
+    assert first["client_ref"] == "c0ffee"
+    assert first["items"] == [
         {
             "message_id": "bmsg_a",
-            "decision": "approve",
-            "sent": True,
-            "ask_settled": True,
-            "status": "approved",
-        }
+            "word": "approve",
+            "sender": "priya@acme.example",
+            "excerpt": "approve the spend?",
+        },
+        {"message_id": "bmsg_zz", "word": "deny", "sender": None, "excerpt": None},
     ]
-    last = _hub_calls(world.hub, "/v1/messaging/requests/decide")[-1]
-    assert [d["message_id"] for d in last["body"]["decisions"]] == ["bmsg_b", "bmsg_a"]
-    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
-    assert _ask_status(world.root, COS, ask_b) == "withdrawn"
-    assert _intent_states(world.root) == {"bmsg_a": "sent", "bmsg_b": "sent"}
+    assert frames[1]["authorize_id"] == first["authorize_id"]
+    flat = json.dumps(frames)
+    for leaked in ("PRIVATE BODY", "PRIVATE RATIONALE", "body_hash", "rationale"):
+        assert leaked not in flat
+
+    _dismissing_signer(monkeypatch)
+    _post_authorize(world, _items(("bmsg_a", "approve")))
+    assert [f["state"] for f in frames[2:]] == ["prompting", "dismissed"]
+    assert frames[2]["client_ref"] is None
+
+    for bad in ("C0FFEE", "x" * 4, "a" * 33, "", 7):
+        refused = _post_authorize(world, _items(("bmsg_a", "approve")), client_ref=bad)
+        assert refused.status_code == 422, (bad, refused.text)
+    assert len(frames) == 4  # a malformed body publishes nothing
 
 
 def test_a_request_decided_elsewhere_is_settled_by_the_list(world) -> None:
