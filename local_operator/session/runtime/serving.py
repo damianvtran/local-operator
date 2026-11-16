@@ -1157,10 +1157,6 @@ class ServingSessionHandle(SessionHandle):
         # ``config.yml`` change (:meth:`follow_config`) move it without
         # reconstructing the handle.
         self._auto_approve = auto_approve
-        #: Whether the conversation's live ``auto`` was chosen while it already
-        #: held Team Bridge content (team-bridge-egress.md: "Grants"). Only such a grant keeps
-        #: covering calls in a latched session; persisted beside the record.
-        self._approve_granted_while_latched = False
         #: The FILE's ``tool_approval_mode`` as last known, independent of the
         #: live gate (which an explicit conversation choice may override). The
         #: pending-gate projection publishes it beside the mode so a viewer can
@@ -1602,22 +1598,22 @@ class ServingSessionHandle(SessionHandle):
             # account profile save is the exception: auto-approve is not
             # consent to rewriting account-wide agents (``never_auto_approved``).
             #
-            # Team Bridge (team-bridge-egress.md: "Grants"): a SESSION auto granted before the
-            # conversation latched no longer covers calls after it -- the call
-            # falls through to the card. Global auto is untouched: closed for
-            # ask mode; accepted risk in auto/yolo. The session's own
-            # latch is consulted too, so a card whose raiser passed no flag (a
+            # Team Bridge (team-bridge-egress.md: "Grants"): an auto grant
+            # covers a latched session whichever scope it came from -- a
+            # conversation's own ``auto`` exactly as the machine default
+            # (#3928). The latch's protection lives elsewhere and is unchanged:
+            # the read-tier egress gate, ``bridge_ack`` on a routed loosening
+            # (``_approvals_slash``) and the latched card. The session's own latch is consulted
+            # for the CARD below, so a card whose raiser passed no flag (a
             # profile save, an ``@path`` read) is still person-only.
             from local_operator.harness.bridge_egress import (
                 bridge_card_notice,
                 session_grant_covers,
             )
 
-            latched = bool(bridge_latched) or self._session_bridge_latched()
-            if session_grant_covers(
-                self._approval_grant(), title=tool_name, bridge_latched=latched
-            ):
+            if session_grant_covers(self._approval_grant(), title=tool_name):
                 return True
+            latched = bool(bridge_latched) or self._session_bridge_latched()
             if self._gates_closed_for_exit:
                 # Leaving on a signal: nobody will be asked before the exit, and
                 # a card parked now would hold the drain open (see
@@ -1812,7 +1808,9 @@ class ServingSessionHandle(SessionHandle):
         ``/approvals``, a desktop "Set auto", a record read back on resume);
         ``global`` only when the gate follows the machine default or a run pin.
         Derived from the same attributes the mode is, so no assignment line
-        can move one without the other.
+        can move one without the other. Since #3928 the latch no longer reads
+        the scope (both scopes cover a latched session alike); it stays on the
+        grant as provenance.
         """
         from local_operator.harness.bridge_egress import ApprovalGrant
 
@@ -1822,31 +1820,23 @@ class ServingSessionHandle(SessionHandle):
         return ApprovalGrant(
             auto=bool(getattr(self, "_auto_approve", False)),
             scope=scope,
-            granted_while_latched=bool(getattr(self, "_approve_granted_while_latched", False)),
-        )
-
-    def _bridge_grant_suspended(self) -> bool:
-        """Whether a live session auto is void because the session latched."""
-        from local_operator.harness.bridge_egress import session_grant_covers
-
-        grant = self._approval_grant()
-        if not grant.auto or grant.scope != "session":
-            return False
-        return not session_grant_covers(
-            grant, title="", bridge_latched=self._session_bridge_latched()
         )
 
     def _watch_bridge_latch(self) -> None:
-        """Announce, once, that a pre-latch session auto stopped covering calls."""
+        """Re-publish parked cards as latched cards the moment the session latches.
+
+        Until #3928 this also announced that a pre-latch SESSION auto had
+        stopped covering calls. No grant is suspended by the latch any more
+        (a session auto is honoured exactly as the machine default), so there
+        is nothing to announce: a notice saying "paused" would contradict the
+        gate, the band and ``/approvals``.
+        """
         latch = getattr(self._session, "bridge_taint_latch", None)
         if latch is None:
             return
 
         def announce() -> None:
-            from local_operator.harness.bridge_egress import (
-                bridge_card_notice,
-                grant_suspended_notice,
-            )
+            from local_operator.harness.bridge_egress import bridge_card_notice
 
             # Cards parked while the session was clean are re-published as
             # latched cards (security r7 lead on #3796): every attached viewer,
@@ -1859,10 +1849,7 @@ class ServingSessionHandle(SessionHandle):
                 relatched = self._fold.latch_pending(bridge_card_notice(latch))
             except Exception:  # noqa: BLE001 - the gate still enforces; logged at warning
                 logger.warning("could not re-publish parked cards as latched", exc_info=True)
-            if self._bridge_grant_suspended():
-                self._emit_notice(grant_suspended_notice(latch), "warning", headline="Approvals")
-                self._notify()
-            elif relatched:
+            if relatched:
                 self._notify()
 
         latch.on_latched.append(announce)
@@ -2035,13 +2022,8 @@ class ServingSessionHandle(SessionHandle):
             return
         self._explicit_approvals_mode = override
         self._auto_approve = override == "auto"
-        # Absent/unreadable reads False: a pre-latch (or pre-S1) record is void
-        # once the session latches (team-bridge-egress.md: "Grants").
-        from local_operator.session.approval_policy import read_granted_while_latched
-
-        self._approve_granted_while_latched = override == "auto" and read_granted_while_latched(
-            directory
-        )
+        # A legacy ``granted_while_latched`` key in the record is ignored: the
+        # latch no longer distinguishes a pre- from a post-latch grant (#3928).
 
     def follow_config(self, watcher: Any) -> None:
         """Subscribe the gate to ``tool_approval_mode`` changes on ``watcher``.
@@ -8504,12 +8486,8 @@ class ServingSessionHandle(SessionHandle):
                     # session-ask card over a global-auto file would otherwise
                     # have to invent "global Ask" (the U4 defect).
                     payload["approval_global_mode"] = global_mode
-                    if self._bridge_grant_suspended():
-                        # The EFFECTIVE mode (team-bridge-egress.md: "Grants"): the conversation's
-                        # auto predates its Team Bridge content, so this gate
-                        # asks. Claiming auto here would contradict the card.
-                        payload["approval_mode"] = "ask"
-                        payload["approval_suspended"] = "bridge"
+                    # No ``approval_suspended`` fold any more (#3928): the latch
+                    # suspends no grant, so the resolved mode IS the effect.
                 else:
                     payload["approval_mode"] = ""
                     payload["approval_provenance"] = ""
@@ -11695,24 +11673,27 @@ class ServingSessionHandle(SessionHandle):
             # rendered the latched sentence, from the picker) or a typed command
             # the TUI marks may make a post-latch session grant. Same receipt
             # shape as the unattributed-loosening refusal.
+            if self._auto_approve:
+                # ALREADY AUTO IS NOT A LOOSENING (design r1 D2 on #4080). A
+                # session already in auto -- its own choice or the machine
+                # default -- loses nothing to this request, so refusing it told
+                # the operator "auto is still off" while every tool ran without
+                # asking. Answer with the truthful report instead, and write
+                # nothing: recording a session override here would pin a
+                # machine-default auto onto this conversation, a change the
+                # unacknowledged frame may not make. ask->auto still refuses.
+                return self._already_auto_receipt(session, SlashResult, may_loosen)
             refusal = self._bridge_ack_refusal(SlashResult, latched=latched)
             if refusal is not None:
                 return refusal
         self._auto_approve = wanted_auto
-        # Stamped only for a grant made while ALREADY latched: that is the
-        # deliberate post-latch loosening, which keeps covering calls and
-        # survives resume. Every other grant is void once the session latches.
-        self._approve_granted_while_latched = bool(wanted_auto and latched)
         # A human typed the mode in this session, so the FILE no longer moves
         # this gate in either direction (see :meth:`_on_config_change`). The MODE
         # is recorded, not merely the fact of a choice (review round 2, R6) —
         # and since 2026-10-23 it is recorded with the CONVERSATION too, so the
         # choice survives a resume instead of living in this handle's memory.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
-        saved_failure = self._persist_approval_override(
-            "auto" if wanted_auto else "ask",
-            granted_while_latched=self._approve_granted_while_latched,
-        )
+        saved_failure = self._persist_approval_override("auto" if wanted_auto else "ask")
         self._notify()
         # "(this session)" on the LIVE half, matching the app's own receipt word
         # for word (UX round 1, U5): the two hosts answer the same gesture, and
@@ -11761,7 +11742,6 @@ class ServingSessionHandle(SessionHandle):
         mode: str | None,
         *,
         had_record: bool = True,
-        granted_while_latched: bool = False,
     ) -> str | None:
         """Record (or clear) this conversation's choice; return a failure clause.
 
@@ -11796,7 +11776,7 @@ class ServingSessionHandle(SessionHandle):
         if directory is None:
             return None
         try:
-            _write_approval_override(directory, mode, granted_while_latched=granted_while_latched)
+            _write_approval_override(directory, mode)
         except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
             logger.warning(
                 "could not save %s beside the transcript",
@@ -11815,6 +11795,20 @@ class ServingSessionHandle(SessionHandle):
                 f"({error.__class__.__name__})"
             )
         return None
+
+    def _already_auto_receipt(self, session: Any, SlashResult: Any, may_loosen: bool | None) -> Any:
+        """The receipt for an unacknowledged ``auto`` while auto is in effect.
+
+        Reuses the bare ``/approvals`` report verbatim, so no new copy exists
+        to translate and the sentence names the mode's real provenance (this
+        session vs config.yml) instead of claiming a session switch. ``data``
+        carries the same ``ok``/``approval_mode`` keys every approvals receipt
+        sends, because the card keys on them, never on the sentence.
+        """
+        report = self._approvals_slash(session, "", SlashResult, may_loosen=may_loosen)
+        return report.model_copy(
+            update={"data": {**report.data, "approval_mode": "auto", "ok": True}}
+        )
 
     def _bridge_ack_refusal(self, SlashResult: Any, *, latched: bool | None = None) -> Any:
         """The receipt refusing an unacknowledged loosening while latched, or ``None``.
