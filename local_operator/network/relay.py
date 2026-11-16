@@ -15992,7 +15992,8 @@ class RelayServer:
         # per member probed.
         from local_operator.network import readiness as readiness_mod
 
-        readiness_mod.mark_out_of_scope(rows, addresses.local_ipv4_addresses())
+        own_addresses = addresses.local_ipv4_addresses()
+        readiness_mod.mark_out_of_scope(rows, own_addresses)
         # INFORMATIONAL, NOT FAILED (drill finding, 2026-10-03): the same
         # semantics ``ready`` applies to its own rows — ONE home,
         # ``readiness.mark_informational`` — because doctor's reader met the same
@@ -16001,7 +16002,19 @@ class RelayServer:
         # another address. The flip touches reachability rows only; the
         # credential-repair rows beside them stay exactly as they are.
         readiness_mod.mark_informational(rows)
-        if probe.sock is None and probe.attempts and not any(a.connected for a in probe.attempts):
+        # A LIVE LINK VOUCHES (live-link false red, 2026-11-16): the same rule
+        # ``ready`` applies, one home (``readiness.mark_covered_by_link``). A peer
+        # that dials in while its advertised address is dead is up; neither the
+        # silent address nor the "restart its relay / open the port" row below is
+        # a fault while its link is live. Without one, both stay exactly as before.
+        link_live = self._link_for(member.device_id) is not None
+        readiness_mod.mark_covered_by_link(rows, link_live=link_live, own_addresses=own_addresses)
+        if (
+            not link_live
+            and probe.sock is None
+            and probe.attempts
+            and not any(a.connected for a in probe.attempts)
+        ):
             # EVERY ADDRESS WENT UNANSWERED (2026-10-21): the node's public IP had
             # moved after an EC2 stop/start, this device kept dialling the stored
             # one, and the row could only heal on a completed handshake — which the

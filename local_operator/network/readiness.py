@@ -6163,6 +6163,11 @@ def informational_clause(row: Mapping[str, Any]) -> str:
         return ""
     usable = ", ".join(str(item) for item in observed.get("usable_elsewhere") or ())
     note = _private_address_note(str(row.get("endpoint") or ""))
+    if not usable and observed.get("covered_by_link"):
+        # The link vouches without naming an address (an inbound link records
+        # the dialer's source socket, which is not one the peer can be pointed
+        # at -- R2-1/Q-3), so the clause names the link, never an address.
+        return f"not remote-usable from this device{note}; the peer is reachable over its live link"
     return f"not remote-usable from this device{note}; the peer is reachable at {usable}"
 
 
@@ -6214,6 +6219,54 @@ def mark_informational(rows: list[dict[str, Any]]) -> None:
         observed = row.setdefault("observed", {})
         observed["informational"] = True
         observed["usable_elsewhere"] = list(usable)
+        if "remedies" in row:
+            row["remedies"] = []
+
+
+def mark_covered_by_link(
+    rows: list[dict[str, Any]], *, link_live: bool, own_addresses: Sequence[str]
+) -> None:
+    """A LIVE LINK vouches for a peer whose declared address gave no answer.
+
+    WHY (live-link false red, 2026-11-16): a peer that DIALS IN while the direct
+    address it advertises is dead -- a NAT'd laptop, a node advertising its
+    VPC-private address -- is demonstrably up: its link is live and carries
+    traffic. Both producers still read the silent address as a fault and named a
+    firewall or a relay restart, so a working pair reported red.
+    :func:`mark_informational` could not help: it needs an IDENTIFIED address to
+    vouch, and an inbound link has none to give.
+
+    CONSTRAINTS, each the honest negative of its neighbour:
+    * only with a live link (``server._link_for``: never one that has begun
+      closing); with none every row keeps its fault and its exact remedy;
+    * only the NO-ANSWER family (:func:`_no_answer_row`): a REFUSAL proves
+      something answered at that address and refused, so the address really is
+      wrong -- that row keeps failing with its existing "its link is live" advice;
+    * a row another rule already claimed (scope, informational) is left alone;
+    * a PRIVATE address on a /16 this device itself holds keeps its fault (the
+      F9 counter-probe): from the same LAN that address is askable, so silence
+      there while the peer is up IS a path fault worth naming, link or not;
+    * reporting only: no dial, backoff or wire change.
+    The flipped row keeps its observed facts and gains ``informational`` plus
+    ``covered_by_link``; its remedies are cleared, because action items under an
+    ok row misread, and :func:`informational_clause` names the link instead.
+    """
+    if not link_live:
+        return
+    for row in rows:
+        if row["ok"] or str(row.get("check") or "") != "reachability":
+            continue
+        endpoint = str(row.get("endpoint") or "")
+        if not endpoint or not _no_answer_row(row):
+            continue
+        host = endpoint.rpartition(":")[0] or endpoint
+        if _private_block(host) is not None and not _off_network(host, own_addresses):
+            continue
+        row["ok"] = True
+        observed = row.setdefault("observed", {})
+        observed["informational"] = True
+        observed["covered_by_link"] = True
+        observed.setdefault("usable_elsewhere", [])
         if "remedies" in row:
             row["remedies"] = []
 
@@ -6590,6 +6643,8 @@ def _reachability_rows(
     # askable and did not lead; the two rules must not both claim a row).
     mark_out_of_scope(rows, own_addresses)
     mark_informational(rows)
+    # LAST: an address another answer already vouched for keeps that reading.
+    mark_covered_by_link(rows, link_live=link is not None, own_addresses=own_addresses)
     return rows, link
 
 
