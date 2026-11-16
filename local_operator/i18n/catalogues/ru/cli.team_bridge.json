@@ -62,5 +62,5 @@
   "cli.team_bridge.status.running_none": "Работающий приёмник: записей нет",
   "cli.team_bridge.status.running_exited": "Работающий приёмник: нет — последний записанный (pid {pid}, версия {version}) завершился",
   "cli.team_bridge.status.running_detail": "Работающая сборка: {generation}; принимаемые версии согласия: {versions}",
-  "cli.team_bridge.status.restart_needed": "Нужен перезапуск: работающий приёмник — не установленная версия ({installed}); новый код он подхватит только после перезапуска"
+  "cli.team_bridge.status.restart_needed": "Нужен перезапуск: работающий приёмник не соответствует установленной версии ({installed}); новый код он подхватит только после перезапуска"
 }

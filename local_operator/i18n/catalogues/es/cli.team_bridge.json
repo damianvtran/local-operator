@@ -61,6 +61,6 @@
   "cli.team_bridge.status.running": "Receptor en ejecución: pid {pid}, versión {version}, iniciado {started}",
   "cli.team_bridge.status.running_none": "Receptor en ejecución: ninguno registrado",
   "cli.team_bridge.status.running_exited": "Receptor en ejecución: ninguno — el último registrado (pid {pid}, versión {version}) ya terminó",
-  "cli.team_bridge.status.running_detail": "Build en ejecución: {generation}; versiones de consentimiento que acepta: {versions}",
+  "cli.team_bridge.status.running_detail": "Compilación en ejecución: {generation}; versiones de consentimiento que acepta: {versions}",
   "cli.team_bridge.status.restart_needed": "Hace falta reiniciar: el receptor en ejecución no es la versión instalada ({installed}); solo usará el código nuevo cuando se reinicie"
 }

@@ -62,5 +62,5 @@
   "cli.team_bridge.status.running_none": "چلتا ہوا وصول کنندہ: کوئی ریکارڈ نہیں",
   "cli.team_bridge.status.running_exited": "چلتا ہوا وصول کنندہ: کوئی نہیں — آخری ریکارڈ شدہ وصول کنندہ (pid {pid}، ورژن {version}) بند ہو چکا ہے",
   "cli.team_bridge.status.running_detail": "چلتا ہوا بلڈ: {generation}؛ قبول کیے جانے والے رضامندی ورژن: {versions}",
-  "cli.team_bridge.status.restart_needed": "ری اسٹارٹ ضروری ہے: چلتا ہوا وصول کنندہ انسٹال شدہ ورژن ({installed}) نہیں ہے؛ یہ نیا کوڈ صرف ری اسٹارٹ کے بعد استعمال کرے گا"
+  "cli.team_bridge.status.restart_needed": "ری اسٹارٹ ضروری ہے: چلتا ہوا وصول کنندہ نصب شدہ ورژن ({installed}) نہیں ہے؛ یہ نیا کوڈ صرف ری اسٹارٹ کے بعد استعمال کرے گا"
 }

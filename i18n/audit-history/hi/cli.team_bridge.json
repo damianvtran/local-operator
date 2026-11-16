@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "cli.team_bridge",
-  "history_sha256": "bf4b2a4aab8218f519da4d7d6fb29bb0e4ff5c7a28ee0003067d11b609593344",
+  "history_sha256": "226ea8b21608d370001cf9375c517fd197a47c2da1118ca22029785adf1a465f",
   "entries": [
     {
       "locale": "hi",
@@ -35,6 +35,26 @@
       "evidence": "i18n/audits/evidence/hi/cli.team_bridge/rc1/record.json",
       "round": "rc1",
       "keys_audited": 1
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4e0c44eef58370be9a5f7ac9297cc5fad449b637626442750a4c19a4d60b63b5",
+      "translator": {
+        "agent": "coder — PR #4096 translator (radientdev job cc8d17acb1bf)",
+        "model": "unrecorded — the translator job's serving model is not available to this auditor; not inferred",
+        "date": "2026-11-15"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev task, session 45a2df262985), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit of PR #4096 (receiver status running-build lines) at head 1482f62f8a37 + auditor fixes, en source_sha256 4e0c44eef58370be9a5f7ac9297cc5fad449b637626442750a4c19a4d60b63b5. Scope: 5 added keys status.running, status.running_none, status.running_exited, status.running_detail, status.restart_needed versus origin/main; the other 59 keys unchanged since the PR #3444 passed row and not re-audited. Checked against en context notes, glossary and the locale style guide: names the process actually running as recorded by itself; none recorded vs recorded-but-exited kept distinct; build = installed copy the process started from; consent identifiers and versions verbatim; restart required to pick up installed code. Mechanical: key parity 64/64; placeholder sets identical to en ({pid},{version},{started},{generation},{versions},{installed}); no plural/select in new keys; NFC; no Cf/bidi controls. hi: H1 MINOR fixed by auditor: 'वर्ज़न' -> 'संस्करण' in 4 keys (catalogue uses संस्करण 24x, वर्ज़न nowhere else). रिसीवर/बिल्ड/सहमति/रीस्टार्ट consistent with namespace. Unresolved blocker/major: 0. Single independent semantic audit; not a second high-visibility audit."
     }
   ]
 }

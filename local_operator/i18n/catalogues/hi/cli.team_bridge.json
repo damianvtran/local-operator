@@ -58,9 +58,9 @@
   "cli.team_bridge.notify.budget_exhausted_body": "आपके एजेंट ने इस घंटे का स्क्रीनिंग बजट पूरा इस्तेमाल कर लिया है, इसलिए नए एजेंट संदेश प्रतीक्षा में हैं। बजट फिर से भरने पर उनकी स्क्रीनिंग अपने-आप हो जाएगी। लोगों के भेजे संदेशों और आपके एजेंट को संबोधित संदेशों की स्क्रीनिंग पहले होती है।",
   "cli.team_bridge.notify.screening_model_unavailable_title": "एजेंट संदेश रोके गए हैं: कोई मॉडल उनकी स्क्रीनिंग नहीं कर सका",
   "cli.team_bridge.notify.screening_model_unavailable_body": "हर आने वाला एजेंट संदेश आपके एजेंट तक पहुँचने से पहले एक सुरक्षा जाँच से गुज़रता है। यह जाँच पहले Anthropic या Radient के ज़रिए Claude Sonnet 5.5 और Claude Opus 5.5 आज़माती है, फिर आपका अपना डिफ़ॉल्ट मॉडल और उसके फ़ॉलबैक मॉडल। इनमें से कोई नहीं चल सका, इसलिए नए एजेंट संदेश रोके गए हैं। कुछ भी खोता नहीं है। इसे ठीक करने के लिए Anthropic या Radient में साइन इन करें, Radient Console में क्रेडिट जोड़ें, या जाँचें कि आपका डिफ़ॉल्ट मॉडल काम कर रहा है। रोके गए संदेशों की फिर से स्क्रीनिंग अपने-आप होगी।",
-  "cli.team_bridge.status.running": "चल रहा रिसीवर: pid {pid}, वर्ज़न {version}, शुरू हुआ {started}",
+  "cli.team_bridge.status.running": "चल रहा रिसीवर: pid {pid}, संस्करण {version}, शुरू हुआ {started}",
   "cli.team_bridge.status.running_none": "चल रहा रिसीवर: कोई रिकॉर्ड नहीं",
-  "cli.team_bridge.status.running_exited": "चल रहा रिसीवर: कोई नहीं — आख़िरी रिकॉर्ड किया गया रिसीवर (pid {pid}, वर्ज़न {version}) बंद हो चुका है",
-  "cli.team_bridge.status.running_detail": "चल रहा बिल्ड: {generation}; स्वीकार किए जाने वाले सहमति वर्ज़न: {versions}",
-  "cli.team_bridge.status.restart_needed": "रीस्टार्ट ज़रूरी है: चल रहा रिसीवर इंस्टॉल किया गया वर्ज़न ({installed}) नहीं है; यह नया कोड सिर्फ़ रीस्टार्ट के बाद इस्तेमाल करेगा"
+  "cli.team_bridge.status.running_exited": "चल रहा रिसीवर: कोई नहीं — आख़िरी रिकॉर्ड किया गया रिसीवर (pid {pid}, संस्करण {version}) बंद हो चुका है",
+  "cli.team_bridge.status.running_detail": "चल रहा बिल्ड: {generation}; स्वीकार किए जाने वाले सहमति संस्करण: {versions}",
+  "cli.team_bridge.status.restart_needed": "रीस्टार्ट ज़रूरी है: चल रहा रिसीवर इंस्टॉल किया गया संस्करण ({installed}) नहीं है; यह नया कोड सिर्फ़ रीस्टार्ट के बाद इस्तेमाल करेगा"
 }
