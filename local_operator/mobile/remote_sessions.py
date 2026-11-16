@@ -76,6 +76,27 @@ def resolve_owner(root: Path, session_id: str) -> SessionRow | None:
 
 
 READ_CAPABILITY = "mobile-session-read-v1"
+#: Turn-supplement bytes on the same carrier (``wire.MOBILE_SESSION_SUPPLEMENTS_V1``).
+#: Spelled as a literal like ``READ_CAPABILITY`` so this module stays import-light;
+#: ``test_credentials_lifecycle_recipient`` pins both against ``wire``'s tuple.
+SUPPLEMENTS_CAPABILITY = "mobile-session-supplements-v1"
+
+#: A supplement read's address shapes. A job is ``persistence.new_job_id``'s 12 hex;
+#: a digest is the attachment store's 32 hex. Both are lookup KEYS checked on both
+#: peers before any lookup — never a path, never a URL.
+_SUPPLEMENT_REF = {
+    "file": re.compile(r"[a-f0-9]{12}"),
+    "document": re.compile(r"[a-f0-9]{32}"),
+    "sound": re.compile(r"[a-f0-9]{32}"),
+}
+
+#: Owner refusal tokens (``session/media.py``) -> mesh refusal codes. The codes are
+#: mapped to phone statuses in :func:`_read_detail`; keep the two tables exhaustive.
+_SUPPLEMENT_REFUSALS = {
+    "missing": ("media_missing", "supplement unavailable"),
+    "no-cwd": ("supplement_needs_running", "file previews need the session running"),
+    "too-large": ("too_large", "supplement exceeds the preview limit"),
+}
 
 
 def validate_read(frame: dict[str, Any]) -> None:
@@ -83,28 +104,41 @@ def validate_read(frame: dict[str, Any]) -> None:
     from local_operator.network.types import MeshRefusal
 
     purpose = frame.get("mobile_session_read")
-    if purpose not in ("history", "projection", "media"):
+    if purpose not in ("history", "projection", "media", "supplement"):
         raise MeshRefusal("protocol_error", "invalid mobile_session_read")
     allowed = {"op", "req", "peer", "locality", "session_id", "mobile_session_read", "limit"}
-    allowed.update(
-        {"entry_id", "index", "kind", "offset", "length", "expected_media_id"}
-        if purpose == "media"
-        else {"before_id", "after_id"} if purpose == "history" else set()
-    )
+    if purpose == "media":
+        allowed.update({"entry_id", "index", "kind", "offset", "length", "expected_media_id"})
+    elif purpose == "supplement":
+        allowed.update({"kind", "ref", "index", "offset", "length", "expected_media_id"})
+    elif purpose == "history":
+        allowed.update({"before_id", "after_id"})
     if set(frame) - allowed:
         raise MeshRefusal("protocol_error", "mixed mobile read fields")
     if purpose == "media":
-        from local_operator.network.sync import SYNC_CHUNK_BYTES
-
         if not isinstance(frame.get("entry_id"), str) or not frame["entry_id"]:
             raise MeshRefusal("protocol_error", "invalid media entry")
         if frame.get("kind") not in ("image", "video", "file"):
             raise MeshRefusal("protocol_error", "invalid media kind")
+    if purpose == "supplement":
+        kind = frame.get("kind")
+        if kind not in _SUPPLEMENT_REF:
+            raise MeshRefusal("protocol_error", "invalid supplement kind")
+        ref = frame.get("ref")
+        if not isinstance(ref, str) or _SUPPLEMENT_REF[kind].fullmatch(ref) is None:
+            raise MeshRefusal("protocol_error", "invalid supplement reference")
+    if purpose in ("media", "supplement"):
+        from local_operator.network.sync import SYNC_CHUNK_BYTES
+
         for key in ("index", "offset", "length"):
             if type(frame.get(key)) is not int or frame[key] < 0:
                 raise MeshRefusal("protocol_error", "invalid media coordinate")
         if not 0 < frame["length"] <= SYNC_CHUNK_BYTES:
             raise MeshRefusal("protocol_error", "invalid media length")
+        if purpose == "supplement" and frame["kind"] != "file" and frame["index"] != 0:
+            # Digest families have exactly one blob per address; a non-zero index
+            # would be a second spelling of the same read.
+            raise MeshRefusal("protocol_error", "invalid supplement index")
         expected = frame.get("expected_media_id")
         if expected is not None and (
             not isinstance(expected, str) or re.fullmatch(r"[a-f0-9]{64}", expected) is None
@@ -116,6 +150,103 @@ def validate_read(frame: dict[str, Any]) -> None:
             raise MeshRefusal("protocol_error", "invalid history cursor")
     if frame.get("before_id") and frame.get("after_id"):
         raise MeshRefusal("protocol_error", "exclusive history cursors")
+
+
+def _owner_cwd(root: Path, session_id: str) -> str:
+    """The cwd of THIS device's live runtime for ``session_id``, else ``""``.
+
+    The owner's own discovery record — the source the relay's catalogue already
+    reads (``RelayServer`` rows) — and never anything the viewer sent. ``reap=False``
+    keeps a read from moving a dead record aside (reaping is the daemon's job), and a
+    ``stale`` record is no runtime: an empty cwd makes a cwd-relative featured file
+    ``supplement_needs_running``, exactly the local route's 409.
+    """
+    from local_operator.session.runtime import registry
+
+    try:
+        records = registry.scan(root, reap=False)
+    except OSError:
+        return ""
+    for record, state in records:
+        if state != "stale" and getattr(record, "session_id", None) == session_id:
+            return str(getattr(record, "cwd", "") or "")
+    return ""
+
+
+def _serve_chunk(
+    frame: dict[str, Any], session_id: str, source: Any, address: dict[str, Any]
+) -> dict[str, Any]:
+    """One validated byte window of ``source`` as the carrier's reply.
+
+    Shared by the ``media`` and ``supplement`` purposes so both apply the same
+    identity, short-read and reply-budget checks; ``address`` is the purpose's
+    own echo (``entry_id`` or ``ref``) the viewer re-checks.
+    """
+    from local_operator.network.relay import (
+        SESSION_HISTORY_REPLY_BUDGET_BYTES,
+        session_history_reply_bytes,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    if frame.get("expected_media_id") not in (None, source.media_id):
+        raise MeshRefusal("media_changed", "retained media changed")
+    offset = frame["offset"]
+    if offset > source.total:
+        raise MeshRefusal("protocol_error", "media offset past end")
+    try:
+        data = source.read(offset, frame["length"])
+    except OSError as exc:
+        raise MeshRefusal("media_changed", "retained media changed") from exc
+    if len(data) != min(frame["length"], source.total - offset):
+        raise MeshRefusal("media_changed", "retained media changed")
+    result = {
+        "mobile_session_read": 1,
+        "session_id": session_id,
+        **address,
+        "index": frame["index"],
+        "kind": frame["kind"],
+        "media_id": source.media_id,
+        "mime": source.mime,
+        "total": source.total,
+        "offset": offset,
+        "data_b64": base64.b64encode(data).decode("ascii"),
+    }
+    # Raw chunks reuse SYNC_CHUNK_BYTES, whose base64 envelope already fits
+    # the mesh. Check the actual ack too: oversized metadata cannot tear
+    # down a shared authenticated link.
+    if session_history_reply_bytes(frame.get("req"), result) > SESSION_HISTORY_REPLY_BUDGET_BYTES:
+        raise MeshRefusal("page_too_large", "media reply exceeds mesh budget")
+    return result
+
+
+def _supplement_source(root: Path, session_id: str, frame: dict[str, Any]) -> Any:
+    """Resolve a supplement read ON THE OWNER, per chunk, by the local routes' policy.
+
+    Re-resolved on every frame (no turn-time snapshot, no cached handle): a grant
+    revoked, a row rewritten or a file changed between two chunks is judged afresh
+    at the next one. Featured files run ``resolve_supplement_file`` — the owner's
+    own phone route's policy, by the operator's 2026-11-15 decision — with the
+    owner's OWN live cwd (:func:`_owner_cwd`), never anything the viewer sent.
+    """
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.media import (
+        resolve_supplement_file,
+        supplement_digest_media,
+    )
+
+    if frame["kind"] == "file":
+        source = resolve_supplement_file(
+            root / "sessions" / session_id,
+            frame["ref"],
+            frame["index"],
+            cwd=_owner_cwd(root, session_id),
+        )
+    else:
+        source = supplement_digest_media(root, session_id, frame["ref"], frame["kind"])
+    if isinstance(source, str):
+        code, reason = _SUPPLEMENT_REFUSALS.get(source, _SUPPLEMENT_REFUSALS["missing"])
+        raise MeshRefusal(code, reason)
+    return source
 
 
 def owner_read(root: Path, session_id: str, frame: dict[str, Any]) -> dict[str, Any]:
@@ -169,38 +300,11 @@ def owner_read(root: Path, session_id: str, frame: dict[str, Any]) -> dict[str, 
         source = session_media(root, session_id, frame["entry_id"], frame["index"], frame["kind"])
         if source is None:
             raise MeshRefusal("media_missing", "retained media unavailable")
-        if frame.get("expected_media_id") not in (None, source.media_id):
-            raise MeshRefusal("media_changed", "retained media changed")
-        offset = frame["offset"]
-        if offset > source.total:
-            raise MeshRefusal("protocol_error", "media offset past end")
-        try:
-            data = source.read(offset, frame["length"])
-        except OSError as exc:
-            raise MeshRefusal("media_changed", "retained media changed") from exc
-        if len(data) != min(frame["length"], source.total - offset):
-            raise MeshRefusal("media_changed", "retained media changed")
-        result = {
-            "mobile_session_read": 1,
-            "session_id": session_id,
-            "entry_id": frame["entry_id"],
-            "index": frame["index"],
-            "kind": frame["kind"],
-            "media_id": source.media_id,
-            "mime": source.mime,
-            "total": source.total,
-            "offset": offset,
-            "data_b64": base64.b64encode(data).decode("ascii"),
-        }
-        # Raw chunks reuse SYNC_CHUNK_BYTES, whose base64 envelope already fits
-        # the mesh. Check the actual ack too: oversized metadata cannot tear
-        # down a shared authenticated link.
-        if (
-            session_history_reply_bytes(frame.get("req"), result)
-            > SESSION_HISTORY_REPLY_BUDGET_BYTES
-        ):
-            raise MeshRefusal("page_too_large", "media reply exceeds mesh budget")
-        return result
+        return _serve_chunk(frame, session_id, source, {"entry_id": frame["entry_id"]})
+    if frame["mobile_session_read"] == "supplement":
+        return _serve_chunk(
+            frame, session_id, _supplement_source(root, session_id, frame), {"ref": frame["ref"]}
+        )
     if frame["mobile_session_read"] == "projection":
         projection = _durable_projection(session_id, root=root)
         if projection is None:
@@ -306,6 +410,13 @@ def _read_detail(reply: dict[str, Any] | None, *, session_id: str) -> dict[str, 
             raise RemoteSessionError("remote_media_missing", 404)
         if code == "media_changed":
             raise RemoteSessionError("remote_media_changed", 409)
+        # Supplement refusals the phone acts on (docs/mobile.md): "Open on <owner>"
+        # when a cwd-relative file needs the owner's runtime, and the local
+        # route's own 413.
+        if code == "supplement_needs_running":
+            raise RemoteSessionError("remote_supplement_needs_running", 409)
+        if code == "too_large":
+            raise RemoteSessionError("remote_too_large", 413)
         if code in ("peer_unreachable", "timeout", "unavailable", "page_too_large"):
             raise RemoteSessionError("remote_unreachable")
         # Authorization deliberately conceals its finer reason at the mesh
@@ -526,7 +637,9 @@ def media_chunk(
     if expected_media_id is not None:
         fields["expected_media_id"] = expected_media_id
     result = mesh_read(root, row, "media", **fields)
-    return _checked_media_result(row, result, **fields)
+    return _checked_media_result(
+        row, result, address_key="entry_id", **_address(fields, "entry_id")
+    )
 
 
 async def async_media_chunk(
@@ -550,26 +663,96 @@ async def async_media_chunk(
     if expected_media_id is not None:
         fields["expected_media_id"] = expected_media_id
     result = await async_mesh_read(root, row, "media", **fields)
-    return _checked_media_result(row, result, **fields)
+    return _checked_media_result(
+        row, result, address_key="entry_id", **_address(fields, "entry_id")
+    )
+
+
+def _supplement_fields(
+    kind: str, ref: str, index: int, offset: int, length: int, expected_media_id: str | None
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "kind": kind,
+        "ref": ref,
+        "index": index,
+        "offset": offset,
+        "length": length,
+    }
+    if expected_media_id is not None:
+        fields["expected_media_id"] = expected_media_id
+    return fields
+
+
+def supplement_chunk(
+    root: Path,
+    row: SessionRow,
+    *,
+    kind: str,
+    ref: str,
+    index: int,
+    offset: int,
+    length: int,
+    expected_media_id: str | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    """One owner-validated window of a supplement blob (``document``/``file``/``sound``).
+
+    The supplement twin of :func:`media_chunk`: same carrier, same reply checks,
+    addressed by ``ref`` (a job for ``file``, a digest otherwise) instead of an
+    entry id. The relay forwards it only to an owner advertising
+    :data:`SUPPLEMENTS_CAPABILITY`.
+    """
+    fields = _supplement_fields(kind, ref, index, offset, length, expected_media_id)
+    result = mesh_read(root, row, "supplement", **fields)
+    return _checked_media_result(row, result, address_key="ref", **_address(fields, "ref"))
+
+
+async def async_supplement_chunk(
+    root: Path,
+    row: SessionRow,
+    *,
+    kind: str,
+    ref: str,
+    index: int,
+    offset: int,
+    length: int,
+    expected_media_id: str | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    fields = _supplement_fields(kind, ref, index, offset, length, expected_media_id)
+    result = await async_mesh_read(root, row, "supplement", **fields)
+    return _checked_media_result(row, result, address_key="ref", **_address(fields, "ref"))
+
+
+def _address(fields: dict[str, Any], key: str) -> dict[str, Any]:
+    """``fields`` with the purpose's address renamed to the checker's ``address``."""
+    renamed = {name: value for name, value in fields.items() if name != key}
+    renamed["address"] = fields[key]
+    return renamed
 
 
 def _checked_media_result(
     row: SessionRow,
     result: dict[str, Any],
     *,
-    entry_id: str,
+    address_key: str,
+    address: str,
     index: int,
     kind: str,
     offset: int,
     length: int,
     expected_media_id: str | None = None,
 ) -> tuple[dict[str, Any], bytes]:
+    """Validate an owner's chunk reply before any byte reaches an HTTP consumer.
+
+    ``address_key`` names the purpose's echoed address (``entry_id`` for retained
+    media, ``ref`` for supplements); every other identity check is shared, so the
+    two purposes cannot drift in what they accept from a peer.
+    """
     import binascii
 
     identity = result.get("media_id")
     if (
         result.get("session_id") != row.id
-        or result.get("entry_id") != entry_id
+        or result.get(address_key) != address
         or type(result.get("index")) is not int
         or result["index"] != index
         or result.get("kind") != kind

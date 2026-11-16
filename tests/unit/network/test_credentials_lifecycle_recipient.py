@@ -474,6 +474,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # it to ``mobile.remote_sessions.owner_read``), so advertising it promises an
         # owner whose ``net_session_history`` handler folds the projection itself.
         remote_sessions.READ_CAPABILITY: "net_session_history",
+        # Supplement bytes are another ``mobile_session_read`` purpose on the same
+        # op (``owner_read``'s ``supplement`` branch), checked by both peers; no op.
+        wire.MOBILE_SESSION_SUPPLEMENTS_V1: "net_session_history",
         # Change pushes gate a receiving mode on the existing membership op;
         # advertising them promises that its handler understands bound snapshots.
         wire.MEMBER_LIST_PUSH_V1: "net_member_list",

@@ -198,6 +198,9 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # Owner-folded mobile history/projection; never infer this schema from a
     # legacy journal page whose entries use the desktop transcript vocabulary.
     "mobile-session-read-v1",
+    # Turn-supplement (Highlights) bytes on that same owner-folded read; see
+    # MOBILE_SESSION_SUPPLEMENTS_V1 below.
+    "mobile-session-supplements-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
     # Change-only member tables permit a long anti-entropy interval, without
@@ -287,6 +290,14 @@ MESH_RESTART_V1 = "mesh-restart-v1"
 #: answered by some other route (the base64-through-the-model path this replaces is
 #: what corrupted bytes).
 MESH_FILE_V1 = "mesh-file-v1"
+#: Turn-supplement bytes (a Highlight's component document, featured file or sound)
+#: over the owner-folded mobile read: ``peer_session_history`` with
+#: ``mobile_session_read="supplement"`` (``mobile/remote_sessions.py``). It adds no op,
+#: only a purpose on ``net_session_history``. BOTH ends check it — the viewer before
+#: forwarding and the owner before serving — so an owner that predates it is
+#: answered ``unsupported`` (the phone's 409 ``remote_unsupported``, "Update
+#: <owner>") instead of reading a purpose it would refuse as a protocol error.
+MOBILE_SESSION_SUPPLEMENTS_V1 = "mobile-session-supplements-v1"
 #: A peer session's Files index (``network/file_index.py``; remote-files-parity.md §2).
 #: Checked by the viewer BEFORE asking, so an owner that predates it is answered with
 #: ``peer_update_required`` (the desktop says "update <device>") rather than asked an op
