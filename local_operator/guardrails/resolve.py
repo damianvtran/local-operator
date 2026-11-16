@@ -3188,7 +3188,35 @@ class _Walker:
         # ``_split`` blanks the bodies but keeps the openers, in order, so the
         # bodies are dealt out to segments by counting the openers in each.
         lexed = lex(command)
-        pieces, owned_bodies = _fd_redirect_merge(lexed.segments, lexed.bodies)
+        owned_bodies = [list(bodies) for bodies in lexed.bodies]
+        if not lexed.open:
+            for index, (text, _piped, _op) in enumerate(lexed.segments):
+                if not any(lexed.nested_bodies[index]):
+                    continue
+                raw_words, redirects = scan(text)
+                # Only assignment-only segments guarantee every complete sub is
+                # recursively walked below without also consuming these bodies
+                # as shell stdin. The shared lexer retains nested bodies for R10
+                # split substitutions; omit a duplicate only with its structural
+                # same-segment ownership proof, never by comparing body text.
+                if (
+                    not redirects
+                    and raw_words
+                    and all(
+                        not word.broken
+                        and word.parts
+                        and word.parts[0].kind == "bare"
+                        and _ASSIGN_RE.match(word.parts[0].text)
+                        for word in raw_words
+                    )
+                    and any(part.kind == "sub" for word in raw_words for part in word.parts)
+                ):
+                    owned_bodies[index] = [
+                        body
+                        for body, nested in zip(owned_bodies[index], lexed.nested_bodies[index])
+                        if not nested
+                    ]
+        pieces, owned_bodies = _fd_redirect_merge(lexed.segments, owned_bodies)
         # R7-1/R8, structural: if the text ends inside a construct the ONE
         # shared scanner tracks (quote, ``$(``, ``${``, backtick, heredoc), its
         # segments are a guess. A delete word anywhere then fails toward
