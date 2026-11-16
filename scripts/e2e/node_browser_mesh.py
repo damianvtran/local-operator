@@ -5,6 +5,7 @@ stores are separate, but they share the existing fixture's actual invite/SAS
 ceremony (only the two synthetic humans are supplied). No catalogue, remote
 viewer, decision handler or operator-signature verification is replaced.
 """
+
 from __future__ import annotations
 
 import time
@@ -46,7 +47,13 @@ class MeshRig:
     def start(self) -> dict[str, Any]:
         import pytest
 
-        from local_operator.network import approvals, identity, operator_binding, relay, store
+        from local_operator.network import (
+            approvals,
+            identity,
+            operator_binding,
+            relay,
+            store,
+        )
         from local_operator.network.credentials import github
         from local_operator.network.onboard_approvals import request_device
         from local_operator.notifications import remote_attention
@@ -81,7 +88,9 @@ class MeshRig:
             # shared _live_link helper defaults its joiner to drive, which
             # correctly cannot carry an operator_challenge across the relay.
             record, _, _ = _pair(
-                (node, operator, host, port), patch, role="admin",
+                (node, operator, host, port),
+                patch,
+                role="admin",
                 settings=relay.NetworkSettings(port=operator_port, listen_address="127.0.0.1"),
             )
             member_capabilities = require_operator_member(
@@ -92,7 +101,9 @@ class MeshRig:
             )
             assert self.link is not None, f"operator member handshake failed: {reason}"
             card = request_device(
-                host="synthetic-node.invalid", user="harness", host_key_fp="SHA256:fixture",
+                host="synthetic-node.invalid",
+                user="harness",
+                host_key_fp="SHA256:fixture",
                 network=record.network_id,
                 credential_ref="synthetic-unused-ssh",
                 root=self.operator_root,
@@ -101,10 +112,13 @@ class MeshRig:
             approvals.approve(
                 card["approval_id"],
                 signature_hex=_sign_decision(self.operator_root, card, "approve", at),
-                decided_at=at, root=self.operator_root,
+                decided_at=at,
+                root=self.operator_root,
             )
             assert operator_binding.record_onboarded(
-                self.operator_root, approval_id=card["approval_id"], network_id=record.network_id,
+                self.operator_root,
+                approval_id=card["approval_id"],
+                network_id=record.network_id,
                 device_id=node.identity.device_id,
             )
             # Present over the authenticated peer link, not accept_presented()
@@ -119,7 +133,8 @@ class MeshRig:
             assert member is not None and member.active
         remote_attention.origin_baseline_ms(self.operator_root, self.node_id)
         return {
-            "network_id": self.network_id, "node_device": self.node_id,
+            "network_id": self.network_id,
+            "node_device": self.node_id,
             "operator_device": self.operator_id,
             "relay_ports": [server.settings.port for server in self.servers],
             "signed_binding": operator_binding.operator_device(self.node_root),
@@ -140,7 +155,10 @@ class MeshRig:
         return items
 
     def notice(self, sid: str, ask_id: str) -> dict[str, Any]:
-        from local_operator.notifications.remote_attention import ASK_NOTICE_PREFIX, notice_key
+        from local_operator.notifications.remote_attention import (
+            ASK_NOTICE_PREFIX,
+            notice_key,
+        )
 
         expected = notice_key(self.node_id, sid, f"{ASK_NOTICE_PREFIX}{ask_id}")
         items = self.observe()
@@ -159,7 +177,13 @@ class MeshRig:
 
 
 async def answer_over_http(
-    operator_root: Path, sid: str, ask: dict[str, Any], word: str, *, plain: bool, backstop: float,
+    operator_root: Path,
+    sid: str,
+    ask: dict[str, Any],
+    word: str,
+    *,
+    plain: bool,
+    backstop: float,
 ) -> dict[str, Any]:
     """Real TCP HTTP -> desktop router -> real mesh-backed AttachedSession.
 
@@ -232,8 +256,10 @@ async def answer_over_http(
                 return {
                     "ok": response.status_code == 200,
                     "error": "" if response.status_code == 200 else str(payload),
-                    "http_status": response.status_code, "http_path": path,
-                    "request": body, "response": payload,
+                    "http_status": response.status_code,
+                    "http_path": path,
+                    "request": body,
+                    "response": payload,
                     "surface": "desktop-http-remote-session",
                     "remote_owner": remote_row.owner_device,
                 }

@@ -102,12 +102,18 @@ def test_misset_scratchpad_cannot_bless_real_stores(layout: dict[str, Path], sub
 
 
 def test_mesh_preflight_rejects_drive_member_before_signed_browser_dispatch() -> None:
-    from local_operator.network.types import MemberRecord, NetworkRecord, capabilities_for_role
+    from local_operator.network.types import (
+        MemberRecord,
+        NetworkRecord,
+        capabilities_for_role,
+    )
     from scripts.e2e.node_browser_mesh import require_operator_member
 
     record = NetworkRecord(network_id="n_synthetic", name="synthetic")
     member = MemberRecord(
-        device_id="d_synthetic", name="operator", role="drive",
+        device_id="d_synthetic",
+        name="operator",
+        role="drive",
         capabilities=sorted(capabilities_for_role("drive")),
     )
     record.members = [member]

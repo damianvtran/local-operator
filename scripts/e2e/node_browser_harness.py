@@ -336,7 +336,11 @@ def host_snapshot() -> dict[str, Any]:
     env.update(NO_NOTIFY_CHILD_ENV)
     status = subprocess.run(
         ["lop", "browser", "status"],
-        capture_output=True, text=True, env=env, timeout=60, check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=True,
     ).stdout
     identity = [
         line.rstrip() for line in status.splitlines() if line.strip().startswith(IDENTITY_PREFIXES)
@@ -348,10 +352,14 @@ def host_snapshot() -> dict[str, Any]:
         hashes[str(anchor)] = _sha(anchor)
     bridge = subprocess.run(
         ["ss", "-ltnpH", f"sport = :{REAL_BRIDGE_PORT}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     return {
-        "hashes": hashes, "live_chrome": pid, "browser_status_identity": identity,
+        "hashes": hashes,
+        "live_chrome": pid,
+        "browser_status_identity": identity,
         "live_bridge_owner": bridge,
     }
 
@@ -1394,9 +1402,8 @@ async def _inner_flow(
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.tools.builtin import build_browser_tool
-    from tests.e2e.harness import build_session
-
     from scripts.e2e.node_browser_mesh import MeshRig
+    from tests.e2e.harness import build_session
 
     mesh = MeshRig(node_root, op_root)
     session_box["mesh"] = mesh
@@ -1408,7 +1415,8 @@ async def _inner_flow(
         "node is a real active headless mesh member",
         "two loopback relays; signed operator binding",
         {**mesh_facts, "headless_node": headless_node_once()},
-        headless_node_once() and len(mesh_facts["relay_ports"]) == 2
+        headless_node_once()
+        and len(mesh_facts["relay_ports"]) == 2
         and mesh_facts["signed_binding"] == (mesh.operator_id, mesh.network_id),
     )
     tool = build_browser_tool(None)
@@ -1461,7 +1469,8 @@ async def _inner_flow(
     forwarded = await asyncio.to_thread(mesh.notice, sid, ask_id)
     results.row(
         "site card crosses real catalogue transport into synthetic operator inbox",
-        "one full remote-notice key naming node/session/ask", forwarded,
+        "one full remote-notice key naming node/session/ask",
+        forwarded,
         forwarded["count"] == 1 and not forwarded["items"][0]["dismissed_at"],
     )
     approve_word = "approve"
@@ -1526,7 +1535,8 @@ async def _inner_flow(
     settled = await asyncio.to_thread(mesh.notice, sid, ask_id)
     results.row(
         "answered member card retires from the operator inbox",
-        "one forwarded notice, now dismissed", settled,
+        "one forwarded notice, now dismissed",
+        settled,
         settled["count"] == 1 and bool(settled["items"][0]["dismissed_at"]),
     )
     # ``call_5`` is the dark ``open``; the turn then polls the dark capture, so
@@ -1575,7 +1585,9 @@ async def _inner_flow(
     else:
         forwarded_deny = await asyncio.to_thread(mesh.notice, sid, str(deny_ask["ask_id"]))
         results.row(
-            "deny card reaches the operator inbox", "one active forwarded notice", forwarded_deny,
+            "deny card reaches the operator inbox",
+            "one active forwarded notice",
+            forwarded_deny,
             forwarded_deny["count"] == 1 and not forwarded_deny["items"][0]["dismissed_at"],
         )
         denied = await asyncio.to_thread(
@@ -1583,7 +1595,8 @@ async def _inner_flow(
         )
         settled_deny = await asyncio.to_thread(mesh.notice, sid, str(deny_ask["ask_id"]))
         results.row(
-            "denied member card retires from the operator inbox", "one dismissed forwarded notice",
+            "denied member card retires from the operator inbox",
+            "one dismissed forwarded notice",
             settled_deny,
             settled_deny["count"] == 1 and bool(settled_deny["items"][0]["dismissed_at"]),
         )
@@ -1618,7 +1631,8 @@ async def _inner_flow(
     if expire_ask is not None:
         forwarded_expire = await asyncio.to_thread(mesh.notice, sid, str(expire_ask["ask_id"]))
         results.row(
-            "cancellable card reaches the operator inbox", "one active forwarded notice",
+            "cancellable card reaches the operator inbox",
+            "one active forwarded notice",
             forwarded_expire,
             forwarded_expire["count"] == 1 and not forwarded_expire["items"][0]["dismissed_at"],
         )
@@ -1697,8 +1711,12 @@ async def operator_role(args: argparse.Namespace) -> int:
 
     ask = json.loads(Path(args.ask_file).read_text())
     verdict = await answer_over_http(
-        Path(args.root) / "operator", args.session, ask, args.word,
-        plain=args.mode == "plain", backstop=CONNECT_BACKSTOP_S,
+        Path(args.root) / "operator",
+        args.session,
+        ask,
+        args.word,
+        plain=args.mode == "plain",
+        backstop=CONNECT_BACKSTOP_S,
     )
     _emit(verdict)
     return 0
