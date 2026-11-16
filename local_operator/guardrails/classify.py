@@ -50,13 +50,24 @@ from local_operator.guardrails.resolve import (
 
 if TYPE_CHECKING:
     # Runtime import is deferred: ``provenance`` imports this module.
-    from local_operator.guardrails.provenance import ForeignCreations
+    from local_operator.guardrails.provenance import (
+        FinishedForeign,
+        ForeignCreations,
+        WorktreeActivity,
+    )
 
 _STATE_DIRNAME = ".local-operator"
 _CONFIG_FILE = "config.yml"
 _SECRETS_DIRNAME = "secrets"
 _SESSIONS_DIRNAME = "sessions"
 _DESTROYING_OPS = frozenset({"delete", "move", "clean"})
+#: The ranking reason of a permission change that unlocks a tree for removal
+#: (``resolve._unprotected_operands``). It reaches the judge verbatim as the
+#: target's "ranked because" fact, so the judge is told it is a forced removal.
+FORCED_REMOVAL_REASON = (
+    "permission escalation that unlocks write-protected files for removal "
+    "(a forced removal of protected files the session did not create)"
+)
 # Spelled here rather than imported: ``provenance`` imports this module.
 _LEDGER_DIRNAME = "guardrails"
 _LEDGER_FILENAME = "created.sqlite"
@@ -88,6 +99,9 @@ class Verdict:
     risk: Risk
     targets: list[RankedTarget] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
+    #: Steering notes a LOW verdict carries to the agent (``GuardOutcome.warnings``):
+    #: today the facts behind a finished-foreign-worktree LOW (item A).
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def critical_targets(self) -> list[RankedTarget]:
@@ -404,7 +418,9 @@ def _in_session_scratchpad(path: str, sessions: str, *, pattern: bool = False) -
 OTHER_SCRATCHPAD = "another session's files"
 
 
-def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
+def _tree_read(
+    target: Target, prot: _Protected, session_id: str, *, only_assigned: bool = False
+) -> str | None:
     """Case 7 (2026-11-09): a read of a TASK-TREE session's scratch file.
 
     The settings lane ran ``node scripts/i18n/ledger-assemble.mjs --receipt
@@ -412,7 +428,9 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
     and the backstop refused it as another session's files. ``None`` = LOW:
     the file exists, its session is in the caller's subagent tree
     (``provenance.same_task_tree``), the interpreter runs a git-tracked script
-    (``Target.script``) and no output flag names the file. Otherwise the
+    (``Target.script``) and no output flag names the file — or, with no
+    script condition at all, when every owner is the caller's ancestor or
+    descendant (``_all_in_lineage``; field report 2026-11-12). Otherwise the
     suffix shown with the HIGH: the lineage fact when there is one, so the
     judge sees it; ``""`` for a stranger's pad (unchanged). Evidence files
     never reach here (``_touch_reason`` returns another reason for them).
@@ -442,6 +460,40 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
             if not relation:
                 return ""
             relations[owner] = relation
+    lineage = _all_in_lineage(set(relations), session_id, roots)
+    if (
+        lineage
+        and not target.as_output
+        and not target.executes
+        and not target.unproven_code
+        and _lineage_regular_file(path, target.raw_path)
+    ):
+        # Field report 2026-11-12 (UI #1888 native QA): QA child fbd3094083f4
+        # read its launcher a7450d93932d's staged manifest with ``node -e
+        # '…readFileSync("<parent pad>/…")…'``, and the launcher in turn ran
+        # its descendants' frozen supervisor (``node <child pad>/x.mjs``) and
+        # audit JSON — both refused as "another session's files". One subagent
+        # LINEAGE is one owner's working state, so a read of an ancestor's or a
+        # descendant's scratch that the resolver cannot pin (an interpreter
+        # running opaque code) ranks as it would in the caller's own pad: LOW.
+        # Kept narrow on purpose: only a ``touch`` (path handed to an unknown
+        # program) reaches here — RECOGNISED deletes, overwrites and writes
+        # into a lineage member's pad keep ``_high_reason``'s HIGH, because
+        # that pad is a live session's state (what the caller itself created
+        # there is already credited through the ledger). Opaque code handed a
+        # lineage FILE may still write or delete that one file, exactly as in
+        # the caller's own pad. Only an existing regular, non-symlink FILE
+        # earns the credit (QA Q1 on PR #3906): handed a pad ROOT or a
+        # directory, ``f["rm"+"Sync"](argv[1],{recursive:true})`` wiped a whole
+        # lineage pad unreviewed; a link or a missing path is unpinnable. A
+        # word named as an output, or handed to a sed that runs code
+        # (``Target.executes``), or ``python -c`` CODE that #3918's read-only
+        # proof refused (``Target.unproven_code``: visible code shown able to
+        # write gets no blanket credit), stays HIGH. Every spelling, the realpath included, must
+        # land in a lineage member's pad, so a link out to a sibling or a
+        # stranger never borrows the credit. Siblings are NOT lineage (see
+        # ``_all_in_lineage``): they keep case 7's tracked-script rule below.
+        return None
     if (
         os.path.isfile(path)
         and not os.path.islink(path)
@@ -470,7 +522,81 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
     ):
         return None
     owner = _pad_owner(os.path.realpath(path), roots) or ""
-    return f" (session {owner} is this session's {relations.get(owner, '')} in one task tree)"
+    shown = f"session {owner} is this session's {relations.get(owner, '')} in one task tree"
+    if lineage:
+        shown += _lineage_facts(target, only_assigned=only_assigned)
+    return f" ({shown})"
+
+
+def _lineage_facts(target: Target, *, only_assigned: bool) -> str:
+    """Why a lineage member's path still went to the judge, as provenance.
+
+    WHY (PR #3906 round 1, field case C): the launcher's run passed
+    ``LOCAL_OPERATOR_SCRATCHPAD=<child pad ROOT>``; a pad root handed to opaque
+    code is the QA-M1 wipe shape, so it stays HIGH by design (no carve-out by
+    variable name). The judge decides it, so it gets the facts the classifier
+    PROVED rather than an inference: what the path is, how it reached the call,
+    and that no recognised delete or write names it (``classify_targets``
+    skips a touch whose path a write or delete already ranked).
+    """
+    path = os.path.realpath(target.path or "")
+    if (
+        os.path.basename(path) == _SCRATCHPAD_DIRNAME
+        and os.path.basename(os.path.dirname(os.path.dirname(path))) == "sessions"
+    ):
+        what = "the path is that session's scratchpad root"
+    elif target.as_output:
+        what = "the path is named as an output"
+    elif os.path.islink(target.path or "") or not os.path.exists(path):
+        what = "the path is a link or does not exist"
+    elif os.path.isdir(path):
+        what = "the path is a directory in that session's scratchpad"
+    else:
+        what = "the path is handed to a program that may run code on it"
+    facts = [what]
+    if target.assigned and only_assigned:
+        facts.append(f"it reaches this call only as the inline env assignment {target.assigned}=…")
+    facts.append("no recognised delete or write op names it")
+    return "; " + "; ".join(facts)
+
+
+def _lineage_regular_file(path: str, raw_path: str | None) -> bool:
+    """Is ``path`` an existing regular file, by every spelling, never a link?
+
+    Lexical and resolved spellings both (and the un-normalised ``raw_path``):
+    a link anywhere in the word's own last component, or a directory or a
+    missing path, gets no lineage read credit (QA Q1 on PR #3906).
+    """
+    spellings = [path, os.path.realpath(path)]
+    if raw_path:
+        spellings += [raw_path, os.path.realpath(raw_path)]
+    return all(os.path.isfile(s) and not os.path.islink(s) for s in spellings)
+
+
+def _all_in_lineage(owners: set[str], session_id: str, roots: set[str]) -> bool:
+    """Is every ``owner`` an ancestor or a descendant of ``session_id``?
+
+    By ``parent`` links only (``provenance.subagent_ancestors``), the full
+    depth either way. An ``opener`` relation is a separate task and never
+    qualifies. Siblings and cousins do not either, deliberately: they share a
+    launcher, not a line of delegation — neither briefed the other, so neither
+    can know what the other's opaque script does with its files, and the
+    launcher, which CAN read both, is the party that hands one lane's output to
+    another. Their reads keep case 7's narrower rule (a git-tracked script,
+    no output flag) and otherwise the judge's HIGH.
+    """
+    from local_operator.guardrails import provenance
+
+    if not owners:
+        return False
+    for owner in owners:
+        root = _owner_root(owner, roots)
+        if owner in provenance.subagent_ancestors(session_id, state_root=root):
+            continue
+        if session_id in provenance.subagent_ancestors(owner, state_root=root):
+            continue
+        return False
+    return True
 
 
 def _pad_owner(path: str, roots: set[str]) -> str | None:
@@ -938,6 +1064,13 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
         return "git clean removes untracked work"
     if any(_under(path, own) for own in prot.own_session):
         return None
+    if target.op == "unprotect":
+        # Never LOW outside the session's own directory, even where removing
+        # the same path would be (incident 2026-11-14: ``chmod -R u+w`` of a
+        # deep benchmark tree forced ``rm -rf`` past its write-protected raw
+        # data). The creation ledger still lowers it for a tree the session
+        # made (``_owned_by_session`` in ``_rank``), as it does for a delete.
+        return FORCED_REMOVAL_REASON
     if target.op not in _DESTROYING_OPS:
         # S10: overwriting a file inside the state root (outside this session's
         # own directory) rewrites the harness's data — review it.
@@ -1224,6 +1357,7 @@ def _rank(
         # unknown ranks HIGH with that state named (the one fact the agent can
         # act on); not-linked takes the ordinary ranking below.
         from local_operator.guardrails.provenance import (
+            state_phrase,
             worktree_activity,
             worktree_state,
         )
@@ -1234,8 +1368,34 @@ def _rank(
         # here only ignored ``.expo/``/``.pnpm-store/`` git deletes anyway —
         # returned HIGH below before the ledger check was ever reached, and
         # the judge saw no ledger fact, so finished own trees were refused.
-        own = _owned_by_session(target, path, prot, session_id)
-        state = worktree_state(path, own=own is not None)
+        #
+        # FAMILY (field case 2026-11-14, cleanup subagent bbb5e6c44eb8): a
+        # tree an ANCESTOR created is this session's too (``owned_record``).
+        # A SIBLING's or cousin's counts only here, for ``git worktree
+        # remove`` WITHOUT ``--force`` (``kin``): git itself refuses a tree
+        # with tracked or untracked changes and keeps the branch ref, so the
+        # removal loses nothing but ignored files — and only when the tree is
+        # clean, no PR/MR is open or unknown, and neither its creator nor any
+        # other session is running in it (all checked below). ``rm -rf``,
+        # ``--force``, any other delete and every write keep a sibling's tree
+        # foreign.
+        #
+        # IGNORED FILES follow git's own rule for a non-forced removal by the
+        # family (``git worktree remove`` deletes them without ``--force``;
+        # measured with git 2.55 on a throwaway repo: ignored ``.terraform/``
+        # plus ``.env`` removed, rc 0). A FORCED removal of an ancestor's or
+        # sibling's tree keeps the stricter rule — an ignored ``.env`` the
+        # caller never made is not known to be reproducible.
+        own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
+        relation = own[2] if own is not None else ""
+        state = worktree_state(
+            path,
+            own=own is not None and (relation == "" or not target.forced),
+            session_id=session_id,
+        )
+        # Never a bare "busy" (operator directive 2026-11-14): the reason names
+        # each holder (pid, command, session) or why the inventory failed.
+        state_text = state_phrase(path, state, session_id)
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1245,7 +1405,19 @@ def _rank(
             # running owner or an unknown PR state only withholds the LOW, so
             # the judge sees those facts. ``worktree_activity`` explains both.
             activity = worktree_activity(path, session_id)
-            facts = activity.facts()
+            facts = _with_scan_note(activity.facts(), path)
+            if own is None:
+                # Whose tree it is (QA Q1, PR #3964): the foreign-tree path
+                # through ``_reached_worktrees`` already names the ledger's
+                # creator, but a direct ``git worktree remove`` of a tree
+                # outside this family did not, so neither the agent nor the
+                # judge learned who to hand it back to. Display only — the
+                # rank above never reads it.
+                from local_operator.guardrails import provenance
+
+                creators = provenance.recorded_creators(path)
+                if creators:
+                    facts += "; recorded creator: " + ", ".join(creators)
             if activity.pr_state == "open":
                 return RankedTarget(
                     target,
@@ -1268,6 +1440,10 @@ def _rank(
             # and an unproven path keep the judge, and a judge timeout there
             # stays a refusal.
             own_idle = not activity.owners_running and activity.pr_state in ("none", "unknown")
+            if relation == "kin":
+                # A sibling's tree never gets #3816's unknown-PR waiver: that
+                # waiver rests on the caller having made the tree itself.
+                own_idle = own_idle and activity.pr_state == "none"
             if own is not None and own_idle and state == "clean":
                 # Nothing uncommitted, nobody else in it, no open PR: the
                 # creator removing it loses nothing, ``--force`` or not.
@@ -1276,6 +1452,23 @@ def _rank(
                     Risk.LOW,
                     f"{own[0]}; linked worktree with no uncommitted change ({facts})",
                 )
+            if own is not None and relation == "" and own_idle and state == "dirty":
+                # OWN + DETACHED + DIRTY (operator directive 2026-11-14, field
+                # case attr3880-ci on lop-remote-node-2; see
+                # ``provenance.own_detached_scratch``): no branch to lose and
+                # HEAD kept by a ref, so the uncommitted changes are the
+                # creator's own scratch — LOW for ``remove`` with or without
+                # ``--force``. A branch, a dangling HEAD or a nested repo
+                # returns ``None`` and falls to the judge below.
+                from local_operator.guardrails.provenance import own_detached_scratch
+
+                scratch = own_detached_scratch(path) if _scratch_location(path) else None
+                if scratch is not None:
+                    return RankedTarget(
+                        target,
+                        Risk.LOW,
+                        f"{own[0]}; {scratch}; {_changes_phrase(path)}; {facts}",
+                    )
             if own is not None and state == "dirty":
                 # Real tracked/untracked work in an OWN tree: the judge decides
                 # with the ledger row and the exact entries (``build_delete_case``
@@ -1283,10 +1476,30 @@ def _rank(
                 return RankedTarget(
                     target,
                     Risk.HIGH,
-                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}; {facts}",
+                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}"
+                    f"{_dangling_phrase(path)}; {facts}",
                 )
             if idle and state == "clean" and not target.forced:
                 return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
+            if (
+                own is None
+                and idle
+                and state == "clean"
+                and target.forced
+                and not _finished_route_barred(path, prot)
+            ):
+                # ``--force`` on ANOTHER session's clean tree: LOW only when the
+                # finished-worktree predicate proves it merged and unused
+                # (operator decision a-891c); otherwise the ordinary ranking
+                # below and its foreign-ledger HIGH apply as before.
+                finished = _no_ledger_inside(
+                    foreign, path, _finished(path, session_id, foreign, activity)
+                )
+                if finished.safe:
+                    _clear_finished(foreign, path, finished)
+                    return RankedTarget(
+                        target, Risk.LOW, f"a finished, merged linked git worktree ({facts})"
+                    )
             if idle and state == "stale-initializing" and target.force_count == 2:
                 return RankedTarget(
                     target,
@@ -1300,7 +1513,7 @@ def _rank(
                 return RankedTarget(
                     target,
                     Risk.HIGH,
-                    f"a git repository root; linked worktree state: {state}; {facts}",
+                    f"a git repository root; linked worktree state: {state_text}; {facts}",
                 )
             if state not in ("clean", "stale-initializing"):
                 # QA round 3 (Q3-OBS): dirty, locked, busy, unknown or timeout
@@ -1315,17 +1528,28 @@ def _rank(
                     target,
                     Risk.HIGH,
                     "; ".join(
-                        [f"a git repository root; linked worktree state: {state}; {facts}", *notes]
+                        [
+                            f"a git repository root; linked worktree state: {state_text}; {facts}",
+                            *notes,
+                        ]
                     ),
                 )
             # Clean but forced, or stale-initializing without ``-f -f`` (git
             # refuses that itself): nothing uncommitted to lose, so the ordinary
             # ranking applies, but the state stays in whatever reason it gives.
-            worktree_note = f"linked worktree state: {state}; {facts}"
+            worktree_note = f"linked worktree state: {state_text}; {facts}"
             notes.append(worktree_note)
+    scratch_facts: list[str] = []
     if not target.worktree_remove and target.op == "delete" and not target.selected:
         reached = _reached_worktrees(
-            target, path, prot, session_id, globstar=globstar, through_link=link is None
+            target,
+            path,
+            prot,
+            session_id,
+            globstar=globstar,
+            through_link=link is None,
+            foreign_rows=foreign,
+            scratch=scratch_facts,
         )
         if reached is not None:
             return reached
@@ -1359,7 +1583,9 @@ def _rank(
         # ``_reached_worktrees``), already passed its bar (clean, idle, no
         # open PR); a bare ``rm link`` removes only the entry.
         if owned is not None:
-            reason, matches = owned
+            reason, matches, _relation = owned
+            if scratch_facts:
+                reason = "; ".join([reason, *scratch_facts])
             shown = ""
             if target.pattern is not None:
                 shown = ", ".join(matches[:4]) + (
@@ -1381,6 +1607,68 @@ def _rank(
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _dangling_phrase(path: str) -> str:
+    """``; HEAD: … reachable from NO ref …`` for a detached tree no ref keeps, else "".
+
+    WHY (QA Q4, PR #3987): the refusal guidance tells the agent to act on
+    "HEAD reachable from no ref" by tagging or branching first, but only the
+    judge's brief carried that fact; the deterministic reason the agent sees
+    said just ``dirty … (detached HEAD)``. Same wording as the judge's line
+    (``check.py``), so both name one fact.
+    """
+    from local_operator.guardrails.provenance import detached_head
+
+    detached = detached_head(path)
+    if detached is None or detached[1] is not None:
+        return ""
+    return (
+        f"; HEAD: detached at {detached[0]}, reachable from NO ref (commits made in "
+        "it are lost with the tree: keep them with git tag or git branch first)"
+    )
+
+
+def _with_scan_note(facts: str, path: str) -> str:
+    """``facts`` plus the cwd-unreadable processes the scan ignored for ``path``.
+
+    WHY (operator directive 2026-11-14): a process whose cwd this uid may not
+    read no longer fails the whole holder scan closed
+    (``provenance._unreadable_cwd_evidence``); the judge, the agent and the
+    operator still see that it was there and why it did not count.
+    """
+    from local_operator.guardrails.provenance import cwd_scan_note
+
+    note = cwd_scan_note(path)
+    return f"{facts}; {note}" if note else facts
+
+
+def _scratch_location(path: str) -> bool:
+    """May an own detached tree at ``path`` rank as disposable scratch, by WHERE it is?
+
+    WHY (QA Q2, PR #3987): the operator's waiver covers the place agents put
+    throwaway trees — under the repository's own ``.worktrees/`` directory
+    (``<main checkout>/.worktrees/...``). An own detached tree anywhere else
+    (``~/outside-wt``) keeps the ordinary ranking: its location says nothing
+    about it being scratch, so its uncommitted changes go to the judge.
+
+    A session scratchpad is the brief's other location, but no tree there
+    reaches this check: ``_owned_by_session`` refuses every path under a
+    state root (another session's files), so the ledger never vouches for a
+    scratchpad tree and it stays HIGH (unchanged from base). Widening that
+    bar is a separate, security-relevant change, not this waiver's.
+
+    Lexical on the realpath; an unreadable ``.git`` answers ``False`` (fail
+    closed to the base rank).
+    """
+    from local_operator.guardrails import provenance as prov
+
+    real = os.path.realpath(path)
+    common = prov._common_dir(real)
+    if not common or os.path.basename(common.rstrip(os.sep)) != ".git":
+        return False  # a bare common dir has no main checkout to hold ``.worktrees/``
+    holder = os.path.join(os.path.realpath(os.path.dirname(common.rstrip(os.sep))), ".worktrees")
+    return real.startswith(holder + os.sep)
 
 
 def _changes_phrase(path: str) -> str:
@@ -1460,8 +1748,13 @@ def _reached_worktrees(
     *,
     globstar: bool = False,
     through_link: bool = False,
+    foreign_rows: ForeignCreations | None = None,
+    scratch: list[str] | None = None,
 ) -> RankedTarget | None:
     """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
+
+    ``scratch`` collects the fact phrase of each own detached scratch tree
+    let through (``provenance.own_detached_scratch``), for the LOW reason.
 
     WHY (security review of PR #3800): a linked worktree is ranked as one
     however the delete reaches it — its literal path, a glob match
@@ -1489,6 +1782,8 @@ def _reached_worktrees(
     """
     from local_operator.guardrails import provenance as prov
 
+    candidates: list[str] = []
+    scan = path
     if target.pattern is not None:
         matches = _expand_glob(target.pattern, globstar=globstar)
         if matches is None:
@@ -1507,7 +1802,6 @@ def _reached_worktrees(
         ]
         roots = prov.linked_worktrees_reached(candidates, resolved=True)
     else:
-        scan = path
         if through_link and os.path.islink(path):
             # MAJOR-1 (restack of #3802): ``path`` is slash-stripped, so for
             # ``rm -rf link/`` it names the LINK, which
@@ -1526,20 +1820,32 @@ def _reached_worktrees(
         return None
     foreign: list[str] = []
     own: list[str] = []
+    # Roots only an ANCESTOR's row vouches for: still own (``owned_record``),
+    # but ``rm -rf`` deletes their ignored files too, and an ignored ``.env``
+    # the caller never made is not known to be reproducible, so their state
+    # is read with the non-own ignored rule. A sibling's row never applies
+    # here (``kin`` is for non-forced ``git worktree remove`` only).
+    inherited: set[str] = set()
     for root in roots:
-        owned = (
-            session_id
-            and not any(_under(root, st) for st in prot.state_roots)
-            and prov.owned_record(root, session_id) is not None
+        record = (
+            prov.owned_record(root, session_id)
+            if session_id and not any(_under(root, st) for st in prot.state_roots)
+            else None
         )
-        (own if owned else foreign).append(root)
+        (own if record is not None else foreign).append(root)
+        if record is not None and record.relation:
+            inherited.add(root)
     checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
     jobs: dict[str, Any] = {}
     for root in checked:
-        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=True)
+        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(
+            r, own=r not in inherited, session_id=session_id
+        )
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
-        jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
+        # The finished-worktree predicate (item A) reads the same state plus
+        # the facts that can clear a foreign tree; one lookup, memoised.
+        jobs[f"fstate:{root}"] = lambda r=root: _finished(r, session_id, foreign_rows)
     deadline = time.monotonic() + _REACH_LOOKUP_BUDGET_S
     looked = _bounded_lookups(jobs, deadline)
     held: list[str] = []
@@ -1549,7 +1855,7 @@ def _reached_worktrees(
         if state is None or activity is None:
             held.append(f"{root}: created by this session; not checked in time (state unknown)")
             continue
-        facts = activity.facts()
+        facts = _with_scan_note(activity.facts(), root)
         if activity.pr_state == "open":
             return RankedTarget(
                 target,
@@ -1565,10 +1871,32 @@ def _reached_worktrees(
         idle = activity.pr_state in ("none", "unknown") and not activity.owners_running
         # Strictly ``clean``: a stale ``initializing`` lock is LOW only for
         # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
+        if (
+            state == "dirty"
+            and root not in inherited
+            and idle
+            and _scratch_location(root)
+            and (phrase := prov.own_detached_scratch(root)) is not None
+        ):
+            # ``rm -rf`` of an own detached dirty tree: the same waiver ``git
+            # worktree remove`` gets in ``_rank`` (operator directive
+            # 2026-11-14, field case attr3880-ci). Not held, so the ordinary
+            # ranking below gives the ledger LOW — for a literal path, or a
+            # glob reaching only own trees (review n1, PR #3987: consistent
+            # with ledger LOW elsewhere; a foreign match still holds). The
+            # detached/kept-by fact rides into that reason (review n2).
+            if scratch is not None:
+                scratch.append(f"{root}: {phrase}")
+            continue
         if state != "clean" or not idle:
-            changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
+            changes = (
+                f"; {prov.describe_changes(root)}{_dangling_phrase(root)}"
+                if state == "dirty"
+                else ""
+            )
             held.append(
-                f"{root}: created by this session; linked worktree state: {state}{changes}; {facts}"
+                f"{root}: created by this session; linked worktree state: "
+                f"{prov.state_phrase(root, state, session_id)}{changes}; {facts}"
             )
     if unchecked:
         held.append(
@@ -1577,15 +1905,46 @@ def _reached_worktrees(
         )
     if not foreign and not held:
         return None
+    finished = {
+        root: (_no_ledger_inside(foreign_rows, root, f) if f is not None else None)
+        for root in foreign[:_MAX_FOREIGN_STATES]
+        for f in [looked.get(f"fstate:{root}")]
+    }
+    proven = {root: f for root, f in finished.items() if f is not None and f.safe}
+    if (
+        not held
+        and len(foreign) <= _MAX_FOREIGN_STATES
+        and len(proven) == len(foreign)
+        and not any(_finished_route_barred(root, prot) for root in foreign)
+    ):
+        # Every foreign tree reached is a finished, merged, idle one (item A):
+        # that objection is settled, and ONLY that one. A delete of exactly
+        # those roots (the tree itself, or a glob matching only proven roots)
+        # is LOW; an enclosing delete continues to the ordinary ranking, so
+        # parent data, other sessions' rows and protected names still count.
+        for root in foreign:
+            _clear_finished(foreign_rows, root, proven[root])
+        exact = set(candidates) if target.pattern is not None else {os.path.realpath(scan)}
+        if exact and exact <= set(roots):
+            return RankedTarget(target, Risk.LOW, "finished, merged linked git worktrees")
+        return None
     parts = list(held)
     states = {
-        root: looked.get(f"fstate:{root}", "unknown") for root in foreign[:_MAX_FOREIGN_STATES]
+        root: (f.state if (f := finished.get(root)) is not None else "unknown")
+        for root in foreign[:_MAX_FOREIGN_STATES]
     }
     # Work at risk first: a dirty/locked/busy tree is what the judge must see.
     foreign.sort(key=lambda r: states.get(r, "not read") == "clean")
     shown = foreign[:_MAX_FOREIGN_SHOWN]
-    activities = _bounded_lookups(
-        {root: (lambda r=root: prov.worktree_activity(r, session_id)) for root in shown},
+    known = {
+        root: f.activity for root in shown if (f := finished.get(root)) and f.activity is not None
+    }
+    activities = known | _bounded_lookups(
+        {
+            root: (lambda r=root: prov.worktree_activity(r, session_id))
+            for root in shown
+            if root not in known
+        },
         deadline,
     )
     for root in shown:
@@ -1603,11 +1962,94 @@ def _reached_worktrees(
             who = "not created by this session (not in the ledger)"
         activity = activities.get(root)
         facts = activity.facts() if activity is not None else "PR state unknown (lookup timed out)"
-        parts.append(f"{root}: {who}; linked worktree state: {state}{changes}; {facts}")
+        state_text = prov.state_phrase(root, state, session_id)
+        parts.append(f"{root}: {who}; linked worktree state: {state_text}{changes}; {facts}")
     if len(foreign) > _MAX_FOREIGN_SHOWN:
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
+
+
+def _finished_route_barred(root: str, prot: _Protected) -> bool:
+    """True when a foreign tree sits where a plain directory already ranks HIGH.
+
+    WHY (QA Q1 on PR #3992). The finished-foreign-worktree route settles ONE
+    objection, "another session's worktree"; it must never outrank where the
+    tree lives. A tree under a local-operator state root (``<state>/worktrees``,
+    another session's scratchpad) or at the top level of a home ranked HIGH on
+    main for that place alone ("inside the local-operator state root"), and
+    the two early LOW returns of the route skipped those checks. Barring the
+    route there keeps main's rank: the ordinary/foreign ranking runs as before.
+    Both the lexical and physical spellings count, as in ``_high_reason``.
+    """
+    for spelling in {root.rstrip("/") or "/", os.path.realpath(root)}:
+        if any(_under(spelling, state) for state in prot.state_roots):
+            return True
+        if spelling in prot.homes or os.path.dirname(spelling) in prot.homes:
+            return True
+        if any(_under(spelling, r) for r in (*prot.install_roots, *prot.secrets_dirs)):
+            return True
+    return False
+
+
+def _finished(
+    root: str,
+    session_id: str,
+    rows: ForeignCreations | None,
+    activity: WorktreeActivity | None = None,
+) -> FinishedForeign:
+    """``provenance.finished_foreign_worktree`` for ``root``, memoised per classification.
+
+    The memo lives on the call's ``ForeignCreations`` (see its ``finished``),
+    so a tree reached by two targets of one command is checked once, and
+    never across calls (an owner may start in between).
+
+    Runs on the lookup pool (``_reached_worktrees``), so it never touches
+    the ledger connection: SQLite objects are bound to their creating thread.
+    Callers pass a ``safe`` answer through :func:`_no_ledger_inside` on the
+    classifying thread before acting on it.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    real = os.path.realpath(root)
+    memo = rows.finished if rows is not None else {}
+    if real not in memo:
+        memo[real] = prov.finished_foreign_worktree(real, session_id, activity=activity)
+    return memo[real]
+
+
+def _no_ledger_inside(
+    rows: ForeignCreations | None, root: str, finished: FinishedForeign
+) -> FinishedForeign:
+    """``finished``, downgraded when a third session's ledger row lies INSIDE ``root``.
+
+    WHY (review R2 on PR #3992): the predicate proves the tree's own work is
+    finished, not a directory another session recorded inside it (an empty
+    ``mkdir`` passes ``clean``), so such a row makes the tree not safe
+    (``foreign-ledger-inside``). The downgrade is memoised like the answer.
+    With no ``rows`` the predicate's answer stands, as before.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    if not finished.safe or rows is None or rows.foreign_under(root) is None:
+        return finished
+    downgraded = prov.FinishedForeign(
+        "not-safe", ("foreign-ledger-inside",), finished.state, finished.activity
+    )
+    rows.finished[os.path.realpath(root)] = downgraded
+    return downgraded
+
+
+def _clear_finished(rows: ForeignCreations | None, root: str, finished: FinishedForeign) -> None:
+    """Record a proven finished tree: its ledger row stops objecting, and the
+    LOW result carries the facts as a warning (``Verdict.warnings``)."""
+    if rows is None:
+        return
+    real = os.path.realpath(root)
+    rows.cleared.add(real)
+    note = finished.warning(real)
+    if note not in rows.notices:
+        rows.notices.append(note)
 
 
 #: Glob matches ``_foreign_reason`` compares one by one; past it the glob's
@@ -1649,9 +2091,25 @@ def _foreign_reason(target: Target, path: str, foreign: ForeignCreations | None)
 
 
 def _owned_by_session(
-    target: Target, path: str, prot: _Protected, session_id: str
-) -> tuple[str, list[str]] | None:
+    target: Target,
+    path: str,
+    prot: _Protected,
+    session_id: str,
+    *,
+    kin: bool = False,
+    family: bool = True,
+) -> tuple[str, list[str], str] | None:
     """A LOW reason when this session created what ``target`` destroys, else ``None``.
+
+    "This session" is its family (``provenance.owned_record``): its own and
+    its descendants' creations, and its ancestors'. ``kin`` admits a
+    sibling's or cousin's ``git worktree add`` too; only the non-forced
+    ``git worktree remove`` branch of ``_rank`` passes it. The third item
+    is the matched ``CreationRecord.relation`` (``""`` when several targets
+    mix relations, the strictest one seen otherwise). ``family=False`` counts
+    only this session's own rows (``provenance.owned_record``); the
+    unanswered-ask escalation passes it so a family member's row never lifts
+    an ask that binds the whole family (QA Q1, PR #3964).
 
     Only reached for a target already ranked HIGH by ``_high_reason`` and
     already cleared of CRITICAL ancestry, credential derivation and opaque or
@@ -1673,7 +2131,7 @@ def _owned_by_session(
         record = provenance.owned_link(link, session_id)
         if record is None:
             return None
-        return f"a symlink {record.describe()}; only the link is removed", [path]
+        return f"a symlink {record.describe()}; only the link is removed", [path], ""
 
     if target.pattern is not None:
         import glob as _glob
@@ -1688,22 +2146,29 @@ def _owned_by_session(
     else:
         paths = [path]
     first: str | None = None
+    relation = ""
     for candidate in paths:
         real = os.path.realpath(candidate)
         if any(_under(real, st) for st in prot.state_roots):
             return None
-        record = provenance.owned_record(real, session_id)
+        record = provenance.owned_record(real, session_id, kin=kin and family, family=family)
         if record is None:
+            return None
+        if record.relation == "kin" and not (record.kind == "worktree" and record.path == real):
+            # A sibling vouches only for the exact linked worktree it added,
+            # never for a container or a directory it made inside one.
             return None
         if provenance.is_primary_checkout(real) and not (
             record.kind == "clone" and record.path == real
         ):
             return None
         first = first or record.describe()
+        if record.relation == "kin" or (record.relation == "ancestor" and relation == ""):
+            relation = record.relation
     if first is None:
         return None
     reason = first if len(paths) == 1 else f"{len(paths)} matches, all {first}"
-    return reason, sorted(paths)
+    return reason, sorted(paths), relation
 
 
 #: ``*.log``, ``build-*.tmp``: a last component that ends in a literal
@@ -1780,9 +2245,16 @@ def classify_targets(
                 continue
             shown = f"{reason}, handed to {t.program or 'a program'}"
             if reason == OTHER_SCRATCHPAD:
-                tree = _tree_read(t, prot, session_id)
+                tree = _tree_read(
+                    t,
+                    prot,
+                    session_id,
+                    only_assigned=all(u.assigned for u in touched if u.path == t.path),
+                )
                 if tree is None:
-                    continue  # LOW: a tracked script reading a teammate's file
+                    # LOW: a tracked script reading a teammate's file, or any
+                    # read of a lineage member's scratch (``_tree_read``).
+                    continue
                 shown += tree
             evidence_hits.append(RankedTarget(t, Risk.HIGH, shown))
     for name in dict.fromkeys(blind):
@@ -1810,6 +2282,9 @@ def classify_targets(
     # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
     # row for it would invent a target (review M1 on PR #3816).
     ranked = [r for r in ranked if not (r.target.critical_only and r.risk is not Risk.CRITICAL)]
+    for r in ranked:
+        if r.target.credential_value:
+            _hide_credential_path(r, prot)
     evidence_hits = [
         h for h in evidence_hits if not (h.target.critical_only and h.risk is not Risk.CRITICAL)
     ]
@@ -1824,7 +2299,49 @@ def classify_targets(
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)
     reasons = [r.reason for r in ranked if r.risk is not Risk.LOW] + list(opaque_reasons)
-    return Verdict(risk=risk, targets=ranked, reasons=reasons)
+    # The "removed without review" notices describe a LOW outcome (R3, PR
+    # #3992): a verdict that ends HIGH or CRITICAL for another target removed
+    # nothing without review, so it must not carry them.
+    warnings = list(foreign.notices) if risk is Risk.LOW else []
+    return Verdict(risk=risk, targets=ranked, reasons=reasons, warnings=warnings)
+
+
+#: Characters that end a path inside a reason (same set ``check`` masks with).
+_PATH_END = r"\s;,()'\"|"
+
+
+def _hide_credential_path(ranked: RankedTarget, prot: _Protected) -> None:
+    """Scrub a credential path value AND its ancestor directories from ``ranked``.
+
+    WHY (review R1 / QA Q2 on PR #3992). A target inside a path-valued
+    credential variable ranks like a literal, and its reason can name an
+    ENCLOSING directory: "inside <ledger dir>, created by another session",
+    a worktree root, a protected parent. ``check.credential_path_masks`` hides
+    only the value and what lies under it, so such an ancestor reached the
+    refusal, the judge brief, the journal and the preview. This runs at the
+    source, for this target only, so unrelated targets keep their paths:
+    the value (each lexical/physical spelling) becomes ``$NAME <credential
+    path>``, and every ancestor below ``$HOME`` (or below ``/`` outside it)
+    becomes "a directory holding $NAME <credential path>". ``$HOME`` itself and
+    its ancestors stay: they say nothing about where the key lives.
+    """
+    from local_operator.guardrails.resolve import _credential_spellings
+
+    name = ranked.target.credential_name or "credential"
+    label = f"${name} <credential path>"
+    masks: dict[str, str] = {}
+    for spelling in _credential_spellings(ranked.target.credential_value or ""):
+        masks[spelling] = label
+        parent = os.path.dirname(spelling)
+        while parent not in ("", "/"):
+            if parent in prot.homes or any(h.startswith(parent + "/") for h in prot.homes):
+                break
+            masks.setdefault(parent, f"a directory holding {label}")
+            parent = os.path.dirname(parent)
+    for spelling in sorted(masks, key=len, reverse=True):
+        pattern = re.compile(re.escape(spelling) + f"(?=$|[/{_PATH_END}])[^{_PATH_END}]*")
+        ranked.reason = pattern.sub(lambda _m, lab=masks[spelling]: lab, ranked.reason)
+        ranked.shown = pattern.sub(lambda _m, lab=masks[spelling]: lab, ranked.shown)
 
 
 def classify_bash(

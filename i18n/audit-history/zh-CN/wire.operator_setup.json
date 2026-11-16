@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.operator_setup",
+  "history_sha256": "3f0adfda11815a14227f39df0ec5130a0ce32c4f1dfb622f2fe4aa6565c4a563",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.operator_setup",
+      "source_sha256": "62f86da21178d7f9e2d808b2172fb37d31cc0c5f7a62cb79a50040d4ff0b0444",
+      "translator": {
+        "agent": "C3 coder session aa53a3349ddc (approvals-setup lane, branch feat/approvals-setup-no-terminal)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported by the delegating manager",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, session 485bad0ccbf0; independent of translator session aa53a3349ddc — same model family, separate session)",
+        "session": "485bad0ccbf0",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "blocker": 0,
+        "major": 1,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Round 1 audited all 21 keys at 3be60bb565e4 against en + context sidecar, i18n/glossary.md and i18n/style-guides/zh-CN.md; mechanical: key parity, no placeholders, NFC, no Cc/Cf/bidi controls, verbatim 'Local Operator' and '/mobile approvals on', no anchor/sudo/pkexec/Radient, no ASCII apostrophe/ellipsis, fr U+202F; menu path in tui.anchor_clause matches desktop ui.settings.page.title/ui.providers.phone.heading; anchor_clause opens with the locale semicolon and has no final period (composed at serving.py:11540 / tui/app.py:60214). Remediation at 0ac607ad6437 applied every finding verbatim; round 2 verified all changed values byte-equal to the recommended strings, no other key changed; check.py --catalogues-only 0 problems. Target zh-CN/wire.operator_setup.json sha256 0cd0a3e6f300a43ffd96fc1544b4390e32f212a1ee3591f50a762c74242e29db. Findings: ZH-1 MAJOR refused.no_password_prompt (spec U18), refused.in_progress, outcome.cancelled, outcome.failed: 密码提示 is the established zh UI term for \"password hint\" (macOS/Windows), drifting the U18 meaning -> 密码输入窗口/密码窗口/密码验证 (fixed); ZH-2 MINOR prompt.* x3, refused.privileged, tui.usage, tui.anchor_clause: spaces between Chinese and Latin runs against zh-CN style guide (corpus 34 unspaced vs 9 spaced) -> unspaced (fixed). A second independent audit of the high-visibility prompt.* keys (shown inside the macOS password dialog) is running separately; this receipt does not stand in for it."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.operator_setup",
+      "source_sha256": "1e76a1dde28ed78f9ddc15aec24b8ac7e964052bc9735aafde542b151847fb78",
+      "translator": {
+        "agent": "coder subagent job 7e0de4d5b443 (label 3950-c3-r1-remediation) of host session 25fe8dfbf610",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "model from the host's launch record ('on this session's model'); actual served fallback not observable by the auditor",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev translation-auditor role, session 3c3553f39a3c; independent of translator job 7e0de4d5b443 — same model family, separate session)",
+        "session": "3c3553f39a3c",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Round-1 remediation audit at ed2e82a80368 (branch feat/approvals-setup-no-terminal, PR #3950): the 10 changed/added keys (prompt.phone_approvals, refused.terminal_cannot_prompt, refused.cannot_install, refused.key_failed, refused.unsafe_staging, outcome.not_verified, outcome.changed_elsewhere, outcome.file_only, tui.usage, tui.approvals_report_not_set_up) and the removal of tui.anchor_clause, per git diff d72765c18905..ed2e82a80368, read against en + context sidecar, i18n/glossary.md and i18n/style-guides/zh-CN.md; the 14 unchanged keys are byte-identical to d72765c18905 (previous passed receipt) and were re-read only for glossary consistency. Mechanical (verified in bytes): 24/24 key parity with en, {live}/{saved}x2 placeholder multiset equal, verbatim '/mobile approvals on', '/approvals {saved}', 'config.yml', 'Touch ID', 'Local Operator'; no manual bidi controls; full-width ：（）“”， and no space at CJK/Latin seams; tui.usage has no trailing period; Settings -> Phone access path equals the desktop labels ui.settings.page.title + ui.providers.phone.heading in local-operator-ui; tui.approvals_report_not_set_up is rendered whole (serving.py:11409, tui/app.py:31938). Target zh-CN/wire.operator_setup.json sha256 4bffe90d0a7ba65f0ef2c35b85cf59edf01c023af7090fd5c25467663a829127. Findings: ZH-R1-1 NIT outcome.file_only: \"注意：在这台电脑本身上审批时，不会要求指纹或密码。\" -> \"注意：直接在这台电脑上审批时，不会要求指纹或密码。\" ('在这台电脑本身上' reads calqued from 'itself'; '直接在…上' carries the same this-computer-not-the-phone contrast idiomatically) — open, non-gating, for the translator/implementer. This receipt does not stand in for the separate second independent audit of the high-visibility prompt.* keys."
+    }
+  ]
+}

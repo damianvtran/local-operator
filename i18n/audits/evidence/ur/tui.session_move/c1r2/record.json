@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "audit_id": "c1r2",
+  "audit_round": 2,
+  "audit_kind": "same-history delta audit of the translator's v2 revision of an already round-1-audited group",
+  "locale": "ur",
+  "namespace": "tui.session_move",
+  "audit_date": "2026-11-11",
+  "key_count": {
+    "namespace": 7,
+    "group_total": 22
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e1c9906d0fb4",
+    "model": "anthropic/claude-sonnet-5-5",
+    "independent_from_translator": true,
+    "actual_model_source": "served model quoted in the auditor's own report header; no fallback reported",
+    "fallback_used": false
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "record": "c1-prep/ur.v2-changes.md"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.json",
+      "sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.context.json",
+      "sha256": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/tui.session_move.json",
+      "sha256": "82f8fc421b0449e47b8cd8c464d182dd672f77a70335a25d0dd5bdf8d964dc06"
+    },
+    "v2_candidate_all_22_keys": {
+      "path": "c1-prep/ur.v2.json",
+      "sha256": "49ae1dbe62f41d3c12d041769751f79e8ee34d9a9292ffb4d069ef238d0d8936"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_bytes_note": "verify.log (integrator, not the auditor) shows every shipped value is byte-equal to the audited v2 candidate",
+  "current_report_verdict": {
+    "status": "passed",
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 2,
+    "unresolved_blocker_major_count": 0
+  },
+  "limits": [
+    "The round-2 auditor was a read-only reading role and kept no command log; verify.log is the integrator's mechanical re-verification of the shipped bytes, not the auditor's output.",
+    "No rendered terminal frame, no native-speaker review."
+  ],
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "8e00c25832a8bfe224e92d1892858a9164f12117beaacc345c88006295556376"
+    },
+    {
+      "path": "round1-A-report.md",
+      "sha256": "485ad7881e9ab58a7ebca95f2043d5c83966fa1761776574a4e4ef6c0364b4c6"
+    },
+    {
+      "path": "round1-B-report.md",
+      "sha256": "c510f56dbcc70ca37bb00c75929183da6b9eb3b93c16646ae9cc40469ec3a2ca"
+    },
+    {
+      "path": "verify.log",
+      "sha256": "e1237d9ed21d96d8f05c87e989317b3bf0c8eb46b1768823309671ce38a4cc98"
+    }
+  ]
+}

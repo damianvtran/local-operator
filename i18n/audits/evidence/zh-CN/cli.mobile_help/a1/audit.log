@@ -1,0 +1,77 @@
+# zh-CN/cli.mobile_help mechanical + render check (scripts run with .venv/bin/python; runtime.render_message = product renderer)
+en catalogue_sha256     3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267
+zh-CN catalogue_sha256  b07a34c8e22bceacb9335c2941d08bbdeb995a9c8bde4a30b47e4a07ee56752f
+keys en=17 zh-CN=17 missing=[] extra=[]
+
+[cli.mobile_help.mobile] args=OK nfc=True cells en=49 zh-CN=31
+  en : Phone access: control this machine's lop sessions
+  zh-CN: 手机访问：控制此机器上的lop会话
+
+[cli.mobile_help.install] args=OK nfc=True cells en=44 zh-CN=31
+  en : Install the daemon, password and LaunchAgent
+  zh-CN: 安装守护进程、密码和LaunchAgent
+
+[cli.mobile_help.status] args=OK nfc=True cells en=37 zh-CN=36
+  en : Daemon health, gate and live sessions
+  zh-CN: 守护进程健康状态、访问关卡和活动会话
+
+[cli.mobile_help.daemon_action] args=OK nfc=True cells en=18 zh-CN=12
+  en : Restart the daemon
+  zh-CN: 重启守护进程
+  zh-CN[action=start]: 启动守护进程
+  zh-CN[action=stop]: 停止守护进程
+  zh-CN[action=other_value]: other_value守护进程
+
+[cli.mobile_help.logs] args=OK nfc=True cells en=40 zh-CN=30
+  en : Tail the daemon's and the runtimes' logs
+  zh-CN: 跟踪守护进程和运行时的日志末尾
+
+[cli.mobile_help.logs_lines] args=OK nfc=True cells en=35 zh-CN=38
+  en : Lines per file (up to two are read)
+  zh-CN: 每个文件读取的行数（最多读取两个文件）
+
+[cli.mobile_help.logs_follow] args=OK nfc=True cells en=107 zh-CN=78
+  en : Follow by name, so a log created or rotated while you watch is seen (a descriptor-bound follow misses both)
+  zh-CN: 按名称跟踪，以显示查看期间新建或轮转的日志（绑定描述符的跟踪会漏掉这两种情况）
+
+[cli.mobile_help.password] args=OK nfc=True cells en=34 zh-CN=18
+  en : Show or rotate the portal password
+  zh-CN: 显示或轮换门户密码
+
+[cli.mobile_help.devices] args=OK nfc=True cells en=57 zh-CN=39
+  en : List this computer's push devices, or revoke/unrevoke one
+  zh-CN: 列出此电脑的推送设备，或撤销/恢复某设备
+
+[cli.mobile_help.devices_command] args=OK nfc=True cells en=59 zh-CN=54
+  en : list (default), revoke <device_id>, or unrevoke <device_id>
+  zh-CN: list（默认）、revoke <device_id>或unrevoke <device_id>
+
+[cli.mobile_help.devices_device_id] args=OK nfc=True cells en=69 zh-CN=56
+  en : the device_id `lop mobile devices` lists; required by revoke/unrevoke
+  zh-CN: `lop mobile devices`列出的device_id；revoke/unrevoke必填
+
+[cli.mobile_help.devices_port] args=OK nfc=True cells en=60 zh-CN=50
+  en : the mobile daemon's port (default: the daemon's own default)
+  zh-CN: mobile守护进程的端口（默认：守护进程自身的默认值）
+
+[cli.mobile_help.uninstall] args=OK nfc=True cells en=22 zh-CN=15
+  en : Remove the LaunchAgent
+  zh-CN: 移除LaunchAgent
+
+[cli.mobile_help.uninstall_purge] args=OK nfc=True cells en=24 zh-CN=12
+  en : Also delete the password
+  zh-CN: 同时删除密码
+
+[cli.mobile_help.serve] args=OK nfc=True cells en=27 zh-CN=20
+  en : Run the daemon (foreground)
+  zh-CN: 运行守护进程（前台）
+
+[cli.mobile_help.doctor] args=OK nfc=True cells en=54 zh-CN=32
+  en : Read-only diagnostics for phone access (safe to share)
+  zh-CN: 手机访问的只读诊断（可放心分享）
+
+[cli.mobile_help.doctor_json] args=OK nfc=True cells en=29 zh-CN=22
+  en : Print the diagnostics as JSON
+  zh-CN: 以JSON格式输出诊断信息
+
+RESULT placeholder/NFC defects: 0

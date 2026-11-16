@@ -1,0 +1,21 @@
+$ .venv/bin/python i18n/audits/evidence/es/cli.failures/gbt2/checks.py.txt
+sha256 en local_operator/i18n/catalogues/en/cli.failures.json 8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea
+sha256 context local_operator/i18n/catalogues/en/cli.failures.context.json b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f
+sha256 es local_operator/i18n/catalogues/es/cli.failures.json 0e70ea3dea3701c9a581b0507337e73fbb2bb0f44801dc1e29e3d859a9057cd9
+keys en/es/context: 5 5 5
+key order identical: True | context keys match: True
+OK  cli.failures.error_line args=(('prog', 'simple'), ('message', 'simple')) backticks_equal=True cells en=24 es=24 plural/select=False
+OK  cli.failures.required args=(('names', 'simple'),) backticks_equal=True cells en=45 es=47 plural/select=False
+OK  cli.failures.invalid_choice args=(('argument', 'simple'), ('value', 'simple'), ('choices', 'simple')) backticks_equal=True cells en=68 es=71 plural/select=False
+OK  cli.failures.invalid_command args=(('group', 'simple'), ('command', 'simple')) backticks_equal=True cells en=34 es=39 plural/select=False
+OK  cli.failures.github_borrow_timeout args=(('owner', 'simple'), ('seconds', 'simple')) backticks_equal=True cells en=83 es=83 plural/select=False
+failures: 0
+rc=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+rc=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale es --namespace cli.failures
+3d5c5a46c10eadb60c3f802e9714d4b728755926024e4583a611dea0015e2ff8
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/es/cli.failures/gbt2/receipt.json --expected-history-sha "$(...history-sha...)" --dry-run
+i18n/audit-history/es/cli.failures.json
+rc=0

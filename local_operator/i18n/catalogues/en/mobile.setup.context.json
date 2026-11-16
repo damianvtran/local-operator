@@ -139,11 +139,6 @@
     "tone": "Plain, precise, non-alarmist",
     "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
-  "mobile.setup.mobile_bundle_tui": {
-    "role": "Phone setup title, progress, consent or recovery",
-    "tone": "Plain, precise, non-alarmist",
-    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
-  },
   "mobile.setup.supervisor_tui": {
     "role": "Phone setup title, progress, consent or recovery",
     "tone": "Plain, precise, non-alarmist",
@@ -168,6 +163,11 @@
     "role": "Phone setup title, progress, consent or recovery",
     "tone": "Plain, precise, non-alarmist",
     "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.operation_failed_tui": {
+    "role": "TUI /mobile result line",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Shown in the terminal app's /mobile command when checking or turning on phone access failed because Radient could not be reached or the Radient sign-in was rejected. /login radient is the TUI's own slash command and stays verbatim; never replace it with a shell command such as lop login radient."
   },
   "mobile.setup.verification_tui": {
     "role": "Phone setup title, progress, consent or recovery",
@@ -399,10 +399,20 @@
     "tone": "Plain, actionable and cautious",
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim. The tunnel's owner switched it off in the Radient web console; the only fix is the console, and setup deliberately does not re-enable it."
   },
+  "mobile.setup.disabled_resume": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span; setup never spends money on its own. Shown when the person tried to turn a deliberately stopped phone access back on, but phone access is switched off in the Radient console. Turning it on in the console does NOT bring it back by itself; the person must then turn it back on again here. 'the console' is the Radient console. Never promise automatic reconnection."
+  },
   "mobile.setup.billing_lapsed": {
     "role": "Mobile setup progress or blocker",
     "tone": "Plain, actionable and cautious",
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim. Billing was activated before but the prepaid balance no longer covers it. The fix is adding credit, not accepting a price again."
+  },
+  "mobile.setup.billing_lapsed_resume": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span; setup never spends money on its own. Shown when the person tried to turn a deliberately stopped phone access back on, but the Radient balance has run out. Phone access stays off: adding credit does NOT bring it back by itself, so the person must turn it back on again here (the card's button or /mobile enable). Never promise automatic reconnection."
   },
   "mobile.setup.reconnect": {
     "role": "Mobile setup progress or blocker",
@@ -468,5 +478,65 @@
     "role": "Mobile setup action line",
     "tone": "Plain, actionable imperative",
     "note": "The one action line when the owner switched phone access off in the console. {url} is the Radient console URL and stays verbatim; no command is named."
+  },
+  "mobile.setup.stopped_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. The person turned phone access off themselves; the card's button turns it back on. Not an error, not a nag."
+  },
+  "mobile.setup.owner_missing_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. The account that owns the tunnel is no longer signed in here; the card offers that sign-in."
+  },
+  "mobile.setup.login_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. Shown beside the sign-in button."
+  },
+  "mobile.setup.choose_account_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. Shown beside the account picker; reassures that an existing phone address keeps its owner."
+  },
+  "mobile.setup.account_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. Radient's account/route check did not complete; nothing on this computer changed."
+  },
+  "mobile.setup.cloudflared_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. cloudflared is a product name and stays verbatim. The agent installs it with normal tool approval."
+  },
+  "mobile.setup.mobile_bundle_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. The local phone web interface is missing; the agent prepares it with normal tool approval."
+  },
+  "mobile.setup.supervisor_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. No background service (launchd/systemd/Task Scheduler) is available to keep the connector running."
+  },
+  "mobile.setup.apply_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. Shown beside the primary 'turn on' button when nothing else blocks setup; any price was already accepted."
+  },
+  "mobile.setup.verification_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. Setup ran but the phone route is not confirmed yet; usually clears within moments."
+  },
+  "mobile.setup.failed_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. Setup stopped part-way; completed steps are not undone, so retrying is safe."
+  },
+  "mobile.setup.complete_plain": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, reassuring, non-technical",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span (the button or the TUI's action line carries the action); setup never spends money on its own. Shown under the verified phone address."
   }
 }

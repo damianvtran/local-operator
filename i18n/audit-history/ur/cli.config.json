@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.config",
+  "history_sha256": "31112f96c6b3bdcc039aa8e87186e42f2bb416b4222f8523022ced47ce203004",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "changes_requested",
+        "findings": 9,
+        "unresolved_blocker_major": 3
+      },
+      "status": "changes_requested",
+      "note": "ur C1 `cli.config` round 1 audit A on the v1 bytes: 3 MAJOR, 3 minor, 3 nit (group-wide counts, same report for both namespaces). Superseded by v2 and the final round-2 pass; report preserved at i18n/audits/evidence/ur/cli.config/c1r2/round1-A-report.md.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.config/c1r2/round1-A-report.md",
+          "sha256": "485ad7881e9ab58a7ebca95f2043d5c83966fa1761776574a4e4ef6c0364b4c6"
+        }
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ur C1 `cli.config` FINAL: round-2 delta audit of the v2 bytes now shipped (target file sha256 238217444ea6), 0 BLOCKER/0 MAJOR/1 MINOR/2 NIT. Round 1: A deepseek 3 MAJOR (changes_requested), B sonnet 0M/5m/3n; v2 revised 12 keys. Independent of translator openai/gpt-6.1-sol. Deferred minor U2-1: <پیر> placeholder reads as Monday alone; shipped says «پیر ڈیوائس». Evidence: i18n/audits/evidence/ur/cli.config/c1r2/record.json. No rendered frame; no native review.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.config/c1r2/record.json",
+          "sha256": "c629673c6af9cf329c6bc822032b2f4db6a0e8c69b338acb8361e3e81deed0c8"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.config/c1r2/report.md",
+          "sha256": "8e00c25832a8bfe224e92d1892858a9164f12117beaacc345c88006295556376"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.config/c1r2/round1-B-report.md",
+          "sha256": "c510f56dbcc70ca37bb00c75929183da6b9eb3b93c16646ae9cc40469ec3a2ca"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.config/c1r2/verify.log",
+          "sha256": "e1237d9ed21d96d8f05c87e989317b3bf0c8eb46b1768823309671ce38a4cc98"
+        }
+      ]
+    }
+  ]
+}

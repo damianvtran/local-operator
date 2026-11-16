@@ -1,0 +1,23 @@
+{
+  "locale": "vi",
+  "namespace": "mobile.doctor",
+  "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+  "translator": {
+    "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+    "date": "2026-11-14"
+  },
+  "auditor": {
+    "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-14",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "PR #3953 round-1 remediation audit a3 PASSED: 23 changed/new keys, 0 blocker / 0 major / 0 minor / 0 nit. Findings: none. Translator model unverified; auditor anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/vi/mobile.doctor/a3/record.json",
+  "evidence": "i18n/audits/evidence/vi/mobile.doctor/a3/record.json",
+  "round": "a3",
+  "keys_audited": 23
+}

@@ -1,0 +1,17 @@
+{
+  "cli.config.created": "Nouveau fichier de configuration créé : {path}",
+  "cli.config.opened": "Fichier de configuration ouvert : {path}",
+  "cli.config.cleared": "Clé {key} effacée : sa valeur par défaut s’applique à nouveau",
+  "cli.config.updated": "Clé {key} mise à jour avec la valeur {value}",
+  "cli.config.running_sessions_unchanged": "Les sessions en cours restent inchangées — modifier la configuration ne peut pas assouplir leurs règles d’approbation ; saisissez /approvals auto dans chaque session où vous souhaitez désactiver les approbations. Les nouvelles sessions démarrent en mode auto.",
+  "cli.config.list_title": "Options de configuration",
+  "cli.config.list_description": "Description : {description}",
+  "cli.config.list_unrecognised": "clé non reconnue ; rien ne la lit",
+  "cli.config.list_desc_hosting": "Plateforme du fournisseur d’IA (p. ex. radient, openai, deepseek, anthropic, openrouter)",
+  "cli.config.list_desc_model_name": "Modèle précis à utiliser pour les interactions",
+  "cli.config.list_desc_conversation_length": "[OBSOLÈTE — remplacé par le compactage] Nombre maximal de messages à conserver dans l’historique de conversation",
+  "cli.config.list_desc_detail_length": "[OBSOLÈTE — remplacé par le compactage] Nombre de messages récents à conserver sans les résumer dans l’historique de conversation",
+  "cli.config.list_desc_max_learnings_history": "[OBSOLÈTE — remplacé par le compactage] Nombre maximal d’apprentissages à conserver",
+  "cli.config.list_desc_classification_notice": "[OBSOLÈTE] Les suggestions intelligentes restent muettes dans le chat ; l’appel et son coût figurent dans le journal de session",
+  "cli.config.list_desc_auto_save_conversation": "Enregistrement automatique des conversations"
+}

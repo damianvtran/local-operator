@@ -349,6 +349,8 @@ def test_the_probe_dial_never_races_our_own_listener(monkeypatch: pytest.MonkeyP
         settings=relay.NetworkSettings(port=4097), root=None, _link_for=lambda _d: None
     )
     server._redial_candidates = lambda m: relay.RelayServer._redial_candidates(server, m)
+    # The dial body sits behind the single-flight entry; bound the same way.
+    server._dial_for_link = lambda d, **kw: relay.RelayServer._dial_for_link(server, d, **kw)
     link, reason, _attempts = relay.RelayServer._ensure_link_with_probe(server, "d_node")
     assert link is None and reason == "refused"
     assert raced == [["172.31.18.0:4097", "16.52.146.32:4097"]]

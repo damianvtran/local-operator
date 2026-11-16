@@ -120,11 +120,13 @@ def test_a_live_language_switch_moves_every_surface_off_english(fr_fixture: None
     assert notify.BODIES["closed"] == notify.BODY_CLOSED == want_closed
     assert notify.BODIES["retired"] == notify.BODY_RETIRED == want_retired
     assert COMPOSE_BODIES["retired"] == want_retired
-    # Phone push: outcome phrase AND count clause both follow.
+    # Phone push: the outcome phrase follows (the alert body is the composer's
+    # house sentence since 2026-11-14 and no longer prints the count), and the
+    # count clause, still a translated helper, follows too.
     want_count = text.tr("wire.push_alert")(_kp.attention_count(total=5, count="5"))
     assert want_count.startswith("FR:") and "5" in want_count
-    alert = push_payload.completion_alert("retired", 5)[push_payload.ALERT_BODY_FIELD]
-    assert alert == f"{want_retired} · {want_count}"
+    alert = push_payload.completion_alert("retired")[push_payload.ALERT_BODY_FIELD]
+    assert alert == want_retired
     assert push_payload.count_phrase(5) == want_count
     assert want_closed != english["closed"]
     assert want_retired != english["retired"]

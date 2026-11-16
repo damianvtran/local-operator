@@ -214,6 +214,24 @@ class RadientPushTransport:
         """The §3.2 ``computer`` handle — the tunnel id (SESSION-PUSH §1)."""
         return self.tunnel_id
 
+    def registration_computer_handle(self) -> str | None:
+        """Return the emit identity only while this lane owns the current binding.
+
+        Registration may outlive a tunnel/account switch or a cloud refusal.
+        Never hand a phone the old lane's handle in either case. This reads the
+        tunnel config, so the daemon calls it off the event loop. The value is
+        the existing SESSION-PUSH computer identity, not a registry-derived ID
+        or a new credential; learning it grants no authority.
+        """
+        key = self._tunnel_key()
+        # Config I/O must stay outside the lock, as in re-arm. The check below
+        # is the linearization point: a forward may disarm while that read is
+        # blocked, and re-arm may change the credential binding under this lock.
+        with self._disarm_lock:
+            if self._disarmed or key != (self.tunnel_id, self.credential_id):
+                return None
+            return self.computer
+
     @property
     def disarmed(self) -> bool:
         """Whether calls are refused locally; a disarmed lane may re-arm here.
@@ -440,7 +458,24 @@ class PushLane:
     with the send split out of its critical section.
     """
 
-    def __init__(self, transport: RadientPushTransport, config_dir: Path) -> None:
+    def __init__(
+        self,
+        transport: RadientPushTransport,
+        config_dir: Path,
+        *,
+        unread_count: Callable[[], int | None] | None = None,
+    ) -> None:
+        """``unread_count`` is the daemon's listing count, handed to the worker.
+
+        It is the SAME number the phone's badge reads
+        (``SessionTable.unread_snapshot``'s ``count``), so a banner's "N
+        conversations need you" matches the badge. Without it the worker falls
+        back to its store census, which is lifetime history on a real machine:
+        the 2026-11-14 production banner read "47502 conversations need you"
+        because this constructor passed nothing. ``None`` here keeps that
+        fallback for a caller with no daemon (a test, a diagnostic), never for
+        the service, which always passes the table's reader.
+        """
         self.transport = transport
         self.lock = threading.Lock()
         #: Held for a whole heartbeat, network included, and only ever taken
@@ -466,6 +501,7 @@ class PushLane:
             config_dir=config_dir,
             computer=transport.computer,
             report_block=self._emit_rows,
+            unread_count=unread_count,
         )
         #: When the last heartbeat attempt FAILED, so the scan does not retry it
         #: every 2 s: ``heartbeat_due`` stays true after a failure (the report's
@@ -576,7 +612,9 @@ class PushLane:
         return block
 
 
-def build_push_lane(config_dir: Path) -> PushLane | None:
+def build_push_lane(
+    config_dir: Path, *, unread_count: Callable[[], int | None] | None = None
+) -> PushLane | None:
     """The lane for this machine, or ``None`` when it has no live tunnel.
 
     ``None`` is today's behaviour, deliberately (ADR §2.4): push rides the
@@ -585,11 +623,17 @@ def build_push_lane(config_dir: Path) -> PushLane | None:
     tunnel deletes ``config.json`` (``lop tunnel revoke``), so an absent file is
     the revoked case too; a record still carrying ``revoked_at`` is refused for
     the same reason.
+
+    ``unread_count`` is passed straight to :class:`PushLane` (see there): the
+    service hands it ``SessionTable.listing_unread_count`` on BOTH construction
+    paths — at start and from the late-tunnel factory.
     """
     key = _tunnel_key()
     if key is None:
         return None
     tunnel_id, credential_id = key
     return PushLane(
-        RadientPushTransport(tunnel_id=tunnel_id, credential_id=credential_id), config_dir
+        RadientPushTransport(tunnel_id=tunnel_id, credential_id=credential_id),
+        config_dir,
+        unread_count=unread_count,
     )

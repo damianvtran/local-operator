@@ -1,0 +1,17 @@
+{
+  "cli.config.created": "{path} पर नई कॉन्फ़िगरेशन फ़ाइल बनाई गई",
+  "cli.config.opened": "{path} पर कॉन्फ़िगरेशन फ़ाइल खोली गई",
+  "cli.config.cleared": "{key} का मान हटाया गया: अब फिर से इसका डिफ़ॉल्ट मान लागू है",
+  "cli.config.updated": "{key} का मान {value} कर दिया गया",
+  "cli.config.running_sessions_unchanged": "चल रहे सत्रों में कोई बदलाव नहीं हुआ — कॉन्फ़िगरेशन में बदलाव करने से उनकी स्वीकृति की शर्तें कम नहीं होतीं; जिस सत्र में टूल चलाने के लिए स्वीकृति नहीं चाहिए, उसमें /approvals auto टाइप करें। नए सत्र auto मोड में शुरू होते हैं।",
+  "cli.config.list_title": "कॉन्फ़िगरेशन विकल्प",
+  "cli.config.list_description": "विवरण: {description}",
+  "cli.config.list_unrecognised": "पहचानी गई कुंजी नहीं है; प्रोग्राम में कहीं भी इसे पढ़ा नहीं जाता",
+  "cli.config.list_desc_hosting": "AI प्रदाता का प्लेटफ़ॉर्म (जैसे radient, openai, deepseek, anthropic, openrouter)",
+  "cli.config.list_desc_model_name": "बातचीत के लिए इस्तेमाल किया जाने वाला मॉडल",
+  "cli.config.list_desc_conversation_length": "[अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में रखे जाने वाले संदेशों की अधिकतम संख्या",
+  "cli.config.list_desc_detail_length": "[अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में बिना सारांश बनाए रखे जाने वाले हाल के संदेशों की संख्या",
+  "cli.config.list_desc_max_learnings_history": "[अप्रचलित — अब इसकी जगह संपीडन है] सीखी गई बातों की सहेजी जाने वाली प्रविष्टियों की अधिकतम संख्या",
+  "cli.config.list_desc_classification_notice": "[अप्रचलित] स्मार्ट संकेत चैट में कुछ नहीं दिखाते; कॉल और उसकी लागत सत्र लॉग में दर्ज होती है",
+  "cli.config.list_desc_auto_save_conversation": "बातचीत अपने आप सहेजी जाए या नहीं"
+}

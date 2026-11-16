@@ -126,6 +126,36 @@ def offline_hold_s(root: Path | None = None) -> float:
     return min(max(value, grant_ttl_s(root)), OFFLINE_HOLD_MAX_S)
 
 
+def github_token_hold_s(root: Path | None = None) -> float:
+    """``network.credentials.github_token_hold_s``: the hold for a lent PAT or ``gh`` token.
+
+    WHY A SEPARATE CAP (review #3947 M1, 2026-11-14): a PAT or a ``gh`` login has no
+    revoke endpoint, so a lost node that never hears ``lop network panic`` can keep
+    using one for the whole hold — only revoking it at GitHub ends it. The operator
+    chose the full 24 h for personal tokens too ("Full 24 h for personal tokens too",
+    Damian, 2026-11-14), so this DEFAULTS TO :func:`offline_hold_s`; the setting
+    exists so that residual can be narrowed for those two arms alone without new
+    plumbing. Lowering it affects LATER grants only: a grant already lent keeps the
+    hold it was stated with (the revoke receipt reports that one, #3947 R2-m2). Read
+    on the OWNER, where the token lives and the hold is stated
+    (``owner._grant_from_owner_token``); clamped to ``[grant_ttl_s, offline_hold_s]``
+    so it can only shorten the hold. A garbled value reads as the hold.
+    """
+    from local_operator.network import store
+
+    hold = offline_hold_s(root)
+    raw = store.read_config(("network", "credentials", "github_token_hold_s"), None, root)
+    if raw is None:
+        return hold
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return hold
+    if value != value:  # NaN
+        return hold
+    return min(max(value, grant_ttl_s(root)), hold)
+
+
 #: How often a turn waiting for an absent owner re-reads the owner's liveness stamp
 #: (:func:`owner_wait_s`). The relay acts at this resolution (``REDIAL_TICK_S``), so
 #: polling faster cannot see the owner sooner; each poll is file reads, never a dial.
@@ -349,7 +379,41 @@ class _LocalOps:
         broker = owner_mod.broker_for_relay(self._server)
         if broker is None:
             return {"kind": "ack", "key": key, "revoked": 0}
-        return {"kind": "ack", "key": key, "revoked": broker.revoke_outstanding(key, holder)}
+        # Read BEFORE the revoke: what this relay lent the holder, so the receipt
+        # states the hold a node that cannot hear the revoke actually has (#3947 R2-m2).
+        lent_until = broker.lent_hold_until_ms(key, holder)
+        return {
+            "kind": "ack",
+            "key": key,
+            "revoked": broker.revoke_outstanding(key, holder),
+            "lent_hold_until_ms": lent_until,
+        }
+
+    def claim(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Answer a ``credential_claim``: ask the renewing node before this owner renews.
+
+        Blocking for up to ``renewal.CLAIM_WAIT_S`` (R4's ``W``) on this control
+        worker; the asking process never waits that long itself (it gives up after
+        ``renewal.CLAIM_INLINE_S`` and reads the outcome off the row later).
+        """
+        from local_operator.network.credentials import owner as owner_mod
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        key = str(frame.get("key") or "")
+        broker = owner_mod.broker_for_relay(self._server)
+        if broker is None:
+            return {"kind": "ack", "key": key, "state": "not_lent"}
+        return {"kind": "ack", "key": key, **renewal_mod.owner_claim(broker, key)}
+
+    def lend_push(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Answer a ``credential_lend_push``: send the owner's new pair to the renewing node."""
+        from local_operator.network.credentials import owner as owner_mod
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        key = str(frame.get("key") or "")
+        broker = owner_mod.broker_for_relay(self._server)
+        pushed = broker is not None and renewal_mod.push_to_node(broker, key)
+        return {"kind": "ack", "key": key, "pushed": bool(pushed)}
 
     def share_push(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Push one just-shared placement row to its holder now (``share_push``).
@@ -433,6 +497,10 @@ def _stop_slice(server: RelayServer) -> None:
 
     owner_mod.stop_broker_for_relay(server)
     sync_mod.stop_engine_for_relay(server)
+    # A pending renew nudge must not fire into a relay that is going away.
+    from local_operator.network.credentials import renew_push
+
+    renew_push.stop(server)
 
 
 def install(server: RelayServer) -> None:
@@ -464,6 +532,11 @@ def install(server: RelayServer) -> None:
     from local_operator.network.credentials import share_push as share_push_mod
 
     share_push_mod.install()
+    # THE RENEW-ON-RECONNECT WAKE CHECK rides the same tick (``renew_push.wake_step``);
+    # its link-up half is the ``on_link_up`` hook registered below.
+    from local_operator.network.credentials import renew_push as renew_push_mod
+
+    renew_push_mod.install()
     handler = owner_mod.MeshCredentialBroker.relay_handler(server)
     ops = _LocalOps(server)
     server.register_ops(
@@ -475,6 +548,8 @@ def install(server: RelayServer) -> None:
             "credential_placement": ops.placement,
             "credential_revoke": ops.revoke,
             "credential_share_push": ops.share_push,
+            "credential_claim": ops.claim,
+            "credential_lend_push": ops.lend_push,
             "credential_sync_pull": ops.sync_pull,
         },
         slow={"net_broker": BROKER_OP_DEADLINE_S},
@@ -482,4 +557,7 @@ def install(server: RelayServer) -> None:
         # where the ops (and therefore the lazily built owners) first become
         # reachable from a relay.
         on_stop={"mesh-credentials": lambda: _stop_slice(server)},
+        # An owner's return (start, wake, re-link) renews what it lends that member,
+        # so a daily owner login restarts an idle node's offline hold.
+        on_link_up={"mesh-credentials-renew": lambda link: renew_push_mod.on_link_up(server, link)},
     )

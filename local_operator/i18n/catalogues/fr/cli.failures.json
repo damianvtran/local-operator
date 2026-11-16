@@ -2,5 +2,6 @@
   "cli.failures.error_line": "{prog}: erreur: {message}",
   "cli.failures.required": "les arguments suivants sont requis : {names}",
   "cli.failures.invalid_choice": "argument {argument} : choix invalide : {value} (choisir parmi {choices})",
-  "cli.failures.invalid_command": "Commande {group} invalide : {command}"
+  "cli.failures.invalid_command": "Commande {group} invalide : {command}",
+ "cli.failures.github_borrow_timeout": "L’identifiant GitHub de {owner} n’a pas été reçu dans les {seconds} s ; relancer la commande"
 }

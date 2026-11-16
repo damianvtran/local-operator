@@ -1,0 +1,80 @@
+{
+ "schema": 1,
+ "audit_id": "a3",
+ "audit_kind": "independent_translation_audit",
+ "locale": "vi",
+ "namespace": "mobile.setup",
+ "source_sha256": "3025a3af72d2a082766ca7b4c72100db41f2504f48404697af453121b0b6e427",
+ "target_sha256": "0d19c72617cbdda054b8be433fdc28ab3b874b4c80803ddd23c7abdac524038d",
+ "audit_date": "2026-11-14",
+ "key_count": 106,
+ "keys_audited": 12,
+ "new_keys": [
+  "mobile.setup.stopped_plain",
+  "mobile.setup.owner_missing_plain",
+  "mobile.setup.login_plain",
+  "mobile.setup.choose_account_plain",
+  "mobile.setup.account_plain",
+  "mobile.setup.cloudflared_plain",
+  "mobile.setup.mobile_bundle_plain",
+  "mobile.setup.supervisor_plain",
+  "mobile.setup.apply_plain",
+  "mobile.setup.verification_plain",
+  "mobile.setup.failed_plain",
+  "mobile.setup.complete_plain"
+ ],
+ "changed_keys": [],
+ "source_audit_revision": "01113e5aa048884a507d9bb4868815f909f63a48",
+ "working_tree_uncommitted": false,
+ "scope": "374037856..01113e5aa (git diff -- local_operator/i18n/); unchanged keys passed in earlier rounds (a2), not re-audited",
+ "pr": "#3958 (branch fix/tunnel-remedy-no-commands, stacked on #3945)",
+ "translator": {
+  "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 01113e5aa on fix/tunnel-remedy-no-commands; English source by the same coder)",
+  "model": null,
+  "date": "2026-11-14",
+  "model_note": "not disclosed to the auditor; recorded null rather than invented"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev team), independent Local Operator session 9054cd229d3f; not the translator/coder of host session 25fe8dfbf610; edited no catalogue value",
+  "session": "9054cd229d3f",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 9054cd229d3f (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+   "sha256": "3025a3af72d2a082766ca7b4c72100db41f2504f48404697af453121b0b6e427"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+   "sha256": "e6771af01c56a4e0667a6e7b44d6f29b0f240849e584b2a02e45ae56aa35e101"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/vi/mobile.setup.json",
+   "sha256": "0d19c72617cbdda054b8be433fdc28ab3b874b4c80803ddd23c7abdac524038d"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/vi.md",
+   "sha256": "f550e01392de0a313d5efd626fcc7dbdd1c86df64c2324bac37eebc7ff06e6e9"
+  }
+ },
+ "findings": {
+  "blocker": 0,
+  "major": 0,
+  "minor_or_nit": 3
+ },
+ "artifacts": {
+  "report.md": "39395b12e2f332e9fc89775d97386c423c9cb3841f610b639b487481d9b6b772",
+  "audit.log": "5a06be8ea99fa97dd35c17aeaeaaded7148e3b4bc9453b1f5440d914a2a7f29a"
+ },
+ "reproduction_script": {
+  "path": "~/.local-operator/sessions/9054cd229d3f/scratchpad/i18n-audit-3958/mech.py",
+  "sha256": "9072faaec05623e4df996f1f9e4904689415db13f7073b20627af3f7145594b5",
+  "note": "session scratch, outside the repo; its stdout is captured in audit.log"
+ }
+}

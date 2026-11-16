@@ -6025,6 +6025,9 @@ class _StubbornProc:
     """
 
     def __init__(self, lines: list[bytes]) -> None:
+        # Match asyncio.Process's spawn contract even though this fake never
+        # launches an OS child: grep records ownership before reading its pipe.
+        self.pid = 424242
         self._lines = list(lines)
         self.returncode: int | None = None
         self.killed = 0

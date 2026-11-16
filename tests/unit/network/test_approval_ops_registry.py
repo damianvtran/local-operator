@@ -36,6 +36,7 @@ from local_operator import profile_approval
 from local_operator.config import ConfigManager
 from local_operator.network import approval_ops
 from local_operator.network import approvals as A
+from local_operator.network import file_device_approval
 from local_operator.network.credentials import (
     desktop_approval,
     finite_share,
@@ -227,6 +228,8 @@ def test_file_only_signing_is_derived_from_the_registry_with_the_pair_op() -> No
         inheritance.OP: False,
         pair_op.OP: True,
         profile_approval.OP: False,
+        # Dormant file authority never inherits file-only credential policy.
+        file_device_approval.OP: False,
     }
     assert dict(desktop_approval.FILE_ONLY_SIGNING) == approval_ops.file_only_signing()
     # Every registered op carries an explicit decision, and only registered ops are listed.
@@ -237,6 +240,7 @@ def test_file_only_signing_is_derived_from_the_registry_with_the_pair_op() -> No
             A.KIND_DEVICE_ONBOARD,
             A.KIND_OPERATOR_DEVICE_PAIR,
             A.KIND_PROFILE_SAVE,
+            A.KIND_FILE_DEVICE_APPROVAL,
         }
 
 

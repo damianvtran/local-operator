@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from local_operator.providers.auth_store import AuthStore
@@ -647,7 +648,9 @@ async def test_a_stopped_tunnel_reports_stopped_not_a_repoint(rig, monkeypatch):
 
     for plan in (await setup.observe(), await setup.observe_local()):
         assert plan["step"] == "stopped", plan
-        assert plan["ready"] is False
+        # Ready: the surface's "turn it back on" button is the fix. Only a
+        # click (`apply(resume_stopped=True)`) acts on it; see the tests below.
+        assert plan["ready"] is True
         # The identity line still names the row a resumed connector will use.
         assert plan["credential_id"] == fresh
 
@@ -1315,3 +1318,216 @@ async def test_a_claimed_setup_run_invalidates_the_cached_inactive_cause(rig, mo
     monkeypatch.setattr(setup, "_apply", fake_apply)
     await setup.apply(17, None)
     assert not cache.exists()
+
+
+# --- A deliberately stopped tunnel: click-only resume, never a spend (#3945 U1) --
+#
+# The desktop rendered the stopped step's sentence ("Use lop tunnel start...")
+# beside a [Turn on] button that `apply` declined, so the button could never
+# work. Now the step is ready and a person's click resumes it; the post-sign-in
+# auto-hook (`setup apply --no-spend`, through `setup.command`) still never does.
+
+
+def _record_dispatch(monkeypatch, rig):
+    """The REAL dispatch except the service install, which would address launchd.
+
+    The stubbed install serves the route, as a started connector would, so the
+    run's verification passes without its bounded retry sleeps.
+    """
+    from local_operator.tunnels import cli
+
+    real_dispatch = cli.dispatch
+    dispatched: list[str] = []
+
+    async def dispatch(args):
+        dispatched.append(args.tunnel_command)
+        if args.tunnel_command in {"install", "start", "restart"}:
+            value = config.load()
+            value["stopped"] = False  # what the real `tunnel install` saves
+            config.save(value)
+            _serve(rig)
+            return "stubbed service step"
+        return await real_dispatch(args)
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+    return dispatched
+
+
+@pytest.mark.asyncio
+async def test_auto_hook_never_resumes_a_stopped_tunnel(rig, monkeypatch):
+    """REGRESSION GUARD: the unattended run must leave a deliberate stop alone."""
+    save(rig[1], stopped=True)
+    _unserve(rig)
+    dispatched = _record_dispatch(monkeypatch, rig)
+
+    rendered = await setup.command(_no_spend_args())
+
+    plan = json.loads(rendered)
+    assert plan["step"] == "stopped"
+    assert dispatched == []
+    assert config.load()["stopped"] is True
+    # Nothing reached Radient either: no read, and certainly no activation.
+    assert rig[2] == []
+    # And the plain CLI apply (no click) is the same refusal.
+    assert (await setup.apply(17))["step"] == "stopped"
+    assert dispatched == [] and config.load()["stopped"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_click_resumes_a_stopped_tunnel_without_spending(rig, monkeypatch):
+    save(rig[1], stopped=True)
+    _unserve(rig)
+    dispatched = _record_dispatch(monkeypatch, rig)
+
+    plan = await setup.apply(17, resume_stopped=True)
+
+    assert plan["verified"] is True, plan
+    assert "install" in dispatched
+    assert config.load()["stopped"] is False
+    assert ("POST", "/billing/activate") not in rig[2]
+    assert all(command != "activate" for command in dispatched)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "billing,step",
+    [
+        ({"eligible": False, "active": False, "monthly_price_usd": "0.05"}, "quote"),
+        ({"eligible": False, "active": True, "balance_usd": 0}, "billing_lapsed"),
+    ],
+)
+async def test_a_resume_that_needs_money_answers_the_billing_step_and_keeps_the_stop(
+    rig, monkeypatch, billing, step
+):
+    """Resuming never spends: a needed purchase is the accept/add-credit flow."""
+    save(rig[1], stopped=True)
+    _unserve(rig)
+    rig[0].update(billing)
+    dispatched = _record_dispatch(monkeypatch, rig)
+
+    plan = await setup.apply(17, resume_stopped=True)
+
+    assert plan["step"] == step and plan["ready"] is False
+    assert dispatched == []
+    assert config.load()["stopped"] is True
+    assert ("POST", "/billing/activate") not in rig[2]
+
+
+def test_the_tui_enable_is_a_person_and_resumes_a_stopped_tunnel(rig, monkeypatch):
+    from local_operator.tunnels import cli
+
+    save(rig[1], stopped=True)
+    _unserve(rig)
+    dispatched = _record_dispatch(monkeypatch, rig)
+
+    status = cli.mobile_action("status", selected=17)
+    assert status.splitlines()[0] == "Phone access is deliberately turned off"
+    assert status.splitlines()[-1] == "Run /mobile enable --credential-id 17"
+    assert "lop " not in status and dispatched == []
+
+    cli.mobile_action("enable", selected=17)
+    assert "install" in dispatched
+    assert config.load()["stopped"] is False
+
+
+def test_the_cli_keeps_its_own_resume_command_for_a_stopped_tunnel():
+    """The CLI cannot resume through `setup apply`, so it gets no such action line."""
+    plan = setup._plan("stopped", "Use lop tunnel start.", ready=True, credential_id=17)
+    lines = setup.text(plan, surface="cli", include_receipts=False).splitlines()
+    assert lines[-1] == "Use lop tunnel start."
+    assert not any("setup apply" in line for line in lines)
+
+
+def test_owner_missing_is_plain_with_a_sign_in_action_in_the_tui():
+    plan = setup._plan("owner_missing", "Run lop login-status; restore it.", credential_id=17)
+    lines = setup.text(plan, surface="tui", include_receipts=False).splitlines()
+    assert "lop " not in "\n".join(lines)
+    assert lines[-1] == "Sign in with /login radient, then run /mobile status."
+
+
+# --- #3958 round-1 fold-ins: blocked-resume copy, one mobile_bundle entry, keyed TUI error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["billing_lapsed", "disabled"])
+async def test_a_blocked_resume_never_promises_an_automatic_reconnect(rig, monkeypatch, step):
+    """Q1: a resume that billing or the console blocks keeps the stop, so the
+    copy must send the person back to the button, not promise a reconnect."""
+    save(rig[1], stopped=True)
+    _unserve(rig)
+    if step == "billing_lapsed":
+        rig[0].update(eligible=False, active=True, balance_usd=0)
+    else:
+        rig[1].update(enabled=False, status="disabled")
+    dispatched = _record_dispatch(monkeypatch, rig)
+
+    plan = await setup.apply(17, resume_stopped=True)
+
+    assert plan["step"] == step and plan.get("resuming") is True, plan
+    assert config.load()["stopped"] is True and dispatched == []
+    surfaces = {
+        "cli/tui sentence": plan["remedy"],
+        "desktop": setup.plain_remedy(plan),
+        "tui card": setup.text(plan, surface="tui", include_receipts=False),
+    }
+    for surface, copy in surfaces.items():
+        assert "by itself" not in copy, (surface, copy)
+        assert "turn phone access back on here" in copy, (surface, copy)
+        assert "lop " not in copy and "`" not in copy, (surface, copy)
+    # Negative control: a running tunnel (no resume) still reconnects on its
+    # own, and keeps the sentence that says so.
+    assert "by itself" in setup.plain_remedy({**plan, "resuming": False})
+
+
+def test_the_tui_mobile_bundle_step_is_the_one_plain_sentence():
+    """R1: one `mobile_bundle` entry in the TUI table — the plain sentence."""
+    plan = setup._plan(
+        "mobile_bundle", "Prepare it with lop mobile install, then retry.", credential_id=17
+    )
+    card = setup.text(plan, surface="tui", include_receipts=False)
+    assert setup.plain_remedy(plan) in card.splitlines()
+    assert card.splitlines()[-1].startswith("The phone interface is not prepared")
+    assert "lop " not in card
+
+
+def test_no_setup_table_repeats_a_key():
+    """R1's root cause: a repeated dict-literal key silently drops the earlier
+    value (flake8 F601). Every literal table in setup.py stays unambiguous."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(setup.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+            repeated = {k for k in keys if keys.count(k) > 1}
+            assert not repeated, (node.lineno, repeated)
+
+
+@pytest.mark.parametrize("action", ["status", "enable"])
+@pytest.mark.parametrize("failure", [OSError("unreachable"), httpx.ConnectError("down")])
+def test_a_failed_tui_mobile_action_names_the_slash_sign_in(monkeypatch, action, failure):
+    """R2: `mobile_action` only answers the TUI, so its failure line is keyed
+    copy naming `/login radient`, never the shell's `lop login radient`."""
+    from local_operator.tunnels import cli
+
+    monkeypatch.setattr(setup, "auto_reconnecting", lambda: False)
+    monkeypatch.setattr(setup, "observe", AsyncMock(side_effect=failure))
+    monkeypatch.setattr(setup, "apply", AsyncMock(side_effect=failure))
+
+    text = cli.mobile_action(action, selected=17)
+
+    assert "sign in with /login radient" in text, text
+    assert "lop " not in text, text
+
+
+def test_the_cli_failure_line_stays_the_cli_text(monkeypatch, capsys):
+    """R2's other surface: `lop tunnel ...` keeps its own (command-free) line."""
+    from local_operator.tunnels import cli
+
+    monkeypatch.setattr(cli, "dispatch", AsyncMock(side_effect=OSError("unreachable")))
+
+    assert cli.main(argparse.Namespace(tunnel_command="status")) == 1
+    assert capsys.readouterr().err.strip() == (
+        "Tunnel operation failed; check network access and your Radient login."
+    )

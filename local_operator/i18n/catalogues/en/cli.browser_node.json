@@ -15,7 +15,7 @@
   "cli.browser_node.refuse_sudo": "Refused: these steps need root and `sudo -n` would prompt: {steps}. Run it from an account with non-interactive sudo; or, at an interactive terminal, run `sudo -v` first and then this command again in the same terminal (guide://browser, \"Headless nodes\").",
   "cli.browser_node.refuse_no_record": "Refused: there is nothing to repair, because {path} does not exist. Install it with `lop browser setup --node --authorised-by '<who, when>'`.",
   "cli.browser_node.refuse_authorisation": "Refused: installing a browser on a node needs the operator's authorisation. Run it again with `--authorised-by '<who, when>'`; the text is recorded verbatim.",
-  "cli.browser_node.paired_yes": "Paired: yes. New sessions on this node get the browser tool (sessions already running do not), but no site can be opened there yet: per-site approval on a headless node needs the operator's signed decision, which this build does not have.",
+  "cli.browser_node.paired_yes": "Paired: yes. New sessions on this node get the browser tool (sessions already running do not). Each site they open needs the operator's approval, which the operator answers and signs on their own device.",
   "cli.browser_node.paired_no": "Paired: no.",
   "cli.browser_node.record": "Record: {path}",
   "cli.browser_node.failed_tail": "Setup stopped at the failed step. Fix it, then run `lop browser setup --node --repair --authorised-by '<who, when>'`.",

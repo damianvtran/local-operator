@@ -294,8 +294,9 @@ class TeamBridgeSettingsPut(_Strict):
 
     tenant_id: str | None = Field(default=None, max_length=128)
     #: REQUIRED for every hub write. Absent ONLY on a local-preference write
-    #: (``share_typing`` alone, below): the model validator refuses any other
-    #: body without it, so "no state" can never be read as "keep the state".
+    #: (``share_typing`` and/or ``screening_model``, below): the model validator
+    #: refuses any other body without it, so "no state" can never be read as
+    #: "keep the state".
     state: Literal["active", "paused", "disabled"] | None = None
     consent_version: str | None = Field(default=None, max_length=128)
     consented_via: Literal["dialog", "settings"] | None = None
@@ -331,24 +332,31 @@ class TeamBridgeSettingsPut(_Strict):
     def _state_or_local_preference(self) -> "TeamBridgeSettingsPut":
         if self.state is not None:
             return self
-        # Without ``state`` the ONLY accepted body is the local preference plus
-        # the receipt: a stray consent/label/tenant field would otherwise be
-        # silently dropped instead of refused.
-        if self.share_typing is None:
+        # Without ``state`` the ONLY accepted body is the local preferences
+        # (``share_typing``, ``screening_model``) plus the receipt: a stray
+        # consent/label/tenant field would otherwise be silently dropped
+        # instead of refused.
+        #
+        # WHY ``screening_model`` IS ACCEPTED HERE (local-operator-ui #1928
+        # review R1 / S-2 / S-3). It used to ride only a ``state`` write, so a
+        # renderer had to re-send ``state`` to save a model pick — and a state
+        # write runs the explicit-enable commit (``_commit_explicit_enable``):
+        # on a machine that does not own the endpoint it commits an owner and a
+        # native consent receipt, installs the connector and sets
+        # ``team_bridge.enabled``; a stale ``active`` re-sent over a pause
+        # RESUMES the endpoint. A preference must never re-assert consent
+        # (#3632), so it is a state-less, machine-local write like
+        # ``share_typing``.
+        if self.share_typing is None and self.screening_model is None:
             raise ValueError("state is required")
-        # ``screening_model`` is refused here too although it is local: the
-        # state-less branch writes ``share_typing`` and returns before the
-        # screening write, so accepting it would drop a choice silently. A
-        # screening choice rides a ``state`` write, its only reviewed contract.
         other_fields = (
             self.tenant_id,
             self.consent_version,
             self.consented_via,
             self.label,
-            self.screening_model,
         )
         if any(value is not None for value in other_fields):
-            raise ValueError("a share_typing-only write carries no other fields")
+            raise ValueError("a local-preference write carries no other fields")
         return self
 
 
@@ -808,6 +816,29 @@ def _screening_view(preferred: tuple[str, str] | None) -> dict[str, Any]:
     }
 
 
+def _current_screening_choice(config_dir: Path) -> str | None:
+    """The Screening model choice in force on this machine, as the selector."""
+
+    from local_operator.team_bridge.settings import read_screening_model
+
+    return _screening_selector(read_screening_model(config_dir))
+
+
+def _record_screening_choice(config_dir: Path, value: str) -> str | None:
+    """The state-less write's screening save; a failed write is a coded 500."""
+
+    try:
+        return _apply_screening_choice(config_dir, value)
+    except Exception:  # noqa: BLE001 - surfaced as a coded 500
+        raise HTTPException(
+            500,
+            {
+                "code": "screening_model_not_saved",
+                "message": "could not save the screening model",
+            },
+        ) from None
+
+
 def _apply_screening_choice(config_dir: Path, value: str | None) -> str | None:
     """Store the Screening model choice this body carried; return what is in force.
 
@@ -1185,22 +1216,29 @@ async def put_settings(
 
     _refuse_write_scope(request)
     if body.state is None:
-        # The local-preference-only write (validator: ``share_typing`` and the
-        # receipt, nothing else). No hub call, so there is no full settings
-        # payload to answer with; the renderer refetches GET if it needs one.
+        # The local-preference-only write (validator: ``share_typing`` and/or
+        # ``screening_model`` plus the receipt, nothing else). It writes the
+        # machine-local keys and RETURNS: no hub call, no explicit-enable or
+        # local-owner commit, no consent receipt, no connector sync, no
+        # ``team_bridge.enabled`` write — a preference must never re-assert
+        # consent (#3632), and with no hub call there is no state to change.
+        # No full settings payload to answer with; the reply carries each
+        # preference SENT, read back as it is now in force (an off-table
+        # screening id is ignored, so ``preferred`` says what actually holds).
         # ``expected_account_id`` stays required for a uniform body contract,
-        # but there is no bearer to compare it with: the key is per machine.
-        assert body.share_typing is not None
-        _record_share_typing(config_manager.config_dir, body.share_typing)
-        return reply({"share_typing": _read_share_typing(config_manager.config_dir)})
-    # THE ONE LOCAL FIELD ON THIS BODY. It is applied BEFORE the hub call, and
-    # deliberately not forwarded: which model screens incoming mail is this
-    # machine's business (the screener runs here), and the hub only shape-checks
-    # the id it is told about elsewhere. Writing it first means a hub refusal
-    # cannot throw away a choice the user already made and this machine can
-    # honour; if the hub call then fails the caller sees its error and the
-    # choice stands, which is the half this route could actually complete.
-    screening = _apply_screening_choice(config_manager.config_dir, body.screening_model)
+        # but there is no bearer to compare it with: the keys are per machine.
+        local: dict[str, Any] = {}
+        if body.screening_model is not None:
+            local["screening"] = {
+                "preferred": _record_screening_choice(
+                    config_manager.config_dir, body.screening_model
+                ),
+                "models": _screening_models(),
+            }
+        if body.share_typing is not None:
+            _record_share_typing(config_manager.config_dir, body.share_typing)
+            local["share_typing"] = _read_share_typing(config_manager.config_dir)
+        return reply(local)
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -1240,8 +1278,21 @@ async def put_settings(
         # missing consent echo for a known-to-be-required case): caller bugs, in
         # the desktop plane's validation register.
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
-    # The local preference lands only AFTER the hub accepted the state write,
-    # so a refused write changes nothing on either side.
+    # The local preferences land only AFTER the hub accepted the state write,
+    # so a refused write changes nothing on either side (UI #1928 security
+    # S-4: written first, a refused save showed the old selection while the
+    # new model was already in force). The screening choice is LOCAL and never
+    # forwarded — which model screens incoming mail is this machine's business.
+    # A local save failure after the hub committed answers success with the
+    # value read back, like ``share_typing`` below; the renderer can re-send
+    # the preference alone on the state-less write.
+    try:
+        screening = _apply_screening_choice(config_manager.config_dir, body.screening_model)
+    except Exception:  # noqa: BLE001 - the hub has already committed the state
+        logging.getLogger(__name__).warning(
+            "team bridge: state saved upstream but the screening model was not saved locally"
+        )
+        screening = _current_screening_choice(config_manager.config_dir)
     if body.share_typing is not None:
         try:
             _record_share_typing(config_manager.config_dir, body.share_typing)

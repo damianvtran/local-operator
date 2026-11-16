@@ -1,0 +1,5 @@
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ur --namespace cli.mobile_help
+5062a61e84743e2f45d92824f867b9a3395b7c04035b0a1ad87db272afef844c
+$ .venv/bin/python scripts/i18n/ledger.py append --dry-run --receipt <scratchpad>/receipt-ur-cli.mobile_help.json --expected-history-sha 5062a61e84743e2f45d92824f867b9a3395b7c04035b0a1ad87db272afef844c
+i18n/audit-history/ur/cli.mobile_help.json
+[exit 0]

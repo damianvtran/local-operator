@@ -49,16 +49,14 @@ EAGER_MAX_BYTES = 32 * 1024
 #: next order of magnitude.
 DEFERRED_MAX_BYTES = 160 * 1024
 
-#: Total raw bytes of eager wire files per locale. Measured 2026-11-12 (26 eager
-#: namespaces each; sum of ``catalogue_bytes`` as below): hi 66,548 B, ru 55,691,
-#: ur 51,407, vi 43,919, fr 43,362, es 40,837, en 36,068, zh-CN 35,308. hi was
-#: already 65,187 B on main (349 B under the old 64 KiB cap) and the
-#: temporary-chat desktop error codes (+1,361 B in hi `wire.errors.desktop`)
-#: crossed it. Those codes are envelope identities the desktop resolves from
-#: the bundle, so deferral, the structural remedy, does not apply; 72 KiB is the
-#: next 8 KiB step above that max (73,728 B: 7,180 B of headroom in hi).
-#: The ceiling is per locale, not per bundle, so a new locale cannot arrive with
-#: a payload no one measured.
+#: Total raw bytes of eager wire files per locale. The ceiling is per locale, not
+#: per bundle, so a new locale cannot arrive with a payload no one measured.
+#:
+#: Measured basis (2026-11-15): merged main c7f96b4ec has 26 eager namespaces
+#: in each of 8 shipped locales; hi is largest at 67,674 raw UTF-8 bytes.
+#: The 72 KiB ceiling leaves 6,054 B for ordinary copy edits while bringing the
+#: split-or-defer conversation back before structural growth accumulates.
+#: It stays a growth guard, not a packing target or a compressed-byte budget.
 EAGER_TOTAL_MAX_BYTES = 72 * 1024
 
 
@@ -110,6 +108,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.slash.notifications_page",
         "wire.tool_rows.bridge",
         "wire.sessions",
+        "wire.operator_setup",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "
         "namespace. Adding one requires updating this assertion, recording its "
@@ -191,8 +190,9 @@ def test_the_total_ceiling_still_catches_an_oversized_payload(
     # Three small files, none near the per-file ceiling: the accumulation class
     # the per-namespace ceiling cannot see (a single over-total file would also
     # trip the per-file ceiling, which would prove the wrong guard).
-    # The last file takes the remainder so the sum is ceiling - 1 whatever the
-    # ceiling's residue mod 3 (64 KiB happened to leave exactly 1; 72 KiB is 0).
+    # The last file takes the remainder, so the sum sits one byte under ANY
+    # ceiling (at 64 KiB, 3 * (ceiling // 3) happened to be ceiling - 1, because
+    # 65,536 is 1 mod 3; 80 KiB is not, so the remainder is computed).
     third = EAGER_TOTAL_MAX_BYTES // 3
     sizes = [third, third, EAGER_TOTAL_MAX_BYTES - 1 - 2 * third]
     paths = []

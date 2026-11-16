@@ -3048,6 +3048,47 @@ change, minor fixes included, gets a numbered
 `### Agent review — round <N>` delta round scoped `<prev-head>..<head>` by an
 independent reviewer, plus QA if a QA'd surface moved.
 
+## macOS login items: Background Task Management attribution
+
+macOS lists every LaunchAgent under System Settings > Login Items and posts
+"… can run in the background" when one appears. Background Task Management
+(BTM) names the item after the code at the plist's **`Program`**, not
+`ProgramArguments[0]`, `Label` or the file name (measured on macOS 27.2,
+2026-11-14): an unsigned `Program` is named after its file name ("python3",
+"python3.12") with no developer, and every such item notifies on its own; a
+Developer-ID-signed `Program` is named after its bundle and grouped under the
+certificate's developer name, and once that developer has been notified,
+further items from it register silently. Ordinary tool-call child processes
+(bash, eval, python) create no BTM items at all — only launchd plists do.
+
+So every plist names the CI-signed launcher
+(`packaging/macos/lop-launcher/launcher.c`, planted at
+`~/.local/share/lop/bin/Local Operator.lopruntime`), which execs the `python3`
+shim beside it; `update.daemon_program()` selects it only after `codesign`
+verifies team `SHA2U6KT7V` AND the exact leaf `Developer ID Application:
+Radient Inc. (SHA2U6KT7V)`, and falls back to the shim otherwise (pure wheel,
+pip/pipx/source installs). Per-episode jobs (`com.local-operator.episode.<id>`)
+use the launcher's `LOP_LAUNCHER_TARGET` mode so their own interpreter still runs.
+Expect **one** "Software from "Radient Inc." can run in the background"
+notification per Mac at rollout.
+
+Rules that follow from it:
+
+- **Only the Radient Inc. organization identity signs Local Operator code.**
+  The team id survived the individual-to-organization conversion, so a team
+  check alone also accepts the retired individual certificate — and BTM would
+  show its personal name. `procname.SIGNING_AUTHORITY` is the one pin; CI
+  asserts it on the finished signature, and the local runtime-signing opt-in
+  refuses any other leaf (runtimes then stay ad-hoc).
+- **Never run `sfltool`** to inspect BTM (it raises an admin/Touch ID dialog on
+  the operator's screen); read the `BackgroundTaskManagementAgent` "Posting
+  advisory" lines with `log show` instead.
+- Tests and rigs create no plists in the real `~/Library/LaunchAgents`; use an
+  isolated `HOME` ("Isolating a run").
+- **Linux** (systemd user units) has no BTM equivalent: nothing to do.
+  **Windows** would need an Authenticode-signed launcher `.exe` (a separate
+  certificate); deferred, and nothing notifies there today.
+
 ## Security advisories
 
 Any agent handling a reported vulnerability or a GHSA for this repository
@@ -3617,6 +3658,90 @@ loaded — a rendered page, a flow, a screenshot for a PR. That is ordinary
 browser work: use the `browser` tool against the paired browser like any other
 session. Reach for a harness only when you need a browser that does not yet
 have the build you are testing.
+
+#### Testing a node browser without the operator
+
+A headless node approves a site only on the OPERATOR's signature, which the
+extension re-verifies against the anchor in Chrome managed policy
+(`browser_bridge/site_approval.py`). Never answer a card in the operator's real
+asks or notifications stores to test that, and never loosen the default-deny.
+Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
+
+```sh
+SB=<path to a built storybook-static>   # see "Storybook" below
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB"   # full flow
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB" --preflight  # rig only
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --security-control \
+  --root "$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>"
+```
+
+- **Storybook (required, `--storybook-dir`):** the screenshots open the
+  `browser-approvals-dock--approved` story from a static Storybook build. In a
+  `local-operator-ui` checkout (or worktree) whose head has that story, run
+  `pnpm build-storybook`; it writes `storybook-static/` at that checkout's root
+  (gitignored). Any existing build that contains the story can be reused; there
+  is no default path, so a missing build is a clean refusal, not a FAIL row.
+- **Where results land:** each run writes
+  `$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>/` (or `--root`, which
+  must be a fresh subdirectory of the scratchpad): `results.md`/`results.json`,
+  `light.png`/`dark.png`, `inner.log` and the Chrome/daemon logs. The last
+  stdout line prints the path. A full run takes about 30 s; the backstop is
+  600 s.
+
+- **What is real:** the installed CRX the live node runs (read only; its version
+  is in the results), a fresh headless Chrome profile, the bridge daemon,
+  policy-delivered pairing, a `Session` running the real browser tool, the
+  `RuntimeServer` door, two real loopback `RelayServer` instances with separate
+  config stores and a signed synthetic operator binding, catalogue transport
+  into `RemoteAttentionWatcher` and the synthetic operator's `notifications.db`.
+  A separate operator process mounts the real desktop router and POSTs to
+  `/v1/desktop/sessions/{sid}/answers`; `DesktopSessions` resolves a real
+  mesh-backed remote facade and the handler selects the signed `bridge_decide`
+  door. The model is scripted, the pairing fixture supplies two synthetic
+  humans, the key is file-only, and the root-owned anchor is replaced
+  (`tests/fixtures/anchor_fixture.py`). No product bypass is installed.
+- **Isolation:** one `systemd-run --user --scope` (1536M, no swap) around
+  `unshare -Urmn`; scratch dirs are bind-mounted over
+  `/etc/opt/chrome/policies/managed` and `/etc/local-operator/operators`, the
+  private netns makes the real bridge on `127.0.0.1:4099` unreachable, and the
+  inner run aborts if the real policy file is visible. Every root lives under
+  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else, including
+  live config subtrees if the scratchpad environment is mis-set (only the
+  canonical `sessions/<id>/scratchpad/<run>` subtree is exempt). The hidden
+  `--inner`/`--operator` modes re-apply those refusals, refuse outside a
+  private netns holding only `lo`, and refuse any config root that does not
+  resolve under the run root, before writing anything.
+- **Interrupts:** the scope is named `nbh-<stamp>`; on exit, Ctrl-C, SIGTERM or
+  the backstop the launcher runs `systemctl --user stop nbh-<stamp>.scope`
+  (exact cgroup membership) and removes `/tmp/nbh-<stamp>-*`. Only a SIGKILLed
+  launcher can leave the scope; stop it by that name.
+- **Proof it touched nothing:** the launcher hashes the real policy and anchor,
+  records the live node Chrome's PID, real :4099 listener owner and the
+  paired-identity lines of `lop browser status` before and after, and fails
+  on any difference (or on a failed/empty identity probe).
+- **Rows:** open refused (`origin_not_allowed`), card raised, wrong-key
+  signature, plain `ask_respond`, the agent's own unsigned decide, signed Approve
+  (`lop browser sites --json` allows the origin), open succeeds, light/dark
+  screenshots differ, each taken only once the story rendered in its theme (the
+  tape polls `snapshot` for the story root, then checks the PNG's content and
+  page-background luminance; a spinner frame is "not rendered"), signed Deny
+  (origin in the `--json` denied list, open still refused), and a late signed
+  Approve after the AGENT withdrew its request with its own `cancel_access`
+  (`BLOCKED`, not `PASS`, unless the extension answered `cancelled`). The member
+  also withdraws its queued ask, so the late HTTP tap must receive 409 with the
+  queue's withdrawn refusal, not Phase 1's non-member extension-expiry refusal.
+  Each card is observed over real catalogue transport and its one full
+  `remote-notice:<device>:<session>:remote-ask:<ask>` inbox key is checked;
+  answered, denied and cancelled member cards must retire on the next listing.
+  Results: `results.md`/`results.json`, PNGs and logs in the run directory.
+  LOOK at both PNGs before citing them; a sha256 alone is not proof.
+- **Phase boundary:** Phase 1 used direct loopback attach and did not cover the
+  mesh/inbox/HTTP legs. This harness continuation adds those legs and real
+  membership without changing pairing policy, host anchors or product code.
+- **Testing an extension change:** the harness installs the CRX named in
+  `~/.local-operator/browser/extension/update.xml`, not `extension/` source.
+- A long `TMPDIR` breaks Chrome's singleton socket (108-byte unix path limit),
+  so Chrome gets a short private dir under `/tmp`, removed at exit.
 
 ### 7. Evidence goes on the PR, never into the repository
 

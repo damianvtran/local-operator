@@ -68,6 +68,11 @@ LOCAL_CREDENTIAL_OPS: tuple[str, ...] = (
     # The share push (``share_push``): ``credential share`` asks THIS device's relay
     # to hand the row it just wrote to the new holder over the relay's own link.
     "credential_share_push",
+    # The renewal claim (mesh-credential-renewal §B.3 R3): an owner PROCESS about to
+    # present a lent login's refresh token asks THIS device's relay to ask the
+    # renewing node first; and, after it renewed, to push the new pair to that node.
+    "credential_claim",
+    "credential_lend_push",
 )
 
 #: Leg 2 (relay → owner relay). ONE peer op with a ``kind`` discriminator, as the
@@ -98,9 +103,28 @@ REFRESH_CAP_STRING = "credential-refresh-v1"
 #: ``refresh_take`` (node → owner) asks for the material under a signed
 #: delegation; ``refresh_return`` (node → owner, three frames) is the handback.
 #: Two kinds, no new op and no new capability row (§7.10's rule, unchanged).
-BrokerKind = Literal["grant", "report", "placement", "refresh_take", "refresh_return"]
+BrokerKind = Literal[
+    "grant",
+    "report",
+    "placement",
+    "refresh_take",
+    "refresh_return",
+    "renewal_claim",
+    "renewal_push",
+]
+#: ``renewal_claim`` / ``renewal_push`` (owner -> renewing node, design
+#: mesh-credential-renewal §B.3 R3): "are you renewing?" and "here is the pair I just
+#: renewed". Gated on ``renewal.RENEWAL_CAP_STRING`` by the sender.
 BROKER_KINDS: frozenset[str] = frozenset(
-    {"grant", "report", "placement", "refresh_take", "refresh_return"}
+    {
+        "grant",
+        "report",
+        "placement",
+        "refresh_take",
+        "refresh_return",
+        "renewal_claim",
+        "renewal_push",
+    }
 )
 
 #: The three ``sub`` messages of the ordered handback (design §3.3 Rule A).
@@ -368,18 +392,12 @@ def peer_affinity(value: Any) -> tuple[int, int] | None:
     return (account_id, created_at)
 
 
-#: The longest narrowing LIST a peer may carry. 500 is GitHub's own ceiling on
-#: ``repositories`` in ``POST /app/installations/{id}/access_tokens`` (the App
-#: mint maximum), so no designation the owner can actually lend is longer. It was
-#: 64, which silently truncated a longer list here while the owner had digested the
-#: whole one — every delivery then failed its digest and the borrower kept its
-#: standing list forever (PR #3841 mesh-lane m2). The settings validator refuses a
-#: designation over this same number where a person types it
-#: (``settings_io._validate_github_repositories``), so the two cannot drift; a
-#: hand-edited longer list still truncates here and is REFUSED, receipted, on the
-#: borrower (``too_many_entries``), never applied as a partial list. Size: 500 x
-#: 200 chars is ~100 KB, far inside the 8 MiB session frame.
-MAX_NARROWING_LIST_ENTRIES = 500
+#: The largest list one ``Grant.narrowing`` entry may carry across the peer
+#: boundary. Equal to ``github.MAX_DESIGNATED_REPOSITORIES`` (a unit test pins
+#: them equal): the owner refuses a longer designation, so an honest owner never
+#: reaches this bound. 2000 entries of at most 200 characters stay far inside the
+#: 8 MiB record ceiling.
+MAX_NARROWING_LIST_ENTRIES = 2000
 
 
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
@@ -401,8 +419,15 @@ def _bounded_narrowing(value: Any) -> dict[str, Any]:
         if isinstance(item, str):
             out[name] = item[:200]
         elif isinstance(item, (list, tuple)):
+            # NEVER CUT A LIST: a truncated allow-list is a DIFFERENT designation
+            # (it silently drops repos, and a digest delivered beside it cannot
+            # verify). Over the bound the entry is dropped whole, which reads as
+            # "nothing delivered": the borrower keeps its standing list, the
+            # fail-closed direction. This replaced a silent ``[:64]``.
+            if len(item) > MAX_NARROWING_LIST_ENTRIES:
+                continue
             entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
-            out[name] = entries[:MAX_NARROWING_LIST_ENTRIES]
+            out[name] = entries
     return out
 
 
@@ -527,6 +552,7 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "quota_blocked": 0,
     "interactive_required": 300_000,
     "rate_limited": 0,
+    "owner_busy": 0,
     "unsupported": NO_RETRY,
     "device_bound": 300_000,
     "not_authorised": 60_000,
@@ -540,6 +566,10 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "device_scope_required": 60_000,
     "github_app_unusable": 300_000,
     "github_repositories_unset": 300_000,
+    # A designation larger than one grant can carry (the App mint's 500, the
+    # wire's MAX_NARROWING_LIST_ENTRIES): refused rather than cut, and repaired
+    # by the operator on the owner (an opt-out or an explicit list).
+    "github_repositories_overflow": 300_000,
     "github_repo_refused": 0,
     # The forge ladder's token arms (mesh-consent-provisioning §3.2): a source
     # that RESOLVED but could not be read refuses by arm rather than falling
@@ -627,7 +657,7 @@ DEFAULT_RETRY_AFTER_MS = 60_000
 QUOTA_REASON_HOLDER_EXCLUDED = "holder_excluded"
 QUOTA_REASON_POOL_DEPLETED = "pool_depleted"
 BROKER_ERROR_REASONS: frozenset[str] = frozenset(
-    {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED}
+    {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED, "owner_busy"}
 )
 
 
@@ -649,7 +679,8 @@ class BrokerError:
     owner_device_name: str = ""
     retry_after_ms: int = 0
     #: Which arm produced this refusal, from :data:`BROKER_ERROR_REASONS`; "" when
-    #: the producer did not say (every code but ``quota_blocked``, and older owners).
+    #: the producer did not say. Also distinguishes a GitHub owner lookup timeout
+    #: from rate limiting without breaking older borrowers' transient-code fence.
     reason: str = ""
     #: ``retry_after_ms`` is a FLOOR, not the owner's reset (#3108 review r2 m1): the
     #: owner stated a longer wait than ``MAX_PEER_RETRY_AFTER_MS``, which the boundary
@@ -657,6 +688,17 @@ class BrokerError:
     #: promise about the owner's account — a proven 3 h reopening would otherwise be
     #: rendered "for another 5 min", and repeated every 5 min. Never on the wire.
     retry_after_is_floor: bool = False
+
+    def as_borrower_error(self) -> BrokerError:
+        """Normalize the additive busy reason ONLY at upgraded consumer edges.
+
+        Keep from_detail literal: an older client must still see rate_limited
+        and keep its held grant. Re-serialization restores that compatible wire
+        code even when an upgraded relay has normalized the in-memory error.
+        """
+        if self.code == "rate_limited" and self.reason == "owner_busy":
+            return dataclasses.replace(self, code="owner_busy")
+        return self
 
     @property
     def is_holder_exclusion(self) -> bool:
@@ -683,7 +725,11 @@ class BrokerError:
 
     def to_detail(self) -> dict[str, Any]:
         """The wire shape (design §3.2's failure reply, inside ``detail``)."""
-        detail: dict[str, Any] = {"kind": "error", "code": self.code, "message": self.message}
+        detail: dict[str, Any] = {
+            "kind": "error",
+            "code": "rate_limited" if self.code == "owner_busy" else self.code,
+            "message": self.message,
+        }
         if self.key:
             detail["key"] = self.key
         if self.owner_device:
@@ -692,7 +738,9 @@ class BrokerError:
             detail["owner_device_name"] = self.owner_device_name
         if self.retry_after_ms:
             detail["retry_after_ms"] = self.retry_after_ms
-        if self.reason:
+        if self.code == "owner_busy":
+            detail["reason"] = "owner_busy"
+        elif self.reason:
             detail["reason"] = self.reason
         return detail
 
@@ -713,6 +761,17 @@ class BrokerError:
                 else ""
             ),
         )
+
+
+@dataclasses.dataclass
+class BorrowTimeout(BrokerError):
+    """Local-only diagnostic: no token, wire field, grant or extra authority.
+
+    The normal refusal code still drives every existing held/policy decision.
+    Only a timeout that remains refused may explain the missing tool env.
+    """
+
+    timeout_s: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)

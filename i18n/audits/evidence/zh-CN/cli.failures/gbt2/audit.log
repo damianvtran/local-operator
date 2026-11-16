@@ -1,0 +1,10 @@
+audit gbt2 zh-CN/cli.failures — execution log (commands actually run by session 1c05d7f1365f, 2026-11-16; outputs abridged)
+$ git log --oneline -3   -> 80a55b208 fix(tools): report GitHub credential borrow timeouts / f0689a27c ...
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only   -> rc=0; "check.py: catalogue checks: 0 problem(s)"
+$ python (eval): key order equal=True n=5; placeholders equal per key=True; NFC=True; bidi controls=False; github_borrow_timeout cells(excl. placeholders)=42
+$ sha256sum en/cli.failures.json -> 8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea
+$ sha256sum en/cli.failures.context.json -> b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f
+$ sha256sum zh-CN/cli.failures.json -> b66092adae0533bd2db7ec17ae70eb026c6ac287932d93ba4ca702246cc0e393
+$ grep zh-CN catalogues: 凭据=37, 凭证=0; period-less-source values containing '；请': 5, ending '。': 0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace cli.failures -> 2cacec1bdbe13bcde1557afe21c7c5b2b76856a8d553641baa9964fe1d5e1b34
+(ledger append --dry-run result is reported to the requester; it runs after this log is hashed into record.json)

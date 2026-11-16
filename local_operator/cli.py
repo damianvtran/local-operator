@@ -68,6 +68,7 @@ from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_browser_help as _bh
 from local_operator.i18n.keys import cli_browser_node as _bn
+from local_operator.i18n.keys import cli_config as _cc
 from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
@@ -167,6 +168,7 @@ _t = tr("wire.exec")
 _bt = tr("cli.browser")
 _bnt = tr("cli.browser_node")
 _spt = tr("cli.skills_push")
+_cct = tr("cli.config")
 
 
 def build_cli_parser() -> LocalizedArgumentParser:
@@ -1077,6 +1079,12 @@ def build_cli_parser() -> LocalizedArgumentParser:
     mobile_subparsers = mobile_parser.add_subparsers(dest="mobile_command")
     mobile_subparsers.add_parser("install", help=_mb.install().envelope(locale=help_locale)["text"])
     mobile_subparsers.add_parser("status", help=_mb.status().envelope(locale=help_locale)["text"])
+    doctor_parser = mobile_subparsers.add_parser(
+        "doctor", help=_mb.doctor().envelope(locale=help_locale)["text"]
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help=_mb.doctor_json().envelope(locale=help_locale)["text"]
+    )
     for action in ("start", "stop", "restart"):
         mobile_subparsers.add_parser(
             action, help=_mb.daemon_action(action=action).envelope(locale=help_locale)["text"]
@@ -1278,6 +1286,23 @@ def build_cli_parser() -> LocalizedArgumentParser:
     )
     setup_browser.add_argument(
         "--json", action="store_true", help=_bn.help_json().envelope(locale=help_locale)["text"]
+    )
+    # `lop browser sites [--revoke ORIGIN]`: the stored per-site decisions of
+    # THIS machine's browser, and their removal (browser_bridge/sites_cli.py).
+    # A headless node has no Settings page, and its site cards promise this.
+    from local_operator.i18n.keys import browser_site_approval as _bsa
+
+    sites_browser = browser_subparsers.add_parser(
+        "sites", help=_bsa.sites_help().envelope(locale=help_locale)["text"]
+    )
+    sites_browser.add_argument(
+        "--revoke",
+        metavar="ORIGIN",
+        default=None,
+        help=_bsa.sites_revoke_help().envelope(locale=help_locale)["text"],
+    )
+    sites_browser.add_argument(
+        "--json", action="store_true", help=_bh.json().envelope(locale=help_locale)["text"]
     )
     status_browser = browser_subparsers.add_parser(
         "status", help=_bh.status().envelope(locale=help_locale)["text"]
@@ -2860,7 +2885,7 @@ def config_create_command() -> int:
     # ~/.local-operator: config_dir() honours LOCAL_OPERATOR_CONFIG_DIR, and
     # config_open_command below already reports the resolved path — naming a
     # different file here makes the two commands contradict each other.
-    print(f"Created new configuration file at {base_dir / 'config.yml'}")
+    print(_cct(_cc.created(path=str(base_dir / "config.yml"))))
     return 0
 
 
@@ -2895,7 +2920,7 @@ def config_open_command() -> int:
             subprocess.run(["open", str(config_path)], check=True)
         else:
             subprocess.run(["xdg-open", str(config_path)], check=True)
-        print(f"Opened configuration file at {config_path}")
+        print(_cct(_cc.opened(path=str(config_path))))
         return 0
     except Exception as e:  # noqa: BLE001 — GUI opener absent or failed
         gui_error = e
@@ -2908,7 +2933,7 @@ def config_open_command() -> int:
             import shlex
 
             subprocess.run([*shlex.split(editor), str(config_path)], check=True)
-            print(f"Opened configuration file at {config_path}")
+            print(_cct(_cc.opened(path=str(config_path))))
             return 0
         except Exception as e:  # noqa: BLE001 — editor missing or exited non-zero
             gui_error = e
@@ -2974,7 +2999,7 @@ def config_edit_command(args: argparse.Namespace) -> int:
             # the automatic one — the state `reset_setting` exists to avoid, and the
             # reason the flag is on the rows that carry it (review round 1, M4).
             settings_io.reset_setting(config_manager, setting)
-            print(f"Cleared {args.key}: it reads as its default again")
+            print(_cct(_cc.cleared(key=args.key)))
             return 0
         # An ENUM's displayed LABEL is not always its stored VALUE (D11).
         # `model_effort auto` means the stored ``""``, and the guessed parse
@@ -3079,7 +3104,7 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # echo of a normalised value is exactly what it was.
         stored = settings_io.read_setting(config_manager, setting)
         echoed = matched_choice.label if matched_choice is not None else stored
-        print(f"Successfully updated {args.key} to {echoed}")
+        print(_cct(_cc.updated(key=args.key, value=str(echoed))))
         if setting.key == "tool_approval_mode" and str(stored).strip().lower() == "auto":
             # Qualified on purpose (UX round 1, U4). "Successfully updated
             # tool_approval_mode to auto" reads as "my running agents are not
@@ -3089,11 +3114,7 @@ def config_edit_command(args: argparse.Namespace) -> int:
             # and this command's process holds none. The TIGHTENING direction
             # says nothing extra: it really does reach every running session,
             # and is the safe direction besides.
-            print(
-                "Running sessions are unchanged — a config write cannot loosen one; "
-                "type /approvals auto in each session you want ungated. "
-                "New sessions open at auto."
-            )
+            print(_cct(_cc.running_sessions_unchanged()))
         return 0
     except settings_io.ConfigUnreadableError as e:
         # Distinct from the schema rejection below: the key and the value are
@@ -3138,46 +3159,36 @@ def config_list_command() -> int:
     config_manager = ConfigManager(config_dir())
     config = config_manager.get_config()
 
-    # Legacy descriptions kept for the two keys the schema does not carry
-    # (`compaction` and `tui` as whole mappings, listed for users following an
-    # older doc). Everything else is described by the schema, so the page and
-    # this table cannot describe one key two ways.
-    descriptions = {
-        "hosting": "AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)",
-        "model_name": "The specific model to use for interactions",
-        "conversation_length": "[DEPRECATED — superseded by compaction] "
-        "Maximum number of messages to keep in conversation history",
-        "detail_length": "[DEPRECATED — superseded by compaction] "
-        "Number of recent messages to leave unsummarized in conversation history",
-        "max_learnings_history": "[DEPRECATED — superseded by compaction] "
-        "Maximum number of learning entries to retain",
-        # The ONE entry here whose key the schema DOES carry (a READONLY row in the
-        # retired section), and it is here for this table's own grammar: the three
-        # keys above spell their retirement as a bracketed tag, and without one
-        # `classification.notice: True` was the only row in the family a scanning
-        # reader could not see was retired (design round 1, D3). Restating the
-        # sentence the registry carries is deliberate — the alternative, teaching
-        # this loop to synthesise a tag from `section`, would double-tag the three
-        # rows above, which already carry theirs in their own text.
-        "classification.notice": "[DEPRECATED] Smart hints is silent in the chat; "
-        "the call and its cost are in the session log",
-        "auto_save_conversation": "Whether to automatically save conversations",
-        "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
-        "replaces conversation_length/detail_length",
-        "tui": "TUI settings (theme)",
-        "session": "Session settings; session.cleanup.* is the opt-in cleanup policy "
-        "(off by default: nothing removes a session directory unless enabled)",
+    # Row descriptions that deliberately RESTATE (or, for the retired keys, tag)
+    # the schema's own help so a scanning reader sees the retirement bracket on
+    # every retired row (design round 1, D3: ``classification.notice`` was the
+    # only retired row without one, and synthesising the tag from ``section``
+    # would double-tag the three history keys, whose sentence already carries
+    # it). Each is a keyed message looked up LAZILY, at render time, so the
+    # active locale decides the language; everything else is the schema's keyed
+    # ``setting.help``. An older dict also held ``compaction``/``tui``/``session``
+    # rows for whole mappings that are not schema keys: the loop below walks
+    # ``settings_io.SETTINGS`` only, so nothing ever read them and they were dropped.
+    legacy_descriptions = {
+        "hosting": _cc.list_desc_hosting,
+        "model_name": _cc.list_desc_model_name,
+        "conversation_length": _cc.list_desc_conversation_length,
+        "detail_length": _cc.list_desc_detail_length,
+        "max_learnings_history": _cc.list_desc_max_learnings_history,
+        "classification.notice": _cc.list_desc_classification_notice,
+        "auto_save_conversation": _cc.list_desc_auto_save_conversation,
     }
 
-    print("\n\033[1;32m╭─ Configuration Options ───────────────────────\033[0m")
+    print(f"\n\033[1;32m╭─ {_cct(_cc.list_title())} ───────────────────────\033[0m")
     for setting in settings_io.SETTINGS:
         # The EFFECTIVE value (stored, else the shipped default), which is what
         # the user is asking about — an unset key showing blank would read as
         # "off" for every boolean here.
         value = settings_io.read_setting(config_manager, setting)
-        description = descriptions.get(setting.key) or setting.help
+        legacy = legacy_descriptions.get(setting.key)
+        description = _cct(legacy()) if legacy is not None else setting.help
         print(f"\033[1;32m│ {setting.key}: {value}\033[0m")
-        print(f"\033[1;32m│   Description: {description}\033[0m")
+        print(f"\033[1;32m│   {_cct(_cc.list_description(description=description))}\033[0m")
     # Anything a hand-edited config carries that the schema does not know about
     # is still listed, marked, rather than hidden: a key the app does not read
     # is exactly what a user needs to be told about, and silently omitting it
@@ -3185,7 +3196,11 @@ def config_list_command() -> int:
     unknown = sorted(set(config.values) - {setting.path[0] for setting in settings_io.SETTINGS})
     for key in unknown:
         print(f"\033[1;32m│ {key}: {config.values[key]}\033[0m")
-        print("\033[1;32m│   Description: not a recognised key; nothing reads it\033[0m")
+        print(
+            "\033[1;32m│   "
+            + _cct(_cc.list_description(description=_cct(_cc.list_unrecognised())))
+            + "\033[0m"
+        )
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
     return 0
 
@@ -4010,6 +4025,10 @@ def _browser_node_command(args: argparse.Namespace) -> int:
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
+    if command == "sites":
+        from local_operator.browser_bridge import sites_cli
+
+        return sites_cli.main(getattr(args, "revoke", None), as_json=bool(args.json))
     if command in ("tabs", "reconcile", "cleanup"):
         import asyncio
         import json
@@ -11088,6 +11107,23 @@ def mobile_command(args: argparse.Namespace) -> int:
 
     from local_operator.mobile import install as mobile_install
 
+    if command == "doctor":
+        # Read-only and redacted (see `mobile/doctor.py`): safe to paste into a
+        # support thread or relay over Team Bridge, where shell diagnostics are
+        # refused. Exit 0 whenever a report was produced — it reports, it does
+        # not alarm; the `overall` field carries the verdict.
+        import asyncio
+        import json as _json
+
+        from local_operator.mobile import doctor
+
+        report = asyncio.run(doctor.collect())
+        if getattr(args, "json", False):
+            print(_json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(doctor.text(report))
+        return 0
+
     if command == "install":
         from local_operator.mobile.auth import store_description
 
@@ -11114,7 +11150,26 @@ def mobile_command(args: argparse.Namespace) -> int:
         assert isinstance(result, dict)
         print(f"installed:    {'yes' if result['installed'] else 'no'}")
         print(f"password set: {'yes' if result['password_set'] else 'no'}")
-        print(f"healthy:      {'yes' if result['healthy'] else 'no'}")
+        # The daemon's descriptor headroom (open of the soft limit that
+        # `mobile/fdlimit.py` raises at start), on the `healthy` line it
+        # qualifies: exhausting it is how a healthy-looking daemon stops
+        # answering the phone. Joined with symbols only, so the line adds no
+        # untranslated word (the keyed copy carries the words); an unlimited
+        # or unreadable value is a symbol for the same reason.
+        files_note = ""
+        files = result.get("files")
+        if result["healthy"] and isinstance(files, dict):
+            from local_operator.i18n.keys import mobile_doctor as _md_files
+            from local_operator.i18n.text import tr as _tr_files
+
+            used, limit = files.get("open"), files.get("soft")
+            files_note = " · " + _tr_files("mobile.doctor")(
+                _md_files.files_status_line(
+                    open=str(used) if used is not None else "?",
+                    limit=str(limit) if limit is not None else "∞",
+                )
+            )
+        print(f"healthy:      {'yes' if result['healthy'] else 'no'}{files_note}")
         # A healthy daemon with no bundle serves a 503 to every authenticated GET
         # ("mobile web bundle not built"), so `healthy: yes` on its own reads as
         # fine while the phone has no UI at all — the state generations
@@ -11135,7 +11190,29 @@ def mobile_command(args: argparse.Namespace) -> int:
                 else "no web sources to build from"
             )
             print(f"bundle:       not built ({detail})")
-        gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
+        from local_operator.i18n.keys import mobile_doctor as _md_keys
+        from local_operator.i18n.text import tr as _tr
+
+        _md_t = _tr("mobile.doctor")
+        # A daemon that is not running has no gate to be open: the probe merely
+        # failed to connect, and printing that as "OPEN (boundary failure)" sent
+        # people hunting a security fault on a machine that was simply asleep
+        # (probe 6d779936753a, fix #2). But "not running" is only true when no
+        # process holds the port (R1-4, Q5): a daemon that holds it and does
+        # not answer — the fd-starved "Asleep / Not answering" state — has a
+        # gate nobody can read, which is the doctor's own `not answering`.
+        if not result["healthy"]:
+            from local_operator.mobile.doctor import daemon_pid
+
+            port = result.get("port")
+            held = isinstance(port, int) and daemon_pid(port) is not None
+            gate = _md_t(
+                _md_keys.daemon_state_not_answering()
+                if held
+                else _md_keys.daemon_state_not_running()
+            )
+        else:
+            gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
         print(f"log:          {result['log']}")
         from local_operator.tunnels.request_log import render as render_requests
@@ -11155,7 +11232,9 @@ def mobile_command(args: argparse.Namespace) -> int:
                 f"  [{session['state']}] pid {session['pid']} · "
                 f"{session['kind']} · {name} · {session['model_label']}"
             )
-        return 0 if result["healthy"] else -1
+        # Never installed is not a failure of this command (fix #2): only a
+        # daemon that IS installed and does not answer exits non-zero.
+        return 0 if result["healthy"] or not result["installed"] else -1
 
     if command in ("start", "stop", "restart"):
         result = mobile_install.service_action(command)

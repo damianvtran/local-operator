@@ -50,6 +50,7 @@ from typing import (
     cast,
 )
 
+from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.buildwatch import UpdateLock
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
@@ -530,7 +531,7 @@ _ANNOUNCE_FAILED = "failed"
 _display_watch_attached: set[str] = set()
 
 
-def _session_may_announce(session: Any) -> bool:
+def session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
 
     THE RULE, stated once: a session the operator's own listings HIDE must not
@@ -574,6 +575,14 @@ def _session_may_announce(session: Any) -> bool:
     except Exception:  # noqa: BLE001 — an unanswered question must not silence a toast
         logger.debug("could not read the session origin for the announce gate", exc_info=True)
         return True
+
+
+# PUBLIC since the mobile push worker asks the same question (push parity with
+# the desktop banner, PR #3989 review R2): a cross-module caller must not hang
+# off a private name in this module, where a rename would break pushes silently
+# inside a tick whose exceptions are only logged. The private alias stays so
+# this module's own call sites and existing tests keep reading unchanged.
+_session_may_announce = session_may_announce
 
 
 def _already_bounded(images: Any) -> bool:
@@ -1148,10 +1157,6 @@ class ServingSessionHandle(SessionHandle):
         # ``config.yml`` change (:meth:`follow_config`) move it without
         # reconstructing the handle.
         self._auto_approve = auto_approve
-        #: Whether the conversation's live ``auto`` was chosen while it already
-        #: held Team Bridge content (team-bridge-egress.md: "Grants"). Only such a grant keeps
-        #: covering calls in a latched session; persisted beside the record.
-        self._approve_granted_while_latched = False
         #: The FILE's ``tool_approval_mode`` as last known, independent of the
         #: live gate (which an explicit conversation choice may override). The
         #: pending-gate projection publishes it beside the mode so a viewer can
@@ -1593,22 +1598,22 @@ class ServingSessionHandle(SessionHandle):
             # account profile save is the exception: auto-approve is not
             # consent to rewriting account-wide agents (``never_auto_approved``).
             #
-            # Team Bridge (team-bridge-egress.md: "Grants"): a SESSION auto granted before the
-            # conversation latched no longer covers calls after it -- the call
-            # falls through to the card. Global auto is untouched: closed for
-            # ask mode; accepted risk in auto/yolo. The session's own
-            # latch is consulted too, so a card whose raiser passed no flag (a
+            # Team Bridge (team-bridge-egress.md: "Grants"): an auto grant
+            # covers a latched session whichever scope it came from -- a
+            # conversation's own ``auto`` exactly as the machine default
+            # (#3928). The latch's protection lives elsewhere and is unchanged:
+            # the read-tier egress gate, ``bridge_ack`` on a routed loosening
+            # (``_approvals_slash``) and the latched card. The session's own latch is consulted
+            # for the CARD below, so a card whose raiser passed no flag (a
             # profile save, an ``@path`` read) is still person-only.
             from local_operator.harness.bridge_egress import (
                 bridge_card_notice,
                 session_grant_covers,
             )
 
-            latched = bool(bridge_latched) or self._session_bridge_latched()
-            if session_grant_covers(
-                self._approval_grant(), title=tool_name, bridge_latched=latched
-            ):
+            if session_grant_covers(self._approval_grant(), title=tool_name):
                 return True
+            latched = bool(bridge_latched) or self._session_bridge_latched()
             if self._gates_closed_for_exit:
                 # Leaving on a signal: nobody will be asked before the exit, and
                 # a card parked now would hold the drain open (see
@@ -1803,7 +1808,9 @@ class ServingSessionHandle(SessionHandle):
         ``/approvals``, a desktop "Set auto", a record read back on resume);
         ``global`` only when the gate follows the machine default or a run pin.
         Derived from the same attributes the mode is, so no assignment line
-        can move one without the other.
+        can move one without the other. Since #3928 the latch no longer reads
+        the scope (both scopes cover a latched session alike); it stays on the
+        grant as provenance.
         """
         from local_operator.harness.bridge_egress import ApprovalGrant
 
@@ -1813,31 +1820,23 @@ class ServingSessionHandle(SessionHandle):
         return ApprovalGrant(
             auto=bool(getattr(self, "_auto_approve", False)),
             scope=scope,
-            granted_while_latched=bool(getattr(self, "_approve_granted_while_latched", False)),
-        )
-
-    def _bridge_grant_suspended(self) -> bool:
-        """Whether a live session auto is void because the session latched."""
-        from local_operator.harness.bridge_egress import session_grant_covers
-
-        grant = self._approval_grant()
-        if not grant.auto or grant.scope != "session":
-            return False
-        return not session_grant_covers(
-            grant, title="", bridge_latched=self._session_bridge_latched()
         )
 
     def _watch_bridge_latch(self) -> None:
-        """Announce, once, that a pre-latch session auto stopped covering calls."""
+        """Re-publish parked cards as latched cards the moment the session latches.
+
+        Until #3928 this also announced that a pre-latch SESSION auto had
+        stopped covering calls. No grant is suspended by the latch any more
+        (a session auto is honoured exactly as the machine default), so there
+        is nothing to announce: a notice saying "paused" would contradict the
+        gate, the band and ``/approvals``.
+        """
         latch = getattr(self._session, "bridge_taint_latch", None)
         if latch is None:
             return
 
         def announce() -> None:
-            from local_operator.harness.bridge_egress import (
-                bridge_card_notice,
-                grant_suspended_notice,
-            )
+            from local_operator.harness.bridge_egress import bridge_card_notice
 
             # Cards parked while the session was clean are re-published as
             # latched cards (security r7 lead on #3796): every attached viewer,
@@ -1850,10 +1849,7 @@ class ServingSessionHandle(SessionHandle):
                 relatched = self._fold.latch_pending(bridge_card_notice(latch))
             except Exception:  # noqa: BLE001 - the gate still enforces; logged at warning
                 logger.warning("could not re-publish parked cards as latched", exc_info=True)
-            if self._bridge_grant_suspended():
-                self._emit_notice(grant_suspended_notice(latch), "warning", headline="Approvals")
-                self._notify()
-            elif relatched:
+            if relatched:
                 self._notify()
 
         latch.on_latched.append(announce)
@@ -2026,13 +2022,8 @@ class ServingSessionHandle(SessionHandle):
             return
         self._explicit_approvals_mode = override
         self._auto_approve = override == "auto"
-        # Absent/unreadable reads False: a pre-latch (or pre-S1) record is void
-        # once the session latches (team-bridge-egress.md: "Grants").
-        from local_operator.session.approval_policy import read_granted_while_latched
-
-        self._approve_granted_while_latched = override == "auto" and read_granted_while_latched(
-            directory
-        )
+        # A legacy ``granted_while_latched`` key in the record is ignored: the
+        # latch no longer distinguishes a pre- from a post-latch grant (#3928).
 
     def follow_config(self, watcher: Any) -> None:
         """Subscribe the gate to ``tool_approval_mode`` changes on ``watcher``.
@@ -7245,7 +7236,11 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def ask_answer(
-        self, request_id: str, value: str, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        question_index: int | None = None,
+        by: str = UNVERIFIED_SURFACE,
     ) -> str:
         # ``question_index`` is accepted for protocol parity with the TUI handle
         # (U8 guard). An owned session assigns a DISTINCT request_id per question
@@ -7259,7 +7254,11 @@ class ServingSessionHandle(SessionHandle):
         # synthetic id has to resolve onto the whole-ask queue rather than onto a
         # gate future that never existed. Nothing else is touched: every other
         # request id is an approval or a live picker and falls through unchanged.
-        mirrored = await self._mirror_ask_answer(request_id, value)
+        # ``by`` is the label the RUNTIME stamped for this connection
+        # (``asks/surfaces.stamp_answer_surface``): ``mirror`` only when the
+        # frame proved the operator capability. The fail-closed default is for
+        # a caller that never went through that seam.
+        mirrored = await self._mirror_ask_answer(request_id, value, by=by)
         if mirrored is not None:
             return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
@@ -7272,7 +7271,9 @@ class ServingSessionHandle(SessionHandle):
             raise ValueError("that question was already answered") from exc
         return "answered"
 
-    async def _mirror_ask_answer(self, request_id: str, value: str | None) -> str | None:
+    async def _mirror_ask_answer(
+        self, request_id: str, value: str | None, *, by: str = UNVERIFIED_SURFACE
+    ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
         ``None`` is "this is not a mirrored ask id" — the ordinary case on every
@@ -7296,7 +7297,7 @@ class ServingSessionHandle(SessionHandle):
         if not value:
             # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
             # is not a step of the multi-step flow.
-            outcome = self._session.decline_ask(ask_id, by="mirror")
+            outcome = self._session.decline_ask(ask_id, by=by)
             if not outcome.get("ok"):
                 raise ValueError(str(outcome.get("error") or "the decline was refused"))
             return "declined"
@@ -7310,7 +7311,7 @@ class ServingSessionHandle(SessionHandle):
         # settle the ask in one atomic write. ``ask_respond`` stays atomic and
         # still refuses a partial map — a whole-ask client has no reason to send
         # one, and accepting it there would be a second, weaker contract.
-        outcome = self._session.answer_ask_question(ask_id, key, [value], by="mirror")
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):
@@ -7370,7 +7371,24 @@ class ServingSessionHandle(SessionHandle):
         signature over the composite ask#question#word target) and which minted
         the one-shot grant the dispatcher consumes at the point of effect. A
         plain ``ask_respond`` on a bridge ask is refused by the session.
+
+        A ``site:v1:`` question (a headless node's per-site browser approval,
+        ``browser_bridge/site_approval.py``) takes the session's async site door
+        instead: its effect is a browser-bridge call, and it needs no Team
+        Bridge runtime. A refusal keeps its typed ``code`` in the message so
+        the surface can tell "unsigned" from "expired".
         """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        site_door = getattr(self._session, "site_decide", None)
+        if is_site_question_id(question_id) and site_door is not None:
+            site_outcome = await cast(
+                Callable[[str, str, str], Awaitable[Mapping[str, Any]]], site_door
+            )(ask_id, question_id, word)
+            if not site_outcome.get("ok"):
+                raise ValueError(str(site_outcome.get("error") or "the decision was refused"))
+            await self._session.reconcile_asks()
+            return "decided"
         outcome = self._session.bridge_decide(ask_id, question_id, word)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the decision was refused"))
@@ -8468,12 +8486,8 @@ class ServingSessionHandle(SessionHandle):
                     # session-ask card over a global-auto file would otherwise
                     # have to invent "global Ask" (the U4 defect).
                     payload["approval_global_mode"] = global_mode
-                    if self._bridge_grant_suspended():
-                        # The EFFECTIVE mode (team-bridge-egress.md: "Grants"): the conversation's
-                        # auto predates its Team Bridge content, so this gate
-                        # asks. Claiming auto here would contradict the card.
-                        payload["approval_mode"] = "ask"
-                        payload["approval_suspended"] = "bridge"
+                    # No ``approval_suspended`` fold any more (#3928): the latch
+                    # suspends no grant, so the resolved mode IS the effect.
                 else:
                     payload["approval_mode"] = ""
                     payload["approval_provenance"] = ""
@@ -11432,8 +11446,8 @@ class ServingSessionHandle(SessionHandle):
         return remedy
 
     @staticmethod
-    def _uninstalled_anchor_clause() -> str:
-        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+    def _uninstalled_anchor_report(live: str, saved: str) -> str | None:
+        """The whole report line for a host with no usable anchor, else ``None``.
 
         THIS REPLACES THE DELETED "retire and reopen the session here" clause, and
         it replaces it with the one thing that clause was standing in for: a
@@ -11446,12 +11460,23 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.operator import operator_authority_unusable
 
         if not operator_authority_unusable():
-            return ""
-        return (
-            "; but operator authority is not installed on this machine yet: neither can run "
-            "until it is set up here — ask Local Operator to set up operator authority for "
-            "you (one approval and one admin password prompt)"
-        )
+            return None
+        # U17 (design v2 A2): the remedy names where a person turns approvals on —
+        # Settings → Phone access in the desktop app, `/mobile approvals on` in the
+        # terminal app — instead of "ask Local Operator to set up operator
+        # authority", which sent a non-technical user to a terminal-only verb.
+        #
+        # THE WHOLE LINE IS ONE KEY (design round 1 on #3950, D2/D3). It used to be
+        # a keyed clause appended to the English report, so every other locale got
+        # a sentence that switched language halfway. Only this state's line is
+        # keyed; its only caller reaches it with the session asking (`live` is
+        # "ask"), which is why the effect words are part of the message. ONE key for
+        # both mirrors so they cannot drift apart.
+        from local_operator.i18n.keys import wire_operator_setup as _ws
+        from local_operator.i18n.text import tr
+
+        report = _ws.tui_approvals_report_not_set_up(live=live, saved=saved)
+        return tr("wire.operator_setup")(report)
 
     def _approvals_slash(
         self,
@@ -11588,7 +11613,13 @@ class ServingSessionHandle(SessionHandle):
                     # capability that now exists (a pane attached to another
                     # process's runtime can loosen), so a reader with a working lever
                     # was told to retire a runtime instead of using it.
-                    remedy += self._uninstalled_anchor_clause()
+                    keyed = (
+                        None
+                        if self._auto_approve
+                        else self._uninstalled_anchor_report(live, on_disk)
+                    )
+                    if keyed is not None:
+                        return SlashResult(kind="notice", text=keyed, style="info")
                 return SlashResult(
                     kind="notice",
                     text=(
@@ -11642,24 +11673,27 @@ class ServingSessionHandle(SessionHandle):
             # rendered the latched sentence, from the picker) or a typed command
             # the TUI marks may make a post-latch session grant. Same receipt
             # shape as the unattributed-loosening refusal.
+            if self._auto_approve:
+                # ALREADY AUTO IS NOT A LOOSENING (design r1 D2 on #4080). A
+                # session already in auto -- its own choice or the machine
+                # default -- loses nothing to this request, so refusing it told
+                # the operator "auto is still off" while every tool ran without
+                # asking. Answer with the truthful report instead, and write
+                # nothing: recording a session override here would pin a
+                # machine-default auto onto this conversation, a change the
+                # unacknowledged frame may not make. ask->auto still refuses.
+                return self._already_auto_receipt(session, SlashResult, may_loosen)
             refusal = self._bridge_ack_refusal(SlashResult, latched=latched)
             if refusal is not None:
                 return refusal
         self._auto_approve = wanted_auto
-        # Stamped only for a grant made while ALREADY latched: that is the
-        # deliberate post-latch loosening, which keeps covering calls and
-        # survives resume. Every other grant is void once the session latches.
-        self._approve_granted_while_latched = bool(wanted_auto and latched)
         # A human typed the mode in this session, so the FILE no longer moves
         # this gate in either direction (see :meth:`_on_config_change`). The MODE
         # is recorded, not merely the fact of a choice (review round 2, R6) —
         # and since 2026-10-23 it is recorded with the CONVERSATION too, so the
         # choice survives a resume instead of living in this handle's memory.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
-        saved_failure = self._persist_approval_override(
-            "auto" if wanted_auto else "ask",
-            granted_while_latched=self._approve_granted_while_latched,
-        )
+        saved_failure = self._persist_approval_override("auto" if wanted_auto else "ask")
         self._notify()
         # "(this session)" on the LIVE half, matching the app's own receipt word
         # for word (UX round 1, U5): the two hosts answer the same gesture, and
@@ -11708,7 +11742,6 @@ class ServingSessionHandle(SessionHandle):
         mode: str | None,
         *,
         had_record: bool = True,
-        granted_while_latched: bool = False,
     ) -> str | None:
         """Record (or clear) this conversation's choice; return a failure clause.
 
@@ -11743,7 +11776,7 @@ class ServingSessionHandle(SessionHandle):
         if directory is None:
             return None
         try:
-            _write_approval_override(directory, mode, granted_while_latched=granted_while_latched)
+            _write_approval_override(directory, mode)
         except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
             logger.warning(
                 "could not save %s beside the transcript",
@@ -11762,6 +11795,20 @@ class ServingSessionHandle(SessionHandle):
                 f"({error.__class__.__name__})"
             )
         return None
+
+    def _already_auto_receipt(self, session: Any, SlashResult: Any, may_loosen: bool | None) -> Any:
+        """The receipt for an unacknowledged ``auto`` while auto is in effect.
+
+        Reuses the bare ``/approvals`` report verbatim, so no new copy exists
+        to translate and the sentence names the mode's real provenance (this
+        session vs config.yml) instead of claiming a session switch. ``data``
+        carries the same ``ok``/``approval_mode`` keys every approvals receipt
+        sends, because the card keys on them, never on the sentence.
+        """
+        report = self._approvals_slash(session, "", SlashResult, may_loosen=may_loosen)
+        return report.model_copy(
+            update={"data": {**report.data, "approval_mode": "auto", "ok": True}}
+        )
 
     def _bridge_ack_refusal(self, SlashResult: Any, *, latched: bool | None = None) -> Any:
         """The receipt refusing an unacknowledged loosening while latched, or ``None``.

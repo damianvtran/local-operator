@@ -29,6 +29,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import types
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -308,9 +310,13 @@ async def test_a_queued_ask_is_answered_through_the_command_route() -> None:
                 )
             assert reply.status_code == 200, reply.text
             assert reply.json()["ok"] is True
+            # ``by`` is the RUNTIME's stamp, not the phone's: the relay's
+            # connection proved no operator capability, so the answer records
+            # ``remote`` and is never read as delete consent
+            # (``asks/surfaces.stamp_answer_surface``).
             assert handle.ask_calls[-1] == (
                 "ask_respond",
-                {"ask_id": "ask-1", "answers": {"q1": ["yes"], "q2": []}, "by": ""},
+                {"ask_id": "ask-1", "answers": {"q1": ["yes"], "q2": []}, "by": "remote"},
             )
 
             # §10 (#1936): the SAME atomic body over the SAME route, as a
@@ -333,7 +339,7 @@ async def test_a_queued_ask_is_answered_through_the_command_route() -> None:
             assert reply.json()["ok"] is True
             assert handle.ask_calls[-1] == (
                 "ask_revise",
-                {"ask_id": "ask-1", "answers": {"q1": ["no"], "q2": []}, "by": ""},
+                {"ask_id": "ask-1", "answers": {"q1": ["no"], "q2": []}, "by": "remote"},
             )
         finally:
             dial.cancel()
@@ -568,6 +574,8 @@ class _FakeAskClient:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self._refusal = refusal
         self.closed = False
+        #: The keyword arguments the route passed to ``engage_session_client``.
+        self.engage_kwargs: dict[str, object] = {}
 
     def _maybe_refuse(self) -> None:
         if self._refusal:
@@ -666,6 +674,7 @@ def _cold_engage(
 
     async def fake_engage(config_dir, session_id, work, **kwargs):  # noqa: ANN001, ANN003, ANN202
         engagements.append((session_id, work))
+        client.engage_kwargs = dict(kwargs)
         return client, "runtime ready"
 
     monkeypatch.setattr(attach_client, "engage_session_client", fake_engage)
@@ -711,6 +720,60 @@ def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answer
         assert client.calls[-1][1]["answers"] == body["answers"]
     # The engaged connection is released rather than left open by the route.
     assert client.closed is True
+
+
+def test_a_portal_body_cannot_name_the_answering_surface(monkeypatch) -> None:
+    """PORTAL FORGERY: the HTTP body's ``by`` never reaches the runtime.
+
+    Anyone holding the portal cookie writes this body. Before the fix ``by``
+    went verbatim to ``client.ask_respond(..., by=by)`` and the runtime recorded
+    it, so ``"desktop"`` became delete consent. Now the route forwards no ``by``
+    and does not opt into the operator proof (the fake's signature has no
+    ``operator_ask``, so an opt-in would fail the request); the runtime stamps
+    the surface itself (``asks/surfaces``).
+    """
+    client, _engagements = _cold_engage(monkeypatch)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}, "by": "desktop"},
+    )
+    assert reply.status_code == 200, reply.text
+    assert client.calls[-1] == (
+        "ask_respond",
+        {"ask_id": "ask-1", "answers": {"q1": ["yes"]}, "by": ""},
+    )
+    # QA round 1, Q1: the cold route dials as a RELAY, so the runtime stamps
+    # the phone's answer ``remote`` (``asks.surfaces``), not ``unverified``.
+    assert client.engage_kwargs == {"locality": "remote"}
+
+
+@pytest.mark.asyncio
+async def test_engage_session_client_declares_the_caller_s_locality(monkeypatch) -> None:
+    """The seam forwards ``locality`` into the dial's hello (default ``local``)."""
+    from local_operator.mobile import attach_client
+    from local_operator.session.runtime import launch
+
+    async def fake_engage_runtime(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return types.SimpleNamespace(detail="runtime ready")
+
+    connected: list[str] = []
+
+    async def fake_connect(self, record, session_id):  # noqa: ANN001, ANN202
+        connected.append(self._locality)
+
+    monkeypatch.setattr(launch, "engage_runtime", fake_engage_runtime)
+    monkeypatch.setattr(attach_client, "find_runtime_record", lambda *a: (object(), None))
+    monkeypatch.setattr(attach_client.AttachClient, "connect", fake_connect)
+    from local_operator.session.runtime.launch import AskErrand
+
+    errand = AskErrand(ask_id="ask-1")
+    config = Path("/nonexistent-config")
+    client, _ = await attach_client.engage_session_client(config, "s-1", errand)
+    client.close()
+    assert connected[-1] == "local"
+    client, _ = await attach_client.engage_session_client(config, "s-1", errand, locality="remote")
+    client.close()
+    assert connected[-1] == "remote"
 
 
 def test_a_cold_dismiss_never_engages(monkeypatch) -> None:
