@@ -457,6 +457,15 @@ ROLE_BY_WORDS = frozenset({"operator"})
 NOT_IN_QUEUE = "that ask is not in this session's queue — it may belong to another session."
 
 
+#: The ``by.via`` the desktop approvals batch stamps on the ``withdrawn`` row it
+#: writes (``team_bridge.approvals.SETTLED_BY``; a test pins the two together,
+#: and this module may not import the team-bridge package).
+BATCH_DECIDE_VIA = "team_bridge_batch_decide"
+
+#: The card's refusal for a request already decided from the approvals list.
+BATCH_DECIDED_COPY = "you already decided this request from the desktop's approvals list."
+
+
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).
 
@@ -486,6 +495,12 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         # names a different act — the one where the agent was told to decide.
         return DISMISS_ALREADY_DISMISSED
     if status == store.STATUS_WITHDRAWN:
+        if (record.get("withdrawn_by") or {}).get("via") == BATCH_DECIDE_VIA:
+            # A team request the person already decided from the desktop's
+            # approvals list (QA Q2): the agent withdrew nothing, and "send it
+            # as a chat message" would be the wrong remedy for a decision that
+            # has already reached the requester.
+            return BATCH_DECIDED_COPY
         # DESIGN §12's sentence, verbatim: a withdrawn ask is not answerable
         # from any surface (its box hides everywhere — ``withdrawn`` is not
         # outstanding), and a stale tap reads the ONE route left — say it in
