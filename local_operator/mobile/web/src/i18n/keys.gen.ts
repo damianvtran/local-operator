@@ -1113,6 +1113,10 @@ export type MessageParams = {
   "wire.settings.auto_save_conversation.choice.true.description": undefined;
   "wire.settings.auto_save_conversation.help": undefined;
   "wire.settings.auto_save_conversation.label": undefined;
+  "wire.settings.bash_heavy_jobs_enabled.choice.false.description": undefined;
+  "wire.settings.bash_heavy_jobs_enabled.choice.true.description": undefined;
+  "wire.settings.bash_heavy_jobs_enabled.help": undefined;
+  "wire.settings.bash_heavy_jobs_enabled.label": undefined;
   "wire.settings.bash_memory_enabled.choice.false.description": undefined;
   "wire.settings.bash_memory_enabled.choice.true.description": undefined;
   "wire.settings.bash_memory_enabled.help": undefined;
@@ -1364,6 +1368,8 @@ export type MessageParams = {
   "wire.settings.guardrails_judge_timeout_s.label": undefined;
   "wire.settings.guardrails_rules_dir.help": undefined;
   "wire.settings.guardrails_rules_dir.label": undefined;
+  "wire.settings.heavy_jobs.description": undefined;
+  "wire.settings.heavy_jobs.title": undefined;
   "wire.settings.hooks.description": undefined;
   "wire.settings.hooks.title": undefined;
   "wire.settings.hooks_forward_claude.help": undefined;
