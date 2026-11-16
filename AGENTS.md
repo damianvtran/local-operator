@@ -3691,16 +3691,23 @@ SB=<path to a built storybook-static>   # see "Storybook" below
 - **What is real:** the installed CRX the live node runs (read only; its version
   is in the results), a fresh headless Chrome profile, the bridge daemon,
   policy-delivered pairing, a `Session` running the real browser tool, the
-  `RuntimeServer` door, and a separate operator process answering through
-  `bridge_decision_target` + `AttachClient.bridge_decide` (the `/answers`
-  route's two calls) with a synthetic file key. Only the model (scripted) and
-  the root-owned anchor (`tests/fixtures/anchor_fixture.py`) are replaced.
+  `RuntimeServer` door, two real loopback `RelayServer` instances with separate
+  config stores and a signed synthetic operator binding, catalogue transport
+  into `RemoteAttentionWatcher` and the synthetic operator's `notifications.db`.
+  A separate operator process mounts the real desktop router and POSTs to
+  `/v1/desktop/sessions/{sid}/answers`; `DesktopSessions` resolves a real
+  mesh-backed remote facade and the handler selects the signed `bridge_decide`
+  door. The model is scripted, the pairing fixture supplies two synthetic
+  humans, the key is file-only, and the root-owned anchor is replaced
+  (`tests/fixtures/anchor_fixture.py`). No product bypass is installed.
 - **Isolation:** one `systemd-run --user --scope` (1536M, no swap) around
   `unshare -Urmn`; scratch dirs are bind-mounted over
   `/etc/opt/chrome/policies/managed` and `/etc/local-operator/operators`, the
   private netns makes the real bridge on `127.0.0.1:4099` unreachable, and the
   inner run aborts if the real policy file is visible. Every root lives under
-  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else. The hidden
+  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else, including
+  live config subtrees if the scratchpad environment is mis-set (only the
+  canonical `sessions/<id>/scratchpad/<run>` subtree is exempt). The hidden
   `--inner`/`--operator` modes re-apply those refusals, refuse outside a
   private netns holding only `lo`, and refuse any config root that does not
   resolve under the run root, before writing anything.
@@ -3709,8 +3716,9 @@ SB=<path to a built storybook-static>   # see "Storybook" below
   (exact cgroup membership) and removes `/tmp/nbh-<stamp>-*`. Only a SIGKILLed
   launcher can leave the scope; stop it by that name.
 - **Proof it touched nothing:** the launcher hashes the real policy and anchor,
-  records the live node Chrome's PID and the paired-identity lines of the real
-  `lop browser status` before and after, and fails the run on any difference.
+  records the live node Chrome's PID, real :4099 listener owner and the
+  paired-identity lines of `lop browser status` before and after, and fails
+  on any difference (or on a failed/empty identity probe).
 - **Rows:** open refused (`origin_not_allowed`), card raised, wrong-key
   signature, plain `ask_respond`, the agent's own unsigned decide, signed Approve
   (`lop browser sites --json` allows the origin), open succeeds, light/dark
@@ -3719,14 +3727,17 @@ SB=<path to a built storybook-static>   # see "Storybook" below
   page-background luminance; a spinner frame is "not rendered"), signed Deny
   (origin in the `--json` denied list, open still refused), and a late signed
   Approve after the AGENT withdrew its request with its own `cancel_access`
-  (`BLOCKED`, not `PASS`, unless the extension answered `cancelled`). Results: `results.md`/`results.json`, PNGs and logs in the run
-  directory. LOOK at both PNGs before citing them; a sha256 alone is not proof.
-- **Not covered:** the card's trip over two mesh relays into the operator's
-  inbox, and the desktop `/answers` HTTP route itself (the operator attaches over
-  loopback). The node root is not a mesh member, so node-only branches gated on
-  `node_host.headless_node_once()` (e.g. `cancel_access` withdrawing the card
-  with its entry) do not run here. Those legs are pinned by `tests/unit/network/test_remote_attention_relay.py`
-  and `tests/unit/network/test_remote_viewer.py`.
+  (`BLOCKED`, not `PASS`, unless the extension answered `cancelled`). The member
+  also withdraws its queued ask, so the late HTTP tap must receive 409 with the
+  queue's withdrawn refusal, not Phase 1's non-member extension-expiry refusal.
+  Each card is observed over real catalogue transport and its one full
+  `remote-notice:<device>:<session>:remote-ask:<ask>` inbox key is checked;
+  answered, denied and cancelled member cards must retire on the next listing.
+  Results: `results.md`/`results.json`, PNGs and logs in the run directory.
+  LOOK at both PNGs before citing them; a sha256 alone is not proof.
+- **Phase boundary:** Phase 1 used direct loopback attach and did not cover the
+  mesh/inbox/HTTP legs. This harness continuation adds those legs and real
+  membership without changing pairing policy, host anchors or product code.
 - **Testing an extension change:** the harness installs the CRX named in
   `~/.local-operator/browser/extension/update.xml`, not `extension/` source.
 - A long `TMPDIR` breaks Chrome's singleton socket (108-byte unix path limit),

@@ -12,22 +12,22 @@ WHAT IS REAL. The installed extension CRX (the same one the live node runs, read
 only), a real headless Chrome with a fresh profile, the real bridge daemon
 (``python -m local_operator.browser_bridge.daemon``), policy-delivered pairing
 (``managed-pairing.ts``), a real ``Session`` running the real browser tool, the
-real ``RuntimeServer``/``ServingSessionHandle`` door, and a SEPARATE operator
-process that attaches with the real ``AttachClient`` and answers through
-``asks.decision.bridge_decision_target`` + ``AttachClient.bridge_decide`` — the
-same two calls the desktop ``/answers`` route makes — so the challenge, the ES256
-signature, the runtime's verification and the extension's re-verification are all
-production code. What is NOT real: the model (a scripted stream, as in
-``tests/e2e/harness.py``) and the root-owned anchor file, replaced in-process by
-``tests/fixtures/anchor_fixture.install_fixture_anchor`` in both roles.
+real ``RuntimeServer``/``ServingSessionHandle`` door, TWO loopback mesh relays
+with separate stores and a real signed operator binding, the catalogue transport
+and ``RemoteAttentionWatcher`` writing a synthetic operator notifications.db.
+A SEPARATE operator process mounts the production desktop router and makes an
+actual HTTP POST to ``/v1/desktop/sessions/{sid}/answers``. Its real remote-session
+facade attaches through the operator relay; the handler selects ``bridge_decide``
+and production code performs the challenge, ES256 signature, runtime verification
+and extension re-verification. Phase 1 exercised direct attach; this continuation
+adds the missing mesh/inbox/HTTP legs without a production bypass.
 
-WHAT IT DOES NOT COVER (yet). The card's trip over two mesh relays into the
-operator's inbox and the desktop ``/v1/desktop/sessions/{sid}/answers`` route
-itself. The operator attaches to the node runtime directly over loopback
-instead; both legs have their own in-repo coverage
-(``tests/unit/network/test_remote_attention_relay.py``,
-``tests/unit/network/test_remote_viewer.py``). See AGENTS.md "Testing a node
-browser without the operator".
+SYNTHETIC BOUNDARIES. The model is scripted (``tests/e2e/harness.py``), pairing's
+two humans are supplied by the existing real invite/SAS fixture, the signer is a
+file-only synthetic key, and the root-owned anchor is replaced in-process by
+``tests/fixtures/anchor_fixture.install_fixture_anchor`` in both roles. Native
+credential discovery is suppressed while the synthetic relays are constructed;
+no host credential, operator card or real inbox is used.
 
 SAFETY ARGUMENT — why a run cannot touch the operator's real node:
 
@@ -51,8 +51,9 @@ SAFETY ARGUMENT — why a run cannot touch the operator's real node:
   ``scripts/``/``tests/``. ``--security-control`` checks that a normal process
   with the same isolated HOME never trusts the synthetic key.
 * The outer launcher hashes the real policy and anchor, records the live node
-  Chrome's PID and the paired-identity lines of the real ``lop browser status``
-  before and after, and fails the run if any differ.
+  Chrome's PID, bridge :4099 listener owner and the paired-identity lines of the
+  real ``lop browser status`` before and after, and fails if any differ. A failed
+  or empty status probe is not accepted as an unchanged pairing.
 * The whole run is one named ``systemd-run --user --scope --unit nbh-<stamp>``
   with ``MemoryMax=1536M`` and no swap; children are started in their own
   process groups and reaped by exact group id. SIGTERM/SIGINT raise
@@ -98,7 +99,6 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
@@ -166,10 +166,15 @@ def refusal(
         return f"refused: root {resolved} is not inside the scratchpad {pad}"
     if resolved == real or resolved in real.parents:
         return f"refused: root {resolved} is (or contains) the real config root {real}"
-    # The scratchpad itself lives under ~/.local-operator/sessions/<id>/; the
-    # root must be a CHILD of it, never one of the real stores beside it.
     if resolved == pad:
         return "refused: use a fresh subdirectory of the scratchpad, not the scratchpad itself"
+    # A mis-set scratchpad must not bless live stores beneath the config tree.
+    # Only the canonical session scratchpad subtree is disposable there; derive
+    # that exception from the path shape, not the caller-controlled env value.
+    if real in resolved.parents:
+        relative = resolved.relative_to(real).parts
+        if len(relative) < 4 or relative[0] != "sessions" or relative[2] != "scratchpad":
+            return f"refused: root {resolved} is inside the real config root {real}"
     return None
 
 
@@ -267,6 +272,7 @@ def hidden_mode_refusal(args: argparse.Namespace) -> str | None:
             "--node-root": Path(args.node_root),
             "LOCAL_OPERATOR_CONFIG_DIR": Path(key_root),
             "--ask-file": Path(args.ask_file),
+            "operator relay root": root / "operator",
         }
     else:
         paths = {name: root / name for name in ("node", "operator", "wrong-key-operator", "policy")}
@@ -319,7 +325,7 @@ def _sha(path: Path) -> str:
 
 
 def host_snapshot() -> dict[str, Any]:
-    """Hashes of the real anchor/policy, the live Chrome PID, the real pairing."""
+    """Real anchor/policy hashes, Chrome PID, pairing and bridge listener owner."""
     pid = subprocess.run(
         ["systemctl", "--user", "show", "-p", "MainPID", LIVE_UNIT],
         capture_output=True,
@@ -329,15 +335,25 @@ def host_snapshot() -> dict[str, Any]:
     env.pop("LOCAL_OPERATOR_CONFIG_DIR", None)
     env.update(NO_NOTIFY_CHILD_ENV)
     status = subprocess.run(
-        ["lop", "browser", "status"], capture_output=True, text=True, env=env, timeout=60
+        ["lop", "browser", "status"],
+        capture_output=True, text=True, env=env, timeout=60, check=True,
     ).stdout
     identity = [
         line.rstrip() for line in status.splitlines() if line.strip().startswith(IDENTITY_PREFIXES)
     ]
+    if not identity:
+        raise RuntimeError("real browser status returned no paired-identity lines")
     hashes = {str(REAL_POLICY): _sha(REAL_POLICY)}
     for anchor in sorted(REAL_ANCHOR_DIR.glob("*.json")):
         hashes[str(anchor)] = _sha(anchor)
-    return {"hashes": hashes, "live_chrome": pid, "browser_status_identity": identity}
+    bridge = subprocess.run(
+        ["ss", "-ltnpH", f"sport = :{REAL_BRIDGE_PORT}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return {
+        "hashes": hashes, "live_chrome": pid, "browser_status_identity": identity,
+        "live_bridge_owner": bridge,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +497,7 @@ def outer(args: argparse.Namespace) -> int:
     for key, label in (
         ("hashes", "real /etc policy + anchor hashes unchanged"),
         ("live_chrome", "live node Chrome PID unchanged"),
+        ("live_bridge_owner", "real bridge :4099 listener owner unchanged"),
         ("browser_status_identity", "real `lop browser status` paired identity unchanged"),
     ):
         rows.append(
@@ -783,6 +800,9 @@ def _tape(urls: dict[str, str], shots: dict[str, str]) -> PollingTape:
             # which also withdraws the card) before the operator's late answer.
             _call("call_10", {"action": "open", "url": urls["expire"]}),
             _call("call_11", {"action": "request_access", "url": urls["expire"]}),
+            text_turn("asked about the third origin"),
+            # A separate turn lets the real watcher observe the live card before
+            # the agent cancels it; otherwise there is no notice to retire.
             _call("call_12", {"action": "cancel_access", "url": urls["expire"]}),
             text_turn("withdrew the third request"),
         ]
@@ -922,6 +942,24 @@ def expired_refused(verdict: dict[str, Any]) -> bool:
         verdict.get("connected")
         and verdict.get("ok") is False
         and _site_refusal("refused_expired") in str(verdict.get("error", ""))
+    )
+
+
+def withdrawn_refused(verdict: dict[str, Any]) -> bool:
+    """A member withdraws its ask too: the late HTTP tap gets the queue's refusal.
+
+    Phase 1's non-member left the ask open and reached the extension's expired
+    entry. A real headless member settles its card in cancel_access, so the
+    signed door refuses before extension dispatch (Session.site_decide).
+    """
+    from local_operator.asks.render import refusal_copy
+
+    return bool(
+        verdict.get("connected")
+        and verdict.get("ok") is False
+        and verdict.get("http_status") == 409
+        and verdict.get("surface") == "desktop-http-remote-session"
+        and refusal_copy({"status": "withdrawn"}) in str(verdict.get("error", ""))
     )
 
 
@@ -1113,8 +1151,13 @@ async def inner(args: argparse.Namespace) -> int:
     # main() already refused unless the namespace, mask and containment checks
     # hold (hidden_mode_refusal), so this is the first write of the run.
     root = Path(args.root)
+    import local_operator
+
+    source = Path(local_operator.__file__).resolve()
+    assert source == REPO / "local_operator" / "__init__.py", source
     root.mkdir(parents=True, exist_ok=True)
     results = Results(root / "results.json")
+    results.fact("product_source", str(source))
     results.row(
         "namespace masks the real managed policy",
         f"{REAL_POLICY} absent",
@@ -1181,6 +1224,9 @@ async def inner(args: argparse.Namespace) -> int:
         if runtime is not None:
             with contextlib.suppress(Exception):
                 runtime.close()
+        mesh = session_box.get("mesh")
+        if mesh is not None:
+            await asyncio.to_thread(mesh.close)
         group.reap()
         profile = root / "chrome-profile"
         shutil.rmtree(profile, ignore_errors=True)
@@ -1350,6 +1396,21 @@ async def _inner_flow(
     from local_operator.tools.builtin import build_browser_tool
     from tests.e2e.harness import build_session
 
+    from scripts.e2e.node_browser_mesh import MeshRig
+
+    mesh = MeshRig(node_root, op_root)
+    session_box["mesh"] = mesh
+    mesh_facts = await asyncio.to_thread(mesh.start)
+    results.fact("mesh", mesh_facts)
+    from local_operator.browser_bridge.node_host import headless_node_once
+
+    results.row(
+        "node is a real active headless mesh member",
+        "two loopback relays; signed operator binding",
+        {**mesh_facts, "headless_node": headless_node_once()},
+        headless_node_once() and len(mesh_facts["relay_ports"]) == 2
+        and mesh_facts["signed_binding"] == (mesh.operator_id, mesh.network_id),
+    )
     tool = build_browser_tool(None)
     if tool is None:
         results.row("browser tool advertised on the node", "tool present", None, False)
@@ -1397,6 +1458,12 @@ async def _inner_flow(
     if not ask:
         return 2
     ask_id = str(ask["ask_id"])
+    forwarded = await asyncio.to_thread(mesh.notice, sid, ask_id)
+    results.row(
+        "site card crosses real catalogue transport into synthetic operator inbox",
+        "one full remote-notice key naming node/session/ask", forwarded,
+        forwarded["count"] == 1 and not forwarded["items"][0]["dismissed_at"],
+    )
     approve_word = "approve"
 
     # --- negative controls before the real decision -----------------------
@@ -1456,6 +1523,12 @@ async def _inner_flow(
         {"verdict": approved, "ask": _ask_status(session, ask_id), "sites": sites_after[:300]},
         bool(approved.get("ok")) and allowed_after,
     )
+    settled = await asyncio.to_thread(mesh.notice, sid, ask_id)
+    results.row(
+        "answered member card retires from the operator inbox",
+        "one forwarded notice, now dismissed", settled,
+        settled["count"] == 1 and bool(settled["items"][0]["dismissed_at"]),
+    )
     # ``call_5`` is the dark ``open``; the turn then polls the dark capture, so
     # "call_5 recorded and the turn lock free" means both captures settled.
     resumed = await _continue_after_answer(
@@ -1500,8 +1573,19 @@ async def _inner_flow(
     if deny_ask is None:
         results.row("deny: card raised", "open ask", _last_result(session, "call_8"), False)
     else:
+        forwarded_deny = await asyncio.to_thread(mesh.notice, sid, str(deny_ask["ask_id"]))
+        results.row(
+            "deny card reaches the operator inbox", "one active forwarded notice", forwarded_deny,
+            forwarded_deny["count"] == 1 and not forwarded_deny["items"][0]["dismissed_at"],
+        )
         denied = await asyncio.to_thread(
             _operator, args.host_netns, root, op_root, node_root, sid, deny_ask, "deny", "signed"
+        )
+        settled_deny = await asyncio.to_thread(mesh.notice, sid, str(deny_ask["ask_id"]))
+        results.row(
+            "denied member card retires from the operator inbox", "one dismissed forwarded notice",
+            settled_deny,
+            settled_deny["count"] == 1 and bool(settled_deny["items"][0]["dismissed_at"]),
         )
         resumed_deny = await _continue_after_answer(
             session, "call_9", "call_9", "open the second origin again"
@@ -1531,6 +1615,14 @@ async def _inner_flow(
     expire_origin = base["expire"]
     await session.prompt("try the third origin")
     expire_ask = _site_ask(session, expire_origin)
+    if expire_ask is not None:
+        forwarded_expire = await asyncio.to_thread(mesh.notice, sid, str(expire_ask["ask_id"]))
+        results.row(
+            "cancellable card reaches the operator inbox", "one active forwarded notice",
+            forwarded_expire,
+            forwarded_expire["count"] == 1 and not forwarded_expire["items"][0]["dismissed_at"],
+        )
+    await session.prompt("withdraw the third request")
     withdrawal = _last_result(session, "call_12")
     if expire_ask is None:
         results.row("expired: card raised", "an ask", _last_result(session, "call_11"), False)
@@ -1548,19 +1640,27 @@ async def _inner_flow(
             approve_word,
             "signed",
         )
+        settled_expire = await asyncio.to_thread(mesh.notice, sid, str(expire_ask["ask_id"]))
+        results.row(
+            "cancelled member card retires from the operator inbox",
+            "one dismissed forwarded notice",
+            settled_expire,
+            settled_expire["count"] == 1 and bool(settled_expire["items"][0]["dismissed_at"]),
+        )
         allowed_late = _allowed(node_root, expire_origin)
         results.row(
-            "expired card: a signed Approve after the entry is withdrawn grants nothing",
-            "agent cancel_access -> extension answers state cancelled; "
-            "then the signed Approve is refused as expired (refused_expired); "
-            "origin not allowed",
+            "cancelled member card: late HTTP Approve grants nothing",
+            "cancel_access -> cancelled entry and withdrawn ask; "
+            "POST /answers -> 409 with the queue's withdrawn refusal; origin not allowed",
             {
                 "withdrawal": {"error": withdrawal["error"], "details": details},
                 "ask": _ask_status(session, str(expire_ask["ask_id"])),
                 "verdict": late,
                 "allowed": allowed_late,
             },
-            expired_refused(late) and not allowed_late,
+            withdrawn_refused(late)
+            and _ask_status(session, str(expire_ask["ask_id"])) == "withdrawn"
+            and not allowed_late,
             blocked=not gone,
         )
     results.row(
@@ -1583,62 +1683,25 @@ def _emit(payload: dict[str, Any]) -> None:
 
 
 async def operator_role(args: argparse.Namespace) -> int:
-    """Answer ONE card the way the desktop ``/answers`` route does.
+    """Answer over real HTTP on the synthetic operator's remote-session surface.
 
-    ``_verified_decision_target`` → ``bridge_decision_target`` (checks the site
-    card and notes it verified) → ``bridge.remote.bridge_decide`` (the attach
-    client asks the node runtime for a challenge and signs it with THIS root's
-    operator key). ``--mode plain`` sends the ordinary ``ask_respond`` instead,
-    which must never count as the decision.
+    The pool resolves the node through its relay, never the node's runtime
+    registry. The production /answers handler selects and signs the decision.
+    ``plain`` is the unsigned control on that same attached remote facade.
     """
     key_root = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
     from tests.fixtures.anchor_fixture import install_fixture_anchor
 
     install_fixture_anchor(key_root)
-    from local_operator.asks.decision import bridge_decision_target
-    from local_operator.mobile.attach_client import AttachClient
-    from local_operator.session.runtime import registry
+    from scripts.e2e.node_browser_mesh import answer_over_http
 
     ask = json.loads(Path(args.ask_file).read_text())
-    question = ask["questions"][0]
-    slot = str(question.get("id") or "")
-    answers = {slot: [args.word]}
-    records = [r for r, s in registry.scan(Path(args.node_root), reap=False) if s == "live"]
-    if not records:
-        print(json.dumps({"ok": False, "error": "no live node runtime"}))
-        return 1
-    client = AttachClient(lambda _p: None, lambda _r: None)
-    await client.connect(records[0], args.session)
-    # Every verdict from here on reached the runtime: a crash or a refused
-    # connect is never mistaken for the door refusing the answer.
-    try:
-        if args.mode == "plain":
-            try:
-                detail = await client.ask_respond(ask["ask_id"], answers, by="desktop")
-                _emit({"ok": True, "detail": str(detail)})
-            except Exception as error:  # noqa: BLE001 — the refusal IS the result
-                _emit({"ok": False, "error": f"{type(error).__name__}: {error}"})
-            return 0
-        row = SimpleNamespace(ask_id=ask["ask_id"], questions=ask["questions"])
-        target = bridge_decision_target(row, answers)
-        if target is None:
-            _emit({"ok": False, "error": "no decision target"})
-            return 0
-        try:
-            verdict = await client.bridge_decide(*target)
-        except Exception as error:  # noqa: BLE001
-            _emit({"ok": False, "error": f"{type(error).__name__}: {error}"})
-            return 0
-        if isinstance(verdict, dict):
-            _emit({"ok": bool(verdict.get("ok", True)), **verdict})
-        else:
-            _emit({"ok": True, "detail": str(verdict)})
-        return 0
-    finally:
-        # AttachClient.close() is synchronous teardown; awaiting its None
-        # only raised a TypeError that the suppress swallowed.
-        with contextlib.suppress(Exception):
-            client.close()
+    verdict = await answer_over_http(
+        Path(args.root) / "operator", args.session, ask, args.word,
+        plain=args.mode == "plain", backstop=CONNECT_BACKSTOP_S,
+    )
+    _emit(verdict)
+    return 0
 
 
 # ---------------------------------------------------------------------------
