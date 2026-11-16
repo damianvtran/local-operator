@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "audit_id": "gbt2",
+  "locale": "ru",
+  "namespace": "cli.failures",
+  "audit_date": "2026-11-16",
+  "key_count": 5,
+  "audited_revision": "80a55b20802ed13a7379fef90644f2345b63066a",
+  "base_revision": "f0689a27c2af546e71be2a2783e6c6e86bc5004d",
+  "new_key": "cli.failures.github_borrow_timeout",
+  "translator": {
+    "agent": "i18n-translator (timeout-ru)",
+    "session": null,
+    "model": "openai/gpt-6.1-sol",
+    "fallback_model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-16",
+    "provenance_source": "reported by parent session; translator session id not supplied"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (audit2-ru)",
+    "session": "2753becb3d9e",
+    "model": "anthropic/claude-opus-5-5",
+    "initial_model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "actual_model_source": "session prompt 'Model:' line showed openai/gpt-6.1-sol; harness [model switch] notice after the first tool call: fallback to anthropic/claude-opus-5-5 (quota HTTP 429), which performed the substantive audit",
+    "independence_note": "Different session from translator; same model family as translator's fallback (disclosed). No MT service. No native-human or rendered-frame certification."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.json",
+      "sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.context.json",
+      "sha256": "b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.failures.json",
+      "sha256": "224acab136701ec6539e5792547d57a12139129fa36468cd7d69d6affa3a69b5"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.failures/gbt2/report.md",
+      "sha256": "047ad7743313c00f8e66a7956e016079b2d4a4a1c971ea5979c84db3454cfc0d"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.failures/gbt2/audit.log",
+      "sha256": "1aa4fdc1faff12f984f11c3a3f7f883ad2a3348aacdceaa19014787ecdc4f832"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning; audit.log holds actual command output. receipt.json is the ledger receipt (append validated by --dry-run only; not appended).",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "R1"
+    ],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 1,
+      "NIT": 0
+    },
+    "observations": [
+      "O1",
+      "O2"
+    ]
+  }
+}

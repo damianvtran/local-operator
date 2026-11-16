@@ -1,0 +1,75 @@
+{
+  "locale": "ur",
+  "namespace": "cli.failures",
+  "audit_id": "gbt2",
+  "audit_date": "2026-11-16",
+  "key_count": 5,
+  "source_audit_revision": "80a55b20802ed13a7379fef90644f2345b63066a",
+  "base_revision": "f0689a27c",
+  "auditor": {
+    "agent": "i18n-auditor (audit2-ur subagent)",
+    "session": "4af8d78683c7",
+    "model": "anthropic/claude-opus-5-5 (harness quota fallback from primary openai/gpt-6.1-sol, HTTP 429, switched before any catalogue string was read; the fallback performed the audit)",
+    "actual_model_source": "Host system prompt 'Model: openai/gpt-6.1-sol' then harness [model switch] notice: now anthropic/claude-opus-5-5, reason provider failure quota HTTP 429",
+    "fallback": "openai/gpt-6.1-sol -> anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independence": "Distinct agent/session from translator; did not author or edit the namespace. Same model ids as translator (gpt-6.1-sol / claude-opus-5-5): independent agent, not independent vendor."
+  },
+  "translator": {
+    "agent": "i18n-translator (timeout-ur)",
+    "model": "openai/gpt-6.1-sol (fallback anthropic/claude-opus-5-5 during the run, as reported by parent)",
+    "date": "2026-11-16"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.json",
+      "sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.context.json",
+      "sha256": "b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/cli.failures.json",
+      "sha256": "441087deae2c9821f45c0965590035b180bacdd3057f1d912f98b15b38b3b7f6"
+    }
+  },
+  "source_sha256_ledger": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/ur/cli.failures/gbt2/report.md",
+      "sha256": "d8ed3d79d3d577150d78fec52f5089f88a83c71dda0fdb8bce255b72d7246a97"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/ur/cli.failures/gbt2/audit.log",
+      "sha256": "ca5ed98e78f08552ff269246ce43145fb7e1e19cfe17e80bc2617974e54c0696"
+    }
+  },
+  "audit_log_is_execution_log": true,
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log is actual command output captured by shell redirection in this session (git rev-parse, catalogue hashes, mechanical parity script, check.py rc=0, generate.py --check rc=1 for stale generated mobile bundles).",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "U1"
+    ],
+    "severities": {
+      "U1": "MINOR"
+    }
+  },
+  "findings": [
+    {
+      "id": "U1",
+      "severity": "MINOR",
+      "keys": [
+        "cli.failures.github_borrow_timeout"
+      ],
+      "summary": "Line opens with Latin {owner} then GitHub; plain stderr line resolves LTR on first-strong/dir=auto viewers, misplacing Urdu clauses",
+      "suggested": "{seconds} سیکنڈ کے اندر {owner} سے GitHub کریڈینشل موصول نہیں ہوئی؛ کمانڈ دوبارہ چلائیں"
+    }
+  ],
+  "mt_service_used": false,
+  "earlier_audits_for_key_consulted": false,
+  "native_or_rendered_rtl_review_claimed": false,
+  "original_lost_evidence": null
+}

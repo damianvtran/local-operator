@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.failures",
+  "history_sha256": "e00007bf35365dc28144f780b83dff839d918c61224a9052fdba5f288641cc02",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "cli.failures",
+      "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+      "translator": {
+        "agent": "i18n-translator (timeout-es)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-16",
+        "fallback_used": true,
+        "fallback_model": "anthropic/claude-opus-5-5"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (audit2-es), gbt2",
+        "session": "b5fe50e51391",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 2,
+        "fallback_used": true,
+        "fallback_from": "openai/gpt-6.1-sol"
+      },
+      "status": "passed",
+      "note": "Independent audit gbt2, 5/5 keys incl. new github_borrow_timeout; es 0e70ea3d. 0 blocker/major; 2 minor (F1 'desde {owner}' placement, F2 'reintenta el comando' vs catalogue 'vuelve a ejecutar'). Record: i18n/audits/evidence/es/cli.failures/gbt2/record.json"
+    }
+  ]
+}

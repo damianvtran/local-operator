@@ -744,6 +744,17 @@ class BrokerError:
         )
 
 
+@dataclasses.dataclass
+class BorrowTimeout(BrokerError):
+    """Local-only diagnostic: no token, wire field, grant or extra authority.
+
+    The normal refusal code still drives every existing held/policy decision.
+    Only a timeout that remains refused may explain the missing tool env.
+    """
+
+    timeout_s: float = 0.0
+
+
 @dataclasses.dataclass(frozen=True)
 class CredentialRef:
     """Where a granted bearer came from, in the OWNER's own id space."""

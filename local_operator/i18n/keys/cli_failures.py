@@ -14,6 +14,10 @@ def error_line(*, prog: str, message: str) -> Msg:
     return Msg("cli.failures.error_line", {"prog": prog, "message": message})
 
 
+def github_borrow_timeout(*, owner: str, seconds: str) -> Msg:
+    return Msg("cli.failures.github_borrow_timeout", {"owner": owner, "seconds": seconds})
+
+
 def invalid_choice(*, argument: str, value: str, choices: str) -> Msg:
     return Msg(
         "cli.failures.invalid_choice",
