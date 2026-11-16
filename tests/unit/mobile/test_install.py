@@ -1104,3 +1104,29 @@ def test_the_verbs_refuse_a_redirected_home_and_act_for_the_owned_one(
         ["print", f"{install._domain()}/{install.LABEL}"],
         ["kickstart", "-k"],
     ], owned.calls
+
+
+def test_a_wheel_shipped_dist_without_sources_is_never_discarded(tmp_path: Path) -> None:
+    """The slimmed release shape: ``scripts/slim_wheel.py`` drops every
+    ``mobile/web/`` member outside ``dist/``, so an installed wheel has the bundle
+    and neither ``package.json`` nor ``scripts/check-bundle.mjs``. Discarding that
+    ``dist/`` would leave nothing to rebuild it from, so both entry points must
+    trust it — even with Node on PATH — rather than run a guard that is absent."""
+    web = tmp_path / "local_operator" / "mobile" / "web"
+    (web / "dist" / "assets").mkdir(parents=True)
+    (web / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+    (web / "dist" / "assets" / "a.js").write_text("1", encoding="utf-8")
+
+    with (
+        patch.object(install.shutil, "which", return_value="/usr/bin/node"),
+        patch.object(install.subprocess, "run") as run,
+        patch.object(install, "_build_bundle") as build,
+    ):
+        assert install.ensure_bundle(web_dir=web) == (True, "bundle present")
+        assert install.ensure_bundle(build=False, web_dir=web) == (True, "bundle present")
+        assert install.snapshot_bundle(web) == "already built"
+
+    run.assert_not_called()
+    build.assert_not_called()
+    assert (web / "dist" / "index.html").exists()
+    assert (web / "dist" / "assets" / "a.js").exists()
