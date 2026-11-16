@@ -612,7 +612,11 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "credential.desktop_applied": frozenset({"surface", "operation"}),
     "credential.desktop_apply_refused": frozenset({"surface", "operation", "code"}),
-    "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
+    # `reason` is the refusal's arm marker (`holder_excluded`, `pool_depleted`) when it
+    # has one: a fixed vocabulary word, never an id or label (#3066 follow-up Q7).
+    "credential.grant_refused": frozenset(
+        {"credential_key", "act", "sub", "code", "capability", "reason"}
+    ),
     # `act` is the OWNER whose login was served, `sub` this borrowing device (the
     # credential.grant vocabulary). `hold_until` is the hold end (epoch ms) and
     # `bound` which limit set it (token|hold|cap|grant); `serves` counts the

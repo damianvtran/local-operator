@@ -1936,24 +1936,51 @@ class MeshCredentialClient:
         except Exception:  # noqa: BLE001 — a receipt that cannot be written is not a refusal
             logger.debug("could not write a held-credential receipt", exc_info=True)
 
-    def _resting_refusal(self, key: str, label: str, resting: list[dict[str, Any]]) -> BrokerError:
+    def _resting_refusal(
+        self,
+        key: str,
+        label: str,
+        resting: list[dict[str, Any]],
+        *,
+        owner_wait_ms: int = 0,
+        owner_wait_is_floor: bool = False,
+    ) -> BrokerError:
         """``quota_blocked`` built from this device's own cooldowns. Not cached.
 
         Not cached in the refusal file on purpose: the cooldowns already ARE the
         record, and a cached refusal would outlive a cooldown the operator clears
         (or one that ends) by its own TTL rather than by the fact.
+
+        ``owner_wait_ms`` is the owner's PROVEN reopening of the rows this ask did
+        NOT exclude (its own blocks; #3066 follow-up n2), 0 when the owner had
+        nothing to add or is an older build. A login is usable again at the EARLIER
+        of the two, so that is the wait stated. When the owner's is earlier the
+        resting labels are dropped: they name the logins of the LATER wait, and a
+        sentence pinning them to the sooner time would name the wrong login.
+        Neither side knows the other's per-row times, so nothing finer is claimed.
+
+        A CLAMPED owner time is only a floor (``owner_wait_is_floor``: the peer
+        boundary caps it at ``MAX_PEER_RETRY_AFTER_MS``). If this device's own rest
+        ends by then, the rest is still the earlier wait; otherwise the earliest
+        reopening lies somewhere between the floor and the rest, and the only true
+        statement is "at least <floor>" -- never the floor as an exact time, and
+        never the rest, which the owner's row may beat.
         """
         now = time.time()
         remaining_ms = max(0, int((min(float(r["until"]) for r in resting) - now) * 1000))
         accounts = tuple(
             dict.fromkeys(str(r.get("label") or "") for r in resting if r.get("label"))
         )
+        floor = False
+        if 0 < owner_wait_ms < remaining_ms:
+            remaining_ms, accounts, floor = owner_wait_ms, (), owner_wait_is_floor
         error = BrokerError(
             code="quota_blocked",
             key=key,
             owner_device=self.owner_of(key),
             owner_device_name=self.owner_label(key),
             retry_after_ms=remaining_ms,
+            retry_after_is_floor=floor,
         )
         error.message = render_broker_error(
             error,
@@ -3677,7 +3704,13 @@ class MeshCredentialClient:
         # was excluded too, its return time is the wait that is actually true for
         # this ask; the hold's "try again in about 5 min" would be wrong for it.
         if resting and refused.is_holder_exclusion:
-            return self._resting_refusal(key, label, resting)
+            return self._resting_refusal(
+                key,
+                label,
+                resting,
+                owner_wait_ms=refused.retry_after_ms,
+                owner_wait_is_floor=refused.retry_after_is_floor,
+            )
         if refresh_held is not None and (
             refused.is_holder_exclusion or refused.code in _NOTHING_LEFT_TO_LEND
         ):
