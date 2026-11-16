@@ -151,8 +151,13 @@ class MeshRig:
             self.operator_root, ttl_s=0, catalog=RelayPeerCatalog(self.operator_root)
         )
         RemoteAttentionWatcher(self.operator_root).observe(rows)
-        items, _ = NotificationStore(self.operator_root).list_items(state="all", limit=100)
-        return items
+        store = NotificationStore(self.operator_root)
+        items, _ = store.list_items(state="all", limit=100)
+        # "all" is the visible inbox (read + unread), not its tombstones. A
+        # settled card disappears there, so inspect the dismissed API as well
+        # rather than reporting successful retirement as a missing-row failure.
+        dismissed, _ = store.list_items(state="dismissed", limit=100)
+        return items + dismissed
 
     def notice(self, sid: str, ask_id: str) -> dict[str, Any]:
         from local_operator.notifications.remote_attention import (

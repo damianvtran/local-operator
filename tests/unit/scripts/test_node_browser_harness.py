@@ -126,6 +126,29 @@ def test_mesh_preflight_rejects_drive_member_before_signed_browser_dispatch() ->
         require_operator_member(record, member.device_id)
 
 
+def test_retirement_reads_dismissed_rows_from_the_real_notification_store(tmp_path: Path) -> None:
+    from local_operator.notifications.store import NotificationStore
+    from scripts.e2e.node_browser_mesh import MeshRig
+
+    root = tmp_path / "synthetic-operator"
+    rig = MeshRig(tmp_path / "node", root)
+    rig.node_id = "d_synthetic_node"
+    key = "remote-notice:d_synthetic_node:synthetic_sid:remote-ask:a-retired"
+    store = NotificationStore(root)
+    created = store.notify("synthetic_sid", title="Synthetic site card", key=key)
+    store.apply("dismiss", ids=[(created.item_id, created.revision)], via="remote-attention")
+    # This is the actual API distinction behind run2's three false FAIL rows:
+    # "all" still excludes dismissed records. Keep the failing old observation
+    # alongside the corrected real helper query, not a mock with invented rows.
+    old_items, _ = store.list_items(state="all", limit=100)
+    assert old_items == []
+    found = rig.notice("synthetic_sid", "a-retired")
+    assert found["count"] == 1
+    assert found["items"][0]["key"] == key
+    assert found["items"][0]["dismissed_at"]
+    assert found["items"][0]["dismissed_via"] == "remote-attention"
+
+
 def test_remote_notice_assertion_names_the_node_session_and_ask(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
