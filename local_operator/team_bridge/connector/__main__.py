@@ -110,6 +110,11 @@ SELF_CHECK_MIN_UPTIME_S = 300.0
 #: patching this, not by sleeping.
 _PROCESS_STARTED_S = time.monotonic()
 
+#: The same start on the wall clock, for the runtime record ``receiver status``
+#: prints (``runtime_record``): an owner reads "started 2026-11-15 09:12", not
+#: a monotonic offset that means nothing outside this process.
+_PROCESS_STARTED_WALL_S = time.time()
+
 #: The marker the plist and the systemd unit set in their OWN environment
 #: (``install.render_plist`` / ``render_systemd``), and nothing else on the host
 #: does. Required in addition to the supervisor's marker because BOTH supervisor
@@ -310,6 +315,13 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
     # Restart-scoped transport root: read HERE, once.
     base_url = args.base_url or DEFAULT_RADIENT_API_BASE_URL
 
+    # Remote rollout confirmation: record which build this process IS before
+    # the (possibly endless) wait for an owner, so `receiver status` can name
+    # an idle receiver's version too. Never clobbers a live peer's record.
+    from local_operator.team_bridge.connector import runtime_record as _runtime
+
+    _runtime.record_start(config_dir, started_at=_PROCESS_STARTED_WALL_S)
+
     store = Store(config_dir)
     if args.credential_id and args.account_id and args.tenant_id and args.endpoint_id:
         # A pinned namespace stays pinned across re-arms: only that exact
@@ -333,6 +345,7 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
         logger.info("bridge connector idle: stage=idle code=no_owner")
     while owner is None:
         if stop is not None and stop.is_set():
+            _runtime.clear_own_record(config_dir)
             return 0
         await _loop.idle_until_owner_changes(
             None, config_dir=config_dir, owner_source=owner_source, stop=stop
@@ -359,11 +372,14 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
                 # It came back, or a third process took it in the window. There
                 # is nothing further to do from here; the supervisor's retry is
                 # the next attempt.
+                _runtime.clear_own_record(config_dir)
                 return 75
         else:
             # Task Scheduler retries failures, not clean exits. A foreground
             # owner may relinquish this lock later; exit nonzero so the logon
             # receiver cannot remain permanently stopped after losing that race.
+            # A loser leaves no record naming itself as the running build.
+            _runtime.clear_own_record(config_dir)
             return 75
 
     # F4 (live E2E): the store the screener reads its provider key from. The
@@ -374,6 +390,9 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
     # the screening cycle's live-identity check, and the bridge client is
     # deliberately never served a bearer lent by a paired device (see
     # ``TeamBridgeClient._auth_store``). Values are never read or logged here.
+    # The singleton is ours: this process now serves the config dir, so its
+    # record wins over whatever an earlier holder left.
+    _runtime.record_singleton_held(config_dir, started_at=_PROCESS_STARTED_WALL_S)
     auth_store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
     try:
         while owner is not None:
@@ -404,6 +423,7 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
             )
     finally:
         auth_store.close()
+        _runtime.clear_own_record(config_dir)
         lock.release()
     return 0
 

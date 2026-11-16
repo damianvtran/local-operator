@@ -209,6 +209,54 @@ def _woke_nobody(root: Path) -> dict[str, int]:
         return {}
 
 
+def _running_receiver(root: Path) -> dict[str, Any] | None:
+    """The receiver's own record of the build it is running (``runtime_record``).
+
+    WHY: remote rollout confirmation. The service state above says whether the
+    service manager holds a receiver; only the process itself can say WHICH
+    code it loaded, and a launchd/systemd receiver keeps the build it was
+    exec'd from across every ``lop`` update until it restarts.
+    """
+
+    from local_operator.team_bridge.connector.runtime_record import running_receiver
+
+    try:
+        return running_receiver(root)
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return None
+
+
+def _running_lines(running: dict[str, Any] | None) -> list[Any]:
+    """The human lines for :func:`_running_receiver`; versions/pids verbatim."""
+
+    if running is None:
+        return [_k.status_running_none()]
+    version = running["version"] or "—"
+    if running["alive"] is False:
+        return [_k.status_running_exited(pid=str(running["pid"]), version=version)]
+    started_at = running["started_at"]
+    started = (
+        time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(started_at))
+        if started_at is not None
+        else "—"
+    )
+    lines: list[Any] = [
+        _k.status_running(pid=str(running["pid"]), version=version, started=started)
+    ]
+    lines.append(
+        _k.status_running_detail(
+            generation=running["generation"] or "—",
+            versions=", ".join(running["consent_versions"]) or "—",
+        )
+    )
+    # ONE line for both causes (a different version, or a generation an update
+    # has replaced): the remedy is the same restart, and fewer keys means less
+    # per-locale audit. The JSON keeps the two causes apart for scripts.
+    if running["restart_needed"]:
+        lines.append(_k.status_restart_needed(installed=running["installed_version"] or "—"))
+    return lines
+
+
 def _status(root: Path, *, as_json: bool) -> int:
     import os
 
@@ -221,6 +269,7 @@ def _status(root: Path, *, as_json: bool) -> int:
     last = _last_check(root)
     screening = read_screening_status(root)
     woke_nobody = _woke_nobody(root)
+    running = _running_receiver(root)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
@@ -250,6 +299,10 @@ def _status(root: Path, *, as_json: bool) -> int:
                     "foreground_command": install.foreground_command(root),
                     # ``None`` when not enrolled or unreadable; see _screening.
                     "screening": screening,
+                    # The build the receiver process itself recorded (pid,
+                    # version, generation, consent set, start) plus
+                    # ``restart_needed``; ``None`` = no receiver recorded.
+                    "running": running,
                 }
             )
         )
@@ -257,6 +310,8 @@ def _status(root: Path, *, as_json: bool) -> int:
     t = _tr()
     print(t(_k.status_supervisor(name=install.supervisor_name())))
     print(t(_k.status_state(state=state)))
+    for line in _running_lines(running):
+        print(t(line))
     print(t(_k.status_enrolment(state=enrolment)))
     print(t(_k.status_config_dir(path=str(root))))
     print(t(_k.status_log(path=str(log))))
