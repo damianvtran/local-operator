@@ -14607,6 +14607,9 @@ class RelayServer:
         """
         from local_operator.network.credentials import owner as owner_mod
 
+        # The raw login cache is local memory: evict it before scheduling the
+        # potentially slow renewal-store/API work, not after that worker finishes.
+        owner_mod.invalidate_github_source_on_panic(self, network_id)
         thread = threading.Thread(
             target=owner_mod.revoke_lent_on_panic,
             args=(self, network_id),
