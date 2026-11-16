@@ -185,8 +185,9 @@ Allow/Deny card. An attached terminal keeps a mirror of the owner's latch,
 marked from that flag, which drives the redraw only; the owner still enforces.
 
 The latch records which kind of source set it, and that kind picks only the
-wording of the card notice and the refused-auto receipt. `agent_message` means a Team Bridge card or `bridge` result reached
-this conversation. `other_session` means the content came through another
+wording of the card notice and the refused-auto receipt. `agent_message` means
+a Team Bridge card or `bridge` result reached this conversation.
+`other_session` means the content came through another
 session or device (a peek, a mesh reply, a cross-session read, a spill or
 archive copy, or a parent/child link). An Agent message wins when both apply,
 and a latch row with no kind reads as `agent_message`. The kind never changes
@@ -223,7 +224,14 @@ It lives in:
 - the dangerous-delete guard's judge, which never takes Team Bridge or peer
   text as consent (`guardrails/judge.py`).
 
-None of those changed. The `granted_while_latched` stamp that marked a
+None of those changed. What the egress gate buys depends on the mode,
+though: it raises the call to the approval gate, and under either kind of
+auto (session or machine default) the grant answers that raised call without
+a card. So the read-tier egress protection applies to `ask` sessions; an auto
+session keeps `bridge_ack`, the Allow/Deny-only parked card and the
+dangerous-delete judge, and accepts the auto risk it already chose.
+
+The `granted_while_latched` stamp that marked a
 post-latch grant is retired with the split; a record or parked draft from an
 older build that still carries it is read without it.
 

@@ -11673,6 +11673,16 @@ class ServingSessionHandle(SessionHandle):
             # rendered the latched sentence, from the picker) or a typed command
             # the TUI marks may make a post-latch session grant. Same receipt
             # shape as the unattributed-loosening refusal.
+            if self._auto_approve:
+                # ALREADY AUTO IS NOT A LOOSENING (design r1 D2 on #4080). A
+                # session already in auto -- its own choice or the machine
+                # default -- loses nothing to this request, so refusing it told
+                # the operator "auto is still off" while every tool ran without
+                # asking. Answer with the truthful report instead, and write
+                # nothing: recording a session override here would pin a
+                # machine-default auto onto this conversation, a change the
+                # unacknowledged frame may not make. ask->auto still refuses.
+                return self._already_auto_receipt(session, SlashResult, may_loosen)
             refusal = self._bridge_ack_refusal(SlashResult, latched=latched)
             if refusal is not None:
                 return refusal
@@ -11785,6 +11795,20 @@ class ServingSessionHandle(SessionHandle):
                 f"({error.__class__.__name__})"
             )
         return None
+
+    def _already_auto_receipt(self, session: Any, SlashResult: Any, may_loosen: bool | None) -> Any:
+        """The receipt for an unacknowledged ``auto`` while auto is in effect.
+
+        Reuses the bare ``/approvals`` report verbatim, so no new copy exists
+        to translate and the sentence names the mode's real provenance (this
+        session vs config.yml) instead of claiming a session switch. ``data``
+        carries the same ``ok``/``approval_mode`` keys every approvals receipt
+        sends, because the card keys on them, never on the sentence.
+        """
+        report = self._approvals_slash(session, "", SlashResult, may_loosen=may_loosen)
+        return report.model_copy(
+            update={"data": {**report.data, "approval_mode": "auto", "ok": True}}
+        )
 
     def _bridge_ack_refusal(self, SlashResult: Any, *, latched: bool | None = None) -> Any:
         """The receipt refusing an unacknowledged loosening while latched, or ``None``.

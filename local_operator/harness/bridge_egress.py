@@ -105,8 +105,9 @@ BRIDGE_TAINT_DETAILS_KEY = "bridge_taint"
 Tier = Literal["read", "write", "exec"]
 
 #: WHERE the latch's content came from (UX round 1, U1). It picks the WORDING
-#: of the card notice, the paused-auto notice and the refused-auto receipt,
-#: and nothing else: every tier, card and grant decision reads only
+#: of the card notice and the refused-auto receipt, and nothing else (the
+#: paused-auto notice it also worded was retired with #3928; its i18n keys
+#: stay until a separate cleanup): every tier, card and grant decision reads only
 #: ``latched`` (a guard test asserts the decision is identical for both
 #: kinds). Without it, a reply from the user's OWN laptop over the mesh was
 #: announced as "a message from a teammate's agent", which made an accurate
@@ -1200,6 +1201,10 @@ def session_grant_covers(grant: ApprovalGrant | None, *, title: str) -> bool:
     loosening, the Allow/Deny-only latched card, and the dangerous-delete
     guard's judge, which never takes bridge or peer text as consent. ``ask``
     is untouched: no grant, so every latched call still reaches the card.
+
+    So under either kind of auto this answers the call the egress gate raised
+    without a card: the read-tier egress protection applies to ``ask``
+    sessions, and an auto session keeps the other three protections.
     """
     from local_operator.harness.approval import never_auto_approved
 

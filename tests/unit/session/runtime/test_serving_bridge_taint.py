@@ -218,6 +218,60 @@ async def test_3928_negative_control_latched_ask_still_prompts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("record", "default_auto", "word"),
+    [
+        ("auto", True, "auto"),  # its own session auto
+        (None, True, "auto"),  # riding the machine default
+        (None, True, "yolo"),  # same rule for every loosening spelling
+    ],
+)
+async def test_4080_d2_unacked_auto_on_an_already_auto_latched_session_is_truthful(
+    tmp_path: Path, record: str | None, default_auto: bool, word: str
+) -> None:
+    """Design r1 D2 on #4080: an unacked ``auto`` to a session ALREADY auto used
+    to answer "auto is still off" while every tool ran unasked. It now answers
+    with the bare report (auto in effect) and writes nothing."""
+    handle, session, _ = await _latched_session(tmp_path, "d", record, default_auto)
+    scope_before = handle._approval_grant().scope
+    directory = handle._session_directory()
+    assert directory is not None
+    override_path = directory / OVERRIDE_FILENAME
+    override_before = override_path.read_bytes() if override_path.exists() else None
+
+    receipt = handle._approvals_slash(session, word, SlashResult)
+
+    assert receipt.data.get("ok") is True and receipt.data.get("approval_mode") == "auto"
+    assert receipt.data.get("approval_reason") != "bridge_latched"
+    assert receipt.text == handle._approvals_slash(session, "", SlashResult).text
+    assert receipt.text.startswith("tool approvals: auto")
+    assert "still off" not in receipt.text
+    # Nothing changed: no override pinned onto a machine-default session.
+    assert handle._auto_approve is True
+    assert handle._approval_grant().scope == scope_before
+    after = override_path.read_bytes() if override_path.exists() else None
+    assert after == override_before
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_4080_d2_unacked_ask_to_auto_on_a_latched_session_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The D2 negative control: the receipt change is only for ALREADY auto."""
+    handle, session, _ = await _latched_session(tmp_path, "e", None, False)
+    refused = handle._approvals_slash(session, "auto", SlashResult)
+    assert refused.data == {
+        "approval_mode": "ask",
+        "ok": False,
+        "approval_reason": "bridge_latched",
+    }
+    assert handle._auto_approve is False
+    assert await _parks(handle) is True
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
 async def test_t22b_a_parked_latched_card_is_not_answered_by_a_loosening(tmp_path: Path) -> None:
     handle, session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
     setattr(session, "bridge_latched", True)
