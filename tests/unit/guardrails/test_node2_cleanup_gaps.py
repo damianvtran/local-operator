@@ -554,6 +554,9 @@ def test_q3_unrecorded_harness_child_is_foreign_while_a_spawn_is_in_flight(
     monkeypatch.setattr(prov, "_cwd_entries", lambda *, fresh=False: ((child, real),))
     monkeypatch.setattr(prov, "_process_table", lambda: {child: (me, "bash"), me: (1, "lop")})
     monkeypatch.setattr(prov, "_session_pids", lambda sid: ({me: "this session"}, {}))
+    # ``child`` is synthetic yet models a LIVE process: without this, the
+    # gone-holder re-check (``_still_exists``) would rightly drop it.
+    monkeypatch.setattr(prov, "_still_exists", lambda pid: True)
     holders = prov.cwd_holders(real, S)
     assert holders is not None and holders[0].family  # base attribution, nothing in flight
     with spawned.spawning():

@@ -3226,10 +3226,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        # ``_join`` rather than ``subscribe``: both entry points (``subscribe``
-        # and ``subscribe_threadsafe``) admit their callback through this one
-        # private method, so the closure that removes it is qualified here.
-        "local_operator/session/frontend_state.py::FrontendStateStore._join.unsubscribe",
+        # ``_register`` rather than ``subscribe``: every entry point admits its
+        # callback through this one private method (it takes the state reference
+        # under the same lock as the append), so the closure that removes it is
+        # qualified here. The receiver is ``self._subscribers``, a
+        # ``list[Callable]``; ``.remove(callback)`` drops a listener, never a path.
+        "local_operator/session/frontend_state.py::FrontendStateStore._register.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
     ),
@@ -3512,6 +3514,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
         "never a directory, never under sessions/",
+    ),
+    # The UI browser host's health-probe failure log (2026-11-15). Source and
+    # target are `ensure_log_dir()` joined to the fixed basename
+    # `HEALTH_FAILURE_LOG_NAME` and that name + ".1" — no session id, no caller
+    # input — so the rotation can only displace that one log FILE.
+    (
+        "local_operator/ui_browser/backend.py::_open_health_log_for_append",
+        "os.replace",
+        "Rotates the browser-health.log FILE to browser-health.log.1 under log_dir(); "
+        "both names are fixed constants, never a directory, never under sessions/",
     ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes
     # these from `paths.log_dir()` and an int pid ALONE — never a session id,

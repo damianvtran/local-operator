@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.105.3"
+version = "0.106.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -524,8 +524,30 @@ local_operator = [
 # sidecar is imported only by the excluded `peer-cycles.test.ts`. The
 # package-data test pins all of that, and that no runtime module calls
 # `context()`. Message catalogues (`*/<namespace>.json`) still ship.
+#
+# THE RELAY WEB'S CHECK-ONLY SCRIPTS STAY IN GIT TOO. Same day again: #4066
+# put main's slimmed wheel 365 B over the 17.5 MiB budget. `scripts/*.mjs`
+# ships because the installed repair runs `pnpm build` = `prebuild`
+# (generate-theme-css.mjs -> palette-source.mjs, inline-mark.mjs) +
+# `check-i18n.mjs && tsc -b && vite build` + `postbuild` (check-bundle.mjs).
+# Five scripts are on none of those paths: the condense-parity checkers (they
+# read the excluded `*.parity.json`), the two `node --test` checks run by
+# `pnpm test`, and contrast-contract.mjs run by `pnpm check-themes`. No shipped
+# source, build script or Python module imports or runs them (the
+# package-data test derives the build chain from package.json and pins that
+# every script it reaches still ships). generate-projects-status.mjs and its
+# `.d.mts` are left in on purpose: a test pins that pair as shipped and the
+# saving (~3.8 KB) does not justify reopening it here.
 [tool.setuptools.exclude-package-data]
-"*" = ["*.test.ts", "*.test.tsx", "*.parity.json", "*.context.json"]
+"*" = [
+    "*.test.ts",
+    "*.test.tsx",
+    "*.parity.json",
+    "*.context.json",
+    "*check-condense-parity-*.mjs",
+    "*.node-check.mjs",
+    "*contrast-contract.mjs",
+]
 
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"

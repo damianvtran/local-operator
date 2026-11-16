@@ -127,33 +127,13 @@ def read_override(session_dir: Path) -> tuple[str | None, str | None]:
     return str(override), None
 
 
-#: Additive key (Team Bridge taint, team-bridge-egress.md: "Grants"): True only for an ``auto``
-#: chosen while the conversation ALREADY held Team Bridge content. A record
-#: without it, or with anything but a literal ``true``, reads False -- so every
-#: pre-existing record and every pre-latch grant is void once the session
-#: latches, and a resumed session keeps that rule.
-GRANTED_WHILE_LATCHED_KEY = "granted_while_latched"
+#: A ``granted_while_latched`` key written by builds before #3928 may still
+#: sit in a record. :func:`read_override` reads only ``override``, so it is
+#: ignored: the Team Bridge latch no longer distinguishes a pre- from a
+#: post-latch ``auto`` (team-bridge-egress.md: "Grants"), and nothing writes it.
 
 
-def read_granted_while_latched(session_dir: Path) -> bool:
-    """Whether this conversation's ``auto`` record was granted while latched.
-
-    Fails closed to ``False`` on every abnormality (absent file, unreadable,
-    malformed, non-boolean): ``False`` is the reading that asks.
-    """
-    path = session_dir / OVERRIDE_FILENAME
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    return payload.get(GRANTED_WHILE_LATCHED_KEY) is True
-
-
-def write_override(
-    session_dir: Path, mode: str | None, *, granted_while_latched: bool = False
-) -> None:
+def write_override(session_dir: Path, mode: str | None) -> None:
     """Record ``mode`` for the conversation in ``session_dir``.
 
     ``None`` writes the explicit "no choice" document rather than deleting the
@@ -179,10 +159,6 @@ def write_override(
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             document: dict[str, object] = {"schema_version": SCHEMA_VERSION, "override": mode}
-            if mode == "auto" and granted_while_latched:
-                # Written only when true, so a clean conversation's record is
-                # byte-identical to what older builds wrote and read.
-                document[GRANTED_WHILE_LATCHED_KEY] = True
             json.dump(document, handle)
             handle.flush()
             # fsync BEFORE the rename: the replace may be reordered otherwise,
