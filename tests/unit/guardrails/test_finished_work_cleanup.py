@@ -132,9 +132,12 @@ def _squashed_tree(home: Path, repo: Path, name: str) -> Path:
     _squash_merge(repo, name)
     tip = _git("rev-parse", f"fix/{name}", cwd=repo).strip()
     # The field shape: the tip is never an ancestor of origin/main.
-    assert subprocess.run(
-        ["git", "merge-base", "--is-ancestor", tip, "origin/main"], cwd=repo
-    ).returncode == 1
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", tip, "origin/main"], cwd=repo
+        ).returncode
+        == 1
+    )
     return wt
 
 
@@ -184,9 +187,7 @@ async def test_incident_clear_needs_no_answer_even_with_a_relayed_one(
     wt = _squashed_tree(home, repo, "incident-clear")
     _ask(home, "a-2432", f"All 34 paths listed: {wt}?", "All 34 paths listed", surface="remote")
     judge = _Judge()
-    outcome = await _check(
-        home, f"git -C {repo} worktree remove {wt}", judge, _operator("a-2432")
-    )
+    outcome = await _check(home, f"git -C {repo} worktree remove {wt}", judge, _operator("a-2432"))
     assert outcome is not None and not outcome.blocked, outcome and outcome.text
     assert judge.prompts == []
     assert prov.verified_ask(ME, "a-2432") is None  # remote is still not consent
@@ -295,7 +296,9 @@ def test_finished_foreign_route_takes_squash_with_forge_unread(
 # -- 2A. foreign trees by creator state -----------------------------------------------
 
 
-def test_running_creator_keeps_high(home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_running_creator_keeps_high(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     wt = _squashed_tree(home, repo, "running")
     monkeypatch.setattr(prov, "_running_owners", lambda real, sid, strict=False: (LIVE,))
     assert _rank(home, f"git -C {repo} worktree remove {wt}").risk is Risk.HIGH
@@ -370,9 +373,7 @@ def test_rig_with_foreign_dirty_worktree_is_high(home: Path, repo: Path) -> None
     assert _rank(home, f"rm -rf {rig}").risk is Risk.HIGH
 
 
-def test_rig_with_live_foreign_holder_is_high(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_rig_with_live_foreign_holder_is_high(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rig = _rig(home, "qa-held")
     holder = prov.CwdHolder(pid=4242, command="bash", owner="session x", family=False)
     monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, own=False: (holder,))
@@ -432,14 +433,14 @@ def _ask(
     ]
     if answer is not None:
         rows.append(
-        {
-            "v": 1,
-            "kind": "answered",
-            "ask_id": ask_id,
-            "at": now,
-            "by": {"surface": surface},
-            "answers": {"q1": [answer]},
-        }
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": ask_id,
+                "at": now,
+                "by": {"surface": surface},
+                "answers": {"q1": [answer]},
+            }
         )
     with path.open("a") as fh:
         for row in rows:
@@ -553,7 +554,7 @@ async def test_answer_never_settles_an_open_pr(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", ["~", "~/.local-operator", "~/$EMPTY", "\"$EMPTY\"/", "~/repo"])
+@pytest.mark.parametrize("target", ["~", "~/.local-operator", "~/$EMPTY", '"$EMPTY"/', "~/repo"])
 async def test_protected_targets_stay_refused(home: Path, repo: Path, target: str) -> None:
     _record(home, repo, kind="clone", creator=DONE)
     outcome = await _check(home, f"rm -rf {target}", _Judge())

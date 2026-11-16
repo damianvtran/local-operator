@@ -724,9 +724,7 @@ class DeleteCase:
                 )
                 if words is None or git_facts is None:
                     return ""
-                basis.append(
-                    f"{path} named by ask {words.ask_id} (effect: delete; {git_facts})"
-                )
+                basis.append(f"{path} named by ask {words.ask_id} (effect: delete; {git_facts})")
                 continue
             words = next(
                 (

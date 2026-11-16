@@ -3245,7 +3245,7 @@ def _nested_repository(real: str) -> str | None:
 
 
 def finished_rig(path: str, session_id: str) -> tuple[str | None, str]:
-    """``(fact, "")`` when a ``$HOME`` rig is finished work another session left; else ``(None, why)``.
+    """``(fact, "")`` for a ``$HOME`` rig another, ended session left; else ``(None, why)``.
 
     WHY (node-2 census, 2026-11-15, v0.105.3; operator, ask a-798d: "these
     requests should not require human approval and shouldn't be blocked by
@@ -4006,8 +4006,8 @@ def ask_answer_covers(
 #: Trailing words a typed whole-set first clause may carry that only restate
 #: the approval: "Remove all as recommended", "Remove all I give approval".
 _WHOLE_SET_TAIL_RE = re.compile(
-    r"(?i)(?:\s+(?:as\s+(?:recommended|suggested|proposed|planned)|i\s+give\s+(?:my\s+)?approval"
-    r"|i\s+approve|approved|please|now))*\W*"
+    r"(?i)(?:\s+(?:as\s+(?:recommended|suggested|proposed|planned)"
+    r"|i\s+give\s+(?:my\s+)?approval|i\s+approve|approved|please|now))*\W*"
 )
 #: The ONLY first clauses :func:`_typed_whole_set` accepts: a removal verb over
 #: the whole set ("Remove all", "Delete them", "Remove all 34"). A bare "yes"/
@@ -4044,8 +4044,9 @@ def _typed_whole_set(answer: str) -> bool:
     instruction to someone else, not a condition on the delete.
 
     Narrow on purpose: the first clause must be a removal verb over the whole
-    set (``_TYPED_WHOLE_SET_RE``, plus approval-restating words), and NOTHING anywhere in the answer may
-    decline or carve out (``_DECLINE_RE``, ``_CARVE_OUT_RE``, "but not"), so
+    set (``_TYPED_WHOLE_SET_RE``, plus approval-restating words), and NOTHING
+    anywhere in the answer may decline, narrow or carve out (``_DECLINE_RE``,
+    ``_NARROWING_RE``, ``_CARVE_OUT_RE``, "but not"), so
     "Remove all except qa-push", "Remove only the worktrees", "Remove all but
     keep X" and "No" approve nothing here. (``_kept_answer`` already vetoes
     most of those; this re-checks so the rule holds on its own.)
