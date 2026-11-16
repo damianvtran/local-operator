@@ -18452,9 +18452,14 @@ class Session:
         * user semantics win: a consumed user message, or a queued-but-
           unconsumed one (``awaiting_user``), notifies, and a mixed run keeps
           that behaviour with EXACTLY one publication (one row per turn);
-        * any non-user trigger that is not exclusively wake/monitor deliveries
-          notifies (a job result, an incident notice, a wake+job mix) — a
-          quiet delivery never suppresses it;
+        * routine ask answers, background-job results and known system notices
+          stay silent on EVERY surface. The operator's decision (ask a-91bd,
+          2026-11-16) was "No, stay quiet everywhere unless it errors or needs
+          me": bookkeeping completion is not worth another interruption.
+          Errors and awaiting-user inputs still override this default; explicit
+          high-priority attention items keep their independent delivery path;
+        * other non-user inputs keep their existing loud default; unknown types
+          are never silently classified as routine;
         * EXCEPT a PEER-ONLY run: a run whose non-user inputs are exclusively
           peer-family — a ``peer_message`` from another local session, or a
           defensive ``hub_message`` (``PEER_FAMILY_INPUT_TYPES``) — optionally
@@ -18464,8 +18469,8 @@ class Session:
           to, and the sender reads the reply as the turn's own outcome. It
           notifies again the moment a typed or queued user joins the run, a
           delivery asked to be told, or the run errors; peer mixed with any
-          other internal input keeps that input's loud semantics — fail loud
-          for every class the policy has not explicitly quieted;
+          other internal input keeps that input's semantics — fail loud for
+          every class the policy has not explicitly quieted;
         * wake/monitor-only runs notify iff one of their deliveries asked to
           (``notify_requested``, the OR of their ``notify`` parameters);
         * AIDA'S CHECK-IN QUIETING VETO, applied after the rule above and only
@@ -18486,16 +18491,27 @@ class Session:
         )
         triggers = set(self._run_triggers)
         non_user = triggers - {"user"}
-        # PEER-ONLY runs stay quiet: non-user inputs that are exclusively
-        # peer-family (the peer-notify policy, 2026-10-10). ``_run_input_types``
-        # holds the raw custom types of this run's INTERNAL inputs —
-        # wake/monitor deliveries are not recorded there — and the empty or
-        # unknown sentinel can never match, so every input the policy has not
-        # explicitly quieted is LOUD.
-        peer_only = (
+        # One shared eligibility decision prevents desktop and phone policy
+        # drift. Use an explicit vocabulary, not a session_* prefix: a future
+        # input requiring attention must fail loud until deliberately classified.
+        # Wake/monitor inputs have no raw type here; their notify request still
+        # wins below, as do a real user (including mixed runs) and actual errors.
+        routine_input_types = {
+            ASK_RESPONSE_MESSAGE_TYPE,
+            JOB_RESULT_MESSAGE_TYPE,
+            SESSION_INCIDENT_MESSAGE_TYPE,
+            SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+            SESSION_CREDENTIAL_MESSAGE_TYPE,
+            SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+            SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+            SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            SESSION_SEND_NOTICE_MESSAGE_TYPE,
+        }
+        quiet_internal = (
             "internal" in non_user
             and bool(self._run_input_types)
-            and self._run_input_types <= PEER_FAMILY_INPUT_TYPES
+            and self._run_input_types <= PEER_FAMILY_INPUT_TYPES | routine_input_types
         )
         notify = (
             self._has_awaiting_user()
@@ -18503,7 +18519,12 @@ class Session:
             or not (
                 non_user
                 and (
-                    non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE} or peer_only
+                    non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+                    or (
+                        non_user
+                        <= {"internal", WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+                        and quiet_internal
+                    )
                 )
             )
             or self._run_notify_requested
