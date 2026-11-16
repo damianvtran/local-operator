@@ -1,5 +1,6 @@
 """Durable update intent/recovery on owned roots, not installation/handoff proof."""
 
+import json
 import os
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,253 @@ def _occ_row(root: Path, identifier: str) -> dict[str, dict[str, Any]]:
     row = tx.occurrence_status(root, identifier)
     assert row is not None
     return row
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'{"padding":"' + b"x" * (64 * 1024) + b'"}',
+        ('{"padding":"' + "é" * (32 * 1024) + '"}').encode("utf-8"),
+        b'{"padding":"\xff"}',
+        b'{"nested":' + b"[" * 2000 + b"0" + b"]" * 2000 + b"}",
+    ],
+)
+def test_recovery_reader_rejects_oversized_or_invalid_utf8_without_mutation(tmp_path, data):
+    record = tmp_path / "legacy.json"
+    record.write_bytes(data)
+    before = record.stat().st_mtime_ns
+    assert tx.read_record(record) is None
+    assert record.read_bytes() == data
+    assert record.stat().st_mtime_ns == before
+
+
+def _nested(depth: int) -> bytes:
+    """A dict whose deepest container sits at exactly ``depth`` levels."""
+    return b'{"a":' + b"[" * (depth - 1) + b"0" + b"]" * (depth - 1) + b"}"
+
+
+def test_recovery_reader_enforces_its_own_nesting_bound(tmp_path):
+    """The bound is explicit, not the interpreter's recursion limit.
+
+    Python 3.12+ parses a 2000-deep array without RecursionError, so a reader
+    relying on that limit accepted it; the explicit bound refuses at 33 on every
+    interpreter and accepts the deepest legitimate shape (32).
+    """
+    record = tmp_path / "depth.json"
+    record.write_bytes(_nested(tx.MAX_RECOVERY_RECORD_DEPTH))
+    assert tx.read_record(record) is not None
+    record.write_bytes(_nested(tx.MAX_RECOVERY_RECORD_DEPTH + 1))
+    assert tx.read_record(record) is None
+    assert tx.parse_record_bytes(_nested(tx.MAX_RECOVERY_RECORD_DEPTH + 1)) is None
+
+
+def test_recovery_reader_ignores_brackets_inside_strings(tmp_path):
+    value = {"detail": "[[[[" * 40 + '\\"{{{{' * 20, "operation_id": "0" * 32}
+    record = tmp_path / "strings.json"
+    record.write_text(json.dumps(value))
+    assert tx.read_record(record) == value
+
+
+def test_recovery_reader_accepts_exact_byte_boundary(tmp_path):
+    # The writer permits exactly 64 KiB; rejecting it here would strand valid
+    # existing recovery evidence after upgrading the controller.
+    data = b'{"padding":"' + b"x" * (64 * 1024 - 14) + b'"}'
+    assert len(data) == 64 * 1024
+    record = tmp_path / "boundary.json"
+    record.write_bytes(data)
+    assert tx.read_record(record) == {"padding": "x" * (64 * 1024 - 14)}
+
+
+def test_recovery_reader_protects_hardlinks_and_special_files(tmp_path):
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text('{"operation_id":"' + "0" * 32 + '"}')
+    linked = tmp_path / "linked.json"
+    os.link(sentinel, linked)
+    assert tx.read_record(linked) is None
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    assert tx.read_record(fifo) is None
+    assert sentinel.read_text() == '{"operation_id":"' + "0" * 32 + '"}'
+
+
+def test_recovery_reader_bounds_growth_after_fstat(tmp_path, monkeypatch):
+    record = tmp_path / "growing.json"
+    record.write_bytes(b'{"padding":"')
+    original = os.fstat
+
+    def grow_after_stat(descriptor):
+        sample = original(descriptor)
+        with record.open("ab") as stream:
+            stream.write(b"x" * (64 * 1024) + b'"}')
+        return sample
+
+    def must_not_parse(_data):
+        pytest.fail("oversized bytes reached the JSON parser")
+
+    monkeypatch.setattr(tx.os, "fstat", grow_after_stat)
+    monkeypatch.setattr(tx.json, "loads", must_not_parse)
+    assert tx.read_record(record) is None
+
+
+def test_capacity_refusal_keeps_the_existing_256_boundary(tmp_path):
+    directory = tmp_path / tx.OPERATION_DIR
+    directory.mkdir()
+    # Admission has always counted ALL entries, not just parseable JSON. Do not
+    # make foreign or unfinished names into spare slots in the diagnostic fix.
+    for index in range(255):
+        (directory / f"unknown-{index}").write_text("protected")
+    operation = start(tmp_path)
+    assert len(list(directory.iterdir())) == 256
+    assert _row(tmp_path, operation.identifier)["phase"] == "queued"
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    with pytest.raises(tx.RecoveryCapacityError) as caught:
+        start(tmp_path)
+    assert caught.value.code == "update_recovery_capacity"
+    assert caught.value.active_limit == 256
+    assert caught.value.observed_at_least == 256
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+def test_incident_shaped_256_real_legacy_records_remain_protected(tmp_path):
+    # This histogram comes from the operator-supplied incident, NOT a claim
+    # about the contents or eligibility of the real Mac's recovery store.
+    phases = ["partial"] * 181 + ["promoted"] * 67 + ["failed"] * 7 + ["prepared"]
+    operations = []
+    for phase in phases:
+        operation = start(tmp_path)
+        operation.advance(phase)
+        operations.append(operation)
+    directory = tmp_path / tx.OPERATION_DIR
+    before = {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in directory.iterdir()
+    }
+    assert len(before) == 256
+    report = tx.recovery_capacity_status(tmp_path)
+    assert report["scan_complete"] is True
+    assert report["observed_entries"] == report["protected_entries"] == 256
+    assert report["protected_reasons"] == {"writer_finality_unproven": 256}
+    assert report["retirable_entries"] == 0
+    with pytest.raises(tx.RecoveryCapacityError):
+        start(tmp_path)
+    assert before == {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in directory.iterdir()
+    }
+    for operation in operations:
+        assert _row(tmp_path, operation.identifier)["retirement"]["eligible"] is False
+
+
+@pytest.mark.parametrize("phase", sorted(tx._OPERATION_PHASES))
+def test_legacy_phases_and_dead_owners_remain_protected(tmp_path, monkeypatch, phase):
+    operation = start(tmp_path)
+    operation.advance(phase)
+    monkeypatch.setattr(tx, "owner_alive", lambda _row: False)
+    status = _row(tmp_path, operation.identifier)
+    assert status["owner_state"] == "gone"
+    assert status["phase"] == phase
+    assert status["retirement"] == {
+        "eligible": False, "reason": "writer_finality_unproven"
+    }
+    assert tx.recovery_capacity_status(tmp_path)["retirable_entries"] == 0
+    # Existing ID lookup and late writer paths must still work. A dry run does
+    # not take ownership from an old controller or move its durable record.
+    operation.advance("partial", receipts=[{"state": "pending"}])
+    assert _row(tmp_path, operation.identifier)["receipts"] == [{"state": "pending"}]
+
+
+def test_capacity_dry_run_does_not_trust_a_claimed_terminal_seal(tmp_path):
+    operation = start(tmp_path)
+    record = tmp_path / tx.OPERATION_DIR / f"{operation.identifier}.json"
+    row = json.loads(record.read_text())
+    row["terminal_seal"] = {"version": 1, "central_services_complete": True}
+    record.write_text(json.dumps(row))
+    status = _row(tmp_path, operation.identifier)
+    assert status["retirement"] == {
+        "eligible": False, "reason": "unverified_terminal_seal"
+    }
+    report = tx.recovery_capacity_status(tmp_path)
+    assert report["protected_reasons"] == {"unverified_terminal_seal": 1}
+    assert report["retirable_entries"] == 0
+
+
+def test_capacity_dry_run_never_creates_an_absent_root(tmp_path, monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a dry run must not acquire a transaction or probe owner liveness")
+
+    monkeypatch.setattr(tx, "transaction", forbidden)
+    monkeypatch.setattr(tx, "owner_alive", forbidden)
+    root = tmp_path / "absent"
+    assert tx.recovery_capacity_status(root) == {
+        "active_limit": 256,
+        "observed_entries": 0,
+        "namespace_entries": {tx.OPERATION_DIR: 0, tx.V2_OPERATION_DIR: 0},
+        "at_limit": False,
+        "scan_complete": True,
+        "protected_entries": 0,
+        "retirable_entries": 0,
+        "protected_reasons": {},
+        "mutation_performed": False,
+    }
+    assert not root.exists()
+
+
+def test_capacity_dry_run_protects_unsafe_unknown_and_legacy_entries(tmp_path, monkeypatch):
+    operation = start(tmp_path)
+    directory = tmp_path / tx.OPERATION_DIR
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("private unrelated bytes")
+    (directory / ("1" * 32 + ".json")).symlink_to(sentinel)
+    (directory / ("2" * 32 + ".json")).write_text("not JSON")
+    (directory / "foreign").mkdir()
+    before = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("dry run acquired a transaction or probed owner liveness")
+
+    monkeypatch.setattr(tx, "transaction", forbidden)
+    monkeypatch.setattr(tx, "owner_alive", forbidden)
+    report = tx.recovery_capacity_status(tmp_path)
+    assert report["observed_entries"] == report["protected_entries"] == 4
+    assert report["scan_complete"] is True
+    assert report["retirable_entries"] == 0
+    assert report["protected_reasons"] == {
+        "writer_finality_unproven": 1,
+        "unreadable_or_unsafe_record": 2,
+        "unknown_namespace_entry": 1,
+    }
+    assert before == {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in tmp_path.rglob("*") if path.is_file()
+    }
+    assert (directory / f"{operation.identifier}.json").exists()
+
+
+def test_capacity_dry_run_stops_after_the_first_overflow_entry(tmp_path, monkeypatch):
+    directory = tmp_path / tx.OPERATION_DIR
+    directory.mkdir()
+    for index in range(300):
+        (directory / f"{index:032x}.json").write_text(
+            json.dumps({"operation_id": f"{index:032x}"})
+        )
+    original = tx.read_record
+    reads = []
+
+    def counted(path):
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(tx, "read_record", counted)
+    report = tx.recovery_capacity_status(tmp_path)
+    assert report["observed_entries"] == report["protected_entries"] == 257
+    assert report["scan_complete"] is False
+    assert report["retirable_entries"] == 0
+    assert len(reads) == 256
+    assert sum(report["protected_reasons"].values()) == 257
+    assert len(list(directory.iterdir())) == 300
 
 
 def test_operation_survives_reread_with_candidate_and_partial_receipts(tmp_path):

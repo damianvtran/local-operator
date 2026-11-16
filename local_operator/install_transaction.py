@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -32,6 +33,19 @@ DEFAULT_TIMEOUT_S = 10.0
 
 class InstallTransactionError(Exception):
     """Actionable refusal shared by CLI, TUI and mesh install writers."""
+
+
+class RecoveryCapacityError(InstallTransactionError):
+    """Bounded active namespace is full, not a transient installer failure.
+
+    The machine code is additive to the frozen update failure vocabulary. The
+    count is a LOWER bound observed during admission, never a census or a claim
+    that any legacy operation can be retired.
+    """
+
+    code = "update_recovery_capacity"
+    active_limit = 256
+    observed_at_least = 256
 
 
 class LockUnsupported(InstallTransactionError):
@@ -78,10 +92,48 @@ def owner_alive(record: dict[str, Any]) -> bool | None:
     return procstate.same_birth(record.get("birth_scheme"), record.get("birth_token"), pid)
 
 
+# Readers must bound input before JSON parsing as well as writers bounding output:
+# recovery examines untrusted/legacy records and cannot allocate an arbitrary file.
+MAX_RECOVERY_RECORD_BYTES = 64 * 1024
+#: Structural bound, enforced BEFORE parsing. Real records nest at most a few
+#: levels (record -> handoff -> occurrences -> entry). Relying on the
+#: interpreter's recursion limit instead is not a bound: since Python 3.12 the
+#: C JSON scanner no longer trips ``sys.getrecursionlimit()``, so a 2000-deep
+#: 4 KiB record parsed successfully there and then reached callers that recurse
+#: over it (``copy.deepcopy``, ``json.dumps``) and do not expect RecursionError.
+MAX_RECOVERY_RECORD_DEPTH = 32
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+_JSON_BRACKET = re.compile(r"[\[\]{}]")
+
+
+def parse_record_bytes(data: bytes) -> dict[str, Any] | None:
+    """Decode one bounded recovery record; ``None`` for anything not trustworthy.
+
+    Shared by every recovery reader so the byte, encoding and nesting bounds
+    cannot drift between the live reader and the dry-run classifier. Brackets
+    inside JSON strings are not structure, so strings are masked first; an
+    unterminated string leaves its brackets counted, which can only refuse.
+    """
+    if len(data) > MAX_RECOVERY_RECORD_BYTES:
+        return None
+    try:
+        text = data.decode("utf-8")
+        depth = 0
+        for bracket in _JSON_BRACKET.findall(_JSON_STRING.sub("", text)):
+            depth += 1 if bracket in "[{" else -1
+            if depth > MAX_RECOVERY_RECORD_DEPTH:
+                return None
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def read_record(path: Path) -> dict[str, Any] | None:
     # Observation must not follow an unsafe lock/attempt name into unrelated
     # bytes, nor block on a FIFO. No create/acquire/update is involved here.
     descriptor: int | None = None
+    data = b""
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
             return None
@@ -92,18 +144,21 @@ def read_record(path: Path) -> dict[str, Any] | None:
         if (
             not stat.S_ISREG(sample.st_mode)
             or sample.st_nlink != 1
+            or sample.st_size > MAX_RECOVERY_RECORD_BYTES
             or (os.name == "posix" and sample.st_uid != os.getuid())
         ):
             return None
-        with os.fdopen(descriptor, encoding="utf-8") as stream:
+        with os.fdopen(descriptor, "rb") as stream:
             descriptor = None
-            value = json.load(stream)
-    except (OSError, ValueError):
+            # Read bytes, not characters: multibyte JSON must not multiply the
+            # 64 KiB writer contract, including when a file grows after fstat.
+            data = stream.read(MAX_RECOVERY_RECORD_BYTES + 1)
+    except OSError:
         return None
     finally:
         if descriptor is not None:
             os.close(descriptor)
-    return value if isinstance(value, dict) else None
+    return parse_record_bytes(data)
 
 
 @dataclass(frozen=True)
@@ -266,6 +321,13 @@ def transaction(
 
 
 OPERATION_DIR = ".update-operations"
+#: The future-only fenced protocol's namespace (see ``fenced_operation``). Named
+#: HERE so legacy admission can count it without importing that module (which
+#: imports this one): both protocols share ONE active-recovery budget.
+V2_OPERATION_DIR = ".update-operations-v2"
+#: The v2 record's protocol tag, also named here so the read-only capacity dry
+#: run can tell a well-formed v2 record from an unreadable one.
+V2_PROTOCOL = "update-operation.v2"
 _OPERATION_PHASES = {
     "queued",
     "preparing",
@@ -297,7 +359,7 @@ def _operation_path(root: Path, identifier: str, *, create: bool = False) -> Pat
 
 def _persist_operation(path: Path, record: dict[str, Any]) -> None:
     data = json.dumps(record, sort_keys=True).encode("utf-8")
-    if len(data) > 64 * 1024:
+    if len(data) > MAX_RECOVERY_RECORD_BYTES:
         raise InstallTransactionError("update operation exceeds its bounded recovery record")
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     staged = f".{uuid.uuid4().hex}.tmp"
@@ -383,17 +445,64 @@ class UpdateOperation:
             held.validate(self.root)
 
 
+def _namespace_entries(root: Path, bound: int) -> Iterator[tuple[str, Path | None]]:
+    """THE one enumeration both admission and the status dry run use.
+
+    Yields ``(namespace, entry)`` over the legacy then the v2 namespace, and
+    stops after ``bound + 1`` entries in TOTAL (one overflow sentinel), so a
+    flooded directory cannot make either caller unbounded. An unsafe namespace
+    directory (symlink, foreign owner, not a directory) yields
+    ``(namespace, None)`` once and is never followed: admission refuses on it,
+    the dry run reports it. Read-only: no create, no lock, no record read.
+    """
+    seen = 0
+    for name in (OPERATION_DIR, V2_OPERATION_DIR):
+        directory = root / name
+        if not directory.exists() and not directory.is_symlink():
+            continue
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            yield name, None
+            continue
+        for entry in directory.iterdir():
+            seen += 1
+            yield name, entry
+            if seen > bound:
+                return
+
+
+def active_recovery_entries(root: Path, *, limit: int | None = None) -> int:
+    """Count legacy AND v2 namespace entries against ONE shared budget.
+
+    Every entry counts, unknown names included, exactly like the original legacy
+    loop: neither namespace may manufacture spare slots or exclude protected
+    legacy obligations. Bounded: stops one past ``limit`` so a flooded directory
+    cannot make admission unbounded. An unsafe directory refuses admission
+    rather than being skipped, because skipping would undercount.
+    """
+    bound = RecoveryCapacityError.active_limit if limit is None else limit
+    count = 0
+    for _name, entry in _namespace_entries(root, bound):
+        if entry is None:
+            raise InstallTransactionError(
+                "update operation directory is unsafe; no record was written"
+            )
+        count += 1
+    return count
+
+
 def start_operation(root: Path, *, baseline: str, target: str, route: str) -> UpdateOperation:
     identifier = uuid.uuid4().hex
     with transaction(root, operation="register durable update operation") as held:
         held.validate(root)
         path = _operation_path(root, identifier, create=True)
         # Bound namespace growth without deleting unknown/unfinished operations.
-        for index, _path in enumerate(path.parent.iterdir()):
-            if index >= 255:
-                raise InstallTransactionError(
-                    "update recovery records are at capacity; inspect pending operations"
-                )
+        # v2 entries count too: otherwise each protocol would see its own 256 and
+        # together they would form the second capacity pool the cap forbids.
+        if active_recovery_entries(root) >= RecoveryCapacityError.active_limit:
+            raise RecoveryCapacityError(
+                "update recovery records are at capacity; inspect pending operations"
+            )
         _persist_operation(
             path,
             {
@@ -671,6 +780,87 @@ def advance_handoff(
         return merged
 
 
+def _retirement_status(record: dict[str, Any] | None) -> dict[str, Any]:
+    """No legacy phase, report, or dead owner is positive writer-finality proof.
+
+    The current receipt protocol has no exhaustive writer-release certificate:
+    old occurrence/capacity/handoff writers may still advance an operation. Even
+    a purported seal must therefore remain protected, not become a new trust
+    input. Keep this dry-run conclusion separate from phase and owner liveness.
+    """
+    reason = "unreadable_or_unsafe_record"
+    if record is not None:
+        reason = (
+            "unverified_terminal_seal"
+            if "terminal_seal" in record
+            else "writer_finality_unproven"
+        )
+    return {"eligible": False, "reason": reason}
+
+
+def recovery_capacity_status(root: Path) -> dict[str, Any]:
+    """Read-only, bounded dry run; NEVER retire, repair, or acquire a lock.
+
+    Count every entry of BOTH namespaces exactly as admission does, through the
+    same enumeration (``_namespace_entries``), including foreign names and
+    unfinished writes, so this diagnostic can never disagree with the refusal it
+    explains. At most 256 entries are inspected in total, plus one overflow
+    sentinel with an explicit incomplete-scan flag; no historical scan or
+    liveness probe can turn unknown entries into available slots. A v2 record,
+    sealed or not, still occupies its slot. This API does not authorize a live
+    migration or claim to recover legacy capacity.
+    """
+    limit = RecoveryCapacityError.active_limit
+    counts: dict[str, int] = {}
+    namespaces: dict[str, int] = {OPERATION_DIR: 0, V2_OPERATION_DIR: 0}
+    observed = 0
+    complete = True
+    for name, path in _namespace_entries(root, limit):
+        if path is None:
+            # Admission refuses on this directory; it was not followed, so the
+            # count below is a lower bound.
+            complete = False
+            counts["unsafe_namespace_directory"] = counts.get("unsafe_namespace_directory", 0) + 1
+            continue
+        observed += 1
+        namespaces[name] += 1
+        if observed > limit:
+            complete = False
+            counts["uninspected_overflow"] = 1
+            break
+        identifier = path.stem
+        if (
+            path.name != f"{identifier}.json"
+            or len(identifier) != 32
+            or any(character not in "0123456789abcdef" for character in identifier)
+        ):
+            reason = "unknown_namespace_entry"
+        else:
+            record = read_record(path)
+            if record is not None and record.get("operation_id") != identifier:
+                record = None
+            if name == OPERATION_DIR:
+                reason = _retirement_status(record)["reason"]
+            elif record is None or record.get("protocol") != V2_PROTOCOL:
+                reason = "unreadable_or_unsafe_record"
+            else:
+                reason = "new_protocol_sealed" if record.get("sealed") else "new_protocol_open"
+        counts[reason] = counts.get(reason, 0) + 1
+    return {
+        "active_limit": limit,
+        "observed_entries": observed,
+        "namespace_entries": namespaces,
+        # The same comparison admission makes; with an incomplete scan the
+        # observed count is a lower bound that already reaches the limit.
+        "at_limit": observed >= limit,
+        "scan_complete": complete,
+        "protected_entries": observed,
+        "retirable_entries": 0,
+        "protected_reasons": counts,
+        "mutation_performed": False,
+    }
+
+
 def operation_status(root: Path, identifier: str) -> dict[str, Any] | None:
     """Observe only; never acquire/create/clear the transaction or its records."""
     path = _operation_path(root, identifier)
@@ -681,7 +871,7 @@ def operation_status(root: Path, identifier: str) -> dict[str, Any] | None:
         raise InstallTransactionError("update operation status is unreadable; ownership is unknown")
     alive = owner_alive(record)
     state = "live" if alive is True else "gone" if alive is False else "unknown"
-    return {**record, "owner_state": state}
+    return {**record, "owner_state": state, "retirement": _retirement_status(record)}
 
 
 def register_attempt(

@@ -3296,6 +3296,57 @@ def test_a_successful_report_says_ok_true_and_keeps_every_existing_key(
     assert "failure" not in report
 
 
+@pytest.mark.parametrize("capacity", [True, False])
+def test_recovery_capacity_code_survives_wrapped_command_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    capacity: bool,
+) -> None:
+    """Exercise the public report boundary without any installer or live root.
+
+    Identical English from an ordinary exception must NOT grant the machine
+    code: only the typed cause survives the wrapper as persistent pressure.
+    """
+    from local_operator import install_transaction as tx
+
+    sentence = "update recovery records are at capacity; inspect pending operations"
+    cause = tx.RecoveryCapacityError(sentence) if capacity else RuntimeError(sentence)
+
+    def refused(**_kwargs: Any) -> int:
+        # Mirror the REAL raise site: ``install_into_generation`` marks
+        # ``environment`` before ``start_operation`` and wraps its refusal with
+        # this exact prefix. Raising at the tracker's initial ``check`` stage
+        # instead would be classified ``network`` by the frozen stage table —
+        # a fake stage, not the path a full recovery store takes.
+        update_mod._reach("environment")
+        raise UpdateError(f"could not persist update recovery: {sentence}") from cause
+
+    monkeypatch.setattr(update_mod, "_update_command_body", refused)
+    monkeypatch.setattr(update_mod, "installed_version", lambda: "0.0.0")
+    assert update_command(check=False) == 1
+    report = _reported_failure(capsys.readouterr())
+    assert report["ok"] is False
+    assert report["schema"] == "update.report.v1"
+    assert report["failure"]["step"] == "environment"
+    assert report["failure"]["kind"] == "unknown"
+    assert report["failure"]["detail"] == ""
+    assert report["failure"]["error"] == f"could not persist update recovery: {sentence}"
+    if capacity:
+        assert report["failure"]["code"] == "update_recovery_capacity"
+    else:
+        assert "code" not in report["failure"]
+
+
+def test_recovery_failure_code_follows_context_without_classifying_plain_text() -> None:
+    from local_operator import install_transaction as tx
+
+    wrapper = UpdateError("outer")
+    wrapper.__context__ = tx.RecoveryCapacityError("inner")
+    assert update_mod._failure_code(wrapper) == "update_recovery_capacity"
+    assert update_mod._failure_code(RuntimeError("update_recovery_capacity")) is None
+    assert update_mod._failure_code(None) is None
+
+
 def test_the_report_vocabularies_are_the_frozen_contract() -> None:
     """The two closed vocabularies the desktop parser will switch on."""
     assert update_mod._UPDATE_STEPS == (
