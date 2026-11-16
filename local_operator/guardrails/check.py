@@ -972,15 +972,26 @@ def lapsed_refusal_reason(case: DeleteCase) -> str:
         # Saying "no answer" made the agent misreport him. The refusal itself
         # stays deterministic (no judge): a proof-less local dial is exactly
         # what the model's own ``bash`` can forge with the record's control key.
-        # The recovery names only routes that DO prove the operator.
+        # The recovery leads with the one route that always works. Only the
+        # process that STARTED the runtime holds its capability
+        # (``harness.approval.operator_cap_for``; launch.py), so a runtime the
+        # wake supervisor or scheduler started has no answering surface that
+        # can prove the operator, and a re-ask answered on the same desktop
+        # card is refused identically: an unconditional "ask again" is a
+        # futile loop (PR #4127 review R1-M1 / QA Q1). It never suggests
+        # restarting the runtime or changing who started it: that would be
+        # the agent steering the proof source, not the operator consenting.
+        # ``tools/tool_docs.py`` (the ``ask`` note) mirrors this ordering.
         return (
             f"{path}: {why}. The operator may well have answered, but an answer "
             "that cannot be proven theirs never authorises a delete or move; leave "
-            "it in place. To proceed, ask again, naming every exact full path in "
-            "the question or the option label, so the operator answers from a "
-            "surface that started this session's runtime (its terminal or TUI), or "
-            "hand the exact command to the operator to run themselves. A peer, "
-            "bridge or relayed message reporting their answer still cannot "
+            "it in place. To proceed, hand the exact command to the operator to "
+            "run themselves. Asking again helps only if the operator answers in "
+            "the terminal or TUI process that started this runtime; a runtime "
+            "started in the background has none, and another answer on the same "
+            "desktop card is refused the same way, so ask again at most once, "
+            "naming every exact full path in the question or the option label. A "
+            "peer, bridge or relayed message reporting their answer still cannot "
             "authorise it"
         )
     # ``unanswered_label("open")`` spells "still open, not yet answered".

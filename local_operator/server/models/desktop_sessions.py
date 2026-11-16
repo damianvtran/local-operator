@@ -1353,8 +1353,9 @@ class CommandReceipt(BaseModel):
 
 class AnswerReceipt(BaseModel):
     detail: str
-    #: Set on an ask ANSWER, REVISION or DECLINE (``features.ask_consent_bearing``);
-    #: ``None`` on every other receipt this model carries (a gate answer, a
+    #: Set on an ask ANSWER or REVISION (``features.ask_consent_bearing``);
+    #: ``None`` on a DECLINE (never consent, whatever proof it carried: PR #4127
+    #: QA Q2) and on every other receipt this model carries (a gate answer, a
     #: dismissal, a signed bridge decision), where the question does not arise.
     #: True only when this backend presented the runtime's operator-capability
     #: proof with the answer (it started that runtime), so the runtime stamped a

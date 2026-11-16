@@ -9663,6 +9663,23 @@ async def test_a_peer_conversation_answer_is_never_consent_bearing(answers_api) 
     )
     assert result.status_code == 200, result.text
     assert result.json()["result"]["consent_bearing"] is False
+    assert remote.probes == []  # R1-n1: short-circuited before the probe
+
+
+@pytest.mark.asyncio
+async def test_a_decline_receipt_never_reports_consent_bearing(answers_api) -> None:
+    """PR #4127 QA Q2: a decline is never consent, so even a connection that held
+    the operator proof must not let a card read "this answer can authorise"."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=True)
+    remote.detail = "declined"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "declined", "consent_bearing": None}
+    assert remote.calls == [("a-1", None, True, False)]
 
 
 @pytest.mark.asyncio

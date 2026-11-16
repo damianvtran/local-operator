@@ -178,8 +178,12 @@ def _stamp_ask_answer(
         kind=authority.kind,
         mirror=mirror,
     )
+    # ``ask`` (and ``conn.surface``, from the dialer's hello) are client-supplied
+    # and unvalidated here, so they are ``%r``: a newline in a forged id must not
+    # mint a second, fake "surface=desktop proved=True" line in the very record
+    # this log exists to be trusted for (PR #4127 review R1-m1).
     logger.info(
-        "ask answer stamped: op=%s ask=%s surface=%s conn.kind=%s conn.surface=%s "
+        "ask answer stamped: op=%s ask=%r surface=%s conn.kind=%s conn.surface=%r "
         "locality=%s proved=%s",
         op,
         ask_id,

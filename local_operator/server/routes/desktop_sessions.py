@@ -5150,10 +5150,17 @@ async def answer(session_id: str, body: Answer, request: Request):
             # field of that name is a 422). A peer's conversation is always
             # False: its answer is relayed and stamped ``remote`` whatever this
             # process holds for a same-numbered local pid. Absent probe (an
-            # older facade or a test double) reads False: fail closed.
+            # older facade or a test double) reads False: fail closed. A
+            # DECLINE reads null: a decline is never consent, so "this answer
+            # can authorise" must not be claimable for one, whatever proof the
+            # connection held (PR #4127 QA Q2).
             probe = getattr(bridge.remote, "ask_consent_bearing", None)
-            consent_bearing = bool(
-                getattr(bridge, "remote_row", None) is None and callable(probe) and probe()
+            consent_bearing: bool | None = (
+                None
+                if body.decline
+                else bool(
+                    getattr(bridge, "remote_row", None) is None and callable(probe) and probe()
+                )
             )
             return reply({"detail": detail, "consent_bearing": consent_bearing})
         if body.epoch != bridge.remote.frontend_state.epoch:

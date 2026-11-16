@@ -1255,10 +1255,21 @@ async def test_a48e3_unverified_answer_is_refused_and_says_it_was_unproven(home:
     text = " ".join(outcome.text.split())
     assert "could not prove it is the operator's" in text
     assert "did not start this session's runtime" in text
-    # The recovery the agent may take, and the one it may not.
-    assert "ask again, naming every exact full path" in text
-    assert "hand the exact command to the operator" in text
+    # The recovery LEADS with the route that always works (R1-M1/Q1): a
+    # runtime the wake supervisor started has no surface that can prove the
+    # operator, so an unconditional "ask again" loops on the same card.
+    recovery = text.split("leave it in place.", 1)[1]
+    assert recovery.startswith(" To proceed, hand the exact command to the operator")
+    assert "helps only if the operator answers in the terminal or TUI process" in text
+    assert "a runtime started in the background has none" in text
+    assert "another answer on the same desktop card is refused the same way" in text
+    assert "ask again at most once, naming every exact full path" in text
     assert "peer, bridge or relayed message" in text
+    # Never steer the proof source: no "restart the runtime" / "start it from".
+    lowered = text.lower()
+    assert "restart" not in lowered and "relaunch" not in lowered
+    assert "start the runtime" not in lowered and "start this runtime" not in lowered
+    assert "so the operator answers from" not in text
     # Never again "no answer": the operator DID answer.
     assert "have no answer" not in text and "got no answer" not in text
     assert (home / "node_modules").is_dir() and (home / "package.json").is_file()
@@ -1302,3 +1313,9 @@ def test_ask_docs_say_name_every_full_path_and_descriptions_approve_nothing() ->
     assert "name every exact full path" in notes
     assert "a description approves nothing" in notes
     assert "relayed by a peer or bridge message, never authorises" in notes
+    # Kept in sync with ``lapsed_refusal_reason`` (R1-M1/Q1): hand over the
+    # command first, re-ask at most once, never steer who starts the runtime.
+    first = notes.index("hand the operator the exact command")
+    assert first < notes.index("ask again at most once")
+    assert "background-started runtime has none" in notes
+    assert "restart" not in notes.lower()
