@@ -6598,10 +6598,14 @@ def _pin_inviter_key(answer: dict[str, Any], envelope: Any, handshake: Any) -> N
     """
     from local_operator.network.types import MeshRefusal
 
-    verified = str(handshake.peer_public_key or "") if handshake.auth_verified else ""
     for row in answer.get("members") or []:
         if not isinstance(row, dict) or row.get("device_id") != envelope.inviter_device_id:
             continue
+        verified = (
+            str(getattr(handshake, "peer_public_key", "") or "")
+            if getattr(handshake, "auth_verified", False)
+            else ""
+        )
         if not verified or str(row.get("public_key") or "") != verified:
             raise MeshRefusal(
                 "invite_wrong_inviter",

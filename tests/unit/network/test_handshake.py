@@ -139,7 +139,16 @@ def run_handshake(
             )
             dialer.send_auth(client, hs_mod.Credential("epoch", epoch, key))
             outcome.frames.append(dialer.auth_core)
-            welcome = dialer.read_welcome(reader, deadline)
+            # The dialer verifies the listener's welcome proof against the key ITS
+            # OWN record holds for the device it meant to reach (mesh-listener-auth).
+            welcome = dialer.read_welcome(
+                reader,
+                deadline,
+                hs_mod.DialerExpectation(
+                    device_id=listener_identity.device_id,
+                    public_key_for={listener_identity.device_id: listener_identity.public_key}.get,
+                ),
+            )
             outcome.frames.append(welcome)
             outcome.dialer = dialer.establish()
             outcome.dialer_codec = dialer.codec()

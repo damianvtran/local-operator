@@ -370,6 +370,11 @@ def test_every_code_the_doctor_can_print_has_a_reading_too() -> None:
     reasons = {value for name, value in vars(handshake).items() if name.startswith("REASON_")}
     assert len(reasons) >= 10, reasons  # a truncated enumeration is not evidence
     for code in sorted(reasons | {"pair_phase_requires_the_ceremony"}):
+        if code in resume.DOCTOR_DETAIL_WORDS:
+            # A refusal with its OWN stated per-address reading (the dialer's listener
+            # refusals, mesh-listener-auth): the table entry, never the fallback.
+            assert resume.doctor_detail_words(code) == resume.DOCTOR_DETAIL_WORDS[code], code
+            continue
         assert resume.doctor_detail_words(code) == resume._BARE_CODE_WORDS, code  # noqa: SLF001
     # THE STATE Q-R24-2 IS ABOUT. An address that ANSWERED while the doctor's own
     # budget expired: this build's spelling, from the listing's own producer with the
@@ -820,7 +825,12 @@ def test_the_dialler_learns_the_member_table_from_the_peer_it_dialled(
     _add_member(server_a.root, record.network_id, NEWCOMER)
     assert store.load(record.network_id, server_b.root).member(NEWCOMER) is None
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     learned = store.load(record.network_id, server_b.root)
     newcomer_row = learned.member(NEWCOMER)
@@ -842,7 +852,12 @@ def test_the_listener_learns_the_member_table_from_the_peer_that_dialled_it(
     _add_member(server_b.root, record.network_id, NEWCOMER)
     assert store.load(record.network_id, server_a.root).member(NEWCOMER) is None
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     # The listener's pull runs on its own handshake thread — `dial` returns when
     # THIS side's handshake is done, and the peer may not have finished its end — so
@@ -867,7 +882,12 @@ def test_learning_a_member_is_audited(peer_pair: Devices, monkeypatch: pytest.Mo
     record, _host, _port = _pair(peer_pair, monkeypatch, role="admin")
     _add_member(server_a.root, record.network_id, NEWCOMER)
 
-    link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
+    link, reason = server_b.dial(
+        record.network_id,
+        host=f"{host_a}:{port_a}",
+        epoch=record.epoch,
+        expected_device=server_a.identity.device_id,
+    )
     assert link is not None, reason
     events = [
         row

@@ -514,7 +514,10 @@ def test_a_re_dial_during_a_copy_releases_the_source_and_the_retry_completes(
 
                 request.addfinalizer(reap_evicted_readers)
                 replacement, reason = server_b.dial(
-                    record.network_id, host=f"{host}:{port}", epoch=record.epoch
+                    record.network_id,
+                    host=f"{host}:{port}",
+                    epoch=record.epoch,
+                    expected_device=server_a.identity.device_id,
                 )
                 assert replacement is not None, reason
         return real(self_, frame, timeout=timeout)
@@ -565,7 +568,12 @@ def test_the_copy_links_own_death_releases_the_entry_even_beside_a_second_link(
     a_dev, b_dev = server_a.identity.device_id, server_b.identity.device_id
     server_b._ensure_link(a_dev)
     host_b, port_b = server_b._listener.getsockname()[:2]  # type: ignore[union-attr]
-    second, reason = server_a.dial(record.network_id, host=f"{host_b}:{port_b}", epoch=record.epoch)
+    second, reason = server_a.dial(
+        record.network_id,
+        host=f"{host_b}:{port_b}",
+        epoch=record.epoch,
+        expected_device=server_b.identity.device_id,
+    )
     assert second is not None, reason
     two = wait_for(
         lambda: len([lk for lk in server_b.links.values() if lk.device_id == a_dev and lk.alive])

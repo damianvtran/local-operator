@@ -533,10 +533,14 @@ class Handshake:
     shared: bytes = b""
     peer_device_id: str = ""
 
-    #: True once :meth:`verify_auth` has matched the peer's MAC — i.e. once the id in
-    #: ``peer_device_id`` is PROVEN rather than declared. Read by the refusal audit
-    #: (``relay._audit_handshake_refusal``), which may not name a device as the actor
-    #: on the strength of a claim: an attacker chooses the id it declares.
+    #: True once the PEER has proved the id in ``peer_device_id`` rather than declared
+    #: it: on the listener, :meth:`verify_auth` matched the dialer's sig and MAC; on the
+    #: dialer, :meth:`verify_welcome` matched the listener's welcome proof against the
+    #: stored key of the device it meant to reach. It becomes
+    #: ``HandshakeResult.peer_verified``, which ``_admit_link`` requires. Also read by
+    #: the refusal audit (``relay._audit_handshake_refusal``), which may not name a
+    #: device as the actor on the strength of a claim: an attacker chooses the id it
+    #: declares.
     auth_verified: bool = False
     peer_instance_id: str = ""
     peer_public_key: str = ""
