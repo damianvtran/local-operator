@@ -42,6 +42,7 @@ from local_operator.tui.widgets.command_picker import (
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 
+from .conftest import await_session_boot
 from .test_app_pilot import FakeSession, _factory
 
 #: Every host's vocabulary, read from the one definition each host imports. A
@@ -50,11 +51,20 @@ CLEAR_WORDS = ("clear", "none", "reset")
 
 
 async def _boot(pilot, app: OperatorApp) -> None:
-    """Settle until the session exists — `_cmd_goal` rejects a set before then."""
-    for _ in range(40):
-        await pilot.pause()
-        if app._session is not None:
-            return
+    """Block until the session is adopted — `_cmd_goal` rejects a set before then.
+
+    Waits on the boot WORKER, not on 40 ``pilot.pause()`` turns. The turn loop
+    was a bet that the worker's ``_warm_session_imports`` thread hop finishes
+    inside 40 pump turns, and it fell through SILENTLY when it lost: the
+    ``/goal none`` that followed was refused for want of a session, so the goal
+    survived and the test read ``'land the OAuth refresh fix' == ''`` (main run
+    44077850873, job 134039630024, a GIL-starved shard).
+    ``LOP_TEST_SLOW_BOOT_WARM_S=3`` reproduces it locally. ``await_session_boot``
+    asserts adoption too, so a boot that genuinely never lands fails here, by
+    name, instead of three steps later as a goal that was not cleared.
+    """
+    await await_session_boot(app)
+    await pilot.pause()
 
 
 def _notice_texts(app: OperatorApp) -> list[str]:
