@@ -354,6 +354,12 @@ def inotify_usage(proc: Path = Path("/proc")) -> dict[str, Any] | None:
     watches = instances = 0
     top_pid: int | None = None
     top_watches = 0
+    # Ranked separately: when max_user_instances is the bottleneck, the process
+    # to restart is the one holding the most inotify FDS, which can be a
+    # different process from the biggest watch holder (watchdog opens one
+    # instance per scheduled path, each with a handful of watches).
+    top_instance_pid: int | None = None
+    top_instances = 0
     try:
         pids = [name for name in os.listdir(proc) if name.isdigit()]
     except OSError:
@@ -366,7 +372,7 @@ def inotify_usage(proc: Path = Path("/proc")) -> dict[str, Any] | None:
             fds = os.listdir(base / "fd")
         except OSError:
             continue  # exited, or not ours to read
-        held = 0
+        held = owned = 0
         for fd in fds:
             try:
                 if os.readlink(base / "fd" / fd) != "anon_inode:inotify":
@@ -374,12 +380,15 @@ def inotify_usage(proc: Path = Path("/proc")) -> dict[str, Any] | None:
                 # fdinfo is "pos:/flags:/mnt_id:/ino:" then one "inotify wd:…"
                 # line per watch, so counting line starts counts watches.
                 held += (base / "fdinfo" / fd).read_bytes().count(b"\ninotify")
-                instances += 1
+                owned += 1
             except OSError:
                 continue
         watches += held
+        instances += owned
         if held > top_watches:
             top_pid, top_watches = int(pid), held
+        if owned > top_instances:
+            top_instance_pid, top_instances = int(pid), owned
     return {
         "watches": watches,
         "limit": limit,
@@ -387,6 +396,8 @@ def inotify_usage(proc: Path = Path("/proc")) -> dict[str, Any] | None:
         "instance_limit": instance_limit,
         "top_pid": top_pid,
         "top_watches": top_watches,
+        "top_instance_pid": top_instance_pid,
+        "top_instances": top_instances,
     }
 
 
@@ -395,10 +406,9 @@ def check_watches(proc: Path = Path("/proc")) -> dict[str, Any]:
     if usage is None:
         return _check("watches", WARN, _t(_md.watches_unknown()))
     limit, instance_limit = usage["limit"], usage["instance_limit"]
-    ratio = max(
-        usage["watches"] / limit if limit else 1.0,
-        usage["instances"] / instance_limit if instance_limit else 1.0,
-    )
+    watch_ratio = usage["watches"] / limit if limit else 1.0
+    instance_ratio = usage["instances"] / instance_limit if instance_limit else 1.0
+    ratio = max(watch_ratio, instance_ratio)
     args = {
         "watches": str(usage["watches"]),
         "limit": str(limit),
@@ -407,7 +417,11 @@ def check_watches(proc: Path = Path("/proc")) -> dict[str, Any]:
     }
     if ratio >= WATCHES_WARN_RATIO:
         at_limit = usage["watches"] >= limit or usage["instances"] >= instance_limit
-        pid = str(usage["top_pid"] or "?")
+        # Name the holder of whichever budget is the bottleneck. With either
+        # count > 0 its top holder is set, so "?" only survives a zero limit
+        # (no key without the process clause exists; adding one needs copy).
+        top = usage["top_instance_pid"] if instance_ratio > watch_ratio else usage["top_pid"]
+        pid = str(top or "?")
         summary = (
             _md.watches_at_limit(pid=pid, **args) if at_limit else _md.watches_near(pid=pid, **args)
         )

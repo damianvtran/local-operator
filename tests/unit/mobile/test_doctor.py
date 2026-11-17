@@ -699,6 +699,27 @@ def test_at_the_watch_limit_names_the_biggest_holder(tmp_path, monkeypatch):
     assert "No space left on device" in check["summary"]
 
 
+def test_at_the_instance_limit_names_the_biggest_instance_holder(tmp_path, monkeypatch):
+    """Design D2: when instances are the bottleneck, rank by instances, not watches.
+
+    pid 3105 holds the most watches (one fd, 50 watches) but pid 77 holds the
+    most inotify fds; restarting 3105 would not free a single instance.
+    """
+    holders = {3105: [50], 77: [1] * 6, 78: [1]}
+    proc = _fake_proc(tmp_path, holders, (100_000, 8))
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "fail"
+    data = check["data"]
+    assert (data["top_pid"], data["top_watches"]) == (3105, 50)
+    assert (data["top_instance_pid"], data["top_instances"]) == (77, 6)
+    assert check["summary"] == doctor._t(
+        doctor._md.watches_at_limit(
+            watches="57", limit="100000", instances="8", instance_limit="8", pid="77"
+        )
+    )
+
+
 def test_unreadable_watch_limits_are_unknown_not_a_guess(tmp_path, monkeypatch):
     proc = _fake_proc(tmp_path, {10: [1]}, None)
     monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")

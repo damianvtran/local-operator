@@ -662,23 +662,28 @@ class LibraryIndexer:
             )
 
     def _start_session_watch(self, root: Path) -> None:
-        watch = session_watch.SessionDirWatch(
-            root,
-            self._mark_dirty,
-            # Lost events: a reconcile re-reads every journal's signature.
-            on_overflow=self.wake,
-            on_failure=self._session_watch_failed,
-        )
+        # Construction is inside the try: it loads libc through ctypes, and a
+        # host where that fails (no inotify symbols, a stripped container libc)
+        # must fall back to the reconcile like the watchdog branch does. This
+        # runs on the worker thread with no handler above it, so anything that
+        # escaped here would end the worker, not just the watch.
         try:
+            watch = session_watch.SessionDirWatch(
+                root,
+                self._mark_dirty,
+                # Lost events: a reconcile re-reads every journal's signature.
+                on_overflow=self.wake,
+                on_failure=self._session_watch_failed,
+            )
             watch.start()
-        except OSError as error:
+        except Exception as error:  # noqa: BLE001 - fall back to the timer, never to a crash
             # ``start`` already closed its fd, so nothing it took is held.
             self._session_watch_failed(error)
             return
         self._observer = watch
         self.observer_failed = False
 
-    def _session_watch_failed(self, error: OSError) -> None:
+    def _session_watch_failed(self, error: Exception) -> None:
         """Fall back to the timed reconcile, saying so ONCE per indexer.
 
         Budget exhaustion is the case this exists for: the old recursive watch
@@ -691,7 +696,7 @@ class LibraryIndexer:
         if self._watch_warned:
             return
         self._watch_warned = True
-        if error.errno in session_watch.BUDGET_ERRNOS:
+        if getattr(error, "errno", None) in session_watch.BUDGET_ERRNOS:
             logger.warning(
                 "library: inotify limit reached (%s); journal watch off, using the timed "
                 "reconcile. Raise fs.inotify.max_user_watches / max_user_instances, or "
@@ -699,7 +704,13 @@ class LibraryIndexer:
                 error,
             )
         else:
-            logger.warning("library: journal watch stopped (%s); using the timed reconcile", error)
+            # A non-OSError is a bug or a broken libc, not a budget: keep its
+            # traceback (an OSError's message already says everything).
+            logger.warning(
+                "library: journal watch stopped (%s); using the timed reconcile",
+                error,
+                exc_info=None if isinstance(error, OSError) else error,
+            )
 
     def _mark_dirty(self, session_id: str) -> None:
         if session_id:

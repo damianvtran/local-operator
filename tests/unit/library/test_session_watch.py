@@ -121,6 +121,21 @@ def _until(predicate: Any, timeout: float = 2.0) -> bool:
     return predicate()
 
 
+def _drain_until_quiet(seen: list[str], quiet: float = 0.2, bound: float = 3.0) -> None:
+    """Clear ``seen`` until no event has arrived for ``quiet`` seconds.
+
+    Bounded overall so a watch that never goes quiet fails the test rather
+    than hanging it.
+    """
+    deadline = time.monotonic() + bound
+    while True:
+        seen.clear()
+        time.sleep(quiet)
+        if not seen:
+            return
+        assert time.monotonic() < deadline, f"events never went quiet: {seen!r}"
+
+
 def _indexer(tmp_path: Path) -> tuple[indexer.LibraryIndexer, list[str]]:
     index = indexer.LibraryIndexer(tmp_path)
     dirty: list[str] = []
@@ -257,12 +272,80 @@ def test_real_inotify_holds_one_watch_per_session_on_a_cloexec_fd(tmp_path) -> N
         seen.clear()
         (late / "transcript.jsonl").write_text("{}\n")
         assert _until(lambda: "dddddddddddd" in seen)
+        # QA Q1: one write is several events (CREATE, MODIFY, CLOSE_WRITE) and
+        # the reader may still be delivering the tail; clearing after the
+        # first one let that tail land in the assertion below. Drain to quiet.
+        _drain_until_quiet(seen)
         # Deep writes are invisible by design: nothing below a session root.
-        seen.clear()
-        (sessions / SESSIONS[0] / "scratchpad" / "rig0" / "deep.txt").write_text("x")
+        owner = SESSIONS[0]
+        (sessions / owner / "scratchpad" / "rig0" / "deep.txt").write_text("x")
         time.sleep(0.2)
+        assert owner not in seen
         assert seen == []
         assert watch.watch_count() == 2 + len(SESSIONS)
     finally:
         watch.stop()
     assert watch.watch_count() == 0
+
+
+def test_an_overflow_rescans_and_watches_sessions_whose_create_was_lost(tmp_path, fake) -> None:
+    """Review M1: IN_Q_OVERFLOW may have swallowed a session's IN_CREATE.
+
+    The directory exists but has no watch; the overflow must add it (and
+    queue it once) besides asking for the reconcile.
+    """
+    sessions = _deep_sessions(tmp_path)
+    index, dirty = _indexer(tmp_path)
+    woke = threading.Event()
+    index.wake = woke.set  # type: ignore[method-assign]
+    index._start_observer()
+    try:
+        lost = "dddddddddddd"
+        (sessions / lost).mkdir()  # its IN_CREATE never reaches the reader
+        assert (str(sessions / lost), session_watch.SESSION_MASK) not in fake.added
+        fake.feed(_event(-1, session_watch.IN_Q_OVERFLOW))
+        assert woke.wait(2.0)
+        assert (str(sessions / lost), session_watch.SESSION_MASK) in fake.added
+        assert index._observer.watch_count() == 2 + len(SESSIONS)
+        assert _until(lambda: dirty == [lost])
+        # Already-watched sessions are not re-added.
+        assert len(fake.added) == 2 + len(SESSIONS)
+    finally:
+        index._stop_observer()
+
+
+def test_a_watch_constructor_failure_falls_back_and_keeps_the_worker(tmp_path, monkeypatch, caplog):
+    """Review M2: a libc/ctypes failure at construction is a fallback, not a crash.
+
+    ``_start_observer`` runs on the worker thread with no handler above it,
+    so it must not raise; the worker then carries on with the reconcile.
+    """
+    _deep_sessions(tmp_path)
+    monkeypatch.setattr(session_watch, "supported", lambda: True)
+
+    def broken_libc() -> Any:
+        raise AttributeError("undefined symbol: inotify_init1")
+
+    monkeypatch.setattr(session_watch, "_Syscalls", broken_libc)
+    index, _dirty = _indexer(tmp_path)
+    reconciles = threading.Event()
+    monkeypatch.setattr(index, "reconcile", lambda *a, **k: reconciles.set())
+    with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+        index._start_observer()  # must not raise
+        index._start_observer()  # nor warn twice
+        assert index.observer_failed is True
+        assert index._observer is None
+        index.observer_failed = False
+        index.start()
+        try:
+            assert reconciles.wait(5.0)
+            # The worker reached its own _start_observer and fell back...
+            assert _until(lambda: index.observer_failed, timeout=5.0)
+            # ...and is still serving its loop afterwards.
+            time.sleep(0.1)
+            assert index.running
+        finally:
+            index.stop()
+    warnings = [r for r in caplog.records if "journal watch stopped" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None  # a non-OSError keeps its traceback

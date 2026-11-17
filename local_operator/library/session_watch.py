@@ -96,6 +96,10 @@ ROOT_MASK: Final = (
 #: create/move pair catches ``os.replace`` of a sidecar or journal.
 SESSION_MASK: Final = (
     IN_MODIFY
+    # No IN_DELETE_SELF/IN_MOVE_SELF here: a session directory's removal
+    # already arrives as the root's IN_DELETE/IN_MOVED_FROM (which drops its
+    # watch and re-queues the id), and the kernel's IN_IGNORED, which every
+    # watch receives when it goes away, clears the stale wd mapping.
     | IN_ATTRIB
     | IN_CLOSE_WRITE
     | IN_CREATE
@@ -124,7 +128,7 @@ class _Syscalls:
     """The three inotify syscalls. A seam: tests replace it to count watches."""
 
     def __init__(self) -> None:
-        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        libc = self._libc()
         self._init1 = libc.inotify_init1
         self._init1.argtypes = [ctypes.c_int]
         self._init1.restype = ctypes.c_int
@@ -134,6 +138,24 @@ class _Syscalls:
         self._rm = libc.inotify_rm_watch
         self._rm.argtypes = [ctypes.c_int, ctypes.c_int]
         self._rm.restype = ctypes.c_int
+
+    @staticmethod
+    def _libc() -> ctypes.CDLL:
+        """The process's own symbols first, a named libc second.
+
+        ``CDLL(None)`` is ``dlopen(NULL)``: the libc CPython is already linked
+        against, with no lookup cost. ``find_library`` is the fallback only,
+        because on Linux it may spawn ``ldconfig``/``gcc`` subprocesses to
+        search for the library. A failure here raises to the indexer, which
+        falls back to the timed reconcile.
+        """
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            libc.inotify_init1  # noqa: B018 - probe the symbol
+            return libc
+        except AttributeError:
+            name = ctypes.util.find_library("c") or "libc.so.6"
+            return ctypes.CDLL(name, use_errno=True)
 
     @staticmethod
     def _error(path: str | None = None) -> OSError:
@@ -284,6 +306,24 @@ class SessionDirWatch:
             self._session_wd[name] = wd
         return True
 
+    def _rescan_sessions(self) -> list[str]:
+        """Watch every session directory that lacks one. Raises on budget.
+
+        Returns the names newly watched. Only adds: a directory whose removal
+        event was lost leaves a mapping to a wd the kernel no longer fires
+        (and ``_add_session`` overwrites one it reuses), while the reconcile
+        the overflow triggers drops that session's assets.
+        """
+        with os.scandir(self.root) as entries:
+            names = sorted(e.name for e in entries if e.is_dir(follow_symlinks=False))
+        with self._lock:
+            missing = [name for name in names if name not in self._session_wd]
+        added = [name for name in missing if self._add_session(name)]
+        for name in added:
+            # Files may have landed before the watch did, as on IN_CREATE.
+            self._on_session(name)
+        return added
+
     def _drop_session(self, name: str, *, rm: bool) -> None:
         with self._lock:
             wd = self._session_wd.pop(name, None)
@@ -356,6 +396,15 @@ class SessionDirWatch:
 
     def _event(self, wd: int, mask: int, name: str) -> None:
         if mask & IN_Q_OVERFLOW:
+            # Events were lost, possibly including a session directory's
+            # IN_CREATE: without its watch that session's later writes would
+            # stay invisible until the slow reconcile. Rescan first so the
+            # reconcile the callback triggers reads into a complete watch set.
+            try:
+                self._rescan_sessions()
+            except OSError as error:
+                self._fail(error)
+                return
             if self._on_overflow is not None:
                 self._on_overflow()
             return
