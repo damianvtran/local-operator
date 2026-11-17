@@ -244,6 +244,41 @@ def _resolved_executable() -> Path:
     return Path(os.path.realpath(executable)) if executable else Path(executable)
 
 
+def _module_command(python: Path, *args: str) -> list[str]:
+    """``python -B -P -m local_operator <args>``: how the controller runs a generation.
+
+    One builder for both launches (preparation and the post-flip tail) so the
+    module route is pinned by ``tests/unit/test_main_module.py``, which runs the
+    argv this returns for real. ``-m local_operator`` needs
+    ``local_operator/__main__.py``; its absence made every tail exit 1 with
+    "No module named local_operator.__main__". ``-B`` keeps the generation
+    tree free of fresh bytecode; ``-P`` keeps the caller's cwd off
+    ``sys.path`` so a checkout there cannot shadow the installed package.
+    """
+    return [str(python), "-B", "-P", "-m", "local_operator", *args]
+
+
+def _tail_command(python: Path, promoted: Path, target: str, *, no_services: bool) -> list[str]:
+    """The post-flip tail argv ``controller`` hands to the CURRENT generation.
+
+    Factored out of ``controller`` only so ``tests/unit/test_main_module.py``
+    can launch this exact argv as a real subprocess: the tail is the launch
+    that regressed (it is spawned after the core flip, so a failure there is
+    reported as "central services remain pending" and nothing else notices).
+    """
+    command = _module_command(
+        python,
+        "update",
+        "--controller-tail",
+        str(promoted),
+        "--controller-target",
+        target,
+    )
+    if no_services:
+        command += ["--no-services"]
+    return command
+
+
 def bootstrap(args: argparse.Namespace) -> int:
     if args.caller != CALLER_CONTRACT:
         raise BootstrapError(
@@ -294,12 +329,8 @@ def bootstrap(args: argparse.Namespace) -> int:
         fresh = destination(args.root, args.baseline)
         if (fresh.device, fresh.inode) != (initial.device, initial.inode):
             raise BootstrapError("destination root was replaced during controller preparation")
-        command = [
-            str(python),
-            "-B",
-            "-P",
-            "-m",
-            "local_operator",
+        command = _module_command(
+            python,
             "update",
             "--controller-root",
             str(initial.root),
@@ -313,7 +344,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             args.caller,
             "--controller-target",
             version,
-        ]
+        )
         if args.snapshot is not None:
             command += ["--from-snapshot", args.snapshot]
         if args.no_services:
@@ -438,20 +469,7 @@ def controller(args: argparse.Namespace) -> int:
         raise BootstrapError("core promoted but current is unreadable; services pending")
     python_name = "Scripts/python.exe" if os.name == "nt" else "bin/python"
     python = update._generation_install_root(now) / python_name
-    command = [
-        str(python),
-        "-B",
-        "-P",
-        "-m",
-        "local_operator",
-        "update",
-        "--controller-tail",
-        str(promoted),
-        "--controller-target",
-        target,
-    ]
-    if args.no_services:
-        command += ["--no-services"]
+    command = _tail_command(python, promoted, target, no_services=args.no_services)
     try:
         _run(
             command,
