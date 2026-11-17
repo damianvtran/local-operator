@@ -490,19 +490,25 @@ def test_s1_a_1500_deep_stamped_row_is_still_downgraded(tmp_path: Path) -> None:
     assert _rows(session / "asks.jsonl")[0]["by"]["mesh_origin"]["verified"] is False
 
 
-def test_s1_a_line_too_deep_to_decode_does_not_abort_the_walk(tmp_path: Path) -> None:
-    """json.loads raises RecursionError (not ValueError) past its own depth limit."""
+def test_s1_a_line_too_deep_to_decode_refuses_the_import(tmp_path: Path) -> None:
+    """json.loads raises RecursionError (not ValueError) past its depth limit: refuse.
+
+    Review R2-1: the limit depends on the caller's stack depth, so a line too deep
+    at the import door can still decode for a shallower reader. Skipping it left a
+    ``verified: true`` stamp such a reader would trust; the import must refuse.
+    """
     session = tmp_path / "s"
     own = _stamp(by="dev-a")
     session.mkdir()
     too_deep = b'{"lop_mesh_origin": {"verified": true}, "x": ' + b"[" * 200_000 + b"]" * 200_000
     later = json.dumps({"lop_mesh_origin": own}).encode()
-    (session / "transcript.jsonl").write_bytes(too_deep + b"}\n" + later + b"\n")
+    original = too_deep + b"}\n" + later + b"\n"
+    (session / "transcript.jsonl").write_bytes(original)
 
-    assert origin.downgrade_stamps(session) == 1
-    lines = (session / "transcript.jsonl").read_bytes().split(b"\n")
-    assert lines[0] == too_deep + b"}"  # unreadable to every reader: left byte-identical
-    assert json.loads(lines[1])["lop_mesh_origin"]["verified"] is False
+    with pytest.raises(origin.ImportStampsRefused, match="too deep"):
+        origin.downgrade_stamps(session)
+    # Refused before any write-back: the door quarantines or keeps it in staging.
+    assert (session / "transcript.jsonl").read_bytes() == original
 
 
 @pytest.mark.parametrize("name", ["transcript.jsonl.gz", "transcript.jsonl.zst"])

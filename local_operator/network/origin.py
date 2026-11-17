@@ -337,13 +337,19 @@ def _downgrade_file(path: Path) -> int:
             continue
         try:
             payload = json.loads(line)
-        except (ValueError, RecursionError):
+        except RecursionError as exc:
+            # FAIL CLOSED (review R2-1). The decoder's depth limit is not a property
+            # of the line: it follows the CALLER's stack depth (a C recursion
+            # counter on 3.12, the stack pointer on 3.14). A line just past the
+            # limit here, under the import door's frames, still decodes for a
+            # reader running shallower, and that reader would see ``verified:
+            # true``. Since this line carries the stamp needle, refuse the import
+            # exactly as an un-writable lowered line does below.
+            raise ImportStampsRefused(f"{path.name}: a stamped line is too deep to lower") from exc
+        except ValueError:
             # A torn or foreign line is left byte-identical: the downgrade only
-            # LOWERS trust, and an unparseable line is never read as a stamp anyway.
-            # ``RecursionError`` is how the decoder reports nesting past ITS limit
-            # (S-1); every reader uses the same decoder, so such a line is equally
-            # unreadable to them, and skipping it keeps the walk going for the
-            # lines after it instead of aborting the whole directory.
+            # LOWERS trust, and malformed JSON is malformed for every reader at
+            # every depth, so it can never be read as a stamp.
             continue
         if _downgrade_value(payload):
             try:

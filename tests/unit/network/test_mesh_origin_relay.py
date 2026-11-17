@@ -382,7 +382,8 @@ def test_s1_s2_move_promote_refuses_cleanly(
     if case == "oserror_partway":
         _fail_on_second_file(monkeypatch)
     outcome = mobility._promote(cast(Any, SimpleNamespace(root=root)), staged, "moved0000001")
-    assert outcome == mobility._PROMOTE_REFUSED
+    # Q-1: refused with its OWN outcome, so the reply names the real cause.
+    assert outcome == mobility._PROMOTE_STAMPS_REFUSED
     assert not (root / "sessions" / "moved0000001").exists()
     _assert_no_verified_copy(root)
 
@@ -450,3 +451,171 @@ def test_s1_s2_replica_promote_refuses_and_quarantines(
     quarantined = sync.network_dir(root) / sync.QUARANTINE_DIRNAME / "recovered0001"
     assert quarantined.is_dir()
     assert not (quarantined / ".session.pid").exists()
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (R2-1): the decoder's depth limit follows the CALLER's stack
+# depth (a C recursion counter on 3.12, the stack pointer on 3.14), so a line too
+# deep for the import door can still decode for a reader running shallower. The
+# door must refuse such a line, never skip it with ``verified: true`` in place.
+# ---------------------------------------------------------------------------
+
+#: C frames the import runs under. Each level goes through ``map`` (a C call back
+#: into Python), which lowers the decoder's limit on both 3.12 and 3.14; plain
+#: Python recursion does not on 3.12. 50 levels measured ~100 decode levels of gap
+#: on 3.12.15 and ~350 on 3.14.9, far more than the door's own extra frames need.
+_IMPORT_C_DEPTH = 50
+
+
+def _c_nested(levels: int, fn: Any) -> Any:
+    if levels == 0:
+        return fn()
+    return list(map(lambda _: _c_nested(levels - 1, fn), [0]))[0]
+
+
+def _decode_limit() -> int:
+    """Deepest ``[[...]]`` json.loads accepts at the CURRENT stack depth."""
+
+    def decodes(depth: int) -> bool:
+        try:
+            json.loads("[" * depth + "]" * depth)
+        except RecursionError:
+            return False
+        return True
+
+    low, high = 1, 1_000_000
+    while low < high:
+        middle = (low + high + 1) // 2
+        if decodes(middle):
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def _line_too_deep_at_the_door() -> str:
+    """A verified stamp row that fails to decode at the door yet decodes at the top."""
+    limit = _c_nested(_IMPORT_C_DEPTH, _decode_limit)
+    # The outer object is one level, so ``limit`` list levels total limit + 1.
+    head = json.dumps({"lop_mesh_origin": OWN})[:-1]
+    line = head + ', "pad": ' + "[" * limit + "]" * limit + "}"
+
+    def reader() -> Any:
+        return json.loads(line)
+
+    with pytest.raises(RecursionError):
+        _c_nested(_IMPORT_C_DEPTH, reader)
+    # The hazard itself: a shallower reader (this frame) decodes it as verified.
+    assert reader()["lop_mesh_origin"]["verified"] is True
+    return line
+
+
+def test_r2_1_move_door_refuses_a_line_too_deep_at_its_depth(tmp_path: Path) -> None:
+    root = tmp_path / "config"
+    staged = _staged_move(root)
+    line = _line_too_deep_at_the_door()
+    with (staged / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+    outcome = _c_nested(
+        _IMPORT_C_DEPTH,
+        lambda: mobility._promote(cast(Any, SimpleNamespace(root=root)), staged, "moved0000001"),
+    )
+    assert outcome == mobility._PROMOTE_STAMPS_REFUSED
+    assert not (root / "sessions" / "moved0000001").exists()
+    _assert_no_verified_copy(root)
+
+
+def test_r2_1_replica_door_refuses_a_line_too_deep_at_its_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, session_id = _replica(tmp_path)
+    line = _line_too_deep_at_the_door()
+    with (sync.replica_dir(root, session_id) / "transcript.jsonl").open(
+        "a", encoding="utf-8"
+    ) as handle:
+        handle.write(line + "\n")
+    # A hostile owner's plan covers the line it wrote; the door is under test here.
+    monkeypatch.setattr(sync, "_verify_replica_against_cursor", lambda *a, **k: None)
+
+    def recover() -> None:
+        sync.promote_replica(root, session_id, new_id="recovered0001")
+
+    with pytest.raises(sync.SyncRefused, match="too deep"):
+        _c_nested(_IMPORT_C_DEPTH, recover)
+    assert not (root / "sessions" / "recovered0001").exists()
+    _assert_no_verified_copy(root)
+    assert (sync.network_dir(root) / sync.QUARANTINE_DIRNAME / "recovered0001").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# R2-2: the refused copy leaves ``sessions/`` WHILE STILL CLAIMED, so nothing ever
+# sees an unclaimed copy there; if it cannot leave, the claim stays.
+# ---------------------------------------------------------------------------
+
+
+def _refusing_replica(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
+    root, session_id = _replica(tmp_path)
+
+    def boom(path: Path) -> int:
+        raise origin.ImportStampsRefused("injected")
+
+    monkeypatch.setattr(origin, "_downgrade_file", boom)
+    return root, session_id
+
+
+def test_r2_2_quarantine_moves_the_copy_before_releasing_its_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    root, session_id = _refusing_replica(tmp_path, monkeypatch)
+    real_rename = os.rename
+    claimed_at_move: list[bool] = []
+
+    def watching_rename(src: Any, dst: Any) -> None:
+        if sync.QUARANTINE_DIRNAME in Path(dst).parts:
+            claimed_at_move.append((Path(src) / ".session.pid").exists())
+        real_rename(src, dst)
+
+    monkeypatch.setattr(sync.os, "rename", watching_rename)
+    with pytest.raises(sync.SyncRefused):
+        sync.promote_replica(root, session_id, new_id="recovered0001")
+    assert claimed_at_move == [True]
+    quarantined = sync.network_dir(root) / sync.QUARANTINE_DIRNAME / "recovered0001"
+    assert quarantined.is_dir()
+    assert not (quarantined / ".session.pid").exists()  # released once it was out
+    _assert_no_verified_copy(root)
+
+
+def test_r2_2_a_failed_quarantine_keeps_the_claim_and_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    root, session_id = _refusing_replica(tmp_path, monkeypatch)
+    real_rename = os.rename
+
+    def failing_rename(src: Any, dst: Any) -> None:
+        if sync.QUARANTINE_DIRNAME in Path(dst).parts:
+            raise OSError("injected: quarantine unavailable")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(sync.os, "rename", failing_rename)
+    with pytest.raises(sync.SyncRefused):
+        sync.promote_replica(root, session_id, new_id="recovered0001")
+    # Still under sessions/, so it stays claimed: listings and sweeps skip it.
+    assert (root / "sessions" / "recovered0001" / ".session.pid").exists()
+
+
+# ---------------------------------------------------------------------------
+# Q-1: a downgrade refusal is not an id collision; the reply says which it was.
+# ---------------------------------------------------------------------------
+
+
+def test_q1_refusal_reply_names_the_real_cause() -> None:
+    stamps = mobility._promote_refusal_detail("moved0000001", mobility._PROMOTE_STAMPS_REFUSED)
+    assert "origin stamps could not be lowered" in stamps
+    assert "already exists" not in stamps
+    collision = mobility._promote_refusal_detail("moved0000001", mobility._PROMOTE_REFUSED)
+    assert "already exists on this device" in collision

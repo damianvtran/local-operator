@@ -3878,7 +3878,7 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
             )
 
 
-def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> None:
+def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> bool:
     """Move a refused recovery's partial copy out of ``sessions/`` (S-1).
 
     Before the origin-stamp work a refused copy was simply left un-promoted under
@@ -3891,9 +3891,15 @@ def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> None:
     ``target`` was created by this call (``promote_replica`` refuses an existing
     one before claiming), so only this call's own bytes move. Best-effort: a
     rename that fails is logged and the original refusal still propagates.
+
+    CALLED WHILE THE COPY IS STILL CLAIMED (review R2-2), and it carries its
+    ``.session.pid`` out with it. Returns True once nothing is left at ``target``
+    (moved, or never there), having dropped that claim at the landing; False when
+    the rename failed, with the claim KEPT, so the copy left under ``sessions/``
+    still reads as owned to listings and sweeps for as long as this process lives.
     """
     if not target.exists() or target.is_symlink():
-        return
+        return True
     holding = network_dir(root) / QUARANTINE_DIRNAME
     try:
         holding.mkdir(parents=True, exist_ok=True)
@@ -3905,8 +3911,17 @@ def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> None:
         logger.error(
             "sync: a refused recovery of %s could not be moved out of sessions/: %s", new_id, exc
         )
-        return
+        return False
     logger.warning("sync: the refused recovery of %s was moved to %s", new_id, landing)
+    # ``release_session`` only acts under ``sessions/``, so the claim that moved
+    # with the copy is dropped here, at its new path.
+    from local_operator.session.retention import LIVE_MARKER_NAME
+
+    try:
+        (landing / LIVE_MARKER_NAME).unlink()
+    except OSError:
+        pass
+    return True
 
 
 def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[str, Any]:
@@ -4086,7 +4101,12 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         # predicts (``ImportStampsRefused`` for a compressed journal, a row crafted
         # to break the parser). The old handler let those escape, skipping the
         # claim release and leaving the copy in place with its stamps verified.
-        release_session(target)
+        #
+        # MOVE FIRST, THEN RELEASE (review R2-2): releasing first left an
+        # UNCLAIMED copy under ``sessions/`` (whose stamps may still read
+        # verified) for listings and sweeps to pick up, briefly, or for good if
+        # the move then failed. The quarantine drops the claim at the landing; a
+        # failed move keeps it, and the refusal below still propagates.
         _quarantine_refused_recovery(Path(root), target, new_id)
         if isinstance(exc, SyncRefused):
             raise

@@ -2156,8 +2156,7 @@ def _destination_move(
             _move_refusal(
                 session_id,
                 "in_progress",
-                f"{target_id} could not be adopted here because a session with that id "
-                "already exists on this device; nothing was changed",
+                _promote_refusal_detail(target_id, promote_outcome),
                 phase_reached="handing_off",
                 changed=True,
             ),
@@ -2415,7 +2414,7 @@ def _finish_from_tombstone(
             _move_refusal(
                 session_id,
                 "in_progress",
-                f"{session_id} already exists on this device; nothing was changed",
+                _promote_refusal_detail(session_id, promote_outcome),
                 phase_reached="handing_off",
                 changed=True,
             ),
@@ -2460,14 +2459,41 @@ class _PromoteOutcome(NamedTuple):
     ``None`` unless the arriving session carried wakes — the block the move's
     receipt reports (see :class:`MoveCarryBlock`), which is the half a bool
     could never carry out of the promote.
+
+    ``stamps_refused`` (QA Q-1) marks the one refusal that is NOT about the id
+    already being taken here: the copy's origin stamps could not be lowered to
+    ``verified: false``. The callers word their reply from it, so the operator is
+    not told about a collision that never happened.
     """
 
     ok: bool
     carry: dict[str, Any] | None
+    stamps_refused: bool = False
 
 
-#: Every refusal ``_promote`` answers with: nothing landed, nothing carried.
+#: The refusal ``_promote`` answers with when the id is taken or the copy could
+#: not land: nothing landed, nothing carried.
 _PROMOTE_REFUSED = _PromoteOutcome(ok=False, carry=None)
+#: The refusal for an imported copy whose origin stamps could not be lowered.
+_PROMOTE_STAMPS_REFUSED = _PromoteOutcome(ok=False, carry=None, stamps_refused=True)
+
+
+def _promote_refusal_detail(target_id: str, outcome: _PromoteOutcome) -> str:
+    """The reply for a refused promote, naming its real cause (QA Q-1).
+
+    Shared by ``_destination_move`` and ``_finish_from_tombstone`` so both say
+    the same thing. This module words its replies inline rather than through
+    i18n keys, so this follows suit.
+    """
+    if outcome.stamps_refused:
+        return (
+            f"{target_id} could not be adopted here because its origin stamps could not "
+            "be lowered to unverified; nothing was changed"
+        )
+    return (
+        f"{target_id} could not be adopted here because a session with that id "
+        "already exists on this device; nothing was changed"
+    )
 
 
 def _validated_session_id(value: Any) -> str:
@@ -2680,7 +2706,7 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         logger.warning(
             "mobility: could not lower the imported origin stamps of %s: %s", target_id, exc
         )
-        return _PROMOTE_REFUSED
+        return _PROMOTE_STAMPS_REFUSED
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(str(source), str(target))
