@@ -3748,6 +3748,28 @@ def effort_displacement(selected: Any, effective: Any, chosen: str | None = None
 ATTACH_FRAME_ATTENTION_OMITTED_KEYS: frozenset[str] = frozenset({"origin", "needs_user"})
 
 
+def attach_frame_attention(value: Any) -> Any:
+    """``value`` minus :data:`ATTACH_FRAME_ATTENTION_OMITTED_KEYS` — the attach projection.
+
+    ONE function every attach write path calls, because no single pydantic hook
+    covers them all: construction and the follower ``apply`` run the
+    ``FrontendSessionState`` field validator, but the publisher's live refresh
+    (``FrontendStateStore.mutate``) validates per field through a bare
+    ``TypeAdapter`` and installs with ``model_copy`` — neither runs the model
+    validator — and the desktop bridge builds its local frames from raw
+    ``AttentionStore.state`` (review round 3, R3-1/R3-2). Why the keys stay off:
+    ``FrontendSessionState._attention_wire``. Non-dicts and dicts without the
+    keys come back as the same object, so the common path allocates nothing.
+    """
+    if isinstance(value, dict) and any(key in value for key in ATTACH_FRAME_ATTENTION_OMITTED_KEYS):
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in ATTACH_FRAME_ATTENTION_OMITTED_KEYS
+        }
+    return value
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 
@@ -4100,19 +4122,13 @@ class FrontendSessionState(BaseModel):
         pre-ADR-0009 shape; a future surface that needs them over attach must
         add them back here, with a cap and a size-policy review.
 
-        Validated at construction rather than stripped at one call site, so
-        both the snapshot build and ``FrontendStateStore``'s
-        ``model_validate`` refresh path apply it.
+        This validator covers construction, ``model_validate`` (the initial
+        refresh) and the follower ``apply``. Paths that bypass model validation
+        — ``FrontendStateStore.mutate`` (the publisher's live refresh) and the
+        desktop bridge's local attention frames — call
+        :func:`attach_frame_attention` themselves; see its docstring.
         """
-        if isinstance(value, dict) and any(
-            key in value for key in ATTACH_FRAME_ATTENTION_OMITTED_KEYS
-        ):
-            return {
-                key: item
-                for key, item in value.items()
-                if key not in ATTACH_FRAME_ATTENTION_OMITTED_KEYS
-            }
-        return value
+        return attach_frame_attention(value)
 
     @field_validator("last_usage", mode="before")
     @classmethod
@@ -7979,6 +7995,13 @@ class FrontendStateStore:
                     wire_changes[key] = candidate_jobs
                 continue
             candidate = _json_value(value)
+            if key == "attention":
+                # ``_validate_state_field`` and ``model_copy`` below never run the
+                # model's attention validator, so the attach projection is applied
+                # HERE — before the equality check, so a change confined to the
+                # omitted keys is no change at all, and before ``wire_changes``,
+                # so the update frame matches the installed state (R3-1).
+                candidate = attach_frame_attention(candidate)
             # Serialize only fields the caller proposes changing. Dumping the
             # complete state here cloned every retained trajectory even for a
             # one-bit streaming update, turning unrelated UI reads into stalls.

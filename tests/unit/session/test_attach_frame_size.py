@@ -7377,3 +7377,34 @@ def test_peer_cycle_budget_marker_withholds_without_revoking_loaded_proof() -> N
     untouched = {"peer_cycle_display": dict(refusal)}
     _bound_peer_cycle_display_in_place(untouched)
     assert untouched["peer_cycle_display"] == refusal
+
+
+def test_the_live_refresh_keeps_adr_0009_routing_facts_off_the_attach_frame() -> None:
+    """``mutate`` — the publisher's live refresh — strips ``origin``/``needs_user`` too.
+
+    Review round 3, R3-1: construction ran the model's attention validator, but
+    ``refresh_from_session(initial=False)`` goes through ``mutate``, whose
+    per-field ``TypeAdapter`` and ``model_copy`` install never do. So after the
+    first live attention change the uncapped ``origin`` rode the stored state,
+    the update frame and every later attach snapshot. Pins all three, with the
+    4000-character origin the reviewer's repro used, and that a change confined
+    to the omitted keys is no change on the wire.
+    """
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    updates: list[FrontendUpdate] = []
+    store.subscribe(updates.append)
+    raw = {"unseen": True, "completion_token": "t", "origin": "o" * 4000, "needs_user": True}
+
+    update = store.mutate(attention=dict(raw))
+
+    projected = {"unseen": True, "completion_token": "t"}
+    assert store.state.attention == projected
+    assert update is not None
+    assert update.changes["attention"] == projected
+    assert [u.changes["attention"] for u in updates] == [projected]
+    snapshot = sync_wire_payload(store.subscribe(lambda _u: None).sync)["snapshot"]
+    assert snapshot["attention"] == projected
+    assert "o" * 4000 not in json.dumps(snapshot)
+
+    # Only the routing facts moved: nothing the frame carries changed.
+    assert store.mutate(attention={**raw, "origin": "phone", "needs_user": False}) is None
