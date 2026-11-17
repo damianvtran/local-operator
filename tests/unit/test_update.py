@@ -1297,7 +1297,14 @@ def test_services_stage_on_a_generation_install_moves_the_supervised_units(
     report = update._services_stage()
 
     assert order == ["daemons", "serve"], "the supervised units must move on this path"
-    assert calls == [{"wait_s": services.RELOAD_WAIT_S, "rolling": True}]
+    # The update also hands the serve move its bounded background retry (fix B).
+    assert calls == [
+        {
+            "wait_s": services.RELOAD_WAIT_S,
+            "rolling": True,
+            "schedule_retry": update.schedule_serve_move_retry,
+        }
+    ]
     assert report.daemons == (update.DaemonStatus("mobile", "refreshed"),)
 
 
@@ -1332,7 +1339,14 @@ def test_services_stage_on_a_mutable_install_keeps_the_non_rolling_reload(
     report = update._services_stage()
 
     assert order == ["daemons", "serve"]
-    assert calls == [{"wait_s": services.RELOAD_WAIT_S, "rolling": False}]
+    # The update also hands the serve move its bounded background retry (fix B).
+    assert calls == [
+        {
+            "wait_s": services.RELOAD_WAIT_S,
+            "rolling": False,
+            "schedule_retry": update.schedule_serve_move_retry,
+        }
+    ]
     assert report.daemons == statuses
 
 

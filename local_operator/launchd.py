@@ -108,6 +108,10 @@ PlistRefreshKind = Literal[
     "revived",
     "left-stopped",
     "failed",
+    # The running process is provably on a superseded generation and a rule
+    # forbade moving it (``detail`` says which). Reported, never silent: see
+    # ``update._systemd_restart_if_build_moved``.
+    "stale",
 ]
 
 ReloadOutcome = Literal["reloaded", "not-addressable", "failed"]
@@ -311,6 +315,11 @@ class PlistRefresh:
         """
         if self.kind == "failed":
             return f"warning: {self.name} daemon was not refreshed: {self.detail}"
+        if self.kind == "stale":
+            # A LEFT-ON-PURPOSE daemon is still a daemon on an old build, so it
+            # is a warning: silence here is what let three Linux daemons sit
+            # one to two releases behind a "complete" update (2026-11-17).
+            return f"warning: {self.name} daemon is still on an older build: {self.detail}"
         return ""
 
 
