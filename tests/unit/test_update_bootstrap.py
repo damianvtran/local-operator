@@ -294,6 +294,49 @@ def test_a_superseded_tail_is_not_sent_a_flag_its_release_may_not_know(
     assert "--controller-previous" not in command
 
 
+def test_a_snapshot_tail_is_not_sent_controller_previous(
+    destination, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 3, R3-1: a snapshot may predate the flag, so it is never sent.
+
+    ``--from-snapshot`` admits a same-or-newer-numbered build of ANY commit, so
+    even when the tail runs from the build this run promoted, its parser may
+    reject ``--controller-previous`` (argparse exit 2 → PARTIAL). Fails on
+    b39c7004, which gated the flag on ``now == promoted`` alone.
+    """
+    from types import SimpleNamespace
+
+    from local_operator import update
+
+    root, generation = destination
+    _order, commands, promoted, args = _fake_controller_world(
+        monkeypatch, root, generation, current_after_flip="promoted"
+    )
+    snapshot_dir = root.parent / "snapshot-src"
+    snapshot_dir.mkdir()
+    snapshot = SimpleNamespace(
+        path=snapshot_dir, commit="c" * 40, ref="main", version=TARGET, temporary=False
+    )
+    monkeypatch.setattr(update, "resolve_snapshot", lambda _spec: snapshot)
+    monkeypatch.setattr(
+        update, "classify_snapshot_downgrade", lambda _s: SimpleNamespace(is_downgrade=False)
+    )
+    monkeypatch.setattr(
+        update,
+        "classify_snapshot_install",
+        lambda _s: SimpleNamespace(install_from_wheel=False, version=TARGET),
+    )
+    args.from_snapshot = str(snapshot_dir)
+
+    assert bootstrap.controller(args) == 0
+
+    # Precondition: the tail really runs from the promoted build (the case the
+    # old gate sent the flag in); only the snapshot route withholds it.
+    (command,) = commands
+    assert _flag(command, "--controller-tail") == str(promoted)
+    assert "--controller-previous" not in command
+
+
 def _run_tail(
     monkeypatch: pytest.MonkeyPatch, root: Path, argv: list[str], promoted: Path
 ) -> list[tuple[Path | None, Path | None]]:

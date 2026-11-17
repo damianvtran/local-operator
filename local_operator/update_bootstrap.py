@@ -465,7 +465,13 @@ def controller(args: argparse.Namespace) -> int:
     # this release's code and accepts the flag. A superseding current may be an
     # older release whose parser rejects unknown flags; that tail would exit 2
     # and turn a committed core into PARTIAL. Omitted, it reclaims as before.
-    if now.resolve() == Path(promoted).resolve():
+    #
+    # And ONLY on the published route (review round 3, R3-1): `--from-snapshot`
+    # admits any same-or-newer-numbered build, including a commit from before
+    # this flag existed, so `now == promoted` alone does not prove the tail's
+    # parser knows it. Without a snapshot the promoted build is the verified
+    # published `version`, i.e. this controller's own release.
+    if args.from_snapshot is None and now.resolve() == Path(promoted).resolve():
         command += ["--controller-previous", str(dest.baseline)]
     if args.no_services:
         command += ["--no-services"]

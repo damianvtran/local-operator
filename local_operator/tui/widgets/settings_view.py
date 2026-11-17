@@ -366,10 +366,19 @@ def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style")
 #: ``update.keep_generations`` — "… are always kept" is what makes keep=0 a
 #: safe value to type, and QA's render at 80/100/120 cols (PR #4135) showed the
 #: one-row ladder cutting it in en and fr. Keep this list SHORT: every member
-#: trades the band's blank top row for a second line of help, and the band
-#: height stays fixed at two rows, so a sentence needing three still falls to
-#: the marked cut.
+#: trades the band's blank top row for a second line of help and may GROW the
+#: band to :data:`_DETAIL_WRAP_MAX_ROWS` rows (taken from the list), so a
+#: sentence needing more than that still falls to the marked cut.
 _WRAPPED_HELP_KEYS: frozenset[str] = frozenset({"update.keep_generations"})
+
+#: Most rows the detail band may grow to for a :data:`_WRAPPED_HELP_KEYS` row.
+#: QA round 2, Q1 (PR #4135): two rows were not enough — the fr keep help (196
+#: cells) was cut at 80 and 100 cols, losing its "Toujours conservées : …"
+#: guarantee. Four holds that sentence down to ~50-cell rows. Capped rather
+#: than unbounded because every extra row comes out of the settings LIST while
+#: the cursor sits on that one row; past the cap the marked cut is the honest
+#: floor. Bridge rows keep the fixed two-row band (design round 1, D4).
+_DETAIL_WRAP_MAX_ROWS = 4
 
 
 def _help_wraps(setting: settings_io.Setting, *, bridge_row: bool) -> bool:
@@ -1019,6 +1028,11 @@ class SettingsView(Vertical):
         #: detail repaints on every cursor move, and an unconditional style
         #: write would dirty the chrome each time.
         self._detail_two_line = False
+        #: Rows the detail band is laid out with: the stylesheet's 2, or up to
+        #: `_DETAIL_WRAP_MAX_ROWS` while a listed help wraps past two rows.
+        #: Counted by `_chrome_rows` so the list and pane budgets give those
+        #: rows up rather than overrunning the view (QA round 2, Q1).
+        self._detail_rows = 2
         self._hovered: int | None = None
         #: Key of the row whose enum choices are expanded, or None. One at a
         #: time: two open dropdowns in a vertical list make the second one's
@@ -3793,7 +3807,18 @@ class SettingsView(Vertical):
             self._selected = min(indices, key=lambda index: abs(index - self._selected))
         self._paint_list()
         self._paint_pane()
+        band_rows = self._detail_rows
         self._paint_detail()
+        if self._detail_rows != band_rows:
+            # The detail band just grew or shrank (a listed help wrapping past
+            # two rows, QA round 2 Q1), so the list and pane were budgeted
+            # against the old chrome height: repaint them against the new one
+            # and re-park the cursor, which the grown band may now cover. Only
+            # on that flip — the detail decides its height from the cursor row,
+            # so it cannot be known before `_paint_detail` runs.
+            self._paint_list()
+            self._paint_pane()
+            self._scroll_to_selection()
         self._paint_chrome()
 
     def _paint_list(self) -> None:
@@ -4680,7 +4705,7 @@ class SettingsView(Vertical):
             return bridge_ink
 
         text = Text(no_wrap=True, overflow="ellipsis")
-        wrap_used = False
+        wrap_rows = 0
         row = self._current()
         question, contract = self._confirm_parts()
         if self._too_short:
@@ -5091,10 +5116,15 @@ class SettingsView(Vertical):
                     # organization" — so it renders across the detail band's
                     # two rows while it needs both. The band keeps its total
                     # height; only the blank top row yields (see
-                    # `_apply_detail_padding`). A sentence that cannot fit
+                    # `_apply_detail_padding`) — except a `_WRAPPED_HELP_KEYS`
+                    # row, which may grow the band (QA round 2, Q1). A sentence that cannot fit
                     # even wrapped falls through to the rungs below, whose
                     # truncation carries its own visible mark.
-                    lines = _wrap_cells(help_text, width, max_lines=2)
+                    # Listed help rows may take up to `_DETAIL_WRAP_MAX_ROWS`
+                    # (QA round 2, Q1) as far as the list can spare them;
+                    # bridge rows keep the fixed two-row band (D4).
+                    max_lines = 2 if bridge_row else self._detail_wrap_budget()
+                    lines = _wrap_cells(help_text, width, max_lines=max_lines)
                     # The wrapped help is the ONLY text in the band, which is
                     # D5's `dim` case (`help_alone_part`), not `faint` (1.97:1)
                     # — review round 2, R2-2, for `_WRAPPED_HELP_KEYS` rows.
@@ -5102,10 +5132,10 @@ class SettingsView(Vertical):
                     wrap_style = help_style if (bridge_row or recording_row) else help_alone_part[1]
                     if lines:
                         text.append(lines[0], style=wrap_style)
-                        if len(lines) == 2:
+                        for line in lines[1:]:
                             text.append("\n")
-                            text.append(lines[1], style=wrap_style)
-                            wrap_used = True
+                            text.append(line, style=wrap_style)
+                        wrap_rows = len(lines) if len(lines) > 1 else 0
                         break
                     continue
                 rendered = self._join_detail(rung)
@@ -5128,7 +5158,7 @@ class SettingsView(Vertical):
                     # long string is ugly rather than silently broken.
                     text.append(truncate_cells(rendered.plain, width), style=rung[0][1])
                     break
-        self._apply_detail_padding(wrap_used)
+        self._apply_detail_padding(wrap_rows)
         self._detail_text = text
         # The one surface that legitimately changes on every move (it describes
         # the cursor row), so this elides nothing in the common case — it is
@@ -5214,7 +5244,7 @@ class SettingsView(Vertical):
                 return Text(rung, style=style)
         return Text(truncate_cells(floor, width), style=style)
 
-    def _apply_detail_padding(self, two_line: bool) -> None:
+    def _apply_detail_padding(self, wrap_rows: int) -> None:
         """Release the detail band's blank top row while a wrap needs both rows.
 
         The band is `height: 2` with a deliberate blank first row (its own
@@ -5225,12 +5255,46 @@ class SettingsView(Vertical):
         round 1, D4). Touched only when the MODE flips: this runs on every
         paint, and an unconditional style write would dirty the chrome each
         time.
+
+        Generalised for QA round 2, Q1 (PR #4135): ``wrap_rows`` is how many
+        rows the wrapped help occupies (0 when nothing wrapped). Past two, the
+        band GROWS to that many rows — only ever for a `_WRAPPED_HELP_KEYS`
+        row, bounded by `_detail_wrap_budget` — and `_chrome_rows` counts the
+        growth so the list and pane shrink by the same rows instead of the page
+        overflowing. Bridge rows never exceed two, so D4's fixed band holds for
+        them. Clearing the inline height (None) hands the band back to the
+        stylesheet's `height: 2`.
         """
 
-        if two_line == self._detail_two_line:
-            return
-        self._detail_two_line = two_line
-        self._detail.styles.padding = (0, 0, 0, 0) if two_line else (1, 0, 0, 0)
+        two_line = wrap_rows >= 2
+        band_rows = max(wrap_rows, 2)
+        if two_line != self._detail_two_line:
+            self._detail_two_line = two_line
+            self._detail.styles.padding = (0, 0, 0, 0) if two_line else (1, 0, 0, 0)
+        if band_rows != self._detail_rows:
+            self._detail_rows = band_rows
+            self._detail.styles.height = band_rows if band_rows > 2 else None
+
+    def _detail_wrap_budget(self) -> int:
+        """Rows a listed help may wrap across: 2 up to `_DETAIL_WRAP_MAX_ROWS`.
+
+        Rows above the stylesheet's two come out of the settings list, so the
+        band grows only while the list keeps its `_BODY_MIN_ROWS` floor — the
+        same floor the height ladder defends (#431). Measured against the body
+        the page would have with a TWO-row band, so the budget does not depend
+        on whatever the band grew to on the previous paint. Before layout
+        (height 0) it is 2: the mount frame keeps the stylesheet band.
+        """
+
+        try:
+            height = self.size.height
+        except Exception:
+            height = 0
+        if height <= 0:
+            return 2
+        body_with_two_row_band = self._body_rows() + (self._detail_rows - 2)
+        spare = max(body_with_two_row_band - _BODY_MIN_ROWS, 0)
+        return min(_DETAIL_WRAP_MAX_ROWS, 2 + spare)
 
     @staticmethod
     def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:
@@ -5848,6 +5912,9 @@ class SettingsView(Vertical):
             rows -= 1
         if not self._chrome_pad:
             rows -= 1
+        # A listed help wrapped past the band's two rows (QA round 2, Q1):
+        # those rows are chrome while the cursor sits on that row.
+        rows += self._detail_rows - 2
         return rows
 
     def _apply_height_ladder(self) -> None:
