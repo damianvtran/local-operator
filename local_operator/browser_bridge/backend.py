@@ -711,12 +711,21 @@ def format_error(
         # had no tab to sign in to — a second round trip per site (operator
         # report, 2026-11-17). Gated on the flag, never on the host alone: an
         # older app sends no flag and opens nothing, so the text stays exactly
-        # what that app actually does.
-        if host == HOST_UI and error.data.get("opens_on_approval") is True:
+        # what that app actually does. ``opened_tab`` means that page is ALREADY
+        # open from an earlier Allow whose allow-once grant lapsed before the
+        # agent's `open`: asking for a fresh sign-in there would send the
+        # operator to redo work they finished (UX round 1, U1).
+        if host == HOST_UI and error.data.get("opened_tab") is True:
             steps += (
-                " When the user approves, the app opens this page in its browser for "
-                "them. If the site needs them to sign in, ask once: approve, sign in "
-                "in the tab that opens, then reply here."
+                " The page from an earlier approval is still open in the app's Browser: "
+                "ask the user to approve again; the page they already used comes back, "
+                "so there is no need to sign in again."
+            )
+        elif host == HOST_UI and error.data.get("opens_on_approval") is True:
+            steps += (
+                " Approving opens this page in the app's Browser. If the site needs a "
+                "sign-in, ask once: approve, sign in on the page that opens in the "
+                "app's Browser, then reply here."
             )
         return steps
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):

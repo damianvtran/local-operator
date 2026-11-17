@@ -773,16 +773,37 @@ def test_origin_not_allowed_with_opens_on_approval_asks_for_one_round_trip() -> 
     # The legacy steps survive verbatim, with the full url, ahead of the new clause.
     assert rendered.startswith(_UI_NOT_ALLOWED_LEGACY)
     assert rendered.endswith(
-        " When the user approves, the app opens this page in its browser for them. "
-        "If the site needs them to sign in, ask once: approve, sign in in the tab "
-        "that opens, then reply here."
+        " Approving opens this page in the app's Browser. If the site needs a "
+        "sign-in, ask once: approve, sign in on the page that opens in the app's "
+        "Browser, then reply here."
     )
+    assert "sign in in" not in rendered  # U4: relayable to the operator as-is
+
+
+def test_origin_not_allowed_with_opened_tab_says_approve_again_no_new_sign_in() -> None:
+    """U1: the allow-once grant lapsed before the agent's open, but the page the
+    operator signed in on is still open. The agent must ask for approval only,
+    not a second sign-in; the url stays the agent's own (never the tab's)."""
+    data = {
+        "origin": "https://example.com",
+        "url": "https://example.com/login?next=%2Fhome",
+        "opens_on_approval": True,
+        "opened_tab": True,
+    }
+    rendered = format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="ui")
+    assert rendered.startswith(_UI_NOT_ALLOWED_LEGACY)
+    assert rendered.endswith(
+        " The page from an earlier approval is still open in the app's Browser: ask the "
+        "user to approve again; the page they already used comes back, so there is no "
+        "need to sign in again."
+    )
+    assert "ask once" not in rendered
 
 
 def test_opens_on_approval_is_ignored_on_the_extension_host() -> None:
     """The flag is the desktop app's; the extension opens nothing on Allow."""
     data = {"origin": "https://example.com", "url": "https://example.com/a"}
-    flagged = {**data, "opens_on_approval": True}
+    flagged = {**data, "opens_on_approval": True, "opened_tab": True}
     assert format_error(
         _error(ErrorCode.ORIGIN_NOT_ALLOWED, flagged), action="open", host="extension"
     ) == format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="extension")

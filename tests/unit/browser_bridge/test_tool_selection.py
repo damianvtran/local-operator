@@ -578,7 +578,15 @@ _UI_ALLOWED_LEGACY = (
     "before opening it with backend='extension', call request_access with\n"
     "backend='extension'."
 )
-_OPENS_SENTENCE = "When they approve, the app opens this page in its browser for them."
+_OPENS_SENTENCE = "Approving opens this page in the app's Browser."
+_ASK_ONCE = (
+    "ask once: approve, sign in on the page that opens in the app's Browser, then reply here."
+)
+_ALREADY_OPEN = (
+    "Their page from an earlier approval is still open in the app's Browser. "
+    "Ask them to approve again; the page they already used comes back, so there is "
+    "no need to sign in again."
+)
 
 
 def test_access_text_without_app_flags_is_unchanged() -> None:
@@ -604,6 +612,36 @@ def test_access_text_without_app_flags_is_unchanged() -> None:
     assert _OPENS_SENTENCE not in pending and "same tab" not in pending
 
 
+# The await_access timeout receipt exactly as an app without the flags renders
+# it — the R4 change splices a sentence into its "Remind them" row, so the
+# no-flag row is pinned literally rather than against itself.
+_UI_TIMEOUT_LEGACY = (
+    "still pending after 120s, and the operator has not decided on this\n"
+    "origin yet:\n"
+    "https://example.com\n"
+    "Remind them to check the Local Operator desktop app's browser tab. Then:\n"
+    "- An interface is attached to this session: keep calling\n"
+    "  action='await_access' — each call waits at most 240s — until about 15\n"
+    "  MINUTES in total have gone by.\n"
+    "- Once the prompt has expired, call action='request_access' with the\n"
+    "  same url to raise a new one: that is what pings them again.\n"
+    "AN UNANSWERED PROMPT IS NOT A REFUSAL."
+)
+
+
+def test_await_timeout_without_app_flags_is_unchanged() -> None:
+    assert (
+        builtin._access_result_text(
+            "await_timeout",
+            "https://example.com",
+            host=builtin.HOST_UI_PREFIX,
+            attached=True,
+            total_s=120,
+        )
+        == _UI_TIMEOUT_LEGACY
+    )
+
+
 def test_pending_with_opens_on_approval_asks_for_one_round_trip() -> None:
     """Approving opens the page, so approve + sign in + reply is ONE errand
     (operator report, 2026-11-17) — in both the attached and unattached arms."""
@@ -617,7 +655,8 @@ def test_pending_with_opens_on_approval_asks_for_one_round_trip() -> None:
         )
         flat = " ".join(text.split())
         assert _OPENS_SENTENCE in flat
-        assert "ask once: approve, sign in in the tab that opens, then reply here." in flat
+        # U4: relayable as-is — no "sign in in", and it names where.
+        assert _ASK_ONCE in flat and "sign in in" not in flat
         # The surrounding guidance is untouched: the new sentence is additive.
         baseline = builtin._access_result_text(
             "pending", "https://example.com", host=builtin.HOST_UI_PREFIX, attached=attached
@@ -625,53 +664,142 @@ def test_pending_with_opens_on_approval_asks_for_one_round_trip() -> None:
         assert text.split("\n\n", 1)[1] == baseline.split("\n\n", 1)[1]
 
 
-def test_allowed_with_opened_tab_says_wait_then_open_the_full_url() -> None:
-    url = "https://example.com/login?next=%2Fhome"
+def test_pending_with_opened_tab_says_approve_again_no_new_sign_in() -> None:
+    """U1: the allow-once grant lapsed while the approval-opened tab is still
+    live. Re-approval brings that signed-in page back, so the agent must not
+    ask for a fresh sign-in — and the opened_tab sentence wins over the
+    ask-once one when the app sends both."""
     text = builtin._access_result_text(
-        "allowed", "https://example.com", host=builtin.HOST_UI_PREFIX, url=url, opened_tab=True
+        "pending",
+        "https://example.com",
+        host=builtin.HOST_UI_PREFIX,
+        opens_on_approval=True,
+        opened_tab=True,
     )
     flat = " ".join(text.split())
-    assert "The page is open in the desktop app's browser for the operator." in flat
-    assert f"wait for their reply, then call open url={url}:" in flat
-    assert "same tab where they left it, with no new tab and no new approval" in flat
-    assert "If you hold a browser tab, close it first, or open will navigate yours" in flat
+    assert _ALREADY_OPEN in flat
+    assert _ASK_ONCE not in flat and _OPENS_SENTENCE not in flat
+
+
+def test_await_timeout_keeps_the_one_errand_sentence() -> None:
+    """R4: the timeout reminder carries the same errand as the pending text."""
+    for flags, sentence in (
+        ({"opens_on_approval": True}, _ASK_ONCE),
+        ({"opens_on_approval": True, "opened_tab": True}, _ALREADY_OPEN),
+    ):
+        text = builtin._access_result_text(
+            "await_timeout",
+            "https://example.com",
+            host=builtin.HOST_UI_PREFIX,
+            attached=True,
+            total_s=120,
+            **flags,
+        )
+        flat = " ".join(text.split())
+        assert sentence in flat, flags
+        assert "Then: - An interface is attached" in flat
+        assert flat.endswith("AN UNANSWERED PROMPT IS NOT A REFUSAL.")
+
+
+def test_allowed_with_opened_tab_says_wait_then_open_the_full_url() -> None:
+    url = "https://accounts.example.com/oauth2/authorize?client_id=abc123&scope=openid"
+    text = builtin._access_result_text(
+        "allowed",
+        "https://accounts.example.com",
+        host=builtin.HOST_UI_PREFIX,
+        url=url,
+        opened_tab=True,
+    )
+    flat = " ".join(text.split())
+    assert "The page is open in the app's Browser for the operator." in flat
+    # U2: waiting is the rule whenever sign-in/input may be needed, and why.
+    assert (
+        "If it may need their sign-in or input, do not call open until they reply: "
+        "open hands that tab over to you." in flat
+    )
+    # U3: "same tab" is hedged, with both exceptions named.
+    assert "no new tab and no new approval" not in flat
+    assert "It normally continues in that tab." in flat
+    assert "If the site ended on another origin you get a new tab" in flat
+    assert "if you hold a browser tab open navigates yours (close it first" in flat
+    assert "still signed in via the shared session" in flat
     # The per-host warning (2026-11-02 incident) survives, and "now" does not:
     # the operator may be mid sign-in.
     assert "call request_access with backend='extension'" in flat
     assert "there now" not in flat
-    # The url is never split across rows (the model hands it back verbatim).
-    assert any(url in line for line in text.split("\n"))
+    # R3: the url is its own row, unsplit and with no trailing ":" glued on, so
+    # the card's per-row clip can only ever cut the url itself.
+    assert url in text.split("\n")
+    assert all(len(row) <= 94 for row in text.split("\n") if row != url)
+
+
+def test_app_flags_are_ignored_on_the_extension_host() -> None:
+    """R2: the flags are the desktop app's; the extension opens nothing on
+    Allow, so a payload carrying them must not change its texts (the same gate
+    ``format_error`` applies)."""
+    for state in ("allowed", "pending", "await_timeout"):
+        for attached in (True, False):
+            plain = builtin._access_result_text(
+                state,
+                "https://example.com",
+                host="",
+                attached=attached,
+                url="https://example.com/a",
+            )
+            flagged = builtin._access_result_text(
+                state,
+                "https://example.com",
+                host="",
+                attached=attached,
+                url="https://example.com/a",
+                opens_on_approval=True,
+                opened_tab=True,
+            )
+            assert flagged == plain, (state, attached)
+
+
+def _ui_access_route(monkeypatch, fake_call) -> None:
+    """Route access actions to the desktop app's host, the one the flags gate on."""
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "ui_browser_available", lambda: True, raising=False)
+
+    async def reachable(classified=None) -> bool:
+        return True
+
+    monkeypatch.setattr(builtin, "ui_browser_reachable", reachable, raising=False)
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["request_access", "await_access"])
 async def test_access_actions_pass_the_app_flags_into_text_and_details(monkeypatch, action) -> None:
-    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
-    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
     url = "https://example.com/login?next=%2Fhome"
 
     async def fake_call(tool_call_id, wire_action, params, *, surface="", client=None):
         assert wire_action == action
+        assert builtin._host_of_client(client) == builtin.HOST_UI_PREFIX
         return {"origin": "https://example.com", "state": "allowed", "opened_tab": True}, None
 
-    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    _ui_access_route(monkeypatch, fake_call)
     result = await builtin.execute_browser(
-        "t", {"action": action, "url": url}, None, None, ToolContext(browser=BrowserSurface())
+        "t",
+        {"action": action, "url": url, "backend": "ui"},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
     )
     assert result.details == {
         "origin": "https://example.com",
         "state": "allowed",
         "opened_tab": True,
     }
-    flat = " ".join(result.text.split())
-    assert f"then call open url={url}:" in flat
+    assert url in result.text.split("\n")
+    assert "do not call open until they reply" in " ".join(result.text.split())
 
 
 @pytest.mark.asyncio
-async def test_request_access_pending_passes_opens_on_approval(monkeypatch) -> None:
-    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
-    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
-
+async def test_request_access_pending_passes_the_app_flags(monkeypatch) -> None:
     async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         return {
             "origin": "https://example.com",
@@ -679,18 +807,48 @@ async def test_request_access_pending_passes_opens_on_approval(monkeypatch) -> N
             "position": 1,
             "pending_count": 1,
             "opens_on_approval": True,
+            "opened_tab": True,
         }, None
 
-    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    _ui_access_route(monkeypatch, fake_call)
     result = await builtin.execute_browser(
         "t",
-        {"action": "request_access", "url": "https://example.com/a"},
+        {"action": "request_access", "url": "https://example.com/a", "backend": "ui"},
         None,
         None,
         ToolContext(browser=BrowserSurface()),
     )
-    assert result.details is not None and result.details["opens_on_approval"] is True
-    assert _OPENS_SENTENCE in " ".join(result.text.split())
+    assert result.details is not None
+    assert result.details["opens_on_approval"] is True and result.details["opened_tab"] is True
+    assert _ALREADY_OPEN in " ".join(result.text.split())
+
+
+@pytest.mark.asyncio
+async def test_await_access_timeout_carries_the_last_pending_flags(monkeypatch) -> None:
+    """R4 through the real await loop: the flags of the last pending slice
+    reach the timeout text, which the loop renders after its deadline."""
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        assert action == "await_access"
+        pending = {"origin": "https://example.com", "state": "pending", "opens_on_approval": True}
+        return pending, None
+
+    _ui_access_route(monkeypatch, fake_call)
+    result = await builtin.execute_browser(
+        "t",
+        {
+            "action": "await_access",
+            "url": "https://example.com",
+            "timeout_s": 0.05,
+            "backend": "ui",
+        },
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    flat = " ".join(result.text.split())
+    assert "still pending after" in flat
+    assert _ASK_ONCE in flat
 
 
 @pytest.mark.asyncio

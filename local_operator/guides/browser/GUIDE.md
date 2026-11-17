@@ -565,10 +565,15 @@ explicit confirmation dialog and is off by default.
 
 **Desktop app: approving opens the page.** When the app's responses carry
 `opens_on_approval` / `opened_tab`, Allow opens the requested URL in a tab of
-the app's browser for the operator. If the site needs a sign-in, ask ONCE:
-approve, sign in in the tab that opens, then reply. After their reply, a plain
-`open url=<url>` continues in that same tab (no new tab, no new approval). If
-you already hold a tab, `close` it first or `open` navigates yours instead.
+the app's Browser for the operator. If the site needs a sign-in, ask ONCE:
+approve, sign in on the page that opens in the app's Browser, then reply. Do
+not `open` before they reply when the page may need their sign-in or input:
+`open` hands that tab to you. After their reply, a plain `open url=<url>`
+normally continues in that tab; if the site ended on another origin you get a
+new tab, and if you hold a tab `open` navigates yours (`close` it first) — both
+still signed in via the shared session. `opened_tab` on a pending answer or an
+`origin_not_allowed` means the earlier page is still open: they approve again,
+no new sign-in.
 
 ### On a headless node: the operator decides on their device
 

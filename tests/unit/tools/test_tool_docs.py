@@ -559,10 +559,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # (8,190 chars, per main's own note). This branch's net delta over that is
     # +7 tokens: the `setvalue` row and its `selector`/`text` help, less the
     # prose trims listed above. Rendered: 8,091 chars against the 8,192 cap.
-    # +5 tokens (approve-opens-tab): "the app's Allow opens the page", paid for
-    # by tightening the same origin_not_allowed sentence. Rendered: 8,187 chars
-    # against the 8,192 cap (main: 8,173).
-    "browser": 2148,
+    "browser": 2143,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
