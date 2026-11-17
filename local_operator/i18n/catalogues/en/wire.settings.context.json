@@ -358,7 +358,7 @@
     "role": "description of the 'on' choice",
     "tone": "terse fragment",
     "width": "about 40 cells",
-    "note": "Says what is always kept: the current install, installs a session still uses, and the few newest unused ones."
+    "note": "Says what is always kept: the current install, the installs a session or service is running from ('running'), and the few newest unused ones."
   },
   "wire.settings.update_auto_prune.help": {
     "role": "settings row help",
@@ -368,20 +368,20 @@
   },
   "wire.settings.update_auto_prune.label": {
     "role": "settings row label in the updates section",
-    "tone": "terse, lowercase like its neighbours",
-    "width": "short label column",
+    "tone": "terse, Sentence case (first word capitalised) like its neighbours",
+    "width": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
     "note": "An on/off switch: delete old unused install generations automatically after each update."
   },
   "wire.settings.update_keep_generations.help": {
     "role": "settings row help",
     "tone": "plain",
     "width": "one or two short sentences",
-    "note": "Must keep the guarantee: the current install and installs in use are always kept regardless of this number. No ICU arguments."
+    "note": "Must keep the guarantee: the current install, the previous install (the one that was current before this update; the code protects it), the install running the update (the one executing the update), and any install a session or background service registered (recorded its install as in use) are always kept, regardless of this number. Default 2; 0 is allowed. No ICU arguments."
   },
   "wire.settings.update_keep_generations.label": {
     "role": "settings row label for a number",
-    "tone": "terse, lowercase",
-    "width": "short label column",
+    "tone": "terse, Sentence case (first word capitalised) like its neighbours",
+    "width": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
     "note": "The number of newest UNUSED installs kept after each prune (default 2; 0 is allowed)."
   },
   "wire.settings.updates.description": {
