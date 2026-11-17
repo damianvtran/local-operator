@@ -214,6 +214,15 @@ except where noted.
   known race (a card that parks between the check and the steer) is accepted
   and pinned: nothing is approved and the tool does not run
   (`tests/unit/voice/test_utterance_during_approval.py`).
+  **Amended 2026-11-17:** a QUEUED ask is not a card. It is mirrored onto
+  `pending_gate` for one release for old clients, but the agent keeps running,
+  so words are an ordinary message or steer. The queued engine is detected the
+  way the wire documents (`asks` or `asks_open` present on the state,
+  `FrontendStateStore.queued_engine_live`); with it off
+  (`LOP_ASK_NONBLOCKING=0`) an ask-kind gate is a real card and still refuses.
+  Found live: with an ask open, every spoken request was refused until the ask
+  was answered (`tests/unit/server/test_desktop_voice.py`, the two
+  `..._ask_..._refuse_speech` tests).
 - **V14 — Binding a take to its turn.** A take binds to the turn whose stream
   carries the user `message_start` with `message.id ==` the take's
   `request_id`, for a prompt, a mid-turn steer and a tail steer, live and on

@@ -7231,6 +7231,22 @@ class FrontendStateStore:
         return self._state.pending_gate
 
     @property
+    def queued_engine_live(self) -> bool:
+        """Whether this runtime runs the queued-ask engine, WITHOUT cloning the state.
+
+        The capability read the wire documents: a well-formed ``asks`` list, or
+        the presence of ``asks_open`` (``desktop-session-contract.ts``'s
+        "presence of ``asks``/``asks_open`` IS the capability flag"). While it is
+        true, an ask-kind :attr:`pending_gate` is only the legacy mirror of a
+        QUEUED ask (``asks/render.mirror_card``) -- the agent is continuing, so
+        the ask parks nothing -- and a reader asking "is something blocking
+        this turn?" must not count it. Under ``LOP_ASK_NONBLOCKING=0`` neither
+        field is published and the same gate IS a parked card.
+        """
+        state = self._state
+        return state.asks is not None or state.asks_open is not None
+
+    @property
     def has_subscribers(self) -> bool:
         """Whether a FRONTEND is attached.
 

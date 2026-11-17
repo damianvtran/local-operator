@@ -571,8 +571,13 @@ async def voice_utterance(
 async def _card_pending(request: Request, session_id: str) -> bool:
     """V13: does the session have a card (an approval, or a blocking ask) parked now?
 
-    Every pending card counts, not only approvals: a blocking ask is as
-    interruptible as ``bash`` and a steer withdraws it the same way.
+    An approval counts, and so does a BLOCKING ask (``LOP_ASK_NONBLOCKING=0``):
+    both hold the turn and a steer withdraws them. A QUEUED ask does not. It is
+    mirrored onto ``pending_gate`` for one release so an old client can answer
+    it, but the agent is continuing, so it parks nothing; counting it refused
+    every spoken request until the ask was answered (2026-11-17). The queued
+    engine is told apart by the capability the wire documents, read here as
+    ``queued_engine_live``.
 
     Read through the CONTROL door for ``_streaming``'s reason: a cold read-door
     answer would report a parked card as absent. A facade whose frontend state
@@ -584,9 +589,13 @@ async def _card_pending(request: Request, session_id: str) -> bool:
             remote = bridge.remote
             try:
                 gate = remote.pending_gate if remote is not None else None
+                queued = bool(remote is not None and remote.queued_engine_live)
             except RuntimeError:
                 gate = None
-    return gate is not None
+                queued = False
+    if gate is None:
+        return False
+    return not (getattr(gate, "kind", None) == "ask" and queued)
 
 
 def _validation_reason(exc: ValidationError) -> str:

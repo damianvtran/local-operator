@@ -10341,6 +10341,17 @@ class AttachedSession:
         return self._frontend_store.pending_gate
 
     @property
+    def queued_engine_live(self) -> bool:
+        """Whether the owner runs the queued-ask engine; see the store's property.
+
+        Paired with :attr:`pending_gate`: an ask-kind gate while this is true is
+        the legacy mirror of a queued ask, not a parked card.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.queued_engine_live
+
+    @property
     def has_running_job(self) -> bool:
         """Whether the owner's roster still shows a running child, clone-free.
 

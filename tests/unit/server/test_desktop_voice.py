@@ -57,6 +57,9 @@ class FakeRemote:
     def __init__(self) -> None:
         self.is_streaming = False
         self.pending_gate: Any = None
+        #: True when the runtime runs the queued-ask engine (``asks``/``asks_open``
+        #: are on its state), so an ask-kind ``pending_gate`` is only the legacy mirror.
+        self.queued_engine_live = False
         self.admissions: list[dict[str, Any]] = []
         self.gate_answers: list[Any] = []
 
@@ -588,7 +591,7 @@ async def test_an_utterance_during_a_pending_approval_is_refused(rig: Any) -> No
     assert remote.pending_gate is not None
 
     # N4: a BLOCKING ask's card (``LOP_ASK_NONBLOCKING=0``) is interruptible too,
-    # so it is refused the same way. A queued ask parks no card at all.
+    # so it is refused the same way. A QUEUED ask is not a card (see the tests below).
     remote.pending_gate = SimpleNamespace(request_id="ask-1", kind="ask", title="", detail="")
     asked = await _utter(rig, SESSION_A, "the blue one")
     assert asked.status_code == 409, asked.text
@@ -599,6 +602,47 @@ async def test_an_utterance_during_a_pending_approval_is_refused(rig: Any) -> No
     free = await _utter(rig, SESSION_A, "the blue one")
     assert free.status_code == 200, free.text
     assert remote.admissions[-1]["steer"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_queued_asks_mirrored_card_does_not_refuse_speech(rig: Any) -> None:
+    """A queued ask is mirrored onto ``pending_gate`` for old clients, but it parks
+    nothing: the agent is continuing, so words are an ordinary message or steer.
+
+    Found live (2026-11-17): with an ask open, every spoken request was refused
+    ``approval_pending`` until the ask was answered. An APPROVAL still refuses.
+    """
+    await _enable(rig, SESSION_A)
+    remote = rig.pool.remote
+    remote.queued_engine_live = True
+    remote.pending_gate = SimpleNamespace(request_id="a-7df9.0", kind="ask", title="", detail="")
+    spoken = await _utter(rig, SESSION_A, "what about digimon cards")
+    assert spoken.status_code == 200, spoken.text
+    assert remote.admissions[-1]["text"] == "what about digimon cards"
+
+    # An approval is a real parked card whatever else is queued beside it.
+    remote.admissions.clear()
+    remote.pending_gate = SimpleNamespace(
+        request_id="gate-1", kind="approval", title="bash", detail="rm -rf build/"
+    )
+    refused = await _utter(rig, SESSION_A, "yes")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "approval_pending"
+    assert remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_ask_still_refuses_speech_when_the_queue_is_off(rig: Any) -> None:
+    """``LOP_ASK_NONBLOCKING=0``: no ``asks`` on the state, the ask-kind gate is a
+    real parked card and speech must not withdraw it (V13)."""
+    await _enable(rig, SESSION_A)
+    remote = rig.pool.remote
+    remote.queued_engine_live = False
+    remote.pending_gate = SimpleNamespace(request_id="ask-1", kind="ask", title="", detail="")
+    refused = await _utter(rig, SESSION_A, "the blue one")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "approval_pending"
+    assert remote.admissions == []
 
 
 # -- B3: a deleted conversation leaves the slot ----------------------------------
