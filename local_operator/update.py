@@ -113,6 +113,14 @@ PYPI_JSON_URL = "https://pypi.org/pypi/local-operator/json"
 #: the full document is ~1.3 MB and grows with every release.
 PYPI_VERSION_JSON_URL = "https://pypi.org/pypi/local-operator/{version}/json"
 
+#: The PEP 691 JSON simple index: the page uv itself resolves against, and a
+#: DIFFERENT Fastly object from :data:`PYPI_JSON_URL`, so the two go stale
+#: independently. :func:`_fetch_pypi_read` cross-checks the project document
+#: against it because a client cannot bust PyPI's edge cache for the project
+#: document (see the CDN-lag note there).
+PYPI_SIMPLE_URL = "https://pypi.org/simple/local-operator/"
+_SIMPLE_JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
+
 #: Short enough that a hung PyPI cannot stall a splash worker across the
 #: TUI suite; long enough for a slow but living mirror.
 _FETCH_TIMEOUT_S = 5.0
@@ -1227,23 +1235,157 @@ class _PypiRead:
     named_version: str | None = None
 
 
-def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
-    """One live read: ready version, or an answered-but-not-ready refusal."""
+def _final_release(value: Any) -> Any | None:
+    """``packaging`` Version for a final (non-pre, non-dev) release string, else None."""
+    from packaging.version import InvalidVersion, Version
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = Version(value.strip())
+    except InvalidVersion:
+        return None
+    if parsed.is_prerelease or parsed.is_devrelease:
+        return None
+    return parsed
+
+
+def _newest_listed_release(payload: dict[str, Any]) -> str | None:
+    """Newest final ``releases`` key with at least one non-yanked file.
+
+    An empty file list is skipped on purpose: that is a release still being
+    created, and it stays the readiness gate's ("still publishing") call via
+    ``info.version``, not a version this picks over a ready one.
+    """
+    releases = payload.get("releases")
+    if not isinstance(releases, dict):
+        return None
+    best: tuple[Any, str] | None = None
+    for key, files in releases.items():
+        parsed = _final_release(key)
+        if parsed is None or not isinstance(files, list):
+            continue
+        if not any(isinstance(f, dict) and not f.get("yanked") for f in files):
+            continue
+        if best is None or parsed > best[0]:
+            best = (parsed, str(key).strip())
+    return best[1] if best else None
+
+
+def _newest_simple_release(payload: Any) -> str | None:
+    """Newest final version with a non-yanked file on a PEP 691 simple page.
+
+    Versions come from the FILENAMES, not the PEP 700 ``versions`` list,
+    because yanking is per file: a version whose files are all yanked is not
+    offered, exactly as uv treats it.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("files"), list):
+        return None
+    from packaging.utils import (
+        InvalidSdistFilename,
+        InvalidWheelFilename,
+        parse_sdist_filename,
+        parse_wheel_filename,
+    )
+
+    best: Any | None = None
+    for entry in payload["files"]:
+        if not isinstance(entry, dict) or entry.get("yanked"):
+            continue
+        name = entry.get("filename")
+        if not isinstance(name, str):
+            continue
+        try:
+            if name.endswith(".whl"):
+                version = parse_wheel_filename(name)[1]
+            else:
+                version = parse_sdist_filename(name)[1]
+        except (InvalidWheelFilename, InvalidSdistFilename):
+            continue
+        parsed = _final_release(str(version))
+        if parsed is not None and (best is None or parsed > best):
+            best = parsed
+    return str(best) if best is not None else None
+
+
+def _get_json(url: str, client: Any | None, headers: dict[str, str] | None = None) -> Any:
+    """One bounded GET returning parsed JSON; raises on any failure."""
     import httpx
 
+    getter = httpx.get if client is None else client.get
+    if headers:
+        response = getter(url, timeout=_FETCH_TIMEOUT_S, headers=headers)
+    else:
+        response = getter(url, timeout=_FETCH_TIMEOUT_S)
+    response.raise_for_status()
+    return response.json()
+
+
+def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
+    """One live read: ready version, or an answered-but-not-ready refusal.
+
+    THE PROJECT DOCUMENT ALONE LAGS A RELEASE (2026-11-17, fix/update-live-index).
+    ``/pypi/local-operator/json`` is served by PyPI's Fastly edge with
+    ``cache-control: max-age=900``; right after a publish an edge can keep the
+    previous object for minutes. Reproduced twice that day on two hosts:
+    ~1 min after 0.106.6 went live ``lop update`` said 0.106.5 was latest, and
+    ~4 min after 0.106.7 ``lop update --check`` said 0.106.6, while the same URL
+    fetched elsewhere already named the new release. Measured the same day, a
+    client CANNOT bust that object: ``Cache-Control: no-cache`` and
+    ``max-age=0`` request headers and a random query string all still came back
+    ``x-cache: ...HIT`` with the same ETag. So the answer is a cross-check of
+    independently cached sources, taking the newest that is proven ready:
+
+    1. the project document — ``info.version``, raised to its newest final,
+       non-yanked ``releases`` key when those two disagree;
+    2. the JSON simple index (:data:`PYPI_SIMPLE_URL`, a separate edge object,
+       and the page uv resolves against); a newer final version there is
+       confirmed through ITS per-version document, an object no client has
+       asked the edge for yet, so it cannot be a stale copy of the release.
+
+    The simple-index probe is best effort: unreachable, malformed, or naming a
+    version whose own document is not served (or names something else) leaves
+    the project document's answer exactly as before. The readiness gate is
+    unchanged: a newer version with no installer wheel yet is the same
+    "still publishing" refusal (``answered`` with ``named_version``).
+    """
     try:
-        if client is None:
-            response = httpx.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
-        else:
-            response = client.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
-        response.raise_for_status()
-        payload = response.json()
+        payload = _get_json(PYPI_JSON_URL, client)
     except Exception:
         return _PypiRead(version=None)
     named = _named_pypi_version(payload)
     if named is None:
         return _PypiRead(version=None)
-    return _PypiRead(version=_ready_pypi_version(payload), answered=True, named_version=named)
+    ready = _ready_pypi_version(payload)
+    listed = _newest_listed_release(payload)
+    named_final = _final_release(named)
+    if listed is not None and (named_final is None or _final_release(listed) > named_final):
+        releases = payload.get("releases")
+        files = releases.get(listed) if isinstance(releases, dict) else None
+        if _downloadable_wheel(files, listed):
+            named, ready = listed, listed
+
+    try:
+        simple = _newest_simple_release(
+            _get_json(PYPI_SIMPLE_URL, client, headers={"Accept": _SIMPLE_JSON_ACCEPT})
+        )
+    except Exception:
+        simple = None
+    baseline = _final_release(named)
+    if simple is not None and (baseline is None or _final_release(simple) > baseline):
+        document, _why = _pypi_release_document(simple, client=client)
+        if document is not None:
+            logger.info(
+                "PyPI project JSON names %s but the simple index and %s's own document "
+                "name %s; using the newer (CDN lag right after publish)",
+                named,
+                simple,
+                simple,
+            )
+            return _PypiRead(
+                version=_ready_pypi_version(document), answered=True, named_version=simple
+            )
+    return _PypiRead(version=ready, answered=True, named_version=named)
 
 
 def _fetch_pypi_version(*, client: Any | None = None) -> str | None:

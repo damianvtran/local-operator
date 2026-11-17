@@ -430,6 +430,140 @@ def test_check_latest_500_and_timeout_are_silent(tmp_path: Path) -> None:
         assert timed.behind is False
 
 
+# THE CDN-LAG CROSS-CHECK (2026-11-17, fix/update-live-index). Right after a
+# release goes live, PyPI's Fastly edge can keep serving the previous
+# ``/pypi/local-operator/json`` object for minutes (``lop update --check`` said
+# 0.106.6 was the latest ~4 min after 0.106.7 went 200). The stubs below route by
+# URL so each source can be stale independently, which is the failure shape.
+
+
+def _simple_index(*versions: str, yanked: tuple[str, ...] = ()) -> dict[str, Any]:
+    """A PEP 691 JSON simple-index page listing one pure wheel per version."""
+    return {
+        "meta": {"api-version": "1.1"},
+        "name": "local-operator",
+        "versions": list(versions),
+        "files": [
+            {
+                "filename": f"local_operator-{v}-py3-none-any.whl",
+                "url": (
+                    f"https://files.pythonhosted.org/packages/local_operator-{v}-py3-none-any.whl"
+                ),
+                "hashes": {"sha256": "a" * 64},
+                "yanked": v in yanked,
+            }
+            for v in versions
+        ],
+    }
+
+
+def _routed_transport(
+    routes: dict[str, httpx.Response | dict[str, Any]], seen: list[httpx.Request] | None = None
+) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(request)
+        hit = routes.get(str(request.url))
+        if hit is None:
+            return httpx.Response(404, text="not found")
+        return hit if isinstance(hit, httpx.Response) else httpx.Response(200, json=hit)
+
+    return httpx.MockTransport(handler)
+
+
+def _ready_files(version: str) -> list[dict[str, object]]:
+    return [_wheel(version), _mac_wheel(version)]
+
+
+def test_stale_info_version_with_newer_release_key_resolves_newer(tmp_path: Path) -> None:
+    """``info.version`` lags ``releases`` in one document: the newest final key wins."""
+    stale = {
+        "info": {"version": "0.28.0"},
+        "urls": _ready_files("0.28.0"),
+        "releases": {
+            "0.28.0": _ready_files("0.28.0"),
+            "0.29.0": _ready_files("0.29.0"),
+            # Never advertised: a pre-release, and a release whose only file is yanked.
+            "0.30.0rc1": _ready_files("0.30.0rc1"),
+            "0.31.0": [_wheel("0.31.0", yanked=True), _mac_wheel("0.31.0", yanked=True)],
+        },
+    }
+    client = _client(_routed_transport({update_mod.PYPI_JSON_URL: stale}))
+    with patch.object(update_mod, "installed_version", return_value="0.28.0"):
+        result = check_latest(force=True, cache_dir=tmp_path, client=client)
+    assert result.latest == "0.29.0"
+    assert result.behind is True
+
+
+def test_stale_project_json_is_cross_checked_against_the_simple_index(tmp_path: Path) -> None:
+    """The whole project document is the stale CDN object: the simple index and
+    the new version's own (never-cached) document carry the release."""
+    seen: list[httpx.Request] = []
+    routes: dict[str, httpx.Response | dict[str, Any]] = {
+        update_mod.PYPI_JSON_URL: _pypi_payload("0.28.0", _ready_files("0.28.0")),
+        update_mod.PYPI_SIMPLE_URL: _simple_index("0.27.0", "0.28.0", "0.29.0"),
+        update_mod.PYPI_VERSION_JSON_URL.format(version="0.29.0"): _pypi_payload(
+            "0.29.0", _ready_files("0.29.0")
+        ),
+    }
+    client = _client(_routed_transport(routes, seen))
+    with patch.object(update_mod, "installed_version", return_value="0.28.0"):
+        result = check_latest(force=True, cache_dir=tmp_path, client=client)
+    assert result.latest == "0.29.0"
+    assert result.behind is True
+    simple = [r for r in seen if str(r.url) == update_mod.PYPI_SIMPLE_URL]
+    assert simple and simple[0].headers["accept"].startswith("application/vnd.pypi.simple.v1+json")
+    # The fresh answer is what later TTL reads (the splash) are served.
+    cached = json.loads((tmp_path / "pypi-local-operator.json").read_text(encoding="utf-8"))
+    assert cached["payload"] == {"version": "0.29.0", "ready": True}
+
+
+def test_simple_index_newer_but_unconfirmed_keeps_the_project_answer(tmp_path: Path) -> None:
+    """A newer simple-index entry whose own document is not served yet (or names
+    another version) is not proof: the project document's ready answer stands."""
+    routes: dict[str, httpx.Response | dict[str, Any]] = {
+        update_mod.PYPI_JSON_URL: _pypi_payload("0.28.0", _ready_files("0.28.0")),
+        update_mod.PYPI_SIMPLE_URL: _simple_index("0.28.0", "0.29.0"),
+    }
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True, cache_dir=tmp_path, client=_client(_routed_transport(routes))
+        )
+    assert result.latest == "0.28.0"
+
+
+def test_simple_index_newer_still_uploading_reports_pending(tmp_path: Path) -> None:
+    """The new version's document exists but has no installable wheel yet: the
+    same "still publishing" refusal the project document gives, not the old version."""
+    routes: dict[str, httpx.Response | dict[str, Any]] = {
+        update_mod.PYPI_JSON_URL: _pypi_payload("0.28.0", _ready_files("0.28.0")),
+        update_mod.PYPI_SIMPLE_URL: _simple_index("0.28.0", "0.29.0"),
+        update_mod.PYPI_VERSION_JSON_URL.format(version="0.29.0"): _pypi_payload("0.29.0", []),
+    }
+    with patch.object(update_mod, "installed_version", return_value="0.28.0"):
+        result = check_latest(
+            force=True, cache_dir=tmp_path, client=_client(_routed_transport(routes))
+        )
+    assert result.latest is None
+    assert result.pending_version == "0.29.0"
+
+
+def test_simple_index_ignores_yanked_prerelease_and_unreachable(tmp_path: Path) -> None:
+    project = _pypi_payload("0.28.0", _ready_files("0.28.0"))
+    for simple in (
+        _simple_index("0.28.0", "0.29.0", yanked=("0.29.0",)),
+        _simple_index("0.28.0", "0.29.0rc1"),
+        httpx.Response(500, text="nope"),
+        httpx.Response(200, text="<html>not json</html>"),
+    ):
+        routes = {update_mod.PYPI_JSON_URL: project, update_mod.PYPI_SIMPLE_URL: simple}
+        with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+            result = check_latest(
+                force=True, cache_dir=tmp_path, client=_client(_routed_transport(routes))
+            )
+        assert result.latest == "0.28.0", simple
+
+
 def test_corrupt_cache_is_missing(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text("not-json", encoding="utf-8")
@@ -489,6 +623,10 @@ def test_unready_cache_entry_does_not_skip_get(tmp_path: Path) -> None:
     hits = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        # Count the project document only: every live read also probes the
+        # simple index (the CDN-lag cross-check), which this stub 404s.
+        if str(request.url) != update_mod.PYPI_JSON_URL:
+            return httpx.Response(404)
         hits["n"] += 1
         return httpx.Response(200, json=_pypi_payload("0.28.0", []))
 
