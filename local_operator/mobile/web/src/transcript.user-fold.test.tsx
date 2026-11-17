@@ -7,20 +7,21 @@
 //
 // The contract here:
 //   * a condensed user message keeps its whole text in the DOM and shows the first
-//     three lines; when the text really overflows those lines a labelled
-//     "Show more" / "Show less" control appears, with aria-expanded;
-//   * the control appears ONLY on real overflow (a short message has none);
+//     three lines; when the text is VERY long (8+ wrapped lines) a labelled
+//     "Show more" / "Show less" control appears, with aria-expanded and a
+//     chevron that points down to open and up to close;
+//   * the control appears ONLY for very long text (short and medium have none);
 //   * an uncondensed message (open turn, live turn) is full text with no control;
 //   * the reader's explicit "Show more" survives opening and re-condensing the turn;
 //   * pressing the control holds ITS place on screen (the scroll anchor).
 //
 // WHAT THIS LAYER CANNOT PROVE. happy-dom does no layout, so `scrollHeight` and
-// `clientHeight` are 0 and "does the text overflow three lines" is unanswerable
-// here. `stubLayout` stands in for the browser's own answer with a deterministic
-// model (20 px a line, 30 characters a line, and a clamp that caps the box at
-// three lines) so the component's DECISIONS are tested against both outcomes.
-// Whether three real lines at 320/360/390 overflow is shown by the phone-size
-// captures on the PR, not by this file. The clamp is an inline style on purpose:
+// `clientHeight` are 0 and "how many lines is this text" is unanswerable here.
+// `stubLayout` stands in for the browser's own answer with a deterministic model
+// (20 px a line, 30 characters a line, and a clamp that caps the box at three
+// lines) so the component's DECISIONS are tested against both outcomes. Whether
+// real text at 320/360/390 reaches 8 lines is shown by the phone-size captures
+// on the PR, not by this file. The clamp is an inline style on purpose:
 // an inline style RESOLVES in happy-dom, so dropping the clamp fails the test
 // where a class-name echo would pass for a clamp that is present but inert.
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -82,8 +83,13 @@ function entry(id: string, kind: TranscriptEntry["kind"], text = "", extra: Part
 }
 const tool = (id: string) => entry(id, "tool", "", { tool_name: "bash", tool_call_id: id, summary: `run ${id}`, elapsed_s: 2 });
 
-/** Long enough to overflow three 30-character lines in the stub. */
+/** Long enough to reach the fold threshold (8 wrapped lines of 30 characters). */
 const LONG =
+	"These two issues are on local operator mobile relay and I would like both of them looked at before you change anything at all, please. " +
+	"The first is a message that gets cut off and cannot be opened; the second is that my own messages blend into the page. " +
+	"Take a look at the pill and at the message I sent, and you will see exactly the two problems I mean.";
+/** Past three lines but short of the threshold: a paragraph, read in place. */
+const MEDIUM =
 	"These two issues are on local operator mobile relay and I would like both of them looked at before you change anything at all, please.";
 const SHORT = "Quick one: what time is it?";
 
@@ -127,6 +133,36 @@ describe("a user message inside a condensed turn", () => {
 		fireEvent.click(less);
 		expect(clampOf(userText(container))).toBe(CLAMP_LINES);
 		expect(showMore()).toBeTruthy();
+	});
+
+	it("shows a medium message in full, with no clamp and no control", () => {
+		const { container } = render(<Transcript pid="s" entries={settledTurn(MEDIUM)} />);
+		expect(container.querySelector("[data-condensed-turn]")).not.toBeNull();
+		expect(userText(container).textContent).toBe(MEDIUM);
+		// Over three lines, under the threshold: nothing is hidden, nothing to press.
+		expect(clampOf(userText(container))).toBe(0);
+		expect(showMore()).toBeNull();
+		expect(showLess()).toBeNull();
+	});
+
+	it("starts folding at exactly the threshold, not a line before", () => {
+		const atThreshold = "x".repeat(CHARS_PER_LINE * 8);
+		const justUnder = "x".repeat(CHARS_PER_LINE * 7);
+		const first = render(<Transcript pid="s" entries={settledTurn(justUnder)} />);
+		expect(showMore()).toBeNull();
+		first.unmount();
+		render(<Transcript pid="s" entries={settledTurn(atThreshold)} />);
+		expect(showMore()).toBeTruthy();
+	});
+
+	it("points the chevron down to open and up to close", () => {
+		render(<Transcript pid="s" entries={settledTurn(LONG)} />);
+		const direction = () => showMore()?.querySelector("svg")?.getAttribute("data-direction") ?? showLess()?.querySelector("svg")?.getAttribute("data-direction");
+		expect(direction()).toBe("down");
+		fireEvent.click(showMore()!);
+		expect(direction()).toBe("up");
+		fireEvent.click(showLess()!);
+		expect(direction()).toBe("down");
 	});
 
 	it("offers no control when the text fits the three lines", () => {

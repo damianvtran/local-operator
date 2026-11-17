@@ -40,12 +40,13 @@ describe("condensed transcript rendering", () => {
 	it("condenses a settled turn on first paint and restores every row on expand", () => {
 		const rows = settledTurn();
 		const view = render(<Transcript pid="s" entries={rows} />);
-		/* The prompt keeps ALL its text while the turn is condensed (clamped to three
-		   lines by `UserText`; see transcript.user-fold.test.tsx), instead of
-		   dropping everything after the first line as it used to. */
+		/* The prompt keeps ALL its text while the turn is condensed, instead of
+		   dropping everything after the first line as it used to. A short prompt
+		   like this one is not clamped; only a VERY long one is (`UserText`; see
+		   transcript.user-fold.test.tsx). */
 		const prompt = view.container.querySelector<HTMLElement>("[data-user-text]")!;
 		expect(prompt.textContent).toBe("First question line\nThe rest of the prompt");
-		expect(prompt.style.getPropertyValue("-webkit-line-clamp") || (prompt.style as unknown as Record<string, string>).WebkitLineClamp).toBe("3");
+		expect(prompt.style.overflow).toBe("");
 		expect(screen.queryByText("run t-1")).toBeNull();
 		expect(screen.getByText("The answer")).toBeTruthy();
 		expect(view.container.querySelectorAll("[data-condense-header]").length).toBe(1);

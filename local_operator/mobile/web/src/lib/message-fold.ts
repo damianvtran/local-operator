@@ -17,5 +17,14 @@
  */
 export const MESSAGE_PRESSED_EVENT = "lo:message-pressed";
 
-/** How many wrapped lines a condensed turn shows of the person's own message. */
+/** How many wrapped lines a condensed turn shows of a folded message. */
 export const MESSAGE_PREVIEW_LINES = 3;
+
+/**
+ * How long a message must be, in wrapped lines at the reader's own width, before
+ * a condensed turn folds it at all. Shorter messages show in full with no
+ * control: the operator asked that the fold appear "only for very long messages,
+ * so it doesn't appear all the time". Five or more hidden lines is what earns a
+ * button; a message that is merely a paragraph is read in place.
+ */
+export const MESSAGE_FOLD_MIN_LINES = 8;

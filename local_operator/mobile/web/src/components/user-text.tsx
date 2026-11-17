@@ -10,11 +10,12 @@
  * WHAT IT DOES.
  *  - `folded` false (the turn is open, or live): the whole text, exactly as before.
  *    No clamp, no control.
- *  - `folded` true: the WHOLE text stays in the DOM (a screen reader reads all of
- *    it) but the box is clamped to `MESSAGE_PREVIEW_LINES` lines. Only when the
- *    text really overflows those lines does a labelled "Show more" / "Show less"
- *    button appear, with `aria-expanded` and `aria-controls`. A message that fits
- *    gets no control, so a short prompt gains nothing to look at.
+ *  - `folded` true AND the text is VERY long (`MESSAGE_FOLD_MIN_LINES` wrapped
+ *    lines at the reader's width): the WHOLE text stays in the DOM (a screen
+ *    reader reads all of it) but the box is clamped to `MESSAGE_PREVIEW_LINES`
+ *    lines, with a labelled "Show more" / "Show less" button (`aria-expanded`,
+ *    `aria-controls`, chevron down to open and up to close). A shorter message
+ *    shows in full with no control: the fold must not appear all the time.
  *  - the reader's choice is this component's own state, separate from the turn
  *    bar: opening the turn (full text, no control) and condensing it again leaves
  *    an opened message opened, and "Show less" is still on screen.
@@ -29,11 +30,10 @@
  * dropped; a class name asserted against itself passes for a clamp that is
  * present but inert (see `session-view.overflow.test.tsx`).
  *
- * MEASURING. `scrollHeight > clientHeight` on the clamped box says "something is
- * hidden" in a real browser; it is re-read on resize (rotation, large text, a late
- * font). Once measured true it is latched while the message is open, because an
- * open box has nothing hidden and would otherwise report false and take the "Show
- * less" control away.
+ * MEASURING. `scrollHeight` is the whole text's height clamped or not, so
+ * "is it very long" has the same answer folded, open or unfolded: no latch is
+ * needed and an opened message keeps its "Show less" at any width. It is re-read
+ * on resize (rotation, large text, a late font).
  *
  * THE SCROLL ANCHOR. The control announces itself with `MESSAGE_PRESSED_EVENT`
  * before the message changes height and with `CONTENT_RESIZED_EVENT` after, so
@@ -45,9 +45,8 @@
 import { useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { cn } from "../lib/cn";
 import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
-import { MESSAGE_PREVIEW_LINES, MESSAGE_PRESSED_EVENT } from "../lib/message-fold";
+import { MESSAGE_FOLD_MIN_LINES, MESSAGE_PREVIEW_LINES, MESSAGE_PRESSED_EVENT } from "../lib/message-fold";
 import { messageRuntime } from "../store";
-import { Chevron } from "./ui/disclosure";
 
 const CLAMP: CSSProperties = {
 	display: "-webkit-box",
@@ -60,26 +59,34 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 	const textId = useId();
 	const box = useRef<HTMLDivElement>(null);
 	const [open, setOpen] = useState(false);
-	const [overflows, setOverflows] = useState(false);
-	const clamped = folded && !open;
+	const [long, setLong] = useState(false);
+	/* Fold only a VERY long message (`MESSAGE_FOLD_MIN_LINES` wrapped lines). */
+	const foldable = folded && long;
+	const clamped = foldable && !open;
 
-	/* Read whether the clamp hides anything. Only a clamped box can answer; an open
-	   or unfolded one keeps the last answer (the latch described above). */
+	/* Read how many wrapped lines the whole text takes. `scrollHeight` is the full
+	   content height whether or not the box is clamped, so this answer is the same
+	   folded, open or unfolded: no latch is needed, and an opened message never
+	   loses its "Show less" because the text now happens to fit. The first measure
+	   is in a layout effect, so a long message is clamped before it first paints. */
 	useLayoutEffect(() => {
 		const el = box.current;
-		if (!clamped || !el) return;
-		const measure = () => setOverflows(el.scrollHeight > el.clientHeight);
+		if (!el) return;
+		const measure = () => {
+			const parsed = parseFloat(getComputedStyle(el).lineHeight);
+			const lineHeight = Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+			setLong(el.scrollHeight >= lineHeight * MESSAGE_FOLD_MIN_LINES);
+		};
 		measure();
-		/* A late web-font swap can add a wrapped line without resizing the clamped
-		   box (it stays three lines tall), so the observer below would never fire
-		   and the text would be cut with no control. Re-read once fonts settle. */
+		/* A late web-font swap can add a wrapped line without resizing a clamped box,
+		   so the observer below would not fire; re-read once fonts settle. */
 		let live = true;
 		void document.fonts?.ready.then(() => { if (live) measure(); });
 		if (typeof ResizeObserver === "undefined") return () => { live = false; };
 		const observer = new ResizeObserver(measure);
 		observer.observe(el);
 		return () => { live = false; observer.disconnect(); };
-	}, [clamped, text]);
+	}, [text]);
 
 	/* The message changed height after it painted: say so, so the transcript can
 	   hold the pressed control. Not on the first paint, which is not a change. */
@@ -92,7 +99,6 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 		box.current?.dispatchEvent(new CustomEvent(CONTENT_RESIZED_EVENT, { bubbles: true }));
 	}, [open]);
 
-	const showControl = folded && overflows;
 	return (
 		<>
 			<div
@@ -105,7 +111,7 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 			>
 				{text}
 			</div>
-			{showControl ? (
+			{foldable ? (
 				<button
 					type="button"
 					data-message-toggle={entryId}
@@ -126,7 +132,24 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 					)}
 				>
 					<span>{messageRuntime.t(open ? "relay.transcript.message.show_less" : "relay.transcript.message.show_more")}</span>
-					<Chevron open={open} className="text-ink-muted" />
+					{/* Down opens, up closes: the direction the text moves. (The shared
+					    `Chevron` is a right/down disclosure caret, which says "expand a
+					    section", not "show the rest of this text".) */}
+					<svg
+						aria-hidden
+						data-direction={open ? "up" : "down"}
+						viewBox="0 0 12 12"
+						width="12"
+						height="12"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="1.5"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+						className="shrink-0"
+					>
+						<path d={open ? "M2.5 7.5 6 4l3.5 3.5" : "M2.5 4.5 6 8l3.5-3.5"} />
+					</svg>
 				</button>
 			) : null}
 		</>

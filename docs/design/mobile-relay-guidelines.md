@@ -38,10 +38,13 @@ static replay, an old screenshot or an intended interaction as current live proo
   `canvas`. This is the structural-boundary case, not a redundant panel outline: tool
   rows, notices and peer cards stay unbordered so the edge keeps meaning "the human
   said this".
-- **A condensed turn folds the person's own message, with a control.** Inside a
-  condensed turn the message keeps its whole text in the DOM and shows three lines;
-  when the text overflows them, a worded "Show more" / "Show less" button
-  (`aria-expanded`, `aria-controls`, a 44 px target) opens and closes it. It is
+- **A condensed turn folds a VERY long message of the person's, with a control.**
+  Inside a condensed turn a message of 8 or more wrapped lines (`MESSAGE_FOLD_MIN_LINES`,
+  measured at the reader's width) keeps its whole text in the DOM and shows three
+  lines; a shorter message shows in full with no control, so the fold does not
+  appear all the time. A worded "Show more" / "Show less" button (`aria-expanded`,
+  `aria-controls`, a 44 px target; chevron down to open, up to close) opens and
+  closes it. It is
   separate from the turn bar and keeps its state through opening and re-condensing
   the turn. The preview carries no fade of its own (the transcript scroller already
   fades its edges). Long assistant replies are not folded: they are the primary
