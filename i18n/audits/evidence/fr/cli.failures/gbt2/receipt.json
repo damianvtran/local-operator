@@ -1,0 +1,37 @@
+{
+ "locale": "fr",
+ "namespace": "cli.failures",
+ "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+ "translator": {
+  "agent": "i18n-translator (timeout-fr)",
+  "model": "openai/gpt-6.1-sol",
+  "fallback_model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-16"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (audit2-fr)",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback_from": "openai/gpt-6.1-sol",
+  "session": "e73cdb50a745",
+  "date": "2026-11-16",
+  "result": "passed",
+  "findings": 4,
+  "unresolved_blocker_major": 0
+ },
+ "status": "passed",
+ "note": "fr cli.failures gbt2: fresh independent audit, 5 keys incl. github_borrow_timeout; 0 BLOCKER/0 MAJOR/0 MINOR/4 NIT. Auditor claude-opus-5-5 (fallback from gpt-6.1-sol), separate session. Record: i18n/audits/evidence/fr/cli.failures/gbt2/record.json",
+ "companions": [
+  {
+   "path": "i18n/audits/evidence/fr/cli.failures/gbt2/record.json",
+   "sha256": "af9a75c641231724f5ab727c5b8f23b7d899bbd19e33fde7cc000c5ec47a2161"
+  },
+  {
+   "path": "i18n/audits/evidence/fr/cli.failures/gbt2/report.md",
+   "sha256": "579142f29ba3647c1dfda1e3de83148d0b0bdd6e7725eefde5e8f8c72dae4e91"
+  },
+  {
+   "path": "i18n/audits/evidence/fr/cli.failures/gbt2/audit.log",
+   "sha256": "5c84c144f33f4ef294b0814a7b4d2ec6288f154229eff105c438c1568067bfbf"
+  }
+ ]
+}

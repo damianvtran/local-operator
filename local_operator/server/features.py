@@ -58,6 +58,9 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # reverse lookup (`GET /v1/desktop/sessions/{id}/projects` lives only in
         # routes/desktop_projects.py), so a phone told it may ask would 404.
         "projects_by_session",
+        # The relay answers asks on its own route, which carries no
+        # `consent_bearing` receipt (a phone answer is stamped `remote` anyway).
+        "ask_consent_bearing",
     }
 )
 
@@ -1128,6 +1131,19 @@ def static_feature_flags() -> dict[str, Any]:
         # door on this device, or the live op on the owner -- and an older owner
         # simply refuses in the queue's own words, which the card shows inline.
         "ask_dismiss": 1,
+        # WHETHER A QUEUED-ASK ANSWER CAN AUTHORISE A DELETE: the boolean
+        # ``consent_bearing`` on the answer receipt of
+        # `POST /v1/desktop/sessions/{id}/answers` (answer, revise, decline).
+        # True only when this backend holds the operator capability of the
+        # runtime it answered (it started that runtime) and presented the proof;
+        # False means the runtime stamped the answer `unverified`, which the
+        # dangerous-delete guard never reads as consent (incident a-48e3,
+        # 2026-11-16: a runtime started by the wake supervisor, answered from the
+        # desktop card). WHY A KEY: the field is additive, so a renderer must
+        # tell "older backend, unknown" (key absent) from "this answer is not
+        # consent-bearing" (key present, field False) before it shows a caveat.
+        # Computed server-side only; a hint for the card, never consent itself.
+        "ask_consent_bearing": 1,
         # THE SPEECH SURFACE: `GET /v1/stt/paths` (the ordered cascade report)
         # and `POST /v1/stt/transcriptions` (the executor, with its 409
         # `stt_unavailable` structured refusal), plus the audio-accepting

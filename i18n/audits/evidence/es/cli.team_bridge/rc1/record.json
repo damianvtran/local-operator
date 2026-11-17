@@ -1,0 +1,34 @@
+{
+  "auditor": {"agent": "i18n-auditor (lopdev team), task brand-au-es", "session": "88abe0077c46", "model": "anthropic/claude-opus-5-5", "actual_model_source": "session system prompt model header", "fallback": "none observed", "independent_from_translator_session": true, "translator": "i18n-translator, anthropic/claude-sonnet-5-5"},
+  "locale": "es",
+  "namespaces": ["cli.team_bridge", "tunnel.status"],
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "diff_base": "220d39a96667",
+  "audit_date": "2026-11-16",
+  "input_hashes": {
+    "es/cli.team_bridge.json": "98e7f3a929b862945fe990f18bfb5ef282e68fe785469d2e855325f5e60b0449",
+    "es/tunnel.status.json": "1366d2d93ce014590a8feb5b5b6682dfefd4497b93a06ca9d3479f071a8f1867",
+    "en/cli.team_bridge.json": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "en/cli.team_bridge.context.json": "6c4d922a48e5c563d2204ef4fb7dcd8ef8383e5e85d6c1ce3e86d2e7e81e1403",
+    "en/tunnel.status.json": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "en/tunnel.status.context.json": "b69246da17bb05162c7640506a35e3eed4fab1501fa581818e89df23d339b76b",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/es.md": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+  },
+  "mechanical": {"check_py_catalogues_only": "0 problem(s)", "key_count": {"cli.team_bridge": 59, "tunnel.status": 24}, "keys_added_or_dropped": 0, "lines_changed_in_es": 4, "url_placeholder_identical": true, "nfc": true},
+  "per_key": {
+    "cli.team_bridge.notify.screening_model_unavailable_body": {"verdict": "PASS", "text_fragment": "añade crédito en Radient Console o comprueba que tu modelo predeterminado funciona", "note": "Article-less 'en Radient Console' is the natural Spanish pattern for named products (cf. 'en Google Play Console'); tú register kept; meaning intact."},
+    "tunnel.status.card_open_console": {"verdict": "PASS", "text": "Activa el acceso telefónico en Radient Console", "cells": 46, "with_icon": "'! ' prefix -> 48 <= 50", "note": "Also more accurate than the old 'en la web de Radient'."},
+    "tunnel.status.tunnel_disabled.detail": {"verdict": "PASS", "note": "{url} byte-identical; grammar correct."},
+    "tunnel.status.tunnel_inactive.detail": {"verdict": "PASS", "note": "'revísalo en Radient Console, en {url}.' correct apposition; {url} identical."},
+    "tunnel.status.tunnel_disabled.label": {"verdict": "ACCEPTABLE, change recommended (MINOR)", "current": "túnel desactivado en la consola", "recommended": "túnel desactivado en Radient Console", "recommended_cells": 36}
+  },
+  "findings": [
+    {"id": "es-A1", "severity": "MINOR", "key": "tunnel.status.tunnel_disabled.label", "text": "túnel desactivado en la consola", "evidence": "gateway.py:585-592 emits this label together with tunnel_disabled.detail, which now says 'en Radient Console'. In Spanish dev usage 'consola' commonly means the terminal/shell, so a bare 'la consola' in a CLI status line can read as 'turned off in the terminal'; English has the same ambiguity but weaker. Generic reference is grammatical and not wrong.", "fix": "túnel desactivado en Radient Console"}
+  ],
+  "observations_out_of_scope": ["es/mobile.setup.json (not in this group, unchanged) still says 'la consola de Radient' in mobile.setup.disabled, .disabled_resume and two keys at lines ~96-97 ('Añade crédito en la consola de Radient: {url}', 'activar el acceso telefónico en la consola de Radient: {url}'). Contradicts the glossary brand rule; follow-up candidate, not gating here."],
+  "counts": {"blocker": 0, "major": 0, "minor": 1, "nit": 0},
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "not_verified": ["native-speaker judgement (LLM reasoning only)", "rendered fit in a real TUI/phone/desktop surface (cell counts computed, not rendered)", "the width of the label slot (no maxCells hint in its context note)"],
+  "audit_notes_not_execution_log": true
+}

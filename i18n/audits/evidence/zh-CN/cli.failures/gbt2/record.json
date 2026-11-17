@@ -1,0 +1,87 @@
+{
+ "schema": 1,
+ "audit_id": "gbt2",
+ "audit_kind": "independent_translation_audit",
+ "locale": "zh-CN",
+ "namespace": "cli.failures",
+ "round": 2,
+ "audit_date": "2026-11-16",
+ "key_count": 5,
+ "audited_revision": "80a55b20802ed13a7379fef90644f2345b63066a",
+ "base_revision": "f0689a27c",
+ "keys_audited": [
+  "cli.failures.error_line",
+  "cli.failures.required",
+  "cli.failures.invalid_choice",
+  "cli.failures.invalid_command",
+  "cli.failures.github_borrow_timeout"
+ ],
+ "translator": {
+  "agent": "i18n-translator (timeout-zh-CN)",
+  "model": "openai/gpt-6.1-sol",
+  "fallback": "anthropic/claude-opus-5-5 during the run (as reported by parent)",
+  "date": "2026-11-16"
+ },
+ "auditor": {
+  "agent": "audit2-zh (independent translation auditor subagent)",
+  "session": "1c05d7f1365f",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "session primary openai/gpt-6.1-sol; host switched to fallback anthropic/claude-opus-5-5 (quota HTTP 429) after the first listing command, before any catalogue was read",
+  "date": "2026-11-16",
+  "independent_from_translator_session": true,
+  "actual_model_source": "Local Operator session header Model: openai/gpt-6.1-sol plus host [model switch] notice to anthropic/claude-opus-5-5 (provider quota HTTP 429); all audit judgement made on the fallback model."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/cli.failures.json",
+   "sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/cli.failures.context.json",
+   "sha256": "b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f"
+  },
+  "zh-CN": {
+   "path": "local_operator/i18n/catalogues/zh-CN/cli.failures.json",
+   "sha256": "b66092adae0533bd2db7ec17ae70eb026c6ac287932d93ba4ca702246cc0e393"
+  },
+  "policy": [
+   {
+    "path": "i18n/glossary.md",
+    "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+   },
+   {
+    "path": "i18n/style-guides/zh-CN.md",
+    "sha256": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+   },
+   {
+    "path": "docs/I18N.md",
+    "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+   }
+  ]
+ },
+ "artifacts": [
+  {
+   "path": "i18n/audits/evidence/zh-CN/cli.failures/gbt2/report.md",
+   "sha256": "34e29c0e5c3bb946adfc4fbcdbec8d9531ac6efc0e22d1e3f941c99e76c90e44"
+  },
+  {
+   "path": "i18n/audits/evidence/zh-CN/cli.failures/gbt2/audit.log",
+   "sha256": "5c88aeb4527c4eb93e578627609623b284b19ac78de6d81c2158b8fd2d4a59c6"
+  }
+ ],
+ "receipt": "i18n/audits/evidence/zh-CN/cli.failures/gbt2/receipt.json",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "N1"
+  ],
+  "findings_total": 1,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 1
+ },
+ "audit_notes_not_execution_log": "report.md holds the findings and reasoning; audit.log lists commands actually run in this session with abridged outputs. No MT/translation service used; no rendered terminal capture claimed.",
+ "original_lost_evidence": null
+}

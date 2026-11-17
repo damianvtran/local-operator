@@ -60,6 +60,7 @@ OBSERVATION_STATES: frozenset[str] = frozenset(
         "no_local_credential",
         "interactive_required",
         "rate_limited",
+        "owner_busy",
         "epoch_stale",
         "refresh_failed",
         "unsupported",
@@ -135,6 +136,7 @@ class PlacementState:
             "owner_unreachable",
             "internal",
             "rate_limited",
+            "owner_busy",
             "quota_blocked",
             "unsupported",
         }:
@@ -218,6 +220,7 @@ class PlacementState:
             "owner_unreachable",
             "internal",
             "rate_limited",
+            "owner_busy",
             "quota_blocked",
             "unsupported",
         }:
@@ -252,6 +255,7 @@ class PlacementState:
             "owner_unreachable",
             "internal",
             "rate_limited",
+            "owner_busy",
             "quota_blocked",
             "unsupported",
         }:

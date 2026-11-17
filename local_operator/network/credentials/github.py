@@ -2707,6 +2707,7 @@ def borrowed_git_env(
     root: Path | None = None,
     session_id: str = "",
     client: Any = None,
+    on_timeout: Callable[[Any], object] | None = None,
 ) -> tuple[dict[str, str], str]:
     """Fetch-on-use: ``(env, token)`` for one child, or ``({}, "")``. Never raises.
 
@@ -2730,6 +2731,15 @@ def borrowed_git_env(
         return {}, ""
     token = str(getattr(outcome, "access_token", "") or "")
     if not token:
+        from .types import BorrowTimeout
+
+        if isinstance(outcome, BorrowTimeout) and on_timeout is not None:
+            # A local diagnostic only. Denials, missing sinks and policy answers
+            # do not become timeouts, and nothing enters the child's environment.
+            try:
+                on_timeout(outcome)
+            except Exception:  # noqa: BLE001 — diagnostics cannot break a command
+                pass
         return {}, ""
     # THE BOUND LANDS WITH THE BEARER (§3.4): a grant that carries the owner's
     # narrowing writes it to this device's config HERE, before the child that
@@ -2799,6 +2809,7 @@ def lent_github_env(
     session_id: str,
     register: Callable[[str], object] | None,
     client: Any = None,
+    on_timeout: Callable[[Any], object] | None = None,
 ) -> tuple[dict[str, str], str]:
     """The ONE door a mesh-lent github bearer takes into a local consumer.
 
@@ -2837,7 +2848,10 @@ def lent_github_env(
     if not callable(register):
         return {}, ""
     try:
-        env, token = borrowed_git_env(session_id=session_id, client=client)
+        # Only when asked for: a caller (or test double) that never passes it keeps
+        # the exact call it always made.
+        extra: dict[str, Any] = {"on_timeout": on_timeout} if on_timeout is not None else {}
+        env, token = borrowed_git_env(session_id=session_id, client=client, **extra)
     except Exception:  # noqa: BLE001 — borrowed_git_env never raises; belt and braces
         return {}, ""
     if not env or not token:

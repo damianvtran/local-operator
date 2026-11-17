@@ -95,10 +95,19 @@ def _risk(home: Path, command: str) -> Risk:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        _FIELD_COMMAND,
+        "body=$(cat <<'EOF'\n`git diff --check <base>..<head>`\nEOF\n)"
+        ' && glab api projects/1/notes -f "body=$body"',
+    ],
+    ids=["quoted-body-argument", "unquoted-assignment"],
+)
 async def test_field_gh_pr_comment_heredoc_body_is_low_and_never_judged(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
-    assert _risk(home, _FIELD_COMMAND) is Risk.LOW
+    assert _risk(home, command) is Risk.LOW
 
     def _no_judge(*args: object, **kwargs: object) -> None:
         raise AssertionError("a LOW call must not reach the judge")
@@ -108,7 +117,7 @@ async def test_field_gh_pr_comment_heredoc_body_is_low_and_never_judged(
     rules.mkdir()
     settings = GuardSettings(rules_dirs=(rules,))
     ctx = _context(home)
-    report = preview_tool_call("bash", {"command": _FIELD_COMMAND}, ctx, settings=settings)
+    report = preview_tool_call("bash", {"command": command}, ctx, settings=settings)
     # Main reproduced the field refusal here: builtin_effect "judge", whose
     # text was "dangerous-delete (review) … Targets: an unresolvable target".
     assert report.builtin_risk == "LOW"
@@ -116,7 +125,7 @@ async def test_field_gh_pr_comment_heredoc_body_is_low_and_never_judged(
     assert report.action == "allow"
     # judge=None: a HIGH verdict would fail closed ("judge unavailable") here.
     outcome = await check_tool_call(
-        "bash", {"command": _FIELD_COMMAND}, ctx, judge=None, settings=settings
+        "bash", {"command": command}, ctx, judge=None, settings=settings
     )
     assert outcome is None or not outcome.blocked
 
@@ -136,6 +145,175 @@ async def test_field_gh_pr_comment_heredoc_body_is_low_and_never_judged(
 )
 def test_quoted_heredoc_body_argument_is_data(home: Path, command: str) -> None:
     assert _risk(home, command) is Risk.LOW
+
+
+# The lexer intentionally retains unquoted-substitution bodies for split R10
+# segments. A complete assignment must not walk that retained duplicate as an
+# expansion-active OUTER heredoc after walking the nested substitution itself.
+_REVIEW_LITERAL = (
+    "it's literal review data: `auth-svc-preview-<id>`\n"
+    "`CONTRACT_REF:<path>` and `git diff --check <base>..<head>`\n"
+    "```sh\nrm -rf ~/.local-operator\n```\n"
+)
+
+
+@pytest.mark.parametrize("delimiter", ["'EOF'", '"EOF"', "E'O'F", "'EO'F"])
+@pytest.mark.parametrize("shape", ["single", "multiple-bodies", "nested", "two-assignments"])
+def test_complete_assignment_owns_quoted_heredoc_once(
+    home: Path, delimiter: str, shape: str
+) -> None:
+    from local_operator.guardrails.resolve import resolve_command
+
+    reader = f"cat <<{delimiter}\n{_REVIEW_LITERAL}EOF\n"
+    if shape == "multiple-bodies":
+        reader = f"cat <<{delimiter} <<'SECOND'\n{_REVIEW_LITERAL}EOF\n{_REVIEW_LITERAL}SECOND\n"
+    elif shape == "nested":
+        reader = f'printf "%s" "$(cat <<{delimiter}\n{_REVIEW_LITERAL}EOF\n)"'
+    assignment = f"body=$({reader})"
+    if shape == "two-assignments":
+        assignment += f" other=$({reader})"
+    command = assignment + ' && glab api projects/1/notes -f "body=$body"'
+    ctx = _context(home)
+    result = resolve_command(command, cwd=ctx.cwd, env=ctx.env, home=str(home))
+    assert not result.targets, result.targets
+    assert all(target.program == "glab" and target.op == "touch" for target in result.touched)
+    report = preview_tool_call(
+        "bash", {"command": command}, ctx, settings=GuardSettings(rules_dirs=())
+    )
+    assert report.builtin_risk == "LOW"
+    assert report.builtin_effect == BUILTIN_PASS
+
+
+@pytest.mark.parametrize("nesting", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("kind", ["write", "delete", "literal", "mixed"])
+def test_assignment_dedup_recursion_budget_never_certifies_unexamined_effects(
+    home: Path, nesting: int, kind: str
+) -> None:
+    """R1: ownership must not turn exhausted semantic analysis into LOW.
+
+    The active expansion reaches the existing depth-3 budget one level before
+    a literal reader does. Literal readers stay LOW while analyzed; beyond the
+    budget even their safety is unproven, so conservative scrutiny is intended.
+    These are preview-only inputs: no protected write or delete is executed.
+    """
+    from local_operator.guardrails.resolve import resolve_command
+
+    body = "$(printf changed > ~/.local-operator/config.yml)"
+    delimiter = "EOF"
+    if kind == "delete":
+        body = "$(rm -rf ~/.local-operator)"
+    elif kind == "literal":
+        delimiter = "'EOF'"
+        body += "\nrm -rf ~/.local-operator"
+    reader = f"cat <<{delimiter}\n{body}\nEOF\n"
+    if kind == "mixed":
+        reader = "cat <<'LITERAL' <<EOF\n`rm -rf ~/.local-operator`\nLITERAL\n" + body + "\nEOF\n"
+    command = f"body=$({reader})"
+    for _ in range(nesting - 1):
+        command = f'body="$({command})"'
+    ctx = _context(home)
+    result = resolve_command(command, cwd=ctx.cwd, env=ctx.env, home=str(home))
+    report = preview_tool_call(
+        "bash", {"command": command}, ctx, settings=GuardSettings(rules_dirs=())
+    )
+    if kind == "literal" and nesting <= 3:
+        assert not result.targets
+        assert not result.opaque_reasons
+        assert report.builtin_risk == "LOW"
+        assert report.builtin_effect == BUILTIN_PASS
+    elif kind != "literal" and nesting <= 2:
+        assert result.targets
+        assert report.builtin_risk == "CRITICAL"
+        assert report.builtin_effect == "refuse-critical"
+    else:
+        assert "nested shell too deep to resolve" in result.opaque_reasons
+        assert report.builtin_risk == "HIGH"
+        assert report.builtin_effect == "judge"
+
+
+@pytest.mark.parametrize(
+    ("command", "owned"),
+    [
+        ("body=$(cat <<'EOF'\nliteral\nEOF\n)", [[True]]),
+        ("cat <<'EOF'\nliteral\nEOF", [[False]]),
+        ("body=$(echo hi; cat <<'EOF'\nliteral\nEOF\n)", [[], [False]]),
+        ("body=$(cat <<'EOF'\nliteral\nEOF\n", [[False]]),
+    ],
+)
+def test_lexer_retains_body_and_records_structural_substitution_owner(
+    command: str, owned: list[list[bool]]
+) -> None:
+    from local_operator.tools.search_guard import lex
+
+    result = lex(command)
+    assert result.nested_bodies == owned
+    assert [body for bodies in result.bodies for body in bodies] == ["literal"]
+
+
+@pytest.mark.parametrize("separator", ["; ", " && ", "\n"])
+@pytest.mark.parametrize("quoted", [True, False])
+def test_split_assignment_retains_shell_body_safety(
+    home: Path, separator: str, quoted: bool
+) -> None:
+    delimiter = "'EOF'" if quoted else "EOF"
+    command = f"body=$(echo harmless{separator}bash <<{delimiter}\nrm -rf ~/.local-operator\nEOF\n)"
+    assert _risk(home, command) is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "body=$(cat <<EOF\n$(rm -rf ~/.local-operator)\nEOF\n)",
+        "body=$(cat <<EOF\n`rm -rf ~/.local-operator`\nEOF\n)",
+        "body=$(bash <<'EOF'\nrm -rf ~/.local-operator\nEOF\n)",
+        "body=$(sh <<'EOF'\nrm -rf ~/.local-operator\nEOF\n)",
+        "body=$(rm -rf ~/.local-operator)",
+        "body=$(printf x > ~/.local-operator/config.yml)",
+        "body=$(cat <<'EOF'\nliteral\nEOF\n); rm -rf ~/.local-operator",
+        # An unpaired opener/unclosed substitution never earns ownership proof.
+        "body=$(cat <<'EOF'\n`rm -rf ~/.local-operator`",
+        "body=$(cat <<'EOF'\n`rm -rf ~/.local-operator`\nEOF\n",
+    ],
+)
+def test_assignment_dedup_never_trusts_executable_or_malformed_body(
+    home: Path, command: str
+) -> None:
+    assert _risk(home, command) >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "glab api projects/1/uploads -F file=@~/.local-operator/sessions/foreign/note.json",
+        "glab api projects/1 --output ~/.local-operator/sessions/foreign/note.json",
+        "printf x > ~/.local-operator/config.yml",
+    ],
+)
+def test_assignment_dedup_keeps_real_protected_output_backstop(home: Path, suffix: str) -> None:
+    command = "body=$(cat <<'EOF'\nliteral\nEOF\n) && " + suffix
+    assert _risk(home, command) >= Risk.HIGH
+
+
+def test_bash_assignment_preserves_quoted_review_bytes(home: Path) -> None:
+    """Execute only cat/printf: destructive-looking review text stays literal."""
+    import subprocess
+
+    # macOS /bin/bash 3.2 incorrectly quote-tracks odd apostrophes inside
+    # nested heredocs. Keep this portable shell oracle focused on literal
+    # backticks/placeholders; the parser matrix above also covers apostrophes.
+    literal = _REVIEW_LITERAL.replace("it's", "it is")
+    command = "body=$(cat <<'EOF'\n" + literal + 'EOF\n)\nprintf "%s" "$body"'
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", command],
+        cwd=home / "repo",
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == b""
+    assert result.stdout == literal.rstrip("\n").encode()
 
 
 # -- KEEP: body text that really runs stays dangerous -------------------------

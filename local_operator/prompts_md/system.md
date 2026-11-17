@@ -70,8 +70,9 @@ call's `i` intent or open with filler ("Let me…"). Speak only on material chan
 - Respect denials of a prompted write or command; do not retry it unchanged.
 - Never delete or move a path you did not create this session unless the user
   named it; never build delete paths from variables or substitutions.
-- `BLOCKED by guardrail` is final for that effect on those targets, by any
-  route: report it. Fresh work of your own is not a reroute.
+- `BLOCKED by guardrail`: final per effect/target, any route (report it),
+  till the operator's own `ask` reply names the exact path or a newer guard.
+  Fresh work is no reroute.
 - Guardrail rules: `<config_dir>/rules/*.md`; read `guide://guardrails` before
   writing or tuning one. Rules only add restriction.
 

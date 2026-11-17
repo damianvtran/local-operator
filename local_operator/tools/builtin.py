@@ -131,6 +131,7 @@ from local_operator.harness.wake import (
     format_duration,
 )
 from local_operator.harness.wake_types import WakeOrigin
+from local_operator.i18n.keys import cli_failures as _cli_failures
 from local_operator.i18n.keys import wire_sessions as _ws
 from local_operator.i18n.text import tr
 from local_operator.imaging import (
@@ -4286,7 +4287,32 @@ def _tail_chunks(chunks: list[bytes] | _BashOutput, budget: int) -> list[bytes]:
     return taken
 
 
-async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
+#: Operator-visible failure copy for the bash spawn path (keyed; see AGENTS.md).
+_failure_copy = tr("cli.failures")
+
+
+def _github_borrow_timeout_note(outcome: Any) -> str:
+    """The ONE stderr line a bounded local GitHub borrow timeout adds.
+
+    WHY: a timed-out borrow leaves the child without ``GH_TOKEN`` and ``gh``
+    then says only "set the GH_TOKEN environment variable" (node attribution,
+    2026-11-16). Naming the timeout tells the operator a re-run is the remedy.
+    CONSTRAINTS: only ``BorrowTimeout`` reaches here -- denials, missing
+    redaction sinks and shell-policy excludes keep their existing silence/copy;
+    the line carries the owner's display name and the EXISTING deadline, never a
+    token, and nothing about it changes the child's environment.
+    """
+    owner = str(
+        getattr(outcome, "owner_device_name", "") or getattr(outcome, "owner_device", "") or "?"
+    )
+    timeout_s = float(getattr(outcome, "timeout_s", 0.0) or 0.0)
+    seconds = f"{timeout_s:g}"
+    return _failure_copy(_cli_failures.github_borrow_timeout(owner=owner, seconds=seconds))
+
+
+async def _github_git_injections(
+    context: ToolContext | None, notes: list[str] | None = None
+) -> dict[str, str]:
     """The borrowed-github injectables for ONE bash child, or ``{}``.
 
     Fetch-on-use, off the event loop (the borrow dials this device's relay and
@@ -4302,6 +4328,9 @@ async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
     if context is None:
         return {}
     store = getattr(context, "variables", None)
+    extra: dict[str, Any] = {}
+    if notes is not None:
+        extra["on_timeout"] = lambda outcome: notes.append(_github_borrow_timeout_note(outcome))
     try:
         from local_operator.network.credentials import github
 
@@ -4309,6 +4338,7 @@ async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
             github.lent_github_env,
             session_id=context.session_id or "",
             register=getattr(store, "register_redaction", None),
+            **extra,
         )
     except Exception:  # noqa: BLE001 — a broker fault must not fail a command
         return {}
@@ -4475,7 +4505,10 @@ async def execute_bash(
     # Not borrowed at all for a write-confined shell, for the reason the
     # session credentials above are withheld: no network to use it on, so the
     # token could only leak. Skipping the call also skips the broker round trip.
-    github_env = await _github_git_injections(context) if shell_write is None else {}
+    # Typed borrow-timeout lines only; written to the child's captured stderr
+    # below so every result shape (settled, live, spill, background) carries it.
+    github_notes: list[str] = []
+    github_env = await _github_git_injections(context, github_notes) if shell_write is None else {}
 
     # Refuse a call in which a stored secret would be PRINTED, before any child
     # exists. The control this replaces is an output filter (the redaction
@@ -4640,10 +4673,18 @@ async def execute_bash(
         temp = temp_owner.temp_dir()
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
+    env_policy = _bash_env_policy(confinement, shell_write)
     env = shell_env.child_environment(
-        _bash_env_policy(confinement, shell_write),
+        env_policy,
         injections=injections,
     )
+    if github_notes:
+        # ``None`` means the process's own frozen policy (what child_environment
+        # just applied). The operator's exclude wins over the borrowed login
+        # anyway, so a "retry the command" line would name a remedy that cannot help.
+        applied = env_policy if env_policy is not None else shell_env.load_policy()
+        if "GH_TOKEN" in getattr(applied, "exclude", frozenset()):
+            github_notes.clear()
 
     # Latch/filter shell policy FIRST: ConfigManager's budget read can quarantine
     # malformed YAML, making a later policy probe see an absent file and silently
@@ -4874,6 +4915,8 @@ async def execute_bash(
 
     stdout_chunks = _BashOutput()
     stderr_chunks = _BashOutput()
+    for note in github_notes:
+        stderr_chunks.append(f"{note}\n".encode("utf-8"))
     # Set once the command is owned by a background job, so the pipe readers
     # know where to mirror output for `jobs(op="peek")`. Held in a mutable cell
     # rather than captured by value because the readers start BEFORE the job id

@@ -8,8 +8,9 @@ Code comments cite the sections of this page by name, for example
 **Closed for ask mode; accepted risk in auto/yolo.**
 
 That sentence is the only correct summary of what this slice does, and it is a
-recorded product decision, not an oversight: sessions running
-`tool_approval_mode: auto` as the machine default, `--yolo`, or a
+recorded product decision, not an oversight: sessions running auto (the
+`tool_approval_mode: auto` machine default or the conversation's own
+`/approvals auto`, one rule since #3928, see "Grants"), `--yolo`, or a
 host-declared unattended `--tools` inventory that names the tool keep running
 third-party-reaching calls unattended after a teammate's agent message
 arrives. Do not describe S-38 as closed without the qualifier.
@@ -184,9 +185,9 @@ Allow/Deny card. An attached terminal keeps a mirror of the owner's latch,
 marked from that flag, which drives the redraw only; the owner still enforces.
 
 The latch records which kind of source set it, and that kind picks only the
-wording of the card notice, the paused-auto notice and the refused-auto
-receipt. `agent_message` means a Team Bridge card or `bridge` result reached
-this conversation. `other_session` means the content came through another
+wording of the card notice and the refused-auto receipt. `agent_message` means
+a Team Bridge card or `bridge` result reached this conversation.
+`other_session` means the content came through another
 session or device (a peek, a mesh reply, a cross-session read, a spill or
 archive copy, or a parent/child link). An Agent message wins when both apply,
 and a latch row with no kind reads as `agent_message`. The kind never changes
@@ -196,12 +197,43 @@ The plain `[y/N]` terminal prompt has no session object, so it keeps the
 
 ## Grants
 
-A session auto granted before the latch no longer covers calls once the
-session latches; the call falls through to the card. In the issuing
-conversation the TUI card's `G` and the desktop's "All sessions" count as
-session grants too. A deliberate `/approvals auto` typed after the latch is
-honoured and recorded (`granted_while_latched` in `approvals.json`), so it
-survives resume.
+An auto grant covers a latched session whichever scope it came from: the
+conversation's own auto (a typed `/approvals auto`, an `approvals.json`
+override, the TUI card's `A`/`S`/`G` in the issuing conversation, the
+desktop's "Set auto") is honoured exactly as the machine-default
+`tool_approval_mode: auto` is. The latch suspends no grant, so `/approvals`,
+the status band and the published pending-gate state all report the mode
+that is in effect, and no "auto is paused" notice is shown. `ask` is
+unchanged: a latched `ask` session gets the Allow/Deny card on every gated
+call, whether `ask` is the machine default or the conversation's own choice.
+
+Why (#3928, 2026-11-15). Until then a session auto granted before the latch
+stopped covering calls once the session latched, while the machine default
+kept covering them: two sessions with the same taint got opposite outcomes,
+and a deliberate per-session choice was trusted less than the machine default
+with no argument for that. Voiding global auto too would gate every session on
+the machine after any peer message, against the operator's standing
+no-friction preference. The latch's security value never lived in that split.
+It lives in:
+
+- the read-tier egress gate, which raises `web_fetch`, `read https://…`,
+  `web_search` and `web_read` to the approval gate in a latched session;
+- `bridge_ack` (below), so a routed frame cannot loosen a latched session;
+- the latched card, which is Allow/Deny only and is never answered by a mode
+  change;
+- the dangerous-delete guard's judge, which never takes Team Bridge or peer
+  text as consent (`guardrails/judge.py`).
+
+None of those changed. What the egress gate buys depends on the mode,
+though: it raises the call to the approval gate, and under either kind of
+auto (session or machine default) the grant answers that raised call without
+a card. So the read-tier egress protection applies to `ask` sessions; an auto
+session keeps `bridge_ack`, the Allow/Deny-only parked card and the
+dangerous-delete judge, and accepts the auto risk it already chose.
+
+The `granted_while_latched` stamp that marked a
+post-latch grant is retired with the split; a record or parked draft from an
+older build that still carries it is read without it.
 
 ## bridge_ack
 
@@ -214,9 +246,9 @@ form is covered because global auto covers a latched session's cards (the
 accepted auto/yolo risk), so a stale card's `G` would otherwise loosen the gate
 in one press. A `default` form is judged by what it resolves to, not by its
 words (`approvals_default_may_loosen` in `harness/approval.py`): a bare
-`approvals default` keeps a TUI owner's current mode, and a suspended pre-latch
-session auto keeps that mode auto, so the bare form is refused while latched on
-both owner hosts. Name `default ask` to tighten. Today that includes the phone composer's typed `/approvals
+`approvals default` keeps a TUI owner's current mode, and a session auto keeps
+that mode auto, so the bare form would promote one conversation's auto to every
+session on the machine; it is refused while latched on both owner hosts. Name `default ask` to tighten. Today that includes the phone composer's typed `/approvals
 auto`: the phone has no `bridge_ack` path yet, so a latched session can be
 loosened only from the terminal (fail closed).
 

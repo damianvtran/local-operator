@@ -37,6 +37,8 @@ the marker is how the ratchet records that they are KNOWN, not missed.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
@@ -62,7 +64,9 @@ async def get_wire_bundle(locale: str, request: Request) -> Response:
         detail = f"No catalogue for {locale}."  # i18n: ignore wire.errors slice owns it
         raise HTTPException(status_code=404, detail=detail)
     try:
-        result = catalogues.wire_bundle(locale)
+        # Every wire namespace read, hashed and parsed (twice for the deferred
+        # ones) -- in a thread, for the same reason as ``get_catalogue`` below.
+        result = await asyncio.to_thread(catalogues.wire_bundle, locale)
     except catalogues.CatalogueNotFound:
         # A shipped locale can still lose a file between the listing and the
         # read (a bad deployment). Same 404 shape as the sibling route: the
@@ -87,6 +91,13 @@ async def get_wire_bundle(locale: str, request: Request) -> Response:
     return JSONResponse(body.model_dump(), headers=headers)
 
 
+def _read_catalogue(locale: str, namespace: str) -> tuple[str, dict[str, str]]:
+    """The catalogue's digest and messages; synchronous, for ``asyncio.to_thread``."""
+    return catalogues.catalogue_sha256(locale, namespace), catalogues.load_catalogue(
+        locale, namespace
+    )
+
+
 @router.get("/v1/i18n/catalogues/{locale}/{namespace}", response_model=CRUDResponse)
 async def get_catalogue(locale: str, namespace: str, request: Request) -> Response:
     """One catalogue: messages + hash, with ETag revalidation."""
@@ -96,8 +107,10 @@ async def get_catalogue(locale: str, namespace: str, request: Request) -> Respon
         detail = f"No catalogue for {locale}/{namespace}."  # i18n: ignore wire.errors slice owns it
         raise HTTPException(status_code=404, detail=detail)
     try:
-        sha = catalogues.catalogue_sha256(locale, namespace)
-        messages = catalogues.load_catalogue(locale, namespace)
+        # Two file reads plus a JSON parse, in a thread (serve stall,
+        # 2026-11-15: ``catalogue_bytes`` was sampled on the event loop's
+        # thread): a renderer asks on boot, and disk time must not be loop time.
+        sha, messages = await asyncio.to_thread(_read_catalogue, locale, namespace)
     except catalogues.CatalogueNotFound:
         # Same shape for "no such locale" and "no such namespace": the
         # namespace inventory is served, not discoverable, and a 404 that

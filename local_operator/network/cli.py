@@ -2384,7 +2384,7 @@ def _refusal_words(code: str, owner: str) -> str:
         return f"{owner} has no login for this — sign in on {owner}"
     if code == "refresh_failed":
         return f"{owner} could not refresh the login — try again shortly"
-    if code == "rate_limited":
+    if code in ("rate_limited", "owner_busy"):
         return f"{owner} is busy — try again shortly"
     if code == "quota_blocked":
         return f"rate-limited on {owner} — try again later"
@@ -3507,7 +3507,10 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
 
 
 def _cmd_credential_refresh(args: argparse.Namespace) -> int:
-    """Ask the existing owner broker once; never expose the returned bearer.
+    """Ask the existing owner broker; retry one transient GitHub lookup deadline.
+
+    Other keys and all authorization refusals still get exactly one ask. Never
+    expose a returned bearer or extend a lease while recovering the source.
 
     The local relay resolves the owner from placement and the owner still checks
     holder permission and ADMIN. A CLI refresh cannot grant, retarget, or repair
@@ -3517,12 +3520,27 @@ def _cmd_credential_refresh(args: argparse.Namespace) -> int:
     from local_operator.network.types import MeshRefusal
 
     key = str(args.key)
-    detail = _relay_answer(
-        "credential_grant",
-        timeout=BROKER_OP_DEADLINE_S,
-        credential_key=key,
-        force_refresh=True,
-    )
+    from local_operator.network.credentials.messages import render_broker_error
+    from local_operator.network.credentials.types import BrokerError
+
+    def ask() -> dict[str, Any]:
+        # Explicit refresh can also mint an App token outside the gh-source
+        # lane. Preserve its existing 75s broker window, not the 14s hot borrow.
+        detail = _relay_answer(
+            "credential_grant",
+            timeout=BROKER_OP_DEADLINE_S,
+            credential_key=key,
+            force_refresh=True,
+        )
+        error = BrokerError.from_detail(detail).as_borrower_error()
+        if error.code == "owner_busy":
+            return {**detail, "code": error.code, "message": render_broker_error(error, key=key)}
+        return detail
+
+    detail = ask()
+    if key == "github" and detail.get("code") == "owner_busy":
+        time.sleep(0.25)
+        detail = ask()
     if detail.get("kind") != "grant":
         raise MeshRefusal(
             str(detail.get("code") or "grant_invalid"),
