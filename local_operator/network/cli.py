@@ -6287,6 +6287,11 @@ def _join_one(
         # ``_JoinAttempt`` names it, and without this line a death while WRITING the
         # auth frame was filed at `challenge` — one statement behind the wire.
         attempt.stage = "auth"
+        # A challenge from anyone but the token's inviter is refused before our auth
+        # frame leaves (``Handshake.refuse_unexpected_peer``); the proof check below
+        # is what actually authenticates the inviter.
+        inviter = DialerExpectation(device_id=envelope.inviter_device_id)
+        handshake.refuse_unexpected_peer(inviter)
         handshake.send_auth(sock, credential)
         attempt.stage = "welcome"
         # PINNED TO THE TOKEN'S INVITER (mesh-listener-auth §5). The joiner has no
@@ -6295,9 +6300,7 @@ def _join_one(
         # the token's ``inviter_device_id`` — and MACed under the invite key only a
         # token holder has. Without this the SAS digits were the only MITM defence,
         # and ``--automated`` joins (``typed = result.sas``) skip that comparison.
-        handshake.read_welcome(
-            reader, deadline, DialerExpectation(device_id=envelope.inviter_device_id)
-        )
+        handshake.read_welcome(reader, deadline, inviter)
         attempt.stage = "establish"
         result = handshake.establish()
         attempt.result = result

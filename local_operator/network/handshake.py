@@ -675,6 +675,34 @@ class Handshake:
         self.verify_welcome(frame, expect)
         return frame
 
+    def refuse_unexpected_peer(self, expect: DialerExpectation) -> None:
+        """Refuse BEFORE ``send_auth`` when the challenge names another device.
+
+        The challenge is unauthenticated, so a match here proves nothing (that is
+        :meth:`verify_welcome`'s job), but a MISMATCH is decisive: an honest listener
+        names its own id, so either the address is stale or the peer is lying, and
+        this device would refuse at step 5 anyway. Refusing here, before the auth
+        frame, matters for the honest case: a listener that receives a valid auth
+        completes its side and registers the link, and its duplicate fence
+        (``register_link``, newest wins) then EVICTS the real, older link from this
+        device — so a stale address pointing at member C would cost the working
+        link to C. It also keeps this device's auth tag away from the wrong party.
+        """
+        claimed = str(self.challenge.get("device_id") or "")
+        if expect.device_id and claimed == expect.device_id:
+            return
+        if self.mode == "join":
+            raise HandshakeRefusal(
+                REASON_INVITE_INVITER,
+                "the device that answered is not the one that issued this invite",
+            )
+        raise HandshakeRefusal(
+            REASON_PEER_IDENTITY,
+            f"the device that answered as {claimed or 'unknown'} is not "
+            f"{expect.device_id or 'the device this dial meant to reach'}; the address "
+            "on that member row is stale or redirected. No link was made",
+        )
+
     def verify_welcome(self, frame: dict[str, Any], expect: DialerExpectation) -> None:
         """The dialer's half of mutual authentication: steps 1-9, in this order.
 

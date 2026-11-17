@@ -13942,7 +13942,6 @@ class RelayServer:
             handshake.send_hello(sock)
             reader = wire.FrameReader(sock)
             handshake.read_challenge(reader, deadline)
-            handshake.send_auth(sock, credential)
             # WHO THIS DIAL MEANT TO REACH, from this device's own record. The
             # listener's welcome proof is verified against the STORED key of that
             # member's ACTIVE row (never a key from the frame), and the peer must be
@@ -13950,14 +13949,16 @@ class RelayServer:
             # say whom it meant cannot tell an impostor from the member (G1). Every
             # production caller passes it. Join (unused here: the CLI owns joins)
             # treats ``expected_device`` as the token's inviter id.
-            handshake.read_welcome(
-                reader,
-                deadline,
-                DialerExpectation(
-                    device_id=expected_device,
-                    public_key_for=None if mode == "join" else _active_key_reader(record),
-                ),
+            expect = DialerExpectation(
+                device_id=expected_device,
+                public_key_for=None if mode == "join" else _active_key_reader(record),
             )
+            # A challenge naming another device is refused BEFORE our auth, so an
+            # honest listener at a stale address never completes and never evicts
+            # its real link from us (see ``Handshake.refuse_unexpected_peer``).
+            handshake.refuse_unexpected_peer(expect)
+            handshake.send_auth(sock, credential)
+            handshake.read_welcome(reader, deadline, expect)
             # ``read_welcome`` takes the phase off that very frame — the ONE place
             # it is decided (``Handshake.read_welcome``) — so re-reading it here
             # would be a second rule for one fact.

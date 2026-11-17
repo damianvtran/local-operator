@@ -416,7 +416,12 @@ def test_a_real_member_answering_for_a_different_device_is_refused(
     )
     try:
         link, reason = _dial(mesh, fake, expected_device=mesh.victim.device_id)
-        assert not fake.errors, fake.errors
+        # The rig ran: the genuine listener sent its challenge. The fixed dialer then
+        # hangs up BEFORE its auth frame (``Handshake.refuse_unexpected_peer``), so the
+        # listener's only error is that EOF and it never saw an auth to complete on —
+        # which is what keeps an honest Y from evicting its real link to this device.
+        assert fake.auth_frame == {}, "the dialer sent its auth to the wrong device"
+        assert all(isinstance(e, ConnectionError) for e in fake.errors), fake.errors
         assert link is None and reason != "ok", (
             f"the dialer meant {mesh.victim.device_id} and admitted "
             f"{getattr(link, 'device_id', None)!r} (reason={reason!r})"
@@ -710,6 +715,7 @@ def test_t6_an_honest_member_at_the_targets_address_is_refused_and_demoted(
         )
         fake.handshake_done.wait(5)
         _assert_refused(mesh, reason, "peer_identity_mismatch", dialer_key_derivations)
+        assert fake.auth_frame == {}, "refused after sending auth: the listener completes"
         victim = _row(mesh, mesh.victim.device_id)
         assert endpoint not in victim.endpoints, "the wrong-device endpoint was not demoted"
         assert "127.0.0.1:1" in victim.endpoints, "an unrelated endpoint was demoted"
