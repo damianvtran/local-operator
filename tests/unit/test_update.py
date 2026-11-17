@@ -6241,7 +6241,8 @@ def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
     ``lop install prune`` policy) with the caller's ``on_prune`` reporter, and
     never call ``prune_generations`` directly from this tail.
     """
-    reclaims: list[tuple[Path | None, Any]] = []
+    # (promoted, previous, on_prune): the stub records all three reclaim inputs.
+    reclaims: list[tuple[Path | None, Path | None, Any]] = []
     direct: list[dict[str, Any]] = []
     notices: list[Any] = []
     generation = tmp_path / "owned-generation"

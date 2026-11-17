@@ -310,7 +310,8 @@ async def test_off_default_and_narrow_keeps_the_help_never_shows_the_clause_alon
     assert cell_len(help_text) > 2 * width, (cell_len(help_text), width)
     assert KEY not in plain, "the clause+key rung must not replace the help"
     if _wrap_cells(help_text, width, max_lines=_DETAIL_WRAP_MAX_ROWS) is not None:
-        lines = _assert_whole(plain, width, help_text)
+        # D1 (design round 1): the default note rides the last wrapped line.
+        lines = _assert_whole(plain.removesuffix(" · default: 2"), width, help_text)
         assert view._detail_rows == len(lines)
         assert view._detail.styles.padding.top == 0
     else:
@@ -352,3 +353,27 @@ async def test_the_wrapped_keep_help_takes_dim_ink_not_faint() -> None:
         for span in text.spans
     ]
     assert inks and all(ink == expected for ink in inks), (inks, expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 30), (56, 20)])
+async def test_off_default_wrapped_help_names_the_default_when_it_fits(
+    size: tuple[int, int],
+) -> None:
+    """Design round 1, D1: wrapped off-default help still says ``default: 2``.
+
+    The wrap rung rendered only the help, so the clause every other
+    off-default row shows was dropped even with room on the last line. The
+    help stays whole; the note joins its last line only when it fits.
+    """
+    help_text = _help()
+    plain, width, view = await _paint_at(size, value=0)
+    tail = " · default: 2"
+    lines = _wrap_cells(help_text, width, max_lines=_DETAIL_WRAP_MAX_ROWS)
+    # Preconditions: the help wraps, and the note fits beside its last line.
+    assert lines is not None and len(lines) > 1, (lines, width)
+    assert cell_len(lines[-1] + tail) <= width, (lines[-1], width)
+    assert plain.endswith(tail), plain
+    rendered = _assert_whole(plain.removesuffix(tail), width, help_text)
+    assert len(rendered) == len(lines) == view._detail_rows
+    assert all(cell_len(line) <= width for line in plain.split("\n"))

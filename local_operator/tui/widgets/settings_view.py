@@ -5135,6 +5135,14 @@ class SettingsView(Vertical):
                         for line in lines[1:]:
                             text.append("\n")
                             text.append(line, style=wrap_style)
+                        # DESIGN ROUND 1, D1 (PR #4135): an off-default listed
+                        # row kept the guarantee but lost `default: N`, which
+                        # every other clause rung names. The wrapped help still
+                        # outranks the clause, so it rides only on room the
+                        # last line leaves; bridge rows keep their fixed band.
+                        tail = f" · {clause}"
+                        if clause and not bridge_row and cell_len(lines[-1] + tail) <= width:
+                            text.append(tail, style=clause_style)
                         wrap_rows = len(lines) if len(lines) > 1 else 0
                         break
                     continue
