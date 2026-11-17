@@ -133,14 +133,19 @@ or shadowed executables, shell startup files and imported functions get no proof
 Shell declarations/namerefs, variable-mutating builtins (including `printf -v`
 and `%n`), arithmetic/assignment expansions and unconfined earlier writes end
 all copied fresh bindings. Read-only filesystem classification alone cannot
-prove that a command preserves shell variables.
+prove that a command preserves shell variables. Only `:`, `echo`, `pwd`, a
+narrow `printf`, and `mkdir`/`mktemp` passing the same system-executable check
+keep the proof; `git` (repo-configured programs) and GNU `g*` variants end it.
+Freshness is the walker's own record, never a byte in the value: a command that
+writes the internal marker (`$'\x03'`) gets ordinary literal text.
 
 This fixes a mac-proof capture case where rejecting every slash-bearing
 `mktemp` template collapsed fresh scratch writes to opaque writes at cwd.
 It does not exempt a script as a whole: protected paths, unknown interpreter
 argv and unknown writers keep their usual checks. In particular, curl's
-explicit `-o`/`--output` destination is checked, but curl is not fully modelled
-or declared read-only, and containment is not carried past it.
+explicit `-o`/`--output` destination is ranked like a `>` redirection to the
+same path (state root or config is CRITICAL, scratch is LOW), but curl is not
+fully modelled or declared read-only, and containment is not carried past it.
 
 Success matters: without the supported errexit header, a failed substitution
 could leave `ROOT` empty. AND/OR lists, pipelines, negation, conditional tests,

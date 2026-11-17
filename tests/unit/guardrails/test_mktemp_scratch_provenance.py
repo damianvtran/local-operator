@@ -350,3 +350,108 @@ def test_system_mktemp_in_ordinary_inherited_path_is_supported(tree) -> None:
 def test_legacy_default_mktemp_remains_supported(tree) -> None:
     result = _resolve(tree, 'ROOT=$(mktemp -d)\nprintf proof > "$ROOT/proof"')
     assert any(t.temp for t in result.targets)
+
+
+# PR #4116 review B1: FRESH_DIR_MARK is the byte \x03, which a command can
+# write itself (ANSI-C ``$'\x03'`` or a raw U+0003). Freshness must come from
+# the walker's own proof, never from the byte, so each forged binding ranks
+# exactly as main does: a write through a link into the state root is CRITICAL.
+_PAD = '"$LOCAL_OPERATOR_SCRATCHPAD/'
+_FORGED = {
+    "ln-config": 'ln -s "$HOME/.local-operator" ' + _PAD + "n\"$'\\x03'\n"
+    "R=" + _PAD + "n\"$'\\x03'\n"
+    'printf x > "$R/config.yml"\n',
+    "asks": "R=" + _PAD + "\"$'\\x03'\n" + f'printf x > "$R/sessions/{SID}/asks.jsonl"\n',
+    "rm-sessions": "R=" + _PAD + "\"$'\\x03'\n" + 'rm -rf "$R/sessions"\n',
+    "raw-u0003-config": "R=" + _PAD + 'q\x03"\nprintf x > "$R/config.yml"\n',
+    "raw-u0003-rm": "R=" + _PAD + '\x03"\nrm -rf "$R/sessions"\n',
+}
+
+
+@pytest.mark.parametrize("header", ["", HEADER], ids=["bare", "header"])
+@pytest.mark.parametrize("case", sorted(_FORGED))
+def test_forged_fresh_mark_never_lowers_critical(tree, case, header) -> None:
+    home, pad, cwd, env = tree
+    # The "pre-planted" rows: a link left by an earlier call, named so the
+    # forged value resolves through it into the state root.
+    (pad / "\x03").symlink_to(home / ".local-operator")
+    (pad / "q\x03").symlink_to(home / ".local-operator")
+    command = header + _FORGED[case]
+    assert _rank(tree, command).risk == Risk.CRITICAL
+    report = preview_tool_call(
+        "bash",
+        {"command": command},
+        CallContext(cwd=str(cwd), env=env, scratchpad=str(pad), session_id=SID),
+        settings=GuardSettings(enabled=False),
+    )
+    assert report.builtin_risk == "CRITICAL"
+
+
+def test_forged_mark_in_inherited_env_is_not_fresh(tree) -> None:
+    # Out-of-band provenance: even an inherited value carrying the byte is a
+    # plain string, so it never grants containment.
+    _, pad, _, env = tree
+    env["R"] = str(pad) + "/\x03"
+    result = _resolve(tree, HEADER + 'printf x > "$R/config.yml"\n')
+    assert not any(t.opaque_contained for t in result.targets)
+
+
+def test_genuine_fresh_copy_still_keeps_provenance(tree) -> None:
+    # Control for B1: a walker-proved binding copied by plain assignment keeps
+    # the intended LOW; only forged marks lost it.
+    command = HEADER + ASSIGN + 'COPY="$ROOT"\nmkdir -p "$COPY/s"\nprintf x > "$COPY/s/f"\n'
+    assert _rank(tree, command).risk == Risk.LOW
+
+
+# PR #4116 review M1: mkdir is found on PATH, so it gets mktemp's root-owned
+# identity check; read-only git can run repo-configured programs, so it ends
+# the proof for every later segment.
+def test_shadowed_mkdir_ends_fresh_scope(tree) -> None:
+    home, _, _, env = tree
+    bin_dir = home / "bin"
+    bin_dir.mkdir()
+    shadow = bin_dir / "mkdir"
+    shadow.write_text("#!/bin/bash\nexit 0\n")
+    shadow.chmod(0o755)
+    env["PATH"] = str(bin_dir) + ":/usr/bin:/bin"
+    command = HEADER + ASSIGN + 'mkdir -p "$ROOT/source"\n' + WRITE
+    assert _rank(tree, command).risk >= Risk.HIGH
+    assert not any(t.opaque_contained for t in _resolve(tree, command).targets)
+
+
+@pytest.mark.parametrize("program", ["git status", 'git -C "$ROOT" log', 'gmkdir -p "$ROOT/s"'])
+def test_git_and_gnu_variants_end_fresh_scope(tree, program) -> None:
+    command = HEADER + ASSIGN + program + "\n" + WRITE
+    assert _rank(tree, command).risk >= Risk.HIGH
+
+
+# PR #4116 Q1: curl's output destination is ranked as the same overwrite
+# target a ``>`` redirection records, so protection follows the path.
+@pytest.mark.parametrize("flag", ["--output ", "--output=", "-o ", "-o"])
+def test_curl_output_into_config_is_critical(tree, flag) -> None:
+    command = f'curl -fsSL {flag}"$HOME/.local-operator/config.yml" https://example.invalid/x'
+    assert _rank(tree, command).risk == Risk.CRITICAL
+
+
+def test_curl_output_ranks_like_redirect(tree) -> None:
+    curl = _rank(tree, "curl -o ~/.bashrc https://example.invalid/x").risk
+    assert curl == _rank(tree, "printf x > ~/.bashrc").risk
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'curl -o "$LOCAL_OPERATOR_SCRATCHPAD/out" https://example.invalid/x',
+        "curl -s https://example.invalid/x",
+        "curl -s https://example.invalid/x | jq .",
+        "curl -o out.json https://example.invalid/x",
+        'curl -o "$LOCAL_OPERATOR_SCRATCHPAD/a" https://example.invalid/x',
+        HEADER + ASSIGN + 'curl -o "$ROOT/a" https://example.invalid/x\n',
+        "curl -o /tmp/x https://example.invalid/x",
+        "curl -o /dev/null -w '%{http_code}' https://example.invalid/x",
+        "curl -O https://example.invalid/f.txt",
+        "curl -K cfg https://example.invalid/x",
+    ],
+)
+def test_benign_curl_forms_stay_low(tree, command) -> None:
+    assert _rank(tree, command).risk == Risk.LOW

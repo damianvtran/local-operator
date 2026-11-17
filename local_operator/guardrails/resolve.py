@@ -119,7 +119,32 @@ TEMP_MARK = "\x02"
 _RAW_PATH_VARS = frozenset({"HOME", "OLDPWD"})
 #: A symbolic fresh DIRECTORY below a pinned parent. Unlike TEMP_MARK this
 #: retains that parent in the value; it must never be anchored to cwd or /tmp.
+#: The byte alone proves NOTHING: a command can write it (``$'\x03'``, a raw
+#: U+0003), and trusting it let ``R="$PAD/q"$'\x03'`` through a planted link
+#: drop a state-root write from CRITICAL to LOW (PR #4116 review B1). Only a
+#: value of type :class:`_FreshDirValue` carries the mark; see there.
 FRESH_DIR_MARK = "\x03"
+
+
+class _FreshDirValue(str):
+    """An env value whose FRESH_DIR_MARK the walker itself minted.
+
+    Out-of-band provenance (PR #4116 review B1): command text and inherited
+    env can only ever produce plain ``str``, so they cannot forge this type.
+    Only ``_Walker._assign`` constructs it, from a ``_stored_assignment`` that
+    proved a fail-closed scratch mktemp directory. Any string operation
+    returns a plain ``str`` again, so a derived value loses the proof unless
+    the walker re-mints it. Everywhere else a ``\\x03`` byte is ordinary
+    literal text, exactly as on main, so a forged mark never changes a rank.
+    """
+
+    __slots__ = ()
+
+
+def _is_fresh_binding(value: object) -> bool:
+    return isinstance(value, _FreshDirValue) and FRESH_DIR_MARK in value
+
+
 #: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
 #: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
 #: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
@@ -741,8 +766,11 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
         if TEMP_MARK in value:
             out.temp = True
             value = value.replace(TEMP_MARK, OPAQUE_MARK)
-        fresh = value.count(FRESH_DIR_MARK) == 1 and OPAQUE_MARK not in value
-        if FRESH_DIR_MARK in value:
+        # B1: only a walker-minted binding is fresh; a plain value's \x03 is a
+        # literal byte (main's reading), never containment.
+        authentic = _is_fresh_binding(value)
+        fresh = authentic and value.count(FRESH_DIR_MARK) == 1 and OPAQUE_MARK not in value
+        if authentic:
             out.fresh_dir = True
             value = value.replace(FRESH_DIR_MARK, OPAQUE_MARK)
         if OPAQUE_MARK in value:
@@ -4017,6 +4045,13 @@ class _Walker:
         # the fresh directory or its parent. Never carry containment past it.
         # mkdir only creates directories; mktemp's substitution is walked in a
         # child scope. No exemption is added for the unknown program itself.
+        # PR #4116 review M1: ``:``/echo/pwd/printf are bash builtins, so PATH
+        # never picks them; mkdir/mktemp ARE looked up on PATH and must pass
+        # the same root-owned identity check mktemp's provenance uses. git is
+        # deliberately absent: even read-only git runs repo-configured
+        # programs (core.fsmonitor, textconv), which could swap the fresh
+        # directory for a link. Its own redirections were already ranked
+        # above, while the proof still held; only LATER segments lose it.
         preserves_fresh = (
             words[0].text == name
             and not raw_assigns
@@ -4025,8 +4060,8 @@ class _Walker:
             # proof: printf -v/%n, let, eval and declaration builtins mutate
             # variables. Preserve only the small forms this proof understands.
             and (
-                name in (":", "echo", "pwd", "mkdir", "gmkdir", "mktemp", "gmktemp")
-                or (name == "git" and readonly)
+                name in (":", "echo", "pwd")
+                or (name in ("mkdir", "mktemp") and self._trusted_system_program(name))
                 or (
                     name == "printf"
                     and bool(args)
@@ -4294,10 +4329,15 @@ class _Walker:
         """Unmodelled effects end the proof, including for copied bindings."""
         self.fresh_scope = False
         for key, value in list(self.state.env.items()):
-            if FRESH_DIR_MARK in value:
+            # A plain value's \x03 is literal text (B1): opaquing it would turn
+            # main's CRITICAL through a planted link into HIGH.
+            if _is_fresh_binding(value):
                 self.state.env[key] = OPAQUE_MARK
 
     def _trusted_mktemp(self) -> bool:
+        return self._trusted_system_program("mktemp")
+
+    def _trusted_system_program(self, program: str) -> bool:
         """Inspect, never execute, PATH's winner before granting fresh provenance.
 
         An unchanged inherited PATH may start with a user-controlled executable.
@@ -4316,8 +4356,8 @@ class _Walker:
             if self.state.cwd is None:
                 return False
             entries = [p if os.path.isabs(p) else os.path.join(self.state.cwd, p) for p in entries]
-        selected = shutil.which("mktemp", path=os.pathsep.join(entries))
-        if selected not in ("/usr/bin/mktemp", "/bin/mktemp"):
+        selected = shutil.which(program, path=os.pathsep.join(entries))
+        if selected not in (f"/usr/bin/{program}", f"/bin/{program}"):
             return False
         selected = os.path.realpath(selected)
         try:
@@ -4432,6 +4472,10 @@ class _Walker:
             and word.fresh_dir
             and word.opaque_contained
             and text_value.count(OPAQUE_MARK) == 1
+            # A literal \x03/\x02 already in the word would be read back as a
+            # second mark; keep such a value plain and opaque, as on main (B1).
+            and FRESH_DIR_MARK not in text_value
+            and TEMP_MARK not in text_value
         ):
             # PR #4116: a fail-closed ``$(mktemp -d "$SCRATCH/x.XXXXXXXX")``
             # keeps its pinned parent as FRESH_DIR_MARK. This is NOT the
@@ -4439,6 +4483,10 @@ class _Walker:
             # directory under an existing pinned scratch parent qualifies, and
             # every mutator below drops it again.
             text_value = text_value.replace(OPAQUE_MARK, FRESH_DIR_MARK)
+            if append is None:
+                return Expanded(
+                    text=text_value, refs=list(word.refs), pattern=word.pattern, fresh_dir=True
+                )
         elif temp and word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
             text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
         if append is None:
@@ -4450,7 +4498,7 @@ class _Walker:
             word.refs
             or name in self.for_lists
             or TEMP_MARK in old
-            or FRESH_DIR_MARK in old
+            or _is_fresh_binding(old)
             or FOR_GLOB_MARK in old
             or TEMP_MARK in suffix
         ):
@@ -4458,9 +4506,13 @@ class _Walker:
             return Expanded(text=f"{name}=" + (CREDENTIAL_MARK if credential else OPAQUE_MARK))
         return Expanded(text=f"{name}={old}{suffix}")
 
-    def _assign(self, text: str) -> None:
+    def _assign(self, text: str, *, fresh: bool = False) -> None:
         name, _, value = text.partition("=")
         value = _tilde_value(value, self.state.home)
+        if fresh and FRESH_DIR_MARK in value:
+            # The ONLY place fresh provenance is minted (B1): ``fresh`` comes
+            # from ``_stored_assignment``'s proof, never from the text.
+            value = _FreshDirValue(value)
         self.state.env[name] = value
         if name in ("PATH", "SHELLOPTS", "BASH_ENV", "ENV"):
             self._forget_fresh_directories()
@@ -5275,6 +5327,14 @@ class _Walker:
         for w in dests:
             if w.text and not w.vanished:
                 self.result.touched.append(_target(w, "write", name, st))
+                if name == "curl" and not w.text.startswith("/dev/"):
+                    # PR #4116 Q1: ``curl -o F`` truncates F exactly like
+                    # ``> F``, but as a touch alone only session-state paths
+                    # ranked, so ``-o <state>/config.yml`` was LOW while
+                    # ``printf > config.yml`` was CRITICAL. Rank it as the
+                    # same overwrite target a redirection records (``/dev/``
+                    # skipped there too), with no per-path special case.
+                    self._add(w, "overwrite", name)
         if (
             fully
             and dests
@@ -6054,7 +6114,7 @@ class _Walker:
         ``D=$S/x-$l`` inside a loop body binds D once per iteration, so a
         later ``$D`` target fans out with the loop like a direct ``$l`` one.
         """
-        self._assign(word.text)
+        self._assign(word.text, fresh=word.fresh_dir)
         name = word.text.partition("=")[0]
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
