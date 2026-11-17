@@ -1,0 +1,54 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<title>Reading phone frame</title>
+<style>body{margin:0;padding:8px;background:#ddd;font:12px system-ui}iframe{display:block;border:0;background:#fff}#info{margin:4px 0;font-family:ui-monospace,monospace}</style>
+<div id="info"></div>
+<iframe title="Phone relay" id="phone"></iframe>
+<script>
+/* Fixture-only harness for scripts/mobile_reading_fixture.py. Query:
+   s=<session id> theme=localOperatorLight|localOperatorDark w=390 h=844
+   scroll=top|bottom|<px>  click=<css selector inside the phone, run after load>
+   z=<paint scale, default 1; the iframe still lays out at w x h>
+   measure=1 prints geometry/computed styles of the first user bubble and its toggle
+   wait=<ms before scroll/click> (default 1500)
+   Nothing here is read by product code. */
+const q = new URLSearchParams(location.search);
+const w = +(q.get('w') || 390), h = +(q.get('h') || 844);
+const f = document.querySelector('#phone');
+f.style.width = w + 'px'; f.style.height = h + 'px';
+const z = +(q.get('z') || 1);
+if (z !== 1) { f.style.transform = 'scale(' + z + ')'; f.style.transformOrigin = 'top left'; }
+f.src = '/#/s/' + (q.get('s') || '5c0a1e000001');
+const info = document.querySelector('#info');
+f.addEventListener('load', () => {
+  const d = f.contentDocument;
+  d.documentElement.dataset.theme = q.get('theme') || 'localOperatorLight';
+  setTimeout(() => {
+    const sc = d.querySelector('[data-transcript-scroller], .lo-fade-y.overflow-y-auto');
+    const s = q.get('scroll');
+    if (sc && s) sc.scrollTop = s === 'top' ? 0 : s === 'bottom' ? sc.scrollHeight : +s;
+    const c = q.get('click');
+    if (c) { const el = d.querySelector(c); if (el) el.click(); }
+    setTimeout(() => {
+      const sc2 = d.querySelector('.lo-fade-y.overflow-y-auto');
+      const out = {w, h, theme: d.documentElement.dataset.theme, scroller: sc2 && {top: Math.round(sc2.scrollTop), client: sc2.clientHeight, scroll: sc2.scrollHeight}};
+      if (q.get('measure')) {
+        const r = el => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width * 10) / 10, Math.round(b.height * 10) / 10]; };
+        const bubble = d.querySelector('[data-user-text]')?.parentElement;
+        const btn = d.querySelector('[data-message-toggle]');
+        const text = d.querySelector('[data-user-text]');
+        const cs = el => el && getComputedStyle(el);
+        out.measure = {
+          docScrollW: d.documentElement.scrollWidth, docClientW: d.documentElement.clientWidth,
+          bubble: bubble && {rect: r(bubble), border: cs(bubble).borderTopWidth + ' ' + cs(bubble).borderTopColor, bg: cs(bubble).backgroundColor},
+          canvas: cs(d.body).backgroundColor,
+          text: text && {rect: r(text), scrollH: text.scrollHeight, clientH: text.clientHeight, clamp: cs(text).webkitLineClamp},
+          button: btn && {rect: r(btn), name: btn.getAttribute('aria-label'), expanded: btn.getAttribute('aria-expanded'),
+            hitBefore: (() => { const b = cs(btn, '::before'); return null; })()},
+        };
+        if (btn) { const b = getComputedStyle(btn, '::before'); out.measure.button.hit = {top: b.top, bottom: b.bottom, position: b.position}; }
+      }
+      info.textContent = JSON.stringify(out);
+    }, 400);
+  }, +(q.get('wait') || 1500));
+});
+</script>
