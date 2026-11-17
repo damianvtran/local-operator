@@ -366,7 +366,10 @@ async def test_an_ordinary_prompt_carries_no_stamp_and_is_announced(tmp_path):
         await session.prompt("just talk to me", message_id="m2")
         rows = _user_messages(session)
         assert len(rows) == 1
-        assert not rows[0].provider_payload
+        # The harness marker is what "stamped" means here; ADR 0009's input
+        # surface stamp rides every human row and is not chrome.
+        assert "harness_injected" not in (rows[0].provider_payload or {})
+        assert rows[0].provider_payload == {"lop_input_surface": "tui"}
         assert seen == ["just talk to me"]
     finally:
         await session.dispose()

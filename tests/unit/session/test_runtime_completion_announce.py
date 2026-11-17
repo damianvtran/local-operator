@@ -974,3 +974,58 @@ async def test_only_her_banner_asks_for_a_durable_click(
         assert seen[0]["durable_click_s"] > 3600, "must outlive a morning"
     else:
         assert "durable_click_s" not in seen[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("phone_emits", "expected"), [(True, False), (False, True)])
+async def test_a_mobile_origin_completion_is_the_phones_while_it_would_emit(
+    tmp_path: Path, monkeypatch, banners, phone_emits, expected
+) -> None:
+    """ADR 0009 §2 footnote 1: the desktop stays silent for a mobile-origin
+    completion only while the phone would be told (``phone_would_emit``, the
+    predicate the push worker asks); with no phone to tell, rung 4 still speaks,
+    so the item is never silent on every surface. SETTLED without a claim: the
+    unseen mark stays for the sidebar."""
+    import uuid
+
+    from local_operator.notifications import routing as push_routing
+
+    monkeypatch.setattr(push_routing, "phone_would_emit", lambda state, root, **_: phone_emits)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = str(uuid.uuid4())
+        AttentionStore(config_dir() / "attention.db").publish(
+            f"session/{session_id}", token, "a1", "complete", origin="mobile"
+        )
+        await asyncio.to_thread(handle._announce_completion)
+        assert bool(calls) is expected, calls
+        assert _delivered(session_id, token) is expected
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_origin_completion_never_consults_the_phone(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """The negative control: a non-mobile row banners on the desktop as before,
+    even when a phone would have been told."""
+    import uuid
+
+    from local_operator.notifications import routing as push_routing
+
+    monkeypatch.setattr(push_routing, "phone_would_emit", lambda state, root, **_: True)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = str(uuid.uuid4())
+        AttentionStore(config_dir() / "attention.db").publish(
+            f"session/{session_id}", token, "a1", "complete", origin="desktop"
+        )
+        await asyncio.to_thread(handle._announce_completion)
+        assert calls, "the desktop banners its own work"
+    finally:
+        await session.dispose()

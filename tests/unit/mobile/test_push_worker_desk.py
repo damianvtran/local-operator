@@ -116,6 +116,7 @@ class DeskHarness(Harness):
             desk=self.desk,
             live_devices=self.devices,
             attending=self.desk.attending,
+            preferences=self.preferences,
         )
 
     def idle_beats(self, seconds: float, *, since_input: float = 0.0) -> None:

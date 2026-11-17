@@ -461,6 +461,9 @@ def test_list_serves_the_settings_shape_and_omits_unknown_name() -> None:
         "completions": True,
         "errors": True,
         "previews": True,
+        # ADR 0009: the enum keys resolve to the operator's policy defaults.
+        "completions_scope": "phone",
+        "attention": "away",
     }
     assert "name" not in entry
     assert devices[1]["name"] == "Pixel"
@@ -1680,12 +1683,28 @@ def test_unrevoke_does_not_clear_the_lapse_marker() -> None:
 # store keeps them per device, and the push worker gates emits on them. These
 # cells own the store half; ``test_push_worker.py`` owns the gate.
 
-ALL_ON = {"enabled": True, "completions": True, "errors": True, "previews": True}
+#: Every switch at its absent-default: the booleans on, and ADR 0009's enum keys
+#: at the operator's policy defaults.
+ALL_ON = {
+    "enabled": True,
+    "completions": True,
+    "errors": True,
+    "previews": True,
+    "completions_scope": "phone",
+    "attention": "away",
+}
 
 
 def test_register_stores_valid_preferences_and_the_list_returns_them() -> None:
     client = _client()
-    chosen = {"enabled": True, "completions": False, "errors": True, "previews": False}
+    chosen = {
+        "enabled": True,
+        "completions": False,
+        "errors": True,
+        "previews": False,
+        "completions_scope": "all",
+        "attention": "never",
+    }
     answer = client.post("/api/push/register", json={**PAYLOAD, "preferences": chosen})
     assert answer.status_code == 200, answer.text
     assert _stored_records()[0]["preferences"] == chosen
@@ -1711,6 +1730,15 @@ def test_a_partial_preferences_object_stores_the_missing_keys_as_on() -> None:
         ({"errors": 0}, "preferences.errors must be true or false"),
         ({"completions": None}, "preferences.completions must be true or false"),
         ({"previews": "off"}, "preferences.previews must be true or false"),
+        # ADR 0009's enum keys: a value outside the set is refused, never
+        # stored for the worker to guess at.
+        (
+            {"completions_scope": "desktop"},
+            "preferences.completions_scope must be one of: phone, all",
+        ),
+        ({"completions_scope": True}, "preferences.completions_scope must be one of"),
+        ({"attention": "sometimes"}, "preferences.attention must be one of: away, always, never"),
+        ({"attention": None}, "preferences.attention must be one of"),
     ],
 )
 def test_a_bad_preferences_shape_refuses_and_writes_nothing(
@@ -1721,6 +1749,32 @@ def test_a_bad_preferences_shape_refuses_and_writes_nothing(
     assert answer.status_code == 422, answer.text
     assert sentence in answer.text
     assert not _store_path().exists(), "a refused register writes nothing"
+
+
+@pytest.mark.parametrize(
+    ("chosen", "stored"),
+    [
+        ({"completions_scope": "all"}, {"completions_scope": "all", "attention": "away"}),
+        ({"attention": "always"}, {"completions_scope": "phone", "attention": "always"}),
+        ({"attention": "never"}, {"completions_scope": "phone", "attention": "never"}),
+    ],
+)
+def test_the_routing_enums_are_accepted_and_absent_ones_take_the_policy_default(
+    chosen: dict[str, str], stored: dict[str, str]
+) -> None:
+    client = _client()
+    answer = client.post("/api/push/register", json={**PAYLOAD, "preferences": chosen})
+    assert answer.status_code == 200, answer.text
+    assert _stored_records()[0]["preferences"] == {**ALL_ON, **stored}
+
+
+def test_an_unreadable_stored_enum_resolves_to_its_default_never_to_on() -> None:
+    """A value this build cannot read must not widen what pushes."""
+    resolved = push_devices.resolved_preferences(
+        {"preferences": {"completions_scope": "everything", "attention": 1}}
+    )
+    assert resolved["completions_scope"] == "phone"
+    assert resolved["attention"] == "away"
 
 
 def test_an_unknown_preferences_key_is_echoed_bounded() -> None:

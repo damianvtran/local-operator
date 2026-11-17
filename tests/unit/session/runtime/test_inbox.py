@@ -636,7 +636,11 @@ async def test_a_spooled_harness_continuation_steers_with_its_stamp(tmp_path: Pa
     assert stamp == {"harness_injected": True}, "the stamp was dropped at the steer hop"
     plain_row = queued[1]
     assert isinstance(plain_row, Message)
-    assert not (plain_row.provider_payload or {}), "an operator row must not be stamped"
+    # ADR 0009 stamps every human row with its input surface, so "unstamped"
+    # means "no harness marker", never "no payload at all".
+    assert "harness_injected" not in (
+        plain_row.provider_payload or {}
+    ), "an operator row must not be stamped"
 
 
 def test_a_recall_marker_withholds_its_row_from_both_readers(tmp_path: Path) -> None:

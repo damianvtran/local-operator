@@ -5240,6 +5240,13 @@ async def _run_owner_prompt(
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
     if "owner_typed" in parameters and (getattr(line, "sender", None) or {}).get("remote_origin"):
         fields["owner_typed"] = False
+    if "input_surface" in parameters:
+        # ADR 0009: a prompt spooled across a runtime swap keeps the surface it
+        # was typed on, so a phone prompt replayed by the successor still routes
+        # its completion to the phone.
+        from local_operator.session.session import spooled_input_surface
+
+        fields["input_surface"] = spooled_input_surface(line)
     try:
         if live and getattr(line, "mode", "") == "steer":
             # A LIVE-QUEUED STEER: the user's mid-turn message that the busy
@@ -5293,6 +5300,10 @@ async def _run_owner_prompt(
             getattr(line, "sender", None) or {}
         ).get("remote_origin"):
             steer_fields["owner_typed"] = False
+        if "input_surface" in inspect.signature(steer).parameters:
+            from local_operator.session.session import spooled_input_surface
+
+            steer_fields["input_surface"] = spooled_input_surface(line)
         logger.info(
             "spooled prompt %s arrived mid-turn; joining the turn in flight",
             command_id or "<no id>",

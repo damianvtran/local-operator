@@ -106,6 +106,7 @@ from local_operator.mobile.push_payload import (
     emit_body,
     push_sound,
 )
+from local_operator.notifications import routing as push_routing
 from local_operator.notifications.catalog_view import selected_push_stem
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import (
@@ -434,6 +435,7 @@ class PushWorker:
         report_block: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         unread_count: Callable[[], int | None] | None = None,
         attending: Callable[[str], bool] | None = None,
+        preferences: Callable[[], Mapping[str, Mapping[str, Any]]] | None = None,
     ) -> None:
         """``computer`` is the opaque per-account handle §3.2 carries.
 
@@ -497,6 +499,10 @@ class PushWorker:
         # (:meth:`_previews_allowed`); only an injected list overrides that.
         self._live_devices_injected = live_devices is not None
         self._report_block = report_block
+        #: The devices' resolved push preferences (``push_devices.
+        #: device_preferences``); injectable beside ``live_devices`` because an
+        #: injected live list names devices the registry does not hold.
+        self._preferences = preferences
         self._unread_count = unread_count if unread_count is not None else self._store_count
         self._cursors = WorkerCursors()
         self._loaded = False
@@ -889,11 +895,60 @@ class PushWorker:
         is a property of the computer rather than of the row.
         """
         state = self.store.state(conversation)
-        if not (bool(state.get("unseen")) and bool(state.get("notify"))):
+        # ADR 0009 §3 push-worker edit 1. ``row_is_routable`` is unseen, a
+        # notifiable kind, and ``needs_user`` OR ``notify``: a run that ended on
+        # an ask it opened is a candidate WHATEVER ``notify`` says (a wake run
+        # ending on ``ask_user`` has ``notify = False``). The stamp already means
+        # "opened in this run's window", so no dedup is added here: a later run
+        # ending with the same ask open carries ``needs_user = 0`` and falls
+        # through to ``notify`` like any row.
+        if not push_routing.row_is_routable(state):
             return False
-        return self._desktop_would_announce(conversation, state.get("kind"))
+        # The ROUTING rule per computer: a non-mobile completion is a candidate
+        # only under ``completions_scope: all``, a needs-you row only under
+        # ``attention != never``; errors route whatever their origin. The master
+        # and category switches stay with ``_preference_gate``. A non-candidate
+        # resolves without an emit and the cursor advances (module header).
+        if not push_routing.any_device_routes_row(
+            state, self._device_preferences(), self._live_devices()
+        ):
+            return False
+        return self._desktop_would_announce(
+            conversation, state.get("kind"), mobile=push_routing.is_mobile_origin(state)
+        )
 
-    def _desktop_would_announce(self, conversation: str, kind: Any) -> bool:
+    def _device_preferences(self) -> dict[str, dict[str, Any]]:
+        """The registry's resolved switches; unreadable imposes no preference.
+
+        "No preference" is the absent-defaults (``PREFERENCE_DEFAULTS``), so an
+        unreadable registry still routes by the operator's policy defaults
+        rather than silencing or widening anything.
+        """
+        if self._preferences is not None:
+            return {str(key): dict(value) for key, value in self._preferences().items()}
+        try:
+            return mobile_push_devices.device_preferences(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            return {}
+
+    def _attention_mode(self) -> str:
+        """The computer's ``attention`` mode for the hold: ``always`` wins.
+
+        Completion emits fan out to every device of the computer, so the most
+        permissive live device decides, exactly as ``completions`` does: one
+        phone set to "Always" gets a needs-you item at once.
+        """
+        preferences = self._device_preferences()
+        defaults = mobile_push_devices.PREFERENCE_DEFAULTS
+        modes = {
+            preferences.get(str(device), defaults).get("attention", "away")
+            for device in self._live_devices()
+        }
+        return "always" if "always" in modes else "away"
+
+    def _desktop_would_announce(
+        self, conversation: str, kind: Any, *, mobile: bool = False
+    ) -> bool:
         """The desktop banner's OWN gates, asked of a pushed completion (parity).
 
         WHY: the operator, 2026-11-14 — "only notify under the same circumstances
@@ -928,7 +983,11 @@ class PushWorker:
 
         if kind not in BRIDGE_NOTIFIABLE_KINDS:
             return False
-        if not notifications_enabled():
+        # ADR 0009 §3 edit 1: a MOBILE-origin row skips only the desktop's own
+        # kill switch. A user who turned desktop banners off still wants the
+        # phone to hear about what they started there; the kind gate and
+        # ``session_may_announce`` (a hidden subagent stays hidden) still apply.
+        if not mobile and not notifications_enabled():
             return False
         session_id = _session_id_of(conversation)
         directory = (
@@ -992,10 +1051,31 @@ class PushWorker:
         existing.supersedes += tuple(
             sequence for sequence in supersedes if sequence not in existing.supersedes
         )
+        origin = str(state.get("origin") or "")
+        needs_user = bool(state.get("needs_user"))
+        if (
+            push_routing.is_mobile_origin(state)
+            and existing.attempts == 0
+            and self._attending(_session_id_of(conversation) or "")
+        ):
+            # ADR 0009 §3 edit 3: a mobile-origin item is never held, and the
+            # ONE presence fact that suppresses it is rung 1: its card is on an
+            # attended desktop window right now, in front of the user.
+            self._resolve(existing)
+            return
         # ADR 0008 rule 1: hold only when a person is at the desk AND this desk
         # can banner the kind. A desk that cannot (no feed, permission denied,
         # kind not advertised) is G10: the phone is the only surface left.
-        if gate.holds(kind) and existing.deferred_since is None:
+        # ADR 0009 narrows it by origin and the ``attention`` preference.
+        if (
+            gate.holds(
+                kind,
+                origin=origin,
+                needs_user=needs_user,
+                attention=self._attention_mode(),
+            )
+            and existing.deferred_since is None
+        ):
             existing.deferred_since = now
         if existing.deferred_since is not None:
             self._absorb_superseded(conversation, existing)
@@ -1343,12 +1423,16 @@ class PushWorker:
         # The digest's member kinds, for the preference gate below; empty for
         # the other two forms (a completion carries its own ``kind``).
         digest_kinds: Sequence[str] = ()
+        # ADR 0009: the member rows themselves, so the preference gate judges
+        # each by its routing category (origin, ``needs_user``), not by kind.
+        route_states: list[Mapping[str, Any]] = []
         sound, sound_custom = self._sound()
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
             session_id = _session_id_of(conversation_identity)
             handle = self._handle(session_id)
             state = self.store.state(conversation_identity)
+            route_states = [state]
             token = state.get("completion_token")
             anchor = state.get("anchor_id")
             kind = state.get("kind")
@@ -1397,7 +1481,9 @@ class PushWorker:
             # runs once per emit rather than once per pass).
             kinds: list[str] = []
             for conversation in item.conversations:
-                member_kind = self.store.state(conversation).get("kind")
+                member_state = self.store.state(conversation)
+                route_states.append(member_state)
+                member_kind = member_state.get("kind")
                 if isinstance(member_kind, str):
                     kinds.append(member_kind)
             digest_kinds = kinds
@@ -1421,7 +1507,7 @@ class PushWorker:
                 # detected change has nothing here at all.
                 exclude=list(item.exclude) if item.exclude else None,
             )
-        gated = self._preference_gate(payload, digest_kinds)
+        gated = self._preference_gate(payload, digest_kinds, route_states=route_states)
         if gated is None:
             return None
         payload = gated
@@ -1615,7 +1701,11 @@ class PushWorker:
     # -- the machine-local gates --------------------------------------------
 
     def _preference_gate(
-        self, payload: dict[str, Any], digest_kinds: Sequence[str]
+        self,
+        payload: dict[str, Any],
+        digest_kinds: Sequence[str],
+        *,
+        route_states: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any] | None:
         """Apply the devices' push preferences to one composed payload.
 
@@ -1667,12 +1757,8 @@ class PushWorker:
         row the unpair path tombstoned (``revoke_linked`` sets ``revoked_at``)
         is never counted as a device that wants a push, whatever its switches.
         """
-        preferences: dict[str, dict[str, bool]]
-        try:
-            preferences = mobile_push_devices.device_preferences(self.config_dir)
-        except (mobile_push_devices.PushRegistryCorrupt, OSError):
-            preferences = {}
-        everything: dict[str, bool] = dict.fromkeys(mobile_push_devices.PREFERENCE_KEYS, True)
+        preferences = self._device_preferences()
+        everything: dict[str, Any] = dict(mobile_push_devices.PREFERENCE_DEFAULTS)
         live = self._live_devices()
         emit_type = payload.get("type")
 
@@ -1680,11 +1766,24 @@ class PushWorker:
             switches = preferences.get(device, everything)
             return switches["enabled"] and any(switches[name] for name in categories)
 
+        def wants_rows(device: str) -> bool:
+            # ADR 0009 §3 edit 4: a ``needs_user`` row answers to ``attention``
+            # and is never judged by ``completions``; a completion answers to
+            # ``completions`` AND its scope. ``push_routing`` is the predicate
+            # the desktop asks too, so the two cannot drift.
+            switches = preferences.get(device, everything)
+            return any(push_routing.device_wants_row(switches, row) for row in route_states)
+
         categories: set[str]
         if emit_type == TYPE_COMPLETION:
+            if route_states:
+                return payload if any(wants_rows(device) for device in live) else None
             categories = {_preference_category(str(payload.get("kind", "")))}
             return payload if any(wants(device, categories) for device in live) else None
-        if emit_type == TYPE_DIGEST:
+        by_rows = emit_type == TYPE_DIGEST and bool(route_states)
+        if by_rows:
+            categories = set()
+        elif emit_type == TYPE_DIGEST:
             categories = {_preference_category(kind) for kind in digest_kinds} or {"completions"}
         else:
             # Attention: no category, the master switch alone. An empty set
@@ -1695,9 +1794,13 @@ class PushWorker:
             if device in excluded:
                 continue
             keep = (
-                wants(device, categories)
-                if categories
-                else preferences.get(device, everything)["enabled"]
+                wants_rows(device)
+                if by_rows
+                else (
+                    wants(device, categories)
+                    if categories
+                    else preferences.get(device, everything)["enabled"]
+                )
             )
             if not keep:
                 excluded.add(device)
@@ -1953,13 +2056,31 @@ class _DeskGate:
     presence: DesktopPresence | None = None
     last_input_at: float | None = None
 
-    def holds(self, kind: str) -> bool:
+    def holds(
+        self,
+        kind: str,
+        *,
+        origin: str = "",
+        needs_user: bool = False,
+        attention: str = "away",
+    ) -> bool:
         """Rule 1: hold an arriving completion of ``kind``?
 
         The legacy rule held on focus regardless of kind and is kept verbatim
         for its one release. The desk rule also needs this desk to be able to
         banner the kind (G10), else the phone is the only surface that can.
+
+        ADR 0009 §3 edit 2 narrows WHICH items the rule applies to. A
+        mobile-origin item is never held: the phone is where that work was
+        started. A needs-you item under ``attention: always`` is pushed at once.
+        Everything else (non-mobile needs-you under ``away``, non-mobile errors,
+        and non-mobile completions under ``completions_scope: all``) keeps ADR
+        0008's hold.
         """
+        if origin == push_routing.ORIGIN_MOBILE:
+            return False
+        if needs_user and attention == "always":
+            return False
         if not self.active:
             return False
         if self.legacy or self.presence is None:

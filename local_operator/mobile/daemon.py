@@ -3202,7 +3202,15 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         entry.operator_nonce = operator_nonce() if entry.operator_cap is not None else ""
         entry.operator_salt = ""
         entry.authority_bearing = False
-        auth: dict[str, Any] = {"key": record.control_key, "locality": "remote"}
+        # ADR 0009: ``origin: "mobile"`` on every dial that carries the phone's
+        # human input, so the runtime routes the completion of work started or
+        # steered here back to the phone. The runtime reads it once at auth time
+        # and never from a frame; the mesh relay never forwards it.
+        auth: dict[str, Any] = {
+            "key": record.control_key,
+            "locality": "remote",
+            "origin": "mobile",
+        }
         if entry.operator_nonce:
             # A nonce, never the capability: see ``harness/approval._proof``.
             auth["operator_nonce"] = entry.operator_nonce
@@ -6096,6 +6104,9 @@ class MobileDaemon:
             repaint,
             lambda _reason: None,
             locality="remote",
+            # ADR 0009: this viewer carries the phone's input (see the control
+            # socket's auth frame).
+            origin="mobile",
             # A PROMPT RAISED FOR A RELAY'S OWN SIGNATURE NAMES THE SESSION IN THE
             # LOG (UX round 6, U3 = design round 6, D3). There is no human at this
             # process's terminal — the person who asked is on the phone, and the
@@ -7415,6 +7426,13 @@ def build_app(daemon: MobileDaemon):
                 # unknown field, failing the whole registration; the app sends
                 # the key only when this capability is present.
                 "push_previews": {"available": True},
+                # ADR 0009 routing by origin: the register body accepts the
+                # enum keys ``preferences.completions_scope`` (phone | all) and
+                # ``preferences.attention`` (away | always | never). Its own key
+                # for the reason ``push_previews`` has one: an older daemon
+                # refuses either as an unknown field and would fail the whole
+                # registration, so the app sends them only when this is present.
+                "push_routing": {"available": True},
                 # ADR 0008 desk presence: ``GET/PATCH
                 # /api/settings/phone-away-after`` reads and writes this
                 # computer's ``notifications.phone_away_after_s`` ("send to
@@ -9726,7 +9744,9 @@ def build_app(daemon: MobileDaemon):
                 )
 
                 async def _deliver_prompt() -> str:
-                    client, detail = await continue_command(config_dir(), command)
+                    # ADR 0009: a phone prompt that wakes a cold conversation
+                    # keeps the phone's origin (``PromptErrand.origin``).
+                    client, detail = await continue_command(config_dir(), command, origin="mobile")
                     client.close()
                     return detail
 
@@ -9855,7 +9875,12 @@ def build_app(daemon: MobileDaemon):
                     # runtime records it as ``remote`` (``asks.surfaces``), the
                     # label the live daemon route already gets — not consent.
                     client, _ = await engage_session_client(
-                        config_dir(), session_id, AskErrand(ask_id=ask_id), locality="remote"
+                        config_dir(),
+                        session_id,
+                        AskErrand(ask_id=ask_id),
+                        locality="remote",
+                        # ADR 0009: the cold answer is the phone's input.
+                        origin="mobile",
                     )
                     try:
                         if op == "ask_respond":
@@ -11018,6 +11043,7 @@ def build_app(daemon: MobileDaemon):
                 lambda _projection: None,
                 lambda _reason: None,
                 locality="remote",
+                origin="mobile",
                 on_operator_prompt=lambda copy: logger.warning(
                     "mobile session move: owner prompts an operator: %s", copy
                 ),

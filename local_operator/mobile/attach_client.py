@@ -1095,8 +1095,14 @@ class AttachClient:
         on_move_pending: Callable[[dict[str, Any]], None] | None = None,
         surface: str = "terminal",
         on_operator_prompt: Callable[[str], None] | None = None,
+        origin: str = "",
     ) -> None:
         self._surface = surface
+        #: ADR 0009: ``"mobile"`` when this client carries the PHONE's human
+        #: input (declared by the mobile daemon only), else ``""``. Sent as the
+        #: auth frame's ``origin`` key, which the owner reads once at auth time
+        #: to route the run's completion to the phone.
+        self._origin = origin
         #: Whether the host behind this client ADOPTS the directory a ``retiring``
         #: frame names (the own-cwd move). Declared to the owner in the auth frame
         #: and defaulted FALSE so an embedder that never grows adoption cannot
@@ -1407,6 +1413,11 @@ class AttachClient:
             auth["cwd_adoption"] = True
         if self._surface == "desktop":
             auth["surface"] = "desktop"
+        if self._origin == "mobile":
+            # ADR 0009. Additive: an owner from before the key ignores it, and
+            # the mesh relay's ``AUTH_FIELDS`` never forwards it, so only a dial
+            # made on this machine with the control key can declare it.
+            auth["origin"] = "mobile"
         if self._events:
             # v4 capability flag. A v3 owner ignores unknown auth fields and
             # simply never sends event frames — the caller gates on
@@ -3127,8 +3138,13 @@ async def engage_session_client(
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
     locality: str = "local",
+    origin: str = "",
 ) -> tuple[AttachClient, str]:
     """Make a runtime exist for ``session_id``, then dial it: ``(client, detail)``.
+
+    ``origin`` is ADR 0009's auth tag: the phone daemon passes ``"mobile"`` so a
+    cold answer or a cold-wake prompt routes its completion back to the phone
+    (the wake's own delivery dial gets it through ``PromptErrand.origin``).
 
     ``locality`` is what the dial declares in its hello. The phone daemon's
     cold ask route passes ``"remote"``: it relays a portal answer, and the
@@ -3182,6 +3198,7 @@ async def engage_session_client(
         on_projection or (lambda projection: None),
         lambda reason: None,
         locality=locality,
+        origin=origin,
     )
     try:
         await client.connect(record, session_id)
@@ -3197,6 +3214,7 @@ async def continue_command(
     *,
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
+    origin: str = "",
 ) -> tuple[AttachClient, str]:
     """Deliver one retained command to whichever host wins the session lease.
 
@@ -3225,7 +3243,9 @@ async def continue_command(
             command_id=command.command_id,
             input_mode=command.input_mode,
             input_path=command.input_path,
+            origin=origin,
         ),
         deadline_s=deadline_s,
         on_projection=on_projection,
+        origin=origin,
     )

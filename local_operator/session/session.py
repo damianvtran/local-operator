@@ -435,6 +435,55 @@ def _is_remote_prompt(message: Any) -> bool:
     return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
 
 
+#: ``provider_payload`` key on a user row naming the SURFACE its human input came
+#: from (ADR 0009 Decision 1, mobile repo ``docs/adr/0009-*``). Why it exists: the
+#: phone should hear about work it started, and the desktop about everything
+#: else, and no other record says which surface a turn came from (``origin.json``
+#: is the code path that created a directory, ``mesh.json`` the device). The
+#: value is decided by the runtime from the AUTHENTICATED connection
+#: (``server._input_surface_for``), never read off a frame, and defaults to
+#: ``tui`` for the in-process owner. Invisible to the model and to providers,
+#: like the remote-prompt stamp beside it.
+INPUT_SURFACE_KEY = "lop_input_surface"
+
+#: The routing vocabulary. ``unknown`` is the reading for a conversation with no
+#: stamped human input (a legacy row, a channel-only conversation) and routes as
+#: non-mobile, which errs quiet on the phone.
+INPUT_SURFACES = frozenset({"mobile", "remote", "desktop", "tui", "unknown"})
+
+
+def _input_surface(value: object, default: str = "tui") -> str:
+    """Clamp a surface to :data:`INPUT_SURFACES` (anything else is ``default``)."""
+    return value if isinstance(value, str) and value in INPUT_SURFACES else default
+
+
+def _stamp_input_surface(message: Any, surface: str) -> None:
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[INPUT_SURFACE_KEY] = _input_surface(surface)
+    message.provider_payload = payload
+
+
+def spooled_input_surface(line: Any) -> str:
+    """The surface a SPOOLED owner line carries (``serving._owner_sender``).
+
+    A line spooled across a runtime swap keeps the surface it would have had
+    live. A line from a build before the key reads ``unknown`` rather than
+    ``tui``: it may have come from the phone, and ``unknown`` errs quiet.
+    """
+    sender = getattr(line, "sender", None)
+    value = sender.get("input_surface") if isinstance(sender, Mapping) else None
+    return _input_surface(value, default="unknown")
+
+
+def _input_surface_of(message: Any) -> str | None:
+    """The stamped surface of one row, or ``None`` when it carries no stamp."""
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(INPUT_SURFACE_KEY)
+    return value if isinstance(value, str) and value in INPUT_SURFACES else None
+
+
 #: Transcript custom entry carrying the PROFILE-TRUST EPISODE bit (host-only,
 #: never model context; ``details = {"untrusted": bool}``). Why it is durable:
 #: run-scoped taint reset at every run start, so a Bridge-tainted child's job
@@ -4068,6 +4117,32 @@ class Session:
         #: provenance: the pre-filter's touched-directory sweep only lists files modified
         #: at or after it.
         self._run_started_at: float = 0.0
+        #: ADR 0009 origin: the surface of the most recent HUMAN input admitted
+        #: into the current run (a stamped prompt/steer row, an ask answer, a live
+        #: approval or picker answer), or ``None`` for a run with none so far.
+        #: Reset at every pipeline head beside ``_run_started_at``.
+        self._run_input_surface: str | None = None
+        #: The conversation's LAST DRIVER, which a run with no human input (a
+        #: wake, a job result, a peer or channel message) inherits. ``None`` means
+        #: "not rebuilt yet"; the first run end rebuilds it from the transcript
+        #: (``_reconstruct_input_driver``) so a resumed conversation keeps it.
+        self._conversation_driver: str | None = None
+        #: Surfaces of queued-ask answers, keyed by ask id, noted by the control
+        #: server when the answer op arrives (``note_answer_surface``) and taken
+        #: when the ``ask_response`` row reaches ``_note_run_input``. In memory on
+        #: purpose: the answer and its delivery run happen in one runtime, and a
+        #: lost entry only means the run inherits the last driver (errs quiet).
+        self._ask_answer_surfaces: dict[str, str] = {}
+        #: Epoch ms the next ``needs_user`` window opens: one past the previous
+        #: run END (initialised to construction, so an ask restored from an
+        #: earlier process is never re-announced). It opens there rather than at
+        #: ``_run_started_at``:
+        #: a Team Bridge request ask is raised by the harness BETWEEN runs
+        #: (``_deliver_peer_message``'s idle arm, ``_retry_pending_bridge_issuances``),
+        #: so "opened during this run" would never announce it (ADR 0009 review
+        #: round 3, R3-1, the "opened since the previous run end" remedy). Each ask
+        #: still falls in exactly one window, so it is announced once.
+        self._needs_user_window_ms: int = int(time.time() * 1000)
         #: The session's last REAL typed request, kept across runs (NOT reset at the
         #: pipeline head, unlike ``_run_user_text``). A turn that resumes after an ANSWERED
         #: ask carries no typed row of its own -- the ``ask_response`` is the only input --
@@ -10390,6 +10465,7 @@ class Session:
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
         owner_typed: bool = True,
+        input_surface: str = "tui",
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -10614,6 +10690,12 @@ class Session:
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
             if not owner_typed:
                 _stamp_remote_prompt(user)
+            # ADR 0009: which surface typed this, decided by the runtime from the
+            # connection (``input_surface``; ``tui`` for the in-process owner).
+            # A harness-minted row is not human input, so it carries no stamp and
+            # the run inherits the conversation's last driver.
+            if not harness_injected:
+                _stamp_input_surface(user, input_surface)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -10725,6 +10807,7 @@ class Session:
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        input_surface: str = "tui",
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -10790,6 +10873,10 @@ class Session:
         message = Message.user(text, images, audio=audio, documents=documents, **extra)
         if not owner_typed:
             _stamp_remote_prompt(message)
+        # ADR 0009: a steer is human input, so it flips the run it lands in (a
+        # phone steer into a desk-started run makes that run mobile-origin).
+        if not harness_injected:
+            _stamp_input_surface(message, input_surface)
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -11707,6 +11794,7 @@ class Session:
             # A prompt spooled from a REMOTE connection keeps that provenance
             # (``serving.REMOTE_ORIGIN_SENDER_KEY``): never owner-typed here.
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
+            input_surface=spooled_input_surface(line),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -11715,6 +11803,123 @@ class Session:
         if command_id:
             seen.add(command_id)
         return True
+
+    # -- ADR 0009 origin ------------------------------------------------------
+
+    def _note_run_input_surface(self, message: Any) -> None:
+        """Record the surface of one run input, when it is HUMAN input.
+
+        Origin is the surface of the MOST RECENT human input admitted into the
+        run (ADR 0009 Decision 1, option B): a stamped prompt or steer row, or a
+        person's answer to a queued ask whose answer op the control server
+        noted. Everything else (wakes, job results, peer and channel messages,
+        harness injections) leaves the run to inherit the last driver.
+        """
+        stamped = _input_surface_of(message)
+        if stamped is not None and getattr(message, "role", None) == "user":
+            self._run_input_surface = stamped
+            return
+        if ask_answer_is_person(message):
+            details = getattr(message, "details", None) or {}
+            ask_id = details.get("ask_id") if isinstance(details, Mapping) else None
+            surface = self._ask_answer_surfaces.pop(ask_id, None) if ask_id else None
+            if surface is not None:
+                self._run_input_surface = surface
+
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> None:
+        """The control server's record of WHO answered (ADR 0009, R10).
+
+        ``ask_id`` names a QUEUED ask: its answer reaches the run later as an
+        ``ask_response`` row, which picks this up in ``_note_run_input``. ``None``
+        is a live answer (an approval, a blocking picker) inside the run in
+        flight, which flips that run now. ``surface`` is derived by the server
+        from the authenticated connection, never from the frame.
+        """
+        clamped = _input_surface(surface, default="unknown")
+        if ask_id:
+            self._ask_answer_surfaces[ask_id] = clamped
+            return
+        if self._is_streaming:
+            self._run_input_surface = clamped
+
+    def _reconstruct_input_driver(self) -> str:
+        """The conversation's last driver, rebuilt from the transcript on resume.
+
+        Newest first: a stamped user row is that surface, and an attention
+        marker carrying ``origin`` is the origin a previous run ended with (that
+        covers runs driven by an ask answer, whose row carries no stamp). No
+        such entry, which is every conversation written before ADR 0009, is
+        ``unknown``. Never raises: unreadable history is ``unknown`` (errs quiet).
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+
+        try:
+            entries = self._transcript.entries()
+            for entry in reversed(entries):
+                if entry.type == ENTRY_CUSTOM:
+                    if entry.payload.get("custom_type") == ATTENTION_CUSTOM_TYPE:
+                        details = entry.payload.get("details")
+                        origin = details.get("origin") if isinstance(details, Mapping) else None
+                        if isinstance(origin, str) and origin in INPUT_SURFACES:
+                            return origin
+                    continue
+                message = _entry_to_message(entry)
+                if getattr(message, "role", None) != "user":
+                    continue
+                stamped = _input_surface_of(message)
+                if stamped is not None:
+                    return stamped
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("origin: could not rebuild the last driver", exc_info=True)
+        return "unknown"
+
+    def _run_origin(self) -> str:
+        """This run's origin: its own human input, else the inherited driver."""
+        if self._run_input_surface is not None:
+            return self._run_input_surface
+        if self._conversation_driver is None:
+            self._conversation_driver = self._reconstruct_input_driver()
+        return self._conversation_driver
+
+    def _run_needs_user(self, now: float | None = None) -> bool:
+        """Whether an ask NEW to this run's window is still open at its end.
+
+        ADR 0009 §3 (R2-1): a queued ask is durable, so every later wake, job
+        or peer run also ends with it open; counting "any open ask" would
+        re-push the same question on every background tick. So only an ask
+        whose ``created_at`` falls inside this run's window counts. The window
+        opens just past the PREVIOUS run's end (R3-1: a Team Bridge request ask
+        is raised by the harness between runs, and would otherwise never be
+        announced) and closes now; calling this CLOSES it, so it is called once
+        per run end. Both clocks are this process's wall clock, which
+        ``AskQueue`` stamps ``created_at`` from.
+        """
+        end_ms = int((now if now is not None else time.time()) * 1000)
+        start_ms = self._needs_user_window_ms
+        # The NEXT window opens one millisecond after this one closes, so the
+        # windows tile with no overlap: an ask whose ``created_at`` ties this
+        # run's end at millisecond resolution is counted here and never again.
+        self._needs_user_window_ms = end_ms + 1
+        records = self._open_ask_records(end_ms)
+        return any(start_ms <= int(record.get("created_at") or 0) <= end_ms for record in records)
+
+    def _open_ask_records(self, now_ms: int) -> list[dict[str, Any]]:
+        """The queue's OPEN asks (``asks.store.open_asks``), or ``[]``.
+
+        ``[]`` while the blocking arm is live (no queue: an ask there blocks the
+        run, which therefore cannot end on it) and on any read failure, which
+        errs quiet. Its own seam so the window rule above is testable apart
+        from the queue's delivery machinery.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        try:
+            return list(queue.open_records(now_ms))
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the ask queue", exc_info=True)
+            return []
 
     def _steer_is_live_queued(self, command_id: str) -> bool:
         """Whether a steer with this producer id is already owed by this process.
@@ -17852,6 +18057,10 @@ class Session:
                         # pre-notify marker (key absent) means notify=1 — its
                         # behaviour, verbatim.
                         notify=bool(saved.get("notify", True)),
+                        # ADR 0009: replayed verbatim too; absent reads as
+                        # ``unknown`` origin and no open ask.
+                        origin=str(saved.get("origin") or ""),
+                        needs_user=bool(saved.get("needs_user", False)),
                     ),
                     timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                 )
@@ -18125,6 +18334,7 @@ class Session:
         # distinguished: they require the approval card rather than granting.
         # The assistant/tool rows a session appends itself never reach here.
         input_class = _profile_input_class(message)
+        self._note_run_input_surface(message)
         if input_class == "untrusted":
             self._run_untrusted_input = True
         elif input_class == "consent":
@@ -19516,6 +19726,9 @@ class Session:
         # errors notify, and interrupted stays suppressed by the readers' kind
         # filters whatever this says.
         notify = bool(getattr(outcome, "notify", True))
+        # ADR 0009: read off the same end event, never re-derived here.
+        origin = str(getattr(outcome, "origin", "") or "")
+        needs_user = bool(getattr(outcome, "needs_user", False))
         token = self._attention_run_token or str(uuid.uuid4())
         # The DURABLE reason. For a cut-off it is the harness-authored cause
         # sentence, never the live notice's longer framing: this string is what
@@ -19551,7 +19764,20 @@ class Session:
             # narration text and ``not messages`` alone would miss it. Errors
             # never reach this branch (``kind == "complete"``), which keeps
             # R3's "always notifies" for a quiet batch whose re-entry fails.
-            if kind == "complete" and (not messages or delegated or self._run_ended_quiet(outcome)):
+            # ADR 0009: a quiet or textless end that leaves an ask opened in its
+            # window still open is NOT quiet for the phone (``needs_user``
+            # bypasses ``notify``), so it publishes its row; ``notify`` is forced
+            # false so the desktop's completion banner stays silent, as the
+            # quiet end asked (the ask keeps its own desktop banner).
+            if kind == "complete" and needs_user and (
+                not messages or self._run_ended_quiet(outcome)
+            ):
+                notify = False
+            if kind == "complete" and (
+                (not messages and not needs_user)
+                or delegated
+                or (self._run_ended_quiet(outcome) and not needs_user)
+            ):
                 await self._transcript.append_custom(
                     ATTENTION_CUSTOM_TYPE,
                     {
@@ -19563,7 +19789,11 @@ class Session:
                 return
             # Failure may precede the first assistant message. Its durable outcome
             # marker, not an unrelated previous answer, is the viewable anchor.
-            anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
+            # A ``needs_user`` run with no text of its own (an ask raised, then
+            # ``no_reply``) anchors on its outcome marker the same way.
+            anchor = (
+                messages[-1].id if kind == "complete" and messages else provisional_anchor(token)
+            )
             # The journal precedes publication: runtime death between these writes
             # is repaired idempotently on resume, without fabricating a new token.
             await self._transcript.append_custom(
@@ -19579,6 +19809,11 @@ class Session:
                     # (bootstrap/republish, both of which replay this marker)
                     # re-lands the same row instead of a defaulted one.
                     "notify": notify,
+                    # ADR 0009: durable for the same reason, and the marker's
+                    # ``origin`` is also how a resumed session rebuilds the
+                    # conversation's last driver (``_reconstruct_input_driver``).
+                    "origin": origin,
+                    "needs_user": needs_user,
                 },
             )
             try:
@@ -19601,6 +19836,8 @@ class Session:
                             reason=reason,
                             cause=cause,
                             notify=notify,
+                            origin=origin,
+                            needs_user=needs_user,
                         ),
                         timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                     )
@@ -20330,6 +20567,17 @@ class Session:
             # ``_publish_attention_outcome`` reads it back rather than
             # re-deriving it. One value, four readers, decided by nobody else.
             event = event.model_copy(update={"notify": self._finalize_attention_notify(event)})
+            # ADR 0009: WHERE the outcome goes is decided by origin, and whether
+            # it needs the user by an ask opened in this run's window. Both are
+            # stamped here, at the same choke point as ``notify`` and computed
+            # independently of it: ``notify`` is false for exactly the runs that
+            # end on an open ask without a typed prompt (a wake), which are the
+            # ones the phone must hear about when the desk is away.
+            origin = self._run_origin()
+            needs_user = self._run_needs_user()
+            if self._run_input_surface is not None:
+                self._conversation_driver = self._run_input_surface
+            event = event.model_copy(update={"origin": origin, "needs_user": needs_user})
             self._attention_outcome = event
             # Turn supplements (§2.1): freeze the facts the runtime subscriber needs, while
             # they still exist -- ``_run_triggers`` and the accumulator are reset at the
@@ -20962,6 +21210,9 @@ class Session:
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()
+        # ADR 0009: origin is per run, so the previous run's human input never
+        # labels this one (a wake after a phone prompt inherits it instead).
+        self._run_input_surface = None
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
