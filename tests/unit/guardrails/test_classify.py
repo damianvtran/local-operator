@@ -1271,3 +1271,101 @@ def test_ci_r2_directory_access_error_invalidates_state(
     monkeypatch.setattr(os, "access", access)
     command = f"cd /tmp; cd '{target}'; cd -; rm -rf sessions"
     assert _classify(home, command, cwd=home / ".local-operator").risk >= Risk.HIGH
+
+
+# -- Contained substitutions carried through a variable (node2 QA, #4104 u0) --
+#
+# A log write inside the caller's OWN scratchpad, named with a timestamp held
+# in a variable, was refused as HIGH because the stored value lost the proof
+# that its opaque stretch was a contained ``$(date …)``. The architect's audit
+# (job 08d824b2fd23) also found the containment allowlist too loose: anything
+# without ``/`` or ``.`` in its arguments passed, including bare ``date`` and
+# ``id`` whose spaces word-split an unquoted use into extra unranked paths.
+
+_SP = "$LOCAL_OPERATOR_SCRATCHPAD"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The incident command, verbatim up to its tail.
+        f"L={_SP}/qa-4104-634b/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log; "
+        'exec > "$L" 2>&1; echo started',
+        f'TS=$(date -u +%Y%m%dT%H%M%SZ); exec > "{_SP}/q/u0-$TS.log"',
+        f'L={_SP}/q/u0-$(date -u +%Y%m%dT%H%M%SZ).log; rm -f "$L"',
+        f'L={_SP}/x-$(date +%s); L2=$L.bak; rm -f "$L2"',
+        f'L={_SP}/x-$(date +%s); rm -rf "${{L:-/}}"',
+        f'for d in a b; do L={_SP}/$d-$(date +%s); rm -rf "$L"; done',
+        f'rm -rf "{_SP}"/run-$(date +"%Y%m%d")',
+        f'rm -rf "{_SP}"/run-$(uuidgen)',
+        f'rm -rf "{_SP}"/run-$(id -un)',
+    ],
+)
+def test_contained_substitution_via_variable_in_own_scratchpad_is_low(
+    home: Path, command: str
+) -> None:
+    assert _classify(home, command).risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'L={_SP}/u0-$(date +%s); L=$L/../../..; rm -rf "$L"',
+        f'T=$(date +%s); rm -rf "{_SP}/$T/../../.."',
+        "rm -rf $HOME/x$(date)",
+        "T=$(date +%s); rm -rf ~/.local-operator/$T",
+    ],
+)
+def test_contained_carry_through_keeps_climbs_and_state_critical(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "date",
+        "id",
+        "date +%e",
+        "date -R",
+        "date +%c",
+        "date +%D",
+        "date +%x",
+        "date +%_H",
+        "hostname -I",
+        "date +%s +%s",
+        "date -d x +%s",
+        "uuidgen -r x",
+    ],
+)
+def test_uncontained_substitution_in_own_scratchpad_is_high(home: Path, body: str) -> None:
+    # Unquoted: these print spaces or ``/``, so the word can split or nest.
+    assert _classify(home, f"rm -rf {_SP}/q$({body})").risk is Risk.HIGH
+
+
+def test_contained_value_outside_own_scratchpad_stays_high(home: Path) -> None:
+    command = 'exec > "$HOME/u0-$(date -u +%Y%m%dT%H%M%SZ).log"'
+    assert _classify(home, command).risk is Risk.HIGH
+    # A delete of an opaque name straight under HOME is CRITICAL (it sits
+    # beside the state root); containment must never lower it.
+    command = 'L=$HOME/u0-$(date -u +%Y%m%dT%H%M%SZ).log; rm -f "$L"'
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'L={_SP}/x-$(date +%s); rm -f "$L" "${{L:-/}}" "$L"/y',
+        f'for d in a b; do L={_SP}/$d-$(date +%s); rm -rf "$L"; done',
+        f'L={_SP}/x-$(date +%s); rm -rf "$L/../../.."',
+        f"T=$(mktemp); L={_SP}/$(date +%s); cp $T $L; rm $L",
+    ],
+)
+def test_carry_through_marker_never_reaches_a_target(home: Path, command: str) -> None:
+    verdict = _classify(home, command)
+    targets = [*verdict.targets, *getattr(verdict, "flagged_targets", [])]
+    assert targets
+    for ranked in targets:
+        # Every string field, raw (``repr`` would escape the marker and hide it).
+        for value in [*vars(ranked).values(), *vars(ranked.target).values()]:
+            if isinstance(value, str):
+                assert "\x03" not in value and "\x02" not in value, (command, value)

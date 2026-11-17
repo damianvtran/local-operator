@@ -1907,7 +1907,21 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # the ceiling: the headroom origin/main already sat at, so the next addition finds
 # the ratchet as tight as this one did. The child ceiling does not move (the
 # merged head passes ``--kind child`` with 55 of headroom).
-BUDGET_BILLED_TOKENS = 37_245
+# RAISED 37,245 -> 37,322 for the REFUSAL NARROWING sentence (node2 QA, PR
+# #4104 u0: an agent that resubmitted a refused scratchpad log write with the
+# literal path the refusal prescribed was accused of a reroute). The prompt line
+# under ``BLOCKED by guardrail`` gains one sentence saying that resubmission is a
+# new action. Measured with THIS script on the same host, ISOLATED HOME, base by
+# stashing the two changed product files (system.md, guardrails/check.py):
+#   base (origin/main ff41034fa7cd)       104,114 chars = ~37,451 billed
+#   head (this branch)                    104,329 chars = ~37,528 billed
+#   delta                                    +215 chars = ~+77
+# The +215 is exactly the system.md sentence. The raise is that +77 and no
+# more: this host's base already reads 206 over the committed ceiling, which is
+# the local-vs-CI offset this file documents (CI's reading is the smaller one),
+# so the ceiling moves by the delta rather than being re-derived from a local
+# head that is not the number CI measures.
+BUDGET_BILLED_TOKENS = 37_322
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2126,7 +2140,12 @@ BUDGET_BILLED_TOKENS = 37_245
 # inherits 31,317 and the tighten band below (1,200) is not in play.
 # Same measured music admission as the top arm:32,647 +600 slack. Keep the
 # child's narrower inventory and the shared tighten/negative controls unchanged.
-BUDGET_CHILD_BILLED_TOKENS = 33_247
+# RAISED 33,247 -> 33,324 with the top arm, for the same system.md sentence;
+# same trees, same script, ``--kind child``:
+#   base  92,416 chars = ~33,243 billed (4 of headroom)
+#   head  92,631 chars = ~33,321 billed
+#   delta   +215 chars = ~+77 — the identical sentence, nothing child-only.
+BUDGET_CHILD_BILLED_TOKENS = 33_324
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

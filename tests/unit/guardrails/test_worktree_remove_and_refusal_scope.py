@@ -306,6 +306,14 @@ def _scope_phrases(text: str) -> None:
 
 def test_every_refusal_text_scopes_finality_to_that_action() -> None:
     _scope_phrases(REFUSAL_SCOPE)
+    # node2 QA (#4104 u0): resubmitting the literal the refusal prescribed is a
+    # new action, and the text the agent reads at refusal time must say so.
+    flat = " ".join(REFUSAL_SCOPE.split())
+    assert (
+        "Following the refusal's own prescribed narrowing — resubmitting with a literal path "
+        "you can verify, inside your own scratchpad or worktree — is a new action, not a "
+        "reroute; the guard checks that literal afresh."
+    ) in flat
     rule = Rule(name="r", scope="tool:*", action="block", body="no")
     for text in (
         review_text("dangerous-delete", "a git repository root", "~/x"),
@@ -331,7 +339,9 @@ def test_system_prompt_and_guide_scope_finality_and_keep_import_a_reroute() -> N
     assert (
         "`BLOCKED by guardrail`: final per effect/target, any route (report it), "
         "till the operator's own `ask` reply names the exact path or a newer guard. "
-        "Fresh work is no reroute."
+        "Fresh work is no reroute. Following the refusal's own prescribed narrowing — "
+        "resubmitting with a literal path you can verify, inside your own scratchpad or "
+        "worktree — is a new action, not a reroute; the guard checks that literal afresh."
     ) in prompt
     root = Path(prov.__file__).resolve().parents[1]
     guide = " ".join((root / "guides" / "guardrails" / "GUIDE.md").read_text().split())

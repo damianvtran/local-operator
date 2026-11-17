@@ -72,7 +72,9 @@ call's `i` intent or open with filler ("Let me…"). Speak only on material chan
   named it; never build delete paths from variables or substitutions.
 - `BLOCKED by guardrail`: final per effect/target, any route (report it),
   till the operator's own `ask` reply names the exact path or a newer guard.
-  Fresh work is no reroute.
+  Fresh work is no reroute. Following the refusal's own prescribed narrowing —
+  resubmitting with a literal path you can verify, inside your own scratchpad or
+  worktree — is a new action, not a reroute; the guard checks that literal afresh.
 - Guardrail rules: `<config_dir>/rules/*.md`; read `guide://guardrails` before
   writing or tuning one. Rules only add restriction.
 

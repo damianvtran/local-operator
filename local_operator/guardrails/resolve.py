@@ -56,9 +56,20 @@ from local_operator.tools.search_guard import (
     lex,
 )
 
-#: Programs whose output never contains ``/`` or ``..`` in normal use, so a
-#: substitution of one cannot move a path out of the directory it sits in.
+#: Programs whose output, with the arguments ``_contained_body`` allows, is a
+#: single path component, so a substitution of one cannot move a path out of
+#: the directory it sits in. Membership alone proves nothing: the argument
+#: allowlist below is what keeps ``date +%D`` (prints ``/``) or ``id`` (prints
+#: spaces that word-split into extra relative paths) out.
 _CONTAINED_PROGRAMS = frozenset({"date", "gdate", "uuidgen", "hostname", "whoami", "id"})
+#: ``date +FORMAT`` literal characters that print as themselves and can never
+#: be ``/``, ``.``, whitespace or a glob/shell metacharacter.
+_DATE_LITERAL_RE = re.compile(r"[A-Za-z0-9_:@,+=-]")
+#: ``date`` conversions whose output is drawn from ``[A-Za-z0-9+-]`` only.
+#: Deliberately absent: %c %x %X %D %r (print ``/``, ``:``-and-space or
+#: locale text with spaces), %e %k %l (space-padded), %n %t (whitespace),
+#: %+ %v (locale composites), and the ``_`` (space-pad) flag.
+_DATE_CONVERSION_RE = re.compile(r"%[-0^#]?[YCyGgmdjHIMSsNuwUVWaAbBhpPZzFTR]")
 #: Substitution bodies known to print nothing. Matching is on the stripped
 #: body text; anything not in this set is opaque.
 _EMPTY_BODIES = frozenset(
@@ -77,6 +88,16 @@ CREDENTIAL_MARK = OPAQUE_MARK + "credential" + OPAQUE_MARK
 #: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
 #: unknowable, but known to be a fresh entry under the temp directory.
 TEMP_MARK = "\x02"
+#: Same, for an assignment whose only opaque stretches are CONTAINED
+#: substitutions (``L=$SP/u0-$(date -u +%Y%m%dT%H%M%SZ).log``). Without it the
+#: stored value kept a bare OPAQUE_MARK and every later ``$L`` read lost the
+#: containment proof, so a log write inside the caller's own scratchpad ranked
+#: HIGH (node2 QA, PR #4104 u0). ``_param`` maps it back to OPAQUE_MARK with
+#: ``opaque_contained`` kept, so ``..`` climb checks still see a marker. Never
+#: used for HOME/OLDPWD, whose values are read as raw paths elsewhere.
+CONTAINED_MARK = "\x03"
+#: Variables whose stored value is consumed as a path without ``_param``.
+_RAW_PATH_VARS = frozenset({"HOME", "OLDPWD"})
 #: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
 #: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
 #: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
@@ -681,6 +702,25 @@ def _tilde(text: str, home: str) -> tuple[str, bool]:
     return OPAQUE_MARK + sep + tail, True
 
 
+def _unmark(value: str, out: Expanded) -> str:
+    """A stored variable value as expanded text: carry-through markers become
+    OPAQUE_MARK again, so no raw ``\x02``/``\x03`` ever reaches a target path.
+
+    Containment survives only when every opaque stretch was a contained
+    substitution (CONTAINED_MARK alone); any plain OPAQUE_MARK or TEMP_MARK
+    voids it, as before.
+    """
+    contained_only = CONTAINED_MARK in value and OPAQUE_MARK not in value and TEMP_MARK not in value
+    if TEMP_MARK in value:
+        out.temp = True
+    value = value.replace(TEMP_MARK, OPAQUE_MARK).replace(CONTAINED_MARK, OPAQUE_MARK)
+    if OPAQUE_MARK in value:
+        out.opaque = True
+        if not contained_only:
+            out.opaque_contained = False
+    return value
+
+
 def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: int = 0) -> str:
     """Expand one ``$NAME`` / ``${…}`` form; unknowable forms become opaque."""
     if form.startswith("${"):
@@ -692,23 +732,14 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
         if value is None or value == "":
             out.empty.append(f"${inner} expanded empty" + ("" if value == "" else " (unset)"))
             return ""
-        if TEMP_MARK in value:
-            out.temp = True
-            value = value.replace(TEMP_MARK, OPAQUE_MARK)
-        if OPAQUE_MARK in value:
-            out.opaque = True
-            out.opaque_contained = False
-        return value
+        return _unmark(value, out)
     dm = _BRACE_DEFAULT_RE.match(inner)
     if dm is not None and depth < 4:
         name, op, default = dm.group(1), dm.group(2), dm.group(3)
         current = env.get(name)
         use_default = current is None or (op.startswith(":") and current == "")
         if not use_default and current is not None:
-            if OPAQUE_MARK in current:
-                out.opaque = True
-                out.opaque_contained = False
-            return current
+            return _unmark(current, out)
         # Bash expands the default word itself: ``$``, a leading ``~`` and
         # nested ``${}`` (S1 — the incident shape was an unset variable plus a
         # fallback). Its quotes are stripped as part of that word.
@@ -880,24 +911,28 @@ def _param_ref(form: str, env: Mapping[str, str]) -> str | None:
 def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
     """``exp`` with every recorded ref to a name in ``values`` rewritten."""
     text, pattern = exp.text, exp.pattern
+    opaque, contained, temp = exp.opaque, exp.opaque_contained, exp.temp
     # Right to left, so earlier offsets stay valid.
     for name, ts, te, ps, pe, quoted in sorted(exp.refs, key=lambda r: r[1], reverse=True):
         if name not in values:
             continue
-        text = text[:ts] + values[name] + text[te:]
+        # A per-iteration value is spliced in raw, bypassing ``_param``; unmark
+        # it here so a carry-through marker never lands in a path as text.
+        probe = Expanded(text="")
+        value = _unmark(values[name], probe)
+        opaque = opaque or probe.opaque
+        contained = contained and probe.opaque_contained
+        temp = temp or probe.temp
+        text = text[:ts] + value + text[te:]
         if pattern is not None:
-            pattern = (
-                pattern[:ps]
-                + (_glob_escape(values[name]) if quoted else values[name])
-                + pattern[pe:]
-            )
+            pattern = pattern[:ps] + (_glob_escape(value) if quoted else value) + pattern[pe:]
     return Expanded(
         text=text,
         pattern=pattern,
         empty=list(exp.empty),
-        opaque=exp.opaque,
-        opaque_contained=exp.opaque_contained,
-        temp=exp.temp,
+        opaque=opaque,
+        opaque_contained=contained,
+        temp=temp,
     )
 
 
@@ -926,12 +961,52 @@ def expand(word: _RawWord, env: Mapping[str, str], home: str) -> Expanded:
 #: substitution of one cannot climb out of the directory it sits in — but only
 #: when called with no ``+FORMAT``/path-like argument (S4: ``date +../..``).
 def _contained_body(body: str) -> bool:
+    """True only for an exact allowlisted call whose output is one component.
+
+    An allowlist, not a blocklist (architect review of the node2 #4104 case):
+    rejecting only ``/`` and ``.`` let bare ``date`` / ``id`` (spaces, so an
+    unquoted use word-splits into extra unranked paths), ``date +%D`` (prints
+    ``/``), ``date -R`` and ``+%e`` (space-padded) through as contained.
+    """
     words = body.split()
-    if not words or os.path.basename(words[0]) not in _CONTAINED_PROGRAMS:
+    if not words:
         return False
-    # S4: an argument that could print a path (``date +../..``, ``id /x``) voids
-    # containment; a plain ``+%s``-style format cannot.
-    return not any("/" in w or "." in w for w in words[1:])
+    program, args = os.path.basename(words[0]), words[1:]
+    if program not in _CONTAINED_PROGRAMS:
+        return False
+    if program in ("date", "gdate"):
+        formats = [a for a in args if a.startswith("+")]
+        # Bare ``date`` prints ``Mon Nov 16 …`` (spaces): never contained.
+        if len(formats) != 1 or any(a not in ("-u", "--utc") for a in args if a[0] != "+"):
+            return False
+        # ``+"%Y%m%d"`` is common; the shell drops the quotes. Any quoted
+        # space split the body into a second, non-flag word rejected above.
+        return _date_format_contained(formats[0][1:].replace('"', "").replace("'", ""))
+    if program == "uuidgen":
+        return not args
+    if program == "hostname":
+        return args in ([], ["-s"])
+    if program == "whoami":
+        return not args
+    # ``id``: a bare call prints ``uid=501(x) gid=… groups=…`` with spaces.
+    return len(args) == 1 and args[0] in ("-u", "-g", "-un", "-gn")
+
+
+def _date_format_contained(fmt: str) -> bool:
+    if not fmt:
+        return False
+    i = 0
+    while i < len(fmt):
+        if fmt[i] == "%":
+            m = _DATE_CONVERSION_RE.match(fmt, i)
+            if m is None:
+                return False
+            i = m.end()
+        elif _DATE_LITERAL_RE.fullmatch(fmt[i]):
+            i += 1
+        else:
+            return False
+    return True
 
 
 def _is_mktemp(body: str) -> bool:
@@ -3434,6 +3509,17 @@ class _Walker:
             text_value = words[0].text
             if words[0].temp and text_value.count(OPAQUE_MARK) == 1:
                 text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
+            elif (
+                words[0].opaque
+                and words[0].opaque_contained
+                and OPAQUE_MARK in text_value
+                and CREDENTIAL_MARK not in text_value
+                and not text_value.startswith(FOR_GLOB_MARK)
+                and text_value.partition("=")[0] not in _RAW_PATH_VARS
+            ):
+                # Every opaque stretch is a contained substitution: keep that
+                # proof for later ``$NAME`` reads (see CONTAINED_MARK).
+                text_value = text_value.replace(OPAQUE_MARK, CONTAINED_MARK)
             raw_assigns.append(text_value)
             # Same length (one marker char for another): the refs still line up.
             assign_words.append(
@@ -4687,7 +4773,7 @@ class _Walker:
         ] + [(a.split("=", 1)[1], False, a.split("=", 1)[0]) for a in assigns if "=" in a]
         for text, as_output, assigned in texts:
             for raw in _MENTION_RE.findall(text):
-                if OPAQUE_MARK in raw or TEMP_MARK in raw:
+                if OPAQUE_MARK in raw or TEMP_MARK in raw or CONTAINED_MARK in raw:
                     continue  # an opaque part: the word itself is added below
                 path = _mention_path(raw, st.home, st.cwd)
                 if path is None:
