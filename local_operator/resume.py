@@ -22,7 +22,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -3084,7 +3084,41 @@ PEER_REASON_WORDS: dict[str, str] = {
     # / ``rm`` state).
     "secrets_missing": "this device's network secret is unusable",
     "no_network_secret": "this device no longer holds that network's secret",
+    # THE DIALER'S REFUSALS OF A LISTENER (mesh-listener-auth): ``relay.dial`` returns
+    # these codes when the device that answered could not prove it is the member this
+    # device meant to reach. ``listener_unproven`` is the expected answer of a member
+    # on a build from before listener proofs (the remedy is updating it), and also of
+    # an impostor — the words claim neither; ``peer_identity_mismatch`` is a positive
+    # wrong answer, usually a stale or redirected address. ``meshupdate.update_peer``
+    # appends this gloss to its "unreachable" sentence.
+    "listener_unproven": (
+        "it answered but could not prove its identity (an older build, or not that "
+        "device); update it with `lop network update`"
+    ),
+    "peer_identity_mismatch": (
+        "a different device answered at its address; the stored address is stale or " "redirected"
+    ),
 }
+
+
+def listener_unproven_sentence(name: str, proof: Mapping[str, Any] | None) -> str:
+    """The ONE sentence ``peers`` and ``doctor`` print for an unproven listener.
+
+    ``proof`` is a ``peers()`` row's ``listener_proof`` block. The build is said as
+    "runs" only when it came from a hello this device's listener verified, and as
+    "reports" when it came from the unauthenticated challenge, because that is all
+    a challenge is. Only ``version`` is ever rendered — never a source path. One
+    function so the listing and the doctor cannot drift into two wordings.
+    """
+    block = proof if isinstance(proof, Mapping) else {}
+    build = block.get("build")
+    version = str(build.get("version") or "") if isinstance(build, Mapping) else ""
+    verb = "runs" if block.get("build_source") == "hello" else "reports"
+    build_words = f"{verb} an older build ({version})" if version else f"{verb} an older build"
+    return (
+        f"{name} {build_words} that cannot prove its identity, so this device will not "
+        f"dial it. Update it with: lop network update {name}"
+    )
 
 
 def _carries_wire_tokens(tail: str) -> bool:
@@ -3400,6 +3434,13 @@ DOCTOR_DETAIL_WORDS: dict[str, str] = {
     # not say "the link was refused" about a fault on this machine.
     "secrets_missing": PEER_REASON_WORDS["secrets_missing"],
     "no_network_secret": PEER_REASON_WORDS["no_network_secret"],
+    # Per-ADDRESS readings of the dialer's listener refusals: the row is about the one
+    # endpoint that answered, so these say what that address did, not the member.
+    "listener_unproven": (
+        "this address answered but could not prove it is that device (an older build, "
+        "or not that device)"
+    ),
+    "peer_identity_mismatch": "a different device answered at this address",
 }
 
 

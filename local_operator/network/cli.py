@@ -6200,6 +6200,8 @@ def _join_one(
 
     Handshake = helpers["Handshake"]
     Credential = helpers["Credential"]
+    from local_operator.network.handshake import DialerExpectation
+
     store = helpers["store"]
     invite_mod = helpers["invite_mod"]
     relay_mod = helpers["relay_mod"]
@@ -6287,7 +6289,15 @@ def _join_one(
         attempt.stage = "auth"
         handshake.send_auth(sock, credential)
         attempt.stage = "welcome"
-        handshake.read_welcome(reader, deadline)
+        # PINNED TO THE TOKEN'S INVITER (mesh-listener-auth §5). The joiner has no
+        # member table, so the welcome proof is verified under the key the inviter
+        # sends in ``welcome.inviter`` — accepted only because its fingerprint is
+        # the token's ``inviter_device_id`` — and MACed under the invite key only a
+        # token holder has. Without this the SAS digits were the only MITM defence,
+        # and ``--automated`` joins (``typed = result.sas``) skip that comparison.
+        handshake.read_welcome(
+            reader, deadline, DialerExpectation(device_id=envelope.inviter_device_id)
+        )
         attempt.stage = "establish"
         result = handshake.establish()
         attempt.result = result
@@ -6575,6 +6585,31 @@ def _refuse_offer_against_policy(
         raise MeshRefusal("protocol_error", sentence)
 
 
+def _pin_inviter_key(answer: dict[str, Any], envelope: Any, handshake: Any) -> None:
+    """Refuse a member table whose inviter row carries a key the handshake did not verify.
+
+    The welcome proof bound the inviter to ONE key (fingerprint == the token's
+    ``inviter_device_id``, signature under it). The ``pair_result`` table that
+    follows is what the joiner persists and later verifies every dial against, so
+    an inviter row with a different ``public_key`` would undo the handshake's pin
+    on the very next dial (mesh-listener-auth §5). A row for the inviter that is
+    absent is left to ``_persist_join``; a row that disagrees is refused here,
+    before anything is written.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    verified = str(handshake.peer_public_key or "") if handshake.auth_verified else ""
+    for row in answer.get("members") or []:
+        if not isinstance(row, dict) or row.get("device_id") != envelope.inviter_device_id:
+            continue
+        if not verified or str(row.get("public_key") or "") != verified:
+            raise MeshRefusal(
+                "invite_wrong_inviter",
+                "the inviter's member row carries a different key than the one it proved "
+                "in the handshake; nothing was admitted",
+            )
+
+
 def _finish_pairing(
     *,
     typed: str,
@@ -6679,6 +6714,7 @@ def _finish_pairing(
     # be relabelled a peer-side stop (review round 1, F2).
     if attempt is not None:
         attempt.stage = "persist"
+    _pin_inviter_key(answer, envelope, handshake)
     record = _persist_join(
         answer,
         envelope,
@@ -10184,6 +10220,26 @@ def _peer_line(row: Any) -> str:
     return line + readiness_mod.build_suffix(comparison)
 
 
+def _listener_proof_line(row: Any) -> str:
+    """The dedicated line for a member whose listener cannot prove its identity.
+
+    NOT PART OF THE REACHABILITY PARENTHETICAL, on purpose: that clause follows
+    ``reason``, which the redial loop overwrites with each later ``connect_failed``,
+    while ``listener_proof`` is the relay's sticky fact (``RelayServer.
+    _unproven_listeners``) — so this line stays put until a verified outbound link
+    to the member exists, and the remedy is never hidden by backoff.
+    """
+    from local_operator.resume import UNNAMED_DEVICE, listener_unproven_sentence
+
+    if not isinstance(row, Mapping):
+        return ""
+    proof = row.get("listener_proof")
+    if not isinstance(proof, Mapping) or proof.get("state") != "unproven":
+        return ""
+    name = str(row.get("name") or "").strip() or UNNAMED_DEVICE
+    return "  " + listener_unproven_sentence(name, proof)
+
+
 def _cmd_peers(args: argparse.Namespace) -> int:
     # A LISTING PROBES ITS PEERS, so it needs the relay's own listing budget plus
     # slack rather than the 5s default: with the default, one unreachable member
@@ -10219,11 +10275,16 @@ def _cmd_peers(args: argparse.Namespace) -> int:
     if not isinstance(raw_rows, list):
         raw_rows = live.get("peers")
     rows: list[Any] = raw_rows if isinstance(raw_rows, list) else []
+    lines: list[str] = []
+    for row in rows:
+        lines.append(_peer_line(row))
+        proof_line = _listener_proof_line(row)
+        if proof_line:
+            lines.append(proof_line)
     return _emit(
         args,
         {"ok": True, "peers": rows},
-        [_peer_line(row) for row in rows]
-        or ["no peers: this device is the only member of its networks"],
+        lines or ["no peers: this device is the only member of its networks"],
     )
 
 
@@ -10871,8 +10932,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             # ``ready`` — neither a failure nor a verification — and the raw
             # dial result does not ride along.
             state = "n/a "
+        elif check.get("ok"):
+            state = "ok "
         else:
-            state = "ok " if check.get("ok") else "FAIL"
+            # ``severity: warn`` (the unproven-listener finding): named, not gating.
+            state = "warn" if check.get("severity") == "warn" else "FAIL"
         # The shared clause hangs here with one separator spelling: the
         # sentences live in ``readiness``, so these lines and the readiness
         # readings cannot drift apart (design round 1, D3).
@@ -10888,6 +10952,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
             + (f" — {clause}" if clause else "")
         )
+        if check.get("check") == "listener_proof":
+            # The member cannot be dialled until it updates, so the remedy is the
+            # point of the row: printed, not left to ``--json``.
+            lines.extend(f"    - {remedy}" for remedy in check.get("remedies") or ())
     if not lines:
         lines.append("nothing to check: no networks, or no other members yet")
     if not payload.get("identity_present", True):
@@ -10899,8 +10967,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
         )
 
+    # A ``severity: warn`` row (the unproven-listener finding) is NAMED but does not
+    # gate: the handshake row beside it already reports the failed dial, and an
+    # inbound link from that member can still be healthy.
     link_failures = [
-        failure_words(check) for check in checks if not check.get("ok") and check["class"] == "link"
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "link" and check.get("severity") != "warn"
     ]
     payload_failures = [
         failure_words(check)

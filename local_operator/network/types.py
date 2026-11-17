@@ -2295,3 +2295,11 @@ class HandshakeResult:
     # Keep the local MAC-covered advertisement without changing raw peer semantics.
     local_capabilities: list[str] = field(default_factory=list)
     network_name: str = ""
+    #: True iff THIS handshake authenticated the peer against its STORED key: the
+    #: listener checked the dialer's auth sig+MAC (``verify_auth``), or the dialer
+    #: checked the listener's welcome proof and that the peer is the device it
+    #: meant to reach (``verify_welcome``); a join's key is bound by the token's
+    #: fingerprint. ``RelayServer._admit_link`` refuses a link where this is False,
+    #: which is the one structural gate in front of every link consumer (mesh trust
+    #: audit G1-G4). Defaults False so a result nobody verified is never trusted.
+    peer_verified: bool = False

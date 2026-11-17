@@ -95,8 +95,13 @@ from local_operator.network.credentials.sync import sync_checks
 from local_operator.network.handshake import (
     HANDSHAKE_TIMEOUT_S,
     MAX_DECLARED_ENDPOINTS,
+    REASON_LISTENER_UNPROVEN,
+    REASON_MAC,
+    REASON_PEER_IDENTITY,
     REASON_SELF,
+    REASON_SIGNATURE,
     Credential,
+    DialerExpectation,
     Handshake,
     ListenerPolicy,
     pair_abort_frame,
@@ -1603,6 +1608,7 @@ def adopt_members(
     *,
     sender_device_id: str = "",
     allow_new: bool = True,
+    supplier_verified: bool,
 ) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
@@ -1612,7 +1618,14 @@ def adopt_members(
     A joined member may assert its own bounded standing; only an active admin
     may introduce another device. Unknown rows arrive only in receiver-initiated
     pulls (``allow_new``), never in unsolicited change notifications. No new
-    wire field is needed: the link already authenticates the answering peer.
+    wire field is needed: the link authenticates the answering peer, in BOTH
+    directions since the dialer verifies the listener's welcome proof.
+
+    ``supplier_verified`` is that fact, passed in (``PeerLink.peer_verified``) and
+    REQUIRED with no default: an unverified supplier is refused outright, so a
+    future caller holding a link ``_admit_link`` never vetted cannot merge rows on
+    a claimed admin's authority (mesh trust audit G2). ``_admit_link`` already
+    refuses such links; this is the backup at the one function that writes rows.
 
     THE RULES, and each one is a refusal to guess:
 
@@ -1648,6 +1661,8 @@ def adopt_members(
       the normal case, and shrinking the table on the weaker evidence is how a mesh
       loses members that are still members.
     """
+    if not supplier_verified:
+        return False, []
     changed = False
     added: list[str] = []
     sender = record.member(sender_device_id)
@@ -4891,6 +4906,14 @@ class PeerLink:
         # capability this device expects. An old peer sends none and this is
         # `{}` — "not known", never a default that would read as parity.
         self.peer_build: dict[str, Any] = dict(result.peer_build or {})
+        #: ``PeerLink.peer_verified: bool`` — True iff this link's peer was
+        #: authenticated against its stored key (``HandshakeResult.peer_verified``:
+        #: the listener verified the dialer's auth, or the dialer verified the
+        #: listener's welcome proof and that it is the device it meant to reach).
+        #: ``_admit_link`` refuses False; ``adopt_members``, ``_note_peer_endpoints``
+        #: and ``_broadcast_epoch`` read it as a backup. The name is a cross-lane
+        #: interface — do not rename it.
+        self.peer_verified: bool = bool(getattr(result, "peer_verified", False))
         #: Whether admitting this link runs the slices' ``on_link_up`` hooks. False
         #: only for the pairing ceremony's own link: that is the joiner's CLI socket,
         #: which closes the moment the ceremony ends, so a slice reacting to it would
@@ -5864,6 +5887,15 @@ class RelayServer:
         #: Collapses repeats of one identical handshake refusal into one audit row
         #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
         self._refusal_rows = redial.RefusalCoalescer()
+        #: device_id -> {"build", "endpoint", "at"} for every member whose LISTENER
+        #: answered this device's dial without a welcome proof (``listener_unproven``).
+        #: STICKY ON PURPOSE, separate from ``redial``: the tracker's ``last_cause`` is
+        #: overwritten by every later ``connect_failed``, so the one actionable fact
+        #: ("that device runs a build too old to prove itself; update it") would flap
+        #: away under the reconnect loop. Cleared only when an OUTBOUND link to that
+        #: device is admitted (``_admit_link``). In memory only: re-learnt on the first
+        #: dial after a restart. Read by ``peers()`` as ``listener_proof``.
+        self._unproven_listeners: dict[str, dict[str, Any]] = {}
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
         #: How many inviter ceremonies are PARKED on this relay right now (from the
@@ -6662,8 +6694,17 @@ class RelayServer:
                 # writing it back would resurrect it (``save`` creates the file).
                 continue
 
-    def _note_peer_endpoints(self, network_id: str, device_id: str, endpoints: list[str]) -> None:
+    def _note_peer_endpoints(
+        self, network_id: str, device_id: str, endpoints: list[str], *, verified: bool
+    ) -> None:
         """Record where a peer says it can be reached, on its member row.
+
+        ``verified`` is whether the handshake that carried ``endpoints`` authenticated
+        the peer against its stored key. False writes NOTHING: a durable endpoint is
+        a redirect of every future dial, and before the dialer verified the
+        listener's welcome proof an impostor's endpoints landed here on the victim's
+        row (mesh trust audit G4). Both callers now run after verification, so this
+        is the assertion-style guard that keeps a new caller from undoing that.
 
         THE ROW IS THE ONLY PLACE ``_ensure_link`` DIALS, so a declaration that
         never lands here is a peer that is permanently unreachable. A peer that
@@ -6679,7 +6720,7 @@ class RelayServer:
         flight. The read happens inside the lock instead, and a record that cannot be
         reloaded is still not this connection's problem.
         """
-        if not endpoints or not device_id:
+        if not verified or not endpoints or not device_id:
             return
         try:
             with store.mutate(network_id, self.root) as record:
@@ -6938,7 +6979,11 @@ class RelayServer:
         # stamps hiding it.
         with store.mutate(link.network_id, self.root) as record:
             changed, added = adopt_members(
-                record, rows, sender_device_id=link.device_id, allow_new=allow_new
+                record,
+                rows,
+                sender_device_id=link.device_id,
+                allow_new=allow_new,
+                supplier_verified=bool(getattr(link, "peer_verified", False)),
             )
             link.member_pull_added = list(added)
             if not changed:
@@ -7777,6 +7822,12 @@ class RelayServer:
             "bad_mac": "auth_failed",
             "protocol_mismatch": "protocol_mismatch",
             "invite_device_mismatch": "wrong_device",
+            # The dialer's refusals of a listener (``Handshake.verify_welcome``): no
+            # proof reads as an old build; answering as the wrong device is the
+            # wrong-device family the join path already had.
+            "listener_unproven": "protocol_mismatch",
+            "peer_identity_mismatch": "wrong_device",
+            "invite_wrong_inviter": "wrong_device",
             "invite_invalid": "policy",
             "self_link": "policy",
         }.get(refusal.code, "policy")
@@ -7892,6 +7943,16 @@ class RelayServer:
         answer every other refusal on this transport gives — an open port that
         explains itself is an oracle — and the record of why is this device's own.
         """
+        # NO UNVERIFIED LINK ENTERS THE TABLE (mesh trust audit G1-G4). Checked before
+        # the lock and the duplicate fence: a link whose peer never proved its
+        # identity must not displace a real one, reach ``redial.connected``, run the
+        # link-up hooks, or become visible to any consumer (the member pull, epoch
+        # broadcast, forwards, credential lending). One structural gate here instead
+        # of one per consumer. The handshake normally refuses first; this is the
+        # gate a new dial path cannot forget.
+        if not getattr(link, "peer_verified", False):
+            _close_quietly(link.sock)
+            return "unverified_link"
         displaced: PeerLink | None = None
         with self._links_lock:
             refusal = self._refusal_reason(link.network_id)
@@ -7948,6 +8009,14 @@ class RelayServer:
         if refusal:
             _close_quietly(link.sock)
         else:
+            if outbound:
+                # The peer has now proved itself AS A LISTENER: the sticky
+                # "cannot prove its identity" fact for it is no longer true. Only an
+                # OUTBOUND link clears it; an inbound link from an old member says
+                # nothing about its listener half (see ``_note_unproven_listener``).
+                unproven = getattr(self, "_unproven_listeners", None)
+                if unproven is not None:
+                    unproven.pop(link.device_id, None)
             if displaced is not None:
                 # Outside the lock: ``close`` waits on the writer's flush and then
                 # runs ``link_closed``, which finds the new link and so records no
@@ -8073,7 +8142,10 @@ class RelayServer:
         # and re-read inside the record's lock, which is what makes that tolerance
         # safe to hand them rather than this method's own copy of the record.
         self._note_peer_endpoints(
-            result.network_id, result.peer_device_id, handshake.peer_endpoints
+            result.network_id,
+            result.peer_device_id,
+            handshake.peer_endpoints,
+            verified=bool(getattr(result, "peer_verified", False)),
         )
         self._note_observed_endpoint(
             result.network_id, result.peer_device_id, peer_addr, handshake.peer_endpoints
@@ -13689,6 +13761,13 @@ class RelayServer:
         for link in list(self.links.values()):
             if link.network_id != record.network_id:
                 continue
+            # NEVER A SECRET TO AN UNVERIFIED LINK (G3): ``epoch_frame`` carries the
+            # rotated secret for any active id, so a link whose peer did not prove
+            # its identity gets nothing and the real member's copy is QUEUED below.
+            # ``_admit_link`` already keeps such links out of the table; this is the
+            # backup at the one place the secret is sent.
+            if not getattr(link, "peer_verified", False):
+                continue
             if link.send(
                 epoch_frame(record, state, reason=reason, target_device_id=link.device_id)
             ):
@@ -13864,7 +13943,21 @@ class RelayServer:
             reader = wire.FrameReader(sock)
             handshake.read_challenge(reader, deadline)
             handshake.send_auth(sock, credential)
-            handshake.read_welcome(reader, deadline)
+            # WHO THIS DIAL MEANT TO REACH, from this device's own record. The
+            # listener's welcome proof is verified against the STORED key of that
+            # member's ACTIVE row (never a key from the frame), and the peer must be
+            # ``expected_device`` — an empty one refuses, because a dial that cannot
+            # say whom it meant cannot tell an impostor from the member (G1). Every
+            # production caller passes it. Join (unused here: the CLI owns joins)
+            # treats ``expected_device`` as the token's inviter id.
+            handshake.read_welcome(
+                reader,
+                deadline,
+                DialerExpectation(
+                    device_id=expected_device,
+                    public_key_for=None if mode == "join" else _active_key_reader(record),
+                ),
+            )
             # ``read_welcome`` takes the phase off that very frame — the ONE place
             # it is decided (``Handshake.read_welcome``) — so re-reading it here
             # would be a second rule for one fact.
@@ -13894,7 +13987,10 @@ class RelayServer:
             # ``record`` was read before this handshake and is only an id source now:
             # a round trip has happened since, so the write re-reads inside the lock.
             self._note_peer_endpoints(
-                record.network_id, result.peer_device_id, handshake.peer_endpoints
+                record.network_id,
+                result.peer_device_id,
+                handshake.peer_endpoints,
+                verified=link.peer_verified,
             )
             # CONTACT RE-EVALUATES MEMBERSHIP (§8.4). A link is the one moment both
             # ends are known to be up, and the member table is a distributed fact
@@ -13917,6 +14013,13 @@ class RelayServer:
                 # never mistaken for the peer's proof of anything.
                 expected_device=expected_device,
             )
+            self._note_listener_refusal(
+                refusal.code,
+                network_id,
+                host,
+                expected_device=expected_device,
+                build=dict(handshake.peer_build) if handshake is not None else {},
+            )
             return None, refusal.code
         except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
             _close_quietly(sock)
@@ -13924,6 +14027,68 @@ class RelayServer:
                 record.network_id, host, mode, expected_device=expected_device
             )
             return None, handshake_refused_reason(exc)
+
+    def _note_listener_refusal(
+        self,
+        code: str,
+        network_id: str,
+        host: str,
+        *,
+        expected_device: str,
+        build: dict[str, Any],
+    ) -> None:
+        """What a refused LISTENER teaches this dialer, durably or not at all.
+
+        ``listener_unproven`` (no proof: an old build or an impostor) is remembered
+        in ``_unproven_listeners`` so ``peers``/``doctor`` can name it; it is NOT a
+        reason to touch the member row, because it is the expected answer of a
+        legitimate not-yet-updated member and demoting its address would strand it
+        once it updates.
+
+        A POSITIVE WRONG PROOF (``peer_identity_mismatch``, ``bad_signature``,
+        ``bad_mac``) at endpoint E for member M is evidence that E does not reach M:
+        E is removed from ``M.endpoints`` (never when it is M's ``observed_endpoint``,
+        which only inbound — always verified — links write). Without this an attacker
+        near the dialer wins every ``probe_candidates`` race (first connect wins) and
+        starves the real address. Audited so poisoning is visible.
+        """
+        if not expected_device:
+            return
+        if code == REASON_LISTENER_UNPROVEN:
+            self._unproven_listeners[expected_device] = {
+                "build": _build_version_only(build),
+                "endpoint": host,
+                "at": time.time(),
+            }
+            return
+        if code not in (REASON_PEER_IDENTITY, REASON_SIGNATURE, REASON_MAC):
+            return
+        demoted = False
+        try:
+            with store.mutate(network_id, self.root) as record:
+                member = record.member(expected_device)
+                if (
+                    member is not None
+                    and host in member.endpoints
+                    and host != (member.observed_endpoint or "")
+                ):
+                    member.endpoints = [e for e in member.endpoints if e != host]
+                    store.save(record, self.root)
+                    demoted = True
+        except FileNotFoundError:
+            return
+        if demoted:
+            self.audit.record(
+                AuditEvent(
+                    event="endpoint_demoted",
+                    actor="self",
+                    subject=expected_device,
+                    outcome="ok",
+                    network_id=network_id,
+                    cause="wrong_device" if code == REASON_PEER_IDENTITY else "auth_failed",
+                    detail={"endpoint": host, "code": code},
+                )
+            )
 
     def _clear_refusal_mark(self, network_id: str) -> None:
         """A COMPLETED handshake clears a ``refused_by_peers`` mark.
@@ -16316,9 +16481,46 @@ class RelayServer:
                         # unchanged.
                         "build": dict(link.peer_build) if link is not None else {},
                         "capabilities": sorted(link.capabilities) if link is not None else [],
+                        # WHETHER THIS PEER CAN PROVE ITSELF AS A LISTENER — present on
+                        # every row, like ``build``. Driven by the sticky
+                        # ``_unproven_listeners`` fact, never by ``redial.last_error``,
+                        # so the reconnect loop cannot flap it away.
+                        "listener_proof": self._listener_proof_row(member.device_id, link),
                     }
                 )
         return peers
+
+    def _listener_proof_row(self, device_id: str, link: PeerLink | None) -> dict[str, Any]:
+        """``{"state", "build", "build_source", "at"}`` for one ``peers()`` row.
+
+        ``unproven``: this device's dial was answered with no welcome proof and no
+        outbound link has been admitted since. The build is what the CHALLENGE
+        reported (``build_source: "challenge"``, a claim) unless a live INBOUND link
+        from that member exists, whose hello build the listener side verified
+        (``"hello"``). ``verified``: a live link to it carries ``listener-proof-v1``
+        (inside the MAC-covered transcript) or this device dialled it successfully.
+        ``unknown`` otherwise. Only ``version`` is rendered, never ``source_ref``.
+        """
+        unproven = getattr(self, "_unproven_listeners", {}).get(device_id)
+        if unproven is not None:
+            build = dict(unproven.get("build") or {})
+            source = "challenge"
+            if link is not None and not getattr(link, "outbound", False):
+                hello_build = _build_version_only(getattr(link, "peer_build", {}))
+                if hello_build:
+                    build, source = hello_build, "hello"
+            return {
+                "state": "unproven",
+                "build": build,
+                "build_source": source,
+                "at": unproven.get("at"),
+            }
+        if link is not None and (
+            getattr(link, "outbound", False)
+            or "listener-proof-v1" in getattr(link, "capabilities", ())
+        ):
+            return {"state": "verified", "build": {}, "build_source": "", "at": None}
+        return {"state": "unknown", "build": {}, "build_source": "", "at": None}
 
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         """Install state, health, links, log paths — what ``lop network status`` prints.
@@ -16464,6 +16666,9 @@ class RelayServer:
                 if peer and member.device_id != peer:
                     continue
                 findings.extend(self._probe_member(record, member, deadline=deadline))
+                proof = self._listener_proof_finding(member)
+                if proof is not None:
+                    findings.append(proof)
         return {
             "checks": findings,
             "identity_dir": str(identity),
@@ -16632,6 +16837,38 @@ class RelayServer:
                 }
             )
         return rows
+
+    def _listener_proof_finding(self, member: MemberRecord) -> dict[str, Any] | None:
+        """The named doctor warning for a member whose listener cannot prove itself.
+
+        Read from the sticky ``_unproven_listeners`` fact (this doctor run's own dial
+        refreshes it), so it says the same thing ``lop network peers`` does. Severity
+        ``warn``: named, non-gating — the handshake row already reports the dial.
+        The remedies name both routes: the mesh roll from here, and ``lop update`` on
+        the member itself for one that can never connect to this device (the roll
+        rides the member's own inbound link, which such a member never opens).
+        """
+        from local_operator.resume import UNNAMED_DEVICE, listener_unproven_sentence
+
+        if member.device_id not in self._unproven_listeners:
+            return None
+        proof = self._listener_proof_row(member.device_id, self._link_for(member.device_id))
+        label = member.name or UNNAMED_DEVICE
+        return {
+            "check": "listener_proof",
+            "code": REASON_LISTENER_UNPROVEN,
+            "device_id": member.device_id,
+            "device_name": member.name,
+            "ok": False,
+            "severity": "warn",
+            "listener_proof": proof,
+            "detail": listener_unproven_sentence(label, proof),
+            "remedies": [
+                f"run `lop network update {label}` from this device",
+                f"if {label} can never connect to this device, run `lop update` on "
+                f"{label} itself",
+            ],
+        }
 
     def _handshake_row(
         self, member: MemberRecord, endpoint: str, *, ok: bool, detail: str, **extra: Any
@@ -16988,6 +17225,31 @@ def _audit_pair_grant(
             detail=detail,
         )
     )
+
+
+def _active_key_reader(record: NetworkRecord) -> Callable[[str], str | None]:
+    """The dialer's key lookup: the ACTIVE member row's stored key, or ``None``.
+
+    The same rule the listener's policy applies (``active_member_public_key``): a
+    tombstoned or absent device has no key to verify against, so it is refused
+    ``not_a_member`` before any signature is checked.
+    """
+
+    def public_key_for(device_id: str) -> str | None:
+        member = record.member(device_id)
+        if member is None or not member.active:
+            return None
+        return member.public_key or None
+
+    return public_key_for
+
+
+def _build_version_only(build: Any) -> dict[str, Any]:
+    """A peer's build stamp reduced to its ``version`` — never ``source_ref`` paths."""
+    if not isinstance(build, dict):
+        return {}
+    version = str(build.get("version") or "")
+    return {"version": version} if version else {}
 
 
 def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
