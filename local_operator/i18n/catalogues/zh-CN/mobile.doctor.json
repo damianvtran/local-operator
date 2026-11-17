@@ -29,5 +29,9 @@
   "mobile.doctor.tunnel.connecting": "通过Radient的手机访问仍在连接中。请等待几分钟；如果仍未连接，请运行 lop tunnel restart 重启它。",
   "mobile.doctor.tunnel.turned_off": "此电脑上通过Radient的手机访问已关闭。要在外出时使用手机，请运行 lop tunnel start 重新开启。",
   "mobile.doctor.tunnel.not_running": "此电脑上通过Radient的手机访问未运行。请运行 lop tunnel restart 重启它；如果仍然没有运行，请将这份报告发给支持团队。",
-  "mobile.doctor.tunnel.list_skipped": "未检查重复隧道，因为此电脑上的Radient登录不存在或需要刷新。请打开Local Operator，按提示登录，然后重新运行检查。"
+  "mobile.doctor.tunnel.list_skipped": "未检查重复隧道，因为此电脑上的Radient登录不存在或需要刷新。请打开Local Operator，按提示登录，然后重新运行检查。",
+  "mobile.doctor.watches.ok": "你的账户在这台电脑上使用了 {watches}/{limit} 个文件监视和 {instances}/{instance_limit} 个监视器。",
+  "mobile.doctor.watches.near": "你的账户在这台电脑上使用了 {watches}/{limit} 个文件监视和 {instances}/{instance_limit} 个监视器，已接近上限；其中大部分属于进程 {pid}。请重启该进程，或请管理员调高 fs.inotify.max_user_watches 和 fs.inotify.max_user_instances。",
+  "mobile.doctor.watches.at_limit": "你的账户已用完这台电脑上的文件监视（{watches}/{limit} 个监视，{instances}/{instance_limit} 个监视器），因此其他监视文件的程序会报错“No space left on device”。其中大部分属于进程 {pid}：请重启它，或请管理员调高 fs.inotify.max_user_watches 和 fs.inotify.max_user_instances。",
+  "mobile.doctor.watches.unknown": "无法在这台电脑上统计文件监视的使用情况。如果这里的程序报错“No space left on device”，请把这份报告发给支持团队。"
 }

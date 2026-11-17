@@ -29,5 +29,9 @@
   "mobile.doctor.tunnel.connecting": "Phone access through Radient is still connecting. Wait a few minutes; if it does not connect, restart it with lop tunnel restart.",
   "mobile.doctor.tunnel.turned_off": "Phone access through Radient is turned off on this computer. Turn it back on with lop tunnel start to use your phone away from home.",
   "mobile.doctor.tunnel.not_running": "Phone access through Radient is not running on this computer. Restart it with lop tunnel restart; if it stays off, send this report to support.",
-  "mobile.doctor.tunnel.list_skipped": "Duplicate tunnels were not checked because the Radient sign-in on this computer is missing or needs refreshing. Open Local Operator, sign in if asked, then run the check again."
+  "mobile.doctor.tunnel.list_skipped": "Duplicate tunnels were not checked because the Radient sign-in on this computer is missing or needs refreshing. Open Local Operator, sign in if asked, then run the check again.",
+  "mobile.doctor.watches.ok": "Your account is using {watches} of {limit} file watches and {instances} of {instance_limit} watchers allowed on this computer.",
+  "mobile.doctor.watches.near": "Your account is using {watches} of {limit} file watches and {instances} of {instance_limit} watchers allowed on this computer, close to the limit; most belong to process {pid}. Restart that process, or ask an administrator to raise fs.inotify.max_user_watches and fs.inotify.max_user_instances.",
+  "mobile.doctor.watches.at_limit": "Your account has used up its file watches on this computer ({watches} of {limit} watches, {instances} of {instance_limit} watchers), so other programs that watch files fail with “No space left on device”. Most belong to process {pid}: restart it, or ask an administrator to raise fs.inotify.max_user_watches and fs.inotify.max_user_instances.",
+  "mobile.doctor.watches.unknown": "File watch usage could not be measured on this computer. If programs here fail with “No space left on device”, send this report to support."
 }

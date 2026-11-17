@@ -614,6 +614,7 @@ def test_every_english_problem_sentence_names_a_fix_without_jargon():
         "tunnel.not_configured", "tunnel.login_needed", "tunnel.setup_again", "tunnel.offline",
         "tunnel.connecting", "tunnel.turned_off", "tunnel.not_running", "tunnel.duplicates",
         "tunnel.list_unchecked", "tunnel.list_skipped", "login.missing",
+        "watches.near", "watches.at_limit", "watches.unknown",
     ]  # fmt: skip
     for key in problems:
         text = catalogue[f"mobile.doctor.{key}"]
@@ -628,3 +629,87 @@ def test_status_says_not_answering_when_a_process_holds_the_port(rig, capsys, mo
     mobile_command(argparse.Namespace(mobile_command="status"))
     out = capsys.readouterr().out
     assert "auth gate:    not answering" in out
+
+
+# --- file watches (Linux inotify) ---------------------------------------------------
+
+
+def _fake_proc(root: Path, holders: dict[int, list[int]], limits: tuple[int, int] | None) -> Path:
+    """A ``/proc`` stand-in: ``holders`` maps pid -> watches per inotify fd.
+
+    Each inotify fd is a dangling symlink to ``anon_inode:inotify`` (what
+    ``readlink`` answers for the real thing) beside an ``fdinfo`` file carrying
+    one ``inotify wd:`` line per watch; one ordinary fd per process proves only
+    inotify fds are counted.
+    """
+    proc = root / "proc"
+    for pid, fds in holders.items():
+        (proc / str(pid) / "fd").mkdir(parents=True)
+        (proc / str(pid) / "fdinfo").mkdir()
+        (proc / str(pid) / "fd" / "0").symlink_to("/dev/null")
+        for fd, watches in enumerate(fds, start=3):
+            (proc / str(pid) / "fd" / str(fd)).symlink_to("anon_inode:inotify")
+            lines = "".join(
+                f"inotify wd:{n} ino:1 sdev:1 mask:2 ignored_mask:0\n" for n in range(watches)
+            )
+            (proc / str(pid) / "fdinfo" / str(fd)).write_text(f"pos:\t0\nflags:\t02000000\n{lines}")
+    (proc / "self").mkdir(exist_ok=True)  # non-numeric entries are skipped
+    limits_dir = root / "limits"
+    limits_dir.mkdir()
+    if limits is not None:
+        (limits_dir / "max_user_watches").write_text(f"{limits[0]}\n")
+        (limits_dir / "max_user_instances").write_text(f"{limits[1]}\n")
+    return proc
+
+
+@pytest.mark.parametrize(
+    "holders,limits,status",
+    [
+        ({10: [5, 1], 11: [2]}, (100, 128), "pass"),
+        ({10: [85]}, (100, 128), "warn"),  # watches near the budget
+        ({10: [1]} | {pid: [0] for pid in range(20, 123)}, (100_000, 128), "warn"),  # instances
+        ({10: [99], 11: [1]}, (100, 128), "fail"),  # node2's shape: spent
+    ],
+)
+def test_the_watch_row_sums_this_users_inotify_against_the_limit(
+    tmp_path, monkeypatch, holders, limits, status
+):
+    proc = _fake_proc(tmp_path, holders, limits)
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["id"] == "watches"
+    assert check["status"] == status
+    data = check["data"]
+    assert data["watches"] == sum(sum(fds) for fds in holders.values())
+    assert data["instances"] == sum(len(fds) for fds in holders.values())
+    assert (data["limit"], data["instance_limit"]) == limits
+
+
+def test_at_the_watch_limit_names_the_biggest_holder(tmp_path, monkeypatch):
+    proc = _fake_proc(tmp_path, {3105: [90, 9], 77: [1]}, (100, 128))
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "fail"
+    assert check["data"]["top_pid"] == 3105 and check["data"]["top_watches"] == 99
+    assert check["summary"] == doctor._t(
+        doctor._md.watches_at_limit(
+            watches="100", limit="100", instances="3", instance_limit="128", pid="3105"
+        )
+    )
+    assert "No space left on device" in check["summary"]
+
+
+def test_unreadable_watch_limits_are_unknown_not_a_guess(tmp_path, monkeypatch):
+    proc = _fake_proc(tmp_path, {10: [1]}, None)
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "warn"
+    assert check["summary"] == doctor._t(doctor._md.watches_unknown())
+
+
+def test_the_watch_row_is_reported_on_linux_only(rig, monkeypatch):
+    monkeypatch.setattr(doctor, "check_watches", lambda: doctor._check("watches", "pass", "ok"))
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+    assert "watches" in _by_id(_run(remote=False))
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    assert "watches" not in _by_id(_run(remote=False))

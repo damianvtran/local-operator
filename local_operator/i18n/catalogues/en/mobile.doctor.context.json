@@ -153,5 +153,25 @@
     "role": "Diagnostics check result (CLI, desktop, pasted into support)",
     "tone": "Plain, calm, factual",
     "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.watches.ok": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics (Linux only), read by a non-technical user. It reports the per-user Linux inotify budget: a 'file watch' is one watched folder (inotify watch); a 'watcher' is one inotify instance a program opens. Placeholders are pre-formatted numbers ({pid} is a process id) and stay verbatim; fs.inotify.max_user_watches and fs.inotify.max_user_instances are system setting names and stay verbatim; 'No space left on device' is the literal English error other programs print and stays verbatim inside the locale's quotation marks."
+  },
+  "mobile.doctor.watches.near": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics (Linux only), read by a non-technical user. It reports the per-user Linux inotify budget: a 'file watch' is one watched folder (inotify watch); a 'watcher' is one inotify instance a program opens. Placeholders are pre-formatted numbers ({pid} is a process id) and stay verbatim; fs.inotify.max_user_watches and fs.inotify.max_user_instances are system setting names and stay verbatim; 'No space left on device' is the literal English error other programs print and stays verbatim inside the locale's quotation marks. A problem line states what is wrong, then the fix."
+  },
+  "mobile.doctor.watches.at_limit": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics (Linux only), read by a non-technical user. It reports the per-user Linux inotify budget: a 'file watch' is one watched folder (inotify watch); a 'watcher' is one inotify instance a program opens. Placeholders are pre-formatted numbers ({pid} is a process id) and stay verbatim; fs.inotify.max_user_watches and fs.inotify.max_user_instances are system setting names and stay verbatim; 'No space left on device' is the literal English error other programs print and stays verbatim inside the locale's quotation marks. A problem line states what is wrong, then the fix."
+  },
+  "mobile.doctor.watches.unknown": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics (Linux only), read by a non-technical user. It reports the per-user Linux inotify budget: a 'file watch' is one watched folder (inotify watch); a 'watcher' is one inotify instance a program opens. Placeholders are pre-formatted numbers ({pid} is a process id) and stay verbatim; fs.inotify.max_user_watches and fs.inotify.max_user_instances are system setting names and stay verbatim; 'No space left on device' is the literal English error other programs print and stays verbatim inside the locale's quotation marks."
   }
 }
