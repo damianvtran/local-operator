@@ -62,6 +62,14 @@ INTENT_STATES = ("pending", "sent", "refused", "signin")
 #: ``request_revoked``, which are verdicts, not transport.
 TRANSIENT_CODES = frozenset({"rate_limited", "messaging_unavailable", "bridge_unreachable"})
 
+#: The ``consumption_row_id`` prefix of a row the desktop approvals BATCH
+#: recorded (``team_bridge.approvals``). Card rows carry the ask's response-row
+#: id instead. It lives HERE, in the shared ledger, because the card door
+#: (``Session.bridge_decide``) must recognise a batch row too and may not import
+#: the approvals module (an import scan keeps batch authority off every
+#: session/tool path).
+BATCH_CONSUMPTION_PREFIX = "batch:"
+
 
 class DecideIntentsRefused(Exception):
     """The ledger cannot serve this request (damage, unknown row, bad state)."""
@@ -291,6 +299,30 @@ class DecideIntents:
                 (owner_key,),
             ).fetchall()
             return [_row_to_intent(row) for row in rows]
+        finally:
+            conn.close()
+
+    def unconfirmed_batch_intent(
+        self, owner_key: str, ask_id: str, question_id: str
+    ) -> DecideIntent | None:
+        """The batch row still awaiting the hub for this ask, or ``None``.
+
+        ONE WORD PER ASK (PR #4099, design (c)): a batch row in ``pending`` or
+        ``signin`` holds the word a human signed but the hub has not confirmed.
+        It is sent again only when the human selects that same word in a later
+        signed batch; every surface consults this row so that no later human act
+        records or sends the other word for the same ask.
+        """
+
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM decide_intents WHERE owner_key = ? AND ask_id = ?"
+                " AND question_id = ? AND state IN ('pending', 'signin')"
+                " AND consumption_row_id LIKE ?",
+                (owner_key, ask_id, question_id, BATCH_CONSUMPTION_PREFIX + "%"),
+            ).fetchone()
+            return _row_to_intent(row) if row is not None else None
         finally:
             conn.close()
 
@@ -731,6 +763,7 @@ async def recover_from_durable_answer(
 
 
 __all__ = [
+    "BATCH_CONSUMPTION_PREFIX",
     "DECIDE_INTENTS_SCHEMA_VERSION",
     "INTENT_STATES",
     "TRANSIENT_CODES",
