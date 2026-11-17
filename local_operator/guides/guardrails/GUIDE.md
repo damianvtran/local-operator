@@ -11,10 +11,11 @@ the call's own result and starts with `BLOCKED by guardrail`. It is final for TH
 action: the same effect on the same targets, by any spelling, tool or path — never
 reword, retry or reroute it; report it. It does not taint later work: a NEW artifact
 from your own fresh work, written to your own worktree's mandated location (a repo's
-`i18n/receipts/`, say), is a different action and needs no approval; a reader
-child's `evidence` tool (create-only, content-only) is the sanctioned path for it,
-so using it is fresh work, not a reroute. Copying or importing the blocked material
-there by another route is still a reroute.
+`i18n/receipts/`, say) with your normal write tools, is a different action and needs
+no approval — that is not a reroute. A review-type child whose brief names a
+`Worktree:` also gets the create-only, content-only `evidence` tool, its sanctioned
+path because that role carries no `write`/`edit`; no other session gets it. Copying
+or importing the blocked material there by any route is still a reroute.
 
 **Exactly two exceptions** let you re-issue the IDENTICAL call — same tool,
 byte-identical arguments — ONCE. Neither bypasses anything: the guard re-checks
