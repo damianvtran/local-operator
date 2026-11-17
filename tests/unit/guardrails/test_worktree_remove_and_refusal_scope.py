@@ -53,7 +53,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (state / "config.yml").write_text("version: 1\n")
     # Synthetic repos have no live cwd; process inventory has dedicated controls
     # below and must not make git regressions depend on fleet lsof latency.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     # Synthetic repos have no GitHub remote either: by default every worktree is
     # on GitHub with no open PR. The PR lookup has its own tests below.
     monkeypatch.setattr(prov, "_github_repo", lambda _: "o/r")
@@ -393,7 +393,7 @@ def test_live_or_unknown_process_cwd_blocks_a_clean_worktree(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, inventory: bool | None
 ) -> None:
     wt = _add(repo, repo / ".worktrees" / "busy", "busy")
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: inventory)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: inventory)
     assert prov.worktree_state(str(wt)) == "busy"
     assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.HIGH
 
@@ -751,7 +751,8 @@ def test_glab_lookup_parses_remotes_and_never_prompts(
         "mr",
         "list",
         "--repo",
-        "g/p",
+        # Host-pinned (review m1, PR #4161): a bare path follows GITLAB_HOST.
+        "https://gitlab.com/g/p",
         "--source-branch",
         "feat/x",
         "-F",
@@ -857,8 +858,9 @@ def test_gh_history_lookup_is_one_bounded_call_and_failure_is_unknown(
         _FC(4, "closed", "2026-11-01"),
     ]
     assert seen["argv"] == [
-        "gh", "pr", "list", "--repo", "o/r", "--head", "feat/x", "--state", "all",
-        "--json", "number,state,mergedAt,closedAt,updatedAt", "--limit", "10",
+        "gh", "pr", "list", "--repo", "github.com/o/r", "--head", "feat/x", "--state", "all",
+        "--json", "number,state,mergedAt,closedAt,updatedAt,headRefOid,baseRefName",
+        "--limit", "10",
     ]  # fmt: skip
     assert seen["timeout"] == prov._GH_TIMEOUT_S and seen["prompt"] == "1"
 
@@ -893,7 +895,7 @@ def test_glab_history_lookup_lists_all_states(monkeypatch: pytest.MonkeyPatch) -
         _FC(8, "merged", "2026-11-08"),
     ]
     assert seen["argv"] == [
-        "glab", "mr", "list", "--repo", "g/p", "--source-branch", "feat/x",
+        "glab", "mr", "list", "--repo", "https://gitlab.com/g/p", "--source-branch", "feat/x",
         "--all", "--per-page", "10", "-F", "json",
     ]  # fmt: skip
     assert seen["timeout"] == prov._GH_TIMEOUT_S

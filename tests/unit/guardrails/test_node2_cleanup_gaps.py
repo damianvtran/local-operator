@@ -52,7 +52,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for sid in (S, S2):
         (state / "sessions" / sid / "scratchpad").mkdir(parents=True)
     (state / "config.yml").write_text("version: 1\n")
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     monkeypatch.setattr(prov, "_cwd_entries", lambda *, fresh=False: ())
     # raising=False: the same file runs against the pre-fix base to prove each
     # test fails there (PR evidence), where these names do not exist yet.

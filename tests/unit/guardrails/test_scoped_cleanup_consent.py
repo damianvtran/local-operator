@@ -151,7 +151,7 @@ def fixture(tmp_path, monkeypatch):
     registry.run_dir().mkdir(parents=True)
     # Deterministic external boundaries; git registration/status and strict
     # ledger/registry inventories remain real. No live provider or session store.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     monkeypatch.setattr(prov, "_github_repo", lambda _: "fixture/repo")
     monkeypatch.setattr(prov, "_gh_prs", lambda *_: [])
     return home, repo, wt
@@ -340,7 +340,7 @@ async def test_actual_guard_scope_negative_controls(fixture, monkeypatch, barrie
     elif barrier == "malformed-registry":
         (registry.run_dir() / "malformed.json").write_text("{")
     elif barrier == "unknown-cwd":
-        monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: None)
+        monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: None)
     elif barrier == "locked":
         Path(git(wt, "rev-parse", "--absolute-git-dir"), "locked").write_text("held")
     elif barrier in ("primary", "parent", "glob", "mixed", "symlink", "protected"):

@@ -1390,14 +1390,18 @@ def _rank(
         # caller never made is not known to be reproducible.
         own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
         relation = own[2] if own is not None else ""
+        # A hidden pid with no evidence is ignored for the PLAIN removal only
+        # (git itself still refuses untracked content); ``--force`` keeps the
+        # strict rule (review M1, PR #4161).
         state = worktree_state(
             path,
             own=own is not None and (relation == "" or not target.forced),
             session_id=session_id,
+            hidden_blocks=target.forced,
         )
         # Never a bare "busy" (operator directive 2026-11-14): the reason names
         # each holder (pid, command, session) or why the inventory failed.
-        state_text = state_phrase(path, state, session_id)
+        state_text = state_phrase(path, state, session_id, hidden_blocks=target.forced)
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1863,8 +1867,10 @@ def _reached_worktrees(
     checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
     jobs: dict[str, Any] = {}
     for root in checked:
+        # A reached tree is deleted by ``rm -rf``-style targets: strict on
+        # hidden pids for the not-own (inherited) case (review M1, PR #4161).
         jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(
-            r, own=r not in inherited, session_id=session_id
+            r, own=r not in inherited, session_id=session_id, hidden_blocks=True
         )
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
@@ -1919,9 +1925,10 @@ def _reached_worktrees(
                 if state == "dirty"
                 else ""
             )
+            state_text = prov.state_phrase(root, state, session_id, hidden_blocks=True)
             held.append(
                 f"{root}: created by this session; linked worktree state: "
-                f"{prov.state_phrase(root, state, session_id)}{changes}; {facts}"
+                f"{state_text}{changes}; {facts}"
             )
     if unchecked:
         held.append(
@@ -1987,7 +1994,7 @@ def _reached_worktrees(
             who = "not created by this session (not in the ledger)"
         activity = activities.get(root)
         facts = activity.facts() if activity is not None else "PR state unknown (lookup timed out)"
-        state_text = prov.state_phrase(root, state, session_id)
+        state_text = prov.state_phrase(root, state, session_id, hidden_blocks=True)
         parts.append(f"{root}: {who}; linked worktree state: {state_text}{changes}; {facts}")
     if len(foreign) > _MAX_FOREIGN_SHOWN:
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")

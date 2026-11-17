@@ -4532,10 +4532,15 @@ def bash_guard_environment(context: ToolContext | None) -> tuple[dict[str, str],
     return env, scratch_root
 
 
-#: Env-name prefixes ``gh``/``glab`` read auth or host selection from. The
-#: guard's forge lookups get only these from the session's injections, not
-#: every stored credential (least privilege for a child that only lists PRs).
-_FORGE_AUTH_PREFIXES = ("GH_", "GITHUB_", "GLAB_", "GITLAB_")
+#: The token names ``gh``/``glab`` authenticate with. The guard's forge
+#: lookups get only these from the session's injections, not every stored
+#: credential (least privilege for a child that only lists PRs). Host- and
+#: config-selecting names (``GH_HOST``, ``GH_CONFIG_DIR``, ``GITLAB_HOST``,
+#: ``GH_ENTERPRISE_TOKEN``…) are left out on purpose (review m1, PR #4161):
+#: the guard pins the host in argv, and a stored enterprise override would
+#: otherwise re-point its lookup. ``provenance._forge_cli_env`` narrows this
+#: again to the pinned forge's own pair.
+_FORGE_AUTH_NAMES = frozenset({"GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "GLAB_TOKEN"})
 
 
 def bash_guard_forge_auth(
@@ -4553,7 +4558,7 @@ def bash_guard_forge_auth(
     removal while the agent's own ``gh`` answered at once.
 
     The same two sources ``execute_bash`` merges, in the same order, filtered
-    to :data:`_FORGE_AUTH_PREFIXES`; ``None`` where the bash child gets no
+    to :data:`_FORGE_AUTH_NAMES`; ``None`` where the bash child gets no
     credentials either (a write-confined shell). Lazy and memoised per guard
     call: the borrow may cost one bounded broker round trip (the reason
     :func:`bash_guard_environment` leaves it out), and most classified calls
@@ -4593,7 +4598,7 @@ def bash_guard_forge_auth(
             except Exception:  # noqa: BLE001 — a broker fault leaves the bare env
                 lent = {}
             env.update(lent)
-            memo.append({k: v for k, v in env.items() if k.startswith(_FORGE_AUTH_PREFIXES)})
+            memo.append({k: v for k, v in env.items() if k in _FORGE_AUTH_NAMES})
             return memo[0]
 
     return provider
