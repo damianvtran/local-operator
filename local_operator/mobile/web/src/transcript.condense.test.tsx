@@ -40,15 +40,19 @@ describe("condensed transcript rendering", () => {
 	it("condenses a settled turn on first paint and restores every row on expand", () => {
 		const rows = settledTurn();
 		const view = render(<Transcript pid="s" entries={rows} />);
-		expect(screen.getByText("First question line")).toBeTruthy();
-		expect(screen.queryByText(/The rest of the prompt/)).toBeNull();
+		/* The prompt keeps ALL its text while the turn is condensed (clamped to three
+		   lines by `UserText`; see transcript.user-fold.test.tsx), instead of
+		   dropping everything after the first line as it used to. */
+		const prompt = view.container.querySelector<HTMLElement>("[data-user-text]")!;
+		expect(prompt.textContent).toBe("First question line\nThe rest of the prompt");
+		expect(prompt.style.getPropertyValue("-webkit-line-clamp") || (prompt.style as unknown as Record<string, string>).WebkitLineClamp).toBe("3");
 		expect(screen.queryByText("run t-1")).toBeNull();
 		expect(screen.getByText("The answer")).toBeTruthy();
 		expect(view.container.querySelectorAll("[data-condense-header]").length).toBe(1);
 		expect(getHistory).not.toHaveBeenCalled();
 
 		fireEvent.click(view.container.querySelector("[data-condense-header]")!);
-		expect(screen.getByText(/The rest of the prompt/)).toBeTruthy();
+		expect(view.container.querySelector<HTMLElement>("[data-user-text]")!.style.overflow).toBe("");
 		fireEvent.click(view.container.querySelector("[data-condense-fold] button")!);
 		expect(screen.getByText("run t-1")).toBeTruthy();
 		expect(screen.getByText("run t-2")).toBeTruthy();

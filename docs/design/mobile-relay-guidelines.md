@@ -29,6 +29,23 @@ static replay, an old screenshot or an intended interaction as current live proo
   quieter meta role; monospace is for code and compact numeric/technical facts.
   Keep contrast at the existing checker floors (normally 4.5:1 text, 3:1 meaningful
   UI graphics). Do not solve density by shrinking primary text or touch controls.
+- **The person's own messages carry an edge.** The user bubble, the steer row and the
+  parent bubble take `border border-control`, the desktop's own choice
+  (`UserRow` in `local-operator-ui`). The agent side has no bubble, and the `surface`
+  ground is only **1.07:1** off `canvas` in both Local Operator themes, so the edge is
+  the whole difference between the speakers. `border-hairline` is 1.25:1 light /
+  1.41:1 dark and does not do this job; `border-control` is 3.51:1 / 4.47:1 against
+  `canvas`. This is the structural-boundary case, not a redundant panel outline: tool
+  rows, notices and peer cards stay unbordered so the edge keeps meaning "the human
+  said this".
+- **A condensed turn folds the person's own message, with a control.** Inside a
+  condensed turn the message keeps its whole text in the DOM and shows three lines;
+  when the text overflows them, a worded "Show more" / "Show less" button
+  (`aria-expanded`, `aria-controls`, a 44 px target) opens and closes it. It is
+  separate from the turn bar and keeps its state through opening and re-condensing
+  the turn. The preview carries no fade of its own (the transcript scroller already
+  fades its edges). Long assistant replies are not folded: they are the primary
+  content, and the desktop does not fold them either.
 - A long title truncates in its own `min-w-0` flex slot, not by pushing actions
   outside the viewport. Reserve stable slots for changing status and counts.
 

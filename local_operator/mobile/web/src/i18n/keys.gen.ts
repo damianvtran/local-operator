@@ -548,6 +548,10 @@ export type MessageParams = {
   "relay.transcript.label.peer": undefined;
   "relay.transcript.label.steered": undefined;
   "relay.transcript.label.wake": undefined;
+  "relay.transcript.message.show_less": undefined;
+  "relay.transcript.message.show_less_label": undefined;
+  "relay.transcript.message.show_more": undefined;
+  "relay.transcript.message.show_more_label": undefined;
   "relay.transcript.older.failed": undefined;
   "relay.transcript.older.load": undefined;
   "relay.transcript.older.loading": undefined;
