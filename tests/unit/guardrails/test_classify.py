@@ -1293,7 +1293,6 @@ _SP = "$LOCAL_OPERATOR_SCRATCHPAD"
         'exec > "$L" 2>&1; echo started',
         f'TS=$(date -u +%Y%m%dT%H%M%SZ); exec > "{_SP}/q/u0-$TS.log"',
         f'L={_SP}/q/u0-$(date -u +%Y%m%dT%H%M%SZ).log; rm -f "$L"',
-        f'for d in a b; do L={_SP}/$d-$(date +%s); rm -rf "$L"; done',
         f'rm -rf "{_SP}"/run-$(date +"%Y%m%d")',
         f'rm -rf "{_SP}"/run-$(uuidgen)',
         f'rm -rf "{_SP}"/run-$(id -un)',
@@ -1546,10 +1545,10 @@ def test_round3_rows_stay_critical(home: Path, command: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        f'L={_SP}/$(date +%s)/x; mkdir -p "$L"; touch "$L/a"; ls "$L"; cat "$L/a" | tee "$L/b"; '
-        'rm -rf "$L"',
-        f'L={_SP}/$(date +%s); [ -d "$L" ] && rm -rf "$L"',
-        f'L={_SP}/$(date +%s); test -e "$L" || printf "%s" x > "$L"; rm -f "${{L}}"',
+        f'L={_SP}/$(date +%s)/x; mkdir -p "$L"; touch "$L/a"; ls "$L"; cat "$L/a"; '
+        'tee "$L/b"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); [ -d "$L" ]; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); test -e "$L"; printf "%s" x > "$L"; rm -f "${{L}}"',
         f'L={_SP}/$(date +%s).log; echo hi >> "$L"; rm -f "$L"',
     ],
 )
@@ -1585,3 +1584,92 @@ def test_round3_carriers_prescan_is_an_allowlist() -> None:
         assert _containment_carriers(f"L={sp}/$(date +%s); {use}") == set(), use
     # HOME/OLDPWD are read as raw paths elsewhere: never carriers.
     assert _containment_carriers("HOME=/x/$(date +%s); rm -rf ~") == set()
+
+
+# -- Round 4, PR #4147: carry only in straight-line, safe-program commands ----
+#
+# Round 3's pre-scan counted ONE assignment per name but not whether its
+# segment runs (R6: ``false && L=…``), and only vetted the programs that read
+# ``$L`` (R7: ``hash -p`` rebinding ``date``, ``ln``/``cp -s`` onto a glob or
+# ``$(ls …)`` under the carried prefix). Round 4 makes the carry stricter
+# instead of adding cases: the WHOLE command must be ``;``/newline-joined
+# simple commands built only from ``_CARRY_STRAIGHT_PROGRAMS``, else every
+# carry drops to main's (ff41034f) opaque, judge-ranked reading.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R6: a conditional, looped or grouped assignment may never run.
+        f'false && L={_SP}/$(date +%s); rm -rf "$L"/*',
+        f'[ -d /nope ] && L={_SP}/$(date +%s); rm -rf "$L"/*',
+        f'true || L={_SP}/$(date +%s); rm -rf "$L"/',
+        f'if [ -n "$X" ]; then L={_SP}/$(date +%s); fi; rm -rf "$L"/*',
+        f'while false; do L={_SP}/$(date +%s); done; rm -rf "$L"/*',
+        f'for x in $NOPE; do L={_SP}/$(date +%s); done; rm -rf "$L"/*',
+        f'{{ false && L={_SP}/$(date +%s); }}; rm -rf "$L"/*',
+        # R7: rebinding and link-making that never read ``$L``.
+        f'hash -p /tmp/evil/date date; L={_SP}/$(date +%s); rm -rf "$L"',
+        f'hash -p ./d date; L={_SP}/$(date +%s); rm -rf "$L"/*',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; ln -s / "{_SP}"/[0-9]*/x; rm -rf "$L"/x/',
+        f'L={_SP}/$(date +%s); ln -s / "{_SP}"/1*/x; rm -rf "$L"/x/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; ln -sf / "$(ls -d {_SP}/1*)"/x; rm -rf "$L"/x/',
+        f'L={_SP}/$(date +%s); mkdir "$L"; cp -as / "{_SP}"/*/; rm -rf "$L"/',
+        # A carried log followed by any other program goes to the judge.
+        f'L={_SP}/u0-$(date +%s).log; exec > "$L"; ./run.sh',
+        # Round-3 LOW shapes that are not straight-line now follow main.
+        f'for d in a b; do L={_SP}/$d-$(date +%s); rm -rf "$L"; done',
+        f'L={_SP}/$(date +%s); [ -d "$L" ] && rm -rf "$L"',
+        f'L={_SP}/$(date +%s); cat "$L/a" | tee "$L/b"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); (rm -rf "$L")',
+        f'L={_SP}/$(date +%s); [[ -d "$L" ]]; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); rm -rf "$L" &',
+        # A substitution body is held to the same rule.
+        f'L={_SP}/$(date +%s); echo "$(hash -p /x date)"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); printf -v M x; rm -rf "$L"',
+    ],
+)
+def test_round4_carry_needs_a_straight_line_safe_command(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The incident shapes: straight-line, safe programs only.
+        f"L={_SP}/qa-4104/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log; "
+        'exec > "$L" 2>&1; echo started',
+        f'L={_SP}/u0-$(date -u +%Y%m%dT%H%M%SZ).log\nexec > "$L" 2>&1\necho started\ndate',
+        f'export L={_SP}/u0-$(date +%s).log; exec > "$L"; true',
+        f'local L={_SP}/u0-$(date +%s).log; touch "$L"; rm -f "$L"',
+        f'declare L={_SP}/u0-$(date +%s).log; echo x > "$L"',
+    ],
+)
+def test_round4_straight_line_safe_commands_keep_the_carry(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.LOW
+
+
+def test_round4_straight_safe_command_predicate() -> None:
+    from local_operator.guardrails.resolve import _straight_safe_command
+
+    assert _straight_safe_command('L=/x/$(date +%s); exec > "$L" 2>&1; echo hi')
+    assert _straight_safe_command("A=1\nexport B=2\ntrue")
+    for bad in (
+        "a=1 && true",
+        "true || true",
+        "echo | cat",
+        "true &",
+        "if true; then true; fi",
+        "{ true; }",
+        "(true)",
+        "[[ -n x ]]",
+        "hash -p /x date",
+        "ln -s / x",
+        "exec true",
+        "printf -v x y",
+        "export -n X",
+        "echo $(ln -s / x)",
+        "cat <(hash)",
+        "nohup true",
+    ):
+        assert not _straight_safe_command(bad), bad

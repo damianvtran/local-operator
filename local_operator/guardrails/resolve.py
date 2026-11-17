@@ -1025,6 +1025,79 @@ _CARRY_BAR_SHAPE_RE = re.compile(r"[A-Za-z_][\w.:-]*\s*\(\s*\)|(?:^|[\s;&|(){}])
 _CARRY_BAR_VAR_RE = re.compile(r"(?<![\w$])(?<!\$\{)(?:PATH|BASH_ENV|ENV|IFS|CDPATH)(?!\w)")
 
 
+#: Every command word a carrying command may run (round 4, PR #4147). The
+#: whole command — not just the consumers of ``$NAME`` — must be built from
+#: these, plus plain assignments and unflagged ``export``/``local``/
+#: ``declare``. A rebinding builtin (``hash -p``), a link maker (``ln``,
+#: ``cp -s``, ``mv`` onto a glob or ``$(ls …)`` operand under the carried
+#: prefix) or any program this module does not model can change what the
+#: carried path resolves to without ever reading ``$NAME`` (review R7), so
+#: rather than enumerate them, anything outside this set drops the carry.
+_CARRY_STRAIGHT_PROGRAMS = _CARRY_SAFE_PROGRAMS | {"exec", "date", "true"}
+_CARRY_DECLARE_PROGRAMS = frozenset({"export", "local", "declare"})
+#: Segment separators that always run the next segment. ``&&``/``||`` make
+#: an assignment conditional, ``|`` and ``&`` run it in a subshell, so the
+#: one assignment the walker sees may never happen (review R6).
+_CARRY_STRAIGHT_OPS = frozenset({";", "\n", ""})
+
+
+def _straight_safe_command(command: str, depth: int = 0) -> bool:
+    """True when ``command`` is straight-line and runs only safe programs.
+
+    WHY (PR #4147, round 4, review R6/R7). The carry trusts that the single
+    ``NAME=…`` assignment the pre-scan counts is the value every later
+    ``$NAME`` read sees. That holds only when every segment runs, in order,
+    in this shell: no ``&&``/``||``/``|``/``&``, no ``if``/``while``/
+    ``for``/``case``, no ``{ }``/``( )``/``[[ ]]``. Those keywords and
+    grouping words are never in the safe set, so the program check below
+    rejects them structurally instead of by a keyword list. Substitution
+    and process-substitution bodies are held to the same rule, recursively,
+    so ``$(hash -p …)`` cannot smuggle a program in. Any failure keeps
+    main's behaviour (opaque, judge-ranked); the supported path for a
+    command that does more is a literal log path.
+    """
+    if depth > _MAX_PEEL_DEPTH:
+        return False
+    lexed = lex(command)
+    if lexed.open:
+        return False
+    for text, piped, op in lexed.segments:
+        if piped or op not in _CARRY_STRAIGHT_OPS:
+            return False
+        words, redirects = scan(text)
+        all_words = list(words) + [target for _op, target in redirects]
+        if any(w.broken for w in all_words):
+            return False
+        for w in all_words:
+            for part in w.parts:
+                if part.kind in ("sub", "proc") and not _straight_safe_command(
+                    part.text, depth + 1
+                ):
+                    return False
+        i = 0
+        while i < len(words) and words[i].parts and words[i].parts[0].kind == "bare":
+            if _ASSIGN_RE.match(words[i].parts[0].text) is None:
+                break
+            i += 1
+        if i >= len(words):
+            continue
+        program_word, args = words[i], words[i + 1 :]
+        if len(program_word.parts) != 1 or program_word.parts[0].kind != "bare":
+            return False
+        program = program_word.parts[0].text
+        if program in _CARRY_DECLARE_PROGRAMS:
+            if any(a.parts and a.parts[0].text.startswith("-") for a in args):
+                return False
+            continue
+        if program not in _CARRY_STRAIGHT_PROGRAMS:
+            return False
+        if program == "exec" and args:
+            return False
+        if program == "printf" and any(a.parts and a.parts[0].text.startswith("-v") for a in args):
+            return False
+    return True
+
+
 def _plain_read_names(word: _RawWord) -> list[str]:
     """Names this word reads as a whole plain ``$NAME``/``${NAME}`` part."""
     names = []
@@ -1054,6 +1127,11 @@ def _containment_carriers(command: str) -> frozenset[str]:
 
     A name qualifies only when ALL hold:
 
+    * the WHOLE command is straight-line and built only from safe programs
+      (:func:`_straight_safe_command`, round 4): one conditional, piped,
+      looped or grouped segment, or one program outside
+      ``_CARRY_STRAIGHT_PROGRAMS``, drops every carry;
+
     * the command has no function definition, alias, nested shell, ``eval``,
       ``source``/``.``, ``exec PROG``, ``xargs``, ``env``, ``trap`` or
       ``coproc``, and no non-read mention of PATH/BASH_ENV/ENV/IFS/CDPATH;
@@ -1077,6 +1155,8 @@ def _containment_carriers(command: str) -> frozenset[str]:
         or _CARRY_BAR_SHAPE_RE.search(command)
         or _CARRY_BAR_VAR_RE.search(command)
     ):
+        return frozenset()
+    if not _straight_safe_command(command):
         return frozenset()
     lexed = lex(command)
     if lexed.open:
