@@ -2662,11 +2662,21 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
     # carry rows D wrote claiming ``stamped_by=A``, and nothing at rest proves
     # otherwise. Done in staging so the live session never appears with a stamp
     # still "verified"; a failure refuses the adoption rather than land one.
+    #
+    # ``Exception``, not ``OSError`` (security review S-1): the staging copy is
+    # peer-authored, so the walk can fail in ways no file API predicts — a
+    # compressed journal it refuses (``ImportStampsRefused``), or a row crafted to
+    # break the parser. An exception escaping here escapes the relay's frame
+    # handler and drops the control connection, which the caller misreads as
+    # ``relay_unavailable`` (see the remnant note above); a refusal keeps it
+    # replying. Nothing has been replaced yet, so the live store is untouched and
+    # the partly lowered staging copy stays outside ``sessions/`` with the rest
+    # of a refused move.
     from local_operator.network.origin import downgrade_stamps
 
     try:
         downgrade_stamps(source)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 — any failure must refuse, see above
         logger.warning(
             "mobility: could not lower the imported origin stamps of %s: %s", target_id, exc
         )

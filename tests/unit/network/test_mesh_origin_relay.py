@@ -294,3 +294,159 @@ def test_8_replica_promote_downgrades_imported_stamps(tmp_path: Path) -> None:
         if "lop_mesh_origin" in line
     ]
     assert stamps and all(stamp["verified"] is False for stamp in stamps)
+
+
+# ---------------------------------------------------------------------------
+# Security review round 1 (S-1, S-2): BOTH import doors fail closed on ANY error
+# in the downgrade, and on a compressed journal it cannot lower. "Closed" means:
+# a refusal (not an exception escaping into the relay's frame handler), nothing
+# under ``sessions/`` that still reads ``verified: true``, and no leaked claim.
+# ---------------------------------------------------------------------------
+
+
+def _deep_row() -> str:
+    deep: Any = []
+    for _ in range(1500):
+        deep = [deep]
+    row = json.loads(_stamped_row())
+    row["payload"]["deep"] = deep
+    return json.dumps(row)
+
+
+def _assert_no_verified_copy(root: Path) -> None:
+    import gzip
+
+    sessions = root / "sessions"
+    leftovers: list[str] = []
+    for path in sessions.rglob("*") if sessions.exists() else ():
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.name == ".session.pid":
+            leftovers.append(f"claim {path.relative_to(root)}")
+            continue
+        raw = path.read_bytes()
+        if path.name.endswith(".gz"):
+            raw = gzip.decompress(raw)
+        if b'"verified": true' in raw:
+            leftovers.append(f"verified {path.relative_to(root)}")
+    assert leftovers == []
+
+
+def _fail_on_second_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lower the first stamped file for real, then raise: a walk failing PARTWAY."""
+    real = origin._downgrade_file
+    seen: list[Path] = []
+
+    def flaky(path: Path) -> int:
+        seen.append(path)
+        if len(seen) > 1:
+            raise OSError("injected: disk went away mid-downgrade")
+        return real(path)
+
+    monkeypatch.setattr(origin, "_downgrade_file", flaky)
+
+
+def _staged_move(root: Path, *, deep: bool = False, archive: str = "") -> Path:
+    import gzip
+
+    staged = root / "network" / "staging" / "staged"
+    staged.mkdir(parents=True)
+    row = (_deep_row() if deep else _stamped_row()) + "\n"
+    if archive:
+        body = row.encode()
+        (staged / archive).write_bytes(gzip.compress(body) if archive.endswith(".gz") else body)
+    else:
+        (staged / "transcript.jsonl").write_text(row, encoding="utf-8")
+    (staged / "asks.jsonl").write_text(
+        json.dumps({"kind": "answered", "by": {"surface": "remote", "mesh_origin": OWN}}) + "\n",
+        encoding="utf-8",
+    )
+    return staged
+
+
+@pytest.mark.parametrize(
+    "case", ["deep", "oserror_partway", "transcript.jsonl.gz", "transcript.jsonl.zst"]
+)
+def test_s1_s2_move_promote_refuses_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    root = tmp_path / "config"
+    archive = case if case.startswith("transcript") else ""
+    staged = _staged_move(root, deep=case == "deep", archive=archive)
+    if case == "deep":
+        # The deep row must not refuse on its own: it is downgraded and promoted.
+        outcome = mobility._promote(cast(Any, SimpleNamespace(root=root)), staged, "moved0000001")
+        assert outcome.ok is True, outcome
+        _assert_no_verified_copy(root)
+        return
+    if case == "oserror_partway":
+        _fail_on_second_file(monkeypatch)
+    outcome = mobility._promote(cast(Any, SimpleNamespace(root=root)), staged, "moved0000001")
+    assert outcome == mobility._PROMOTE_REFUSED
+    assert not (root / "sessions" / "moved0000001").exists()
+    _assert_no_verified_copy(root)
+
+
+def _replica(tmp_path: Path, *, deep: bool = False) -> tuple[Path, str]:
+    from tests.unit.network.test_sync import _ask, seed
+
+    root = tmp_path / "holder"
+    root.mkdir()
+    seed(root, "9f3ac1e0b7d2")
+    transcript = root / "sessions" / "9f3ac1e0b7d2" / "transcript.jsonl"
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write((_deep_row() if deep else _stamped_row()) + "\n")
+    asks = root / "sessions" / "9f3ac1e0b7d2" / "asks.jsonl"
+    asks.write_text(
+        json.dumps({"kind": "answered", "by": {"surface": "remote", "mesh_origin": OWN}}) + "\n",
+        encoding="utf-8",
+    )
+    sync.sync_from(
+        root,
+        "9f3ac1e0b7d2",
+        ask=_ask(root),
+        owner_device="d_owner",
+        into=sync.replica_dir(root, "9f3ac1e0b7d2"),
+    )
+    (root / "sessions" / "9f3ac1e0b7d2").rename(tmp_path / "elsewhere")
+    return root, "9f3ac1e0b7d2"
+
+
+def test_s1_replica_promote_downgrades_a_1500_deep_row(tmp_path: Path) -> None:
+    root, session_id = _replica(tmp_path, deep=True)
+    promoted = sync.promote_replica(root, session_id, new_id="recovered0001")
+    assert promoted["session_id"] == "recovered0001"
+    _assert_no_verified_copy(root)
+
+
+@pytest.mark.parametrize("case", ["oserror_partway", "recursion", "transcript.jsonl.gz"])
+def test_s1_s2_replica_promote_refuses_and_quarantines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    import gzip
+
+    root, session_id = _replica(tmp_path)
+    if case == "oserror_partway":
+        _fail_on_second_file(monkeypatch)
+    elif case == "recursion":
+        # Any exception, not only OSError: the class S-1 escaped the handler with.
+        def boom(path: Path) -> int:
+            raise RecursionError("injected")
+
+        monkeypatch.setattr(origin, "_downgrade_file", boom)
+    else:
+        # A HOSTILE owner's plan names the archive, so its cursor covers it (an
+        # honest owner restores the plain file first; a real sync_from of a gz
+        # session lands ``transcript.jsonl``). The cursor check is stubbed to stand
+        # in for that hostile plan: what is under test is the door, not the check.
+        replica = sync.replica_dir(root, session_id)
+        (replica / case).write_bytes(gzip.compress((_stamped_row() + "\n").encode()))
+        monkeypatch.setattr(sync, "_verify_replica_against_cursor", lambda *a, **k: None)
+    with pytest.raises(sync.SyncRefused):
+        sync.promote_replica(root, session_id, new_id="recovered0001")
+    assert not (root / "sessions" / "recovered0001").exists()
+    _assert_no_verified_copy(root)
+    # The refused copy is kept for inspection, OUTSIDE ``sessions/`` and unclaimed.
+    quarantined = sync.network_dir(root) / sync.QUARANTINE_DIRNAME / "recovered0001"
+    assert quarantined.is_dir()
+    assert not (quarantined / ".session.pid").exists()

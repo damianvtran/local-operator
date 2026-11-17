@@ -78,8 +78,10 @@ RELAY_ATTEST_LABEL = b"lop-relay-attest-v1"
 RELAY_KEY_INFO = b"lop-relay-runtime-v1"
 RELAY_KEY_BYTES = 32
 
-#: The EXACT keys of the proved block (M-11). Anything else a relay sends in its
-#: ``peer`` block (``name``) is display data and is NOT bound by the proof.
+#: The string keys of the proved block (M-11); with ``capabilities`` and
+#: ``peer_verified`` they are the six keys the proof binds. ``name`` is display data
+#: but IS bound, so a relay cannot relabel a proved device. Any key a relay sends
+#: outside these six is unbound and never reaches the stamp.
 BLOCK_STR_KEYS: tuple[str, ...] = ("device_id", "name", "network_id", "link_id")
 
 
@@ -284,21 +286,43 @@ def fold_answer_origin(
 _STAMP_NEEDLE = b'mesh_origin"'
 
 
+#: The transcript's ARCHIVE forms (``session.compression.ARCHIVE_FILENAMES``),
+#: spelled here so this module stays import-light; a test pins the two together.
+TRANSCRIPT_ARCHIVE_NAMES: tuple[str, ...] = ("transcript.jsonl.zst", "transcript.jsonl.gz")
+
+
+class ImportStampsRefused(ValueError):
+    """An imported session carries something the downgrade cannot lower.
+
+    Raised instead of skipping it, so both import doors refuse the session rather
+    than land a stamp that still reads ``verified: true`` (security review S-2).
+    """
+
+
 def _downgrade_value(value: Any) -> bool:
-    """Set ``verified=False`` on every stamp nested in ``value``; True if changed."""
+    """Set ``verified=False`` on every stamp nested in ``value``; True if changed.
+
+    ITERATIVE ON PURPOSE (security review S-1). ``json.loads``'s C decoder accepts
+    nesting far deeper than Python's recursion limit (1,500 and 3,000 levels both
+    parse at the default limit of 1,000), so a recursive walk raised
+    ``RecursionError`` on a row a hostile member wrote, and the import door
+    aborted with the stamp still verified. An explicit stack has no such ceiling;
+    its size is bounded by the decoded value, which is already in memory.
+    """
     changed = False
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key in FRAME_ORIGIN_KEYS and isinstance(item, dict):
-                if item.get("verified") is not False:
-                    item["verified"] = False
-                    changed = True
-            if _downgrade_value(item):
-                changed = True
-    elif isinstance(value, list):
-        for item in value:
-            if _downgrade_value(item):
-                changed = True
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, item in current.items():
+                if key in FRAME_ORIGIN_KEYS and isinstance(item, dict):
+                    if item.get("verified") is not False:
+                        item["verified"] = False
+                        changed = True
+                if isinstance(item, (dict, list)):
+                    stack.append(item)
+        elif isinstance(current, list):
+            stack.extend(item for item in current if isinstance(item, (dict, list)))
     return changed
 
 
@@ -313,12 +337,22 @@ def _downgrade_file(path: Path) -> int:
             continue
         try:
             payload = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             # A torn or foreign line is left byte-identical: the downgrade only
             # LOWERS trust, and an unparseable line is never read as a stamp anyway.
+            # ``RecursionError`` is how the decoder reports nesting past ITS limit
+            # (S-1); every reader uses the same decoder, so such a line is equally
+            # unreadable to them, and skipping it keeps the walk going for the
+            # lines after it instead of aborting the whole directory.
             continue
         if _downgrade_value(payload):
-            lines[index] = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            try:
+                lines[index] = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            except RecursionError as exc:
+                # The encoder's depth limit is close to, but not provably at or
+                # above, the decoder's. A stamp we lowered but cannot write back
+                # must refuse the import, never leave the original line in place.
+                raise ImportStampsRefused(f"{path.name}: a stamped line is too deep") from exc
             changed += 1
     if changed:
         fd, staged = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".mo")
@@ -348,7 +382,26 @@ def downgrade_stamps(directory: Path) -> int:
     on a write failure so the caller can refuse the import rather than land a
     session whose stamps were not lowered (fail-closed). Returns the number of
     lines rewritten.
+
+    A transcript ARCHIVE (``transcript.jsonl.gz``/``.zst``, any depth) raises
+    :class:`ImportStampsRefused` before anything is rewritten (security review
+    S-2): readers resolve the archive when the plain file is absent
+    (``compression.transcript_source``), so skipping it would land its stamps
+    verified. Refusing is the smaller safe option than decompressing here: an
+    honest sender restores the archive before it plans the copy (see the note on
+    ``sync.COPY_SET_NAMES``), so only a hand-crafted plan ever carries one, and
+    in-place decompression would pull the zstd codec and the compression
+    module's write protocol into both import doors for a case no honest peer
+    produces. Callers must treat ANY exception as a refusal.
     """
+    for current, dirnames, filenames in os.walk(directory, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not Path(current, name).is_symlink()]
+        for name in filenames:
+            if name in TRANSCRIPT_ARCHIVE_NAMES:
+                raise ImportStampsRefused(
+                    f"{Path(current, name).relative_to(directory)}: a compressed transcript "
+                    "cannot have its origin stamps lowered"
+                )
     total = 0
     for current, dirnames, filenames in os.walk(directory, followlinks=False):
         dirnames[:] = [name for name in dirnames if not Path(current, name).is_symlink()]

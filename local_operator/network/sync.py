@@ -109,6 +109,11 @@ NETWORK_DIRNAME = "network"
 REPLICA_DIRNAME = "replicas"
 REPLICA_CURSOR_NAME = "sync.json"
 STAGING_DIRNAME = "staging"
+#: Where a REFUSED replica recovery is moved (mesh-origin-stamp, security review
+#: S-1). Outside ``sessions/`` for the reason ``staging_dir`` is: nothing that
+#: lists, resumes or sweeps sessions looks here, so a copy whose origin stamps
+#: could not be lowered never appears as a conversation, yet nothing is deleted.
+QUARANTINE_DIRNAME = "quarantine"
 
 #: ``attachments/<ref>.bin`` — the store-relative spelling blobs travel under, so
 #: the two sides cannot disagree about where a blob lives.
@@ -3873,6 +3878,37 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
             )
 
 
+def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> None:
+    """Move a refused recovery's partial copy out of ``sessions/`` (S-1).
+
+    Before the origin-stamp work a refused copy was simply left un-promoted under
+    ``sessions/<new_id>`` (deliberately: this layer never deletes). That copy is
+    now a hazard, not just clutter: if the copy or the downgrade stopped partway,
+    it can hold stamps that still read ``verified: true``, and anything that lists
+    sessions would offer it as a conversation. A rename keeps the no-delete rule
+    and takes it out of every session reader's view in one step.
+
+    ``target`` was created by this call (``promote_replica`` refuses an existing
+    one before claiming), so only this call's own bytes move. Best-effort: a
+    rename that fails is logged and the original refusal still propagates.
+    """
+    if not target.exists() or target.is_symlink():
+        return
+    holding = network_dir(root) / QUARANTINE_DIRNAME
+    try:
+        holding.mkdir(parents=True, exist_ok=True)
+        landing = holding / target.name
+        if landing.exists() or landing.is_symlink():
+            landing = holding / f"{target.name}.{time.time_ns()}"
+        os.rename(target, landing)
+    except OSError as exc:
+        logger.error(
+            "sync: a refused recovery of %s could not be moved out of sessions/: %s", new_id, exc
+        )
+        return
+    logger.warning("sync: the refused recovery of %s was moved to %s", new_id, landing)
+
+
 def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[str, Any]:
     """Turn a replica into a LOCAL session under a freshly minted id.
 
@@ -4038,13 +4074,20 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         # IMPORTED STAMPS ARE EVIDENCE ONLY (mesh-origin-stamp M-4, R2-1): every
         # mesh origin stamp in the recovered copy is lowered to ``verified: false``
         # whoever minted it, while the new id is still claimed and before anything
-        # can run it. An OSError here refuses the recovery (the handler below)
-        # rather than leave a copy whose stamps still read verified.
+        # can run it. ANY failure, here or in the copy above, refuses the recovery
+        # (the handler below), which moves the copy out of ``sessions/`` rather
+        # than leave one whose stamps may still read verified.
         from local_operator.network.origin import downgrade_stamps
 
         downgrade_stamps(target)
-    except (OSError, SyncRefused) as exc:
+    except Exception as exc:  # noqa: BLE001 — every failure here is a refusal, not a crash
+        # ``Exception``, not ``(OSError, SyncRefused)`` (security review S-1): the
+        # replica is peer-authored, so the downgrade can fail in ways no file API
+        # predicts (``ImportStampsRefused`` for a compressed journal, a row crafted
+        # to break the parser). The old handler let those escape, skipping the
+        # claim release and leaving the copy in place with its stamps verified.
         release_session(target)
+        _quarantine_refused_recovery(Path(root), target, new_id)
         if isinstance(exc, SyncRefused):
             raise
         raise SyncRefused(

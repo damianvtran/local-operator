@@ -404,7 +404,8 @@ def test_r3_1_no_production_caller_supplies_the_test_seam() -> None:
     offenders = [
         f"{path.relative_to(REPO)}:{call.lineno}"
         for path, call in _product_calls("mesh_origin_counts")
-        if any(kw.arg in ("_root", "_identity") for kw in call.keywords)
+        # ``kw.arg is None`` is a ``**`` splat, which can smuggle either seam in.
+        if any(kw.arg is None or kw.arg in ("_root", "_identity") for kw in call.keywords)
     ]
     assert offenders == []
 
@@ -412,12 +413,34 @@ def test_r3_1_no_production_caller_supplies_the_test_seam() -> None:
 def test_inert_nothing_in_production_consumes_the_stamp_yet() -> None:
     """This PR produces evidence only; the guard change (60334) consumes it later."""
     assert _product_calls("mesh_origin_counts") == []
+    # The WHOLE product tree (security review S-3): a consumer in ``asks/surfaces``,
+    # ``operator/`` or an approval module would otherwise pass. Only the carriage
+    # modules below may mention the stamp; ``mesh_origin`` alone also names the
+    # unrelated, pre-existing credential-row field, so the pin keys on the stamp's
+    # own spellings instead.
+    carriage = {
+        "local_operator/asks/queue.py",
+        "local_operator/asks/store.py",
+        "local_operator/network/dial.py",
+        "local_operator/network/mobility.py",
+        "local_operator/network/origin.py",
+        "local_operator/network/relay.py",
+        "local_operator/network/sync.py",
+        "local_operator/session/runtime/inbox.py",
+        "local_operator/session/runtime/process.py",
+        "local_operator/session/runtime/server.py",
+        "local_operator/session/runtime/serving.py",
+        "local_operator/session/session.py",
+    }
+    needles = ("lop_mesh_origin", "network.origin", "network import origin", "mesh_origin_counts")
     readers = []
-    for folder in ("guardrails", "harness"):
-        for path in (PRODUCT / folder).rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if "mesh_origin" in text or "network.origin" in text:
-                readers.append(str(path.relative_to(REPO)))
+    for path in PRODUCT.rglob("*.py"):
+        relative = path.relative_to(REPO).as_posix()
+        if relative in carriage:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if any(needle in text for needle in needles):
+            readers.append(relative)
     assert readers == []
 
 
@@ -441,3 +464,65 @@ def test_13_identity_dir_is_a_confined_secret_and_linux_refuses_confinement(
         # No kernel confinement off macOS: a confined shell is REFUSED, never run
         # unconfined (design §3.3 residual 2).
         assert confinement.sandbox_unavailable_reason() is not None
+
+
+# ---------------------------------------------------------------------------
+# Security review round 1: S-1 (deep rows) and S-2 (compressed journals)
+# ---------------------------------------------------------------------------
+
+
+def _deep(depth: int) -> Any:
+    value: Any = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_s1_a_1500_deep_stamped_row_is_still_downgraded(tmp_path: Path) -> None:
+    """The C decoder parses ~1500 levels; a recursive walk of them blew Python's stack."""
+    session = tmp_path / "s"
+    own = _stamp(by="dev-a")
+    _jsonl(session / "transcript.jsonl", [{"lop_mesh_origin": own, "deep": _deep(1500)}])
+    _jsonl(session / "asks.jsonl", [{"by": {"mesh_origin": own}}])
+
+    assert origin.downgrade_stamps(session) == 2
+    assert _rows(session / "transcript.jsonl")[0]["lop_mesh_origin"]["verified"] is False
+    assert _rows(session / "asks.jsonl")[0]["by"]["mesh_origin"]["verified"] is False
+
+
+def test_s1_a_line_too_deep_to_decode_does_not_abort_the_walk(tmp_path: Path) -> None:
+    """json.loads raises RecursionError (not ValueError) past its own depth limit."""
+    session = tmp_path / "s"
+    own = _stamp(by="dev-a")
+    session.mkdir()
+    too_deep = b'{"lop_mesh_origin": {"verified": true}, "x": ' + b"[" * 200_000 + b"]" * 200_000
+    later = json.dumps({"lop_mesh_origin": own}).encode()
+    (session / "transcript.jsonl").write_bytes(too_deep + b"}\n" + later + b"\n")
+
+    assert origin.downgrade_stamps(session) == 1
+    lines = (session / "transcript.jsonl").read_bytes().split(b"\n")
+    assert lines[0] == too_deep + b"}"  # unreadable to every reader: left byte-identical
+    assert json.loads(lines[1])["lop_mesh_origin"]["verified"] is False
+
+
+@pytest.mark.parametrize("name", ["transcript.jsonl.gz", "transcript.jsonl.zst"])
+@pytest.mark.parametrize("where", ["top", "nested"])
+def test_s2_a_compressed_transcript_refuses_the_downgrade(
+    tmp_path: Path, name: str, where: str
+) -> None:
+    import gzip
+
+    session = tmp_path / "s"
+    folder = session if where == "top" else session / "children" / "c1"
+    folder.mkdir(parents=True)
+    body = (json.dumps({"lop_mesh_origin": _stamp(by="dev-a")}) + "\n").encode()
+    (folder / name).write_bytes(gzip.compress(body) if name.endswith(".gz") else body)
+
+    with pytest.raises(origin.ImportStampsRefused):
+        origin.downgrade_stamps(session)
+
+
+def test_s2_archive_names_match_the_compression_module() -> None:
+    from local_operator.session import compression
+
+    assert set(origin.TRANSCRIPT_ARCHIVE_NAMES) == set(compression.ARCHIVE_FILENAMES)
