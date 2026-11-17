@@ -696,7 +696,10 @@ def _pad_exemptible(target: Target) -> bool:
     return (
         _own_pad_exemptible(target)
         and not target.climbs
-        and (not target.opaque or target.opaque_contained)
+        # A containment proof carried through ``$NAME`` is trusted only in the
+        # caller's OWN scratchpad (``in_own_pad`` below), never as another
+        # session's: there main ranked the opaque word, and it must not loosen.
+        and (not target.opaque or (target.opaque_contained and not target.carried))
     )
 
 

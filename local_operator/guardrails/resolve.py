@@ -573,6 +573,12 @@ class Expanded:
     #: a path climb (``date``, ``uuidgen``…). Lets a timestamped name inside the
     #: session's own scratchpad stay LOW; an arbitrary body could print ``..``.
     opaque_contained: bool = True
+    #: Some contained stretch reached this word through a variable
+    #: (CONTAINED_MARK, see ``_containment_carriers``). The carry is trusted
+    #: only for the caller's OWN scratchpad: elsewhere ``classify`` ranks the
+    #: word as main did before the carry existed, so another session's pad
+    #: reached through ``$L`` stays CRITICAL (PR #4147 round 3 probe H2).
+    carried: bool = False
     #: Every character came from an unquoted expansion that produced nothing,
     #: so bash drops the word entirely.
     vanished: bool = False
@@ -734,6 +740,8 @@ def _unmark(value: str, out: Expanded) -> str:
         out.opaque = True
         if not contained_only:
             out.opaque_contained = False
+        else:
+            out.carried = True
     return value
 
 
@@ -768,6 +776,7 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
             if sub.opaque:
                 out.opaque = True
                 out.opaque_contained = out.opaque_contained and sub.opaque_contained
+                out.carried = out.carried or sub.carried
             pieces.append(sub.text)
         value = " ".join(pieces)
         if not value:
@@ -928,6 +937,7 @@ def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
     """``exp`` with every recorded ref to a name in ``values`` rewritten."""
     text, pattern = exp.text, exp.pattern
     opaque, contained, temp = exp.opaque, exp.opaque_contained, exp.temp
+    carried = exp.carried
     # Right to left, so earlier offsets stay valid.
     for name, ts, te, ps, pe, quoted in sorted(exp.refs, key=lambda r: r[1], reverse=True):
         if name not in values:
@@ -939,6 +949,7 @@ def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
         opaque = opaque or probe.opaque
         contained = contained and probe.opaque_contained
         temp = temp or probe.temp
+        carried = carried or probe.carried
         text = text[:ts] + value + text[te:]
         if pattern is not None:
             pattern = pattern[:ps] + (_glob_escape(value) if quoted else value) + pattern[pe:]
@@ -948,6 +959,7 @@ def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
         empty=list(exp.empty),
         opaque=opaque,
         opaque_contained=contained,
+        carried=carried,
         temp=temp,
     )
 
@@ -976,21 +988,6 @@ def expand(word: _RawWord, env: Mapping[str, str], home: str) -> Expanded:
 #: Programs whose output is a single path component in normal use, so a
 #: substitution of one cannot climb out of the directory it sits in — but only
 #: when called with no ``+FORMAT``/path-like argument (S4: ``date +../..``).
-#: A function definition header up to its body opener: ``f() {``, ``f(){``,
-#: ``function f {``, ``function f() (``.
-_FUNC_HEAD_RE = re.compile(
-    r"(?:\bfunction\s+[^\s(){};&|<>]+(?:\s*\(\s*\))?|\b[A-Za-z_][\w.:-]*\s*\(\s*\))\s*([{(])"
-)
-#: A loop body opener; its tail runs once per iteration.
-_LOOP_DO_RE = re.compile(r"\bdo\b")
-#: Any ``NAME=``/``NAME+=`` assignment in raw text, with its right-hand side up
-#: to the next separator (``--opt=x`` and ``${L=x}`` are not matched).
-_RAW_ASSIGN_RE = re.compile(r"(?<![\w$.{}/:%-])([A-Za-z_]\w*)(\+?)=(?!=)([^;&|\n)]*)")
-#: Builtins whose operand words NAME variables they set (or clear).
-_NAME_SETTING_RE = re.compile(
-    r"\b(?:local|declare|typeset|export|readonly|unset|read|mapfile|readarray|getopts|"
-    r"printf\s+-v|let)\b([^;&|\n]*)"
-)
 #: ``((…))`` / ``$((…))`` bodies, and the names an arithmetic body assigns:
 #: ``N=1``, ``N+=1`` (any compound op), ``N++``, ``--N``.
 _ARITH_RE = re.compile(r"\(\((.*?)\)\)", re.S)
@@ -1004,70 +1001,162 @@ def _arith_assigned(text: str) -> set[str]:
     return {a or b for a, b in _ARITH_ASSIGN_RE.findall(text)}
 
 
-def _body_end(text: str, start: int, opener: str) -> int:
-    """Index just past the ``}``/``)`` closing the body opened at ``start``.
+#: Programs that may receive a contained ``$NAME`` as an argument without
+#: voiding its containment (see ``_containment_carriers``). Each one only
+#: names, reads, prints or removes the path it is handed; none of them can
+#: make the entry a link to somewhere else. ``printf -v`` is excluded below.
+_CARRY_SAFE_PROGRAMS = frozenset(
+    {"rm", "mkdir", "touch", "cat", "echo", "printf", "tee", "ls", "test", "["}
+)
+#: Anything that can define code, re-read text as shell, or change how later
+#: words resolve. One appearance anywhere voids every carrier in the command:
+#: a nested shell, ``eval``, a sourced file, an alias or a trap may assign the
+#: name where this pre-scan cannot see, and ``xargs``/``env``/``exec PROG``
+#: hand a value to a program it does not model. Matched on raw text, so a
+#: mention inside quotes errs strict, never loose.
+_CARRY_BAR_WORD_RE = re.compile(
+    r"(?<![\w.-])(?:bash|sh|zsh|dash|ksh|mksh|fish|eval|source|xargs|env|trap|coproc|"
+    r"alias|function)(?![\w.-])"
+)
+#: A function definition header (``f()``, ``f ()``) or a dot-source word.
+_CARRY_BAR_SHAPE_RE = re.compile(r"[A-Za-z_][\w.:-]*\s*\(\s*\)|(?:^|[\s;&|(){}])\.(?=\s|$)")
+#: Variables that change what a later word or program lookup means. Any
+#: mention other than a plain ``$NAME``/``${NAME}`` read is a possible set.
+_CARRY_BAR_VAR_RE = re.compile(r"(?<![\w$])(?<!\$\{)(?:PATH|BASH_ENV|ENV|IFS|CDPATH)(?!\w)")
 
-    Quote-aware so ``f(){ echo "}"; L=/; }`` does not end early. Unbalanced
-    text runs to the end: a longer body only marks more names volatile.
-    """
-    closer = "}" if opener == "{" else ")"
-    depth, i, quote = 0, start, ""
-    while i < len(text):
-        ch = text[i]
-        if quote:
-            if ch == "\\" and quote == '"':
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-        elif ch == "\\":
-            i += 2
+
+def _plain_read_names(word: _RawWord) -> list[str]:
+    """Names this word reads as a whole plain ``$NAME``/``${NAME}`` part."""
+    names = []
+    for part in word.parts:
+        if part.kind not in ("pbare", "pdq"):
             continue
-        elif ch in "'\"":
-            quote = ch
-        elif ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return len(text)
+        inner = part.text[2:-1] if part.text.startswith("${") else part.text[1:]
+        if part.text.startswith("${") and not part.text.endswith("}"):
+            continue
+        if _NAME_RE.fullmatch(inner):
+            names.append(inner)
+    return names
 
 
-def _volatile_names(command: str) -> frozenset[str]:
-    """Variables whose value the walker cannot follow in ``command``.
+def _containment_carriers(command: str) -> frozenset[str]:
+    """Names that may carry a contained-substitution proof through ``$NAME``.
 
-    WHY (review R1 / QA Q3, PR #4147). The walker reads a command once, in
-    order. A function body runs when (and as often as) it is called — and
-    its first statement is glued to the ``f(){`` header word, so it is not
-    even seen as an assignment — and a loop body runs once per iteration, so
-    an append or self-reference there (``L+=/..``, ``L=$L/..``) climbs more
-    than the single pass shows. A stale value for such a name ranked an
-    escaping delete as the scratchpad it started in (``L=<pad>/x; f(){ L=/;
-    }; f; rm -rf "$L"`` LOW). Every name assigned in a function body, and
-    every name appended to or self-assigned in a loop body, is therefore
-    stored as a bare OPAQUE_MARK for the whole command: never a literal and
-    never CONTAINED_MARK, so a delete through it reaches the judge (HIGH) or
-    stays CRITICAL by its protected ancestry.
+    WHY (PR #4147, round 3). The node2 #4104 incident wrote a log to
+    ``L=<pad>/u0-$(date -u +%Y%m%dT%H%M%SZ).log; exec > "$L"``: the
+    substitution is one path component, so ``$L`` stays in the scratchpad,
+    but the walker stored a bare OPAQUE_MARK and ranked it HIGH. Teaching
+    the in-order walker every way bash can reassign, scope or reinterpret a
+    name (functions, loops, setter builtins, nested shells, link-making
+    programs) kept opening escapes in review. So the carry is a narrow,
+    fail-closed ALLOWLIST decided here, before the walk; any name not
+    returned keeps main's behaviour (opaque, judge-ranked).
 
-    Raw text, like the globstar scan: a nested ``bash -c`` script counts, and
-    a quoted string that merely looks like a body only errs strict.
+    A name qualifies only when ALL hold:
+
+    * the command has no function definition, alias, nested shell, ``eval``,
+      ``source``/``.``, ``exec PROG``, ``xargs``, ``env``, ``trap`` or
+      ``coproc``, and no non-read mention of PATH/BASH_ENV/ENV/IFS/CDPATH;
+    * the name is assigned exactly once, as a leading ``NAME=…`` word or an
+      unflagged ``export``/``local``/``declare NAME=…`` (never HOME/OLDPWD);
+    * every other raw-text mention is a plain ``$NAME``/``${NAME}`` read —
+      so ``+=``, ``[i]``, ``${NAME%…}``, ``unset NAME``, ``read NAME``,
+      ``printf -v NAME``, ``(( NAME=… ))`` or any setter not listed here
+      leaves a bare mention and fails closed;
+    * every read is a whole word part consumed as an output-redirect target
+      or an argument of ``_CARRY_SAFE_PROGRAMS`` (``printf`` without ``-v``).
+      A read the segment scan cannot attribute that way (passed to ``ln``,
+      ``mv``, ``cp``, a variable program, another assignment, a heredoc or
+      a nested substitution) fails closed.
+
+    Whether the assigned value really is contained is still decided by the
+    walker (``_contained_body``); this only says the proof may be kept.
     """
-    names: set[str] = set()
-    for head in _FUNC_HEAD_RE.finditer(command):
-        body = command[head.start(1) : _body_end(command, head.start(1), head.group(1))]
-        names.update(m.group(1) for m in _RAW_ASSIGN_RE.finditer(body))
-        for m in _NAME_SETTING_RE.finditer(body):
-            names.update(_NAME_RE.findall(m.group(1)))
-        for m in _ARITH_RE.finditer(body):
-            names |= _arith_assigned(m.group(1))
-    for do in _LOOP_DO_RE.finditer(command):
-        for m in _RAW_ASSIGN_RE.finditer(command, do.end()):
-            name, plus, rhs = m.groups()
-            if plus or re.search(rf"\$\{{?{name}\b", rhs):
-                names.add(name)
-    return frozenset(names - _RAW_PATH_VARS)
+    if (
+        _CARRY_BAR_WORD_RE.search(command)
+        or _CARRY_BAR_SHAPE_RE.search(command)
+        or _CARRY_BAR_VAR_RE.search(command)
+    ):
+        return frozenset()
+    lexed = lex(command)
+    if lexed.open:
+        return frozenset()
+    assigned: dict[str, int] = {}
+    reads: dict[str, int] = {}
+    for text, _piped, _op in lexed.segments:
+        words, redirects = scan(text)
+        if any(w.broken for w in words) or any(w.broken for _r, w in redirects):
+            return frozenset()
+        for op, target in redirects:
+            if ">" in op and "<" not in op:
+                for name in _plain_read_names(target):
+                    reads[name] = reads.get(name, 0) + 1
+        i = 0
+        while (
+            i < len(words)
+            and len(words[i].parts) == 1
+            and (words[i].parts[0].kind == "bare" and words[i].parts[0].text in _PREFIX_WORDS)
+        ):
+            i += 1
+        while i < len(words) and words[i].parts and words[i].parts[0].kind == "bare":
+            m = _ASSIGN_RE.match(words[i].parts[0].text)
+            if m is None:
+                break
+            assigned[m.group(1)] = assigned.get(m.group(1), 0) + 1
+            i += 1
+        if i >= len(words):
+            continue
+        program_word = words[i]
+        program = (
+            program_word.parts[0].text
+            if len(program_word.parts) == 1 and program_word.parts[0].kind == "bare"
+            else None
+        )
+        args = words[i + 1 :]
+        if program == "exec" and args:
+            return frozenset()
+        if program in ("export", "local", "declare"):
+            if any(a.parts and a.parts[0].text.startswith("-") for a in args):
+                continue
+            for a in args:
+                m = (
+                    _ASSIGN_RE.match(a.parts[0].text)
+                    if a.parts and a.parts[0].kind == "bare"
+                    else None
+                )
+                if m is not None:
+                    assigned[m.group(1)] = assigned.get(m.group(1), 0) + 1
+            continue
+        if program not in _CARRY_SAFE_PROGRAMS:
+            continue
+        if program == "printf" and any(a.parts and a.parts[0].text.startswith("-v") for a in args):
+            continue
+        for a in args:
+            for name in _plain_read_names(a):
+                reads[name] = reads.get(name, 0) + 1
+    carriers = set()
+    for name, count in assigned.items():
+        if count != 1 or name in _RAW_PATH_VARS:
+            continue
+        raw_assigns = raw_reads = 0
+        for m in re.finditer(rf"(?<!\w){re.escape(name)}(?!\w)", command):
+            before, after = command[: m.start()], command[m.end() : m.end() + 2]
+            if before.endswith("${"):
+                if not after.startswith("}"):
+                    break
+                raw_reads += 1
+            elif before.endswith("$"):
+                raw_reads += 1
+            elif (
+                after[:1] == "=" and after != "==" and (not before or before[-1] in " \t\n;&|(){}")
+            ):
+                raw_assigns += 1
+            else:
+                break
+        else:
+            if raw_assigns == 1 and raw_reads == reads.get(name, 0):
+                carriers.add(name)
+    return frozenset(carriers)
 
 
 def _contained_body(body: str) -> bool:
@@ -1152,6 +1241,8 @@ class Target:
     empty: list[str] = field(default_factory=list)
     opaque: bool = False
     opaque_contained: bool = False
+    #: ``opaque_contained`` rests on a variable-carried proof (``Expanded.carried``).
+    carried: bool = False
     unknown_cwd: bool = False
     #: The word globs its CHILDREN (``dir/*.log``): ``path`` is the directory
     #: the glob lives in, and the directory itself is not removed (Q2).
@@ -1706,6 +1797,7 @@ def _plain_target(exp: Expanded, op: str, program: str, state: _State) -> Target
         empty=list(exp.empty),
         opaque=opaque,
         opaque_contained=contained,
+        carried=contained and exp.carried,
         unknown_cwd=unknown,
         glob_children=glob_children,
         glob_all=glob_all,
@@ -2184,14 +2276,6 @@ def _strip_grouping(text: str) -> str:
     balanced and must stay or the substitution reads as broken.
     """
     text = _peel_subshell_keyword(text.strip())
-    head = _FUNC_HEAD_RE.match(text)
-    if head is not None:
-        # ``f(){ rm -rf ~`` is the first statement of a function body behind
-        # its header. Left on, ``f(){`` read as the program and the statement
-        # as its arguments, so ``f(){ rm -rf ~; }; f`` ranked LOW (found in
-        # review R1, PR #4147). The body is walked where it is defined, as
-        # if called there; ``_volatile_names`` covers the names it assigns.
-        text = text[head.start(1) :]
     while text[:1] in ("(", "{") and text[:2] != "((":
         text = text[1:].lstrip()
     while text[-1:] in (")", "}") and (
@@ -3303,9 +3387,10 @@ class _Walker:
         #: tell which later opaque name is that entry, so containment is void
         #: under the prefix (QA Q1, PR #4147); see ``_through_new_link``.
         self.opaque_linked: set[str] = set()
-        #: Names assigned where a single in-order pass cannot follow them
-        #: (function bodies, loop appends); see ``_volatile_names``.
-        self.volatile: frozenset[str] = frozenset()
+        #: Names allowed to keep a contained-substitution proof across
+        #: ``$NAME`` reads; see ``_containment_carriers``. Empty unless
+        #: ``_walk_once`` sets it, so any other walk keeps main's behaviour.
+        self.carriers: frozenset[str] = frozenset()
         #: Every path an earlier part of THIS command deleted, moved, copied or
         #: wrote to, or created (lexical and resolved spellings, no trailing
         #: ``/``). Any of them may be a symlink by the time a later word's
@@ -3693,7 +3778,16 @@ class _Walker:
             # stale value (above all a contained one) would rank
             # ``unset L; rm -rf "/$L"`` as the scratchpad instead of ``/``.
             for w in words[1:]:
-                if not w.text.startswith("-"):
+                if w.text.startswith("-"):
+                    continue
+                if name == "unset" and _NAME_RE.fullmatch(w.text) and w.text not in _RAW_PATH_VARS:
+                    # ``unset`` is exact: the name is empty afterwards, so
+                    # ``unset L; rm -rf "/$L"`` reads ``/`` (CRITICAL), not
+                    # an unknowable name (HIGH).
+                    st.env.pop(w.text, None)
+                    self.for_lists.pop(w.text, None)
+                    self.for_roots.pop(w.text, None)
+                else:
                     self._invalidate(w.text)
             return
         if name == "printf":
@@ -3887,6 +3981,7 @@ class _Walker:
                         empty=w.empty,
                         opaque=w.opaque,
                         opaque_contained=w.opaque_contained,
+                        carried=w.carried,
                     )
                     self._add(w2, "overwrite", name)
             return
@@ -3989,6 +4084,11 @@ class _Walker:
         if not _NAME_RE.fullmatch(name) or name in _RAW_PATH_VARS:
             return
         old = self.state.env.get(name, "")
+        if not old:
+            # Unset or empty: keep main's empty reading. An opaque value here
+            # turned ``let L=1; rm -rf "/$L"`` from CRITICAL (``/``) to HIGH,
+            # and the guard never ranks a delete lower than main did.
+            return
         self.state.env[name] = CREDENTIAL_MARK if CREDENTIAL_MARK in old else OPAQUE_MARK
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
@@ -4019,6 +4119,7 @@ class _Walker:
             and CREDENTIAL_MARK not in text_value
             and FOR_GLOB_MARK not in text_value
             and name not in _RAW_PATH_VARS
+            and name in self.carriers
         ):
             # Every opaque stretch is a contained substitution: keep that
             # proof for later ``$NAME`` reads (see CONTAINED_MARK).
@@ -4042,17 +4143,6 @@ class _Walker:
     def _assign(self, text: str) -> None:
         name, _, value = text.partition("=")
         value = _tilde_value(value, self.state.home)
-        if name in self.volatile and name not in _RAW_PATH_VARS:
-            # See ``_volatile_names``: assigned where the walker cannot follow.
-            # Never contained (nor a fresh-temp proof): every marker degrades
-            # to a plain OPAQUE_MARK, which ranks like base did. The visible
-            # text is kept so a climb it shows (``L=$L/..`` in a loop) still
-            # ranks CRITICAL. A wholly literal value stays literal: marking
-            # it opaque turned ``f(){ L=/; rm -rf "$L"; }`` from CRITICAL to
-            # HIGH, and the operator's red line is that CRITICAL never loosens.
-            value = value.replace(CONTAINED_MARK, OPAQUE_MARK).replace(TEMP_MARK, OPAQUE_MARK)
-            self.state.env[name] = value
-            return
         self.state.env[name] = value
         if name == "HOME":
             # S7: a later ``~`` resolves against the NEW home, as bash does.
@@ -5208,7 +5298,6 @@ class _Walker:
             return
         target = _target(exp, op, program, self.state)
         target.selected = selected
-        self._note_volatile(target, exp)
         self._unpin_relinked(target, exp.text)
         self._through_new_link(target)
         self.result.targets.append(target)
@@ -5227,7 +5316,6 @@ class _Walker:
             fanned = _fan_out(exp, values)
             extra = _target(fanned, op, program, self.state)
             extra.selected = selected
-            self._note_volatile(extra, exp)
             self._unpin_relinked(extra, fanned.text)
             # Each iteration's target can pass through a link this command
             # made (item F): the S7 test applies per fanned target, not only
@@ -5378,22 +5466,6 @@ class _Walker:
         for spelled in (target.path, os.path.normpath(raw) if raw else None):
             if spelled:
                 self._name(spelled)
-
-    def _note_volatile(self, target: Target, exp: Expanded) -> None:
-        """Note a target spelled through a ``_volatile_names`` variable.
-
-        Its literal value is the walker's single in-order reading, which a
-        function called later or a loop pass may have changed. A note (like
-        an empty expansion's) keeps any CRITICAL the reading earns but bars
-        an ordinary-path LOW outside the scratchpad: ``L=<pad>/$(date +%s);
-        f(){ local L=/etc; rm -rf "$L"; }; f`` stays HIGH, as on base.
-        """
-        names = sorted({ref[0] for ref in exp.refs} & self.volatile)
-        if names:
-            target.empty.append(
-                "$" + ", $".join(names) + " is assigned in a function or loop body, "
-                "so its value here is not certain"
-            )
 
     def _note_opaque_link(self, name: str, args: list[Expanded]) -> None:
         """Record the literal prefix of an opaque link/move/copy operand.
@@ -5632,7 +5704,7 @@ class _Walker:
         name = word.text.partition("=")[0]
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
-        if "=" not in word.text or not word.refs or name in self.volatile:
+        if "=" not in word.text or not word.refs:
             return
         iterations = self._iterations(word)
         if iterations is None:
@@ -6848,7 +6920,7 @@ def _walk_once(
     # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
     # because a wider walk only errs safe (review round 9, NIT-1).
     walker.result.globstar = bool(_RECURSIVE_GLOB_RE.search(command))
-    walker.volatile = _volatile_names(command)
+    walker.carriers = _containment_carriers(command)
     token = _CWD_MODEL.set(model)
     try:
         walker.walk(command)
