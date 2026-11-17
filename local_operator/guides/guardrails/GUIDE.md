@@ -118,6 +118,45 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   delete words or targets, while a body fed to a shell (`bash <<EOF`, `| sh`)
   and the `$(…)` inside an unquoted `<<EOF` body are still walked.
 
+## Fresh directories inside your scratchpad
+
+For a top-level, straight-line bash script beginning with the exact
+`set -euo pipefail` header, the resolver can retain the parent of a bare
+`ROOT=$(mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXXXX")` assignment.
+The template's parent must already exist, be fully pinned (no symlink or `..`
+components), and be inside the inherited session scratchpad. The random
+component remains **symbolic**, not an invented existing pathname or a creation
+ledger entry. Copies such as `SRC="$ROOT/source"` and bounded literal `for`
+lists retain containment; `${ROOT}old` does not inherit freshness. Bare `mktemp`
+must resolve through PATH to the root-owned system executable under root-owned,
+non-group/world-writable parents; an inherited PATH is not itself proof. Unknown
+or shadowed executables, shell startup files and imported functions get no proof.
+Shell declarations/namerefs, variable-mutating builtins (including `printf -v`
+and `%n`), arithmetic/assignment expansions and unconfined earlier writes end
+all copied fresh bindings. Read-only filesystem classification alone cannot
+prove that a command preserves shell variables. Only `:`, `echo`, `pwd`, a
+narrow `printf`, and `mkdir`/`mktemp` passing the same system-executable check
+keep the proof; `git` (repo-configured programs) and GNU `g*` variants end it.
+Freshness is the walker's own record, never a byte in the value: a command that
+writes the internal marker (`$'\x03'`) gets ordinary literal text.
+
+This fixes a mac-proof capture case where rejecting every slash-bearing
+`mktemp` template collapsed fresh scratch writes to opaque writes at cwd.
+It does not exempt a script as a whole: protected paths, unknown interpreter
+argv and unknown writers keep their usual checks. In particular, curl's
+explicit `-o`/`--output` destination is ranked like a `>` redirection to the
+same path (state root or config is CRITICAL, scratch is LOW), but curl is not
+fully modelled or declared read-only, and containment is not carried past it.
+
+Success matters: without the supported errexit header, a failed substitution
+could leave `ROOT` empty. AND/OR lists, pipelines, negation, conditional tests,
+functions, option changes and unsupported controls therefore get no new proof.
+Reassignment/unset removes the binding, and a link, move or other unmodelled
+writer invalidates all fresh bindings before later commands. Existing default
+`$(mktemp -d)` temp-root handling is separate; flags such as `-p`, `-t` and
+`-u` never borrow its default-root assumption. Unsupported shapes remain guarded;
+do not reword an already refused action to fit this supported subset.
+
 ## Cleaning up what you made
 
 Deleting your own rig directories and worktrees works without asking, through
