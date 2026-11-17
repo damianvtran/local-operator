@@ -55,6 +55,13 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # These f-strings use this device's HeavyClass.reason command label
+    # (long-lived-command and acquired notices) and memory_budget.reason
+    # (why the local cap is off). Neither value comes from a mesh peer.
+    ("local_operator/tools/builtin.py", "_acquire_heavy_lease", "reason"): (
+        3,
+        "local heavy-command labels and memory-cap explanation, not mesh peer codes",
+    ),
     # Backfill parses this device's stored invite receipt to recover the minted
     # id; the coerced detail is regex input, never a rendered peer refusal.
     ("local_operator/network/operator_binding.py", "_invite_ids", "detail"): (

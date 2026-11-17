@@ -208,6 +208,40 @@ def status_no_supervisor_note(*, command: str) -> Msg:
     return Msg("cli.team_bridge.status.no_supervisor_note", {"command": command})
 
 
+def status_restart_needed(*, installed: str) -> Msg:
+    return Msg("cli.team_bridge.status.restart_needed", {"installed": installed})
+
+
+def status_restart_needed_replaced(*, installed: str) -> Msg:
+    return Msg("cli.team_bridge.status.restart_needed_replaced", {"installed": installed})
+
+
+def status_running(*, pid: str, version: str, started: str) -> Msg:
+    return Msg(
+        "cli.team_bridge.status.running",
+        {"pid": pid, "version": version, "started": started},
+    )
+
+
+def status_running_detail(*, generation: str, versions: str) -> Msg:
+    return Msg(
+        "cli.team_bridge.status.running_detail",
+        {"generation": generation, "versions": versions},
+    )
+
+
+def status_running_exited(*, pid: str, version: str) -> Msg:
+    return Msg("cli.team_bridge.status.running_exited", {"pid": pid, "version": version})
+
+
+def status_running_none() -> Msg:
+    return Msg("cli.team_bridge.status.running_none", {})
+
+
+def status_running_unrecorded() -> Msg:
+    return Msg("cli.team_bridge.status.running_unrecorded", {})
+
+
 def status_screening(*, held: str, breaker: str, rejected: str) -> Msg:
     return Msg(
         "cli.team_bridge.status.screening",

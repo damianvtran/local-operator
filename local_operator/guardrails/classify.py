@@ -554,6 +554,8 @@ def _lineage_facts(target: Target, *, only_assigned: bool) -> str:
     else:
         what = "the path is handed to a program that may run code on it"
     facts = [what]
+    if target.unproven_code and target.proof_gap:
+        facts.append(f"its python -c code is not proven read-only: {target.proof_gap}")
     if target.assigned and only_assigned:
         facts.append(f"it reaches this call only as the inline env assignment {target.assigned}=…")
     facts.append("no recognised delete or write op names it")

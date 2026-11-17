@@ -80,7 +80,7 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
-from local_operator import memory_guard
+from local_operator import heavy_lease, memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.guardrails import interrupted_worktree_add
@@ -2699,6 +2699,150 @@ def _configured_memory_budget(override_mb: float | None) -> memory_guard.Budget:
     )
 
 
+#: Strong references to the per-command release watchers: the event loop keeps
+#: only weak ones, and a watcher collected mid-command would never release.
+_HEAVY_LEASE_WATCHERS: set[asyncio.Task[None]] = set()
+
+
+async def _acquire_heavy_lease(
+    tool_call_id: str,
+    params: "BashParams",
+    context: ToolContext | None,
+    signal: AbortSignal | None,
+    on_update: Callable[[AgentToolUpdate], None] | None,
+    heavy: heavy_lease.HeavyClass | None,
+    memory_budget: memory_guard.Budget,
+) -> heavy_lease.Lease | ToolResult | None:
+    """Queue a heavy command for the machine-wide slot; None for everything else.
+
+    Why: the 2026-11-16 node-2 OOM (parallel esbuild/node/chrome builds from
+    several sessions, seven processes killed) happened with every command under
+    its own memory-guard ceiling; only a node-wide limit stops that, see
+    :mod:`local_operator.heavy_lease`.
+
+    Returns the held :class:`heavy_lease.Lease`, a tool error when the bounded
+    wait ran out (it names the holder and the remedies) or the turn was aborted
+    while queued, or None when the command is not heavy, is heavy but also
+    starts a long-running server (a note is printed instead), the lease is off
+    (``bash.heavy_jobs.enabled: false``) or the host has no ``flock`` (Windows).
+
+    Memory cap: a heavy command cannot opt out per call. ``execute_bash``
+    turns its ``memory_mb <= 0`` into "unset" before resolving the budget (PR
+    #4104 R3: ``memory_mb=0`` let an agent take the slot and run uncapped).
+    The operator's machine-wide ``bash.memory.enabled=false`` still WINS: it
+    is their master switch, and overriding it for one class of command would
+    make that switch lie. Such a command still takes the lease, and its
+    queued/acquired lines say the memory cap is off, so the transcript shows
+    the build ran uncapped.
+
+    The queue bound is ``LOCAL_OPERATOR_HEAVY_JOB_WAIT_S`` (default 900 s), on
+    its own: it is NOT capped by the command's ``timeout``, which bounds the
+    command's run and starts at spawn, so queueing never eats into it (PR
+    #4104 K2: capping the queue at the 120 s default timeout refused a build
+    queued behind an ordinary 5-10 minute one).
+    """
+    if heavy is None or not heavy_lease.supported():
+        return None
+    settings = await asyncio.to_thread(heavy_lease.configured_settings)
+    if not settings.enabled:
+        return None
+    if heavy.long_lived:
+        # `pnpm build && pnpm dev`: a lease would be held for the server's whole
+        # life (hours), so no slot is taken; the memory cap still applies (see
+        # `execute_bash`). Silent was the PR #4104 R2-1 defect: the build ran
+        # beside a leased one with no signal, so say how to make it queue.
+        if on_update is not None:
+            line = (
+                f"heavy build in a line that also starts a long-running server ({heavy.reason}):"
+                " not queued; run the build as its own command so it waits for the"
+                " heavy-job slot"
+            )
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
+        return None
+    session_id = (getattr(context, "session_id", None) if context else None) or os.environ.get(
+        "LOCAL_OPERATOR_SESSION_ID", ""
+    )
+    # Redacted before it is written: the record is world-readable to this user
+    # and printed by `lop services status`, and a command line can carry a token.
+    preview = " ".join(_redact_tool_text(params.command, context).split())
+    queued_text: list[str] = []
+    cap_off = (
+        f"; memory cap off on this machine ({memory_budget.reason})"
+        if memory_budget.source == "disabled"
+        else ""
+    )
+
+    def _on_wait(line: str) -> None:
+        line += cap_off
+        queued_text[:] = [line]
+        if on_update is not None:
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
+
+    result = await heavy_lease.acquire(
+        heavy_lease.lease_dir(),
+        settings.slots,
+        wait_seconds=settings.wait_seconds,
+        reason=heavy.reason,
+        session_id=str(session_id or ""),
+        command=preview,
+        on_wait=_on_wait,
+        aborted=(lambda: signal is not None and signal.aborted),
+    )
+    if isinstance(result, heavy_lease.Lease):
+        if cap_off and on_update is not None:
+            # Only when the cap is off: an ordinary acquisition stays silent,
+            # but an uncapped heavy build is worth one visible line.
+            line = f"heavy-job slot acquired ({heavy.reason}){cap_off}"
+            on_update(
+                AgentToolUpdate(
+                    content=[TextContent(text=line)],
+                    details={"tool_name": "bash", "running": True, "heavy_job_queue": line},
+                )
+            )
+        return result
+    if isinstance(result, heavy_lease.Refusal):
+        return _error(tool_call_id, "bash", result.message)
+    return _error(
+        tool_call_id,
+        "bash",
+        f"aborted while queued for the heavy-job slot ({queued_text[0] if queued_text else ''}):"
+        f" {params.command}",
+        details={FAULT_KEY: FAULT_ABORTED},
+    )
+
+
+def _release_heavy_lease_on_exit(process: Any, lease: heavy_lease.Lease) -> None:
+    """Release ``lease`` when ``process`` exits, however the tool call ends.
+
+    Tied to the PROCESS, not the tool call, so one rule covers a foreground
+    run, a timeout or abort (both kill the group, so the wait returns), and a
+    ``background=True`` or steered-detach job, which keeps the slot until the
+    build actually finishes. ``try/finally`` makes the release unconditional
+    even if the wait itself is cancelled; a harness that dies outright drops
+    the flock with its descriptors.
+    """
+
+    async def _watch() -> None:
+        try:
+            await process.wait()
+        finally:
+            lease.release()
+
+    task = asyncio.get_running_loop().create_task(_watch())
+    _HEAVY_LEASE_WATCHERS.add(task)
+    task.add_done_callback(_HEAVY_LEASE_WATCHERS.discard)
+
+
 class BashParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -4691,7 +4835,19 @@ async def execute_bash(
     # inherit credentials. This preserves the existing fail-closed first read.
     # Still resolve BEFORE spawn: a cooperative runner can immediately start a
     # separate PG outside our group accounting. Reuse this Budget for both guards.
-    memory_budget = _configured_memory_budget(params.memory_mb)
+    # Heavy-job classification runs here, before the budget: a heavy command's
+    # `memory_mb <= 0` ("no cap for this call") is treated as unset, so it gets
+    # the configured budget (PR #4104 R3), including a heavy line that also
+    # starts a server and so takes no slot (R2-1). It is not pure: for a
+    # package-manager command it reads the nearest package.json. That stays
+    # synchronous because the read is small and bounded (one stat walk up the
+    # tree, files over 1 MB skipped, any error means "unknown"), cheaper than a
+    # thread hop. The operator's `bash.memory.enabled=false` still wins.
+    heavy_class = heavy_lease.is_heavy(params.command, params.memory_mb, cwd=_safe_cwd(context))
+    budget_override = params.memory_mb
+    if heavy_class is not None and budget_override is not None and budget_override <= 0:
+        budget_override = None
+    memory_budget = _configured_memory_budget(budget_override)
 
     # Resource metadata is reserved, not a credential grant: caller extras or
     # shell policy exclusion must not silently drop/widen the resolved ceiling.
@@ -4739,7 +4895,25 @@ async def execute_bash(
         if wrapped is None:
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
-    spawn_options = detached_popen_kwargs()
+    # Machine-wide heavy-job lease (local_operator/heavy_lease.py): taken LAST,
+    # after every refusal above, so a command that would be refused anyway never
+    # queues, and immediately before the spawn so the slot covers the command's
+    # whole life. A non-heavy command returns None here without touching it.
+    heavy = await _acquire_heavy_lease(
+        tool_call_id, params, context, signal, on_update, heavy_class, memory_budget
+    )
+    if isinstance(heavy, ToolResult):
+        return heavy
+    heavy_slot: heavy_lease.Lease | None = heavy
+    spawn_options: dict[str, Any] = dict(detached_popen_kwargs())
+    lease_fd = heavy_slot.fileno() if heavy_slot is not None else None
+    if lease_fd is not None and os.name == "posix":
+        # The command inherits the lease descriptor, so the flock lives until
+        # BOTH this harness and the command are gone: a harness SIGKILLed or
+        # OOM-killed mid-build no longer frees the slot beside its still
+        # running, detached build (PR #4104 QA Q1). A normal end still frees
+        # it at once: Lease.release() unlocks the shared description.
+        spawn_options["pass_fds"] = (lease_fd,)
     # Filesystem clock, not monotonic or wall: compared with the mtime of a
     # lock git writes during this call (guardrails/interrupted_worktree_add.py).
     spawned_at = interrupted_worktree_add.spawn_stamp(params.command)
@@ -4768,7 +4942,13 @@ async def execute_bash(
             guard_spawned.record(
                 process.pid, getattr(context, "session_id", None) if context else None, process
             )
-    except OSError as exc:
+    except BaseException as exc:
+        # Nothing was spawned, so the heavy slot must go back now; on success it
+        # is released when the process exits (``_release_heavy_lease_on_exit``).
+        if heavy_slot is not None:
+            heavy_slot.release()
+        if not isinstance(exc, OSError):
+            raise
         # A `bash.shell` pointing at a missing or non-executable file made the
         # spawn raise out of the tool, and the generic tool boundary rendered
         # `Tool 'bash' failed unexpectedly:` plus a 2000-char traceback tail —
@@ -4848,6 +5028,9 @@ async def execute_bash(
         if os.name == "posix" and spawn_options.get("start_new_session") is True
         else None
     )
+    if heavy_slot is not None:
+        heavy_slot.note_pgid(spawned_pgid if spawned_pgid is not None else process.pid)
+        _release_heavy_lease_on_exit(process, heavy_slot)
     if spawned_pgid is not None:
         with contextlib.suppress(Exception):
             group_reaper.register_group(
