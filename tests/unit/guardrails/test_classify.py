@@ -1547,7 +1547,6 @@ def test_round3_rows_stay_critical(home: Path, command: str) -> None:
     [
         f'L={_SP}/$(date +%s)/x; mkdir -p "$L"; touch "$L/a"; ls "$L"; cat "$L/a"; '
         'tee "$L/b"; rm -rf "$L"',
-        f'L={_SP}/$(date +%s); [ -d "$L" ]; rm -rf "$L"',
         f'L={_SP}/$(date +%s); test -e "$L"; printf "%s" x > "$L"; rm -f "${{L}}"',
         f'L={_SP}/$(date +%s).log; echo hi >> "$L"; rm -f "$L"',
     ],
@@ -1693,3 +1692,98 @@ def test_round4_straight_safe_command_predicate() -> None:
         assert not _straight_safe_command(bad), bad
     # Visited substitutions balance the raw count, in either spelling.
     assert _straight_safe_command('L=/x/`date +%s`; echo "$(echo `date`)" > "$L"')
+
+
+# -- Round 6, PR #4147: a character-level allowlist gates the carry ----------
+#
+# Rounds 3-5 chased routes through bash's parser and each review found
+# another (R9: backslash-newline hides an opener from lexer and raw count;
+# R10: ``${Z:0:Y}``, ``${Z[Y]}`` and ``test -v`` re-read a carried value as
+# arithmetic, which runs a substitution). ``_carry_charset_ok`` now runs
+# first: anything outside the narrow character set drops every carry, so
+# these rows rank at least HIGH, as on main (ff41034f).
+
+_R6_PRE = f'L={_SP}/$(date +%s); mkdir -p "$L"; '
+_R6_LN = f"ln -s ~ {_SP}/[0-9]*"
+_R6_Y = f"Y=a[\\$\\(ln\\ -s\\ ~\\ {_SP}/[0-9]*\\)]; "
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R9: a backslash-newline splits the opener.
+        _R6_PRE + f'echo $\\\n({_R6_LN}); rm -rf "$L"/home/',
+        _R6_PRE + f'cat <<EOF\n$\\\n({_R6_LN})\nEOF\nrm -rf "$L"/home/',
+        _R6_PRE + f'cat <\\\n({_R6_LN}); rm -rf "$L"/home/',
+        # R10: arithmetic contexts re-read a value as code.
+        _R6_PRE + _R6_Y + 'Z=abc; echo ${Z:0:Y}; rm -rf "$L"/home/',
+        _R6_PRE + _R6_Y + 'Z=abc; echo ${Z[Y]}; rm -rf "$L"/home/',
+        _R6_PRE + _R6_Y + 'test -v "$Y"; rm -rf "$L"/home/',
+        _R6_PRE + _R6_Y + '[ -v "$Y" ]; rm -rf "$L"/home/',
+        _R6_PRE + f'X=$\'a[\\x24({_R6_LN})]\'; [ -v "$X" ]; rm -rf "$L"/home/',
+        _R6_PRE + f'Y="a[$""({_R6_LN})]"; test -v "$Y"; rm -rf "$L"/home/',
+        # Other characters outside the set.
+        _R6_PRE + 'echo $[1+1]; rm -rf "$L"/home/',
+        _R6_PRE + 'cat <<< x; rm -rf "$L"/home/',
+        _R6_PRE + 'rm -rf "$L"/home/ # comment',
+        _R6_PRE + 'touch ~/x; rm -rf "$L"/home/',
+        _R6_PRE + 'rm -rf "$L"/*',
+        _R6_PRE + 'rm -rf "$L"/h?me',
+        # Round 3 kept ``[ -d "$L" ]`` LOW; ``[`` is outside the round-6 set,
+        # so it now follows main (``test -d`` keeps the carry).
+        f'L={_SP}/$(date +%s); [ -d "$L" ]; rm -rf "$L"',
+    ],
+)
+def test_round6_carry_needs_the_character_allowlist(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+def test_round6_carry_charset_predicate() -> None:
+    from local_operator.guardrails.resolve import (
+        _carry_charset_ok,
+        _containment_carriers,
+    )
+
+    sp = _SP
+    for good in (
+        f'L={sp}/q/u0-$(date -u +%Y%m%dT%H%M%SZ).log; exec > "$L" 2>&1; echo started',
+        'TS=$(date +"%Y%m%d"); exec &> "${LOCAL_OPERATOR_SCRATCHPAD}/u-$TS.log"',
+        f'L={sp}/$(uuidgen); echo \'a b\' >> "$L" 2> "$L.err"',
+    ):
+        assert _carry_charset_ok(good), good
+    for bad in (
+        "echo a\\\nb",
+        "echo $'x'",
+        'echo $"x"',
+        "echo $[1]",
+        "echo ${X:-y}",
+        "echo ${X[0]}",
+        "echo ${#X}",
+        "echo {a,b}",
+        "echo *",
+        "echo ?",
+        "echo ~",
+        "echo !x",
+        "echo # c",
+        "cat < x",
+        "echo | cat",
+        "true &",
+        "true && true",
+        "echo `date`",
+        "(true)",
+        "echo $(date)",
+        "echo $( date +%s)",
+        "echo $(echo hi)",
+        "echo $(date +%s; ln -s / x)",
+        "echo 'a$b'",
+        "echo 1>&2",
+        "echo >&2",
+        "echo >| x",
+        'echo "a',
+        "test -v Y",
+        '"test" "-v" Y',
+        "/bin/test -v Y",
+        "echo $1",
+    ):
+        assert not _carry_charset_ok(bad), bad
+        assert _containment_carriers(f'L={sp}/$(date +%s); {bad}; rm -f "$L"') == set(), bad

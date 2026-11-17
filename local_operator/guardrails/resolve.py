@@ -1149,6 +1149,121 @@ def _plain_read_names(word: _RawWord) -> list[str]:
     return names
 
 
+#: Characters a carrying command may contain outside quotes, ``$`` forms,
+#: redirects and allowed substitution bodies (round 6, PR #4147). Name and
+#: path characters only: none of them opens a quote, an expansion, a glob, a
+#: comment, a pipe, a background job, a heredoc or a line continuation.
+_CARRY_WORD_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:@%+=,-"
+)
+#: Characters an allowed ``$(PROGRAM …)`` body may contain: word characters,
+#: blanks and the quotes of ``date +"%Y%m%d"``. No ``$``, ``(``, ``)``,
+#: backtick, backslash or redirect, so the body is one flat call whose
+#: closing ``)`` is the first one after the opener.
+_CARRY_BODY_CHARS = _CARRY_WORD_CHARS | frozenset(" \t\"'")
+_CARRY_NAME_START = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+_CARRY_NAME_CHARS = _CARRY_NAME_START | frozenset("0123456789")
+
+
+def _carry_charset_ok(command: str) -> bool:
+    """True when ``command`` uses only the round-6 carry character allowlist.
+
+    WHY (PR #4147, round 6). Rounds 3-5 vetted the carry by chasing routes
+    through bash's parser — functions, setters, unvisited openers — and each
+    review found another (R9: a backslash-newline splits ``$\\⏎(`` or ``<<``
+    so no opener is visible; R10: ``${Z:0:Y}``, ``${Z[Y]}`` and ``test -v``
+    re-read a carried value as arithmetic, which can run a substitution).
+    This check is a strict CHARACTER-level allowlist run first: the whole
+    raw text, outside the bodies of allowed contained substitutions, may hold
+    only word characters, blanks, ``;``/newline, double quotes, plain single
+    quotes, ``$NAME``/``${NAME}``, the redirects ``>``, ``>>``, ``2>``,
+    ``2>&1``, ``&>``, and ``$(PROG …)`` whose flat body passes
+    :func:`_contained_body`. Anything else — a backslash, ``$'``, ``$"``,
+    ``$[``, brackets, braces beyond ``${NAME}``, globs, ``~``, ``!``, ``#``,
+    ``<``, ``|``, a stray ``&``, a backtick or a bare ``(`` — drops every
+    carry, so the command keeps main's opaque, judge-ranked reading. The
+    later checks in :func:`_containment_carriers` stay as defence in depth.
+    """
+    i, n = 0, len(command)
+    quote: str | None = None
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            # Nothing special inside single quotes: words and blanks only.
+            if ch == "'":
+                quote = None
+            elif ch not in _CARRY_WORD_CHARS and ch not in " \t":
+                return False
+            i += 1
+            continue
+        if ch in _CARRY_WORD_CHARS or ch in " \t" or (quote is None and ch in ";\n"):
+            i += 1
+        elif ch == '"':
+            quote = None if quote == '"' else '"'
+            i += 1
+        elif ch == "'" and quote is None:
+            quote = "'"
+            i += 1
+        elif ch == "$":
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt in _CARRY_NAME_START:
+                i += 2
+                while i < n and command[i] in _CARRY_NAME_CHARS:
+                    i += 1
+            elif nxt == "{":
+                j = i + 2
+                if j >= n or command[j] not in _CARRY_NAME_START:
+                    return False
+                while j < n and command[j] in _CARRY_NAME_CHARS:
+                    j += 1
+                if j >= n or command[j] != "}":
+                    return False
+                i = j + 1
+            elif nxt == "(":
+                close = command.find(")", i + 2)
+                if close == -1:
+                    return False
+                body = command[i + 2 : close]
+                # The program must follow ``$(`` immediately, the body must be
+                # flat and quote-balanced, and the call must be allowlisted.
+                if (
+                    not body
+                    or body[0] in " \t"
+                    or any(c not in _CARRY_BODY_CHARS for c in body)
+                    or body.count('"') % 2
+                    or body.count("'") % 2
+                    or not _contained_body(body)
+                ):
+                    return False
+                i = close + 1
+            else:
+                return False
+        elif quote is None and ch == ">":
+            if command.startswith(">&1", i) and i > 0 and command[i - 1] == "2":
+                i += 3
+            elif command.startswith(">>", i):
+                i += 2
+            else:
+                i += 1
+            if i < n and command[i] in ">&":
+                return False
+        elif quote is None and command.startswith("&>", i):
+            i += 2
+            if i < n and command[i] in ">&":
+                return False
+        else:
+            return False
+    if quote is not None:
+        return False
+    # R10: ``test -v WORD`` evaluates WORD's subscript as arithmetic, which
+    # re-reads a carried value as code (``[ -v`` already fails on ``[``).
+    for segment in re.split(r"[;\n]", command):
+        words = segment.replace('"', "").replace("'", "").split()
+        if "-v" in words and any(os.path.basename(w) == "test" for w in words):
+            return False
+    return True
+
+
 def _containment_carriers(command: str) -> frozenset[str]:
     """Names that may carry a contained-substitution proof through ``$NAME``.
 
@@ -1186,7 +1301,12 @@ def _containment_carriers(command: str) -> frozenset[str]:
 
     Whether the assigned value really is contained is still decided by the
     walker (``_contained_body``); this only says the proof may be kept.
+
+    Round 6: :func:`_carry_charset_ok` runs first and is the primary gate;
+    every check after it is defence in depth.
     """
+    if not _carry_charset_ok(command):
+        return frozenset()
     if (
         _CARRY_BAR_WORD_RE.search(command)
         or _CARRY_BAR_SHAPE_RE.search(command)
