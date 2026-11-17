@@ -40,6 +40,8 @@ import zlib
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from local_operator.providers.account_selection_trace import SelectionExplanation
+
 # ---------------------------------------------------------------------------
 # Op names and the two legs
 # ---------------------------------------------------------------------------
@@ -853,6 +855,12 @@ class Grant:
     identity: dict[str, str] = dataclasses.field(default_factory=dict)
     latency_ms: int = 0
     grant_id: str = ""
+    #: Owner-local audit evidence, deliberately absent from to_detail/from_detail.
+    #: Coalesced outcomes carry their own immutable observation; neither grant
+    #: equality nor credential/cache identity may depend on diagnostic metadata.
+    selection: SelectionExplanation | None = dataclasses.field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
     #: Per-grant narrowing metadata the OWNER enforced at serve time, for the
     #: borrower to materialise locally where a provider needs it at use time —
     #: github's ``{"repositories": [owner/repo, ...]}`` is the git helper's

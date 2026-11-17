@@ -107,6 +107,7 @@ from local_operator.network.credentials.types import (
     peer_int,
     synthetic_credential_id,
 )
+from local_operator.providers.account_selection_trace import SelectionExplanation
 
 if TYPE_CHECKING:  # the store is imported lazily (_auth_store_instance)
     from local_operator.providers.auth_store import QuotaEligibility
@@ -958,6 +959,13 @@ class MeshCredentialBroker:
             return self._refuse(link, key, provider, by, exc.code, str(exc))
         grant.latency_ms = int((time.monotonic() - started) * 1000)
         ref = grant.credential_ref
+        # This is an observation of the already-consented outcome, never another
+        # selector call. Display labels (possibly email) intentionally stay on
+        # this owner's audit; unknown/non-ranking mint paths remain unranked.
+        from local_operator.providers.auth_store import credential_identity
+
+        selection = grant.selection if isinstance(grant.selection, SelectionExplanation) else None
+        label = selection.label if selection is not None else credential_identity(grant.identity)
         detail: dict[str, Any] = {
             "credential_key": key,
             "act": self.self_device,
@@ -975,6 +983,8 @@ class MeshCredentialBroker:
             "anchored": anchor is not None
             and (ref.credential_id, ref.account_created_at) == anchor,
             "policy": policy,
+            "account_label": label if isinstance(label, str) else None,
+            "ranked_reason": selection.audit_reason() if selection is not None else "unranked",
         }
         self._audit(
             "credential.grant",
@@ -1092,6 +1102,7 @@ class MeshCredentialBroker:
                 by=by,
             )
         from local_operator.providers.account_affinity import lend_selection_context
+        from local_operator.providers.account_selection_trace import capture_selection
 
         store = self._auth_store_instance()
         before = self._row_stamps(provider)
@@ -1099,7 +1110,10 @@ class MeshCredentialBroker:
             # THE SAME SELECTOR A LOCAL TURN RUNS, fed the inputs a local turn has:
             # the operator's selection policy, the borrower's warm-account anchor,
             # and its 5xx demotions.
-            with lend_selection_context(policy, anchor, frozenset(peer_demoted)):
+            with (
+                lend_selection_context(policy, anchor, frozenset(peer_demoted)),
+                capture_selection(),
+            ):
                 access = await store.get_oauth_access(
                     provider,
                     for_session or None,
@@ -1278,6 +1292,7 @@ class MeshCredentialBroker:
             credential_id=int(access.credential_id),
             account_created_at=int(getattr(access, "account_created_at", 0) or 0),
             account_ref=getattr(access, "account_ref", None) or "",
+            selection=getattr(access, "selection", None),
             kind=str(getattr(access, "kind", "oauth") or "oauth"),
             token_exp_ms=token_exp_ms,
             refreshed=refreshed,
@@ -1531,6 +1546,7 @@ class MeshCredentialBroker:
         identity: dict[str, str],
         account_created_at: int = 0,
         account_ref: str = "",
+        selection: SelectionExplanation | None = None,
     ) -> Grant:
         """Build the grant, applying §3.3's narrowing rule to the expiry.
 
@@ -1566,6 +1582,7 @@ class MeshCredentialBroker:
                 session_id="" if holder_scope == "device" else for_session,
             ),
             identity=identity,
+            selection=selection,
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
