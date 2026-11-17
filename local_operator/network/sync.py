@@ -3898,29 +3898,25 @@ def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> bool:
     the rename failed, with the claim KEPT, so the copy left under ``sessions/``
     still reads as owned to listings and sweeps for as long as this process lives.
     """
-    if not target.exists() or target.is_symlink():
-        return True
-    holding = network_dir(root) / QUARANTINE_DIRNAME
-    try:
-        holding.mkdir(parents=True, exist_ok=True)
-        landing = holding / target.name
-        if landing.exists() or landing.is_symlink():
-            landing = holding / f"{target.name}.{time.time_ns()}"
-        os.rename(target, landing)
-    except OSError as exc:
-        logger.error(
-            "sync: a refused recovery of %s could not be moved out of sessions/: %s", new_id, exc
-        )
-        return False
-    logger.warning("sync: the refused recovery of %s was moved to %s", new_id, landing)
-    # ``release_session`` only acts under ``sessions/``, so the claim that moved
-    # with the copy is dropped here, at its new path.
-    from local_operator.session.retention import LIVE_MARKER_NAME
+    # Routed through the session-cleanup module (tests/unit/session/
+    # test_no_session_deletion.py): this is a rename OUT of ``sessions/``, and
+    # every such call lives behind cleanup.py's guards. The guard proves the tree
+    # is the one this call created from the claim naming this pid, moves it
+    # without deleting anything, and drops the claim only at the landing.
+    from local_operator.session.cleanup import quarantine_claimed_session_dir
 
-    try:
-        (landing / LIVE_MARKER_NAME).unlink()
-    except OSError:
-        pass
+    landing = quarantine_claimed_session_dir(
+        target,
+        config_dir=Path(root),
+        holding_dir=network_dir(root) / QUARANTINE_DIRNAME,
+        reason=f"refused recovery of {new_id}",
+        actor="sync.promote_replica",
+    )
+    if landing is None:
+        logger.error("sync: a refused recovery of %s could not be moved out of sessions/", new_id)
+        return False
+    if landing != target:
+        logger.warning("sync: the refused recovery of %s was moved to %s", new_id, landing)
     return True
 
 

@@ -608,6 +608,85 @@ def test_r2_2_a_failed_quarantine_keeps_the_claim_and_still_refuses(
     assert (root / "sessions" / "recovered0001" / ".session.pid").exists()
 
 
+# The guarded quarantine (cleanup.quarantine_claimed_session_dir) that the
+# refused-recovery path routes through: it moves only a directory THIS process
+# still claims, never deletes, and refuses everything else in place.
+
+
+def _claimed_dir(root: Path, name: str, pid: str) -> Path:
+    target = root / "sessions" / name
+    target.mkdir(parents=True)
+    (target / ".session.pid").write_text(pid, encoding="utf-8")
+    (target / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    return target
+
+
+def test_quarantine_moves_only_a_dir_this_process_claims(tmp_path: Path) -> None:
+    import os
+
+    from local_operator.session import cleanup
+
+    holding = tmp_path / "network" / "quarantine"
+    mine = _claimed_dir(tmp_path, "mine0001", str(os.getpid()))
+    landing = cleanup.quarantine_claimed_session_dir(
+        mine, config_dir=tmp_path, holding_dir=holding, reason="t", actor="t"
+    )
+    assert landing == holding / "mine0001"
+    assert not mine.exists()
+    assert (landing / "transcript.jsonl").read_text(encoding="utf-8") == "{}\n"
+    assert not (landing / ".session.pid").exists()
+
+
+@pytest.mark.parametrize("claim", ["1", "", None])
+def test_quarantine_refuses_a_dir_another_process_or_nobody_claims(
+    tmp_path: Path, claim: str | None
+) -> None:
+    from local_operator.session import cleanup
+
+    target = _claimed_dir(tmp_path, "other0001", claim or "")
+    if claim is None:
+        (target / ".session.pid").unlink()
+    landing = cleanup.quarantine_claimed_session_dir(
+        target,
+        config_dir=tmp_path,
+        holding_dir=tmp_path / "network" / "quarantine",
+        reason="t",
+        actor="t",
+    )
+    assert landing is None
+    assert (target / "transcript.jsonl").is_file()  # left exactly where it was
+
+
+def test_quarantine_refuses_a_holding_dir_inside_sessions_or_a_foreign_store(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    from local_operator.session import cleanup
+
+    target = _claimed_dir(tmp_path, "mine0002", str(os.getpid()))
+    for holding in (tmp_path / "sessions" / "q", tmp_path.parent / "elsewhere-q"):
+        assert (
+            cleanup.quarantine_claimed_session_dir(
+                target, config_dir=tmp_path, holding_dir=holding, reason="t", actor="t"
+            )
+            is None
+        )
+    other_store = tmp_path / "other"
+    (other_store / "sessions").mkdir(parents=True)
+    assert (
+        cleanup.quarantine_claimed_session_dir(
+            target,
+            config_dir=other_store,
+            holding_dir=other_store / "network" / "quarantine",
+            reason="t",
+            actor="t",
+        )
+        is None
+    )
+    assert (target / ".session.pid").is_file()  # still claimed, still in place
+
+
 # ---------------------------------------------------------------------------
 # Q-1: a downgrade refusal is not an id collision; the reply says which it was.
 # ---------------------------------------------------------------------------

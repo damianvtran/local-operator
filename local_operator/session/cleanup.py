@@ -1627,6 +1627,110 @@ def sweep_handed_away(config_dir: Path, *, max_age_s: float = HANDED_AWAY_MAX_AG
     return swept
 
 
+def quarantine_claimed_session_dir(
+    target: Path,
+    *,
+    config_dir: Path,
+    holding_dir: Path,
+    reason: str,
+    actor: str,
+) -> Path | None:
+    """Move a session directory THIS PROCESS still claims out of the store, intact.
+
+    WHY THIS EXISTS. ``sync.promote_replica`` creates and claims
+    ``sessions/<new_id>`` and then copies a peer's replica into it. When the
+    import door refuses that copy (origin-stamp downgrade failure, a mismatched
+    content digest), the partial tree must leave ``sessions/``: it may still hold
+    stamps reading ``verified: true``, and every listing would offer it as a
+    conversation. It is NOT deleted — the mesh layer never deletes, and the tree
+    is evidence of what a peer sent — so neither :func:`hand_off_session_dir`
+    (renames, then deletes) nor :func:`remove_fresh_session_dir` (deletes) fits.
+
+    THE IDENTITY PROOF is the claim: ``target/.session.pid`` must exist and name
+    ``os.getpid()``. ``promote_replica`` refuses an existing id before it claims,
+    so a claim naming this pid on that path means this process created the
+    directory in this call; any other content (another pid, a lease-owned
+    session, no claim, an unreadable marker) is refused and the tree stays put.
+    The move happens WHILE claimed (review R2-2): the claim travels with the tree
+    and is dropped only at the landing, so no unclaimed copy is ever visible under
+    ``sessions/``. A refusal or a failed rename keeps the claim in place, so the
+    copy still reads as owned to listings and sweeps for as long as we live.
+
+    Further refusals: ``target`` must be a real (non-symlink) direct child of
+    ``<config_dir>/sessions``, and ``holding_dir`` must resolve inside
+    ``config_dir`` but outside ``sessions/`` — a move from the store into the
+    store is not a quarantine.
+
+    Returns the landing path once the tree has left ``sessions/``; ``target``
+    itself when nothing was there to move (the desired post-state); ``None`` on
+    any refusal or rename failure (logged, never raised — the caller is already
+    propagating its own refusal and only needs to know whether the claim stays).
+    """
+    target = Path(target)
+    if not target.exists() and not target.is_symlink():
+        return target
+    try:
+        if target.is_symlink() or not target.is_dir():
+            raise OSError("not a real directory")
+        store = (Path(config_dir) / SESSIONS_DIRNAME).resolve(strict=True)
+        if target.resolve(strict=True).parent != store:
+            raise OSError("not a direct child of the session store")
+        holding_root = Path(holding_dir).resolve()
+        config_root = Path(config_dir).resolve(strict=True)
+        if (
+            config_root not in holding_root.parents
+            or holding_root == store
+            or store in holding_root.parents
+        ):
+            raise OSError("the holding directory is not outside sessions/ in this config")
+        if (target / ".execution-lease").exists():
+            raise OSError("a lease owns it")
+        claimant = (target / LIVE_MARKER_NAME).read_text(encoding="utf-8").strip()
+        if claimant != str(os.getpid()):
+            raise OSError(f"claimed by {claimant or 'nobody'}, not this process")
+    except OSError as exc:
+        logger.warning(
+            "session cleanup: REFUSED to quarantine %s (%s); reason=%s actor=%s",
+            target,
+            exc,
+            reason,
+            actor,
+        )
+        return None
+    try:
+        holding_dir.mkdir(parents=True, exist_ok=True)
+        landing = holding_dir / target.name
+        if landing.exists() or landing.is_symlink():
+            landing = holding_dir / f"{target.name}.{time.time_ns()}"
+        # ``os.rename``, never a copy-and-delete: same filesystem (both under
+        # ``config_dir``), atomic, and it removes nothing.
+        os.rename(target, landing)
+    except OSError as exc:
+        logger.error(
+            "session cleanup: could not quarantine %s (%s); its claim is kept; reason=%s actor=%s",
+            target,
+            exc,
+            reason,
+            actor,
+        )
+        return None
+    logger.warning(
+        "session cleanup: quarantined %s to %s; reason=%s actor=%s",
+        target.name,
+        landing,
+        reason,
+        actor,
+    )
+    # ``retention.release_session`` only acts under ``sessions/``, so the claim
+    # that moved with the tree is dropped here, at its new path. Best-effort: a
+    # stale claim outside the store protects nothing and harms nothing.
+    try:
+        (landing / LIVE_MARKER_NAME).unlink()
+    except OSError:
+        pass
+    return landing
+
+
 def remove_fresh_session_dir(
     target: Path,
     *,
