@@ -2593,3 +2593,116 @@ async def test_local_preview_refusal_preserves_older_pending_hold(
     assert terminal.details["state"] == "allowed"
     assert resource.record["retention"] == ""
     assert sum(method == "owner_release" for method, _ in ui_client.calls) == releases + 1
+
+
+class _PausedTabUiClient(FakeUiClient):
+    """Replays the 2026-11-17 stranding through the real tool lane.
+
+    The first tab sits behind a password-manager prompt, so the app refuses to
+    close it (``owner_refused``) and, once asked to reconcile, answers
+    ``allocating`` with no tab — it has lost attribution, not closed anything.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # A FRESH session: the base fixture's default reconciles a held tab.
+        self.recover_state = "closed"
+        self.opened = 0
+        self.paused: set[str] = set()
+        self.closed: list[str] = []
+
+    async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.browser_bridge.backend import BridgeError
+        from local_operator.browser_bridge.protocol import ErrorCode
+
+        if method == "open" and "tab" not in params:
+            self.calls.append((method, params))
+            self.opened += 1
+            return {"tab": f"ui:{7 + self.opened}:{'a' * 32}", "url": params["url"]}
+        if method == "close":
+            self.calls.append((method, params))
+            if params["tab"] in self.paused:
+                raise BridgeError(
+                    ErrorCode.OWNER_REFUSED,
+                    "a password manager prompt in that tab is waiting for the user",
+                )
+            self.closed.append(params["tab"])
+            return {}
+        if method == "owner_recover" and self.paused:
+            self.calls.append((method, params))
+            return {"ownership_version": 1, "state": "allocating", "tab": ""}
+        return await super().call(method, params)
+
+
+@pytest.mark.asyncio
+async def test_a_tab_that_would_not_close_is_closed_at_teardown_after_a_new_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.ui_browser import backend as ui_backend
+
+    fake = _PausedTabUiClient()
+    monkeypatch.setattr(ui_backend, "UiHostClient", lambda root=None: fake)
+    _ui_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    first = f"ui:8:{'a' * 32}"
+
+    opened = await builtin.execute_browser(
+        "o1", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    holder = context.browser
+    assert holder is not None
+    assert not opened.is_error and holder.surface_id == first
+
+    fake.paused.add(first)
+    closed = await builtin.execute_browser("c1", {"action": "close"}, None, None, context)
+    assert closed.is_error
+    assert "owner_refused" in closed.text and "password manager prompt" in closed.text
+
+    resource.recovered = False
+    await builtin.execute_browser("r1", {"action": "recover"}, None, None, context)
+    assert holder.surface_id == "", "the host lost attribution of the first tab"
+
+    fake.paused.clear()
+    reopened = await builtin.execute_browser(
+        "o2", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert not reopened.is_error
+    # The fresh open first retried the owed tab, freeing its host slot.
+    assert fake.closed == [first]
+    assert "stranded_surfaces" not in json.loads(resource.path.read_text())
+
+    finished = await resource.finish(resource.generation, "completed")
+    assert finished.state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_an_owed_tab_still_paused_at_teardown_leaves_a_cleanable_pending_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.ui_browser import backend as ui_backend
+
+    fake = _PausedTabUiClient()
+    monkeypatch.setattr(ui_backend, "UiHostClient", lambda root=None: fake)
+    _ui_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    first = f"ui:8:{'a' * 32}"
+    await builtin.execute_browser(
+        "o1", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    fake.paused.add(first)
+    await builtin.execute_browser("c1", {"action": "close"}, None, None, context)
+    resource.recovered = False
+    await builtin.execute_browser("r1", {"action": "recover"}, None, None, context)
+    second = await builtin.execute_browser(
+        "o2", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    holder = context.browser
+    assert holder is not None
+    assert not second.is_error and holder.surface_id.startswith("ui:9:")
+
+    finished = await resource.finish(resource.generation, "completed")
+    assert finished.state == "pending"
+    assert "owner_refused" in finished.detail
+    record = json.loads(resource.path.read_text())
+    assert [entry["surface"] for entry in record["stranded_surfaces"]] == [first]
+    assert resources.cleanup_disposition(record) == (True, "")
