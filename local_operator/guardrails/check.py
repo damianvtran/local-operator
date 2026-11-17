@@ -1019,6 +1019,27 @@ class DeleteCase:
         by_evidence = verify_evidence(
             evidence_ids, self.paths, self.evidence, env=self.env, stop=self.stop, alone=alone
         )
+        # MIXED CASE: LISTED EVIDENCE COVERS WITHOUT A CITATION (node2 incident,
+        # #4143 QA; architect job d3c81d1f01c5). A parent ran ``bash <script>
+        # <packet> <packet>/units > <packet>/logs/launch-2.log`` in its
+        # descendant's pad: the directories handed to ``bash`` are
+        # ``unverifiable`` (``build_delete_case``), so ``evidence_basis`` is off
+        # and the CONTEXT-FREE judge decides. Its plain ALLOW covers those, but
+        # the log still needed a cited ``evidence=eN`` — and that judge sees only
+        # the brief, so whether it echoed ``e1`` varied call to call (log1
+        # allowed, the identical log2 refused). A target that a LISTED call
+        # re-verifies with resolver-pinned coverage (``alone=True``: B1 or a clean
+        # clone, no foreign ``.git`` below — the bar ``evidence_basis`` already
+        # uses to allow with no judge at all) needs no citation; this is fresh
+        # re-verification, never trust in the gather. B2 (name + birth time) is
+        # weaker and still needs the judge's citation, and a judge BLOCK never
+        # reaches here. The HIGH ranking is unchanged; only verification moved.
+        listed = list(getattr(self.evidence, "listed", {}) or {})
+        if listed:
+            pinned = verify_evidence(
+                listed, self.paths, self.evidence, env=self.env, stop=self.stop, alone=True
+            )
+            by_evidence = {**pinned, **by_evidence}
         # An ID proves the source, not semantics: only the independent prefix fork
         # may decide completion, restrictions and holds. Never a judge-free route.
         scope = re.fullmatch(r"ALLOW scope=o([1-9][0-9]*)", first)
