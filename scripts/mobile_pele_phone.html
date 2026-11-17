@@ -47,6 +47,10 @@ document.getElementById("metrics").onclick = () => {
     svgClass: svg && svg.getAttribute("class"),
     viewer: viewer && {client: [viewer.clientWidth, viewer.clientHeight], scroll: [viewer.scrollWidth, viewer.scrollHeight], at: [viewer.scrollLeft, viewer.scrollTop],
       svg: (() => { const v = viewer.querySelector("svg"); return v && [v.getBoundingClientRect().width, v.getBoundingClientRect().height]; })()},
+    transcript: (() => {
+      const sc = d.querySelector(".lo-scroll");
+      return sc && { scrollTop: Math.round(sc.scrollTop), max: Math.round(sc.scrollHeight - sc.clientHeight) };
+    })(),
     theme: de.dataset.theme, trail,
     states: [...d.querySelectorAll("[data-diagram-state]")].map((e) => e.dataset.diagramState),
     imgs: d.querySelectorAll("img,script[src*=evil],foreignObject,iframe,a[href^=javascript]").length,

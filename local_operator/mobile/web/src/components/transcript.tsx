@@ -18,6 +18,7 @@ import { SupplementBlock } from "./supplement-block";
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
 import { Disclosure } from "./ui/disclosure";
+import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
 import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { messageRuntime } from "../store";
@@ -909,7 +910,19 @@ export function Transcript({
 			if (pinnedRef.current) el.scrollTop = el.scrollHeight;
 		});
 		ro.observe(el);
-		return () => ro.disconnect();
+		/* A row that changes height after it painted (a mermaid fence replaced by its
+		   drawing, `components/diagram-block.tsx`) says so with this event. It is
+		   decided HERE, where the pin state lives: a pinned reader stays at the tail,
+		   one reading history is never moved, and a Markdown rendered in a page that
+		   is not the transcript has no listener at all. */
+		const onContentResized = () => {
+			if (pinnedRef.current) el.scrollTop = el.scrollHeight;
+		};
+		el.addEventListener(CONTENT_RESIZED_EVENT, onContentResized);
+		return () => {
+			ro.disconnect();
+			el.removeEventListener(CONTENT_RESIZED_EVENT, onContentResized);
+		};
 	}, []);
 
 	/* Prepending older rows must NOT move the viewport: the row the user was

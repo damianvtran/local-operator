@@ -138,15 +138,82 @@ describe("diagram controls", () => {
 		}
 	});
 
-	it("never captures a drag: only click handlers sit on the drawing", async () => {
+	it("never cancels a touch, pointer or wheel gesture on the drawing, so the transcript keeps scrolling", async () => {
 		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.flowchart)} />);
 		await waitFor(() => expect(drawn(container)).not.toBeNull());
 		const tap = screen.getByTestId("diagram-tap");
-		const html = tap.outerHTML;
-		expect(html).not.toMatch(/touch-none|touch-action|overscroll/);
-		const scrolled = fireEvent.touchMove(tap);
-		expect(scrolled).toBe(true); /* not preventDefault-ed */
-		const wheel = fireEvent.wheel(tap, { deltaY: 120 });
-		expect(wheel).toBe(true);
+		const svg = container.querySelector("figure svg")!;
+		for (const target of [tap, svg]) {
+			for (const type of ["touchstart", "touchmove", "touchend", "pointerdown", "pointermove", "wheel", "mousedown", "mousemove"]) {
+				const event = new Event(type, { bubbles: true, cancelable: true });
+				target.dispatchEvent(event);
+				expect(event.defaultPrevented, `${type} on ${target.localName}`).toBe(false);
+			}
+		}
+		expect(tap.outerHTML).not.toMatch(/touch-none|touch-action|overscroll/);
+	});
+
+	it("opens the viewer at the author's pixel size: no shrink-to-fit cap on the drawing", async () => {
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.flowchart)} />);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		await act(async () => fireEvent.click(screen.getByTestId("diagram-full-size")));
+		const dialog = await screen.findByRole("dialog");
+		await waitFor(() => expect(dialog.querySelector("svg")).not.toBeNull());
+		const host = dialog.querySelector("svg")!.parentElement!;
+		expect(host.className).toContain("max-w-none");
+		expect(host.className).toContain("w-max");
+		expect(dialog.querySelector('[data-testid="diagram-viewer-scroll"]')!.className).toContain("overflow-auto");
+	});
+});
+
+describe("diagram block edge cases", () => {
+	it("draws nothing while the column is hidden (0 wide), then draws when it shows", async () => {
+		vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(0);
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.pie)} />);
+		await act(async () => {});
+		expect(container.querySelector('[data-diagram-state="pending"]')).not.toBeNull();
+		expect(container.querySelector("svg")).toBeNull();
+	});
+
+	it("keeps the code block, with no error card, when the renderer chunk cannot be fetched", async () => {
+		vi.resetModules();
+		vi.doMock("pele/lazy", () => {
+			throw new Error("Failed to fetch dynamically imported module");
+		});
+		const { Markdown: Fresh } = await import("./components/markdown");
+		const { container } = render(<Fresh text={fenced(DIAGRAM_SAMPLES.pie)} />);
+		await act(async () => {});
+		await act(async () => {});
+		expect(container.querySelector('[data-diagram-state="pending"] pre')).not.toBeNull();
+		expect(screen.queryByRole("alert")).toBeNull();
+		vi.doUnmock("pele/lazy");
+		vi.resetModules();
+	});
+
+	it("shortens a very long engine message in the error card", async () => {
+		const bad = `flowchart TD\n    A[${"x".repeat(3000)} --> B`;
+		const { container } = render(<Markdown text={fenced(bad)} />);
+		await waitFor(() => expect(container.querySelector('[data-diagram-state="error"]')).not.toBeNull());
+		const message = screen.getByRole("alert").querySelector("pre")!.textContent!;
+		expect(message.length).toBeLessThanOrEqual(401);
+	});
+
+	it("says the row changed height, once, when the drawing replaces the code block", async () => {
+		const heard = vi.fn();
+		const { container } = render(
+			<div onClick={undefined} ref={(el) => el?.addEventListener("lo:content-resized", heard)}>
+				<Markdown text={fenced(DIAGRAM_SAMPLES.state)} />
+			</div>,
+		);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		expect(heard).toHaveBeenCalledTimes(1);
+	});
+
+	it("reserves room for the longest copy label so the row does not reflow when copying fails", async () => {
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.pie)} />);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		const cell = screen.getByTestId("diagram-copy").querySelector(".grid")!;
+		const hidden = Array.from(cell.querySelectorAll('[aria-hidden="true"]')).map((n) => n.textContent);
+		expect(hidden.sort()).toEqual(["Copied", "Couldn't copy"]);
 	});
 });

@@ -111,14 +111,30 @@ for (const assetPath of [...scripts, ...styles]) {
  * THE DIAGRAM RENDERER STAYS OUT OF THE ENTRY CHUNK. Pele is fetched when the
  * first diagram appears (`src/lib/diagram-pele.ts` imports it dynamically); a
  * static import anywhere would put it, and every diagram kind, in the script the
- * phone downloads before it can paint the session list. "pele-flowchart" is the
- * class name Pele's flowchart drawing writes, so it appears in the renderer and
- * nowhere in this app's own code.
+ * phone downloads before it can paint the session list. The marker is the start
+ * of the class attribute Pele writes on every drawing (its source builds it as a
+ * template, so only the compiled library carries it, never this app's own code).
+ * The check also demands the marker in SOME chunk, so a Pele release that renames
+ * it turns this guard red instead of silently never firing.
  */
-for (const assetPath of scripts) {
-	if (readFileSync(onDisk(assetPath), "utf8").includes("pele-flowchart")) {
-		fail(`${assetPath} carries the Pele diagram renderer; it must be loaded with a dynamic import("pele/lazy")`);
+const PELE_MARKER = "pele pele-";
+const scriptNames = new Set(scripts.map((assetPath) => assetPath.replace(/^\.?\//, "")));
+const assetDir = join(dist, "assets");
+const carriers = existsSync(assetDir)
+	? readdirSync(assetDir).filter(
+			(name) => name.endsWith(".js") && readFileSync(join(assetDir, name), "utf8").includes(PELE_MARKER),
+		)
+	: [];
+for (const name of carriers) {
+	if (scriptNames.has(`assets/${name}`)) {
+		fail(`assets/${name} carries the Pele diagram renderer; it must be loaded with a dynamic import of "pele/lazy"`);
 	}
+}
+if (existsSync(join(web, "src", "lib", "diagram-pele.ts")) && carriers.length === 0) {
+	fail(
+		`no chunk in ${assetDir} carries "${PELE_MARKER}", so the entry-chunk guard cannot tell where Pele went; ` +
+			"update PELE_MARKER to a string the library still writes",
+	);
 }
 
 /**

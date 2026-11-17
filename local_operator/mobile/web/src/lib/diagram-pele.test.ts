@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DIAGRAM_SAMPLES } from "../fixtures/diagram-samples";
 import { WIDTH_STEP, bucketWidth, drawDiagram, peekDrawing, resetDiagramCache } from "./diagram-pele";
 
@@ -52,14 +52,45 @@ describe("drawDiagram", () => {
 		const bad = "flowchart TD\n A[Start --> B";
 		const result = await drawDiagram(bad, { kind: "fit", width: 352 });
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.message).toMatch(/error/i);
+		if (!result.ok) {
+			expect(result.message).toMatch(/error/i);
+			expect(result.retryable).toBe(false);
+		}
 		expect(peekDrawing(bad, { kind: "fit", width: 352 })).toBe(result);
 	});
 
 	it("keeps links and images off", async () => {
 		const src = 'flowchart LR\n A --> B\n click A "https://example.com" "t"\n C@{ img: "https://evil.example/p.png", label: "x", w: 40, h: 40 }';
 		const result = await drawDiagram(src, { kind: "full" });
+		expect(result.ok).toBe(true);
 		if (result.ok) expect(result.svg).not.toMatch(/<a\b|<image\b|https:\/\/evil/);
+	});
+
+	it("keeps shrink-to-fit even when the source asks for a fixed size", async () => {
+		const src = '%%{init: {"flowchart": {"useMaxWidth": false}}}%%\nflowchart TD\n A --> B';
+		const result = await drawDiagram(src, { kind: "fit", width: 352 });
+		expect(result.ok && result.svg).toContain("max-width:100%");
+	});
+
+	it("shares one render between identical requests", async () => {
+		const [a, b] = await Promise.all([
+			drawDiagram(DIAGRAM_SAMPLES.er, { kind: "fit", width: 352 }),
+			drawDiagram(DIAGRAM_SAMPLES.er, { kind: "fit", width: 352 }),
+		]);
+		expect(a).toBe(b);
+	});
+
+	it("reports a renderer that cannot load as retryable and does not cache it", async () => {
+		vi.resetModules();
+		vi.doMock("pele/lazy", () => {
+			throw new Error("Failed to fetch dynamically imported module");
+		});
+		const fresh = await import("./diagram-pele");
+		const first = await fresh.drawDiagram("flowchart TD\n A --> B", { kind: "full" });
+		expect(first).toMatchObject({ ok: false, retryable: true });
+		expect(fresh.peekDrawing("flowchart TD\n A --> B", { kind: "full" })).toBeUndefined();
+		vi.doUnmock("pele/lazy");
+		vi.resetModules();
 	});
 
 	it("gives distinct drawings distinct SVG ids", async () => {

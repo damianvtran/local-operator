@@ -2,10 +2,11 @@
  * A closed ```mermaid fence, drawn with Pele.
  *
  * STATES. Until the drawing exists the block shows the plain code block it
- * replaces, so a slow or failed chunk fetch costs nothing the page did not
- * already do. A drawing replaces it; a parse failure puts an error card above
- * it with the engine's own line, because a diagram that cannot be drawn is still
- * something the reader can read.
+ * replaces, and it keeps showing it if the renderer's chunk could not be fetched
+ * (a tab left open across a deploy): that says nothing about the diagram, so no
+ * error card, and the next mount tries again. A drawing replaces the code block; a
+ * parse failure puts an error card above it with the engine's own line, because a
+ * diagram that cannot be drawn is still something the reader can read.
  *
  * FIT, THEN FULL SIZE. The transcript has no horizontal play (operator finding
  * B), so the inline drawing is laid out for the column's width (Pele reflows a
@@ -26,6 +27,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { ReactNode, RefObject } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../lib/cn";
+import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
 import {
 	WIDTH_STEP,
 	bucketWidth,
@@ -42,22 +44,17 @@ import { useModalLayer } from "./ui/use-modal-layer";
 /** The inline drawing's height cap. Taller drawings clip behind a fade and open full size. */
 const INLINE_MAX_HEIGHT = "32rem";
 
+/** The drawing came back as something that is not an SVG document. A diagnostic, not product copy. */
+const UNUSABLE_SVG = "The drawing was not a usable SVG document."; // i18n: ignore engine diagnostic
+
 /** How long "Copied" stays up. */
 const COPIED_MS = 2000;
 
-/** The nearest ancestor that scrolls vertically: the transcript's scroller. */
-function scrollerOf(el: HTMLElement | null): HTMLElement | null {
-	for (let node = el?.parentElement ?? null; node; node = node.parentElement) {
-		const overflow = getComputedStyle(node).overflowY;
-		/* Not "is scrollable yet": a transcript shorter than its box does not scroll
-		   until this very drawing makes it taller, and that is the case to catch. */
-		if (overflow === "auto" || overflow === "scroll") return node;
-	}
-	return null;
-}
+/** Border (1px x 2) and padding (8px x 2) around the drawing inside the card. */
+const CARD_CHROME_PX = 18;
 
-/** Within this many px of the end counts as "following the tail" (the transcript's own threshold). */
-const TAIL_PX = 48;
+/** The error card shows the engine's message as text; a parse error can quote tens of thousands of characters. */
+const MESSAGE_MAX = 400;
 
 /** The sanitised tree for a drawing, or null when the text was not a usable SVG. */
 function useSvgNode(result: DrawResult | undefined): SVGSVGElement | null {
@@ -86,7 +83,7 @@ export function DiagramErrorCard({ message, source }: { message: string; source:
 				    the one line a reader can act on. English by design (a library's
 				    diagnostic, not product copy). */}
 				<pre dir="ltr" className="mt-1 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted [overflow-wrap:anywhere]">
-					{message}
+					{message.length > MESSAGE_MAX ? `${message.slice(0, MESSAGE_MAX)}…` : message}
 				</pre>
 			</div>
 			{source}
@@ -97,7 +94,7 @@ export function DiagramErrorCard({ message, source }: { message: string; source:
 type Copy = "idle" | "copied" | "failed";
 
 const BUTTON =
-	"flex min-h-11 min-w-fit grow items-center justify-center px-3 text-body-sm text-ink-muted select-none active:bg-elevated";
+	"flex min-h-11 min-w-fit grow items-center justify-center px-3 text-body-sm text-ink-muted select-none active:bg-elevated focus-visible:-outline-offset-2";
 
 function useCopy(text: string): [Copy, () => void] {
 	const [state, setState] = useState<Copy>("idle");
@@ -119,22 +116,26 @@ function useCopy(text: string): [Copy, () => void] {
 
 function CopyButton({ source }: { source: string }) {
 	const [state, copy] = useCopy(source);
-	const label = (s: Copy) =>
-		s === "copied"
-			? messageRuntime.t("relay.diagram.copied")
-			: s === "failed"
-				? messageRuntime.t("relay.diagram.copy_failed")
-				: messageRuntime.t("relay.diagram.copy");
-	const other = state === "idle" ? messageRuntime.t("relay.diagram.copied") : messageRuntime.t("relay.diagram.copy");
+	const labels: Record<Copy, string> = {
+		idle: messageRuntime.t("relay.diagram.copy"),
+		copied: messageRuntime.t("relay.diagram.copied"),
+		failed: messageRuntime.t("relay.diagram.copy_failed"),
+	};
 	return (
 		<button type="button" data-testid="diagram-copy" onClick={copy} aria-live="polite" className={BUTTON}>
-			{/* One grid cell holds the live label and the longest other one, so the
-			    row never reflows when the label swaps (same trick as the ask card). */}
+			{/* One grid cell holds the live label and the other two, invisible, so the
+			    button is as wide as the longest of the three in this locale and the row
+			    never reflows when the label swaps (the ask card's trick; "Couldn't copy"
+			    is the longest in seven of eight locales). */}
 			<span className="grid">
-				<span className="col-start-1 row-start-1">{label(state)}</span>
-				<span aria-hidden="true" className="invisible col-start-1 row-start-1">
-					{other}
-				</span>
+				<span className="col-start-1 row-start-1">{labels[state]}</span>
+				{(Object.keys(labels) as Copy[])
+					.filter((key) => key !== state)
+					.map((key) => (
+						<span key={key} aria-hidden="true" className="invisible col-start-1 row-start-1">
+							{labels[key]}
+						</span>
+					))}
 			</span>
 		</button>
 	);
@@ -176,6 +177,30 @@ function DiagramViewer({
 		};
 	}, [source]);
 	const node = useSvgNode(result);
+
+	/* More drawing past the right or bottom edge? Said with a fade on that edge,
+	   the cue the relay uses for clipped scroll content, so a wide drawing that
+	   pans sideways does not look like it simply ends. */
+	const scroller = useRef<HTMLDivElement>(null);
+	const [more, setMore] = useState({ right: false, below: false });
+	useLayoutEffect(() => {
+		const el = scroller.current;
+		if (!el) return;
+		const measure = () =>
+			setMore({
+				right: el.scrollWidth - el.clientWidth - el.scrollLeft > 1,
+				below: el.scrollHeight - el.clientHeight - el.scrollTop > 1,
+			});
+		measure();
+		el.addEventListener("scroll", measure, { passive: true });
+		const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+		resize?.observe(el);
+		return () => {
+			el.removeEventListener("scroll", measure);
+			resize?.disconnect();
+		};
+	}, [node]);
+
 	return createPortal(
 		<div
 			ref={dialogRef}
@@ -188,7 +213,11 @@ function DiagramViewer({
 		>
 			<div
 				className="flex shrink-0 items-center justify-between border-b border-hairline ps-3"
-				style={{ paddingTop: "env(safe-area-inset-top)" }}
+				style={{
+					paddingTop: "env(safe-area-inset-top)",
+					paddingInlineStart: "max(0.75rem, env(safe-area-inset-left))",
+					paddingInlineEnd: "env(safe-area-inset-right)",
+				}}
 			>
 				<span className="text-heading font-semibold text-ink">{messageRuntime.t("relay.diagram.view")}</span>
 				<button
@@ -201,11 +230,35 @@ function DiagramViewer({
 					✕
 				</button>
 			</div>
-			{/* `touch-action` is left at its default: one finger pans this area in both
-			    directions and two fingers still pinch-zoom the page. */}
-			<div dir="ltr" data-testid="diagram-viewer-scroll" className="min-h-0 flex-1 overflow-auto p-3">
-				{node ? (
-					<SvgHost node={node} className="w-max min-w-full [&_svg]:max-w-none! [&_svg]:h-auto" />
+			<div className="relative min-h-0 flex-1">
+				{/* `touch-action` is left at its default: one finger pans this area in both
+				    directions and two fingers still pinch-zoom the page. */}
+				<div
+					ref={scroller}
+					dir="ltr"
+					data-testid="diagram-viewer-scroll"
+					className="h-full overflow-auto p-3"
+					style={{
+						paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))",
+						paddingLeft: "max(0.75rem, env(safe-area-inset-left))",
+						paddingRight: "max(0.75rem, env(safe-area-inset-right))",
+					}}
+				>
+					{node ? <SvgHost node={node} className="w-max min-w-full [&_svg]:max-w-none! [&_svg]:h-auto" /> : null}
+				</div>
+				{more.right ? (
+					<div
+						aria-hidden="true"
+						data-testid="diagram-viewer-fade-right"
+						className="pointer-events-none absolute inset-y-0 right-0 w-10 bg-linear-to-l from-surface to-transparent"
+					/>
+				) : null}
+				{more.below ? (
+					<div
+						aria-hidden="true"
+						data-testid="diagram-viewer-fade-below"
+						className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-linear-to-t from-surface to-transparent"
+					/>
 				) : null}
 			</div>
 		</div>,
@@ -222,28 +275,25 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 	const [clipped, setClipped] = useState(false);
 	const [open, setOpen] = useState(false);
 
-	/* A drawing replaces a code block of a different height, after the transcript
-	   has already settled. A reader who was at the tail (the usual case: the answer
-	   just arrived) would be left above the fold with the diagram cut off, so the
-	   swap re-pins them. A reader scrolled up into history is never moved. */
-	const wasAtTail = useRef(false);
-	const commit = (next: DrawResult) => {
-		const scroller = scrollerOf(box.current);
-		wasAtTail.current = scroller !== null && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < TAIL_PX;
-		setResult(next);
-	};
+	/* A drawing replaces a code block of a different height AFTER the transcript
+	   has settled. Whether the reader is still at the tail is the transcript's call
+	   (it owns the pin state): this only says the row changed. */
+	const announced = useRef(false);
 	useLayoutEffect(() => {
-		if (!wasAtTail.current) return;
-		wasAtTail.current = false;
-		const scroller = scrollerOf(box.current);
-		if (scroller) scroller.scrollTop = scroller.scrollHeight;
+		if (result === undefined) return;
+		if (!announced.current) {
+			announced.current = true;
+			box.current?.dispatchEvent(new CustomEvent(CONTENT_RESIZED_EVENT, { bubbles: true }));
+		}
 	}, [result]);
 
 	/* The column's width, bucketed so a pixel of movement never redraws. */
 	useLayoutEffect(() => {
 		const el = box.current;
 		if (!el) return;
-		const measure = () => setWidth(bucketWidth(el.clientWidth));
+		/* A hidden or collapsed pane is 0 wide: draw nothing yet rather than a 8 px
+		   drawing that is replaced the moment the pane shows. */
+		const measure = () => setWidth(el.clientWidth < WIDTH_STEP ? 0 : bucketWidth(el.clientWidth - CARD_CHROME_PX));
 		measure();
 		if (typeof ResizeObserver === "undefined") return;
 		const observer = new ResizeObserver(measure);
@@ -256,12 +306,12 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 		const mode: DiagramMode = { kind: "fit", width };
 		const hit = peekDrawing(source, mode);
 		if (hit) {
-			commit(hit);
+			setResult(hit);
 			return;
 		}
 		let live = true;
 		void drawDiagram(source, mode).then((r) => {
-			if (live) commit(r);
+			if (live) setResult(r);
 		});
 		return () => {
 			live = false;
@@ -285,8 +335,9 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 		return () => observer.disconnect();
 	}, [node]);
 
-	const explicitFailure = result && !result.ok ? result.message : null;
-	const unusable = result?.ok && node === null ? "invalid SVG" : null;
+	/* A chunk that would not load is not a verdict on the diagram: keep the code block. */
+	const explicitFailure = result && !result.ok && !result.retryable ? result.message : null;
+	const unusable = result?.ok && node === null ? UNUSABLE_SVG : null;
 	const failure = explicitFailure ?? unusable;
 
 	let body: ReactNode;

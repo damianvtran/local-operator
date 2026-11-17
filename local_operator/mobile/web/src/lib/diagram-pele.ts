@@ -4,7 +4,8 @@
  * `pele/lazy` is imported dynamically, so the renderer and each diagram kind
  * are separate chunks fetched when the first diagram appears: none of it is in
  * the entry chunk the phone downloads to paint the session list. A failed fetch
- * clears the memo so the next diagram tries again.
+ * clears the memo and comes back as `retryable`, so the block keeps its code block
+ * and the next mount tries again.
  *
  * WHAT A DRAWING DEPENDS ON. The SVG is a pure function of the source, the
  * width it may use, the fonts and the mode. Colours are not in that list:
@@ -29,7 +30,8 @@ export type DiagramMode =
 
 export type DrawResult =
 	| { ok: true; svg: string; width: number; height: number }
-	| { ok: false; message: string };
+	/** `retryable`: the engine could not be loaded (a chunk fetch failed), which says nothing about the source. */
+	| { ok: false; message: string; retryable: boolean };
 
 let peleModule: Promise<PeleModule> | null = null;
 
@@ -51,6 +53,8 @@ export function bucketWidth(width: number): number {
 
 const CACHE_LIMIT = 48;
 const cache = new Map<string, DrawResult>();
+/** Draws in flight, so two identical fences in one message share one render. */
+const inflight = new Map<string, Promise<DrawResult>>();
 
 function hash(text: string): string {
 	let h = 0x811c9dc5;
@@ -83,6 +87,7 @@ export function peekDrawing(source: string, mode: DiagramMode): DrawResult | und
 /** Test seam: forget every drawing and the loaded module. */
 export function resetDiagramCache(): void {
 	cache.clear();
+	inflight.clear();
 	peleModule = null;
 }
 
@@ -90,13 +95,32 @@ function messageOf(error: unknown): string {
 	return error instanceof Error && error.message ? error.message : String(error);
 }
 
-export async function drawDiagram(source: string, mode: DiagramMode): Promise<DrawResult> {
+export function drawDiagram(source: string, mode: DiagramMode): Promise<DrawResult> {
 	const fonts = diagramFonts();
 	const key = cacheKey(source, mode, fonts);
 	const hit = cache.get(key);
-	if (hit) return hit;
+	if (hit) return Promise.resolve(hit);
+	let pending = inflight.get(key);
+	if (!pending) {
+		pending = draw(source, mode, fonts, key).finally(() => inflight.delete(key));
+		inflight.set(key, pending);
+	}
+	return pending;
+}
+
+async function draw(
+	source: string,
+	mode: DiagramMode,
+	fonts: { sans: string; mono: string },
+	key: string,
+): Promise<DrawResult> {
+	let pele: PeleModule;
 	try {
-		const pele = await loadPele();
+		pele = await loadPele();
+	} catch (error) {
+		return { ok: false, message: messageOf(error), retryable: true };
+	}
+	try {
 		await document.fonts?.ready;
 		const { svg, width, height } = await pele.renderAsync(source, {
 			fontFamily: fonts.sans,
@@ -106,17 +130,19 @@ export async function drawDiagram(source: string, mode: DiagramMode): Promise<Dr
 			links: false,
 			images: false,
 			...(mode.kind === "fit"
-				? { maxWidth: bucketWidth(mode.width) }
+				? /* `responsive` is set, not left to the source: an author's
+				     `%%{init: {"flowchart": {"useMaxWidth": false}}}%%` would otherwise drop the
+				     shrink-to-fit style. */
+				  { responsive: true, maxWidth: bucketWidth(mode.width) }
 				: { responsive: false, autoDirection: false }),
 		});
 		const result: DrawResult = { ok: true, svg, width, height };
 		remember(key, result);
 		return result;
 	} catch (error) {
-		/* A parse failure is a fact about the source and is cached; a failed chunk
-		   fetch is not, so a retry on the next mount can succeed. */
-		const result: DrawResult = { ok: false, message: messageOf(error) };
-		if (error instanceof Error && error.name === "PeleError") remember(key, result);
+		/* A parse failure is a fact about the source and is cached. */
+		const result: DrawResult = { ok: false, message: messageOf(error), retryable: false };
+		remember(key, result);
 		return result;
 	}
 }

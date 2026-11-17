@@ -142,6 +142,38 @@ describe("sanitizeSvg on hand-written markup Pele would never emit", () => {
 		expect(rect.hasAttribute("stroke")).toBe(false);
 	});
 
+	it("refuses an UNCLOSED url(), which a browser still reads as a URL token", () => {
+		const node = run('<rect fill="url(//evil.example/x" mask="url(//evil.example/m.svg#m" stroke="url(#ok"/>' + '<rect style="fill:url(//evil.example/x"/><rect style="--_x:url(//evil"/>');
+		for (const rect of Array.from(node.querySelectorAll("rect"))) {
+			expect(rect.getAttribute("fill")).toBeNull();
+			expect(rect.getAttribute("mask")).toBeNull();
+			expect(rect.getAttribute("stroke")).toBeNull();
+			expect(rect.getAttribute("style")).toBeNull();
+		}
+	});
+
+	it("checks values in linear time: `url(` plus tens of thousands of spaces does not stall the page", () => {
+		const hostile = "url(" + " ".repeat(200_000);
+		const started = performance.now();
+		const node = run(`<rect fill="${hostile}" data-id="${hostile}" style="fill:${hostile}"/>`);
+		const took = performance.now() - started;
+		expect(node.querySelector("rect")!.getAttribute("fill")).toBeNull();
+		/* Measured: the unbounded pattern took 44,500 ms on the same string; this takes a few ms. */
+		expect(took).toBeLessThan(1000);
+	});
+
+	it("keeps only Pele's own class names, so an author's `:::hidden` never meets the app's utilities", () => {
+		const node = run('<g class="pele-node pele-shape-rect hidden sr-only opacity-0"/><g class="hidden"/>');
+		const [first, second] = Array.from(node.querySelectorAll("g"));
+		expect(first.getAttribute("class")).toBe("pele-node pele-shape-rect");
+		expect(second.hasAttribute("class")).toBe(false);
+	});
+
+	it("keeps a data-* label that merely says 'data:', because it is never read as a URL", () => {
+		const node = run('<g data-id="data: a" aria-label="javascript: not a link"/>');
+		expect(node.querySelector("g")!.getAttribute("data-id")).toBe("data: a");
+	});
+
 	it("filters a style attribute down to allow-listed properties and safe values", () => {
 		expect(cleanStyle("color:red;position:fixed;fill:url(https://e/x);--_bg:var(--pele-bg,#fff);--evil:1;font-family:a\\62")).toBe(
 			"color:red;--_bg:var(--pele-bg,#fff)",

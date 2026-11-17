@@ -13,7 +13,7 @@
  *   - elements: shapes, text, gradients, markers. No script, style, foreignObject,
  *     a, image, use, animation or iframe.
  *   - attributes: a fixed presentation set plus `aria-*` and `data-*`. No `on*`,
- *     no `href`/`xlink:href`, no `src`.
+ *     no `href`/`xlink:href`, no `src`. `class` keeps only Pele's own `pele-*` names.
  *   - values: no `javascript:`/`vbscript:`/`data:`; a `url(...)` may only point
  *     at a fragment (`url(#gradient)`); no CSS escapes, `@import` or
  *     `expression(`. A `<` or `>` in a value is data (`data-id="A->B"`), set with
@@ -55,15 +55,19 @@ const CUSTOM_PROPERTY = /^--(_[a-z0-9-]*|pele-[a-z0-9-]+)$/;
 
 /** Values no attribute or declaration may carry, whatever its name. */
 const FORBIDDEN_VALUE = /javascript:|vbscript:|data:|expression\s*\(|@import|\\|\/\*/i;
-/** Every `url(...)` must name a fragment of the same document. */
-const URL_CALL = /url\(\s*([^)]*)\)/gi;
+/**
+ * The ONLY `url(...)` a value may carry: a fragment of this document. Every
+ * quantifier is bounded, so removing them is linear in the value's length (an
+ * unbounded `url\(\s*([^)]*)\)` was quadratic on `url(` plus tens of thousands
+ * of spaces: 4.5 s for a 45k-character fence, measured). Whatever `url(` is left
+ * afterwards, closed or not, is refused.
+ */
+const FRAGMENT_URL = /url\(\s{0,8}["']?#[A-Za-z0-9_.:-]{1,200}["']?\s{0,8}\)/gi;
+const ANY_URL = /url\s*\(/i;
 
 function safeValue(value: string): boolean {
 	if (FORBIDDEN_VALUE.test(value)) return false;
-	for (const match of value.matchAll(URL_CALL)) {
-		if (!/^["']?#[A-Za-z0-9_.:-]+["']?$/.test(match[1].trim())) return false;
-	}
-	return true;
+	return !ANY_URL.test(value.replace(FRAGMENT_URL, ""));
 }
 
 /** Splits `a:b;c:var(--x,#fff)` into declarations without breaking inside parentheses. */
@@ -97,16 +101,25 @@ export function cleanStyle(style: string): string {
 		.join(";");
 }
 
+/** Class names Pele writes. An author-chosen one (`:::hidden`) would meet the app's own utilities. */
+const PELE_CLASS = /^pele(?:-[A-Za-z0-9]+)*$/;
+
 function copyAttributes(from: Element, to: Element): void {
 	for (const attr of Array.from(from.attributes)) {
 		const name = attr.name;
-		if (!(ATTRIBUTES.has(name) || ARIA_OR_DATA.test(name))) continue;
+		const inert = ARIA_OR_DATA.test(name);
+		if (!(ATTRIBUTES.has(name) || inert)) continue;
 		if (name === "xmlns") continue; // createElementNS already set the namespace
 		let value = attr.value;
 		if (name === "style") {
 			value = cleanStyle(value);
 			if (value === "") continue;
-		} else if (!safeValue(value)) {
+		} else if (name === "class") {
+			value = value.split(/\s+/).filter((token) => PELE_CLASS.test(token)).join(" ");
+			if (value === "") continue;
+		} else if (!inert && !safeValue(value)) {
+			/* aria-* and data-* are never interpreted as a URL or a style, so a label
+			   that happens to say "data:" is kept as the text it is. */
 			continue;
 		}
 		if (name === "xml:space") to.setAttributeNS("http://www.w3.org/XML/1998/namespace", name, value);
