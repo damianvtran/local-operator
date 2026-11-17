@@ -6576,6 +6576,10 @@ class StatusDiscipline:
         #: a rename must not suppress that name for the life of the process; a
         #: failed attempt is retried at the next fresh read (≥ the cache TTL).
         self._agent_name_sent: dict[str, str] = {}
+        #: Whether the LAST :meth:`_sync_agent_name` left a wanted name unpublished
+        #: (its PUT failed). Read only by :meth:`publish_identity`, whose caller
+        #: retries on it; the ordinary status read ignores it.
+        self._agent_name_deferred = False
         #: ``(account_id, tenant_id)`` pairs this process already ASKED the hub to
         #: enrol, whatever the answer. The debounce for :meth:`_default_enroll`:
         #: a 404/405 (older hub), a 409, a transport failure or a no-op must not
@@ -6704,9 +6708,11 @@ class StatusDiscipline:
     async def reconcile_identity_mutation(self) -> StatusCheck:
         """Reconcile a persisted, effective UI identity edit without waiting 300s.
 
-        Only the explicit desktop PATCH/reset orchestration calls this, after
-        comparing canonical identity before/after persistence. It is NOT a
-        general force-refresh flag on the status read API. Revisions are sampled
+        Two callers: the explicit desktop PATCH/reset orchestration, after
+        comparing canonical identity before/after persistence, and
+        :meth:`publish_identity` (the connector's rename publisher, fired by a
+        config-watcher change to ``aida.name`` / ``team_bridge.session``). It
+        is NOT a general force-refresh flag on the status read API. Revisions are sampled
         before a read's first await, so concurrent queued edits share the latest
         read while an edit arriving during an older read cannot be lost. The
         existing per-account lock, transport/auth fences and publisher guards
@@ -6720,6 +6726,33 @@ class StatusDiscipline:
         self._identity_revision += 1
         revision = self._identity_revision
         return self._observe(await self._check(Boundary.SURFACE_OPEN, identity_revision=revision))
+
+    async def publish_identity(self) -> bool:
+        """Push a local chief-of-staff rename to the hub now; ``True`` once settled.
+
+        WHY. Before this, a rename reached the hub only at the next FRESH
+        status read (>= :data:`STATUS_CACHE_TTL_S` apart, and only when a
+        surface opened), unless it was made through the desktop settings page.
+        A rename made any other way (``/aida rename``, a session rename synced
+        into ``aida.name``, the agent renaming herself) left the directory and
+        every message label under the old name for minutes, or until someone
+        opened the bridge page (report 2026-11-17: "Aida" -> "Aubree" ->
+        "Aubee"; a #general post after the second rename still said "Aida").
+
+        ``True`` means there is nothing left to push from here: the hub holds
+        the wanted name, no endpoint of this machine's is publishable, or the
+        member is signed out (a sign-in's own boundary publishes then).
+        ``False`` means the read was refused or unavailable, or the PUT failed,
+        and the caller should retry; every guard of :meth:`_sync_agent_name`
+        (active, owned endpoint; no consent write; account pinning) applies
+        unchanged because this is the same boundary.
+        """
+
+        self._agent_name_deferred = False
+        check = await self.reconcile_identity_mutation()
+        if check.state == STATE_SIGNED_OUT:
+            return True
+        return check.error is None and not self._agent_name_deferred
 
     def _observe(self, check: StatusCheck) -> StatusCheck:
         """Record visibility identically for ordinary and explicit mutation reads."""
@@ -7396,6 +7429,7 @@ class StatusDiscipline:
         Best-effort: any failure leaves the status answer untouched.
         """
 
+        self._agent_name_deferred = False
         owned = self._owned_endpoint(check, access, field="agent_name")
         if owned is None:
             return
@@ -7426,6 +7460,7 @@ class StatusDiscipline:
             # Do not log exception prose/tracebacks: transport errors can carry
             # private URLs, credentials or the name. Keep failures diagnosable.
             logger.warning("team_bridge: name synchronization deferred (%s)", type(exc).__name__)
+            self._agent_name_deferred = True
             return
         self._agent_name_sent[endpoint_id] = wanted
 

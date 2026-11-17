@@ -443,3 +443,60 @@ def test_a_malformed_config_is_never_moved_aside_by_the_resolver(tmp_path: Path)
     assert cos_display_name(tmp_path) == "Friday"
     assert config.read_text(encoding="utf-8") == torn
     assert not list(tmp_path.glob("config.yml.bad.*"))
+
+
+# -- the immediate rename publish (report 2026-11-17: "Aida" -> "Aubree" -> "Aubee") --
+
+
+async def test_a_rename_inside_the_cache_window_waits_without_publish_identity(tmp_path: Path):
+    """The reproduction: an ordinary status read inside the TTL never re-sends a rename."""
+
+    _enrolled_aida(tmp_path)
+    counter = _Counter(lambda request: _ok(_echoing("Aida")))
+    discipline = _discipline(counter, tmp_path)
+    await discipline.check(Boundary.APP_START)
+
+    aida_naming.set_name(tmp_path, "Aubee")
+    await discipline.check(Boundary.SURFACE_OPEN)
+
+    assert [r.method for r in counter.requests] == ["GET"]
+
+
+async def test_publish_identity_pushes_a_rename_at_once(tmp_path: Path):
+    _enrolled_aida(tmp_path)
+    counter = _Counter(lambda request: _ok(_echoing("Aida")))
+    discipline = _discipline(counter, tmp_path)
+    await discipline.check(Boundary.APP_START)
+
+    aida_naming.set_name(tmp_path, "Aubee")
+    assert await discipline.publish_identity() is True
+
+    puts = [json.loads(r.content) for r in counter.requests if r.method == "PUT"]
+    assert puts == [{"state": "active", "tenant_id": "tnt_1", "agent_name": "Aubee"}]
+
+
+async def test_publish_identity_reports_a_failed_put_for_retry(tmp_path: Path):
+    _enrolled_aida(tmp_path, "Aubee")
+    puts: list[int] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            puts.append(1)
+            if len(puts) == 1:
+                return httpx.Response(503, json={"error": "busy", "code": "service_unavailable"})
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        return _ok(_echoing("Aida"))
+
+    discipline = _discipline(_Counter(responder), tmp_path)
+
+    assert await discipline.publish_identity() is False
+    assert await discipline.publish_identity() is True
+    assert len(puts) == 2
+
+
+async def test_publish_identity_in_step_is_settled_without_a_put(tmp_path: Path):
+    _enrolled_aida(tmp_path, "Aubee")
+    counter = _Counter(lambda request: _ok(_echoing("Aubee")))
+
+    assert await _discipline(counter, tmp_path).publish_identity() is True
+    assert [r.method for r in counter.requests] == ["GET"]
