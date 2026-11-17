@@ -358,6 +358,10 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
             )
             pairs = ", ".join(f'"{name}": {safe}' for safe, (name, _) in zip(sanitised, params))
         else:
+            # Bound on both branches so the long-mapping explode below is
+            # well-typed; with no parameters the mapping is `{}` and never
+            # reaches that path, so this empty list changes no output.
+            sanitised = []
             signature = ""
             pairs = ""
         statement = f'    return Msg("{key}", {{{pairs}}})'
@@ -368,7 +372,20 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
             # generated files must satisfy `black --check` AS GENERATED — the
             # drift gate compares bytes, so a formatter pass after generation
             # would make the check unreproducible (review round 2, MAJOR).
-            call = f'    return Msg(\n        "{key}",\n        {{{pairs}}},\n    )'
+            mapping = f"        {{{pairs}}},"
+            if len(mapping) > 100:
+                # Even on its own line the mapping can pass the 100-column
+                # flake8 gate once a key carries several placeholders
+                # (wire.github.readiness_list, six). Explode it one pair per
+                # line with a trailing comma — exactly Black's output — so
+                # the module still lints and stays `black --check`-clean AS
+                # GENERATED instead of needing a hand edit the drift gate
+                # would reject.
+                items = "".join(
+                    f'            "{name}": {safe},\n' for safe, (name, _) in zip(sanitised, params)
+                )
+                mapping = f"        {{\n{items}        }},"
+            call = f'    return Msg(\n        "{key}",\n{mapping}\n    )'
         header = f"def {fname}({signature}) -> Msg:"
         # A namespace's longer function name plus several typed placeholders can
         # exceed the same 100-column gate as the return statement. Wrap the

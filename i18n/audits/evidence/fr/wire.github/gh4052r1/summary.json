@@ -1,0 +1,889 @@
+{
+  "head": "0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "base": "aa051d55925b483175388edcbae9dff315ca49f1",
+  "locales": {
+    "en": {
+      "locale": "en",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24"
+        }
+      },
+      "receipt_matches": {},
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "other",
+        "1": "one",
+        "2": "other",
+        "3": "other",
+        "4": "other",
+        "5": "other",
+        "11": "other",
+        "21": "other",
+        "22": "other",
+        "25": "other",
+        "1.5": "other",
+        "1000000": "other"
+      },
+      "composed_examples": {
+        "empty_explicit": "GitHub repositories: none yet — the share is in place, but every borrow is refused while the hand-picked GitHub repositories setting names no repository once opt-outs are removed; add repositories to the GitHub repositories setting (search it in /settings), or explicitly return to every pushable repository minus opt-outs with lop network credential github repos --use-default",
+        "empty_unavailable": "GitHub repositories: none yet — the share is in place, but every borrow is refused while the list of repositories this device's GitHub login can push to could not be fetched (GitHub could not be reached), and there is no earlier list to fall back on; retry when GitHub is reachable: lop network credential github repos --refresh",
+        "excluded": "octo-org/website is opted out — devices you share with lose push to it the next time they fetch the credential, within 5 min",
+        "included": "octo-org/website is back in — devices you share with can push to it again the next time they fetch the credential, within 5 min",
+        "last_good": "the list fetched 2 days ago — GitHub repositories couldn't be listed just now (GitHub could not be reached), so it may be out of date",
+        "ready": "octo-org/website and octo-org/api (2 — every repository its login can push to, listed 2 days ago) — full list: lop network credential github repos on lender-qa",
+        "wrapper_denied": "octo-org/website isn't in the repository list the lending device provided (it may be opted out or not pushable there). Check lop network credential github repos on the lending device. Only that device can change what it lends.",
+        "settings_help": "owner/repo entries to lend GitHub access for. When never set, use every repository the login can push to, minus opt-outs. Clearing a previously shared hand-picked list stops lending; return to automatic selection with lop network credential github repos --use-default."
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 377
+    },
+    "fr": {
+      "locale": "fr",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "a7fa09f683e431a7537b0942a48aa1ef2d7bf0ff0db1a47ee5fd86b26f1be069",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "e773ea8aedb8b87586a4e0c8d72ed6e32cac39d6b522fd0f4b5ae34ac7315037",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "88646055cbd1e7a39d191dc767ddb56e1a61f68548c946fc69176153b36a06e7",
+          "baseline_receipt": {
+            "locale": "fr",
+            "namespace": "wire.settings",
+            "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+            "translator": {
+              "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none (as relayed by the manager)",
+              "date": "2026-11-13"
+            },
+            "auditor": {
+              "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+              "session": "d25b77f53a23",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none observed in this session",
+              "date": "2026-11-13",
+              "result": "passed",
+              "findings": 0,
+              "unresolved_blocker_major": 0,
+              "minor": 0,
+              "nit": 0
+            },
+            "status": "passed",
+            "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings none. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/fr/wire.settings/oh3922r1/record.json"
+          }
+        }
+      },
+      "receipt_matches": {
+        "wire.github": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        },
+        "wire.settings": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        }
+      },
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "one",
+        "1": "one",
+        "2": "other",
+        "3": "other",
+        "4": "other",
+        "5": "other",
+        "11": "other",
+        "21": "other",
+        "22": "other",
+        "25": "other",
+        "1.5": "one",
+        "1000000": "many"
+      },
+      "composed_examples": {
+        "empty_explicit": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions ; ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos --use-default",
+        "empty_unavailable": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée (GitHub est injoignable), sans liste antérieure de secours ; réessayez quand GitHub est joignable : lop network credential github repos --refresh",
+        "excluded": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, sous 5 min",
+        "included": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, sous 5 min",
+        "last_good": "la liste récupérée il y a 2 jours — impossible de lister les dépôts GitHub à l’instant (GitHub est injoignable) ; elle peut donc être périmée",
+        "ready": "octo-org/website et octo-org/api (2 — tous les dépôts auxquels son compte peut envoyer des push, listés il y a 2 jours) — liste complète : lop network credential github repos sur lender-qa",
+        "wrapper_denied": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête.",
+        "settings_help": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default."
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 418
+    },
+    "es": {
+      "locale": "es",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "f3ec27fb36efb1e04cd51bf44acca3e2258a11400554d3cda44bb00064298287",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "14f5d5925abbdb6fe0c0bfd2078affa131b0d97851e6181c0b2a526c687ac544",
+          "baseline_receipt": {
+            "locale": "es",
+            "namespace": "wire.settings",
+            "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+            "translator": {
+              "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified; es label fix e2ea7efff2f6 by i18n-translator job 17c3e25545b7 (same model, no fallback, relayed)",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none (as relayed by the manager)",
+              "date": "2026-11-13"
+            },
+            "auditor": {
+              "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+              "session": "d25b77f53a23",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none observed in this session",
+              "date": "2026-11-13",
+              "result": "passed",
+              "findings": 1,
+              "unresolved_blocker_major": 0,
+              "minor": 0,
+              "nit": 0
+            },
+            "status": "passed",
+            "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-es-1. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/es/wire.settings/oh3922r1/record.json"
+          }
+        }
+      },
+      "receipt_matches": {
+        "wire.github": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        },
+        "wire.settings": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        }
+      },
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "other",
+        "1": "one",
+        "2": "other",
+        "3": "other",
+        "4": "other",
+        "5": "other",
+        "11": "other",
+        "21": "other",
+        "22": "other",
+        "25": "other",
+        "1.5": "other",
+        "1000000": "many"
+      },
+      "composed_examples": {
+        "empty_explicit": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones; añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos --use-default",
+        "empty_unavailable": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (no se pudo contactar con GitHub) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+        "excluded": "octo-org/website está excluido — los dispositivos destinatarios pierden el permiso de push la próxima vez que obtengan la credencial, en un máximo de 5 min",
+        "included": "octo-org/website vuelve a estar incluido — los dispositivos destinatarios pueden volver a hacer push la próxima vez que obtengan la credencial, en un máximo de 5 min",
+        "last_good": "la lista obtenida hace 2 días — no se pudieron listar los repositorios de GitHub ahora (no se pudo contactar con GitHub), por lo que podría estar desactualizada",
+        "ready": "octo-org/website y octo-org/api (2 — todos los repositorios a los que su cuenta puede hacer push, listados hace 2 días) — lista completa: lop network credential github repos en lender-qa",
+        "wrapper_denied": "octo-org/website no está en la lista de repositorios proporcionada por el dispositivo que presta el acceso (puede estar excluido o no admitir push allí). Comprueba lop network credential github repos en ese dispositivo. Solo ese dispositivo puede cambiar qué acceso presta.",
+        "settings_help": "Entradas owner/repo cuyo acceso a GitHub se puede prestar. Si nunca se ha configurado, se usan todos los repositorios a los que la cuenta puede hacer push, menos los excluidos. Vaciar una lista elegida a mano y compartida anteriormente detiene los préstamos; vuelve a la selección automática con lop network credential github repos --use-default."
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 456
+    },
+    "zh-CN": {
+      "locale": "zh-CN",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "dc68606f6da5693a3c876b8a43c936f55dcb71ae4d219219cd505adc57993a69",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "8ab2f6c68fbe34e0485e86ff0a3d21d3362762cded17004bbe39e53bd655c366",
+          "baseline_receipt": {
+            "locale": "zh-CN",
+            "namespace": "wire.settings",
+            "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+            "translator": {
+              "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none (as relayed by the manager)",
+              "date": "2026-11-13"
+            },
+            "auditor": {
+              "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+              "session": "d25b77f53a23",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none observed in this session",
+              "date": "2026-11-13",
+              "result": "passed",
+              "findings": 0,
+              "unresolved_blocker_major": 0,
+              "minor": 0,
+              "nit": 0
+            },
+            "status": "passed",
+            "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings none. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/zh-CN/wire.settings/oh3922r1/record.json"
+          }
+        }
+      },
+      "receipt_matches": {
+        "wire.github": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        },
+        "wire.settings": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        }
+      },
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "other",
+        "1": "other",
+        "2": "other",
+        "3": "other",
+        "4": "other",
+        "5": "other",
+        "11": "other",
+        "21": "other",
+        "22": "other",
+        "25": "other",
+        "1.5": "other",
+        "1000000": "other"
+      },
+      "composed_examples": {
+        "empty_explicit": "GitHub仓库：暂无——共享已设置，但只要手动选择的GitHub仓库设置在去除已排除项后不含任何仓库，就会拒绝所有借用；在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项",
+        "empty_unavailable": "GitHub仓库：暂无——共享已设置，但只要未能获取此设备GitHub账号可push的仓库列表 (无法连接GitHub)，且没有可回退使用的旧列表，就会拒绝所有借用；GitHub可访问后重试：lop network credential github repos --refresh",
+        "excluded": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，5分钟内",
+        "included": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，5分钟内",
+        "last_good": "2天前获取的列表——刚才无法列出GitHub仓库 (无法连接GitHub)，因此列表可能已过时",
+        "ready": "octo-org/website和octo-org/api（2——其账号可push的所有仓库，列出时间：2天前）——完整列表：lop network credential github repos（在lender-qa上运行）",
+        "wrapper_denied": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos。只有该设备才能更改其出借范围。",
+        "settings_help": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 246
+    },
+    "ru": {
+      "locale": "ru",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "5423f28f859465cc5f28b3b316257bd66c9b1bcfe2bfd0ade2ea834560e600f1",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "2b500c8786bdad052555f689678c28212384969512295b9d1cd495d90c0c57ee",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "7418cbf5c3664084f2cb49c87c7cef64df87bab6b8b144de556a96eb7254e55d",
+          "baseline_receipt": {
+            "locale": "ru",
+            "namespace": "wire.settings",
+            "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+            "translator": {
+              "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none (as relayed by the manager)",
+              "date": "2026-11-13"
+            },
+            "auditor": {
+              "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+              "session": "d25b77f53a23",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none observed in this session",
+              "date": "2026-11-13",
+              "result": "passed",
+              "findings": 2,
+              "unresolved_blocker_major": 0,
+              "minor": 1,
+              "nit": 1
+            },
+            "status": "passed",
+            "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-ru-1,I-ru-2. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/ru/wire.settings/oh3922r1/record.json"
+          }
+        }
+      },
+      "receipt_matches": {
+        "wire.github": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        },
+        "wire.settings": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        }
+      },
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "many",
+        "1": "one",
+        "2": "few",
+        "3": "few",
+        "4": "few",
+        "5": "many",
+        "11": "many",
+        "21": "one",
+        "22": "few",
+        "25": "many",
+        "1.5": "other",
+        "1000000": "many"
+      },
+      "composed_examples": {
+        "empty_explicit": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев; добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default",
+        "empty_unavailable": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push (не удалось связаться с GitHub), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+        "excluded": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, в течение 5 мин",
+        "included": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, в течение 5 мин",
+        "last_good": "список, полученный 2 дня назад — сейчас не удалось получить список репозиториев GitHub (не удалось связаться с GitHub), поэтому он может быть устаревшим",
+        "ready": "octo-org/website и octo-org/api (2 — все репозитории, в которые его учётная запись может выполнять push; список получен 2 дня назад) — весь список: lop network credential github repos на lender-qa",
+        "wrapper_denied": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ.",
+        "settings_help": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 423
+    },
+    "vi": {
+      "locale": "vi",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "4aafd3e2688a454b0f80f938f05ae8eac0f2e25735e4c55a92168f274e22d253",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "28d393b48281312b1d918d3af7826581890b01607addb9dae23a702ae12e26e4",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "7f22b9e759bc4cbc12f06e9191b959f47784dd88dcfd17d7bed43e6ac2497254",
+          "baseline_receipt": {
+            "locale": "vi",
+            "namespace": "wire.settings",
+            "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+            "translator": {
+              "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none (as relayed by the manager)",
+              "date": "2026-11-13"
+            },
+            "auditor": {
+              "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+              "session": "d25b77f53a23",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none observed in this session",
+              "date": "2026-11-13",
+              "result": "passed",
+              "findings": 1,
+              "unresolved_blocker_major": 0,
+              "minor": 0,
+              "nit": 1
+            },
+            "status": "passed",
+            "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-vi-1. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/vi/wire.settings/oh3922r1/record.json"
+          }
+        }
+      },
+      "receipt_matches": {
+        "wire.github": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        },
+        "wire.settings": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        }
+      },
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "other",
+        "1": "other",
+        "2": "other",
+        "3": "other",
+        "4": "other",
+        "5": "other",
+        "11": "other",
+        "21": "other",
+        "22": "other",
+        "25": "other",
+        "1.5": "other",
+        "1000000": "other"
+      },
+      "composed_examples": {
+        "empty_explicit": "Kho GitHub: chưa có — đã thiết lập chia sẻ, nhưng mọi lần mượn đều bị từ chối khi cài đặt kho GitHub chọn thủ công không còn kho nào sau khi bỏ các kho bị loại trừ; thêm kho vào cài đặt kho GitHub (tìm trong /settings), hoặc chủ động trở lại tất cả kho có thể push trừ các kho bị loại trừ bằng lop network credential github repos --use-default",
+        "empty_unavailable": "Kho GitHub: chưa có — đã thiết lập chia sẻ, nhưng mọi lần mượn đều bị từ chối khi không lấy được danh sách kho mà tài khoản GitHub trên thiết bị này có thể push (không kết nối được GitHub), và không có danh sách cũ để dùng thay; thử lại khi kết nối được GitHub: lop network credential github repos --refresh",
+        "excluded": "octo-org/website đã được loại trừ — các thiết bị được chia sẻ sẽ mất quyền push kho đó khi lấy thông tin xác thực lần tới, trong vòng 5 phút",
+        "included": "octo-org/website đã được đưa trở lại — các thiết bị được chia sẻ có thể push kho đó lần nữa khi lấy thông tin xác thực lần tới, trong vòng 5 phút",
+        "last_good": "danh sách lấy 2 ngày trước — vừa không thể liệt kê kho GitHub (không kết nối được GitHub), nên danh sách có thể đã cũ",
+        "ready": "octo-org/website và octo-org/api (2 — tất cả kho mà tài khoản của thiết bị đó có thể push, được liệt kê 2 ngày trước) — danh sách đầy đủ: chạy lop network credential github repos trên lender-qa",
+        "wrapper_denied": "octo-org/website không nằm trong danh sách kho do thiết bị cho mượn cung cấp (có thể bị loại trừ hoặc không thể push từ đó). Kiểm tra lop network credential github repos trên thiết bị cho mượn. Chỉ thiết bị đó mới thay đổi được những gì nó cho mượn.",
+        "settings_help": "Các mục owner/repo để cho mượn quyền truy cập GitHub. Nếu chưa từng đặt, dùng tất cả kho mà tài khoản có thể push, trừ các kho bị loại trừ. Xóa trắng danh sách chọn thủ công từng được chia sẻ sẽ dừng cho mượn; trở lại lựa chọn tự động bằng lop network credential github repos --use-default."
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 343
+    },
+    "ur": {
+      "locale": "ur",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "bb25b9b554704e8b4f9e6494e8fc2ceb5804e2deb1474f3fbf915fe37aa27c86",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "47981cc870a599caf1ec964295ed3123b87a2f345bdb324c166694125d959476",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "df609ae5c34199fff380d3f7b80574dd9d76625588d3d1a873f5ab01051ab3fb",
+          "baseline_receipt": {
+            "locale": "ur",
+            "namespace": "wire.settings",
+            "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+            "translator": {
+              "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none (as relayed by the manager)",
+              "date": "2026-11-13"
+            },
+            "auditor": {
+              "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+              "session": "d25b77f53a23",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none observed in this session",
+              "date": "2026-11-13",
+              "result": "passed",
+              "findings": 1,
+              "unresolved_blocker_major": 0,
+              "minor": 0,
+              "nit": 1
+            },
+            "status": "passed",
+            "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-ur-1. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/ur/wire.settings/oh3922r1/record.json"
+          }
+        }
+      },
+      "receipt_matches": {
+        "wire.github": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        },
+        "wire.settings": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        }
+      },
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "other",
+        "1": "one",
+        "2": "other",
+        "3": "other",
+        "4": "other",
+        "5": "other",
+        "11": "other",
+        "21": "other",
+        "22": "other",
+        "25": "other",
+        "1.5": "other",
+        "1000000": "other"
+      },
+      "composed_examples": {
+        "empty_explicit": "GitHub ریپوزیٹریاں: ابھی کوئی نہیں — اشتراک قائم ہے، مگر جب تک ہاتھ سے منتخب GitHub ریپوزیٹریوں کی ترتیبات میں خارج کردہ ریپوزیٹریاں نکالنے کے بعد کوئی ریپوزیٹری نہیں بچتی، مستعار لینے کی ہر درخواست مسترد ہوگی؛ GitHub ریپوزیٹریوں کی ترتیبات میں ریپوزیٹریاں شامل کریں (/settings میں تلاش کریں)، یا lop network credential github repos --use-default سے واضح طور پر push کے قابل تمام ریپوزیٹریوں پر واپس آئیں، خارج کردہ کو چھوڑ کر",
+        "empty_unavailable": "GitHub ریپوزیٹریاں: ابھی کوئی نہیں — اشتراک قائم ہے، مگر جب تک اس ڈیوائس کے GitHub اکاؤنٹ کی push کے قابل ریپوزیٹریوں کی فہرست حاصل نہیں ہو سکی (GitHub سے رابطہ نہیں ہو سکا)، اور متبادل کے لیے کوئی پچھلی فہرست نہیں ہے، مستعار لینے کی ہر درخواست مسترد ہوگی؛ GitHub سے رابطہ ممکن ہونے پر دوبارہ کوشش کریں: lop network credential github repos --refresh",
+        "excluded": "octo-org/website خارج ہے — جن ڈیوائسز سے اشتراک ہے وہ اگلی بار سند حاصل کرتے وقت اس میں push کا حق کھو دیں گے، 5 منٹ کے اندر",
+        "included": "octo-org/website واپس شامل ہے — جن ڈیوائسز سے اشتراک ہے وہ اگلی بار سند حاصل کرتے وقت اس میں دوبارہ push کر سکیں گے، 5 منٹ کے اندر",
+        "last_good": "2 دن پہلے حاصل کردہ فہرست — ابھی GitHub ریپوزیٹریوں کی فہرست نہیں مل سکی (GitHub سے رابطہ نہیں ہو سکا)، اس لیے یہ پرانی ہو سکتی ہے",
+        "ready": "octo-org/website اور octo-org/api (2 — ہر ریپوزیٹری جس میں اس کا اکاؤنٹ push کر سکتا ہے؛ فہرست بنی: 2 دن پہلے) — مکمل فہرست: lop network credential github repos (lender-qa پر چلائیں)",
+        "wrapper_denied": "octo-org/website، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔",
+        "settings_help": "GitHub رسائی مستعار دینے کے لیے owner/repo اندراجات۔ اگر کبھی مقرر نہیں کیا گیا تو اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں استعمال ہوں گی، خارج کردہ کو چھوڑ کر۔ پہلے مشترک کی گئی ہاتھ سے منتخب فہرست کو خالی کرنے سے مستعار دینا بند ہو جاتا ہے؛ lop network credential github repos --use-default سے خودکار انتخاب پر واپس آئیں۔"
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 426
+    },
+    "hi": {
+      "locale": "hi",
+      "inputs": {
+        "wire.github": {
+          "en": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+          "target": "21d945c15034e7ccd1ff1ef4682910a582a981df65df1e3098598073a1966c7f",
+          "context": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "wire.settings": {
+          "en": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+          "target": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4",
+          "context": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        }
+      },
+      "scoped_key_count": 69,
+      "settings_total_keys": 867,
+      "retention": {
+        "wire.settings": {
+          "changed_keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ],
+          "unchanged_target_values": 866,
+          "base_target_sha256": "de496a83a5132bfda490faf7925e344c6d79404efb6106dbdac326a1c690a911",
+          "baseline_receipt": {
+            "locale": "hi",
+            "namespace": "wire.settings",
+            "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+            "translator": {
+              "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none (as relayed by the manager)",
+              "date": "2026-11-13"
+            },
+            "auditor": {
+              "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+              "session": "d25b77f53a23",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none observed in this session",
+              "date": "2026-11-13",
+              "result": "passed",
+              "findings": 0,
+              "unresolved_blocker_major": 0,
+              "minor": 0,
+              "nit": 0
+            },
+            "status": "passed",
+            "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings none. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/hi/wire.settings/oh3922r1/record.json"
+          }
+        }
+      },
+      "receipt_matches": {
+        "wire.github": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        },
+        "wire.settings": {
+          "source": true,
+          "target_note": true,
+          "translator": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "status": "translated"
+        }
+      },
+      "checks": [
+        "duplicate-free JSON",
+        "exact key parity",
+        "placeholder name/kind parity including lossless number-to-plural",
+        "complete CLDR categories",
+        "all branch counts rendered",
+        "technical literals retained",
+        "no manual bidi controls",
+        "settings unaffected values byte-retained",
+        "current-byte translator receipt matched"
+      ],
+      "render_count": 840,
+      "plural_categories_observed": {
+        "0": "one",
+        "1": "one",
+        "2": "other",
+        "3": "other",
+        "4": "other",
+        "5": "other",
+        "11": "other",
+        "21": "other",
+        "22": "other",
+        "25": "other",
+        "1.5": "other",
+        "1000000": "other"
+      },
+      "composed_examples": {
+        "empty_explicit": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती, उधार लेने का हर अनुरोध अस्वीकार होगा; GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos --use-default से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर",
+        "empty_unavailable": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली (GitHub से संपर्क नहीं हो सका), और विकल्प के लिए कोई पिछली सूची नहीं है, उधार लेने का हर अनुरोध अस्वीकार होगा; GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --refresh",
+        "excluded": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, 5 मिनट के भीतर",
+        "included": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, 5 मिनट के भीतर",
+        "last_good": "2 दिन पहले प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी (GitHub से संपर्क नहीं हो सका), इसलिए यह पुरानी हो सकती है",
+        "ready": "octo-org/website और octo-org/api (2 — हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: 2 दिन पहले) — पूरी सूची: lop network credential github repos (lender-qa पर चलाएँ)",
+        "wrapper_denied": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।",
+        "settings_help": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।"
+      },
+      "production_lookup": {
+        "text": "21 days ago",
+        "source_locale": "en"
+      },
+      "max_line_cells_before_wrap": 299
+    }
+  },
+  "render_count": 6720,
+  "pseudo_count": 68,
+  "syntax_negative_control": true
+}

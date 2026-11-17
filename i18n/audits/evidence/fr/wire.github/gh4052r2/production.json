@@ -1,0 +1,422 @@
+{
+  "source_audit_revision": "b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "generated_shipped_locales": [
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "executions": [
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "fr",
+      "message": "wire.github.failure_unknown",
+      "source_locale": "fr",
+      "actual": "échec de la récupération de la liste des dépôts GitHub",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "es",
+      "message": "wire.github.share_empty",
+      "source_locale": "es",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: REASON; REMEDY",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "ru",
+      "message": "wire.github.exclude_added",
+      "source_locale": "ru",
+      "actual": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "ru",
+      "message": "wire.github.include_added",
+      "source_locale": "ru",
+      "actual": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "ru",
+      "message": "wire.github.opt_out_step",
+      "source_locale": "ru",
+      "actual": "исключить репозиторий: lop network credential github exclude <owner/repo> — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "ru",
+      "message": "wire.github.share_empty",
+      "source_locale": "ru",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: REASON; REMEDY",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "ru",
+      "message": "wire.github.wrapper_denied",
+      "source_locale": "ru",
+      "actual": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "ru",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "source_locale": "ru",
+      "actual": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "passed": true
+    },
+    {
+      "surface": "changed production messages.render_record + active text.tr",
+      "locale": "ur",
+      "message": "wire.github.wrapper_denied",
+      "source_locale": "ur",
+      "actual": "octo-org/website، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "es",
+      "reason": "reason_explicit",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones; añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos --use-default",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "es",
+      "reason": "reason_unavailable_local",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (no se pudo contactar con GitHub) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "es",
+      "reason": "reason_unavailable_remote",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (no se pudo contactar con GitHub) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "es",
+      "reason": "reason_excluded_local",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (2) están excluidos; vuelve a incluir uno con lop network credential github include <owner/repo>",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "es",
+      "reason": "reason_excluded_remote",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que su cuenta de GitHub puede hacer push (2) están excluidos; vuelve a incluir uno con lop network credential github include <owner/repo>",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "es",
+      "reason": "reason_no_repos_local",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: la cuenta de GitHub de este dispositivo no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "es",
+      "reason": "reason_no_repos_remote",
+      "actual": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: su cuenta de GitHub no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "ru",
+      "reason": "reason_explicit",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев; добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "ru",
+      "reason": "reason_unavailable_local",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push (не удалось связаться с GitHub), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "ru",
+      "reason": "reason_unavailable_remote",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (не удалось связаться с GitHub), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "ru",
+      "reason": "reason_excluded_local",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (2), исключены; верните один из репозиториев командой lop network credential github include <owner/repo>",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "ru",
+      "reason": "reason_excluded_remote",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые его учётная запись GitHub может выполнять push (2), исключены; верните один из репозиториев командой lop network credential github include <owner/repo>",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "ru",
+      "reason": "reason_no_repos_local",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "passed": true
+    },
+    {
+      "surface": "production generated Msg + active resolver composition",
+      "locale": "ru",
+      "reason": "reason_no_repos_remote",
+      "actual": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: его учётная запись GitHub не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "fr",
+      "message": "wire.github.wrapper_denied",
+      "actual": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête.",
+      "source_locale": "fr",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "fr",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "actual": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default.",
+      "source_locale": "fr",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "fr",
+      "message": "wire.github.age_days",
+      "actual": "il y a 21 jours",
+      "source_locale": "fr",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "fr",
+      "message": "wire.github.age_days",
+      "actual": "il y a 1 000 000 jours",
+      "source_locale": "fr",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "es",
+      "message": "wire.github.wrapper_denied",
+      "actual": "octo-org/website no está en la lista de repositorios proporcionada por el dispositivo que presta el acceso (puede estar excluido o no admitir push allí). Comprueba lop network credential github repos en ese dispositivo. Solo ese dispositivo puede cambiar qué acceso presta.",
+      "source_locale": "es",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "es",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "actual": "Entradas owner/repo cuyo acceso a GitHub se puede prestar. Si nunca se ha configurado, se usan todos los repositorios a los que la cuenta puede hacer push, menos los excluidos. Vaciar una lista elegida a mano y compartida anteriormente detiene los préstamos; vuelve a la selección automática con lop network credential github repos --use-default.",
+      "source_locale": "es",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "es",
+      "message": "wire.github.age_days",
+      "actual": "hace 21 días",
+      "source_locale": "es",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "es",
+      "message": "wire.github.age_days",
+      "actual": "hace 1.000.000 días",
+      "source_locale": "es",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "zh-CN",
+      "message": "wire.github.wrapper_denied",
+      "actual": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos。只有该设备才能更改其出借范围。",
+      "source_locale": "zh-CN",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "zh-CN",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "actual": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。",
+      "source_locale": "zh-CN",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "zh-CN",
+      "message": "wire.github.age_days",
+      "actual": "21天前",
+      "source_locale": "zh-CN",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "zh-CN",
+      "message": "wire.github.age_days",
+      "actual": "1,000,000天前",
+      "source_locale": "zh-CN",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ru",
+      "message": "wire.github.wrapper_denied",
+      "actual": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.",
+      "source_locale": "ru",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ru",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "actual": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "source_locale": "ru",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ru",
+      "message": "wire.github.age_days",
+      "actual": "21 день назад",
+      "source_locale": "ru",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ru",
+      "message": "wire.github.age_days",
+      "actual": "1 000 000 дней назад",
+      "source_locale": "ru",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "vi",
+      "message": "wire.github.wrapper_denied",
+      "actual": "octo-org/website không nằm trong danh sách kho do thiết bị cho mượn cung cấp (có thể bị loại trừ hoặc không thể push từ đó). Kiểm tra lop network credential github repos trên thiết bị cho mượn. Chỉ thiết bị đó mới thay đổi được những gì nó cho mượn.",
+      "source_locale": "vi",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "vi",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "actual": "Các mục owner/repo để cho mượn quyền truy cập GitHub. Nếu chưa từng đặt, dùng tất cả kho mà tài khoản có thể push, trừ các kho bị loại trừ. Xóa trắng danh sách chọn thủ công từng được chia sẻ sẽ dừng cho mượn; trở lại lựa chọn tự động bằng lop network credential github repos --use-default.",
+      "source_locale": "vi",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "vi",
+      "message": "wire.github.age_days",
+      "actual": "21 ngày trước",
+      "source_locale": "vi",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "vi",
+      "message": "wire.github.age_days",
+      "actual": "1.000.000 ngày trước",
+      "source_locale": "vi",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ur",
+      "message": "wire.github.wrapper_denied",
+      "actual": "octo-org/website، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+      "source_locale": "ur",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ur",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "actual": "GitHub رسائی مستعار دینے کے لیے owner/repo اندراجات۔ اگر کبھی مقرر نہیں کیا گیا تو اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں استعمال ہوں گی، خارج کردہ کو چھوڑ کر۔ پہلے مشترک کی گئی ہاتھ سے منتخب فہرست کو خالی کرنے سے مستعار دینا بند ہو جاتا ہے؛ lop network credential github repos --use-default سے خودکار انتخاب پر واپس آئیں۔",
+      "source_locale": "ur",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ur",
+      "message": "wire.github.age_days",
+      "actual": "21 دن پہلے",
+      "source_locale": "ur",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "ur",
+      "message": "wire.github.age_days",
+      "actual": "1,000,000 دن پہلے",
+      "source_locale": "ur",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "hi",
+      "message": "wire.github.wrapper_denied",
+      "actual": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।",
+      "source_locale": "hi",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "hi",
+      "message": "wire.settings.network_credentials_github_repositories.help",
+      "actual": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।",
+      "source_locale": "hi",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "hi",
+      "message": "wire.github.age_days",
+      "actual": "21 दिन पहले",
+      "source_locale": "hi",
+      "passed": true
+    },
+    {
+      "surface": "restored-locale resolver smoke",
+      "locale": "hi",
+      "message": "wire.github.age_days",
+      "actual": "10,00,000 दिन पहले",
+      "source_locale": "hi",
+      "passed": true
+    }
+  ],
+  "production_execution_count": 51,
+  "fallback_controls": {
+    "unsupported_locale": {
+      "text": "21 days ago",
+      "source_locale": "en"
+    },
+    "unknown_key": {
+      "text": "wire.github.does_not_exist",
+      "source_locale": null
+    }
+  },
+  "production_activation_verified": true,
+  "limits": "Resolver + generated-Msg production path only. No browser/native app, no credential fetch/live GitHub request, no native Urdu terminal shaping certification. Pseudo/raw static frame and isolated paint-adapter evidence remain separately labelled."
+}

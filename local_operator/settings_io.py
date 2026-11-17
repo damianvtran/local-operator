@@ -5696,7 +5696,9 @@ SETTINGS: tuple[Setting, ...] = (
         placeholder=_t(_ws.network_credentials_github_repositories_placeholder()),
         empty_unsets=True,
         validate_value=_validate_github_repositories,
-        synonyms=("auth", "access", "permissions", "scopes"),
+        # No "access": the help copy now says "lend GitHub access", so the word
+        # already matches this row and a synonym repeating it is dead weight.
+        synonyms=("auth", "permissions", "scopes"),
     ),
     # -- hub ---------------------------------------------------------------
     # Defaults are LITERALS here for the same reason the aida ones are: this module

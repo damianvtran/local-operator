@@ -1,0 +1,10 @@
+{
+  "changed_values": 9,
+  "candidate_and_neighbor_renders": 26,
+  "pseudo_cases": 9,
+  "retained_pairs": 14,
+  "source_and_context": "unchanged",
+  "prior_findings": "resolved",
+  "production_before_eligibility": "English as expected",
+  "output": "/Users/damian/.local-operator/sessions/91d1e05d2d82/scratchpad/audit4052r2"
+}

@@ -2022,7 +2022,7 @@ class MeshCredentialBroker:
                 # A DETAIL, not a sentence: the borrower's catalogue wraps it in the
                 # remedy (messages.py), so it names no device and no remedy itself —
                 # the old self-contained sentence was rendered twice (QA F1).
-                message=f"{count} repositories; one share can carry at most {limit}",
+                message=github_app.designation_overflow_text(count, limit),
                 **common,
             )
         return None

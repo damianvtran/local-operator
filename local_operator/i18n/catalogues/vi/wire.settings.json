@@ -412,7 +412,7 @@
   "wire.settings.network_audit_max_age_days.label": "Trần tuổi kiểm toán (ngày)",
   "wire.settings.network_audit_max_bytes.help": "Số byte mỗi thế hệ, sau khi xoay vòng. 8 MiB JSONL nén gzip tương đương khoảng 55k bản ghi; do đó trần năm thế hệ là khoảng 40 MiB.",
   "wire.settings.network_audit_max_bytes.label": "Kích thước kiểm toán mỗi thế hệ",
-  "wire.settings.network_credentials_github_repositories.help": "Các mục owner/repo mà token GitHub được môi giới có thể truy cập (trống: không có)",
+  "wire.settings.network_credentials_github_repositories.help": "Các mục owner/repo để cho mượn quyền truy cập GitHub. Nếu chưa từng đặt, dùng tất cả kho mà tài khoản có thể push, trừ các kho bị loại trừ. Xóa trắng danh sách chọn thủ công từng được chia sẻ sẽ dừng cho mượn; trở lại lựa chọn tự động bằng lop network credential github repos --use-default.",
   "wire.settings.network_credentials_github_repositories.label": "Kho GitHub",
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "Thời gian dài nhất một thiết bị được dùng đăng nhập mượn từ chủ sở hữu trước khi phải hỏi lại, cũng là thời gian đăng nhập của chủ sở hữu đã thu hồi hoặc ngoại tuyến còn hoạt động ở nơi khác. Không bao giờ dài hơn chính token.",

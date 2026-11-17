@@ -412,7 +412,7 @@
   "wire.settings.network_audit_max_age_days.label": "审计时间上限（天）",
   "wire.settings.network_audit_max_bytes.help": "轮转后每代的字节数。8 MiB的gzip压缩JSONL约合55000条记录；五代的封顶因此约为40 MiB。",
   "wire.settings.network_audit_max_bytes.label": "每代审计大小",
-  "wire.settings.network_credentials_github_repositories.help": "被代理的GitHub令牌可访问的owner/repo条目（留空：无）",
+  "wire.settings.network_credentials_github_repositories.help": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。",
   "wire.settings.network_credentials_github_repositories.label": "GitHub仓库",
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "设备借用所有者的登录后、在再次请求之前可使用的最长时间；也是被撤销或离线的所有者的登录在别处继续可用的时长。绝不会超过令牌本身。",

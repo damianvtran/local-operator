@@ -412,7 +412,7 @@
   "wire.settings.network_audit_max_age_days.label": "آڈٹ عمر حد (دن)",
   "wire.settings.network_audit_max_bytes.help": "گردش کے بعد فی جنیریشن بائٹس۔ 8 MiB gzip شدہ JSONL میں تقریباً 55k ریکارڈز ہوتے ہیں؛ پانچ جنیریشنز کی حد اس لیے ~40 MiB ہے۔",
   "wire.settings.network_audit_max_bytes.label": "فی جنیریشن آڈٹ سائز",
-  "wire.settings.network_credentials_github_repositories.help": "بروکر شدہ GitHub ٹوکن کن owner/repo اندراجات تک رسائی رکھے (خالی: کوئی نہیں)",
+  "wire.settings.network_credentials_github_repositories.help": "GitHub رسائی مستعار دینے کے لیے owner/repo اندراجات۔ اگر کبھی مقرر نہیں کیا گیا تو اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں استعمال ہوں گی، خارج کردہ کو چھوڑ کر۔ پہلے مشترک کی گئی ہاتھ سے منتخب فہرست کو خالی کرنے سے مستعار دینا بند ہو جاتا ہے؛ lop network credential github repos --use-default سے خودکار انتخاب پر واپس آئیں۔",
   "wire.settings.network_credentials_github_repositories.label": "GitHub ریپوزیٹریز",
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "ڈیوائس مالک سے لیا لاگ اِن دوبارہ پوچھنے سے پہلے زیادہ سے زیادہ کتنی دیر استعمال کرے؛ اس سے منسوخ یا آف لائن مالک کا لاگ اِن کہیں اور کتنی دیر چلے۔ ٹوکن سے زیادہ کبھی نہیں۔",
