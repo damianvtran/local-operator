@@ -122,7 +122,9 @@ def test_a_different_code_restarts_the_count(tmp_path: Path) -> None:
     tracker.note_failure(StoreRefused("schema_damaged", "x"))
     assert jam_mod.read_jam(tmp_path) is None
     tracker.note_failure(StoreRefused("schema_damaged", "x"))
-    assert jam_mod.read_jam(tmp_path)["code"] == "schema_damaged"
+    jam = jam_mod.read_jam(tmp_path)
+    assert jam is not None
+    assert jam["code"] == "schema_damaged"
 
 
 def test_an_unsafe_code_and_a_dead_pid_are_not_reported(tmp_path: Path, monkeypatch) -> None:
