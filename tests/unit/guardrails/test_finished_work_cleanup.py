@@ -342,6 +342,20 @@ def test_rig_of_running_creator_is_high(home: Path) -> None:
     assert "creating session still running" in verdict.reasons[0]
 
 
+@pytest.mark.parametrize(
+    "command", ["sudo rm -rf ~/work", "env --unset FOO rm -rf ~/work", "rm -rf ~/work"]
+)
+@pytest.mark.parametrize(("creator", "risk"), [(DONE, Risk.LOW), (LIVE, Risk.HIGH)])
+def test_wrapped_rig_delete_is_low_only_once_its_creator_ended(
+    home: Path, command: str, creator: str, risk: Risk
+) -> None:
+    """The ``sudo``/``env --unset`` shapes that collided with #3964's never-lowers
+    corpus (``test_loop_cd_never_lowers.py``): the relaxation turns on the
+    CREATOR having ended, so a live creator keeps the delete HIGH, wrapper or not."""
+    _rig(home, "work", creator=creator)
+    assert _rank(home, command).risk is risk
+
+
 def test_rig_without_ledger_row_is_high(home: Path) -> None:
     rig = _rig(home, "qa-unknown", creator=None)
     assert _rank(home, f"rm -rf {rig}").risk is Risk.HIGH
