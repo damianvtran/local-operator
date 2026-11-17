@@ -73,13 +73,28 @@ POLL_SECONDS = 10
 #: waited out in about one request instead of thirty, and every blocked request
 #: the WAF would count against this computer's IP is one not sent.
 TRANSIENT_BACKOFF_CAP_S = 300.0
+#: The cap for transient causes where Radient did NOT answer (no network, a
+#: timeout, this computer's own store busy). Those requests never reach the WAF,
+#: so backing off to its 300 s window protects nothing, and after the grace has
+#: run out the cap IS the worst-case delay between the network returning and the
+#: relay reopening: 60 s keeps that within one minute (it was ~10 s before the
+#: backoff existed) while still not re-asking every 10 s through a long outage.
+#: PR #4168 review R3.
+UNANSWERED_BACKOFF_CAP_S = 60.0
+#: The transient causes where Radient (or its edge) did answer, with "not now":
+#: only these get the WAF-sized backoff above.
+_ANSWERED_TRANSIENT_REASONS = frozenset({AUTHORIZATION_UNAVAILABLE, SERVER_UNAVAILABLE})
 
 
-def transient_poll_delay(failures: int, retry_after: float | None, *, grace_left: float) -> float:
+def transient_poll_delay(
+    failures: int, retry_after: float | None, *, grace_left: float, reason: str
+) -> float:
     """How long the poller waits after its ``failures``-th transient failure in a row.
 
     Radient's own hint wins when it gave one (`RequestFailed.retry_after`);
-    otherwise exponential from the 10 s cadence. Two bounds, both deliberate:
+    otherwise exponential from the 10 s cadence, capped by ``reason``: 300 s
+    when Radient answered "not now", 60 s when it was not reached at all
+    (`UNANSWERED_BACKOFF_CAP_S`). Two further bounds, both deliberate:
     never below `POLL_SECONDS` (a hint of 1 s must not make the poller faster
     than it is when healthy), and never so long that the grace runs out before
     the next check — one cadence before its end, so a recovery inside the grace
@@ -89,7 +104,12 @@ def transient_poll_delay(failures: int, retry_after: float | None, *, grace_left
         delay = retry_after
     else:
         delay = POLL_SECONDS * 2 ** max(0, failures - 1)
-    delay = min(delay, TRANSIENT_BACKOFF_CAP_S)
+    cap = (
+        TRANSIENT_BACKOFF_CAP_S
+        if reason in _ANSWERED_TRANSIENT_REASONS
+        else UNANSWERED_BACKOFF_CAP_S
+    )
+    delay = min(delay, cap)
     if grace_left > 0:
         delay = min(delay, grace_left - POLL_SECONDS)
     return max(float(POLL_SECONDS), delay)
@@ -101,6 +121,7 @@ def _retry_after(failure: BaseException) -> float | None:
         if isinstance(link, RequestFailed) and link.retry_after is not None:
             return link.retry_after
     return None
+
 
 #: cloudflared's own origin idle timeout (`originRequest.keepAliveTimeout`,
 #: default 1m30s): the dual-run's other client of this gateway.
@@ -1214,6 +1235,7 @@ async def run() -> int:
                                 transient_failures,
                                 _retry_after(failure),
                                 grace_left=gateway.grace_remaining(),
+                                reason=reason,
                             )
                         else:
                             transient_failures = 0

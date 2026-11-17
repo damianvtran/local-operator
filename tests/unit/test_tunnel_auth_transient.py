@@ -11,8 +11,10 @@ tunnel's billing may be inactive" — for a login and a plan that were both fine
 What these tests pin:
 
 * a 429 (and a 408) is `AUTHORIZATION_UNAVAILABLE`, never `REFUSED`;
-* the API client reads the wait Radient asked for (`Retry-After`, or the WAF
-  body's "retry in N seconds", which the WAF cannot put in a header);
+* the API client reads the wait Radient asked for (`Retry-After`, else the WAF
+  body: `details.retry_after_seconds` since radient-infra #138, or the older
+  body's "retry in N seconds", from before the WAF could send a header);
+* a definitive refusal forfeits the grace until the next positive check;
 * the gateway keeps serving inside a bounded grace measured from the last
   POSITIVE check, and a definitive refusal still closes it at once;
 * the poller backs off by Radient's own hint instead of re-asking every 10 s.
@@ -39,14 +41,24 @@ from local_operator.tunnels.service import (
 from tests.unit.test_tunnels import HOST, make_connection, make_signing_key, proof
 
 #: The body radient-infra's WAF rule returns (`pulumi/radient_infra/waf.py`
-#: `RATE_LIMIT_BODY`, quoted in local-operator-mobile PR #297): `error` is an
-#: OBJECT, and there is no `Retry-After` header because the WAF cannot set one.
+#: `RATE_LIMIT_BODY` before #138, quoted in local-operator-mobile PR #297):
+#: `error` is an OBJECT, and no `Retry-After` header came with it.
 WAF_BODY = {
     "error": {
         "type": "rate_limit_error",
         "code": "rate_limited",
         "message": "Too many requests from this network; retry in 300 seconds.",
     }
+}
+#: The body from radient-infra #138 (live 2026-11-17 16:24Z): the nested `error`
+#: unchanged, plus a top-level `code` and `details.retry_after_seconds`, sent
+#: WITH a `Retry-After` header. The 60 s value is the tunnel-session rule's; it
+#: differs from the sentence's 300 here on purpose, so a test can tell which
+#: field was read.
+WAF_BODY_138 = {
+    **WAF_BODY,
+    "code": "rate_limited",
+    "details": {"retry_after_seconds": 60},
 }
 
 
@@ -98,6 +110,20 @@ def test_the_unavailable_reason_has_every_surface_entry_and_no_sign_in_remedy():
         # A hint outside the sane window is ignored, never trusted blindly.
         (httpx.Response(429, headers={"Retry-After": "999999"}), None),
         (httpx.Response(401, json=WAF_BODY), None),
+        # radient-infra #138's shape, as deployed: header plus structured body.
+        (httpx.Response(429, json=WAF_BODY_138, headers={"Retry-After": "60"}), 60.0),
+        # #138's body with the header stripped (a proxy): the structured field
+        # wins over the sentence.
+        (httpx.Response(429, json=WAF_BODY_138), 60.0),
+        # A hostile structured hint is bounded like any other.
+        (
+            httpx.Response(429, json={**WAF_BODY_138, "details": {"retry_after_seconds": 10**9}}),
+            None,
+        ),
+        # `true` is not one second.
+        (httpx.Response(429, json={"details": {"retry_after_seconds": True}}), None),
+        # R4: an unparseable header no longer hides the body's hint.
+        (httpx.Response(429, json=WAF_BODY, headers={"Retry-After": "soon"}), 300.0),
     ],
 )
 async def test_the_client_reads_the_wait_radient_asked_for(
@@ -202,6 +228,32 @@ async def test_a_definitive_refusal_closes_at_once_even_inside_the_grace(signing
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("definitive", [gateway.REFUSED, gateway.BILLING_LAPSED])
+@pytest.mark.parametrize("transient", [gateway.UNREACHABLE, gateway.AUTHORIZATION_UNAVAILABLE])
+async def test_a_transient_failure_after_a_refusal_does_not_reopen_the_grace(
+    signing_key, definitive, transient
+):
+    # PR #4168 review R1: positive -> definitive refusal -> one network blip
+    # served 200 again for the rest of the 600 s, because the grace was still
+    # measured from the positive check the refusal had overruled.
+    origin = httpx.MockTransport(_origin)
+    async with httpx.AsyncClient(transport=origin) as upstream:
+        relay = gateway.Gateway(make_connection(signing_key), upstream, mobile_password="pw")
+        relay.authorize()
+        _lapsed(relay, seconds_since_positive=45)
+        relay.note_authorization_failure(definitive)
+        assert (await _relayed(relay, signing_key)).status_code == 503
+        relay.note_authorization_failure(transient, retry_after=10)
+        reply = await _relayed(relay, signing_key)
+        assert reply.status_code == 503
+        assert relay.grace_remaining() == 0
+        # Only a fresh positive check earns the grace back.
+        relay.authorize()
+        assert (await _relayed(relay, signing_key)).status_code == 200
+        assert relay.grace_remaining() > 0
+
+
+@pytest.mark.asyncio
 async def test_a_transient_failure_never_extends_a_gateway_that_was_never_authorized(
     signing_key,
 ):
@@ -215,8 +267,13 @@ async def test_a_transient_failure_never_extends_a_gateway_that_was_never_author
 
 
 def test_the_poller_backs_off_by_radients_hint_and_never_past_the_grace():
-    from local_operator.tunnels.service import transient_poll_delay
+    from functools import partial
 
+    from local_operator.tunnels import service
+
+    transient_poll_delay = partial(
+        service.transient_poll_delay, reason=gateway.AUTHORIZATION_UNAVAILABLE
+    )
     grace = gateway.AUTHORIZATION_GRACE_SECONDS
     # The WAF's own hint wins over the 10 s cadence.
     assert transient_poll_delay(1, 300, grace_left=grace) == 300
@@ -232,3 +289,23 @@ def test_the_poller_backs_off_by_radients_hint_and_never_past_the_grace():
     # … and never polls faster than the cadence.
     assert transient_poll_delay(1, 300, grace_left=5) == POLL_SECONDS
     assert transient_poll_delay(1, 1, grace_left=grace) == POLL_SECONDS
+
+
+@pytest.mark.parametrize(
+    "reason,cap",
+    [
+        (gateway.AUTHORIZATION_UNAVAILABLE, 300),
+        (gateway.SERVER_UNAVAILABLE, 300),
+        (gateway.UNREACHABLE, 60),
+        (gateway.CONTROL_PLANE_TIMEOUT, 60),
+        (gateway.CREDENTIAL_STORE_BUSY, 60),
+    ],
+)
+def test_only_an_answer_from_radient_earns_the_long_backoff(reason, cap):
+    # PR #4168 review R3: with the grace spent, the cap is how long the relay
+    # stays shut after the network returns. A request that never reached Radient
+    # was never counted by its WAF, so it backs off at most a minute.
+    from local_operator.tunnels.service import transient_poll_delay
+
+    assert transient_poll_delay(30, None, grace_left=0, reason=reason) == cap
+    assert transient_poll_delay(1, 300, grace_left=0, reason=reason) == cap

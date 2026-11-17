@@ -42,44 +42,72 @@ STORE_BUSY_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0)
 #: is ignored and the caller falls back to its own backoff.
 MAX_RETRY_AFTER_S = 3600.0
 
-#: The edge WAF's 429 body (`{"error": {"code": "rate_limited", "message":
-#: "... retry in 300 seconds."}}`). The WAF cannot set a `Retry-After` header,
-#: so this sentence is the only place it states the wait.
+#: The edge WAF's 429 body. Two shapes are live, and both must be read:
+#:
+#: - before radient-infra #138 (deployed 2026-11-17 16:24Z): only
+#:   `{"error": {"code": "rate_limited", "message": "... retry in 300 seconds."}}`,
+#:   with NO `Retry-After` header, so the sentence was the only statement of the
+#:   wait;
+#: - from #138: a `Retry-After` header, the same nested `error` object byte for
+#:   byte, plus a top-level `"code": "rate_limited"` and
+#:   `"details": {"retry_after_seconds": 300}` (60 for the tunnel-session rule).
+#:
+#: The header wins (it is the HTTP contract); the body is the fallback for the
+#: old shape, for a proxy that strips the header, and for a header nobody can
+#: parse. `details.retry_after_seconds` is preferred over the sentence because
+#: it is the structured statement of the same number.
 _WAF_RETRY_IN = re.compile(r"retry in (\d{1,5}) seconds?", re.IGNORECASE)
+
+
+def _header_retry_after(response: httpx.Response) -> float | None:
+    """`Retry-After` as seconds (delta-seconds or an HTTP date), or ``None``."""
+    header = response.headers.get("retry-after", "").strip()
+    if not header:
+        return None
+    if header.isdigit():
+        return float(header)
+    try:
+        when = email.utils.parsedate_to_datetime(header)
+    except (TypeError, ValueError):
+        return None
+    if when is None or when.tzinfo is None:
+        return None
+    return (when - datetime.now(UTC)).total_seconds()
+
+
+def _waf_body_retry_after(response: httpx.Response) -> float | None:
+    """The WAF body's own statement of the wait, in either shape, or ``None``."""
+    try:
+        answer = response.json()
+    except ValueError:
+        return None
+    if not isinstance(answer, dict):
+        return None
+    details = answer.get("details")
+    hinted = details.get("retry_after_seconds") if isinstance(details, dict) else None
+    # `bool` is an `int`: `true` must not read as one second.
+    if isinstance(hinted, (int, float)) and not isinstance(hinted, bool):
+        return float(hinted)
+    error = answer.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    found = _WAF_RETRY_IN.search(message) if isinstance(message, str) else None
+    return float(found.group(1)) if found else None
 
 
 def retry_after_seconds(response: httpx.Response) -> float | None:
     """The wait, in seconds, an error answer asked for, or ``None``.
 
     `Retry-After` first (delta-seconds or an HTTP date, RFC 9110 §10.2.3), then —
-    for a 429 only — the WAF body's "retry in N seconds". Only a NUMBER leaves
-    this function: the body itself is never returned or logged, because a
-    provider body may echo a bearer (see `request`). Anything unparseable or
-    outside `(0, MAX_RETRY_AFTER_S]` is ``None``, so the caller's own backoff
-    applies rather than a value nobody can vouch for.
+    for a 429 only, and also when the header is present but unparseable — the
+    WAF body (`_waf_body_retry_after`, both shapes). Only a NUMBER leaves this
+    function: the body itself is never returned or logged, because a provider
+    body may echo a bearer (see `request`). Anything unparseable or outside
+    `(0, MAX_RETRY_AFTER_S]` is ``None``, so the caller's own backoff applies
+    rather than a value nobody can vouch for.
     """
-    seconds: float | None = None
-    header = response.headers.get("retry-after", "").strip()
-    if header:
-        if header.isdigit():
-            seconds = float(header)
-        else:
-            try:
-                when = email.utils.parsedate_to_datetime(header)
-            except (TypeError, ValueError):
-                when = None
-            if when is not None and when.tzinfo is not None:
-                seconds = (when - datetime.now(UTC)).total_seconds()
-    elif response.status_code == 429:
-        try:
-            answer = response.json()
-        except ValueError:
-            answer = None
-        error = answer.get("error") if isinstance(answer, dict) else None
-        message = error.get("message") if isinstance(error, dict) else None
-        found = _WAF_RETRY_IN.search(message) if isinstance(message, str) else None
-        if found:
-            seconds = float(found.group(1))
+    seconds = _header_retry_after(response)
+    if seconds is None and response.status_code == 429:
+        seconds = _waf_body_retry_after(response)
     if seconds is None or not 0 < seconds <= MAX_RETRY_AFTER_S:
         return None
     return seconds

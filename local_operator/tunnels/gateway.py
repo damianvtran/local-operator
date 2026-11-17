@@ -53,7 +53,9 @@ AUTHORIZATION_LEASE_SECONDS = 30
 #: reachable just because this computer cannot hear the revocation. And the
 #: grace is never granted for a definitive answer: a 401/403/402/404, an
 #: inactive record or a version change still close the relay at once
-#: (`note_authorization_failure`, and the poller's restart branch).
+#: (`note_authorization_failure`, and the poller's restart branch), and the
+#: grace is not re-earned after one until the next positive check: a transient
+#: failure that follows a refusal leaves the relay shut.
 AUTHORIZATION_GRACE_SECONDS = 600
 
 
@@ -862,9 +864,7 @@ class Gateway:
         """Seconds of grace left from the last positive check (0 when none)."""
         if self.last_authorized_at is None:
             return 0.0
-        return max(
-            0.0, self.last_authorized_at + AUTHORIZATION_GRACE_SECONDS - time.monotonic()
-        )
+        return max(0.0, self.last_authorized_at + AUTHORIZATION_GRACE_SECONDS - time.monotonic())
 
     def note_authorization_failure(self, reason: str, *, retry_after: float | None = None) -> None:
         """Record why the poller could not renew the relay lease.
@@ -878,7 +878,11 @@ class Gateway:
         the relay open until `AUTHORIZATION_GRACE_SECONDS` after the last
         positive check; every other reason pulls the lease back to its normal
         bound from that check, so a definitive refusal that follows a run of
-        429s closes the relay at once instead of riding the grace out.
+        429s closes the relay at once instead of riding the grace out. A
+        definitive reason also FORFEITS the grace: it clears
+        ``last_authorized_at``, so a transient failure after it (a network blip,
+        one more 429) finds no positive check to measure from and cannot reopen
+        the relay; only the next successful `authorize()` earns the grace back.
         ``retry_after`` is when the poller will ask again, in seconds.
         """
         self.authorization_failure = reason
@@ -894,6 +898,10 @@ class Gateway:
             self.authorized_until = min(
                 self.authorized_until, self.last_authorized_at + AUTHORIZATION_LEASE_SECONDS
             )
+            # Without this, positive -> REFUSED -> UNREACHABLE re-opened the
+            # relay for the rest of the 600 s (PR #4168 review R1): the
+            # transient branch above measures from this timestamp.
+            self.last_authorized_at = None
 
     def refusal_reason(self) -> str:
         """The reason this gateway is refusing relayed requests right now.

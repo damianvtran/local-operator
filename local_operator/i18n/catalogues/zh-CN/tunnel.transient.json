@@ -1,5 +1,5 @@
 {
   "tunnel.transient.authorization_unavailable.label": "Radient要求降低频率",
   "tunnel.transient.authorization_unavailable.relay": "Radient要求这台电脑放慢中继授权检查，通常是因为这个网络同时发出了大量请求。登录和这台电脑都没有问题；Radient恢复响应后会自动重新授权。",
-  "tunnel.transient.authorization_unavailable.terminal": "Radient对连接器的授权检查返回了HTTP 429或408（要求降低频率），问题不在登录、账单，也不在这台电脑。连接器会在上次成功检查后最多10分钟内继续为手机提供服务，按Radient要求的时间等待后再检查，并自动重新授权；无需执行任何本地命令。"
+  "tunnel.transient.authorization_unavailable.terminal": "Radient对连接器的授权检查返回了HTTP 429或408（要求降低频率），问题不在登录、计费，也不在这台电脑。连接器会在上次成功检查后最多10分钟内继续为手机提供服务，按Radient要求的时间等待后再检查，并自动重新授权；无需执行任何本地命令。"
 }

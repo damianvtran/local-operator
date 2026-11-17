@@ -80,8 +80,9 @@ class RequestFailed(ValueError):
     and parsing it back out of a sentence would couple that log to prose.
 
     ``retry_after`` is the wait, in seconds, Radient asked for — its
-    ``Retry-After`` header, or for the edge WAF (which cannot set a header) the
-    "retry in N seconds" of its body — or ``None`` when it named none. It is a
+    ``Retry-After`` header, or else the edge WAF body's
+    ``details.retry_after_seconds`` (radient-infra #138) or its older "retry in
+    N seconds" sentence — or ``None`` when it named none. It is a
     NUMBER read out of the answer, never the body itself, so the redaction rule
     above still holds. The connector's poller backs off by it (see
     ``service.transient_poll_delay``): re-asking inside a WAF block only keeps
