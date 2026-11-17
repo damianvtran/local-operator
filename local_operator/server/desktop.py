@@ -80,6 +80,7 @@ otherwise have no way to admit the dev-server origin the UI is written against.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import secrets
 import select
@@ -145,7 +146,7 @@ _TOKEN_FD_MAX_BYTES = 4096
 _TOKEN_MIN_CHARS = 16
 
 #: How long boot waits for the writer to deliver the line, on platforms where the wait can
-#: be bounded (POSIX ``select``). A spawner that names a descriptor and never writes is a
+#: be bounded (POSIX ``poll``). A spawner that names a descriptor and never writes is a
 #: bug on its side; the daemon then boots with the plane CLOSED rather than hanging.
 _TOKEN_FD_TIMEOUT_S = 10.0
 
@@ -252,14 +253,14 @@ def _read_bearer_fd(fd: int) -> str:
         while b"\n" not in data and len(data) < _TOKEN_FD_MAX_BYTES:
             if os.name == "posix":
                 left = deadline - time.monotonic()
-                if left <= 0 or not select.select([fd], [], [], left)[0]:
+                if left <= 0 or not _readable_within(fd, left):
                     logger.warning("desktop bearer descriptor delivered nothing in time")
                     return ""
             chunk = os.read(fd, _TOKEN_FD_MAX_BYTES - len(data))
             if not chunk:
                 break
             data += chunk
-    except (OSError, ValueError):  # ValueError: a number select() cannot take
+    except (OSError, ValueError):  # ValueError: a negative or otherwise unpollable number
         logger.warning("desktop bearer descriptor is unreadable", exc_info=True)
         return ""
     finally:
@@ -293,6 +294,27 @@ def _usable_bearer(token: str, source: str) -> str:
         )
         return ""
     return token
+
+
+def _readable_within(fd: int, seconds: float) -> bool:
+    """Whether ``fd`` has data (or EOF) to read within ``seconds``. POSIX only.
+
+    ``poll`` and not ``select``: ``select()`` takes only descriptor numbers below
+    ``FD_SETSIZE`` (1024) and raises ``ValueError`` for anything higher, which turned a
+    perfectly good bearer pipe into "descriptor is unreadable" and a CLOSED desktop plane.
+    The number is the spawner's choice, not ours: a reload successor inherits the pipe at
+    whatever number its parent's ``os.pipe()`` returned, and a long-lived serve holding many
+    sockets and session files hands on numbers past 1024. CI hit exactly that in a pytest
+    worker that had accumulated >1000 open descriptors (shard 3.13/3, run 44047538630).
+    ``poll`` has no such ceiling. A hang-up or an invalid descriptor also wakes it, and the
+    following ``os.read`` then reports EOF or raises ``OSError`` -- the same outcomes the
+    caller already maps to a closed plane.
+    """
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    # poll() takes whole milliseconds; round UP so a sub-millisecond remainder still waits
+    # instead of spinning on a zero timeout.
+    return bool(poller.poll(max(1, math.ceil(seconds * 1000))))
 
 
 def _retire_descriptor(fd: int) -> None:

@@ -161,6 +161,64 @@ def test_eof_without_a_newline_still_delivers_the_token(monkeypatch: pytest.Monk
     assert desktop.desktop_posture().token == TOKEN
 
 
+#: A descriptor number past ``FD_SETSIZE`` (1024), the ceiling ``select()`` cannot cross.
+_HIGH_FD = 1100
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the bounded wait and F_DUPFD are POSIX-only")
+def test_a_descriptor_numbered_past_fd_setsize_is_still_adopted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bearer pipe can arrive at any number; ``select()`` refused >= 1024 (CI 44047538630).
+
+    A long-lived pytest worker -- or a busy serve handing its bearer to a reload successor --
+    returns pipe numbers past 1024 from ``os.pipe()``. The wait must not care. The number is
+    pinned with ``F_DUPFD`` rather than by opening a thousand files, so the test is exact.
+    macOS starts processes with a soft RLIMIT_NOFILE of 256, below the target, so the soft
+    limit is raised (never past the hard limit) for this test and restored after it.
+    """
+    import fcntl
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    needed = _HIGH_FD + 16
+    if hard != resource.RLIM_INFINITY and hard < needed:
+        pytest.skip(f"hard RLIMIT_NOFILE {hard} cannot hold descriptor {_HIGH_FD}")
+    if soft != resource.RLIM_INFINITY and soft < needed:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (needed, hard))
+    try:
+        low = _pipe_with(TOKEN.encode() + b"\n")
+        try:
+            high = fcntl.fcntl(low, fcntl.F_DUPFD, _HIGH_FD)
+        finally:
+            os.close(low)
+        assert high >= _HIGH_FD
+        monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(high))
+        desktop.adopt_spawn_bearer()
+        assert desktop.desktop_posture().token == TOKEN
+        # Consumed and closed, like any other bearer descriptor.
+        with pytest.raises(OSError):
+            os.fstat(high)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="only POSIX bounds the wait")
+def test_a_writer_that_never_writes_times_out_with_the_plane_closed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The bounded wait (now ``poll``) still gives up: boot never hangs on a silent spawner."""
+    monkeypatch.setattr(desktop, "_TOKEN_FD_TIMEOUT_S", 0.05)
+    read_end, write_end = os.pipe()  # write end held open and silent
+    try:
+        monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(read_end))
+        desktop.adopt_spawn_bearer()
+    finally:
+        os.close(write_end)
+    assert desktop.desktop_posture().enabled is False
+    assert "delivered nothing in time" in caplog.text
+
+
 @pytest.mark.parametrize("value", ["not-a-number", "987654"])
 def test_a_bad_descriptor_leaves_the_plane_closed(
     monkeypatch: pytest.MonkeyPatch, value: str
