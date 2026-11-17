@@ -1,0 +1,389 @@
+{
+  "round": 3,
+  "locale": "ur",
+  "namespace": "wire.settings",
+  "key_count": 8,
+  "audit_date": "2026-11-16",
+  "pr": "https://github.com/damianvtran/local-operator/pull/4135",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, task as-au-ur)",
+    "session": "47a6d823151f",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "system prompt 'Model:' line of this session",
+    "fallback": "none observed",
+    "independent_from_translator_session": true,
+    "translator": "i18n-translator, job fd83e050300b, anthropic/claude-sonnet-5-5",
+    "native_speaker_review": false
+  },
+  "commit_audited": "a67cdd7c7350255802f8f1b44417f06b9697b288 + uncommitted round-3 translator edit (worktree .worktrees/as4135-copy3)",
+  "diff_base": "a67cdd7c",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "431a5d92412501edc1fad1589ba65f3220e42ba931148cf9179cbd8218d4b860"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "sha256": "e5e0350167c0ea7bc38ada85f30c7afc0a123b3262bc960e77e70eef52817def"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/ur.md",
+      "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+    }
+  },
+  "round3": {
+    "scope": "wire.settings.update_keep_generations.help only; 7 other keys retained",
+    "mechanical": {
+      "hashes_match_brief": true,
+      "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), rc=0",
+      "git_diff_stat_vs_a67cdd7c": "ur/wire.settings.json | 2 +- (1 file, 1+/1-)",
+      "values_changed": [
+        "wire.settings.update_keep_generations.help"
+      ],
+      "key_set_equal_en": true,
+      "key_set_equal_base": true,
+      "retained_7_byte_identical_to_round2_audited_text": true,
+      "nfc": true,
+      "bidi_or_zero_width_chars": "none",
+      "icu_placeholders_backticks": "none (as English)"
+    },
+    "changed_value": {
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "ہمیشہ رکھی جاتی ہیں: موجودہ، پچھلی اور چلتی انسٹالیشنز، اور وہ جنہیں کسی سیشن یا سروس نے استعمال میں درج کیا ہو۔ یہ عدد اتنی ہی تازہ ترین غیر مستعمل انسٹالیشنز بھی رکھتا ہے۔",
+      "cells_whole": 173,
+      "en_cells": 138,
+      "guarantee_clause_end_cell": 112,
+      "guarantee_within_146": true,
+      "cut_at_146_leaves": "…یہ عدد اتنی ہی تازہ ترین غیر مستع (tail cut mid-word; allowed fallback)",
+      "verdict": "PASS (MINOR ur-A2, ur-A7; NIT ur-A6, ur-A8)",
+      "classes": {
+        "always_first": "ہمیشہ رکھی جاتی ہیں: (fronted, unconditional)",
+        "current": "موجودہ",
+        "previous": "پچھلی",
+        "running": "چلتی انسٹالیشنز (general participle: covers the updater and any install a session runs from, not only the current copy)",
+        "registered": "وہ جنہیں کسی سیشن یا سروس نے استعمال میں درج کیا ہو (recorded as in use; cannot read as 'logged in')"
+      },
+      "second_sentence": "یہ عدد … بھی رکھتا ہے: 'this number also keeps …' attaches to the number field; بھی = in addition"
+    },
+    "terminology_recheck": "running = چلتی in choice.true and help (consistent); unused = غیر مستعمل (help, label, auto_prune.help); install = انسٹالیشن; no leftover زیرِ استعمال/in-use sense in any retained value. No retained-value inconsistency found."
+  },
+  "per_key": [
+    {
+      "key": "wire.settings.updates.title",
+      "text": "اپ ڈیٹس",
+      "cells": 7,
+      "verdict": "PASS"
+    },
+    {
+      "key": "wire.settings.updates.description",
+      "text": "اپ ڈیٹ کے بعد بچ جانے والی پرانی انسٹالیشنز کے ساتھ کیا کیا جائے۔ اگلی بار `lop update` چلانے پر لاگو ہوگا۔",
+      "cells": 107,
+      "verdict": "PASS",
+      "note": "accurate; feminine agreement correct; Latin island followed by Urdu, so ۔ never abuts it"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.label",
+      "text": "پرانی انسٹالیشنز صاف کریں",
+      "cells": 25,
+      "budget": 29,
+      "verdict": "PASS (NIT ur-A4)"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.help",
+      "text": "ہر اپ ڈیٹ کے بعد غیر مستعمل انسٹالیشنز حذف کریں، `lop install prune` کی طرح۔",
+      "cells": 76,
+      "budget": "~72 soft",
+      "verdict": "PASS (MINOR ur-A3)"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.true.description",
+      "text": "موجودہ، چلتی اور چند تازہ ترین رکھیں",
+      "cells": 36,
+      "budget": "~40",
+      "verdict": "PASS (NIT ur-A5)",
+      "note": "'running' = چلتی, same root as help's چلتے سیشن; no leftover in-use sense"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.false.description",
+      "text": "ہر انسٹالیشن رکھیں؛ دستی طور پر صاف کریں",
+      "cells": 40,
+      "budget": "~40",
+      "verdict": "PASS"
+    },
+    {
+      "key": "wire.settings.update_keep_generations.label",
+      "text": "غیر مستعمل انسٹالیشنز رکھیں",
+      "cells": 27,
+      "budget": 29,
+      "verdict": "FINDING (MINOR ur-A1)"
+    },
+    {
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "ہمیشہ رکھی جاتی ہیں: موجودہ، پچھلی اور چلتی انسٹالیشنز، اور وہ جنہیں کسی سیشن یا سروس نے استعمال میں درج کیا ہو۔ یہ عدد اتنی ہی تازہ ترین غیر مستعمل انسٹالیشنز بھی رکھتا ہے۔",
+      "cells": 173,
+      "verdict": "PASS (MINOR ur-A2, ur-A7; NIT ur-A6, ur-A8)",
+      "note": "round 3 text; guarantee first, ends at cell 112 <=146; all four classes; ہمیشہ unconditional"
+    }
+  ],
+  "findings": [
+    {
+      "id": "ur-A1",
+      "severity": "MINOR",
+      "key": "wire.settings.update_keep_generations.label",
+      "text": "غیر مستعمل انسٹالیشنز رکھیں",
+      "evidence": "English is a noun phrase naming a count; the imperative 'keep unused installations' beside a number field reads as a command and loses 'how many'. Precedent in the same file: network_audit_generations 'Audit generations kept' → 'محفوظ آڈٹ جنیریشنز'.",
+      "fix": "محفوظ غیر مستعمل انسٹالیشنز (27 cells)",
+      "status": "carried (retained value unchanged)"
+    },
+    {
+      "id": "ur-A2",
+      "severity": "MINOR",
+      "status": "carried, re-evaluated on new text",
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "موجودہ، پچھلی اور چلتی انسٹالیشنز",
+      "evidence": "Plural 'پچھلی … انسٹالیشنز' can read as 'earlier installs' in general (what prune deletes). The English 'current, previous and running installs' has the same structure and ambiguity, so this mirrors the source; the 146-cell guarantee budget (34 cells spare) leaves little room to disambiguate.",
+      "fix": "optional: replace پچھلی with «اس اپ ڈیٹ سے پہلے والی» if the budget allows; otherwise accept"
+    },
+    {
+      "id": "ur-A3",
+      "severity": "MINOR",
+      "key": "wire.settings.update_auto_prune.help",
+      "text": "(76 cells)",
+      "evidence": "4 cells over the ~72 soft hint; the 19-cell Latin island cannot shrink, and the translator already dropped پرانی (old), which is harmless because unused installs are never current or running. Not a defect.",
+      "fix": "accept as-is",
+      "status": "carried (retained value unchanged)"
+    },
+    {
+      "id": "ur-A7",
+      "severity": "MINOR",
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "(173 cells)",
+      "evidence": "Whole value exceeds the <=146 aim by 27 cells, so on 80-col terminals the second sentence is cut mid-word at 146 (…غیر مستع). This is the allowed fallback: the guarantee ends at cell 112. Shorter attempts measured 151-155 cells without losing meaning.",
+      "fix": "accept as-is"
+    },
+    {
+      "id": "ur-A4",
+      "severity": "NIT",
+      "key": "wire.settings.update_auto_prune.label",
+      "text": "پرانی انسٹالیشنز صاف کریں",
+      "evidence": "صاف کرنا with installations as object can read as 'clean the installs' rather than remove them; the help disambiguates with حذف.",
+      "fix": "پرانی انسٹالیشنز ہٹائیں (23 cells), optional",
+      "status": "carried (retained value unchanged)"
+    },
+    {
+      "id": "ur-A5",
+      "severity": "NIT",
+      "key": "wire.settings.update_auto_prune.choice.true.description",
+      "text": "موجودہ، چلتی اور چند تازہ ترین رکھیں",
+      "evidence": "Bare participle چلتی used as a substantive reads clipped; چلتی ہوئی is the natural attributive form.",
+      "fix": "موجودہ، چلتی ہوئی اور چند تازہ ترین رکھیں (41 cells)",
+      "status": "carried (retained value unchanged)"
+    },
+    {
+      "id": "ur-A6",
+      "severity": "NIT",
+      "status": "carried into new text",
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "استعمال میں درج کیا ہو",
+      "evidence": "'recorded in use' collocation slightly calqued.",
+      "fix": "زیرِ استعمال درج کیا ہو (+0 cells net change ≈ same width)"
+    },
+    {
+      "id": "ur-A8",
+      "severity": "NIT",
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "یہ عدد اتنی ہی تازہ ترین غیر مستعمل انسٹالیشنز بھی رکھتا ہے۔",
+      "evidence": "'This number also keeps just as many …' is slightly self-referential (اتنی ہی with no antecedent); the meaning is still clear.",
+      "fix": "اس عدد جتنی تازہ ترین غیر مستعمل انسٹالیشنز بھی رکھی جاتی ہیں۔ (62 cells vs current tail)"
+    }
+  ],
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 4,
+    "nit": 4
+  },
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ur-A1",
+      "ur-A2",
+      "ur-A3",
+      "ur-A7",
+      "ur-A4",
+      "ur-A5",
+      "ur-A6",
+      "ur-A8"
+    ]
+  },
+  "round1": {
+    "note": "Not performed by this auditor: the first attempt (draft English, target e12c5854…) was discarded on resume before any record was written."
+  },
+  "round2": {
+    "commit_audited": "cc66c51cb3add48bd1e88700fa1ba743bcdb252c + uncommitted translator working-tree edits (final round)",
+    "input_hashes_sha256": {
+      "local_operator/i18n/catalogues/ur/wire.settings.json": "f450bbbe3fd15bd972f3abad90bd9c0d8fe39088d54586b6175ca696a2a8c788",
+      "local_operator/i18n/catalogues/en/wire.settings.json": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+      "local_operator/i18n/catalogues/en/wire.settings.context.json": "ebe0faa8bb9d26922c67493ba2ea8508f51df3897257e08dfac3b97dbad40cfe",
+      "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+      "i18n/style-guides/ur.md": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+    },
+    "mechanical": {
+      "hashes_match_brief": true,
+      "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), rc=0",
+      "git_diff_stat_vs_cc66c51c": "local_operator/i18n/catalogues/ur/wire.settings.json | 12 ++++++------ (1 file, 6+/6-)",
+      "values_changed_vs_draft": 6,
+      "changed_outside_scope": [],
+      "unchanged_in_scope": [
+        "updates.title",
+        "update_auto_prune.label"
+      ],
+      "key_set_equal_en": true,
+      "key_set_equal_draft": true,
+      "total_keys": 877,
+      "nfc_all_8": true,
+      "bidi_or_zero_width_chars": "none (U+200B-200F, 202A-202E, 2066-2069, FEFF, 061C scanned)",
+      "backticked_commands_byte_identical": {
+        "updates.description": "`lop update`",
+        "update_auto_prune.help": "`lop install prune`"
+      },
+      "icu_or_placeholders_added": false,
+      "labels_le_29_cells": {
+        "update_auto_prune.label": 25,
+        "update_keep_generations.label": 27
+      }
+    },
+    "per_key": [
+      {
+        "key": "wire.settings.updates.title",
+        "text": "اپ ڈیٹس",
+        "cells": 7,
+        "verdict": "PASS"
+      },
+      {
+        "key": "wire.settings.updates.description",
+        "text": "اپ ڈیٹ کے بعد بچ جانے والی پرانی انسٹالیشنز کے ساتھ کیا کیا جائے۔ اگلی بار `lop update` چلانے پر لاگو ہوگا۔",
+        "cells": 107,
+        "verdict": "PASS",
+        "note": "accurate; feminine agreement correct; Latin island followed by Urdu, so ۔ never abuts it"
+      },
+      {
+        "key": "wire.settings.update_auto_prune.label",
+        "text": "پرانی انسٹالیشنز صاف کریں",
+        "cells": 25,
+        "budget": 29,
+        "verdict": "PASS (NIT ur-A4)"
+      },
+      {
+        "key": "wire.settings.update_auto_prune.help",
+        "text": "ہر اپ ڈیٹ کے بعد غیر مستعمل انسٹالیشنز حذف کریں، `lop install prune` کی طرح۔",
+        "cells": 76,
+        "budget": "~72 soft",
+        "verdict": "PASS (MINOR ur-A3)"
+      },
+      {
+        "key": "wire.settings.update_auto_prune.choice.true.description",
+        "text": "موجودہ، چلتی اور چند تازہ ترین رکھیں",
+        "cells": 36,
+        "budget": "~40",
+        "verdict": "PASS (NIT ur-A5)",
+        "note": "'running' = چلتی, same root as help's چلتے سیشن; no leftover in-use sense"
+      },
+      {
+        "key": "wire.settings.update_auto_prune.choice.false.description",
+        "text": "ہر انسٹالیشن رکھیں؛ دستی طور پر صاف کریں",
+        "cells": 40,
+        "budget": "~40",
+        "verdict": "PASS"
+      },
+      {
+        "key": "wire.settings.update_keep_generations.label",
+        "text": "غیر مستعمل انسٹالیشنز رکھیں",
+        "cells": 27,
+        "budget": 29,
+        "verdict": "FINDING (MINOR ur-A1)"
+      },
+      {
+        "key": "wire.settings.update_keep_generations.help",
+        "text": "ہر صفائی میں رکھی جانے والی تازہ ترین غیر مستعمل انسٹالیشنز کی تعداد۔ موجودہ اور پچھلی انسٹالیشنز، اپ ڈیٹ چلانے والی انسٹالیشن، اور وہ تمام جنہیں کسی چلتے سیشن یا سروس نے استعمال میں درج کیا ہو، ہمیشہ رکھی جاتی ہیں۔",
+        "cells": 215,
+        "verdict": "PASS (MINOR ur-A2, NIT ur-A6)",
+        "note": "all four always-kept classes present (موجودہ / پچھلی / اپ ڈیٹ چلانے والی / چلتے سیشن یا سروس نے درج کیا); ہمیشہ unweakened; رکھی جاتی ہیں agrees"
+      }
+    ],
+    "findings": [
+      {
+        "id": "ur-A1",
+        "severity": "MINOR",
+        "key": "wire.settings.update_keep_generations.label",
+        "text": "غیر مستعمل انسٹالیشنز رکھیں",
+        "evidence": "English is a noun phrase naming a count; the imperative 'keep unused installations' beside a number field reads as a command and loses 'how many'. Precedent in the same file: network_audit_generations 'Audit generations kept' → 'محفوظ آڈٹ جنیریشنز'.",
+        "fix": "محفوظ غیر مستعمل انسٹالیشنز (27 cells)"
+      },
+      {
+        "id": "ur-A2",
+        "severity": "MINOR",
+        "key": "wire.settings.update_keep_generations.help",
+        "text": "موجودہ اور پچھلی انسٹالیشنز",
+        "evidence": "Plural 'پچھلی انسٹالیشنز' can be read as 'earlier installations' in general, i.e. the very old installs the prune deletes. English 'current and previous installs' carries the same ambiguity, so this mirrors the source rather than mis-stating it; Urdu can resolve it cheaply.",
+        "fix": "موجودہ انسٹالیشن، اس اپ ڈیٹ سے پہلے والی انسٹالیشن، اپ ڈیٹ چلانے والی انسٹالیشن، اور وہ تمام جنہیں کسی چلتے سیشن یا سروس نے زیرِ استعمال درج کیا ہو، ہمیشہ رکھی جاتی ہیں۔ (whole help 238 cells; no hard budget)"
+      },
+      {
+        "id": "ur-A3",
+        "severity": "MINOR",
+        "key": "wire.settings.update_auto_prune.help",
+        "text": "(76 cells)",
+        "evidence": "4 cells over the ~72 soft hint; the 19-cell Latin island cannot shrink, and the translator already dropped پرانی (old), which is harmless because unused installs are never current or running. Not a defect.",
+        "fix": "accept as-is"
+      },
+      {
+        "id": "ur-A4",
+        "severity": "NIT",
+        "key": "wire.settings.update_auto_prune.label",
+        "text": "پرانی انسٹالیشنز صاف کریں",
+        "evidence": "صاف کرنا with installations as object can read as 'clean the installs' rather than remove them; the help disambiguates with حذف.",
+        "fix": "پرانی انسٹالیشنز ہٹائیں (23 cells), optional"
+      },
+      {
+        "id": "ur-A5",
+        "severity": "NIT",
+        "key": "wire.settings.update_auto_prune.choice.true.description",
+        "text": "موجودہ، چلتی اور چند تازہ ترین رکھیں",
+        "evidence": "Bare participle چلتی used as a substantive reads clipped; چلتی ہوئی is the natural attributive form.",
+        "fix": "موجودہ، چلتی ہوئی اور چند تازہ ترین رکھیں (41 cells)"
+      },
+      {
+        "id": "ur-A6",
+        "severity": "NIT",
+        "key": "wire.settings.update_keep_generations.help",
+        "text": "استعمال میں درج کیا ہو",
+        "evidence": "'recorded in use' collocation is slightly calqued; زیرِ استعمال درج is the idiomatic 'registered as in use'.",
+        "fix": "زیرِ استعمال درج کیا ہو"
+      }
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 3,
+      "nit": 3
+    },
+    "terminal_verdict": "CLEAN-WITH-FINDINGS"
+  },
+  "not_verified": [
+    "native-speaker judgement (LLM reasoning only, not a native speaker, no native review claimed)",
+    "rendered fit in TUI/desktop (cell counts via rich.cells.cell_len only, no screenshots)",
+    "Nastaliq font shaping and actual terminal bidi rendering"
+  ],
+  "ledger": "not appended (task forbids running ledger.py; record only)",
+  "audit_notes_not_execution_log": "round 3 commands run: shasum -a 256 (ur/en/context); scripts/i18n/check.py --catalogues-only (PYTHONPATH=as4135-copy3, Node 24, CMUX_* unset); git diff a67cdd7c --stat; read-only python diff/keyset/retained-identity/NFC/bidi/cell_len/146-cut checks"
+}

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "7d72653f5d245bf87dadc3e806fa64dbea7d876dadb9be382c404f8b37b49f00",
+  "history_sha256": "b5407976acf72b6b67d3c64434c2f8caa9f9140d62ae46b5b805d64b84c8c706",
   "entries": [
     {
       "locale": "vi",
@@ -680,6 +680,40 @@
       "evidence": "i18n/audits/evidence/vi/wire.settings/ap1/record.json",
       "round": "ap1",
       "keys_audited": 8
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6",
+      "target_sha256": "fa571f18d5247ab5db8007db9f1afe5662b66693325a867d97950ec32759522e",
+      "translator": {
+        "agent": "i18n-translator (jobs for this key's rework: 74904ed7b25a; original first-pass chain in the ap1 receipt: (job 6bf342c7825b); resumed/remediation job chain 6bf342c7825b->4f5e2163d473->c030bb8dc042->7f43b54c66e9)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task as-au-vi)",
+        "session": "9bde6e3b38c6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-16",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 (fix/auto-prune-generations) FINAL round ap2: the ONE reworded key wire.settings.update_keep_generations.help (English now leads with the always-kept guarantee: 'Always kept: current, previous and running installs, and any a session or service registered. Also keeps this many newest unused installs.'; decided by the PR's code review after a real TUI render). This row supersedes the ap1 row's value for update_keep_generations.help only; the other 7 keys are unchanged from ap1 and the ap1 row stays in history (append-only). Independent i18n-auditor session 9bde6e3b38c6 (anthropic/claude-opus-5-5, fallback: none observed), same session as ap1, now at round 3 of its record; audited bytes = target_sha256 on top of a67cdd7c7350 + uncommitted final working tree. i18n-translator (anthropic/claude-sonnet-5-5) job chain for this key: 74904ed7b25a. Pair findings: 0 blocker, 0 major, 0 minor, 0 nit []; verdict CLEAN. Record: i18n/audits/evidence/vi/wire.settings/ap2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/wire.settings/ap2/record.json",
+      "round": "ap2",
+      "keys_audited": 1
     }
   ]
 }
