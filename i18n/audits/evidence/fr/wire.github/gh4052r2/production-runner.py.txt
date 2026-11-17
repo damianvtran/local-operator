@@ -1,0 +1,34 @@
+"""Unmodified production resolver proof after supported approvals + generation."""
+import sys,os,json
+from pathlib import Path
+R=Path('/Users/damian/local-operator/.worktrees/github-designation-ux-4052');os.chdir(R);sys.path.insert(0,str(R))
+from local_operator.i18n import messages,text,resolve,runtime
+from local_operator.i18n.keys import wire_github as keys
+from local_operator.i18n.messages import msg
+O=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])/'audit4052r2';result=json.loads((O/'result.json').read_text());P=R/'local_operator/i18n/catalogues';outputs=[]
+locales=['fr','es','zh-CN','ru','vi','ur','hi'];shipped=json.loads((R/'local_operator/i18n/data/shipped.json').read_text())['locales'];assert set(shipped)==set(['en']+locales),shipped
+for x in result['changed']:
+ l=x['locale'];record=messages.render_record(x['message_key'],x['params'],locale=l);assert record.source_locale==l;assert record.text==x['rendered'],(x['message_key'],record.text,x['rendered'])
+ text.set_active_locale(l);assert text.active_locale()==l
+ actual=text.tr(x['namespace'])(msg(x['message_key'],**x['params']));assert actual==record.text
+ outputs.append({'surface':'changed production messages.render_record + active text.tr','locale':l,'message':x['message_key'],'source_locale':record.source_locale,'actual':record.text,'passed':True})
+for l in ['es','ru']:
+ text.set_active_locale(l);T=text.tr('wire.github')
+ for reason in ['reason_explicit','reason_unavailable_local','reason_unavailable_remote','reason_excluded_local','reason_excluded_remote','reason_no_repos_local','reason_no_repos_remote']:
+  fail=' ('+T(keys.failure_offline())+')';kw={'failure':fail} if 'unavailable' in reason else {'count':2} if 'excluded' in reason else {}
+  r=T(getattr(keys,reason)(**kw))
+  remedy='remedy_unavailable' if 'unavailable' in reason else 'remedy_excluded' if 'excluded' in reason else 'remedy_no_repos' if 'no_repos' in reason else 'remedy_explicit'
+  command='lop network credential github repos --refresh' if 'unavailable' in reason else 'lop network credential github include <owner/repo>' if 'excluded' in reason else 'lop network credential github repos --use-default'
+  m=T(getattr(keys,remedy)(**({'command':command} if remedy!='remedy_no_repos' else {})))
+  actual=T(keys.share_empty(reason=r,remedy=m));candidate=next(z['text'] for z in result['renders'] if z['locale']==l and z.get('reason_key')==reason);assert actual==candidate
+  outputs.append({'surface':'production generated Msg + active resolver composition','locale':l,'reason':reason,'actual':actual,'passed':True})
+for l in locales:
+ text.set_active_locale(l);assert resolve.eligible_locale(l)==l
+ for code,params in [('wire.github.wrapper_denied',{'repo':'octo-org/website','command':'lop network credential github repos'}),('wire.settings.network_credentials_github_repositories.help',{}),('wire.github.age_days',{'count':21}),('wire.github.age_days',{'count':1000000})]:
+  ns='wire.settings' if code.startswith('wire.settings.') else 'wire.github';value=json.loads((P/l/(ns+'.json')).read_text())[code];want=runtime.render_message(value,params,l);record=messages.render_record(code,params,locale=l);assert record.source_locale==l and record.text==want
+  outputs.append({'surface':'restored-locale resolver smoke','locale':l,'message':code,'actual':record.text,'source_locale':record.source_locale,'passed':True})
+fallback=messages.render_record('wire.github.age_days',{'count':21},locale='not-supported');assert fallback.source_locale=='en' and fallback.text=='21 days ago'
+unknown=messages.render_record('wire.github.does_not_exist',{},locale='ur');assert unknown.source_locale is None and unknown.text=='wire.github.does_not_exist'
+text.set_active_locale('en')
+proof={'source_audit_revision':result['head'],'generated_shipped_locales':shipped,'executions':outputs,'production_execution_count':len(outputs),'fallback_controls':{'unsupported_locale':{'text':fallback.text,'source_locale':fallback.source_locale},'unknown_key':{'text':unknown.text,'source_locale':unknown.source_locale}},'production_activation_verified':True,'limits':'Resolver + generated-Msg production path only. No browser/native app, no credential fetch/live GitHub request, no native Urdu terminal shaping certification. Pseudo/raw static frame and isolated paint-adapter evidence remain separately labelled.'}
+(O/'production.json').write_text(json.dumps(proof,ensure_ascii=False,indent=2)+'\n');print(json.dumps({'shipped':shipped,'production_executions':len(outputs),'changed_messages':9,'reason_compositions':14,'restored_smokes':28,'fallback_controls':'passed','native_shaping_certified':False},indent=2))

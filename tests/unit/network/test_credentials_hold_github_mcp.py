@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
+import json
 import time
 from typing import Any
 
@@ -175,18 +177,38 @@ def test_the_tool_github_env_survives_the_owner_and_renews_on_return(
     session_id = "github-held-tool-session"
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(net.b.root))
     registered = 0
+    sink: list[str] = []
 
-    def register(_token: str) -> None:
-        # The consumer must supply a working redaction sink. Count registrations
-        # without retaining or printing the synthetic installation bearer.
-        nonlocal registered
-        registered += 1
+    def register(value: str) -> None:
+        # The consumer must supply a working redaction sink. Keep only digests,
+        # never the synthetic installation bearer itself.
+        sink.append(hashlib.sha256(value.encode()).hexdigest())
+
+    def _digest(value: str) -> str:
+        return hashlib.sha256(value.encode()).hexdigest()
 
     def tool_has_token() -> bool:
+        # Count BEARER registrations, not sink calls. lent_github_env also
+        # registers the optional diagnostic scope it writes beside the bearer
+        # (the JSON and its token-derived identity, PR #4052) so neither leaks
+        # through an env dump; those are display metadata, and a raw call count
+        # would tie this lifecycle test to whether that hint is present.
+        # Every other sink call must be exactly that scope's two values.
+        nonlocal registered
+        sink.clear()
         tool_env, _ = github_mod.lent_github_env(
             session_id=session_id, register=register, client=client
         )
-        return bool(tool_env.get("GH_TOKEN"))
+        token = tool_env.get("GH_TOKEN") or ""
+        if not token:
+            return False
+        expected = [_digest(token)]
+        scope = tool_env.get("LOCAL_OPERATOR_GITHUB_DIAGNOSTIC_SCOPE")
+        if scope:
+            expected += [_digest(scope), _digest(json.loads(scope)["identity"])]
+        assert sink == expected, "the sink saw something other than the bearer and its scope"
+        registered += 1
+        return True
 
     assert tool_has_token(), "the tool received no initial GitHub environment"
     first = client.grants.peek(github_mod.GITHUB_KEY, session_id)

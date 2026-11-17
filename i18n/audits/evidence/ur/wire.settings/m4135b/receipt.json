@@ -1,0 +1,36 @@
+{
+ "locale": "ur",
+ "namespace": "wire.settings",
+ "source_sha256": "c62db407a0b2e1944e63504b6332a3da5dcc494b6877f2ecefed3f518851b96a",
+ "target_sha256": "f6caaa702f8b11e4632eb71f961f5cd87dd499bed5fbb7f602f96bbf2a5e4516",
+ "translator": {
+  "agent": "i18n-translator, session b0fe2564b811",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-17"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (team lopdev, reviewer role, round m4135b), session 634bfc6a6ee7; independent of translator b0fe2564b811 and implementer feac6b2db7a4; did not read the m4135 records or any other session scratchpad",
+  "session": "634bfc6a6ee7",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none observed",
+  "date": "2026-11-17",
+  "result": "clean-with-findings",
+  "findings": 1,
+  "unresolved_blocker_major": 0,
+  "severity_counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 1,
+   "nit": 0
+  },
+  "finding_ids": [
+   "ur-B1"
+  ],
+  "locale_verdict": "CLEAN-WITH-FINDINGS"
+ },
+ "status": "passed",
+ "note": "PR #4135 merge 2 (MERGE_HEAD a0e458d43 into HEAD a4152e090), round m4135b: independent i18n-auditor session 634bfc6a6ee7 (anthropic/claude-opus-5-5, fallback none observed) audited target_sha256 against en c62db407a0b2 in the uncommitted merge tree of .worktrees/auto-prune-pr. Mechanical, 883 keys: key set equals en; placeholder and backtick parity, NFC, no bidi/control chars; literals lop install prune, lop update and lop network credential github repos --use-default verbatim; labels <=29 cells. Three-way vs merge-base eb872993c: 8 PR keys carry HEAD text, network_credentials_github_repositories.help carries main text, no both-sides changes, rest byte-identical. All 9 keys faithful except ur-B1 (minor). Keep help guarantee first (112 cells; whole 173, tail cut allowed). Latin literals embedded without bidi controls, per the TUI per-string isolation contract. GitHub help: two states distinct, clearing stops lending. Findings: 0 blocker, 0 major, 1 minor, 0 nit ['ur-B1']; minor/nit deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+ "evidence": "i18n/audits/evidence/ur/wire.settings/m4135b/record.json",
+ "round": "m4135b",
+ "keys_audited": 883
+}

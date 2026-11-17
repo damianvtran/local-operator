@@ -131,6 +131,26 @@ static replay, an old screenshot or an intended interaction as current live proo
   focus rings or the only indication of selection. Avoid double fades at nested
   scroll boundaries.
 
+## Diagrams
+
+- A CLOSED ```mermaid fence in assistant text is drawn by Pele (`pele`, loaded on
+  demand from its own chunk, never the entry chunk; `scripts/check-bundle.mjs`
+  fails the build if it lands there). An open fence is a reply still streaming and
+  stays the plain code block. A diagram that cannot be drawn keeps its code block
+  under an error card that shows the engine's own message.
+- Colours and fonts are `--pele-*` variables set from the relay's `--lo-*` theme
+  variables (`src/lib/diagram-theme.ts`), so a theme change recolours a drawn
+  diagram without redrawing it. Sections of a `journey` stay one neutral colour,
+  `click` callbacks and links are ignored, and the first four series colours are
+  distinct in all 31 palettes (a fifth may repeat one).
+- The inline drawing is laid out for the column width (Pele reflows a wide chart
+  top to bottom) and clamped in height behind a fade. It reacts to a tap only:
+  one-finger drags always scroll the transcript. Full size is a viewer on the
+  modal layer that scrolls both ways at the author's own pixel size.
+- Pele's SVG is never parsed as HTML. `src/lib/diagram-svg.ts` copies an
+  allow-listed set of elements, attributes and style properties into fresh DOM
+  nodes; the markdown renderer's no-HTML-sink rule still holds for everything else.
+
 ## Drawers, sheets and disclosure
 
 - Reuse the existing modal layer: named dialog, background inertness, focus trap,

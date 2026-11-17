@@ -1,0 +1,979 @@
+{
+  "schema": 1,
+  "audit_date": "2026-11-15T14:25:17.302082+00:00",
+  "source_audit_revision": "0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "scope": "95fff90559ae..0b754ce89567",
+  "audit_kind": "independent second pass for high-visibility/safety copy",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "dbf144330553",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "df4617d39efa",
+    "independent_from_primary_auditor_session": "91d1e05d2d82",
+    "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "key_count": 483,
+  "locale_namespace_records": [
+    {
+      "locale": "fr",
+      "namespace": "wire.github",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 68,
+      "scoped_keys": "all 68 namespace keys",
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.json",
+          "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+          "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/fr/wire.github.json",
+          "sha256": "a7fa09f683e431a7537b0942a48aa1ef2d7bf0ff0db1a47ee5fd86b26f1be069"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 1,
+      "scoped_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+          "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+          "sha256": "e773ea8aedb8b87586a4e0c8d72ed6e32cac39d6b522fd0f4b5ae34ac7315037"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 68,
+      "scoped_keys": "all 68 namespace keys",
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.json",
+          "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+          "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/es/wire.github.json",
+          "sha256": "f3ec27fb36efb1e04cd51bf44acca3e2258a11400554d3cda44bb00064298287"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 1,
+      "scoped_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+          "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+          "sha256": "b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.github",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 68,
+      "scoped_keys": "all 68 namespace keys",
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.json",
+          "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+          "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/zh-CN/wire.github.json",
+          "sha256": "dc68606f6da5693a3c876b8a43c936f55dcb71ae4d219219cd505adc57993a69"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 1,
+      "scoped_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+          "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+          "sha256": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 68,
+      "scoped_keys": "all 68 namespace keys",
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.json",
+          "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+          "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/ru/wire.github.json",
+          "sha256": "5423f28f859465cc5f28b3b316257bd66c9b1bcfe2bfd0ade2ea834560e600f1"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "I2-RU-01"
+        ]
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 1,
+      "scoped_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+          "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+          "sha256": "2b500c8786bdad052555f689678c28212384969512295b9d1cd495d90c0c57ee"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.github",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 68,
+      "scoped_keys": "all 68 namespace keys",
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.json",
+          "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+          "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/vi/wire.github.json",
+          "sha256": "4aafd3e2688a454b0f80f938f05ae8eac0f2e25735e4c55a92168f274e22d253"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 1,
+      "scoped_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+          "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+          "sha256": "28d393b48281312b1d918d3af7826581890b01607addb9dae23a702ae12e26e4"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.github",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 68,
+      "scoped_keys": "all 68 namespace keys",
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.json",
+          "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+          "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/ur/wire.github.json",
+          "sha256": "bb25b9b554704e8b4f9e6494e8fc2ceb5804e2deb1474f3fbf915fe37aa27c86"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "changes_requested",
+        "unresolved_blocker_major_count": 1,
+        "finding_ids": [
+          "I2-UR-01"
+        ]
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 1,
+      "scoped_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+          "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+          "sha256": "47981cc870a599caf1ec964295ed3123b87a2f345bdb324c166694125d959476"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.github",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 68,
+      "scoped_keys": "all 68 namespace keys",
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.json",
+          "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+          "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/hi/wire.github.json",
+          "sha256": "21d945c15034e7ccd1ff1ef4682910a582a981df65df1e3098598073a1966c7f"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "audit_date": "2026-11-15T14:25:17.302082+00:00",
+      "key_count": 1,
+      "scoped_keys": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dbf144330553",
+        "model": "openai/gpt-6.1-sol",
+        "independent_from_translator_session": "df4617d39efa",
+        "independent_from_primary_auditor_session": "91d1e05d2d82",
+        "actual_model_source": "Explicit inbound [model switch] record: openai/gpt-6.1-sol temporary fallback from anthropic/claude-opus-5-5 due to provider failure: quota",
+        "fallback": {
+          "from": "anthropic/claude-opus-5-5",
+          "to": "openai/gpt-6.1-sol",
+          "reason": "provider failure: quota"
+        }
+      },
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+          "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+          "sha256": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4"
+        }
+      },
+      "artifacts": [
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+          "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+          "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+          "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+          "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+        },
+        {
+          "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+          "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+        }
+      ],
+      "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": []
+      },
+      "scope_note": "Independent SECOND pass only; primary auditor owns append and preservation. Settings is changed-key delta only."
+    }
+  ],
+  "findings": [
+    {
+      "id": "I2-UR-01",
+      "severity": "MAJOR",
+      "locale": "ur",
+      "namespace": "wire.github",
+      "key": "wire.github.wrapper_denied",
+      "problem": "Glossary device term switches from ڈیوائس to آلہ in same message.",
+      "suggestion": "Use ڈیوائس consistently; see complete suggested copy in second-pass-report.md."
+    },
+    {
+      "id": "I2-RU-01",
+      "severity": "MINOR",
+      "locale": "ru",
+      "namespace": "wire.github",
+      "key": "wire.github.wrapper_denied",
+      "problem": "Neuter выполнение disagrees with недоступна; financial-creditor calque.",
+      "suggestion": "Use a natural device-sharing-access phrase and нельзя выполнить push; see report."
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-report.md",
+      "sha256": "c27df53b14bf5a9b7a850d0045e6c4f2b0c0625456d6435b45d6182ce72feb92"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py",
+      "sha256": "06044cdb036ae21bbead22411a8028932a36f5253b915d0f27862cdf8a5e4ada"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-audit.log",
+      "sha256": "a730b668f830a2541bc6d250da5571c9ea385efcb1b721682c7f219144900a31"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json",
+      "sha256": "d73696c4f2760510de48f0e62400732a473ae1ab0350903a945316b9cc6a7dc5"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt",
+      "sha256": "3e77fc1d27147f60de7d752488b306fb2351976dc2b31fab9c33fc0a47824343"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "I2-UR-01",
+      "I2-RU-01"
+    ]
+  },
+  "evidence_types": {
+    "second-pass-report.md": "audit_notes_not_execution_log",
+    "second-pass-audit.log": "actual_execution_log",
+    "second-pass-execution.json": "actual_execution_results",
+    "second-pass-rendered.txt": "actual_ICU_rendered_candidate_messages"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "publication": "scratch handoff only; primary auditor must retain canonical tracked evidence and use supported ledger workflow",
+  "limitations": [
+    "No browser/native/app visual capture; actual message render text and measured cell widths only.",
+    "CLI/TUI Urdu shaping and terminal bidi are not certified. No manual bidi controls inserted.",
+    "No catalogue edits, ledger appends, generators, installs or worktree creation."
+  ],
+  "validator_attempts": {
+    "first": "cleanup-required refused before spawn on Darwin",
+    "second": "unmodified production render control returned en because targets unshipped; failed assertion retained",
+    "final": "command-status rc=0; direct real ICU renderer for candidate locales; no eligibility mutation"
+  }
+}

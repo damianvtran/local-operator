@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -23,6 +24,10 @@ from local_operator.harness.types import (
 )
 from local_operator.session.goal_judge import quiet_completion_accepted
 from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.session import (
+    ATTENTION_BANNER_STAMP_CEILING_S,
+    ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
+)
 from local_operator.tools import eval as eval_tool
 from tests.unit.session.test_session import ScriptedStream, make_session
 
@@ -137,11 +142,42 @@ async def test_person_arriving_during_host_settlement_is_consumed_once_before_ac
         await session.dispose()
 
 
-# One constant feeds both the wait and its diagnostic so the message cannot drift.
-SETTLE_TIMEOUT_S = 8
+# THE SETTLE BUDGET IS LOOP-THREAD CPU, NOT WALL TIME (AGENTS.md "If you must
+# measure, measure CPU, not wall time"). The old flat 8 s ``wait_for`` was a
+# wall-clock bet: hosted runs (main 44041716956 test(3.12,5), the #3664 gate
+# test(3.13,4)) failed with the new owner parked in the publish's bounded
+# ``to_thread`` wait. That signature does NOT need the lock held past the
+# product's bound. Reproduced outside the repo by freezing the loop thread for
+# 9 s right after the publish armed its 3 s ceiling: on wake BOTH deadlines had
+# passed, the test's timer won the same loop iteration, and the diagnostic read
+# ``turn_lock_locked=True`` with the publish task one step from releasing it
+# (it exited 3 ms later). The process not being scheduled is not the code
+# holding the lock, and a wall clock cannot tell those apart; the loop thread's
+# CPU clock can, because a descheduled or GIL-waiting thread accrues none.
+#
+# Derivation, not a tuning: the waiter spins on ``sleep(0)``, so while it is
+# scheduled it burns loop CPU at most at wall rate. The longest LEGITIMATE wait
+# on this path is the product's own wall-clock ceilings on the turn-lock-held
+# attention publish (store write, then the banner stamp), so the spin can spend
+# at most their sum before the lock must be free; the healthy steer-to-publish
+# tail is 25-50 ms (four local runs, 2026-11-17). Twice that sum is the budget,
+# so a ceiling that stops bounding the hold — the real regression — still fails
+# here (negative control: ceiling lifted, 90 s worker hold -> failed at 8.00 s
+# CPU / 51 s wall on a load-15 host), and raising a ceiling moves the budget
+# with it instead of silently out-growing it. Holding ``_turn_lock`` across the
+# publish is the product's documented design, not the bug: the outcome is
+# published in the turn's ``finally`` before the next owner may start, and
+# ``ATTENTION_PUBLISH_OFFLOAD_CEILING_S`` exists to bound exactly that hold
+# (a worker starved for 10 s released the lock at +3.0 s, measured).
+SETTLE_CPU_BUDGET_S = 2 * (ATTENTION_PUBLISH_OFFLOAD_CEILING_S + ATTENTION_BANNER_STAMP_CEILING_S)
+# The CPU clock is blind to a pure blocking sleep on the loop (the AGENTS.md
+# table's middle row), so a wall ceiling stays as the CATASTROPHE backstop: it
+# fails a loop wedged without spinning instead of holding the CI job to its
+# 25-minute ``timeout-minutes``. Set for catastrophe, never for precision.
+SETTLE_WALL_BACKSTOP_S = 60.0
 
 
-def timeout_state(session, events, steer_attempts, steer_returns):
+def timeout_state(session, events, steer_attempts, steer_returns, *, cpu_s, wall_s):
     """Name which settle conjunct stayed true when a wait times out.
 
     A hosted run failed with a bare TimeoutError, leaving a product hang (the
@@ -167,7 +203,7 @@ def timeout_state(session, events, steer_attempts, steer_returns):
     def describe_task(task):
         """Bare label plus the await chain a pending task is parked on.
 
-        A measured healthy post-end tail is ~3 ms, so an 8 s timeout is a
+        A measured healthy post-end tail is ~3 ms, so a spent CPU budget is a
         BLOCKED await, and bare ``Task-N:pending`` labels cannot name it. Walk
         the ``cr_await`` chain (bounded, read-only) to the innermost awaiting
         frame. Any failure degrades to the bare label, never a new exception.
@@ -201,7 +237,9 @@ def timeout_state(session, events, steer_attempts, steer_returns):
         )
     )
     return (
-        f"cause unknown, not a fix: new owner never settled in {SETTLE_TIMEOUT_S}s; "
+        f"cause unknown, not a fix: new owner never settled in {cpu_s:.2f}s loop CPU "
+        f"(budget {SETTLE_CPU_BUDGET_S:g}s) / {wall_s:.2f}s wall "
+        f"(backstop {SETTLE_WALL_BACKSTOP_S:g}s); "
         f"agent_end_count={len(ends)} (needs 2), "
         f"is_streaming={field(lambda: session.is_streaming)}, "
         f"turn_lock_locked={field(lambda: session._turn_lock.locked())}, "
@@ -235,20 +273,25 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
     try:
         await session._prompt_messages([peer_input()])
 
-        async def new_owner_settled():
-            while (
-                sum(isinstance(event, AgentEndEvent) for event in events) < 2
-                or session.is_streaming
-                or session._turn_lock.locked()
-            ):
-                await asyncio.sleep(0)
-
-        try:
-            await asyncio.wait_for(new_owner_settled(), timeout=SETTLE_TIMEOUT_S)
-        except TimeoutError as exc:
-            raise AssertionError(
-                timeout_state(session, events, steer_attempts, steer_returns)
-            ) from exc
+        # Runs on the loop thread, so ``thread_time`` is the loop's own CPU (see
+        # SETTLE_CPU_BUDGET_S). The predicate is re-tested after every yield, so
+        # the wait lasts exactly as long as the work; the budgets only decide
+        # when "not yet" has become "never".
+        cpu_start, wall_start = time.thread_time(), time.monotonic()
+        while (
+            sum(isinstance(event, AgentEndEvent) for event in events) < 2
+            or session.is_streaming
+            or session._turn_lock.locked()
+        ):
+            cpu_s = time.thread_time() - cpu_start
+            wall_s = time.monotonic() - wall_start
+            if cpu_s > SETTLE_CPU_BUDGET_S or wall_s > SETTLE_WALL_BACKSTOP_S:
+                raise AssertionError(
+                    timeout_state(
+                        session, events, steer_attempts, steer_returns, cpu_s=cpu_s, wall_s=wall_s
+                    )
+                )
+            await asyncio.sleep(0)
         ends = [event for event in events if isinstance(event, AgentEndEvent)]
         starts = [event for event in events if getattr(event, "type", "") == "agent_start"]
         assert len(stream.requests) == 2 and len(ends) == len(starts) == 2

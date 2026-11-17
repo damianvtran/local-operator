@@ -1,0 +1,47 @@
+{
+  "record_reference": "i18n/audits/evidence/fr/wire.github/gh4052r1/record.json",
+  "changes": [
+    {
+      "path": "i18n/audits/evidence/ur/wire.github/gh4052r1/ur.svg",
+      "before_sha256": "c29d38ea30d69ee74b50558d38e730ae8bb58c767ed98c2b01f9dae6ff59d1c4",
+      "after_sha256": "828ce1ab3b3f532f8e316cc34f963ffca76882257ee82cf9c87ff9102cd7b83d",
+      "transformation": "rstrip whitespace on each SVG line; exported visible geometry/text unchanged"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.github/gh4052r1/vi.svg",
+      "before_sha256": "354d52b1ee557bfa17ffb67306e7831fed3d52aa6cc5cc20c069e57b8788ea4c",
+      "after_sha256": "33bed0842406765ce13cde8932f2f6923acfeee4c39db7bffcde8c89ea2fd432",
+      "transformation": "rstrip whitespace on each SVG line; exported visible geometry/text unchanged"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.github/gh4052r1/ru.svg",
+      "before_sha256": "f332d175cd2baf86bbca6b0b23d86d8dce2d73ef9f3ba61f8493b6a6ef66a50b",
+      "after_sha256": "04513fa867634066b16fd06af9a05c36cdd9bd1dad708ad87eb0cc41a064a945",
+      "transformation": "rstrip whitespace on each SVG line; exported visible geometry/text unchanged"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.github/gh4052r1/zh-CN.svg",
+      "before_sha256": "63d4214e2d16d507e3c46855e065d7e2cebcb9d4c4bb4117ec760f857d17a647",
+      "after_sha256": "d807f298b046648f77dc1d1c020ce94da756066c7210b76838c66bd1645c7120",
+      "transformation": "rstrip whitespace on each SVG line; exported visible geometry/text unchanged"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/wire.github/gh4052r1/hi.svg",
+      "before_sha256": "96c7f77f700df75299144d58498150ba10644929236216f77d0ab758e083f9f1",
+      "after_sha256": "7b70db53e0287e080a2689b9fed4b5bc4fddbdfa544b22397cad487b2cf133df",
+      "transformation": "rstrip whitespace on each SVG line; exported visible geometry/text unchanged"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/fr.svg",
+      "before_sha256": "94a9de1cc8aafafab854eca52ee9c7f47e6fba1847b2e3d22cc0e196e8a3a425",
+      "after_sha256": "9e2430dca23ca0c5ae0f3de548ca52ed16df65835230d2ffdbf30ffe5fa8c553",
+      "transformation": "rstrip whitespace on each SVG line; exported visible geometry/text unchanged"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.github/gh4052r1/es.svg",
+      "before_sha256": "b06d95d5516ab8465895b3a2304755844a03b7638b5f7772e3e267b77ab84194",
+      "after_sha256": "0f5b6bcb2c4170f467a43317702e9ddd1a9625f2665b303a625c4e625a7ddfef",
+      "transformation": "rstrip whitespace on each SVG line; exported visible geometry/text unchanged"
+    }
+  ]
+}

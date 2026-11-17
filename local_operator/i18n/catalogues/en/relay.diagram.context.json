@@ -1,0 +1,50 @@
+{
+  "relay.diagram.close": {
+    "role": "button, accessible name",
+    "tone": "A verb phrase; no final full stop.",
+    "maxCells": 32,
+    "note": "Owned relay SPA copy (docs/design/mobile-relay-guidelines.md). Accessible name of the X button on the full-size diagram view (a flowchart, sequence chart or similar the assistant wrote as text and the page drew). Closes that view and returns to the conversation."
+  },
+  "relay.diagram.copied": {
+    "role": "button label, status",
+    "tone": "A single past-tense word or short phrase; no punctuation.",
+    "maxCells": 14,
+    "note": "Replaces 'Copy source' for about two seconds after the diagram's text was put on the clipboard. Shares one grid cell with relay.diagram.copy, so the button is as wide as the longer of the two."
+  },
+  "relay.diagram.copy": {
+    "role": "button label",
+    "tone": "Sentence-case imperative, no punctuation.",
+    "maxCells": 20,
+    "note": "Button under a drawn diagram: copies the diagram's own text (the Mermaid source the assistant wrote) so it can be pasted elsewhere. 'Source' means that text, not a web address."
+  },
+  "relay.diagram.copy_failed": {
+    "role": "button label, status",
+    "tone": "A short statement, not a command; no final full stop.",
+    "maxCells": 24,
+    "note": "Shown in place of 'Copy source' for a moment when the phone refused the clipboard write (no permission, or an insecure connection). Same sense as relay.asks.card.command.copy_failed, shorter."
+  },
+  "relay.diagram.error.title": {
+    "role": "heading",
+    "tone": "A statement of what happened, not a command. No final full stop.",
+    "maxCells": 44,
+    "note": "Title of the card shown above a diagram's text when the drawing step could not parse or draw it. One technical line from the drawing library (always English) follows the title, and the diagram's own text is shown beneath."
+  },
+  "relay.diagram.full_size": {
+    "role": "button label",
+    "tone": "Short noun phrase or adjective, sentence case, no punctuation.",
+    "maxCells": 16,
+    "note": "Button under a drawn diagram: opens the same drawing at its natural size in a full-screen view that scrolls both ways. Sits in a row with 'Copy source' and 'Save SVG' on a phone-width screen."
+  },
+  "relay.diagram.save": {
+    "role": "button label",
+    "tone": "Sentence-case imperative, no punctuation.",
+    "maxCells": 16,
+    "note": "Button under a drawn diagram: downloads the drawing as an SVG image file. 'SVG' is the file format name and stays as is."
+  },
+  "relay.diagram.view": {
+    "role": "noun, accessible name and view title",
+    "tone": "A single noun; no final full stop.",
+    "maxCells": 24,
+    "note": "Names a drawn diagram (flowchart, sequence chart or similar) for assistive technology, and titles the full-size view. Same noun in both places."
+  }
+}

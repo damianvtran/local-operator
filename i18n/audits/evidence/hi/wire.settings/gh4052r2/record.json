@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "audit_date": "2026-11-15T14:48:16.755913+00:00",
+  "round": 2,
+  "source_audit_revision": "b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "scope": "2afbb818b69074d9f11b0fc1a9a6360967218476..b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "key_count": 1,
+  "namespace_key_count": 867,
+  "retested_keys": [],
+  "auditor": {
+    "agent": "i18n-auditor (lopdev primary)",
+    "session": "91d1e05d2d82",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": "9af0b0ea9021 / df4617d39efa original allocation",
+    "actual_model_source": "Current resumed session system model declaration: anthropic/claude-opus-5-5",
+    "fallback": null,
+    "previous_round_provenance": "Sol after Opus quota fallback, preserved in gh4052r1; not rewritten"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+      "sha256": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4"
+    }
+  },
+  "retention": {
+    "locale": "hi",
+    "namespace": "wire.settings",
+    "changed_keys": [],
+    "unchanged_count": 867,
+    "unchanged_values_sha256": "8b54f73611d5a3cd521bf6080f00a82c8d528b3350d8a129dc6f642414887b05",
+    "baseline_target_sha256": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4",
+    "current_target_sha256": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4",
+    "retained_primary_record": {
+      "path": "i18n/audits/evidence/hi/wire.settings/gh4052r1/record.json",
+      "sha256": "6a00d5ef9403fcefc34eaa57aea2ca04a61febc35043c618b0a4cc16249e6cfd"
+    },
+    "retained_second_record": {
+      "path": "i18n/audits/evidence/hi/wire.settings/gh4052s1/record.json",
+      "sha256": "59f9e05c33be92474f008f61f96ad9c35bae64d7418da55c0dc3fb3601d9f488"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/wire.settings/gh4052r2/report.md",
+      "sha256": "d971347e5160b80d229a7a1e30f0e208d0f1415c516f82aacd311e72eb525c9b"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/result.json",
+      "sha256": "2d40c7125893cb5551e7f239982e3abfe7750058c344516fdabcfd882701ab29"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/runner.py.txt",
+      "sha256": "846cc99fc8f8a3a744c6398494d4b80c6c97d23ef31c53182217d2b2518b2e81"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/audit.log",
+      "sha256": "35c8e9cabfa42b4e0dfb3432e8a22fb2fd71930b5277a87d727c8fbdcc73cfcc"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/catalogue-check.log",
+      "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/wire.settings/gh4052s2/record.json",
+      "sha256": "66ad49bce090d411a0094f92effde99ba10e3eb9092ca26b95b5f8974e6d4c0c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.json",
+      "sha256": "81acf4e9c4e2d80855db17660257d5f86e3cf4b5b70e65c9ebfc42a257938b05"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production-runner.py.txt",
+      "sha256": "2bfed2b15d8c4b522c88039d6e3ea76163f36e28b81378d3b60520e69ba2f52e"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.log",
+      "sha256": "9480f848f4213dae71d54ce77eca56fbe4e12d1b527b16938a8f89b160106b3c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/generate.log",
+      "sha256": "8b2f5c78999f2648b67cdbf7d3704cd9061b108520c055ad40eef0d41633a248"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/generation-check.log",
+      "sha256": "96f4f2560bf20877b9b332cf5ecf3c13ee9f1a5c8013dc1916eba34501678db6"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/full-check.log",
+      "sha256": "89bb2465285750a16d59095a6d1dac352536f330c603a5dc2da3c5408c3c0951"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "closed_finding_ids": [
+      "I-RU-PUSH",
+      "I-RU-WRAPPER",
+      "I-COMPOSE",
+      "I2-UR-01",
+      "I2-RU-01",
+      "I-FR-01",
+      "I-RU-02"
+    ]
+  },
+  "audit_notes_not_execution_log": "report.md is reasoning, audit.log is captured runner output; no production activation claimed before generator execution.",
+  "production_validation": {
+    "artifact": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.json",
+      "sha256": "81acf4e9c4e2d80855db17660257d5f86e3cf4b5b70e65c9ebfc42a257938b05"
+    },
+    "activation_verified": true,
+    "native_shaping_verified": false,
+    "live_GitHub_or_mint_attempted": false
+  }
+}

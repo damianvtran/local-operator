@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "wire.github",
+  "audit_date": "2026-11-15T14:48:16.755913+00:00",
+  "round": 2,
+  "source_audit_revision": "b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "scope": "2afbb818b69074d9f11b0fc1a9a6360967218476..b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "key_count": 68,
+  "namespace_key_count": 68,
+  "retested_keys": [
+    "wire.github.failure_unknown"
+  ],
+  "auditor": {
+    "agent": "i18n-auditor (lopdev primary)",
+    "session": "91d1e05d2d82",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": "9af0b0ea9021 / df4617d39efa original allocation",
+    "actual_model_source": "Current resumed session system model declaration: anthropic/claude-opus-5-5",
+    "fallback": null,
+    "previous_round_provenance": "Sol after Opus quota fallback, preserved in gh4052r1; not rewritten"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.github.json",
+      "sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.github.context.json",
+      "sha256": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/wire.github.json",
+      "sha256": "62221c3f619ba434a4342457d5e06a5146efaee482e3b7bd0e04e3d8c87016e2"
+    }
+  },
+  "retention": {
+    "locale": "fr",
+    "namespace": "wire.github",
+    "changed_keys": [
+      "wire.github.failure_unknown"
+    ],
+    "unchanged_count": 67,
+    "unchanged_values_sha256": "dcd491bf10832e8f887db8adedcb23bf83f561e2d601ef9ddbcad16fbf24920e",
+    "baseline_target_sha256": "a7fa09f683e431a7537b0942a48aa1ef2d7bf0ff0db1a47ee5fd86b26f1be069",
+    "current_target_sha256": "62221c3f619ba434a4342457d5e06a5146efaee482e3b7bd0e04e3d8c87016e2",
+    "retained_primary_record": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/record.json",
+      "sha256": "3bc208651f16950916956fb556145571374005e10656ead06b4e4364e12f1791"
+    },
+    "retained_second_record": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/record.json",
+      "sha256": "c1994b77a45fe255cc9e1cb0ba378fc5f7369919352c07c7ab34947790fe9241"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/report.md",
+      "sha256": "fab113f38f56de7916e6cf54ecd0496e678be868c2f4597cbb3028b66ab8ea46"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/result.json",
+      "sha256": "2d40c7125893cb5551e7f239982e3abfe7750058c344516fdabcfd882701ab29"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/runner.py.txt",
+      "sha256": "846cc99fc8f8a3a744c6398494d4b80c6c97d23ef31c53182217d2b2518b2e81"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/audit.log",
+      "sha256": "35c8e9cabfa42b4e0dfb3432e8a22fb2fd71930b5277a87d727c8fbdcc73cfcc"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/catalogue-check.log",
+      "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/record.json",
+      "sha256": "9804504adebc78b33eee3a5bda0ebe8c716d0df9098afc9bd63f06facd49fab0"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/fr-before.svg",
+      "sha256": "be506f8d3fcf578343f57d719cfb22eca2fa6585b2206ef33889f3bd0b61c1ef"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/fr-before.png",
+      "sha256": "0392347937bc9c69bd9606ac07387e2d484670ed65b2b0bfdcaf0dd8f689d2e2"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/fr-after.svg",
+      "sha256": "82ec8930028d8453142715a46e748085ff797f226535b9a31f8216e13a47a924"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/fr-after.png",
+      "sha256": "cf4834733bf7d9466515a8ad77400e079319fea5bb7ccd4682ed722e4928e47b"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.json",
+      "sha256": "81acf4e9c4e2d80855db17660257d5f86e3cf4b5b70e65c9ebfc42a257938b05"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production-runner.py.txt",
+      "sha256": "2bfed2b15d8c4b522c88039d6e3ea76163f36e28b81378d3b60520e69ba2f52e"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.log",
+      "sha256": "9480f848f4213dae71d54ce77eca56fbe4e12d1b527b16938a8f89b160106b3c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/generate.log",
+      "sha256": "8b2f5c78999f2648b67cdbf7d3704cd9061b108520c055ad40eef0d41633a248"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/generation-check.log",
+      "sha256": "96f4f2560bf20877b9b332cf5ecf3c13ee9f1a5c8013dc1916eba34501678db6"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/full-check.log",
+      "sha256": "89bb2465285750a16d59095a6d1dac352536f330c603a5dc2da3c5408c3c0951"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "closed_finding_ids": [
+      "I-RU-PUSH",
+      "I-RU-WRAPPER",
+      "I-COMPOSE",
+      "I2-UR-01",
+      "I2-RU-01",
+      "I-FR-01",
+      "I-RU-02"
+    ]
+  },
+  "audit_notes_not_execution_log": "report.md is reasoning, audit.log is captured runner output; no production activation claimed before generator execution.",
+  "production_validation": {
+    "artifact": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.json",
+      "sha256": "81acf4e9c4e2d80855db17660257d5f86e3cf4b5b70e65c9ebfc42a257938b05"
+    },
+    "activation_verified": true,
+    "native_shaping_verified": false,
+    "live_GitHub_or_mint_attempted": false
+  }
+}

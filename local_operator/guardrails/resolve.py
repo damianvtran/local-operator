@@ -2381,6 +2381,98 @@ def _py_unsupported_node(code: str) -> str | None:
     return None
 
 
+#: Methods whose call result is PROVEN to be ``str``/``bytes`` whatever the
+#: receiver: on every object the allow-lists can reach these are pathlib's
+#: reads (``Path.read_bytes``/``read_text``), and nothing reachable defines
+#: them otherwise. A ``.replace`` on such a value is ``bytes``/``str.replace``.
+_PY_STR_RESULT_METHODS = frozenset({"read_bytes", "read_text"})
+
+
+def _py_proven_replace_callees(tree: object, imported: set[str]) -> set[int]:
+    """``id`` of every ``.replace`` Attribute PROVEN to be ``str``/``bytes.replace``.
+
+    WHY (field case, node2 lane, guard 0.106.6): a parent's read-only
+    ``python3 -I -c`` asserting ``b == a.replace(b"r6", b"r8")`` over two
+    files in its descendant's pad was sent to the judge, only because
+    ``replace`` is not an allowed attribute. It must stay out of
+    ``_PY_ALLOWED_ATTRS``: ``Path.replace(target)`` RENAMES and the attribute
+    check is untyped. So ``replace`` is admitted only where the RECEIVER's
+    type is proven, never by name alone:
+
+    - a ``str``/``bytes`` literal;
+    - a ``.read_bytes()``/``.read_text()`` call result (``_PY_STR_RESULT_METHODS``);
+    - a Name whose EVERY binding anywhere in the program is a top-level
+      (direct child of the module, so unconditional and not in a loop,
+      branch, ``with``, ``try``, function or comprehension) single-target
+      ``Assign`` of one of the above or of another such Name. Any other
+      binding — augmented assignment, walrus, a ``for``/comprehension target,
+      tuple unpacking, ``del``, an import, an argument — disproves it.
+
+    The call itself must be ``recv.replace(old, new[, count])``: 2 or 3
+    positional arguments, no keywords, no ``*``. ``Path("a").replace("b")``,
+    ``os.replace``, ``x = Path; x.replace(a, b)``, a subscript receiver and
+    ``f = a.replace`` (not a callee) all stay unproven. Constraint: this may
+    only ADD proofs for str/bytes; anything uncertain returns no id.
+    """
+    import ast
+
+    assert isinstance(tree, ast.Module)
+    # name -> the values of its top-level single-Name Assigns; ``plain``
+    # holds those targets' ids, so any OTHER Store of the name disproves it.
+    bindings: dict[str, list[ast.expr]] = {}
+    plain: set[int] = set()
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            plain.add(id(stmt.targets[0]))
+            bindings.setdefault(stmt.targets[0].id, []).append(stmt.value)
+    other_binders: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            if id(node) not in plain:
+                other_binders.add(node.id)
+        elif isinstance(node, ast.arg):
+            other_binders.add(node.arg)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            other_binders.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other_binders.add(node.name)
+        elif isinstance(node, ast.alias):
+            other_binders.add(node.asname or node.name.split(".")[0])
+
+    def proven(expr: ast.expr, visiting: frozenset[str]) -> bool:
+        if isinstance(expr, ast.Constant):
+            return isinstance(expr.value, (str, bytes))
+        if isinstance(expr, ast.Call):
+            return isinstance(expr.func, ast.Attribute) and expr.func.attr in _PY_STR_RESULT_METHODS
+        if isinstance(expr, ast.Name):
+            name = expr.id
+            if name in visiting or name in imported or name in other_binders:
+                return False
+            values = bindings.get(name)
+            return bool(values) and all(proven(v, visiting | {name}) for v in values)
+        return False
+
+    ok: set[int] = set()
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "replace"
+        ):
+            continue
+        if node.keywords or not 2 <= len(node.args) <= 3:
+            continue
+        if any(isinstance(a, ast.Starred) for a in node.args):
+            continue
+        if proven(node.func.value, frozenset()):
+            ok.add(id(node.func))
+    return ok
+
+
 def python_code_read_only(code: str) -> bool:
     """Can ``python -c CODE`` be PROVEN to write, delete and run nothing?
 
@@ -2417,7 +2509,9 @@ def python_code_read_only(code: str) -> bool:
     - builtin ``open`` only as a callee with a literal read mode;
     - ``sub``/``subn`` only with literal leading arguments, so the
       replacement is a string, never a callable;
-    - no dunder or ``_``-prefixed name or alias.
+    - no dunder or ``_``-prefixed name or alias;
+    - ``replace`` only as the callee of a receiver proven ``str``/``bytes``
+      (:func:`_py_proven_replace_callees`), since ``Path.replace`` renames.
 
     Anything else — a parse error, an unlisted node or name — is ``False``
     and keeps the conservative ranking (a judge call, never a LOW).
@@ -2464,6 +2558,7 @@ def python_code_read_only(code: str) -> bool:
     if bound & (imported | builtin_names) or imported & builtin_names:
         return False
     callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    proven_replace = _py_proven_replace_callees(tree, imported)
     known = _PY_ALLOWED_BUILTINS | imported | bound
     for node in nodes:
         if isinstance(node, ast.Name):
@@ -2472,6 +2567,8 @@ def python_code_read_only(code: str) -> bool:
             if node.id == "open" and id(node) not in callees:
                 return False  # ``o = open`` can be called later with any mode
         elif isinstance(node, ast.Attribute):
+            if id(node) in proven_replace and isinstance(node.ctx, ast.Load):
+                continue
             if node.attr not in _PY_ALLOWED_ATTRS or not isinstance(node.ctx, ast.Load):
                 return False
         elif isinstance(node, ast.Subscript):
@@ -4762,19 +4859,29 @@ class _Walker:
         st = self.state
         if not words or not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
             return False
+        # Every refusal below names its gap (field case, node2 lane, guard
+        # 0.106.6): an unexplained refusal left the judge without the one fact
+        # that sent the read to it. Fixed phrases only, never command text
+        # (the judge reads the gap as proved fact; see ``_gap_name``).
         # Pin the interpreter (review r1 M2): ``./python3``, ``/abs/python3``
         # or a ``PATH`` this command rewrote can run a planted executable
         # named ``python3`` that ignores CODE. Only a bare word looked up on
         # the INHERITED ``PATH`` is the interpreter the proof is about.
         if words[0].text != name or "/" in words[0].text or words[0].opaque or assigns:
+            self.read_only_gap = "the interpreter is wrapped, assigned to or not a bare name"
             return False
         if st.env.get("PATH") != self.inherited_path:
+            self.read_only_gap = "the command changed PATH, so python3 may be another program"
             return False
         if self.programs_run or self.named or self.linked or self.result.targets:
+            self.read_only_gap = "an earlier program in the command may plant what python imports"
             return False
         if any(t.op != "touch" for t in self.result.touched) or self.result.created:
+            self.read_only_gap = "an earlier write in the command may plant what python imports"
             return False
-        if any(st.env.get(k) for k in _PY_STARTUP_ENV):
+        startup = [k for k in _PY_STARTUP_ENV if st.env.get(k)]
+        if startup:
+            self.read_only_gap = f"start-up variable {startup[0]} is set"
             return False
         rest = words[1:]
         flags: set[str] = set()
@@ -4782,6 +4889,7 @@ class _Walker:
             flags.add(rest[0].text)
             rest = rest[1:]
         if len(rest) < 2 or rest[0].text != "-c":
+            self.read_only_gap = "an interpreter option outside the safe set precedes -c"
             return False
         # ``-I``/``-P`` keep the cwd off ``sys.path`` (an interpreter too old
         # for ``-P`` exits on the unknown option, running nothing), so nothing
@@ -4796,8 +4904,10 @@ class _Walker:
                 return False
         code = rest[1]
         if code.opaque or code.pattern is not None or code.substitutions:
+            self.read_only_gap = "the code is substituted or not literal"
             return False
         if OPAQUE_MARK in code.text or TEMP_MARK in code.text:
+            self.read_only_gap = "the code is substituted or not literal"
             return False
         if python_code_read_only(code.text):
             return True
@@ -5557,6 +5667,12 @@ READ_ONLY_PROGRAMS = frozenset(
         "basename",
         "dirname",
         "sleep",
+        # ``cut`` (field case, node2 lane, guard 0.106.6: ``test "$(sha256sum
+        # F | cut -d' ' -f1)" = …`` before a proven-read python made the whole
+        # check unprovable). GNU (-b -c -d -f -n -s -z --complement
+        # --output-delimiter) and BSD (-b -c -d -f -n -s -w) cut have no
+        # option that writes a file or runs a program: stdout only.
+        "cut",
         # Shell words that move, bind or branch without writing a file; their
         # bodies and later segments are walked on their own.
         "cd",

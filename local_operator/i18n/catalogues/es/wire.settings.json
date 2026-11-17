@@ -412,7 +412,7 @@
   "wire.settings.network_audit_max_age_days.label": "Límite de antigüedad de auditoría (días)",
   "wire.settings.network_audit_max_bytes.help": "Bytes por generación, tras la rotación. 8 MiB de JSONL con gzip son unos 55k registros; con cinco generaciones, el límite máximo es de ~40 MiB.",
   "wire.settings.network_audit_max_bytes.label": "Tamaño de auditoría por generación",
-  "wire.settings.network_credentials_github_repositories.help": "entradas owner/repo que puede tocar un token de GitHub intermediado (vacío: ninguna)",
+  "wire.settings.network_credentials_github_repositories.help": "Entradas owner/repo cuyo acceso a GitHub se puede prestar. Si nunca se ha configurado, se usan todos los repositorios a los que la cuenta puede hacer push, menos los excluidos. Vaciar una lista elegida a mano y compartida anteriormente detiene los préstamos; vuelve a la selección automática con lop network credential github repos --use-default.",
   "wire.settings.network_credentials_github_repositories.label": "Repositorios de GitHub",
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "El tiempo máximo que un dispositivo puede usar un inicio de sesión prestado por su propietario antes de volver a pedirlo, y por tanto cuánto sigue funcionando en otros lugares el inicio de sesión de un propietario revocado o desconectado. Nunca más que el propio token.",
