@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "523fb24e49bfb81a0a388f1a32643b57ac66c23069d2a30dbda32978ee42db2e",
+  "history_sha256": "f153fc4602d284e46ecf3e17dfce2c7aad11fa015df4e6c7701c3c076cb9269a",
   "entries": [
     {
       "locale": "ru",
@@ -599,6 +599,58 @@
       },
       "retained_upstream_findings": [],
       "note": "Merged-source binding 2026-11-15, copy-reviewer session 5b334e35ef01 (anthropic/claude-opus-5-5, no fallback). Source f5c40bc8a076 = base 2baf6804bc41 + PR #3990 delta (1 key: display_notification_session_name.help; passed d62d8ba8b744 + second audit 937c6ecbae86) + main delta (2 keys: desktop_remote_files_cache_bytes.label/help; passed binding2 187b766ab67d, openai/gpt-6.1-sol). Exact key-disjoint value composition in en and ru; 866 other keys byte-identical to base. No translation changed, no history rewritten, no new native review claimed. Single binding audit only. Evidence: i18n/audits/evidence/ru/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "5237bd670369faa1dbabaf5cabd5999237bdcf08166512872b497ed3a1ce71e0",
+      "target_sha256": "19ededa9b890db27f3f71d49cc27303a33ddce9c016f95038585cd7ef5b1d93b",
+      "translator": {
+        "agent": "translator subagent under the lopdev manager (commit 588dfd96b3b1) — relayed by the manager, not independently verified",
+        "model": null,
+        "fallback": "not reported",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent of the translator; did not translate any key",
+        "session": "5e96a4997450",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "feat/heavy-job-lease 2026-11-16 translation-auditor 5e96a4997450 (anthropic/claude-opus-5-5, no fallback) at branch head c40c7f3e9: 6 new keys audited against en 5237bd670369 (en delta f5c40bc8a076→5237bd670369 is exactly the 6 heavy-job keys added in 7d481973b; diff vs base f0689a27c2af = 6 added lines in en and in this locale). Rest of namespace byte-identical to bytes 2b11291c044a that carried the passed f5c40bc8a076 receipt. Keys: heavy_jobs.title, heavy_jobs.description, bash_heavy_jobs_enabled.label/.help/.choice.true.description/.choice.false.description. No ICU placeholders/markup in source or target (parity 0=0, no plural arms); no bidi/control chars; NFC. Hooks: translator committed with core.hooksPath=/dev/null; this repo installs no git hooks (only *.sample) and has no pre-commit config, so nothing was skipped — generate.py --check and check.py --audit-base origin/main were run by the auditor instead. Terms: задание (glossary job), очередь, сборки/проверки типов/тестовые прогоны, сессии (glossary), инструмент bash; ё kept per corpus. Findings: R1 minor — 'на этой машине' (help) and 'на машину' (description) vs dominant ru rendering of 'this machine' 'на этом компьютере' (e.g. team_bridge_enabled.label in this namespace; 'машина' also occurs, e.g. retry_connectivitymaxretries.help, wire.slash.info). No glossary row for machine; proposed 'на этом компьютере' / 'на компьютер'. Deferred, not gating. 0 blocker/major. Target bytes sha256 19ededa9b890db27f3f71d49cc27303a33ddce9c016f95038585cd7ef5b1d93b. Source observation, not a translation finding: the en copy says one heavy job at a time per machine, but heavy_lease.py auto-sizes up to 4 slots on hosts above 16 GB; the translations render the en faithfully, and any en correction stales this receipt. Single independent audit only; no second audit performed in this receipt."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "beb522ed359310863117d8869f3c494f4733b0346644d81780b8c3a9bcfa0b95",
+      "target_sha256": "21b66296297ddc351f60f22877c122b7c4a8f221be981b58ecc506c42f2c38aa",
+      "translator": {
+        "agent": "translator under the lopdev manager (commit 52ce8b7ef146) — relayed by the manager, not independently verified",
+        "model": null,
+        "fallback": "not reported",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent of the translator; did not translate any key",
+        "session": "d0fd6c8b5699",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "feat/heavy-job-lease 2026-11-16 translation-auditor d0fd6c8b5699 (anthropic/claude-opus-5-5, no fallback) at branch head 52ce8b7ef146: re-audit after the en K1 correction. Source en 5237bd670369→beb522ed3593 changes exactly 3 keys (heavy_jobs.description, bash_heavy_jobs_enabled.help, bash_heavy_jobs_enabled.choice.true.description; 3 changed lines, key order identical); this locale's target changes exactly the same 3 keys. The other 872 keys, including the unchanged heavy-job title/label/choice.false, are value- and order-identical to the bytes 19ededa9b890 that carried the passed 5237bd670369 receipt (auditor 5e96a4997450, commit 86a617971); they were not re-scored. Changed keys audited against the en copy and context notes (slot count depends on memory; copy must not promise exactly one). No ICU placeholders/plural arms/markup in source or target (parity 0=0); NFC; no bidi/control or no-break chars. Main has not touched i18n since merge base f0689a27c2af. Prior deferred note applied: 'на этом компьютере … исчерпали его память' (компьютер agreement correct). 'Ограничивает число … одновременно выполняемых … (при 16 ГБ памяти или меньше — по одному)'; choice 'тяжёлые задания выполняются по очереди'. Glossary задание. 0 findings. Target bytes sha256 21b66296297ddc351f60f22877c122b7c4a8f221be981b58ecc506c42f2c38aa. Single independent audit only; no second audit performed in this receipt."
     }
   ]
 }

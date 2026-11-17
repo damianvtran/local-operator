@@ -39,6 +39,7 @@ from local_operator.asks.surfaces import (
     weakest_surface,
 )
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
+from local_operator.guardrails.provenance import UNPROVEN_SURFACE_LABEL
 from local_operator.harness.approval import (
     ASK_ANSWER_OPS,
     AUTHORITY_OPS,
@@ -203,7 +204,9 @@ _PROVED_DESKTOP = _ConnectionAuthority(
 _NOT_BY_OPERATOR = "not by the operator"
 
 
-def _assert_refused_not_consent(outcome: Any, judge_calls: int, victim: Path) -> None:
+def _assert_refused_not_consent(
+    outcome: Any, judge_calls: int, victim: Path, *, surface: str
+) -> None:
     """A forged/unproven answer never settles the delete; it is refused or judged.
 
     WHY the judge is optional (the #3966 x #3993 interaction). #3993 (this file)
@@ -224,7 +227,16 @@ def _assert_refused_not_consent(outcome: Any, judge_calls: int, victim: Path) ->
     assert outcome.blocked is True, outcome
     assert victim.exists()
     if judge_calls == 0:
-        assert _NOT_BY_OPERATOR in outcome.text, outcome
+        # ``unverified`` has its own wording since incident a-48e3 (2026-11-16):
+        # it says the answer could not be proven the operator's rather than
+        # implying there was none. Both are the same deterministic refusal, but
+        # each surface must carry ITS wording, never the other's (R1-n2).
+        if surface == "unverified":
+            assert UNPROVEN_SURFACE_LABEL in outcome.text, outcome
+            assert _NOT_BY_OPERATOR not in outcome.text, outcome
+        else:
+            assert _NOT_BY_OPERATOR in outcome.text, outcome
+            assert UNPROVEN_SURFACE_LABEL not in outcome.text, outcome
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +261,7 @@ async def test_scenario_d_remote_ask_respond_claiming_desktop_is_not_consent(
     # ...but its surface is the runtime's word, not the frame's.
     assert record["answered_by"] == {"surface": "remote"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="remote")
 
 
 @pytest.mark.asyncio
@@ -267,7 +279,7 @@ async def test_scenario_e_unproven_mirror_answer_is_not_consent(
     assert record["status"] == "answered"
     assert record["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="unverified")
 
 
 @pytest.mark.asyncio
@@ -291,7 +303,7 @@ async def test_a_local_key_holder_cannot_claim_desktop(home: tuple[Path, Path]) 
     )
     assert rig.record()["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="unverified")
 
 
 @pytest.mark.asyncio
@@ -649,7 +661,7 @@ async def test_the_real_socket_stamps_desktop_only_for_a_proved_frame(
         assert judge_calls == 0
     else:
         assert record["answered_by"] == {"surface": "unverified"}
-        _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+        _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="unverified")
 
 
 @pytest.mark.asyncio
@@ -697,7 +709,7 @@ async def test_a_mesh_relayed_answer_is_remote_even_with_a_valid_proof(
         await live.close(config)
     assert rig.record()["answered_by"] == {"surface": "remote"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="remote")
 
 
 @pytest.mark.asyncio
@@ -783,7 +795,7 @@ async def test_scenario_r_an_unproven_revise_does_not_keep_the_proved_label(
     await _proved_no_then_revise(rig, _LOCAL_UNPROVEN)
     assert rig.record()["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="unverified")
 
 
 @pytest.mark.asyncio
@@ -795,7 +807,7 @@ async def test_scenario_r2_a_mesh_revise_does_not_keep_the_proved_label(
     await _proved_no_then_revise(rig, _REMOTE_PROMPT)
     assert rig.record()["answered_by"] == {"surface": "remote"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="remote")
 
 
 @pytest.mark.asyncio
@@ -822,7 +834,7 @@ async def test_a_proved_revise_cannot_wash_an_earlier_unproven_one(
     )
     assert rig.record()["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="unverified")
 
 
 @pytest.mark.asyncio
@@ -847,7 +859,7 @@ async def test_scenario_m_an_unproven_cell_is_not_settled_by_a_proved_tap(
     assert record["answers"] == {"q1": ["Yes"], "q2": ["No"]}
     assert record["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim, surface="unverified")
 
 
 @pytest.mark.asyncio
@@ -893,3 +905,190 @@ def test_weakest_surface_never_exceeds_any_input(labels: tuple[str, ...], expect
     for reader in (GUARD_TRUSTED_SURFACES, PROFILE_CONSENT_SURFACES):
         if result in reader:
             assert all(label in reader for label in labels)
+
+
+# ---------------------------------------------------------------------------
+# Incident a-48e3 (2026-11-16): an operator's desktop-card answer to a runtime
+# the wake supervisor started was stamped ``unverified``, and nothing recorded
+# which connection answered or told the card it could not authorise a delete.
+# The fail-closed stays; these pin the attribution log and the proof probe the
+# answer route reports as ``consent_bearing``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authority", "label", "proved"),
+    [
+        (_LOCAL_UNPROVEN, "unverified", False),
+        (_PROVED_DESKTOP, "desktop", True),
+        (_REMOTE_PROMPT, "remote", False),
+    ],
+)
+async def test_each_stamp_logs_the_connection_facts_without_the_answer(
+    home: tuple[Path, Path],
+    caplog: pytest.LogCaptureFixture,
+    authority: _ConnectionAuthority,
+    label: str,
+    proved: bool,
+) -> None:
+    rig = _Rig(*home, tag=f"log{label}")
+    with caplog.at_level("INFO", logger="local_operator.session.runtime.server"):
+        await rig.dispatch(
+            "ask_respond",
+            {"ask_id": rig.ask_id, "answers": {"q1": ["Yes-secret-words"]}, "by": "desktop"},
+            authority,
+        )
+    lines = [r.getMessage() for r in caplog.records if "ask answer stamped" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert f"ask={rig.ask_id!r}" in lines[0]
+    assert f"surface={label}" in lines[0]
+    assert f"proved={proved}" in lines[0]
+    assert f"locality={authority.locality}" in lines[0]
+    # Connection facts only: never the answer's words, never the frame's ``by``.
+    assert "Yes-secret-words" not in lines[0]
+    assert rig.record()["answered_by"] == {"surface": label}
+
+
+@pytest.mark.asyncio
+async def test_the_mirror_stamp_logs_too(
+    home: tuple[Path, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = _Rig(*home, tag="logmirror")
+    request_id = mirror_request_id(rig.ask_id, 0)
+    with caplog.at_level("INFO", logger="local_operator.session.runtime.server"):
+        await rig.dispatch(
+            "ask_answer", {"request_id": request_id, "value": "Yes"}, _LOCAL_UNPROVEN
+        )
+    [line] = [r.getMessage() for r in caplog.records if "ask answer stamped" in r.getMessage()]
+    assert f"ask={request_id!r}" in line and "surface=unverified" in line and "proved=False" in line
+
+
+@pytest.mark.asyncio
+async def test_a_newline_in_the_ask_id_cannot_forge_a_second_log_line(
+    home: tuple[Path, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    """R1-m1: the ask id is client-supplied and logged before validation; a
+    newline in it must not mint a fake ``surface=desktop proved=True`` line."""
+    rig = _Rig(*home, tag="loginject")
+    forged = "a-x\nask answer stamped: op=ask_respond ask=a-y surface=desktop proved=True"
+    with caplog.at_level("INFO", logger="local_operator.session.runtime.server"):
+        try:
+            await rig.dispatch(
+                "ask_respond", {"ask_id": forged, "answers": {"q1": ["Yes"]}}, _LOCAL_UNPROVEN
+            )
+        except Exception:  # an unknown ask is refused AFTER the stamp is logged
+            pass
+    [line] = [r.getMessage() for r in caplog.records if "ask answer stamped" in r.getMessage()]
+    assert "\n" not in line
+    assert f"ask={forged!r}" in line
+    assert line.endswith("proved=False")
+
+
+@pytest.mark.parametrize(
+    ("cap", "bearing", "held"),
+    [
+        (True, True, True),  # this process started the runtime and it proved itself
+        (False, True, False),  # no capability: not this process's runtime (a-48e3)
+        (True, False, False),  # capability, but the runtime never proved the same one
+        (False, False, False),
+    ],
+)
+def test_the_proof_probe_matches_what_an_opted_in_ask_answer_presents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cap: bool, bearing: bool, held: bool
+) -> None:
+    """``operator_ask_proof_held`` is True exactly when ``authority_proof`` would
+    attach a proof to an opted-in ask answer, i.e. when the runtime will stamp a
+    trusted surface. It is the one source of the route's ``consent_bearing``."""
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    client._operator_cap = mint_operator_cap() if cap else None
+    client._operator_nonce = operator_nonce()
+    client._operator_salt = operator_nonce()
+    client._authority_bearing = bearing
+    assert client.operator_ask_proof_held() is held
+    presented = client.authority_proof("ask_respond", {}, operator_ask=True)
+    assert (presented is not None) is held
+
+
+class _SendClient:
+    """A bound client double: records whether its proof was held when called."""
+
+    def __init__(self, held: bool, *, connected: bool = True, probe: bool = True) -> None:
+        self.connected = connected
+        self.held = held
+        self.sent: list[str] = []
+        if probe:
+            self.operator_ask_proof_held = lambda: self.held
+
+    async def ask_respond(self, ask_id: str, body: Any, *, by: str) -> str:
+        self.sent.append(ask_id)
+        return "answered"
+
+
+def _facade_with(client: Any) -> Any:
+    from local_operator.session.attached import AttachedSession
+
+    facade = AttachedSession.__new__(AttachedSession)
+    facade._client = client  # type: ignore[attr-defined]
+    facade._ask_proof_at_send = False  # type: ignore[attr-defined]
+
+    async def _bound() -> None:
+        return None
+
+    facade._ensure_bound = _bound  # type: ignore[attr-defined]
+    return facade
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client", "expected"),
+    [
+        (_SendClient(True), True),
+        (_SendClient(False), False),
+        # A client predating the probe: fail closed.
+        (_SendClient(True, probe=False), False),
+    ],
+)
+async def test_the_facade_reports_the_proof_its_sending_client_held(
+    client: Any, expected: bool
+) -> None:
+    facade = _facade_with(client)
+    assert facade.ask_consent_bearing() is False  # nothing sent yet
+    await facade._ask_client_method("ask_respond", "a-1", {"q": ["Yes"]}, by="desktop")
+    assert client.sent == ["a-1"]
+    assert facade.ask_consent_bearing() is expected
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_after_the_send_does_not_change_the_reported_proof() -> None:
+    """R1-m2: the route reads the probe after ``ask_respond`` returns. A reconnect
+    in between swaps the bound client; the receipt must still describe the
+    connection that CARRIED the answer, in both directions."""
+    old = _SendClient(False)
+    facade = _facade_with(old)
+    await facade._ask_client_method("ask_respond", "a-1", {"q": ["Yes"]}, by="desktop")
+    facade._client = _SendClient(True)  # a fresh proving connection after the send
+    assert facade.ask_consent_bearing() is False
+    proving = _SendClient(True)
+    facade = _facade_with(proving)
+    await facade._ask_client_method("ask_respond", "a-2", {"q": ["Yes"]}, by="desktop")
+    facade._client = None  # dropped after the send
+    assert facade.ask_consent_bearing() is True
+
+
+@pytest.mark.asyncio
+async def test_a_send_refused_mid_reconnect_reports_no_proof() -> None:
+    facade = _facade_with(_SendClient(True, connected=False))
+    facade._ask_proof_at_send = True  # a stale value from an earlier answer
+
+    async def _refusal(_reason: Any) -> Exception:
+        return RuntimeError("reconnecting")
+
+    facade._refusal_while_reconnecting = _refusal  # type: ignore[attr-defined]
+    facade._unavailable_reason = lambda: "reconnecting"  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError):
+        await facade._ask_client_method("ask_respond", "a-3", {"q": ["Yes"]}, by="desktop")
+    assert facade.ask_consent_bearing() is False

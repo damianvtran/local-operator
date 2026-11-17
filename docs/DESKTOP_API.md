@@ -806,7 +806,7 @@ readings.
 | POST `.../{id}/files/{file_id}/download` | — | `{path,name,bytes,sha256,created,origin_device}`; lands one row of a PEER's conversation on THIS device (`remote_files`); see §"Remote files" |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
-| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. **`dismiss`** (`features.ask_dismiss >= 1`): `{ask_id,dismiss:true,reason?}` with `reason` one of `answered_in_chat` \| `moot` (default `moot`) puts an OPEN ask away — the fourth body shape, and the same epoch-free queued-ask door. It carries no `answers`/`decline`/`revise`/`images` (a body that does is a `422`), it is accepted while the agent is RUNNING (mid-turn the receipt reaches the model at the runner's next boundary; an idle live session holds it with no turn), and it **boots nothing**: a session with no live owner is settled by the no-boot door, and only an owner that is present is dialled. `200 {detail:"dismissed"}`; the ask's own sentence as a `409` (already answered / already dismissed / relayed / team-bridge / not in this session's queue). `dismiss:false` is the same statement as omitting it; `reason` without `dismiss` is a `422`. A relayed or team-bridge OPEN ask stays refused — it is settled where its own model reads it. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
+| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. **`dismiss`** (`features.ask_dismiss >= 1`): `{ask_id,dismiss:true,reason?}` with `reason` one of `answered_in_chat` \| `moot` (default `moot`) puts an OPEN ask away — the fourth body shape, and the same epoch-free queued-ask door. It carries no `answers`/`decline`/`revise`/`images` (a body that does is a `422`), it is accepted while the agent is RUNNING (mid-turn the receipt reaches the model at the runner's next boundary; an idle live session holds it with no turn), and it **boots nothing**: a session with no live owner is settled by the no-boot door, and only an owner that is present is dialled. `200 {detail:"dismissed"}`; the ask's own sentence as a `409` (already answered / already dismissed / relayed / team-bridge / not in this session's queue). `dismiss:false` is the same statement as omitting it; `reason` without `dismiss` is a `422`. A relayed or team-bridge OPEN ask stays refused — it is settled where its own model reads it. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only. **`consent_bearing`** (`features.ask_consent_bearing >= 1`): an ask answer or revision receipt is `{detail, consent_bearing: bool}` (`null` on a decline, a gate answer, a dismissal or a bridge decision: a decline is never consent, whatever proof was presented). `true` only when this backend holds the operator capability of the runtime it answered (it started that runtime) and presented the proof, so the runtime stamped `desktop`; `false` means the runtime stamped `unverified` — the answer is recorded and settles the ask but can never authorise a delete or move (incident a-48e3: a runtime started by the wake supervisor). Computed server-side from the attach handshake; a body field of that name is a `422` (`Answer` forbids unknown fields). A peer conversation always reads `false`. A hint for the card, never consent itself |
 | GET `/v1/desktop/asks` | — | `{asks:[PendingAsk + {session_id,cwd}]}`. An OPEN row also carries `user_messages_since` and `last_user_message_at` (ms) when the writing runtime could count them — how many operator messages were admitted after the ask was raised, and when the latest one arrived, for the card's "N messages from you since this was asked" line. ABSENT (never `0`) means the writer could not count it: an older runtime, a session with no operator message yet, or an ask older than the runtime's retained window. `0` is a fact and draws no line. Index-backed: served with nothing running, from `<config_dir>/asks/<sid>.json`. **The key is a plain list here**: unlike a session frame, its presence is NOT the queued-ask capability proxy — this route only exists on a build that has the feature, and an empty list is the ordinary "nothing is waiting" answer |
 | GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1`, `entry_ts=1`, `open_frame=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**). `entry_ts=1` and `open_frame=1` govern the page embedded in the open frame's snapshot, exactly as on `GET .../{id}` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
@@ -2063,7 +2063,31 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    end); when present it is authoritative. `changes["jobs"]` remains the
    REPLACEMENT form and is what a snapshot/seed carries; a renderer that has
    never heard of `job_deltas` ignores it and keeps its last snapshot until the
-   next sync, which is safe. Rows in both forms are the same bounded summaries.
+   next sync, which is safe. Rows in both forms are the same bounded summaries,
+   with one desktop-only difference: the SLIM ROW. On the desktop plane the
+   roster in the `snapshot` frame, in `frontend.replace`, and in a
+   `changes["jobs"]` replacement keeps only the fields the app renders —
+   `id`, `type`, `status`, `label`, `agent_role`, `queued`, `start_time`,
+   `settled_at`, `usage` (`context_tokens` and `input_tokens` only),
+   `context_window`, `direct_cost`, `latest_details` (open rows and every
+   `music` row; a settled row draws no activity line), `error_text`,
+   `result_text`, `session_id`, `parent_job_id`, `model_label`, `prompt`,
+   `launch_prompts`, `launch_message_id` — and omits any of them whose value is
+   empty (`null`, `""`, `false`, `{}`, `[]`), which every reader treats as
+   absent. Everything else (`descendant_usage`, `session_dir`,
+   `trajectory_length`, `attempt_aliases`, the priced usage receipt, …) is
+   left out: a 2,000-job roster went from ~6.6 MB to ~1.6 MB (the whole open
+   record with an ordinary open-frame page: ~6.8 MB to ~1.8 MB), and a
+   10,000-job open record measures ~8.15 MB, under the relay's 8 MiB record
+   cap. That is the ceiling this slimming reaches: past ~10,000 jobs the
+   remaining weight is the 200-char per-row text floor the rows render.
+   `job_deltas.upserted` rows stay FULL bounded rows, and a merge REPLACES the
+   row it names, so a row's first change restores every field; a settled row
+   does not change again and renders nothing from the dropped fields. The
+   runtime socket and the TUI followers still receive full rows
+   (`sync_wire_payload`); the slim row is applied only by the desktop bridge
+   (`slim_desktop_job_rows_in_place`). A field the app starts reading must be
+   added to `DESKTOP_JOB_ROW_KEYS` in the same change.
    A DEGRADED frame says so rather than going silent: `frontend.update` with
    `degraded: true, paused: true` + `degraded_reason`, and an `event` whose
    type is `notice` with `paused: true, action: "reload"`. `paused` means the
@@ -2242,7 +2266,13 @@ watermark: `unseen` and the sidebar mark survive it untouched.
 
 A cold reconnect, HTTP restart, detached interval, expired replay cursor or future
 cursor requires a gap snapshot. One live shared bridge retains at most256frames
-and8MiB; each subscriber has the same backlog bounds. Overflow emits `gap` and
+and8MiB; each subscriber has the same backlog bounds. A SINGLE frame larger than
+8MiB (e.g. a recovery `history_delta` spanning a huge journal) is never queued,
+retained for replay or used to close anyone: each opened subscriber instead
+receives, in that frame's place and on the same connection, an in-band `gap`
+followed by a fresh `snapshot` (frames behind it at or below the snapshot's `seq`
+are superseded — journal-order corrections excepted, as at open — newer ones follow it), and a reconnect whose cursor predates it
+gets `open{gap:true}`. Overflow emits `gap` and
 closes instead of silently losing semantic events — and an OVERFLOW is only
 reached by a subscriber that has already been served its snapshot. A subscriber
 that has not opened yet is never disconnected for backlog: the frames it would
@@ -3234,7 +3264,8 @@ to.
   most once per tick; the connection's first read is a baseline, so a
   reconnect replays nothing.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
-  overflow emits `gap` and closes.
+  overflow emits `gap` and closes. A single frame over 8 MiB resyncs in band
+  instead (`gap` + fresh `snapshot`, connection kept).
 
 ### The polling cadence
 

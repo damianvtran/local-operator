@@ -66,7 +66,9 @@ def _register(client: TestClient, install_id: str) -> dict[str, Any]:
         "/api/push/register",
         json={
             "platform": "ios",
-            "token": "synthetic-token",
+            # One token per install: two install ids sharing a token are one
+            # installation, and the registry retires the older row.
+            "token": f"synthetic-token-{install_id}",
             "environment": "sandbox",
             "app_version": "1.0.0 (1)",
             "install_id": install_id,

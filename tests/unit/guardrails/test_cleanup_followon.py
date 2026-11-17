@@ -292,7 +292,11 @@ def test_missing_facts_never_earn_the_route(
     assert not v.warnings
 
 
-def test_squash_merge_without_ancestry_stays_with_the_judge(home: Path, repo: Path) -> None:
+def test_squash_merge_is_proven_by_content(home: Path, repo: Path) -> None:
+    """Changed by the finished-work cleanup PR (node-2 census 2026-11-15): a
+    squash merge has no ancestry but HEAD's content is on the advertised tip,
+    so it earns the route as ``merged-by-content``. A local commit made after
+    the squash makes it unproven again (#3992 author's constraint 2)."""
     wt = repo / ".worktrees" / "squashed"
     _git("worktree", "add", "-q", "-b", "fix/squashed", str(wt), cwd=repo)
     (wt / "s.txt").write_text("s\n")
@@ -305,6 +309,12 @@ def test_squash_merge_without_ancestry_stays_with_the_judge(home: Path, repo: Pa
     _git("push", "-q", "origin", "main", cwd=repo)
     _git("fetch", "-q", "origin", cwd=repo)
     _record(home, wt)
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    assert got.safe and "merged-by-content" in got.reasons, got
+    assert _rank(home, f"rm -rf {wt}").risk is Risk.LOW
+    (wt / "later.txt").write_text("later\n")
+    _git("add", ".", cwd=wt)
+    _git("commit", "-qm", "after the squash", cwd=wt)
     assert prov.finished_foreign_worktree(str(wt), ME).reasons == ("not-merged",)
     assert _rank(home, f"rm -rf {wt}").risk is Risk.HIGH
 
@@ -319,7 +329,8 @@ def test_non_main_default_branch_is_read_from_origin(home: Path) -> None:
     ("stub", "verdict", "code"),
     [
         ({"_gh_prs": lambda r, b: [prov.ForgeChange(7, "open", "")]}, "not-safe", "open-pr"),
-        ({"_gh_prs": lambda r, b: None}, "unknown", "pr-unknown"),
+        # No forge remote at all: the PR state is unknown and git never ran.
+        ({"_github_repo": lambda _: None}, "unknown", "pr-unknown"),
         (
             {"_running_owners": lambda real, sid, strict=False: ("cccccccccc3",)},
             "not-safe",
@@ -339,16 +350,16 @@ def test_activity_facts_gate_the_route(
     assert _rank(home, f"rm -rf {wt}").risk >= Risk.HIGH
 
 
-def test_convergence_git_inferred_no_pr_never_earns_the_foreign_route(
+def test_failed_forge_with_merge_proven_earns_the_route_as_forge_unread(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Integration conflict with PR #4024 (merge of origin/main into PR #3992).
+    """Changed consciously by the finished-work cleanup PR (node-2: gh fails).
 
     #4024's ``_git_fallback`` turns a FAILED forge lookup into ``pr_state
-    "none"`` when git proves the branch merged, which is exactly this
-    fixture's tree. The foreign route needs the forge read positively
-    (unreadable foreign facts fail closed), so the git-inferred ``none``
-    must stay ``pr-unknown`` and the delete stays with the judge.
+    "none"`` when git proves the branch merged. #3992 kept that ``pr-unknown``;
+    the operator's request (ask a-798d) is that finished work cleans up, so a
+    merge proven against origin's ADVERTISED tip now earns the route — named
+    ``forge-unread``, never "no open PR". A known open PR still refuses.
     """
     wt = _finished_tree(home, repo, "done")
     monkeypatch.setattr(prov, "_gh_prs", lambda r, b: None)
@@ -356,8 +367,9 @@ def test_convergence_git_inferred_no_pr_never_earns_the_foreign_route(
     # The fallback really fired: without this the test would pass vacuously.
     assert got.activity is not None and got.activity.pr_state == "none", got
     assert got.activity.git_merged, got
-    assert (got.verdict, got.reasons) == ("unknown", ("pr-unknown",)), got
-    assert _rank(home, f"rm -rf {wt}").risk >= Risk.HIGH
+    assert got.safe and "forge-unread" in got.reasons and "no-open-pr" not in got.reasons, got
+    assert "PR state unread" in got.warning(str(wt))
+    assert _rank(home, f"rm -rf {wt}").risk is Risk.LOW
 
 
 def test_unreadable_owner_inventory_is_unknown_not_idle(

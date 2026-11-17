@@ -1,0 +1,24 @@
+# audit.log — actual command output, hi/cli.failures/gbt2, 2026-11-16, session de3fcb4a492b
+$ cd ~/local-operator/.worktrees/github-borrow-timeout-note && git log --oneline -1
+80a55b208 fix(tools): report GitHub credential borrow timeouts
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only ; echo rc=$?
+check.py: catalogue checks: 0 problem(s)
+rc=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace cli.failures
+eea5f42ba067f04bfc1be00e96fc3932131cfed62f420e8be71b06bff562f817
+# key parity / placeholder parity / cell_len (rich.cells.cell_len) / ZWJ-ZWNJ-bidi scan
+keys_equal=True en=5 hi=5
+cli.failures.error_line placeholders_equal=True cells=22 cps=25 invisible=False
+cli.failures.required placeholders_equal=True cells=27 cps=36 invisible=False
+cli.failures.invalid_choice placeholders_equal=True cells=56 cps=71 invisible=False
+cli.failures.invalid_command placeholders_equal=True cells=27 cps=31 invisible=False
+cli.failures.github_borrow_timeout placeholders_equal=True cells=59 cps=79 invisible=False
+# codepoint dump of hi cli.failures.github_borrow_timeout (on-disk bytes)
+U+007B U+006F U+0077 U+006E U+0065 U+0072 U+007D U+0020 U+0938 U+0947 U+0020 U+0047 U+0069 U+0074 U+0048 U+0075 U+0062 U+0020 U+0915 U+094D U+0930 U+0947 U+0921 U+0947 U+0902 U+0936 U+093F U+092F U+0932 U+0020 U+007B U+0073 U+0065 U+0063 U+006F U+006E U+0064 U+0073 U+007D U+0020 U+0938 U+0947 U+0915 U+0902 U+0921 U+0020 U+092E U+0947 U+0902 U+0020 U+0928 U+0939 U+0940 U+0902 U+0020 U+092E U+093F U+0932 U+093E U+003B U+0020 U+0915 U+092E U+093E U+0902 U+0921 U+0020 U+092B U+093F U+0930 U+0020 U+0938 U+0947 U+0020 U+091A U+0932 U+093E U+090F U+0901
+# input sha256
+local_operator/i18n/catalogues/en/cli.failures.json 8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea
+local_operator/i18n/catalogues/en/cli.failures.context.json b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f
+local_operator/i18n/catalogues/hi/cli.failures.json c0721aec5a33a5790477f2265070f7021d2d00de355ef2250fc19069ec7a2913
+i18n/style-guides/hi.md 82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5
+i18n/glossary.md 5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7
+docs/I18N.md da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500

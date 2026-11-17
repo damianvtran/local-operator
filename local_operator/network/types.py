@@ -1394,6 +1394,14 @@ def may_run_slash_in_the_owners_terminal(
 # ---------------------------------------------------------------------------
 
 
+class ControlRequestTimeout(TimeoutError):
+    """Local-only timeout metadata, never a wire refusal or a secret payload."""
+
+    def __init__(self, timeout_s: float) -> None:
+        self.timeout_s = timeout_s
+        super().__init__("the local control reply did not arrive within its existing deadline")
+
+
 class MeshRefusal(Exception):
     """A refusal that carries a machine ``code`` and a sentence for the operator.
 

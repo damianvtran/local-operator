@@ -208,16 +208,17 @@ class SessionDraft:
     aside_main_images: dict[int, Any] = field(default_factory=dict)
     aside_main_shell_mode: bool = False
     approve_all: bool | None = None
-    #: The SCOPE of ``approve_all`` and whether it was granted while the
-    #: conversation already held Team Bridge content (team-bridge-egress.md: "Grants", S-57).
+    #: The SCOPE of ``approve_all`` (team-bridge-egress.md: "Grants", S-57).
+    #: Provenance only since #3928: the Team Bridge latch honours both scopes
+    #: alike, so the post-latch ``approve_granted_while_latched`` stamp that
+    #: rode beside it is gone (an older overflow-parked draft carrying it is
+    #: decoded without it).
     #: ``"global"`` only when the TUI adopted the machine default with no
     #: conversation record; every other writer (``A``, the card's ``S``, a
     #: typed ``/approvals auto``, a record read back) is ``"session"``. The
-    #: defaults are the fail-closed decode: an undetermined scope is a session
-    #: grant and an unknown stamp is False, so a pre-latch ``A`` restored from
-    #: an overflow-parked draft can never survive the latch.
+    #: default is the fail-closed decode: an undetermined scope is a session
+    #: grant.
     approve_scope: str = "session"
-    approve_granted_while_latched: bool = False
     #: Whether THIS conversation's approval card ``G`` set the machine default
     #: to auto. In the issuing conversation that counts as a session grant, as
     #: the desktop's "All sessions" already does (review S-61): a later

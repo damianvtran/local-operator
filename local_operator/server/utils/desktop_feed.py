@@ -2070,7 +2070,9 @@ class DesktopFeed:
         argument is untouched by the move: the caller still reads on the tick
         that decides, so the answer is never the cache's.
         """
-        if presence.attended and presence.session_id == session_id:
+        # ``DesktopPresence.attending`` is shared with the mobile push worker's
+        # presence gate, so the phone suppresses exactly what this suppresses.
+        if presence.attending(session_id):
             return None
         return "always"
 
@@ -2288,6 +2290,26 @@ class DesktopFeed:
             {"kind": kind, "intent": intent},
             session_id=session_id,
         )
+
+    def publish_team_bridge_authorize(self, payload: dict[str, Any]) -> None:
+        """Announce a batch Touch ID prompt's state (``team_bridge_authorize``).
+
+        WHY (PR #4099 security round 2, S-6): the OS sheet cannot say what it is
+        for, and any bearer holder can ask the daemon to raise it. So the daemon
+        publishes, on the MACHINE-WIDE feed every desktop window holds, what each
+        prompt is for — ``{authorize_id, client_ref, state, items}`` with the
+        senders and excerpts it resolved from the local asks — whoever started
+        it. The desktop renders it and labels a ``client_ref`` it did not
+        generate as "not started by you".
+
+        Pushed by ``POST /v1/desktop/team-bridge/requests/decide/authorize`` at
+        each transition (``prompting`` → ``signed`` | ``dismissed`` |
+        ``refused``), not polled: the route is the only place a prompt starts.
+        LIVE-ONLY, like ``settings_intent``: a prompt lasts seconds, so a missed
+        frame has nothing to replay into. The payload never carries a message
+        body, a screening rationale or a body hash.
+        """
+        self._publish("team_bridge_authorize", dict(payload))
 
     def _avatar_probe(self) -> dict[str, str | None]:
         """``{agent_id: avatar sha256 | None}`` from the shared, stat-memoised index.

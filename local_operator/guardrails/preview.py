@@ -56,12 +56,14 @@ from local_operator.guardrails.check import (
     credential_refusal_text,
     escalate_asked_targets,
     evidence_write_verdict,
+    guard_version,
     lapsed_refusal_reason,
     mask_credential_paths,
     read_settings,
     review_text,
     rule_block_text,
     rule_warn_text,
+    stamp_guard_version,
     worktree_flagged,
 )
 from local_operator.guardrails.classify import Verdict, classify_bash
@@ -153,10 +155,16 @@ class PreviewReport:
     #: The rule directories this preview actually loaded, so the report states its
     #: own basis instead of calling a candidate folder "the current rules".
     rule_dirs: tuple[str, ...] = ()
+    #: The installed guard's version, the other half of the refusal-text
+    #: ``(guard <version>)`` comparison the re-evaluation exception in
+    #: ``check.REFUSAL_SCOPE`` asks for: one report carries both facts.
+    guard_version: str = ""
 
     def render(self) -> str:
         """The report as text an agent reads back from its ``eval`` output."""
         lines = [f"preview: {self.tool}  {_one_line(self.call_text)}"]
+        if self.guard_version:
+            lines.append(f"guard: {self.guard_version} (installed)")
         if self.builtin_effect:
             lines.append(
                 f"built-in {DANGEROUS_DELETE_RULE}: risk={self.builtin_risk or 'LOW'} "
@@ -399,9 +407,11 @@ def preview_tool_call(
         "builtin_risk": verdict.risk.name if verdict is not None else "",
         "builtin_targets": private(_ranked_targets(verdict)),
         "builtin_effect": effect,
-        "builtin_text": private(builtin_text),
+        # Stamped like the checkpoint's result so the preview stays byte-equal.
+        "builtin_text": stamp_guard_version(private(builtin_text)),
         "builtin_facts": tuple(private(f) for f in builtin_facts),
         "rule_dirs": tuple(str(path) for path in live.rules_dirs) if live.enabled else (),
+        "guard_version": guard_version(),
     }
     if effect in _REFUSING:
         return PreviewReport(**base, action="refuse", rule=DANGEROUS_DELETE_RULE)
@@ -440,7 +450,10 @@ def preview_tool_call(
             gate.append(rule.name)
             continue
         entry = RulePreview(
-            rule.name, "block", text=_safe_text(rule_block_text(rule)), gated_by=gated_by
+            rule.name,
+            "block",
+            text=stamp_guard_version(_safe_text(rule_block_text(rule))),
+            gated_by=gated_by,
         )
         matched.append(entry)
         blocked = entry

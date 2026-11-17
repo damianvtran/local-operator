@@ -253,10 +253,10 @@ async def test_the_bare_command_opens_the_overlay() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        # The LOCAL handler is what a TUI runs for its own session.
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        # The LOCAL handler is what a TUI runs for its own session; `_open_card`
+        # issues it once the session is adopted (see its docstring for why one
+        # `pause()` was a bet on load, not a wait).
+        await _open_card(pilot, app, session)
         panel = app.query_one(GoalPanel)
         assert panel.is_open
         assert GOAL in _card_text(panel)
@@ -268,9 +268,7 @@ async def test_the_done_key_strikes_the_goal_and_records_it() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        await _open_card(pilot, app, session)
         await pilot.press("d")
         await pilot.pause()
         assert session.goal_status == "done"
@@ -294,9 +292,7 @@ async def test_the_clear_key_arms_first_and_only_the_second_press_erases() -> No
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        await _open_card(pilot, app, session)
         await pilot.press("c")
         await pilot.pause()
         # ARMED, and nothing has happened to the record.
@@ -324,9 +320,7 @@ async def test_escape_cancels_an_armed_clear() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        await _open_card(pilot, app, session)
         await pilot.press("c")
         await pilot.pause()
         await pilot.press("escape")
@@ -354,9 +348,7 @@ async def test_the_card_is_tall_enough_for_its_own_content() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        await _open_card(pilot, app, session)
         panel = app.query_one(GoalPanel)
         rows = _card_text(panel).split("\n")
         # `region` is the OUTER box: the content plus the stylesheet's own two
@@ -541,9 +533,7 @@ async def test_the_card_counts_the_settled_goals_it_did_not_paint() -> None:
 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        await _open_card(pilot, app, session)
         total = len(session.history_view())
         assert total > MAX_HISTORY_ROWS
         panel = app.query_one(GoalPanel)
@@ -568,9 +558,7 @@ async def test_a_short_terminal_says_the_list_was_clipped_rather_than_none() -> 
 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 14)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        await _open_card(pilot, app, session)
         panel = app.query_one(GoalPanel)
         body = _card_text(panel)
         assert "none yet" not in body, "the record has eleven; the card must not deny them"
@@ -602,9 +590,7 @@ async def test_the_clip_notice_is_painted_once_the_ground_can_hold_it() -> None:
 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 16)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        await _open_card(pilot, app, session)
         panel = app.query_one(GoalPanel)
         lines = _card_text(panel).split("\n")
         notice = next(index for index, line in enumerate(lines) if "more settled" in line)
@@ -945,10 +931,7 @@ async def test_the_hint_row_is_painted_whatever_the_record_drops(height: int) ->
 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, height)) as pilot:
-        await _adopted(pilot, app, session)
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
-        panel = app.query_one(GoalPanel)
+        panel = await _open_card(pilot, app, session)
         lines = _card_text(panel).split("\n")
         painted = panel.content_region.height
     assert len(lines) <= painted, f"{height}: body {len(lines)} rows, box paints {painted}"

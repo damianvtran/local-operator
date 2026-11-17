@@ -1354,10 +1354,10 @@ class ApprovalPrompt(AskPickerScreen):
         Why (QA Q-11): the ``S``/``G`` callbacks and the "Allow all" row are
         bound when the card is BUILT. A card parked while the session was clean
         kept them after a teammate's-agent message latched the session, and a
-        press then reached ``_set_approve_all`` while latched -- which stamps
-        ``granted_while_latched``, the marker reserved for a TYPED
-        ``/approvals auto``. The app's setters refuse at press time too; this is
-        the visible half, so the card stops offering what it will refuse.
+        press then reached ``_set_approve_all`` while latched -- a loosening
+        reserved for a TYPED ``/approvals auto``. The app's setters refuse at
+        press time too; this is the visible half, so the card stops offering
+        what it will refuse.
 
         In place rather than rebuilt: the parked future, its binding and the
         reader's place on the card are the gate's single answer path

@@ -554,6 +554,7 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "quota_blocked": 0,
     "interactive_required": 300_000,
     "rate_limited": 0,
+    "owner_busy": 0,
     "unsupported": NO_RETRY,
     "device_bound": 300_000,
     "not_authorised": 60_000,
@@ -658,7 +659,7 @@ DEFAULT_RETRY_AFTER_MS = 60_000
 QUOTA_REASON_HOLDER_EXCLUDED = "holder_excluded"
 QUOTA_REASON_POOL_DEPLETED = "pool_depleted"
 BROKER_ERROR_REASONS: frozenset[str] = frozenset(
-    {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED}
+    {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED, "owner_busy"}
 )
 
 
@@ -680,7 +681,8 @@ class BrokerError:
     owner_device_name: str = ""
     retry_after_ms: int = 0
     #: Which arm produced this refusal, from :data:`BROKER_ERROR_REASONS`; "" when
-    #: the producer did not say (every code but ``quota_blocked``, and older owners).
+    #: the producer did not say. Also distinguishes a GitHub owner lookup timeout
+    #: from rate limiting without breaking older borrowers' transient-code fence.
     reason: str = ""
     #: ``retry_after_ms`` is a FLOOR, not the owner's reset (#3108 review r2 m1): the
     #: owner stated a longer wait than ``MAX_PEER_RETRY_AFTER_MS``, which the boundary
@@ -688,6 +690,17 @@ class BrokerError:
     #: promise about the owner's account — a proven 3 h reopening would otherwise be
     #: rendered "for another 5 min", and repeated every 5 min. Never on the wire.
     retry_after_is_floor: bool = False
+
+    def as_borrower_error(self) -> BrokerError:
+        """Normalize the additive busy reason ONLY at upgraded consumer edges.
+
+        Keep from_detail literal: an older client must still see rate_limited
+        and keep its held grant. Re-serialization restores that compatible wire
+        code even when an upgraded relay has normalized the in-memory error.
+        """
+        if self.code == "rate_limited" and self.reason == "owner_busy":
+            return dataclasses.replace(self, code="owner_busy")
+        return self
 
     @property
     def is_holder_exclusion(self) -> bool:
@@ -714,7 +727,11 @@ class BrokerError:
 
     def to_detail(self) -> dict[str, Any]:
         """The wire shape (design §3.2's failure reply, inside ``detail``)."""
-        detail: dict[str, Any] = {"kind": "error", "code": self.code, "message": self.message}
+        detail: dict[str, Any] = {
+            "kind": "error",
+            "code": "rate_limited" if self.code == "owner_busy" else self.code,
+            "message": self.message,
+        }
         if self.key:
             detail["key"] = self.key
         if self.owner_device:
@@ -723,7 +740,9 @@ class BrokerError:
             detail["owner_device_name"] = self.owner_device_name
         if self.retry_after_ms:
             detail["retry_after_ms"] = self.retry_after_ms
-        if self.reason:
+        if self.code == "owner_busy":
+            detail["reason"] = "owner_busy"
+        elif self.reason:
             detail["reason"] = self.reason
         return detail
 
@@ -744,6 +763,17 @@ class BrokerError:
                 else ""
             ),
         )
+
+
+@dataclasses.dataclass
+class BorrowTimeout(BrokerError):
+    """Local-only diagnostic: no token, wire field, grant or extra authority.
+
+    The normal refusal code still drives every existing held/policy decision.
+    Only a timeout that remains refused may explain the missing tool env.
+    """
+
+    timeout_s: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)

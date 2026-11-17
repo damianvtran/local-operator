@@ -201,6 +201,22 @@ def auto_save_conversation_label() -> Msg:
     return Msg("wire.settings.auto_save_conversation.label", {})
 
 
+def bash_heavy_jobs_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.bash_heavy_jobs_enabled.choice.false.description", {})
+
+
+def bash_heavy_jobs_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.bash_heavy_jobs_enabled.choice.true.description", {})
+
+
+def bash_heavy_jobs_enabled_help() -> Msg:
+    return Msg("wire.settings.bash_heavy_jobs_enabled.help", {})
+
+
+def bash_heavy_jobs_enabled_label() -> Msg:
+    return Msg("wire.settings.bash_heavy_jobs_enabled.label", {})
+
+
 def bash_memory_enabled_choice_false_description() -> Msg:
     return Msg("wire.settings.bash_memory_enabled.choice.false.description", {})
 
@@ -1203,6 +1219,14 @@ def guardrails_rules_dir_help() -> Msg:
 
 def guardrails_rules_dir_label() -> Msg:
     return Msg("wire.settings.guardrails_rules_dir.label", {})
+
+
+def heavy_jobs_description() -> Msg:
+    return Msg("wire.settings.heavy_jobs.description", {})
+
+
+def heavy_jobs_title() -> Msg:
+    return Msg("wire.settings.heavy_jobs.title", {})
 
 
 def hooks_description() -> Msg:

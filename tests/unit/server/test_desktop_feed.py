@@ -4716,6 +4716,33 @@ def test_a_picture_set_and_removal_each_publish_one_avatar_frame(tmp_path):
     assert all("session_id" not in frame for frame in frames)
 
 
+def test_a_team_bridge_authorize_prompt_is_published_machine_wide(tmp_path):
+    """PR #4099 S-6: every window sees what a batch Touch ID prompt is for.
+
+    Machine-wide (no ``session_id``) and LIVE-ONLY: a late subscriber gets no
+    replay, because a prompt lasts seconds and the next one publishes afresh.
+    """
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)  # the open frame
+
+    payload = {
+        "authorize_id": "ab" * 8,
+        "client_ref": None,
+        "state": "prompting",
+        "items": [{"message_id": "bmsg_a", "word": "approve", "sender": "P", "excerpt": "x"}],
+    }
+    feed.publish_team_bridge_authorize(payload)
+    frames = [f for f in _queued(subscription) if f["type"] == "team_bridge_authorize"]
+    assert [f["payload"] for f in frames] == [payload]
+    assert "session_id" not in frames[0]
+
+    late = feed.subscribe()
+    assert not [f for f in _queued(late) if f["type"] == "team_bridge_authorize"]
+    asyncio.run(feed.close())
+
+
 def test_a_settings_intent_change_is_published_on_the_machine_wide_feed(tmp_path):
     """The applier's slot changes reach every window without a session bridge.
 
