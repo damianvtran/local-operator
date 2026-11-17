@@ -114,7 +114,10 @@ the head is final; a red gate blocks merge; re-arm after any push with
 `make merge-gate PR=<n>`; still never run the full suite locally. Run omitted
 required surfaces bounded and record them; CI never replaces real-path QA.
 Resource holds forbid hold-class runs, not evidence. Investigate even
-out-of-slice fails.
+out-of-slice fails. To wait for heavy work, take the heavy-job slot (#4104):
+no CLI waiter exists, so run the heavy command through `bash`, which queues for
+it, or check `lop services status` once; never loop on `pgrep -f <pattern>`,
+which matches its own command line.
 
 ## Converge, do not restart
 
