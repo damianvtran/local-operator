@@ -145,6 +145,8 @@ class FakeServer:
     thread_root: str | None = None
     #: agent-server #402's ``ids.passive``; ``None`` = ABSENT (an older hub).
     passive: bool | None = None
+    #: The body read's ``conversation_kind``; ``None`` = ABSENT (an older body route).
+    conversation_kind: str | None = None
 
     def event_for(self, endpoint: str) -> dict[str, Any] | None:
         if not self.active.get(endpoint, False):
@@ -241,7 +243,7 @@ class FakeServer:
         return {"messages": rows[: limit or 50], "has_more": False}
 
     def body_response(self) -> dict[str, Any]:
-        return {
+        response = {
             "message_id": MESSAGE_ID,
             "body": self.body_override if self.body_override is not None else self.body,
             "body_hash": hashlib.sha256(self.body.encode("utf-8")).hexdigest(),
@@ -249,6 +251,9 @@ class FakeServer:
             "sender_label": self.sender["display_label"],
             "sender_kind": self.sender["kind"],
         }
+        if self.conversation_kind is not None:
+            response["conversation_kind"] = self.conversation_kind
+        return response
 
 
 class FakeWire:
@@ -1861,7 +1866,107 @@ def test_a_passive_thread_reply_is_admitted_but_wakes_nobody(
 
         replay = _run(b, config_dir)
         assert transcripts["sess_b"] == []
-        assert all(item.get("action") != "hold" for item in replay["handled"])
+        # The CARD_POSTED branch, not an empty page: the replay is a duplicate.
+        assert [item["action"] for item in replay["handled"]] == ["duplicate"]
+
+
+@pytest.mark.parametrize(
+    ("conversation_kind", "thread_root", "wakes"),
+    [
+        pytest.param("dm", THREAD_ROOT, True, id="dm-thread-reply-wakes"),
+        pytest.param("dm", None, True, id="dm-top-level-wakes"),
+        pytest.param("group", THREAD_ROOT, False, id="group-honours-passive"),
+        pytest.param("channel", THREAD_ROOT, False, id="channel-honours-passive"),
+        pytest.param(None, THREAD_ROOT, False, id="absent-kind-honours-passive"),
+    ],
+)
+def test_a_passive_bit_never_silences_a_dm(
+    tmp_path, monkeypatch, conversation_kind, thread_root, wakes
+) -> None:
+    """In a DM the agent is always the audience: a passive bit there is a hub bug.
+
+    agent-server #402's first cut marked every thread reply passive regardless of
+    kind (its review M-1); honouring that would drop a direct message for good.
+    """
+
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        thread_root=thread_root,
+        passive=True,
+        conversation_kind=conversation_kind,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+
+    out = _run(b, config_dir)
+
+    handled = out["handled"]
+    assert len(handled) == 1 and handled[0]["action"] == "delivered"
+    assert [(row["endpoint"], row["verdict"]) for row in server.admits] == [("bep_b", "allow")]
+    if wakes:
+        assert handled[0]["detail"] != conversation_mod.CARD_PASSIVE
+        assert len(transcripts["sess_b"]) == 1
+    else:
+        assert handled[0]["detail"] == conversation_mod.CARD_PASSIVE
+        assert transcripts["sess_b"] == []
+
+
+@pytest.mark.parametrize(
+    ("conversation_kind", "wakes"),
+    [
+        pytest.param("channel", False, id="channel-stays-silent"),
+        pytest.param("dm", True, id="dm-wakes"),
+    ],
+)
+def test_a_held_passive_reply_settles_on_the_retry_pass(
+    tmp_path, monkeypatch, conversation_kind, wakes
+) -> None:
+    """A held passive row re-drives through the same hand-off: still no wake.
+
+    The hold stores ``ref.encode()``, so ``/passive=1`` survives the hold; the
+    re-drive returns ``delivered``/``CARD_PASSIVE``, which is terminal, so the hold
+    row is retired rather than retried forever. A DM keeps waking on this path too.
+    """
+
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    store = _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        thread_root=THREAD_ROOT,
+        passive=True,
+        conversation_kind=conversation_kind,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+    ref = _ref(server, "bep_b")
+    assert ref.passive and "/passive=1" in ref.encode()
+    store.persist_hold(b, ref.encode(), "screening_hold", retry_at=0)
+    loop_mod._RETRY_ATTEMPTS.clear()  # a fresh process has no in-memory counter
+
+    out = asyncio.run(
+        loop_mod.retry_due_holds(
+            b,
+            config_dir=config_dir,
+            access=SimpleNamespace(credential_id=b.credential_id),
+            auth_store=None,
+        )
+    )
+
+    outcome = out["outcomes"][0]
+    assert outcome["action"] == "delivered"
+    assert [(row["endpoint"], row["verdict"]) for row in server.admits] == [("bep_b", "allow")]
+    assert Store(config_dir).screening_hold(b, ref.encode()) is None
+    # The retry outcome carries no hand-off ``detail``; the transcript is the wake.
+    assert len(transcripts["sess_b"]) == (1 if wakes else 0)
+    if not wakes:
+        # Settled like the live path, so a later replay of the ref is a duplicate.
+        assert _reservation_rows(config_dir)[0]["card_posted_at"] is not None
 
 
 def test_a_mention_is_never_passive(tmp_path, monkeypatch) -> None:

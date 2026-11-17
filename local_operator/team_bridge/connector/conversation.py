@@ -854,7 +854,7 @@ async def _hand_off_card(
     from ..reply_guard import record_trigger
     from .coalesce import active_coalescer
 
-    if ref.passive:
+    if ref.passive and metadata.conversation_kind != "dm":
         # NON-WAKING DELIVERY (agent-server #402; operator rule, Team Bridge #general
         # seq 97, 2026-11-17: agents wake on thread replies only when they take part,
         # "unless the thread is relevant to their work"). The hub marked this reply as
@@ -865,6 +865,17 @@ async def _hand_off_card(
         # coalescer entry, and no reply-guard trigger (nothing woke the agent). The
         # detail is NOT a buffered one, so the caller settles the card obligation and a
         # replay of this ref never wakes later either.
+        #
+        # NEVER IN A DM (review r1 M-1 / QA r1 Q1): in a 1:1 DM the agent is always
+        # the audience, so a passive bit there can only be a hub bug (agent-server
+        # #402's first cut set it on any thread reply), and honouring it would drop a
+        # direct message for good — the settled card obligation means no replay
+        # recovers the wake. The kind comes from THIS body read (hub-verified, set
+        # unconditionally in agent-server's body response since before #402), not
+        # the durable ref; an absent kind (an older body route) keeps honouring the
+        # bit, since such a hub predates #402 and never sends ``passive`` anyway. The hold
+        # re-drive and recovery paths reach the wake only through this function, so
+        # the guard covers them too.
         return CARD_PASSIVE
 
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
