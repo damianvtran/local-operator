@@ -22409,6 +22409,80 @@ class Session:
             # turn that never reached one again (see ``_flush_parked_deliveries``).
             await self._flush_parked_deliveries()
 
+    async def _spool_parked_for_successor(self) -> None:
+        """Hand peer messages and wakes parked past the last boundary to the successor.
+
+        The leaving-runtime twin of the flush below. A turn on a draining
+        runtime still takes peer messages and its own wakes (the node2
+        incident, 2026-11-17: holding them for ~40 min behind one busy turn was
+        the defect), and the busy arms park them on the steering queue for "the
+        next tool boundary". A turn that ends first has no next boundary, and
+        opening a new turn for them is exactly what a leaving runtime must not
+        do — so they go to the inbox the successor drains into its first turn
+        (``process._drain_inbox_into``), with ``wake=True`` because each was a
+        delivery somebody asked to be acted on.
+
+        Only wake and peer ``CustomMessage`` rows are taken; everything else
+        (plain steers, asks, monitors) keeps its place and its pre-existing
+        handling. A peer row carries its own ``message.id`` so the successor's
+        ``receive_peer_message`` duplicate gate answers a second copy instead of
+        appending it twice. Never raises: this runs in the turn's ``finally``.
+        """
+        from local_operator.harness.message_types import PEER_DELIVERABLE_CUSTOM_TYPES
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        kept: list[AgentMessage] = []
+        taken: list[CustomMessage] = []
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            if isinstance(item, CustomMessage) and (
+                item.custom_type == WAKE_PROMPT_MESSAGE_TYPE
+                or item.custom_type in PEER_DELIVERABLE_CUSTOM_TYPES
+            ):
+                taken.append(item)
+            else:
+                kept.append(item)
+        for item in kept:
+            self._steering_queue.put_nowait(item)
+        if not taken:
+            return
+        directory = getattr(self._transcript, "directory", None)
+        for message in taken:
+            try:
+                if message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+                    await self._spool_parked_wake(message)
+                    continue
+                details = message.details or {}
+                if directory is None:
+                    logger.warning("parked peer message %s could not be spooled", message.id)
+                    continue
+                custom_type = (
+                    message.custom_type
+                    if message.custom_type != PEER_MESSAGE_MESSAGE_TYPE
+                    else ""
+                )
+                await asyncio.to_thread(
+                    append_inbox,
+                    Path(directory),
+                    InboxLine(
+                        text=str(details.get("body") or details.get("text") or ""),
+                        sender=dict(details.get("sender") or {}),
+                        mode="mailbox",
+                        written_at=time.time(),
+                        wake=True,
+                        message_id=str(message.id or ""),
+                        custom_type=custom_type,
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — the turn's finally must not die here
+                logger.warning(
+                    "parked delivery %s could not be spooled while draining",
+                    getattr(message, "id", ""),
+                    exc_info=True,
+                )
+        self._courtesy_wake_count = 0
+        self.refresh_frontend_state()
+
     async def _flush_parked_deliveries(self) -> None:
         """Hand over what a busy latch parked, now that the turn has ended.
 
@@ -22485,6 +22559,14 @@ class Session:
         would cost the busy arms one shared sentence. Recorded here so the
         next reader does not re-derive the mismatch as a bug.
         """
+        if self._leaving_deliveries and not self._disposed and not self._one_shot_exit:
+            # A DRAINING RUNTIME NOW PARKS PEER MESSAGES AND WAKES HERE: they are
+            # delivered into its live turn rather than spooled
+            # (``ServingSessionHandle._admits_into_live_turn``,
+            # ``_spool_wake_to_inbox``), so one that lands past the turn's last
+            # boundary would otherwise sit in memory until the exit disposes it.
+            await self._spool_parked_for_successor()
+            return
         if self._disposed or self._leaving_deliveries or self._one_shot_exit:
             return
         drained: list[AgentMessage] = []
@@ -32307,6 +32389,23 @@ class Session:
         """
         from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
+        # A FIRE INTO A LIVE TURN IS DELIVERED, not spooled. The divert is
+        # installed when a drain LATCHES, and a build-replaced drain latches on a
+        # busy runtime by construction — so for the whole rest of that turn the
+        # session's own reminders went to a successor that boots only after the
+        # turn ends (node2, 2026-11-17: 6 own wakes held ~40 min behind one
+        # turn). Riding the running turn opens no new work on the leaving build,
+        # which is the only thing the divert exists to prevent; an idle fire
+        # still spools below. ``_deliver_wake``'s busy arm parks it for the next
+        # tool boundary, and a turn that ends first hands the park to
+        # ``_flush_parked_deliveries``, whose leaving arm spools it.
+        # ``getattr``: the cell harnesses bind this method onto hosts without the
+        # session's turn flags, and those hosts are idle by construction.
+        if getattr(self, "_is_streaming", False) and not getattr(self, "_disposed", False):
+            deliver = getattr(self, "_wake_hook_before_drain", None) or self._deliver_wake
+            if deliver != self._spool_wake_to_inbox:
+                await deliver(due)
+                return
         if due.final and self._queue_wake_rearm(due):
             return
         text = format_wake_delivery_text(due)
