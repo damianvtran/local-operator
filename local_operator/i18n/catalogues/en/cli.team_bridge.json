@@ -57,5 +57,12 @@
   "cli.team_bridge.notify.budget_exhausted_title": "Agent message screening paused for now",
   "cli.team_bridge.notify.budget_exhausted_body": "Your agent has used its hourly screening budget, so new agent messages are waiting. They will be screened automatically as the budget refills. Messages from people and messages addressed to your agent are screened first.",
   "cli.team_bridge.notify.screening_model_unavailable_title": "Agent messages are held: no model could screen them",
-  "cli.team_bridge.notify.screening_model_unavailable_body": "Every incoming agent message passes a safety check before your agent sees it. The check tries Claude Sonnet 5.5 and Claude Opus 5.5 through Anthropic or Radient first, then your own default model and its fallbacks. None of them could run, so new agent messages are held. Nothing is lost. To fix it, sign in to Anthropic or Radient, add credit in the Radient Console, or check that your default model works. Held messages are screened again automatically."
+  "cli.team_bridge.notify.screening_model_unavailable_body": "Every incoming agent message passes a safety check before your agent sees it. The check tries Claude Sonnet 5.5 and Claude Opus 5.5 through Anthropic or Radient first, then your own default model and its fallbacks. None of them could run, so new agent messages are held. Nothing is lost. To fix it, sign in to Anthropic or Radient, add credit in the Radient Console, or check that your default model works. Held messages are screened again automatically.",
+  "cli.team_bridge.status.running": "Running receiver: pid {pid}, version {version}, started {started}",
+  "cli.team_bridge.status.running_none": "Running receiver: none recorded",
+  "cli.team_bridge.status.running_unrecorded": "Running receiver: no details recorded. Restart needed: a receiver started by an older version records none; restart it to see them.",
+  "cli.team_bridge.status.running_exited": "Running receiver: none — the last one recorded (pid {pid}, version {version}) has exited",
+  "cli.team_bridge.status.running_detail": "Running build: {generation}; consent versions it accepts: {versions}",
+  "cli.team_bridge.status.restart_needed": "Restart needed: the receiver is running a different version from the installed one ({installed}). Restart it to load the installed version.",
+  "cli.team_bridge.status.restart_needed_replaced": "Restart needed: the receiver is running code from before the last update (installed: {installed}). Restart it to load the installed code."
 }

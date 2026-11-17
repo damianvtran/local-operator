@@ -261,6 +261,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The receiver's runtime record (which build is running): a config-dir
+    # sidecar published by atomic replace, the same pattern as the counter above.
+    # Every ``_write`` caller passes ``record_path(config_dir)`` =
+    # ``<config_dir>/team_bridge/connector_runtime.json``; its temp sibling is
+    # that fixed name plus ``.{pid}.tmp``. No caller input reaches either path,
+    # so neither can be a session directory or a transcript.
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ runtime record",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the record; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::clear_own_record",
+        "<path>.unlink",
+        "Removes the fixed team_bridge/connector_runtime.json FILE on exit; never a session path",
+    ),
     # The reply guard's per-install digest key (#3377, review round 1 S-3) is
     # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
     # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
