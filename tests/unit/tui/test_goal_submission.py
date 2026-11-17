@@ -19,7 +19,7 @@ from local_operator.tui.widgets.transcript import UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, GoalSession, _factory
 
 
-async def _await_goal_session(app: OperatorApp, pilot: Pilot[None], session: GoalSession) -> None:
+async def _await_goal_session(app: OperatorApp, pilot: Pilot[None], session: FakeSession) -> None:
     """Wait for this test's session, not merely the initial command frame.
 
     Boot adopts the session in a worker: a drained pilot frame can still expose
@@ -197,7 +197,13 @@ async def test_goal_submits_cited_image_and_keeps_pasted_lookalikes_out_of_resol
         3: Attachment(ImageContent(data="b2xk", mime_type="image/png"), "[Image #3, 1x1]"),
     }
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        # Wait for ADOPTION, not one frame. The command frame can be ready
+        # (so `_run_slash_command`'s readiness gate passes) while the boot
+        # worker has not yet bound `app._session`; `/goal` then stops at
+        # `_cmd_goal`'s `session is None` guard ("session is still
+        # starting…") and nothing is stored — the CI flake `assert '' ==
+        # 'Check a prev…'`, reproduced by delaying the session factory.
+        await _await_goal_session(app, pilot, session)
         app._run_slash_command(f"/goal Check {paste_marker} against {marker}", attachments)
         await app.workers.wait_for_complete()
         await pilot.pause()
