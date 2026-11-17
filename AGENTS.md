@@ -686,8 +686,14 @@ job narrows for nothing on this tree today.
 `pgrep -f <pattern>`, which matches its own command line** (twice on 2026-11-17 a
 waiter matched itself forever and read as a heavy job in another lane's check). No CLI
 waiter exists yet: the `bash` tool takes the slot itself for a heavy command
-(`pytest -n N`, builds, type checks), queues up to 15 min and names the holder;
-otherwise check `lop services status` once, or exclude your own pid.
+(`pytest -n N`, JS builds, `tsc`/`vue-tsc` and `typecheck` scripts; not
+mypy/pyright), queues up to 15 min and names the holder. A serial `python -m
+pytest` takes no slot, so it never queues behind a held one. Otherwise check `lop
+services status` once (it names the holder without waiting), or take a specific
+run's exact pid once and wait with a bounded `kill -0 <pid>` loop. Never wait on any
+`pgrep -f` pattern for test or heavy names: the waiter's shell, its `timeout`
+wrapper and the parent `bash -c` all carry the text, and `[p]ytest` still matches
+a later literal in that same command line.
 
 **A local run now reports on itself, so silence is no longer ambiguous.** With
 `LOCAL_OPERATOR_SHARD_STALL_SECONDS` absent (i.e. anywhere but the CI shard job),

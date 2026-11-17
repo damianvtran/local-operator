@@ -156,7 +156,12 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     # tier, ran review/QA as parallel sessions or on `model=inherit`. The rule
     # itself lives in guide://sessions; this policy, which every engineering role
     # loads, carries only the one line that sends a reader there.
-    assert len(policy) < 12900
+    #
+    # Raised to 13100 for the heavy-slot wait rule (+231 measured with
+    # `len(read_text())`, 12784 -> 13015; PR #4176): twice on 2026-11-17 an
+    # agent's `pgrep -f` waiter matched its own shell and parents forever and
+    # read as a heavy job in another lane's resource check, blocking that lane.
+    assert len(policy) < 13100
     flat = " ".join(policy.split())
     assert "review/QA/design/UX are `task` subagents, on mesh nodes too" in flat
     assert "`guide://sessions`" in flat
