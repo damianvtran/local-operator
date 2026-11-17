@@ -236,6 +236,14 @@ export type MessageParams = {
   "relay.composer.action.stop": undefined;
   "relay.composer.action.stop_agent": undefined;
   "relay.composer.action.stopping": undefined;
+  "relay.diagram.close": undefined;
+  "relay.diagram.copied": undefined;
+  "relay.diagram.copy": undefined;
+  "relay.diagram.copy_failed": undefined;
+  "relay.diagram.error.title": undefined;
+  "relay.diagram.full_size": undefined;
+  "relay.diagram.save": undefined;
+  "relay.diagram.view": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
   "relay.health.ended_send_failed": undefined;

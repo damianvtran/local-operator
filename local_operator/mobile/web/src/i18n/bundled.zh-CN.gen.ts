@@ -266,6 +266,18 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.action.stopping": "\u6b63\u5728\u505c\u6b62",
     },
   },
+  "relay.diagram": {
+    "zh-CN": {
+      "relay.diagram.close": "\u5173\u95ed\u56fe\u8868",
+      "relay.diagram.copied": "\u5df2\u590d\u5236",
+      "relay.diagram.copy": "\u590d\u5236\u6e90\u7801",
+      "relay.diagram.copy_failed": "\u65e0\u6cd5\u590d\u5236",
+      "relay.diagram.error.title": "\u65e0\u6cd5\u7ed8\u5236\u6b64\u56fe\u8868",
+      "relay.diagram.full_size": "\u5b8c\u6574\u5927\u5c0f",
+      "relay.diagram.save": "\u4fdd\u5b58SVG",
+      "relay.diagram.view": "\u56fe\u8868",
+    },
+  },
   "relay.health": {
     "zh-CN": {
       "relay.health.dropped_detail": "\u7535\u8111\u76ee\u524d\u65e0\u6cd5\u8fde\u63a5\u5230\u6b64\u4f1a\u8bdd\uff0c\u6b63\u5728\u4e0d\u65ad\u91cd\u8bd5\u3002\u8fde\u4e0a\u4e4b\u524d\uff0c\u53d1\u9001\u4f1a\u7acb\u5373\u5931\u8d25\uff0c\u5df2\u8f93\u5165\u7684\u6587\u5b57\u4f1a\u4fdd\u7559\u5728\u8f93\u5165\u6846\u4e2d\u3002",

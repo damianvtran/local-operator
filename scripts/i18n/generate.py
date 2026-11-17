@@ -234,6 +234,9 @@ OWNED_SPA_NAMESPACES = (
     # so relay.asks' passed ledger rows do not stale, and because its copy must
     # carry no shell command outside the "Using a terminal?" disclosure (D16).
     "relay.pairing",
+    # The mermaid diagram block: copy/save/full-size controls and the error card.
+    # Its own namespace for the frozen-bytes reason above.
+    "relay.diagram",
 )
 
 # WHY A COMMENT HEADER, NOT A MODULE DOCSTRING (2026-11-15): the header is for
