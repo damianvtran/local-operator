@@ -51,6 +51,11 @@ export function bucketWidth(width: number): number {
 	return Math.max(WIDTH_STEP, Math.floor(width / WIDTH_STEP) * WIDTH_STEP);
 }
 
+/** Explicit Pele bounds; the measurement behind them is at the `renderAsync` call. */
+export const PELE_SOURCE_LIMIT = 50_000;
+export const PELE_MAX_EDGES = 5_000;
+export const PELE_OUTPUT_LIMIT = 1_000_000;
+
 const CACHE_LIMIT = 48;
 const cache = new Map<string, DrawResult>();
 /** Draws in flight, so two identical fences in one message share one render. */
@@ -129,6 +134,17 @@ async function draw(
 			idPrefix: `pele-${hash(key)}`,
 			links: false,
 			images: false,
+			/* The bounds on main-thread work, stated rather than inherited (R3 F4).
+			   Parse, layout, DOMParser and the node-by-node sanitiser copy all run on
+			   the phone's main thread, and Pele's own defaults (50k source, 5k edges,
+			   4M output chars, read from pele 1.13.0 dist) only held because the
+			   version is pinned. Measured on that version: a 2 000-edge, 25.8k-char
+			   flowchart drew in 84 ms to 965k chars of SVG, so 1M output keeps that
+			   worst realistic case and refuses the 4x tail; a refusal is a cached
+			   `limit` error card, with the source still shown. */
+			limit: PELE_SOURCE_LIMIT,
+			maxEdges: PELE_MAX_EDGES,
+			outputLimit: PELE_OUTPUT_LIMIT,
 			...(mode.kind === "fit"
 				? /* `responsive` is set, not left to the source: an author's
 				     `%%{init: {"flowchart": {"useMaxWidth": false}}}%%` would otherwise drop the

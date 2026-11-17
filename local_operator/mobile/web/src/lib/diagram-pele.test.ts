@@ -1,7 +1,15 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DIAGRAM_SAMPLES } from "../fixtures/diagram-samples";
-import { WIDTH_STEP, bucketWidth, drawDiagram, peekDrawing, resetDiagramCache } from "./diagram-pele";
+import {
+	PELE_OUTPUT_LIMIT,
+	WIDTH_STEP,
+	bucketWidth,
+	drawDiagram,
+	loadPele,
+	peekDrawing,
+	resetDiagramCache,
+} from "./diagram-pele";
 
 beforeEach(resetDiagramCache);
 
@@ -47,6 +55,21 @@ describe("drawDiagram", () => {
 			expect(full.width / full.height).toBeGreaterThan(fit.width / fit.height);
 		}
 	});
+
+	it("refuses an SVG over the phone's own output bound that Pele's default would allow (R3 F4)", async () => {
+		/* ~2 600 chained edges: well inside the source (50k) and edge (5k) bounds,
+		   and the drawing lands between our 1M cap and Pele's 4M default. */
+		const chain = ["flowchart TD", ...Array.from({ length: 2600 }, (_, i) => `  N${i} --> N${i + 1}`)].join("\n");
+		expect(chain.length).toBeLessThan(50_000);
+		/* Negative control: without our bound the same source draws, so the refusal below is ours. */
+		const pele = await loadPele();
+		const free = await pele.renderAsync(chain, { links: false, images: false, responsive: false });
+		expect(free.svg.length).toBeGreaterThan(PELE_OUTPUT_LIMIT);
+		expect(free.svg.length).toBeLessThan(4_000_000);
+		const result = await drawDiagram(chain, { kind: "full" });
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.retryable).toBe(false);
+	}, 20_000);
 
 	it("reports a parse error as a result, caches it, and never throws", async () => {
 		const bad = "flowchart TD\n A[Start --> B";

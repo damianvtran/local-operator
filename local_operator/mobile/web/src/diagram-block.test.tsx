@@ -3,7 +3,7 @@
 // (lazy-imported, as in the app). Layout and pixels are the browser rig's job;
 // this file pins the fence rules, the swap from code to drawing, the error
 // fallback, the controls and that hostile labels never become elements.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Markdown } from "./components/markdown";
 import { DIAGRAM_SAMPLES } from "./fixtures/diagram-samples";
@@ -198,6 +198,49 @@ describe("diagram block edge cases", () => {
 		expect(message.length).toBeLessThanOrEqual(401);
 	});
 
+	it("says the row changed height again when a new width redraws it (R3 F2)", async () => {
+		const observers: ResizeObserverCallback[] = [];
+		vi.stubGlobal(
+			"ResizeObserver",
+			class {
+				constructor(cb: ResizeObserverCallback) {
+					observers.push(cb);
+				}
+				observe() {}
+				unobserve() {}
+				disconnect() {}
+			},
+		);
+		const heard = vi.fn();
+		const { container } = render(
+			<div ref={(el) => el?.addEventListener("lo:content-resized", heard)}>
+				<Markdown text={fenced(DIAGRAM_SAMPLES.flowchart)} />
+			</div>,
+		);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		expect(heard).toHaveBeenCalledTimes(1);
+		/* a rotation: the column narrows into another width bucket */
+		vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(250);
+		await act(async () => {
+			for (const cb of [...observers]) cb([], {} as ResizeObserver);
+		});
+		await waitFor(() => expect(heard).toHaveBeenCalledTimes(2));
+		vi.unstubAllGlobals();
+	});
+
+	it("titles an unusable drawing with the localized heading alone, no app-authored English (R3 F5)", async () => {
+		/* The engine's SVG parses to something that is not an <svg> root. */
+		const real = DOMParser.prototype.parseFromString;
+		vi.spyOn(DOMParser.prototype, "parseFromString").mockImplementation(function (this: DOMParser, _s: string, type: DOMParserSupportedType) {
+			return real.call(this, "<html/>", type === "image/svg+xml" ? "text/html" : type);
+		});
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.pie)} />);
+		await waitFor(() => expect(container.querySelector('[data-diagram-state="error"]')).not.toBeNull());
+		const alert = screen.getByRole("alert");
+		expect(alert.textContent).toBe("Couldn't draw this diagram");
+		expect(alert.querySelector("pre")).toBeNull();
+	});
+
 	it("says the row changed height, once, when the drawing replaces the code block", async () => {
 		const heard = vi.fn();
 		const { container } = render(
@@ -215,5 +258,59 @@ describe("diagram block edge cases", () => {
 		const cell = screen.getByTestId("diagram-copy").querySelector(".grid")!;
 		const hidden = Array.from(cell.querySelectorAll('[aria-hidden="true"]')).map((n) => n.textContent);
 		expect(hidden.sort()).toEqual(["Copied", "Couldn't copy"]);
+	});
+});
+
+describe("full-size viewer while its own draw is pending or fails (R3 F3)", () => {
+	it("shows the source while pending, then the error card, never an empty pane", async () => {
+		let settle: (r: unknown) => void = () => {};
+		vi.resetModules();
+		vi.doMock("./lib/diagram-pele", async (importOriginal) => {
+			const real = await importOriginal<typeof import("./lib/diagram-pele")>();
+			return {
+				...real,
+				peekDrawing: (source: string, mode: { kind: string }) =>
+					mode.kind === "full" ? undefined : real.peekDrawing(source, mode as never),
+				drawDiagram: (source: string, mode: { kind: string }) =>
+					mode.kind === "full"
+						? new Promise((resolve) => {
+								settle = resolve;
+							})
+						: real.drawDiagram(source, mode as never),
+			};
+		});
+		const { Markdown: Fresh } = await import("./components/markdown");
+		const { container } = render(<Fresh text={fenced(DIAGRAM_SAMPLES.flowchart)} />);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		await act(async () => fireEvent.click(screen.getByTestId("diagram-full-size")));
+		const pane = within(await screen.findByRole("dialog")).getByTestId("diagram-viewer-scroll");
+		expect(pane.querySelector('[data-diagram-state="pending"] pre')?.textContent).toContain("flowchart");
+		await act(async () => settle({ ok: false, message: "output limit exceeded", retryable: false }));
+		expect(within(pane).getByRole("alert").textContent).toContain("output limit exceeded");
+		expect(pane.querySelector("pre")).not.toBeNull();
+		vi.doUnmock("./lib/diagram-pele");
+		vi.resetModules();
+	});
+});
+
+describe("viewer layout and focus rings (design R2 D2, D3)", () => {
+	it("insets the focus ring so the figure and the viewport edge cannot clip it", async () => {
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.pie)} />);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		expect(screen.getByTestId("diagram-full-size").className).toContain("focus-visible:-outline-offset-2!");
+		await act(async () => fireEvent.click(screen.getByTestId("diagram-full-size")));
+		expect(screen.getByRole("button", { name: "Close diagram" }).className).toContain("focus-visible:-outline-offset-2!");
+	});
+
+	it("centres a short drawing vertically in the viewer without capping a tall one", async () => {
+		const { container } = render(<Markdown text={fenced(DIAGRAM_SAMPLES.pie)} />);
+		await waitFor(() => expect(drawn(container)).not.toBeNull());
+		await act(async () => fireEvent.click(screen.getByTestId("diagram-full-size")));
+		const dialog = await screen.findByRole("dialog");
+		await waitFor(() => expect(dialog.querySelector("svg")).not.toBeNull());
+		const host = dialog.querySelector("svg")!.parentElement!;
+		expect(host.className).toContain("items-center");
+		expect(host.className).toContain("min-h-full");
+		expect(host.className).not.toMatch(/(^|\s)h-full/);
 	});
 });

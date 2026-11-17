@@ -44,9 +44,6 @@ import { useModalLayer } from "./ui/use-modal-layer";
 /** The inline drawing's height cap. Taller drawings clip behind a fade and open full size. */
 const INLINE_MAX_HEIGHT = "32rem";
 
-/** The drawing came back as something that is not an SVG document. A diagnostic, not product copy. */
-const UNUSABLE_SVG = "The drawing was not a usable SVG document."; // i18n: ignore engine diagnostic
-
 /** How long "Copied" stays up. */
 const COPIED_MS = 2000;
 
@@ -74,7 +71,10 @@ function SvgHost({ node, className }: { node: SVGSVGElement; className?: string 
 	return <div ref={host} className={className} />;
 }
 
-export function DiagramErrorCard({ message, source }: { message: string; source: ReactNode }) {
+/* `message` is null when there is no engine text to quote (the drawing came back
+   as something that is not an SVG): the localized title then stands alone,
+   rather than an app-authored English sentence in every locale (R3 F5). */
+export function DiagramErrorCard({ message, source }: { message: string | null; source: ReactNode }) {
 	return (
 		<div data-diagram-state="error" className="flex min-w-0 flex-col gap-1.5">
 			<div role="alert" className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2">
@@ -82,9 +82,11 @@ export function DiagramErrorCard({ message, source }: { message: string; source:
 				{/* The engine's own message, as TEXT: it quotes the diagram, and it is
 				    the one line a reader can act on. English by design (a library's
 				    diagnostic, not product copy). */}
-				<pre dir="ltr" className="mt-1 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted [overflow-wrap:anywhere]">
-					{message.length > MESSAGE_MAX ? `${message.slice(0, MESSAGE_MAX)}…` : message}
-				</pre>
+				{message === null ? null : (
+					<pre dir="ltr" className="mt-1 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted [overflow-wrap:anywhere]">
+						{message.length > MESSAGE_MAX ? `${message.slice(0, MESSAGE_MAX)}…` : message}
+					</pre>
+				)}
 			</div>
 			{source}
 		</div>
@@ -94,7 +96,12 @@ export function DiagramErrorCard({ message, source }: { message: string; source:
 type Copy = "idle" | "copied" | "failed";
 
 const BUTTON =
-	"flex min-h-11 min-w-fit grow items-center justify-center px-3 text-body-sm text-ink-muted select-none active:bg-elevated focus-visible:-outline-offset-2";
+	"flex min-h-11 min-w-fit grow items-center justify-center px-3 text-body-sm text-ink-muted select-none active:bg-elevated focus-visible:-outline-offset-2!";
+/* The `!` is load-bearing: the unlayered `html :focus-visible` rule in
+   styles/index.css sets `outline-offset: 2px` and beats any layered utility, so
+   without it the ring sat OUTSIDE the button and the figure's `overflow-hidden`
+   (or the viewport edge, for the viewer's ✕) clipped it to one stroke (D2). */
+const INSET_RING = "focus-visible:-outline-offset-2!";
 
 function useCopy(text: string): [Copy, () => void] {
 	const [state, setState] = useState<Copy>("idle");
@@ -157,10 +164,12 @@ function saveSvg(node: SVGSVGElement): void {
 /** The full-size viewer: the author's own layout at pixel size, scrolled both ways. */
 function DiagramViewer({
 	source,
+	fallback,
 	onClose,
 	returnFocusRef,
 }: {
 	source: string;
+	fallback: ReactNode;
 	onClose: () => void;
 	returnFocusRef: RefObject<HTMLElement | null>;
 }) {
@@ -225,7 +234,7 @@ function DiagramViewer({
 					type="button"
 					onClick={onClose}
 					aria-label={messageRuntime.t("relay.diagram.close")}
-					className="flex min-h-11 min-w-11 items-center justify-center text-ink-muted active:bg-elevated"
+					className={cn("flex min-h-11 min-w-11 items-center justify-center text-ink-muted active:bg-elevated", INSET_RING)}
 				>
 					✕
 				</button>
@@ -244,7 +253,22 @@ function DiagramViewer({
 						paddingRight: "max(0.75rem, env(safe-area-inset-right))",
 					}}
 				>
-					{node ? <SvgHost node={node} className="w-max min-w-full [&_svg]:max-w-none! [&_svg]:h-auto" /> : null}
+					{/* The `full` layout is unbounded in width, so it can fail (e.g. Pele's
+					    outputLimit) where the inline `fit` draw succeeded, and it is async on
+					    a cold cache: say so, or show the source, never an empty pane (R3 F3).
+					    A drawing shorter than the pane is centred vertically rather than
+					    pinned to the top under 90% empty space (D3); `min-h-full` (not
+					    `h-full`) lets a tall drawing grow the box and scroll, never clip. */}
+					{node ? (
+						<SvgHost
+							node={node}
+							className="flex min-h-full w-max min-w-full items-center [&_svg]:max-w-none! [&_svg]:h-auto"
+						/>
+					) : result === undefined ? (
+						<div data-diagram-state="pending">{fallback}</div>
+					) : (
+						<DiagramErrorCard message={result.ok ? null : result.message} source={fallback} />
+					)}
 				</div>
 				{more.right ? (
 					<div
@@ -276,15 +300,15 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 	const [open, setOpen] = useState(false);
 
 	/* A drawing replaces a code block of a different height AFTER the transcript
-	   has settled. Whether the reader is still at the tail is the transcript's call
-	   (it owns the pin state): this only says the row changed. */
-	const announced = useRef(false);
+	   has settled. Whether the reader is held or kept at the tail is the
+	   transcript's call (it owns the pin state): this only says the row changed.
+	   EVERY new result, not just the first: a rotation changes the width bucket,
+	   the scroller's ResizeObserver re-pins at once, and the redraw at the new
+	   width lands later with a new height that must be followed too (R3 F2). A
+	   cache hit hands back the same object, so an unchanged drawing is silent. */
 	useLayoutEffect(() => {
 		if (result === undefined) return;
-		if (!announced.current) {
-			announced.current = true;
-			box.current?.dispatchEvent(new CustomEvent(CONTENT_RESIZED_EVENT, { bubbles: true }));
-		}
+		box.current?.dispatchEvent(new CustomEvent(CONTENT_RESIZED_EVENT, { bubbles: true }));
 	}, [result]);
 
 	/* The column's width, bucketed so a pixel of movement never redraws. */
@@ -337,12 +361,15 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 
 	/* A chunk that would not load is not a verdict on the diagram: keep the code block. */
 	const explicitFailure = result && !result.ok && !result.retryable ? result.message : null;
-	const unusable = result?.ok && node === null ? UNUSABLE_SVG : null;
-	const failure = explicitFailure ?? unusable;
+	const unusable = result?.ok === true && node === null;
+	const failure = explicitFailure;
 
 	let body: ReactNode;
 	let state: "pending" | "drawn" | "error";
-	if (failure !== null) {
+	if (unusable) {
+		state = "error";
+		body = <DiagramErrorCard message={null} source={fallback} />;
+	} else if (failure !== null) {
 		state = "error";
 		body = <DiagramErrorCard message={failure} source={fallback} />;
 	} else if (drawn && node) {
@@ -401,7 +428,7 @@ export function DiagramBlock({ source, fallback }: { source: string; fallback: R
 	return (
 		<div ref={box} data-diagram-state={state} className="min-w-0">
 			{body}
-			{open && drawn ? <DiagramViewer source={source} onClose={() => setOpen(false)} returnFocusRef={openRef} /> : null}
+			{open && drawn ? <DiagramViewer source={source} fallback={fallback} onClose={() => setOpen(false)} returnFocusRef={openRef} /> : null}
 		</div>
 	);
 }
