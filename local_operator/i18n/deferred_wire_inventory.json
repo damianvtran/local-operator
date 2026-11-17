@@ -442,6 +442,37 @@
         "session/runtime/serving.py": 2,
         "tui/app.py": 4
       }
+    },
+    "wire.github": {
+      "reason": "GitHub repository-sharing copy rendered in-process through tr(\"wire.github\") by network/cli.py, network/readiness.py, network/credentials/messages.py and network/credentials/github.py; the wire and stderr carry finished text, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/network/cli.py",
+          "symbol": "_cmd_credential_github / _designation_lines / _designation_source / _opted_out_lines / _github_ttl_words / _github_designation_now",
+          "note": "owner `repos`/share receipt lines, usage refusals and progress, rendered in-process via _github_text = tr(\"wire.github\") and printed or raised as MeshRefusal finished text"
+        },
+        {
+          "path": "local_operator/network/readiness.py",
+          "symbol": "_designation_phrase",
+          "note": "peer readiness row text rendered in-process via tr(\"wire.github\"); the readiness payload carries the sentence, never a key"
+        },
+        {
+          "path": "local_operator/network/credentials/messages.py",
+          "symbol": "render_broker_error",
+          "note": "borrower-side unset/overflow refusal sentences rendered in-process via tr(\"wire.github\") and returned as finished text"
+        },
+        {
+          "path": "local_operator/network/credentials/github.py",
+          "symbol": "Designation.reason / remedy / refusal, listed_ago, _repository_diagnostic",
+          "note": "owner refusal detail (crosses the mesh as a finished string), age wording and the git-helper's stderr notice, all rendered in-process via tr(\"wire.github\")"
+        }
+      ],
+      "references": {
+        "network/cli.py": 31,
+        "network/credentials/github.py": 29,
+        "network/credentials/messages.py": 5,
+        "network/readiness.py": 11
+      }
     }
   }
 }
