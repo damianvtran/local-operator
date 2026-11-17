@@ -520,7 +520,11 @@ def claim_inbox_batch(batch: InboxReadBatch) -> None:
         # left", or the session acquires a seat, locks and settles on every
         # pipeline pass for its whole lifetime.
         batch.pending_after_commit = bool(raw)
-        batch.chunks = raw.splitlines(keepends=True)
+        # ``\n``-only framing, the writer's own (mesh-origin-stamp review R3-1):
+        # ``splitlines`` also cuts on ``\r``, so ``b"x\r" + <stamped row>`` would
+        # hand ``_parse`` a clean stamped chunk the import downgrade saw (and
+        # refused) as one line. Identical for every row this module writes.
+        batch.chunks = [chunk for chunk in re.split(rb"(?<=\n)", raw) if chunk]
         parsed: list[tuple[int, InboxLine]] = []
         for ordinal, chunk in enumerate(batch.chunks):
             values = _parse(chunk)
@@ -828,14 +832,13 @@ def _count_rows(path: Path) -> int:
 
 
 def _parse(raw: bytes) -> list[InboxLine]:
+    # ONE STRICT STAMP PARSER (mesh-origin-stamp review R3-1): owner rows carry a
+    # ``mesh_origin`` stamp, so the spool is read through the parser the import
+    # downgrade uses; ordinary rows stay tolerant (a torn line is skipped).
+    from local_operator.network.origin import read_jsonl_rows
+
     lines: list[InboxLine] = []
-    for row in raw.splitlines():
-        if not row.strip():
-            continue
-        try:
-            payload = json.loads(row.decode("utf-8", "replace"))
-        except ValueError:
-            continue  # a torn line is skipped, never fatal
+    for payload in read_jsonl_rows(raw):
         if isinstance(payload, dict):
             lines.append(InboxLine.from_json(payload))
     return lines

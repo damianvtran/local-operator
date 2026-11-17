@@ -50,6 +50,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -285,6 +286,99 @@ def fold_answer_origin(
 #: common case for a session no remote device ever wrote to.
 _STAMP_NEEDLE = b'mesh_origin"'
 
+#: A ``\u00XX`` escape of an ASCII lower-case letter or ``_`` — the only way a
+#: JSON key can DECODE to ``mesh_origin`` without containing :data:`_STAMP_NEEDLE`
+#: as bytes (``"mesh\u005forigin"``). ``json.dumps`` never writes one (it escapes
+#: only non-ASCII and control characters), so an honest row never matches; a
+#: line that does is treated as possibly stamped (review R3-1).
+_KEY_LETTER_ESCAPE = re.compile(rb"\\u00(?:5[fF]|[67][0-9a-fA-F])")
+
+
+class StampLineRejected(ValueError):
+    """A possibly stamped line that the ONE strict stamp parser will not read."""
+
+
+def line_may_carry_stamp(line: bytes) -> bool:
+    """Whether ``line`` (raw bytes, never decoded) could hold a stamp key.
+
+    Matched on BYTES before any decoding so no decoder choice (strict,
+    ``"replace"``, surrogateescape) can hide a key from it. False means no JSON
+    parser can find a :data:`FRAME_ORIGIN_KEYS` key on the line.
+    """
+    return _STAMP_NEEDLE in line or _KEY_LETTER_ESCAPE.search(line) is not None
+
+
+def parse_stamp_line(line: bytes) -> Any:
+    """Parse ONE ``\\n``-delimited JSONL line under the strict stamp rules.
+
+    THE single parser that decides whether a stamp at rest is read at all (review
+    R3-1). The import downgrade and every reader that interprets a stamp
+    (:func:`read_jsonl_rows`) go through it, so they cannot disagree on line
+    boundaries or decoding again. Before it, the downgrade split on ``\\n`` and
+    decoded strictly while ``asks.store.read_events`` split with
+    ``bytes.splitlines()`` (also on ``\\r``) and decoded with ``"replace"``: a
+    line ``b"garbage\\r" + <verified answer>`` or one invalid UTF-8 byte made the
+    downgrade skip a line the ask fold then read as ``verified: true``.
+
+    Strict means: the writer's own framing (``\\n`` only — a ``\\r`` anywhere is
+    refused, since a ``splitlines`` reader would cut the line there), strict
+    UTF-8, valid JSON, and decodable at this depth. Raises
+    :class:`StampLineRejected` otherwise; the message names the reason.
+
+    Not covered, deliberately: ``str.splitlines`` also cuts on U+0085/U+2028/
+    U+2029 (legal raw inside a JSON string), but no stamp reader splits that way —
+    the ones that do (census, peek, preview) never interpret a stamp.
+    """
+    if b"\r" in line:
+        raise StampLineRejected("carries a carriage return")
+    try:
+        text = line.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise StampLineRejected("is not strict UTF-8") from exc
+    try:
+        return json.loads(text)
+    except RecursionError as exc:
+        # The decoder's depth limit follows the CALLER's stack depth (a C
+        # recursion counter on 3.12, the stack pointer on 3.14; review R2-1), so a
+        # line too deep here may still decode for a shallower reader.
+        raise StampLineRejected("is too deep to lower") from exc
+    except ValueError as exc:
+        raise StampLineRejected("is not valid JSON") from exc
+
+
+def read_jsonl_rows(raw: bytes) -> list[Any]:
+    """Every JSON value in a JSONL file, for a reader that INTERPRETS stamps.
+
+    Tolerant for ordinary content exactly as the readers were before (rows split
+    with ``bytes.splitlines()``, decoded with ``"replace"``, torn rows skipped),
+    but a line that may carry a stamp is read through :func:`parse_stamp_line`.
+    If the strict parser rejects it, its rows are still read tolerantly — so a
+    torn line costs no ordinary content — with every stamp in them forced to
+    ``verified: false``: a stamp from a line the import door would have refused
+    is never verified. Users: ``asks.store.read_events``,
+    ``session.runtime.inbox._parse``.
+    """
+    rows: list[Any] = []
+    for line in raw.split(b"\n"):
+        lowered = False
+        if line_may_carry_stamp(line):
+            try:
+                rows.append(parse_stamp_line(line))
+                continue
+            except StampLineRejected:
+                lowered = True
+        for piece in line.splitlines():
+            if not piece.strip():
+                continue
+            try:
+                payload = json.loads(piece.decode("utf-8", "replace"))
+            except (ValueError, RecursionError):
+                continue  # a torn line (killed mid-write) is skipped, never fatal
+            if lowered:
+                _downgrade_value(payload)
+            rows.append(payload)
+    return rows
+
 
 #: The transcript's ARCHIVE forms (``session.compression.ARCHIVE_FILENAMES``),
 #: spelled here so this module stays import-light; a test pins the two together.
@@ -328,29 +422,24 @@ def _downgrade_value(value: Any) -> bool:
 
 def _downgrade_file(path: Path) -> int:
     raw = path.read_bytes()
-    if _STAMP_NEEDLE not in raw:
+    if not line_may_carry_stamp(raw):
         return 0
     lines = raw.split(b"\n")
     changed = 0
     for index, line in enumerate(lines):
-        if _STAMP_NEEDLE not in line:
+        if not line_may_carry_stamp(line):
+            # No stamp key can be in it, whatever a reader's decoder: left
+            # byte-identical, torn or not.
             continue
         try:
-            payload = json.loads(line)
-        except RecursionError as exc:
-            # FAIL CLOSED (review R2-1). The decoder's depth limit is not a property
-            # of the line: it follows the CALLER's stack depth (a C recursion
-            # counter on 3.12, the stack pointer on 3.14). A line just past the
-            # limit here, under the import door's frames, still decodes for a
-            # reader running shallower, and that reader would see ``verified:
-            # true``. Since this line carries the stamp needle, refuse the import
-            # exactly as an un-writable lowered line does below.
-            raise ImportStampsRefused(f"{path.name}: a stamped line is too deep to lower") from exc
-        except ValueError:
-            # A torn or foreign line is left byte-identical: the downgrade only
-            # LOWERS trust, and malformed JSON is malformed for every reader at
-            # every depth, so it can never be read as a stamp.
-            continue
+            payload = parse_stamp_line(line)
+        except StampLineRejected as exc:
+            # FAIL CLOSED (reviews R2-1, R3-1). Any reason the ONE strict parser
+            # gives (depth, ``\r``, invalid UTF-8, bad JSON) refuses the import:
+            # skipping it is what let a lenient reader find ``verified: true``.
+            # Readers lower such a line's stamps too (``read_jsonl_rows``), but
+            # the door does not lean on that.
+            raise ImportStampsRefused(f"{path.name}: a stamped line {exc}") from exc
         if _downgrade_value(payload):
             try:
                 lines[index] = json.dumps(payload, ensure_ascii=False).encode("utf-8")

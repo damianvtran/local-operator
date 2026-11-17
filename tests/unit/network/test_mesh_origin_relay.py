@@ -619,3 +619,75 @@ def test_q1_refusal_reply_names_the_real_cause() -> None:
     assert "already exists" not in stamps
     collision = mobility._promote_refusal_detail("moved0000001", mobility._PROMOTE_REFUSED)
     assert "already exists on this device" in collision
+
+
+# ---------------------------------------------------------------------------
+# Review R3-1: a stamped line the strict parser rejects (a stray ``\r``, one
+# invalid UTF-8 byte) refuses the import at BOTH doors; before, the door skipped
+# it and ``asks.store.read_events`` read ``verified: true`` from the copy.
+# ---------------------------------------------------------------------------
+
+_ANSWERED = json.dumps(
+    {"kind": "answered", "ask_id": "a-1", "by": {"surface": "remote", "mesh_origin": OWN}}
+).encode()
+_R3_1_LINES = {
+    "carriage_return": b"garbage\r" + _ANSWERED,
+    "invalid_utf8": _ANSWERED.replace(b'"remote"', b'"remote\xff"'),
+}
+#: An unstamped undecodable line: must stay byte-identical wherever it lands.
+_CONTROL = b"junk\r\xff{torn"
+
+
+def _no_verified_answer(directory: Path) -> None:
+    from local_operator.asks import store as ask_store
+
+    for event in ask_store.read_events(directory):
+        assert event["by"]["mesh_origin"]["verified"] is not True
+
+
+@pytest.mark.parametrize("case", sorted(_R3_1_LINES))
+def test_r3_1_move_door_refuses_a_stamped_line_it_cannot_parse(tmp_path: Path, case: str) -> None:
+    root = tmp_path / "config"
+    staged = _staged_move(root)
+    body = _CONTROL + b"\n" + _R3_1_LINES[case] + b"\n"
+    (staged / "asks.jsonl").write_bytes(body)
+    outcome = mobility._promote(cast(Any, SimpleNamespace(root=root)), staged, "moved0000001")
+    assert outcome == mobility._PROMOTE_STAMPS_REFUSED
+    assert not (root / "sessions" / "moved0000001").exists()
+    _assert_no_verified_copy(root)
+    # Refused before any rewrite of this file; the refused copy stays in staging.
+    assert (staged / "asks.jsonl").read_bytes() == body
+    _no_verified_answer(staged)
+
+
+@pytest.mark.parametrize("case", sorted(_R3_1_LINES))
+def test_r3_1_replica_door_refuses_a_stamped_line_it_cannot_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    root, session_id = _replica(tmp_path)
+    (sync.replica_dir(root, session_id) / "asks.jsonl").write_bytes(
+        _CONTROL + b"\n" + _R3_1_LINES[case] + b"\n"
+    )
+    # A hostile owner's plan covers the bytes it wrote; the door is under test.
+    monkeypatch.setattr(sync, "_verify_replica_against_cursor", lambda *a, **k: None)
+    with pytest.raises(sync.SyncRefused):
+        sync.promote_replica(root, session_id, new_id="recovered0001")
+    assert not (root / "sessions" / "recovered0001").exists()
+    _assert_no_verified_copy(root)
+    # R2-2: quarantined outside ``sessions/`` and unclaimed once there.
+    quarantined = sync.network_dir(root) / sync.QUARANTINE_DIRNAME / "recovered0001"
+    assert quarantined.is_dir()
+    assert not (quarantined / ".session.pid").exists()
+    _no_verified_answer(quarantined)
+
+
+def test_r3_1_an_unstamped_undecodable_line_lands_byte_identical(tmp_path: Path) -> None:
+    root = tmp_path / "config"
+    staged = _staged_move(root)
+    with (staged / "asks.jsonl").open("ab") as handle:
+        handle.write(_CONTROL + b"\n")
+    outcome = mobility._promote(cast(Any, SimpleNamespace(root=root)), staged, "moved0000001")
+    assert outcome.ok is True, outcome
+    landed = (root / "sessions" / "moved0000001" / "asks.jsonl").read_bytes().split(b"\n")
+    assert _CONTROL in landed
+    _assert_no_verified_copy(root)

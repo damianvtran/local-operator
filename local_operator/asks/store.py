@@ -379,16 +379,16 @@ def read_events(session_directory: Path | str, *, strict: bool = False) -> list[
             raise
         logger.warning("ask log unreadable at %s", path, exc_info=True)
         return []
+    # ONE STRICT STAMP PARSER (mesh-origin-stamp review R3-1): this log carries
+    # ``by.mesh_origin`` stamps the fold publishes, so its rows go through the
+    # same parser the import downgrade uses; a stamp on a line that parser
+    # rejects reads ``verified: false``. Ordinary rows stay tolerant (a torn line
+    # is skipped, never fatal: this file is read every minute beside a live
+    # writer).
+    from local_operator.network.origin import read_jsonl_rows
+
     events: list[dict[str, Any]] = []
-    for row in raw.splitlines():
-        if not row.strip():
-            continue
-        try:
-            payload = json.loads(row.decode("utf-8", "replace"))
-        except ValueError:
-            # A torn line (killed mid-write) is skipped, never fatal: this file
-            # is read every minute beside a live writer.
-            continue
+    for payload in read_jsonl_rows(raw):
         if isinstance(payload, dict) and payload.get("ask_id"):
             events.append(payload)
     return events

@@ -532,3 +532,129 @@ def test_s2_archive_names_match_the_compression_module() -> None:
     from local_operator.session import compression
 
     assert set(origin.TRANSCRIPT_ARCHIVE_NAMES) == set(compression.ARCHIVE_FILENAMES)
+
+
+# ---------------------------------------------------------------------------
+# Review R3-1: ONE strict parser decides whether a stamp at rest is read at all.
+# The import door refuses every possibly-stamped line it rejects, and every
+# reader that interprets a stamp reads such a line's stamps as unverified, so
+# the door and the readers give the same verdict on the same bytes.
+# ---------------------------------------------------------------------------
+
+
+def _answered_row(**extra: Any) -> dict[str, Any]:
+    return {
+        "kind": "answered",
+        "ask_id": "a-1",
+        "by": {"surface": "remote", "mesh_origin": _stamp()},
+        **extra,
+    }
+
+
+def _owner_inbox_row() -> dict[str, Any]:
+    return {"text": "hi", "source": "user", "mesh_origin": _stamp()}
+
+
+#: Crafted possibly-stamped lines the strict parser must reject, each paired with
+#: the row a lenient reader recovered from it on d4a59bbfb (``verified: true``).
+_REJECTED_LINES: dict[str, bytes] = {
+    "carriage_return": b"garbage\r" + json.dumps(_answered_row()).encode(),
+    "invalid_utf8": json.dumps(_answered_row(note="x")).encode().replace(b'"x"', b'"\xff"'),
+    "escaped_key_cr": b"junk\r"
+    + json.dumps(_answered_row()).encode().replace(b'"mesh_origin"', b'"mesh\\u005forigin"'),
+    "torn_json": json.dumps(_answered_row()).encode()[:-1],
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REJECTED_LINES))
+def test_r3_1_door_and_readers_agree_on_a_rejected_stamped_line(tmp_path: Path, case: str) -> None:
+    from local_operator.asks import store as ask_store
+    from local_operator.session.runtime import inbox
+
+    line = _REJECTED_LINES[case]
+    assert origin.line_may_carry_stamp(line)
+    with pytest.raises(origin.StampLineRejected):
+        origin.parse_stamp_line(line)
+
+    session = tmp_path / "s"
+    session.mkdir()
+    original = line + b"\n" + json.dumps(_answered_row(ask_id="a-2")).encode() + b"\n"
+    (session / "asks.jsonl").write_bytes(original)
+    with pytest.raises(origin.ImportStampsRefused):
+        origin.downgrade_stamps(session)
+    assert (session / "asks.jsonl").read_bytes() == original
+
+    # The ask fold's reader: whatever it recovers from the rejected line is
+    # unverified; the clean line after it is untouched (the door would lower it).
+    events = ask_store.read_events(session)
+    by_id = {event["ask_id"]: event["by"]["mesh_origin"]["verified"] for event in events}
+    assert by_id.get("a-1", False) is False
+    assert by_id["a-2"] is True
+
+    # The inbox spool's reader, on the same framing trick with an owner row.
+    owner = json.dumps(_owner_inbox_row()).encode()
+    spool_line = {
+        "carriage_return": b"garbage\r" + owner,
+        "invalid_utf8": owner.replace(b'"hi"', b'"\xff"'),
+        "escaped_key_cr": b"junk\r" + owner.replace(b'"mesh_origin"', b'"mesh\\u005forigin"'),
+        "torn_json": owner[:-1],
+    }[case]
+    with pytest.raises(origin.StampLineRejected):
+        origin.parse_stamp_line(spool_line)
+    for parsed in inbox._parse(spool_line + b"\n"):
+        assert parsed.mesh_origin is None or parsed.mesh_origin["verified"] is False
+
+
+def test_r3_1_a_clean_stamped_line_reads_verified_and_the_door_lowers_it(
+    tmp_path: Path,
+) -> None:
+    """The control: a strict line is read verified by the readers, and lowered."""
+    from local_operator.asks import store as ask_store
+
+    session = tmp_path / "s"
+    session.mkdir()
+    (session / "asks.jsonl").write_bytes(json.dumps(_answered_row()).encode() + b"\n")
+    assert ask_store.read_events(session)[0]["by"]["mesh_origin"]["verified"] is True
+    assert origin.downgrade_stamps(session) == 1
+    assert ask_store.read_events(session)[0]["by"]["mesh_origin"]["verified"] is False
+
+
+def test_r3_1_an_escaped_stamp_key_is_lowered_not_skipped(tmp_path: Path) -> None:
+    """``"mesh\\u005forigin"`` decodes to the key without the byte needle."""
+    session = tmp_path / "s"
+    session.mkdir()
+    line = json.dumps(_answered_row()).encode().replace(b'"mesh_origin"', b'"mesh\\u005forigin"')
+    assert origin._STAMP_NEEDLE not in line
+    (session / "asks.jsonl").write_bytes(line + b"\n")
+    assert origin.downgrade_stamps(session) == 1
+    row = json.loads((session / "asks.jsonl").read_bytes())
+    assert row["by"]["mesh_origin"]["verified"] is False
+
+
+def test_r3_1_an_unstamped_undecodable_line_stays_byte_identical(tmp_path: Path) -> None:
+    session = tmp_path / "s"
+    session.mkdir()
+    stamped = json.dumps(_answered_row()).encode()
+    original = b"garbage\r\xff{torn\n" + stamped + b"\n"
+    (session / "asks.jsonl").write_bytes(original)
+    assert origin.downgrade_stamps(session) == 1
+    assert (session / "asks.jsonl").read_bytes().split(b"\n")[0] == b"garbage\r\xff{torn"
+
+
+def test_r3_1_the_inbox_batch_frames_on_newline_like_the_door(tmp_path: Path) -> None:
+    """``claim_inbox_batch`` once split on ``\\r`` too, handing out a clean stamped chunk."""
+    from local_operator.session.runtime import inbox
+
+    owner = json.dumps(_owner_inbox_row()).encode()
+    (tmp_path / inbox.inbox_path(tmp_path).name).write_bytes(b"garbage\r" + owner + b"\n")
+    batch = inbox.try_enter_read_batch(tmp_path)
+    assert batch is not None
+    inbox.claim_inbox_batch(batch)
+    try:
+        assert batch.chunks == [b"garbage\r" + owner + b"\n"]
+        assert [line.mesh_origin["verified"] for _, line in batch.rows if line.mesh_origin] == [
+            False
+        ]
+    finally:
+        inbox.release_inbox_batch(batch)
+        inbox.leave_read_batch(batch)
