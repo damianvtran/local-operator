@@ -967,14 +967,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        6,
+        7,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "
         "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
         "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
         "its directory into. That one is a CONFIG-LEVEL directory: it is where a "
         "session tree goes to stop being one, so it can never be an entry of a session "
         "directory. ``TEMPORARY_LOCK_NAME`` is the temporary-chat sweep's cross-process "
-        "lock, beside the delegated sweep's at the config root. None of the six is a file "
+        "lock, beside the delegated sweep's at the config root. ``QUARANTINE_DIRNAME`` is "
+        "the ``<config>/network/quarantine/`` holding directory a REFUSED mesh recovery's "
+        "partial copy is parked in as evidence: config-level, kept, never swept, never "
+        "copied or synced (``network/sync.py`` spells the same name; "
+        "``test_mesh_origin_relay`` asserts the two agree). None of the seven is a file "
         "a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
@@ -1135,8 +1139,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "carried in one",
     ),
     "local_operator/network/sync.py": (
-        6,
-        "``network``, ``replicas`` and ``staging`` under the config root, plus "
+        7,
+        "``network``, ``replicas``, ``staging`` and ``quarantine`` (where a REFUSED "
+        "replica recovery is parked as evidence, never copied or synced; the same name "
+        "``session/cleanup.py`` declares) under the config root, plus "
         "``attachments`` (see above): the sync plane's own directories. Plus two "
         "fragments: ``.tmp`` (the atomic-write corpse suffix the file above documents) "
         "and ``.json`` (the attachment store's sidecar suffix, never a bare name). The "
