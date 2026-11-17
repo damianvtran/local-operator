@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "cli.team_bridge",
-  "history_sha256": "3eb23e3d1d00256844bae7703188fe402cd8e4609da3dc0869869930054e4cb4",
+  "history_sha256": "58afc8e2d31795cb29787420e4dd88f60693af02c2f26fc429be33f63a72d094",
   "entries": [
     {
       "locale": "ru",
@@ -75,6 +75,34 @@
       },
       "status": "passed",
       "note": "Independent i18n audit round 2 of PR #4096 at head 016ff7885222 (scope d7cf5e9ff727..016ff7885222), en source_sha256 2555250374c3a583d1edec1434d6246db86ce504972d8665faf36ef755855d40. Scope: changed key status.restart_needed (different version), new keys status.restart_needed_replaced (same version, files replaced by the last update; must not say the version differs) and status.running_unrecorded (service manager reports a receiver loaded but it recorded no details; restart needed), plus the context-note-only change of status.running_none (text unchanged; still means nothing loaded and nothing recorded). Separation step: re-reviewed round-1 auditor fixes S1/F1/F2/H1/R1/U1/Z1 from d7cf5e9ff727 and confirmed them against the style guide and catalogue usage (R1 and the restart clauses of F2/H1/U1 are superseded by the re-drafted restart_needed). Other 59 keys unchanged since the round-1 / PR #3444 passed rows and not re-audited. Mechanical: key parity 66/66; placeholders identical to en ({installed} only in the restart keys, none in running_unrecorded); no plural/select in scope; NFC; no Cf/bidi controls; each key rendered in-locale through messages.render_record with installed=9.9.9 (source_locale = locale). ru: imperative перезапустите (вы); N1 nit, accepted: replaced key 'код, который был до последнего обновления' is slightly colloquial but exact and does not imply a version change. N2 nit, accepted: 'сведений нет' drops 'recorded' in the first clause; the second clause 'их не записывает' carries it. Auditor edits: none. Unresolved blocker/major: 0. Single independent semantic audit; not a second high-visibility audit."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "bc305b44083685109f05166df42eec6cc2cd3eeaaf2b86848def36bad7dd544a",
+      "translator": {
+        "agent": "composite: status.* keys by coder translator jobs cc8d17acb1bf/8a2fa5e8903d (PR #4096 r1/r2, incl. round-1 auditor corrections); notify.screening_model_unavailable_body by i18n-translator job e8d6e3d71864 (main 3dd15d6f5559); combined by the key-level rebase merge onto main 72dd603f (PR comment 6935137661), no wording changed",
+        "model": "anthropic/claude-opus-5-5 (status.* keys, per remediation comment 6905469046, coder self-report) / anthropic/claude-sonnet-5-5 (Radient Console value, per main's rc1 receipt)",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 3 (radientdev task, session cbed6c1657e0), independent of translators cc8d17acb1bf, 8a2fa5e8903d, e8d6e3d71864 and of earlier auditors 3330de428371, c6c982934cde, 65a8b33245e3, 72f152fb04f1",
+        "session": "cbed6c1657e0",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": []
+      },
+      "status": "passed",
+      "note": "Merged-source audit, PR #4096 round 3 (convergence), head 908660b7aadb on main 72dd603f, scope cf62fdda6b1a..908660b7aadb; en source_sha256 bc305b44083685109f05166df42eec6cc2cd3eeaaf2b86848def36bad7dd544a = main's 20ff80eb text plus the PR's 25552503 status keys, no key changed on both sides. Audited keys: notify.screening_model_unavailable_body (main's 'Radient Console' value and its context note) and the PR's status.running, status.running_none, status.running_unrecorded, status.running_exited, status.running_detail, status.restart_needed, status.restart_needed_replaced, each read against its en context note. Other keys unchanged since their passed rows and not re-audited. Mechanical: key parity 66/66; placeholders identical to en in every audited key ({pid},{version},{started},{generation},{versions},{installed}); no plural/select in scope; NFC; no Cf/bidi controls. ru: вы register; 'приёмник' consistent with the namespace; 'в Radient Console' unarticled product name, Latin script; restart_needed_replaced says 'код, который был до последнего обновления' and does not claim a version difference; running_exited 'завершился' fits a process exit. No findings. Auditor edits: none. Unresolved blocker/major: 0. Audit performed by reading under a fleet load hold: no in-locale render through messages.render_record and no check.py --audit-base sweep were run this round. Single independent semantic audit; not a second high-visibility audit; native-speaker review not claimed."
     }
   ]
 }
