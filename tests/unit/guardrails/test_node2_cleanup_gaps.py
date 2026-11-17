@@ -365,7 +365,7 @@ def test_1c_unrelated_unreadable_cwd_no_longer_fails_the_scan(
     _add_pid(fake_proc, 4242, None)  # an Electron zygote: nothing readable
     _deny_cwd(monkeypatch, fake_proc, 4242)
     assert prov._cwd_entries(fresh=True) == ((4242, None),)
-    assert prov.cwd_holders(os.path.realpath(wt), S, own=True) == ()
+    assert prov.cwd_holders(os.path.realpath(wt), S) == ()
     note = prov.cwd_scan_note(str(wt))
     assert note == (
         "1 same-user process had an unreadable cwd (pid 4242); "
@@ -387,14 +387,19 @@ def test_overlap_readable_foreign_holder_is_named_before_unrelated_hidden_pid(
     monkeypatch.setattr(prov, "_process_table", lambda: {4343: (1, "foreign-shell")})
     phrase = prov.busy_phrase(str(wt), S)
     assert "pid 4343 foreign-shell" in phrase
-    assert phrase.index("pid 4343") < phrase.index("pid 4242")
+    # Field report 2026-11-17: a hidden pid with no fd/maps evidence inside is
+    # no holder on any judged path; the facts' scan note names it instead.
+    assert "pid 4242" not in phrase
+    assert "pid 4242" in prov.cwd_scan_note(str(wt))
     assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
     risk, reason = _rank(home, FIELD_1)
     assert risk is Risk.HIGH, reason
     assert "pid 4343 foreign-shell" in reason
-    # Ordinary/unowned removal and interrupted-add cleanup retain #3980's
-    # conservative hidden-pid policy even when own cleanup can ignore it.
-    assert _REAL_LIVE_CWD_INSIDE(os.path.realpath(repo / "elsewhere")) is None
+    # Only the judge-free interrupted-add settle keeps #3980's conservative
+    # hidden-pid policy (``hidden_blocks``); judged removals need evidence.
+    elsewhere = os.path.realpath(repo / "elsewhere")
+    assert _REAL_LIVE_CWD_INSIDE(elsewhere) is False
+    assert _REAL_LIVE_CWD_INSIDE(elsewhere, hidden_blocks=True) is None
 
 
 def test_overlap_fresh_scan_finds_foreign_holder_after_cached_miss(
@@ -403,7 +408,7 @@ def test_overlap_fresh_scan_finds_foreign_holder_after_cached_miss(
     wt = _github_default_repos(home, repo)
     _add_pid(fake_proc, 4242, None)
     _deny_cwd(monkeypatch, fake_proc, 4242)
-    assert prov.cwd_holders(os.path.realpath(wt), S, own=True) == ()
+    assert prov.cwd_holders(os.path.realpath(wt), S) == ()
     _add_pid(fake_proc, 4343, wt)
     monkeypatch.setattr(prov, "_process_table", lambda: {4343: (1, "foreign-shell")})
     assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
@@ -425,7 +430,7 @@ def test_1c_unreadable_cwd_with_evidence_inside_is_a_foreign_holder(
         maps=(inside,) if via == "maps" else (),
     )
     _deny_cwd(monkeypatch, fake_proc, 4343)
-    holders = prov.cwd_holders(os.path.realpath(wt), S, own=True)
+    holders = prov.cwd_holders(os.path.realpath(wt), S)
     assert holders is not None and [h.pid for h in holders] == [4343]
     assert not holders[0].family
     assert prov.cwd_scan_note(str(wt)) == ""  # a holder, not an ignored pid

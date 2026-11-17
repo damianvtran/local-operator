@@ -1747,7 +1747,12 @@ def _bounded_lookups(jobs: dict[str, Any], deadline: float) -> dict[str, Any]:
         max_workers=min(_REACH_LOOKUP_WORKERS, len(jobs)), thread_name_prefix="lop-reach"
     )
     try:
-        futures = {pool.submit(fn): key for key, fn in jobs.items()}
+        # The forge auth of this guard call reaches the pool threads (field
+        # report 2026-11-17: ``worktree_activity``'s ``gh`` must see the
+        # session's GH_TOKEN, and a pool does not copy context variables).
+        from local_operator.guardrails.provenance import bind_forge_auth
+
+        futures = {pool.submit(bind_forge_auth(fn)): key for key, fn in jobs.items()}
         done, _ = cf.wait(futures, timeout=max(0.0, deadline - time.monotonic()))
         results: dict[str, Any] = {}
         for fut in done:

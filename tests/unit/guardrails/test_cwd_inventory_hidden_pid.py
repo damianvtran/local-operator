@@ -7,13 +7,13 @@ on every host with a systemd user session — and ``_cwd_inventory`` returned
 ``interrupted_worktree_add.settle_after_kill`` never settled a killed
 ``git worktree add`` on such hosts.
 
-The fix keeps the inventory and reports the hidden pid; a hidden pid still
-counts as "might be inside" (fail closed), because PR #3980 rounds 1-3 found
-no sound proof that such a process is outside a tree. So the settle deletes
-nothing on its account: it only unlocks the half-made tree and the bash result
-tells the agent to remove it. These tests drive the real scan code against a
-fake ``/proc`` (one readable, one hidden and two vanishing pids) and the real
-settle against real git.
+The fix keeps the inventory and reports the hidden pid. For the judge-free
+settle a hidden pid still counts as "might be inside" (``hidden_blocks``), so
+the settle deletes nothing on its account: it only unlocks the half-made tree
+and the bash result tells the agent to remove it. The judged removal paths
+count it only on positive fd/maps evidence (field report 2026-11-17). These
+tests drive the real scan code against a fake ``/proc`` (one readable, one
+hidden and two vanishing pids) and the real settle against real git.
 """
 
 from __future__ import annotations
@@ -100,23 +100,59 @@ def test_one_hidden_cwd_keeps_the_inventory_and_vanished_pids_are_ignored(fake_p
     )
 
 
-def test_a_hidden_pid_counts_as_maybe_inside(fake_proc, tmp_path):
+def test_a_hidden_pid_without_evidence_inside_is_not_a_holder(fake_proc, tmp_path):
+    """Field report 2026-11-17 (node-2, guard 0.106.6): ``(sd-pam)`` alone made
+    every tree read ``busy=unknown``. A hidden pid whose readable fds/maps name
+    nothing inside the tree no longer answers ``None`` on the judged paths; the
+    judge-free settle (``hidden_blocks``) keeps the #3980 refusal."""
     tree = os.path.realpath(tmp_path / "tree")
-    assert prov._live_cwd_inside(tree) is None  # fail closed: busy to worktree_state
+    assert prov._live_cwd_inside(tree) is False
+    assert prov._live_cwd_inside(tree, hidden_blocks=True) is None
     # A readable cwd inside is a definite yes.
     assert prov._live_cwd_inside(os.path.realpath(fake_proc["elsewhere"])) is True
-    fake_proc["state"][HIDDEN] = ProcessLookupError  # it exited: nothing hidden
-    prov._cwd_inventory_cache = None
-    assert prov._live_cwd_inside(tree) is False
 
 
-def test_a_hidden_pid_leaves_own_tree_holders_unknown_and_named(fake_proc, tmp_path):
-    """Merge of #3980 into #3987: the own-tree scan also fails closed on a hidden pid.
+def test_a_hidden_pid_with_an_fd_inside_the_tree_holds_it(fake_proc, tmp_path, monkeypatch):
+    """Fail closed on POSITIVE evidence: an open file inside makes it busy."""
+    # The process table and liveness re-check read the real /proc or ps; the
+    # fake pid exists only in the fake /proc, so answer for it there.
+    monkeypatch.setattr(prov, "_process_table", lambda: {HIDDEN: (1, "x")})
+    monkeypatch.setattr(prov, "_still_exists", lambda pid: pid == HIDDEN)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "held.txt").write_text("x\n")
+    fd_dir = tmp_path / "proc" / str(HIDDEN) / "fd"
+    fd_dir.mkdir(parents=True)
+    (fd_dir / "3").symlink_to(tree / "held.txt")
+    real = os.path.realpath(tree)
+    assert prov._live_cwd_inside(real) is True
+    holders = prov.cwd_holders(real, "s")
+    assert holders is not None and [h.pid for h in holders] == [HIDDEN]
+    assert not holders[0].family
+    assert prov.busy_phrase(real, "s").startswith(f"busy: cwd held by pid {HIDDEN}")
 
-    ``cwd_holders`` (PR #3987) attributes holders by pid; a hidden pid has no
-    cwd to test and no holder to name, so ownership is unknown (``None`` ->
-    ``busy``), and the judge-facing phrase names the pid instead of a bare
-    "busy".
+
+def test_an_unreadable_proc_still_fails_closed(fake_proc, tmp_path, monkeypatch):
+    """Only a per-pid EACCES is tolerated: ``/proc`` itself unreadable is unknown."""
+
+    def refuse(path: Any = ".") -> Iterator[os.DirEntry[str]]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(prov.os, "scandir", refuse)
+    tree = os.path.realpath(tmp_path / "tree")
+    assert prov._live_cwd_inside(tree) is None
+    assert prov.cwd_holders(tree, "s") is None
+    assert prov.busy_phrase(tree, "s").startswith(
+        "busy=unknown: process inventory unreadable (/proc unreadable"
+    )
+
+
+def test_a_hidden_pid_leaves_own_and_foreign_tree_holders_empty_and_noted(fake_proc, tmp_path):
+    """#3987's ``cwd_holders`` no longer voids on a hidden pid for any tree.
+
+    Before the field report only ledger-proven own trees (``own=True``) had the
+    positive-evidence rule; the finished-work path asks without ``own`` and got
+    ``None`` -> ``busy=unknown``. The pid is named in the facts note instead.
     """
     tree = os.path.realpath(tmp_path / "tree")
     entries = prov._cwd_entries(fresh=True)
@@ -125,13 +161,11 @@ def test_a_hidden_pid_leaves_own_tree_holders_unknown_and_named(fake_proc, tmp_p
         (READABLE, os.path.realpath(fake_proc["elsewhere"])),
         (HIDDEN, None),
     ]
-    assert prov.cwd_holders(tree, "s") is None
-    assert prov.busy_phrase(tree, "s") == (
-        f"busy=unknown: process inventory unreadable (cwd of pid {HIDDEN} unreadable "
-        "(Permission denied)); a live process inside cannot be ruled out"
-    )
-    fake_proc["state"][HIDDEN] = ProcessLookupError  # it exited: nothing hidden
     assert prov.cwd_holders(tree, "s") == ()
+    assert prov.cwd_scan_note(tree) == (
+        f"1 same-user process had an unreadable cwd (pid {HIDDEN}); "
+        "ignored: no evidence they hold the tree"
+    )
 
 
 def _git(*args: str, cwd: Path | None = None) -> str:
