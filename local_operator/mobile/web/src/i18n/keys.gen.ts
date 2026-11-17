@@ -975,6 +975,12 @@ export type MessageParams = {
   "wire.outcome_notices.retired": undefined;
   "wire.phone_access.auto_setup.help": undefined;
   "wire.phone_access.auto_setup.label": undefined;
+  "wire.phone_access.away_after.choice.10m.label": undefined;
+  "wire.phone_access.away_after.choice.1m.label": undefined;
+  "wire.phone_access.away_after.choice.2m.label": undefined;
+  "wire.phone_access.away_after.choice.5m.label": undefined;
+  "wire.phone_access.away_after.help": undefined;
+  "wire.phone_access.away_after.label": undefined;
   "wire.phone_access.description": undefined;
   "wire.phone_access.title": undefined;
   "wire.push_alert.attention_count": { "total": number; "count": string };

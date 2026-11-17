@@ -7415,6 +7415,13 @@ def build_app(daemon: MobileDaemon):
                 # unknown field, failing the whole registration; the app sends
                 # the key only when this capability is present.
                 "push_previews": {"available": True},
+                # ADR 0008 desk presence: ``GET/PATCH
+                # /api/settings/phone-away-after`` reads and writes this
+                # computer's ``notifications.phone_away_after_s`` ("send to
+                # phone when I'm away for N"). The phone shows its
+                # per-computer row only when this key is present; an older
+                # relay 404s the route.
+                "phone_away_after": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".
@@ -7855,6 +7862,62 @@ def build_app(daemon: MobileDaemon):
         try:
             payload = await asyncio.to_thread(
                 policy_payload, config_dir(), patch, write=request.method == "PATCH"
+            )
+        except AccountRoutingError as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": str(exc)},
+                status_code=exc.status,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    async def api_phone_away_after(request: Request) -> Response:
+        """ADR 0008: the phone edits THIS computer's "away for N" threshold.
+
+        One named key, through the same projection as account routing
+        (``account_routing.setting_payload``): the phone can never reach an
+        arbitrary config path. It is a computer setting because it describes
+        the desk; the desktop app reads it and sends it on its presence beat.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.i18n.keys import wire_settings_account_policy as _ap
+        from local_operator.mobile.account_routing import (
+            PHONE_AWAY_AFTER_CAPABILITY,
+            PHONE_AWAY_AFTER_KEY,
+            AccountRoutingError,
+            setting_payload,
+        )
+        from local_operator.paths import config_dir
+
+        patch = None
+        if request.method == "PATCH":
+            try:
+                patch = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse(
+                    {
+                        "code": "invalid_setting",
+                        "error": _ap.error_invalid_json().envelope(locale=resolve_language())[
+                            "text"
+                        ],
+                    },
+                    status_code=422,
+                )
+        try:
+            payload = await asyncio.to_thread(
+                setting_payload,
+                config_dir(),
+                PHONE_AWAY_AFTER_KEY,
+                PHONE_AWAY_AFTER_CAPABILITY,
+                patch,
+                write=request.method == "PATCH",
+                unavailable_code="setting_unavailable",
+                # Unreachable in practice: the key is registered in this same
+                # build (pinned by test_phone_away_routes). The generic
+                # "could not be saved" copy is the honest fallback.
+                unavailable=_ap.error_write_failed(),
             )
         except AccountRoutingError as exc:
             return JSONResponse(
@@ -12564,6 +12627,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/usage/reset", api_usage_reset, methods=["POST"]),
         Route("/api/config/events", api_config_events),
         Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
+        Route("/api/settings/phone-away-after", api_phone_away_after, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),

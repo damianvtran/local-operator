@@ -31,6 +31,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    StrictInt,
     field_validator,
     model_serializer,
     model_validator,
@@ -863,6 +864,50 @@ class PresenceBeat(Input):
     #: "nothing is on screen".
     session_id: str = Field(default="", pattern=r"^$|^[a-f0-9]{12}$")
     window: PresenceWindow = Field(default_factory=PresenceWindow)
+    # -- ADR 0008 desk presence (slice 1) --------------------------------------
+    # "Is a PERSON at this computer", as opposed to the window state above,
+    # which answers "is this card on screen". All four are OPTIONAL so today's
+    # beat stays valid byte-for-byte; the model is still `extra="forbid"`,
+    # which is exactly why an app may only send them to a backend advertising
+    # `features.desk_presence` (an undeclared field is a 422 the app swallows,
+    # and the lease then lapses). Raw relative facts only: the receiver turns
+    # them into wall-clock deadlines on its own clock (`presence.DeskReport`).
+    #: Seconds since the last OS input, from Electron `getSystemIdleTime()`.
+    idle_s: StrictInt | None = Field(default=None, ge=0)
+    #: Screen locked (or a lock/suspend/resign event since the last unlock).
+    locked: StrictBool | None = None
+    #: False when the app cannot vouch for `idle_s` (e.g. Wayland, ADR R2).
+    idle_trusted: StrictBool | None = None
+    #: The operator's threshold, one of `presence.AWAY_AFTER_CHOICES_S`. A
+    #: Literal rather than a range so no receiver ever computes a deadline
+    #: from a value no settings surface can show.
+    away_after_s: Literal[60, 120, 300, 600] | None = None
+
+    @field_validator("away_after_s", mode="before")
+    @classmethod
+    def _strict_threshold(cls, value: Any) -> Any:
+        # `Literal[60, ...]` would accept `True`/`60.0` in lax mode; a
+        # threshold is an integer the app read from the setting, nothing else.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("away_after_s must be an integer")
+        return value
+
+    def desk_fields(self) -> dict[str, Any]:
+        """The desk fields as publisher kwargs, or ``{}`` for a legacy beat.
+
+        Empty when the app sent none of them, which is what keeps a legacy
+        beat's published record free of any `desk` entry (version skew row
+        "old app, new core" falls back to the focus rule).
+        """
+        fields = {
+            "idle_s": self.idle_s,
+            "locked": self.locked,
+            "idle_trusted": self.idle_trusted,
+            "away_after_s": self.away_after_s,
+        }
+        if all(value is None for value in fields.values()):
+            return {}
+        return fields
 
 
 class SessionTarget(Input):
@@ -6799,5 +6844,6 @@ async def desktop_presence(
         can_notify_kinds=list(body.can_notify_kinds),
         session_id=body.session_id,
         window=body.window.model_dump(),
+        **body.desk_fields(),
     )
     return reply(PresenceReceipt(lease_seconds=int(PRESENCE_TTL_S)))

@@ -6509,6 +6509,35 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
     ),
+    Setting(
+        # ADR 0008 desk presence: how long this computer may go without input
+        # before a completion it would banner here goes to the phone instead.
+        # A COMPUTER setting (it describes the desk), edited from desktop
+        # Settings through `PATCH /v1/settings/{key}` and from the phone through
+        # the relay's `GET/PATCH /api/settings/phone-away-after`. The desktop
+        # app reads it and sends it as the presence beat's `away_after_s`; the
+        # core's own reader (`presence.configured_away_after_s`) is for the
+        # TUI-only probe (slice 4), where no beat carries it. In the
+        # `phone_access` section because it decides what reaches the phone.
+        # An ENUM of the four presets every client offers (the same shape as
+        # `session.cleanup.temporary.idle_minutes`); the literal default mirrors
+        # `presence.DEFAULT_AWAY_AFTER_S`, held equal by
+        # `test_every_default_matches_its_consumer`.
+        key="notifications.phone_away_after_s",
+        path=("notifications", "phone_away_after_s"),
+        section="phone_access",
+        label=_t(_pa.away_after_label()),
+        help=_t(_pa.away_after_help()),
+        kind=Kind.ENUM,
+        default=120,
+        choices=(
+            Choice(60, _t(_pa.away_after_choice_1m_label())),
+            Choice(120, _t(_pa.away_after_choice_2m_label())),
+            Choice(300, _t(_pa.away_after_choice_5m_label())),
+            Choice(600, _t(_pa.away_after_choice_10m_label())),
+        ),
+        synonyms=("idle", "push", "mobile", "presence"),
+    ),
 )
 
 #: ``key -> Setting`` for the lookups the CLI and the page both do.
