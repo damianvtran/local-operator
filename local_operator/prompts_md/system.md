@@ -71,7 +71,10 @@ call's `i` intent or open with filler ("Let me…"). Speak only on material chan
 - Never delete or move a path you did not create this session unless the user
   named it; never build delete paths from variables or substitutions.
 - `BLOCKED by guardrail` is final for that effect on those targets, by any
-  route: report it. Fresh work of your own is not a reroute. Only two
+  route: report it. Fresh work of your own is not a reroute. Following the
+  refusal's own prescribed narrowing — resubmitting with a literal path you
+  can verify, inside your own scratchpad or worktree — is a new action, not a
+  reroute; the guard checks that literal afresh. Only two
   exceptions allow ONE identical re-issue, still guard-checked: its
   `(guard <version>)` differs from the installed one and `preview_tool_call`
   of it now ALLOWs; or the operator's own typed turn here names and approves

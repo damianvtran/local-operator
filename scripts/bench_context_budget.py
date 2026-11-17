@@ -1927,7 +1927,18 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #   merged head            103,931 chars = ~37,385 billed
 #     = +401 chars = ~+144.2 billed; the ceiling moves by that delta (+144
 #     over main's 37,245), so main's headroom carries over unchanged.
-BUDGET_BILLED_TOKENS = 37_389
+# RAISED 37,389 -> 37,467 at PR #4147's convergence merge with origin/main
+# (#4141's two-exception refusal bullet): the bullet gains #4147's REFUSAL
+# NARROWING sentence (node2 QA, PR #4104 u0: an agent resubmitting a refused
+# scratchpad log write with the literal path the refusal prescribed was
+# accused of a reroute). Measured with THIS script, ISOLATED HOME, one host,
+# base by swapping in origin/main's system.md and guardrails/check.py:
+#   origin/main 2dc66f06   104,515 chars = ~37,595 billed
+#   merged head            104,732 chars = ~37,673 billed
+#     = +217 chars = ~+78 billed, exactly the sentence; the ceiling moves by
+#     that delta so main's headroom carries over unchanged. (This host reads
+#     main itself 206 over 37,389 — the known local-vs-CI offset.)
+BUDGET_BILLED_TOKENS = 37_467
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2155,7 +2166,11 @@ BUDGET_BILLED_TOKENS = 37_389
 #   origin/main da8f3f04   91,832 chars = ~33,033 billed
 #   merged head            92,233 chars = ~33,177 billed
 #     = +401 chars = ~+144.2 billed over main's 33,247.
-BUDGET_CHILD_BILLED_TOKENS = 33_391
+# RAISED 33,391 -> 33,469 at the same #4147 convergence merge (same sentence):
+#   origin/main 2dc66f06   92,817 chars = ~33,387 billed (4 of headroom)
+#   merged head            93,034 chars = ~33,465 billed
+#     = +217 chars = ~+78 billed; the raise keeps main's 4 of headroom.
+BUDGET_CHILD_BILLED_TOKENS = 33_469
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
