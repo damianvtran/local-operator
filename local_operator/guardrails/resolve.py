@@ -1066,13 +1066,70 @@ def _date_format_contained(fmt: str) -> bool:
     return True
 
 
-def _fresh_errexit_scope(command: str) -> bool:
+#: ``name(){ …`` / ``name() {`` opening a one-function definition segment
+#: (identifier names only) for ``_fresh_errexit_scope``'s function form.
+_SCOPE_FUNCTION_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{(?:\s(.*))?", re.DOTALL)
+#: Words a function body in a fresh scope may not contain: each can assign,
+#: unset, rebind or re-read a variable, change cwd, or run text as code, so a
+#: body holding one could change what ``$tmp`` means when it runs.
+_SCOPE_BODY_FORBIDDEN = frozenset(
+    {
+        "local",
+        "declare",
+        "typeset",
+        "export",
+        "readonly",
+        "unset",
+        "read",
+        "mapfile",
+        "readarray",
+        "getopts",
+        "printf",
+        "let",
+        "eval",
+        "source",
+        ".",
+        "cd",
+        "pushd",
+        "popd",
+        "shift",
+        "alias",
+        "shopt",
+        "exec",
+        "command",
+        "builtin",
+    }
+)
+_SCOPE_VAR_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _fresh_errexit_scope(command: str, *, functions: bool = False) -> bool:
     """Recognize only a straight-line, top-level errexit shell, with for lists.
 
     `set -e` is NOT effective inside an if/while test, an AND/OR list, a
     negated command or a pipeline. Refuse those shapes rather than pretending
     a failed substitution cannot leave an empty ROOT. This is a containment
     proof, not a general shell-success interpreter.
+
+    ``functions`` (the function-body pass only, review round 2 Q1, PR #4188):
+    also accept the canonical own-scratch cleanup, ``tmp=$(mktemp -d
+    "$PAD/t.XXXXXXXX")`` + ``cleanup(){ rm -rf "$tmp"; }`` + ``trap cleanup
+    EXIT`` (or a direct ``cleanup`` call). Walking that body made the
+    command CRITICAL where main, which never walked it, said LOW. Accepted:
+
+    * a top-level ``name(){ …; }`` whose body passes the same statement
+      checks plus ``_SCOPE_BODY_FORBIDDEN`` and holds no assignment, so the
+      body cannot change the variable it deletes;
+    * ``trap name EXIT`` for a name defined above (no other trap form);
+    * the name used ONLY as its definition, that trap, or a bare one-word
+      call, so it cannot shadow ``mktemp``/``rm`` or take arguments.
+
+    An EXIT trap fires wherever the script stops, with the variables of that
+    moment, not just at the end the walker models; so after the trap no
+    segment may name (other than as ``$name``) a variable the trapped body
+    reads. Above all a later ``tmp=$(mktemp …)`` that fails would leave
+    ``tmp`` empty when the trap runs. The main pass never takes this form:
+    a definition there still ends the proof, as #4116 had it.
     """
     parsed = lex(command)
     if parsed.open or any(parsed.bodies) or not parsed.segments:
@@ -1099,9 +1156,8 @@ def _fresh_errexit_scope(command: str) -> bool:
         "break",
         "continue",
     }
-    for text, _, op in parsed.segments[1:]:
-        if op not in ("", ";", "\n"):
-            return False
+
+    def statement_ok(text: str, banned: set[str] | frozenset[str], body: bool = False) -> bool:
         words, redirects = scan(text)
         if any(op not in (">", ">|", ">>") for op, _ in redirects):
             return False
@@ -1109,14 +1165,77 @@ def _fresh_errexit_scope(command: str) -> bool:
             if word.broken:
                 return False
             if all(p.kind in ("bare", "sq", "dq") for p in word.parts):
-                if "".join(p.text for p in word.parts) in forbidden:
+                if "".join(p.text for p in word.parts) in banned:
                     return False
             for part in word.parts:
                 if part.kind == "bare" and (
-                    part.text in forbidden or any(c in part.text for c in "(){}!&|\\")
+                    part.text in banned or any(c in part.text for c in "(){}!&|\\")
                 ):
                     return False
-    return True
+                if (
+                    body
+                    and part.kind == "bare"
+                    and (_ASSIGN_RE.match(part.text) or _APPEND_RE.match(part.text))
+                ):
+                    return False
+        return True
+
+    segments = parsed.segments[1:]
+    body_refs: dict[str, set[str]] = {}
+    expected_uses: dict[str, int] = {}
+    trapped_refs: set[str] = set()
+    index = 0
+    while index < len(segments):
+        text, _, op = segments[index]
+        if op not in ("", ";", "\n"):
+            return False
+        if trapped_refs and any(
+            re.search(rf"(?<![\w$]){name}(?!\w)", text) for name in trapped_refs
+        ):
+            # ``tmp=…``/``read tmp``/``for tmp in`` after the trap: the trap
+            # may fire with that value, which the walker never models.
+            return False
+        header = _SCOPE_FUNCTION_RE.fullmatch(text.strip()) if functions else None
+        if header is not None:
+            name, first = header.group(1), header.group(2) or ""
+            body = [first]
+            close = index + 1
+            while close < len(segments) and segments[close][0].strip() != "}":
+                body.append(segments[close][0])
+                if segments[close][2] not in (";", "\n"):
+                    return False
+                close += 1
+            if close >= len(segments) or segments[close][2] not in ("", ";", "\n"):
+                return False
+            if not all(
+                statement_ok(stmt, forbidden | _SCOPE_BODY_FORBIDDEN, body=True)
+                for stmt in body
+                if stmt.strip()
+            ):
+                return False
+            body_refs[name] = {ref for stmt in body for ref in _SCOPE_VAR_REF_RE.findall(stmt)}
+            expected_uses[name] = expected_uses.get(name, 0) + 1
+            index = close + 1
+            continue
+        words = text.split()
+        if functions and len(words) == 3 and words[0] == "trap" and words[2] == "EXIT":
+            if words[1] not in body_refs:
+                return False
+            trapped_refs |= body_refs[words[1]]
+            expected_uses[words[1]] += 1
+            index += 1
+            continue
+        if words and len(words) == 1 and words[0] in body_refs:
+            expected_uses[words[0]] += 1  # a bare call, walked as if inline
+        if not statement_ok(text, forbidden):
+            return False
+        index += 1
+    # Each name only as definition, trap or bare call: never shadowing a
+    # program the proof trusts (``mktemp(){ …; }``) nor called with arguments.
+    return all(
+        len(re.findall(rf"(?<!\w){re.escape(name)}(?!\w)", command)) == uses
+        for name, uses in expected_uses.items()
+    )
 
 
 def _is_mktemp(body: str) -> bool:
@@ -3558,6 +3677,17 @@ def credential_path(value: str, home: str) -> str | None:
 #   pinned (a trap again at the end, with the final definitions); a
 #   non-literal action still reaches every body, R4.
 #
+# Review round 2 (PR #4188):
+# * "Certain" is sticky, not a nesting count: once any piece may open a
+#   compound or group (``_may_nest``), no later redefinition replaces (N1).
+#   A loop's calls see EVERY later definition (N6); ``if``/``while``/``until``
+#   are definition lead words (N2); alias chains, an alias shadowing a
+#   function and a trailing-blank alias are followed (N5).
+# * The function pass accepts #4116's fresh scope with one-line cleanup
+#   functions and ``trap NAME EXIT`` (``_fresh_errexit_scope(functions=…)``,
+#   Q1); the main pass keeps #4116's rule, and passes union, so only rows
+#   whose main pass was already LOW can come out LOW.
+#
 # Known over-approximation (fail-closed, documented): a function defined
 # inside ``( … )`` or ``$( … )`` stays registered after that subshell ends.
 
@@ -3689,43 +3819,49 @@ def _definition_start(text: str) -> tuple[str, tuple[str, str]] | None:
     return None
 
 
+#: Words a command (and so a definition) may follow inside one lex piece.
+_COMMAND_LEAD_WORDS = frozenset({"then", "do", "else", "elif", "!", "time", "-p"})
 #: Words a definition may follow inside one lex piece (``then f(){ …``).
-_DEFINITION_LEAD_WORDS = frozenset({"then", "do", "else", "elif", "!", "time", "-p"})
+#: ``if``/``while``/``until`` too (review round 2 N2, PR #4188): their test
+#: list runs, so ``if f(){ rm -rf ~; }; then f; fi`` defines ``f`` and runs
+#: it. Kept apart from ``_COMMAND_LEAD_WORDS`` because ``_loop_opener`` must
+#: not peel ``while`` off ``while x`` and miss the loop it opens.
+_DEFINITION_LEAD_WORDS = _COMMAND_LEAD_WORDS | {"if", "while", "until"}
 #: Compound openers that repeat their body: a call there can see a definition
 #: made LATER in the same body, on the next iteration (review R6, PR #4188).
 _LOOP_OPENERS = frozenset({"for", "while", "until", "select"})
 
 
-def _nest_opens(text: str) -> int:
-    """Groups/compounds a piece opens (``_group_opens`` plus a bare ``{``)."""
-    return _group_opens(text) + (1 if text.strip() == "{" else 0)
+#: Words that open, continue or close a compound command or group.
+_STRUCTURE_WORDS = frozenset(
+    {*_COMPOUND_OPENERS, *_COMPOUND_CLOSERS, "then", "do", "else", "elif", "{", "}"}
+)
 
 
-def _nest_closes(text: str) -> int:
-    """Groups/compounds a piece closes: ``}``/``fi``/``done``/``esac`` and ``)``."""
-    tail = _strip_trailing_redirects(text)
-    parens = 0
-    while tail.endswith(")") and tail.count(")") > tail.count("("):
-        parens += 1
-        tail = tail[:-1].rstrip()
-    return _group_closes(text) + parens
+def _may_nest(text: str) -> bool:
+    """Could this piece open, continue or close a compound command or group?
+
+    WHY (review round 2 N1, PR #4188): round 1 counted nesting levels, and
+    the counter missed an opener after a lead word (``then if …``) yet
+    counted its ``fi``, and read a ``case`` pattern ``b)`` or ``echo a\\)`` as
+    a closer. Either put a conditional redefinition at "level 0" and let it
+    REPLACE a destructive body. This answers a weaker question that has no
+    such miscount: a structure word anywhere (quotes blanked, escapes
+    dropped) or unbalanced parentheses. Over-matching (``echo done``) only
+    keeps an extra candidate body, which ranking unions (max), so it fails
+    closed.
+    """
+    blanked = re.sub(r"\\.", "", _blank_quoted(text))
+    if blanked.count("(") != blanked.count(")"):
+        return True
+    return any(word in _STRUCTURE_WORDS for word in re.split(r"[\s;&|()<>]+", blanked))
 
 
 def _loop_opener(text: str) -> bool:
     words = text.split()
-    while words and words[0] in (_DEFINITION_LEAD_WORDS | {"{", "("}):
+    while words and words[0] in (_COMMAND_LEAD_WORDS | {"{", "("}):
         words = words[1:]
     return bool(words) and words[0].lstrip("(") in _LOOP_OPENERS
-
-
-def _matching_close(pieces: Sequence[tuple[str, bool, str]], index: int) -> int:
-    """Index of the piece closing the compound that ``pieces[index]`` opens."""
-    level = _nest_opens(pieces[index][0])
-    for k in range(index + 1, len(pieces)):
-        level += _nest_opens(pieces[k][0]) - _nest_closes(pieces[k][0])
-        if level <= 0:
-            return k
-    return len(pieces) - 1
 
 
 def _is_brace_closer(text: str) -> bool:
@@ -4090,7 +4226,9 @@ class _Walker:
             # Bash startup files and imported functions can shadow builtins or
             # mktemp before the first visible segment. PATH inspection cannot
             # prove executable identity in such a shell.
-            self.fresh_scope = _fresh_errexit_scope(command) and not any(
+            self.fresh_scope = _fresh_errexit_scope(
+                command, functions=self.functions is not None
+            ) and not any(
                 value and (key in ("BASH_ENV", "ENV") or key.startswith("BASH_FUNC_"))
                 for key, value in self.state.env.items()
             )
@@ -4136,14 +4274,16 @@ class _Walker:
         # defeated it, so a pipe-fed shell also walks every earlier body not
         # provably sunk elsewhere (fails toward scrutiny).
         produced_so_far: list[_Produced] = []
-        # Open groups/compounds at this level before each piece: a definition
-        # inside one may not run (``if``/loop/``case``) or not persist (``(``).
-        nest_at: list[int] = []
-        level = 0
-        for piece_text, _f, _o in pieces if definitions else ():
-            level = max(0, level + _nest_opens(piece_text))
-            nest_at.append(level)
-            level = max(0, level - _nest_closes(piece_text))
+        # Whether any compound or group may be open before each piece: a
+        # definition inside one may not run (``if``/loop/``case``) or not
+        # persist (``(``). Sticky, not a level count (review round 2 N1): once
+        # anything has opened, no later redefinition is certain (fail closed).
+        nest_at: list[bool] = []
+        opened = False
+        for at, (piece_text, _f, _o) in enumerate(pieces if definitions else ()):
+            prior = definitions.get(at)
+            opened = opened or (prior.nested if prior is not None else _may_nest(piece_text))
+            nest_at.append(opened)
         for index, (text, _flag, op) in enumerate(pieces):
             definition = definitions.get(index)
             if definition is not None and self.functions is not None:
@@ -4155,7 +4295,7 @@ class _Walker:
                     depth == 0
                     and not self.call_stack
                     and not definition.nested
-                    and nest_at[index] == 0
+                    and not nest_at[index]
                     and not piped_in[index]
                     and op not in ("|", "|&", "&")
                     and (index == 0 or pieces[index - 1][2] not in ("&&", "||"))
@@ -4164,9 +4304,12 @@ class _Walker:
                 continue
             if self.functions is not None and definitions and _loop_opener(text):
                 # R6: the body repeats, so a call early in it can run a
-                # definition made later in it (on the next iteration).
-                close = _matching_close(pieces, index)
-                for later in range(index + 1, close + 1):
+                # definition made later in it (on the next iteration). Every
+                # later definition, not just those before the loop's close
+                # (review round 2 N6): finding the close needs the nesting
+                # count N1 retired, and missed ``for ((…))`` and inner loops.
+                # A definition after the loop only adds a candidate (union).
+                for later in range(index + 1, len(pieces)):
                     if later in definitions:
                         self._register_function(definitions[later], certain=False)
             piped = piped_in[index]
@@ -4283,15 +4426,87 @@ class _Walker:
             for w in head[1:]
         ):
             self.functions_exported = True
-        if name is not None and name not in self.functions and name in self.function_aliases:
+        targets = self._alias_targets(head)
+        if targets:
             # ``alias g=f; g`` (with ``expand_aliases``) runs ``f``: pinned,
             # not "any body" (review R4, PR #4188).
-            name = self.function_aliases[name]
+            self._call_names(targets, depth)
+            return True
         if name is not None and name in self.functions:
             self._call_candidates(name, depth)
             return True
         self._opaque_function_call(raw_words, head, depth)
+        if (
+            self.fresh_scope
+            and [w.text for w in head] == ["trap", head[1].text if len(head) > 1 else "", "EXIT"]
+            and not any(w.opaque for w in head)
+            and head[1].text in self.functions
+        ):
+            # Q1: ``_fresh_errexit_scope`` admitted exactly this trap form;
+            # registering it runs nothing now, so it must not end the proof
+            # as an unknown program would.
+            return True
         return False
+
+    def _alias_targets(self, head: list[Expanded]) -> list[str]:
+        """Registered functions an aliased command word may run (``[]``: none).
+
+        WHY (review round 2 N5, PR #4188): round 1 followed one alias hop and
+        only when no function had the word's own name, so ``alias g=f; alias
+        h=g; h``, ``alias f=g; f`` (bash expands an alias BEFORE function
+        lookup) and ``alias s='sudo ' g=f; s g`` (a value ending in a blank
+        alias-expands the NEXT word too) ran a body the walk never saw. Here
+        the whole chain is followed, the next word joins after a
+        trailing-blank value, and the word's OWN function stays a candidate:
+        ``expand_aliases`` is off in a non-interactive bash, so either may
+        run, and walking both only over-approximates.
+        """
+        if not self.function_aliases or not head or head[0].opaque:
+            return []
+        assert self.functions is not None
+        found: list[str] = []
+        words = [w.text for w in head]
+        position = 0
+        while position < len(words):
+            name, chained = words[position], False
+            seen: set[str] = set()
+            # No hop cap: ``seen`` ends a cycle, so a chain is at most as long
+            # as the alias table this one command built.
+            while name in self.function_aliases and name not in seen:
+                seen.add(name)
+                value = self.function_aliases[name]
+                chained = chained or value[-1:].isspace()
+                name = value.split(None, 1)[0] if value.strip() else ""
+                if name in self.functions:
+                    found.append(name)
+            if not seen:
+                break
+            if position == 0 and words[0] in self.functions:
+                found.append(words[0])
+            if not chained or position + 1 >= len(words) or head[position + 1].opaque:
+                break
+            position += 1
+            if words[position] in self.functions and words[position] not in self.function_aliases:
+                found.append(words[position])
+        return list(dict.fromkeys(found))
+
+    def _call_names(self, names: list[str], depth: int) -> None:
+        """Walk each of several functions one call may run, as ``_call_candidates``."""
+        if len(names) == 1:
+            self._call_candidates(names[0], depth)
+            return
+        start = self._save()
+        outcomes: list[_Snapshot] = []
+        for number, name in enumerate(names):
+            if number:
+                self._restore(_Snapshot(**{**vars(start), "env": dict(start.env)}))
+            self._call_candidates(name, depth)
+            outcomes.append(self._save())
+        if any(o != outcomes[-1] for o in outcomes):
+            self.result.opaque_reasons.append(
+                "an aliased command may run one of several shell functions that "
+                "leave different state; which one ran is not known"
+            )
 
     def _call_candidates(self, name: str, depth: int) -> None:
         """Walk every body ``name`` may hold (one, unless a redefinition was unsure).
@@ -4343,7 +4558,17 @@ class _Walker:
                 return True  # ignore/reset the signal: runs nothing.
             if not _NAME_WORD_RE.fullmatch(action):
                 return False
-            if action in self.functions:
+            if action in self.functions and self.fresh_scope:
+                # Q1 (review round 2): in a proved fresh scope the trap's run
+                # is walked here only as "it may fire from now on"; its own
+                # ``rm`` must not end the proof for the segments after it,
+                # which run BEFORE it does. ``_fresh_errexit_scope`` proved
+                # the body changes no variable, so isolating loses nothing.
+                snap = self._save()
+                self._call_candidates(action, depth)
+                self.fresh_scope = True
+                self._restore(snap)
+            elif action in self.functions:
                 self._call_candidates(action, depth)
             # An EXIT trap runs the definition current when the shell ends,
             # which may be a later one: ``_run_trapped_functions``.
@@ -4357,9 +4582,10 @@ class _Walker:
             alias, eq, value = arg.text.partition("=")
             if not eq:
                 continue  # ``alias g`` prints a definition.
-            value = value.strip()
-            if not _NAME_WORD_RE.fullmatch(value):
+            if not _NAME_WORD_RE.fullmatch(value.strip()):
                 return False
+            # Unstripped: a trailing blank (``'sudo '``) makes bash
+            # alias-expand the next word too (``_alias_targets``, N5).
             pairs.append((alias, value))
         for alias, value in pairs:
             self.function_aliases[alias] = value

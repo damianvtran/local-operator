@@ -27,6 +27,11 @@ from local_operator.guardrails.preview import preview_tool_call
 
 SID = "aaaaaaaaaaaa"
 SP = "$LOCAL_OPERATOR_SCRATCHPAD"
+#: PR #4116's fail-closed fresh scope: a scratch-template ``mktemp -d`` in a
+#: straight-line errexit script (review round 2 Q1 rows).
+_HDR = "set -euo pipefail"
+_MK = f'tmp=$(mktemp -d "{SP}/t.XXXXXXXX")'
+_CLEAN = 'cleanup(){ rm -rf "$tmp"; }'
 
 #: (id, command, expected risk). Unless noted "guard", each row ranked LOW on
 #: main (64f79389), where function bodies were never walked.
@@ -145,6 +150,126 @@ ROWS: list[tuple[str, str, Risk]] = [
     ("r4-trap-reset", "f(){ rm -rf ~; }; trap - EXIT", Risk.LOW),
     # R6: a loop body can call a definition made later in it.
     ("r6-loop-carried", "for i in 1 2; do f; f(){ rm -rf ~; }; done", Risk.CRITICAL),
+    # Review round 2 (security N1/N2/N5/N6, QA Q1) on 2553e392. Unless noted
+    # "guard", every row below ranked LOW there.
+    # N1: a nesting counter missed ``then if``/``do while`` and read a case
+    # pattern ``b)`` or ``a\)`` as a closer, so a conditional redefinition
+    # REPLACED the destructive body. Bash runs ``rm -rf ~`` in each.
+    (
+        "n1-if-if",
+        'f(){ rm -rf ~; }; if [ -n "$X" ]; then if true; then :; fi; f(){ :; }; fi; f',
+        Risk.CRITICAL,
+    ),
+    (
+        "n1-if-for",
+        'f(){ rm -rf ~; }; if [ -n "$X" ]; then for i in 1; do :; done; f(){ :; }; fi; f',
+        Risk.CRITICAL,
+    ),
+    (
+        "n1-while-while",
+        "f(){ rm -rf ~; }; while false; do while false; do :; done; f(){ :; }; done; f",
+        Risk.CRITICAL,
+    ),
+    (
+        "n1-case-in-if",
+        'f(){ rm -rf ~; }\nif [ -n "$X" ]; then\n  case "$Y" in\n    b)\n      echo b\n'
+        "      ;;\n  esac\n  f(){ :; }\nfi\nf",
+        Risk.CRITICAL,
+    ),
+    ("n1-case-arm", 'f(){ rm -rf ~\n}\ncase "$X" in\na)\nf(){ :; }\n;;\nesac\nf', Risk.CRITICAL),
+    (
+        "n1-escaped-paren",
+        'f(){ rm -rf ~; }; if [ -n "$X" ]; then echo a\\); f(){ :; }; fi; f',
+        Risk.CRITICAL,
+    ),
+    # After a closed compound the redefinition is no longer "certain": the
+    # earlier body stays a candidate (over-approximation, fail closed).
+    ("n1-after-closed-if", "f(){ rm -rf ~; }; if true; then :; fi; f(){ :; }; f", Risk.CRITICAL),
+    # N2: a definition in an ``if``/``while``/``until`` test list runs.
+    ("n2-if", "if f(){ rm -rf ~; }; then f; fi", Risk.CRITICAL),
+    ("n2-while", "while f(){ rm -rf ~; }; do f; break; done", Risk.CRITICAL),
+    ("n2-until", "until f(){ rm -rf ~; }; do f; break; done", Risk.CRITICAL),
+    ("n2-if-pad", f'if f(){{ rm -rf "{SP}/x"; }}; then f; fi', Risk.LOW),  # guard
+    # N6: C-style and nested loops see a definition made later in the body.
+    ("n6-c-style-for", "for ((i=0;i<2;i++)); do f; f(){ rm -rf ~; }; done", Risk.CRITICAL),
+    (
+        "n6-nested-loop",
+        "for i in 1 2; do for j in 1; do f; done; f(){ rm -rf ~; }; done",
+        Risk.CRITICAL,
+    ),
+    # N5: alias chains, an alias shadowing a function, a trailing-blank alias.
+    ("n5-alias-chain", "f(){ rm -rf ~; }\nalias g=f\nalias h=g\nh", Risk.CRITICAL),
+    ("n5-alias-chain-reversed", "f(){ rm -rf ~; }\nalias h=g\nalias g=f\nh", Risk.CRITICAL),
+    ("n5-alias-chain-one-command", "f(){ rm -rf ~; }\nalias g=f h=g\nh", Risk.CRITICAL),
+    ("n5-alias-shadows-function", "f(){ :; }; g(){ rm -rf ~; }; alias f=g; f", Risk.CRITICAL),
+    ("n5-alias-trailing-blank", "f(){ rm -rf ~; }\nalias s='sudo ' g=f\ns g", Risk.CRITICAL),
+    ("n5-alias-cycle", "f(){ rm -rf ~; }\nalias g=h h=g\ng", Risk.LOW),  # guard: runs no f
+    ("n5-alias-chain-pad", f'f(){{ rm -rf "{SP}/x"; }}\nalias g=f\nalias h=g\nh', Risk.LOW),
+    # Q1: the fail-closed scratch mktemp cleanup through a function stays LOW
+    # (main LOW, 2553e392 CRITICAL/HIGH), as its inline form is LOW.
+    ("q1-trap-cleanup", f"{_HDR}\n{_MK}\n{_CLEAN}\ntrap cleanup EXIT", Risk.LOW),
+    ("q1-direct-call", f"{_HDR}\n{_MK}\n{_CLEAN}\ncleanup", Risk.LOW),
+    # Bash scopes dynamically: defined first, the body sees the later value.
+    ("q1-defined-before-trap", f"{_HDR}\n{_CLEAN}\n{_MK}\ntrap cleanup EXIT", Risk.LOW),
+    ("q1-defined-before-call", f"{_HDR}\n{_CLEAN}\n{_MK}\ncleanup", Risk.LOW),
+    # Guards: none of these may reach LOW.
+    (
+        "q1-body-reassigns",
+        f'{_HDR}\n{_MK}\ncleanup(){{ tmp=$HOME; rm -rf "$tmp"; }}\ntrap cleanup EXIT',
+        Risk.CRITICAL,
+    ),
+    (
+        "q1-body-climbs",
+        f'{_HDR}\n{_MK}\ncleanup(){{ rm -rf "$tmp/.."; }}\ntrap cleanup EXIT',
+        Risk.CRITICAL,
+    ),
+    (
+        "q1-body-printf-v",
+        f'{_HDR}\n{_MK}\ncleanup(){{ printf -v tmp %s "$HOME"; rm -rf "$tmp"; }}\n'
+        "trap cleanup EXIT",
+        Risk.HIGH,
+    ),
+    # The string-form trap is ranked as on main (pre-existing, out of scope).
+    ("q1-string-trap", f'{_HDR}\n{_MK}\ntrap "rm -rf $tmp" EXIT', Risk.LOW),
+    (
+        "q1-conditional-definition",
+        f'{_HDR}\n{_MK}\n[ -n "$X" ] && cleanup(){{ rm -rf "$tmp"; }}\ntrap cleanup EXIT',
+        Risk.HIGH,
+    ),
+    ("q1-call-before-mktemp", f"{_HDR}\n{_CLEAN}\ncleanup\n{_MK}", Risk.HIGH),
+    # The EXIT trap fires wherever the script stops: a failing second mktemp
+    # (or a trap set before the first) leaves ``tmp`` empty, ``"$tmp/x"`` = /x.
+    (
+        "q1-trap-before-mktemp",
+        f'{_HDR}\ncleanup(){{ rm -rf "$tmp/x"; }}\ntrap cleanup EXIT\n{_MK}',
+        Risk.HIGH,
+    ),
+    (
+        "q1-second-mktemp-after-trap",
+        f'{_HDR}\n{_MK}\ncleanup(){{ rm -rf "$tmp/x"; }}\ntrap cleanup EXIT\n{_MK}',
+        Risk.HIGH,
+    ),
+    # A variable the body reads changes after the trap and back: the trap may
+    # have fired in between (``false`` exits under errexit).
+    (
+        "q1-variable-flips-after-trap",
+        f'{_HDR}\n{_MK}\nn=x\ncleanup(){{ rm -rf "$tmp/$n"; }}\ntrap cleanup EXIT\n'
+        "n=../..\nfalse\nn=x",
+        Risk.HIGH,
+    ),
+    # A function shadowing ``mktemp`` (or taking arguments) is no proof.
+    ("q1-mktemp-shadowed", f"{_HDR}\nmktemp(){{ echo /; }}\n{_MK}\n{_CLEAN}\ncleanup", Risk.HIGH),
+    (
+        "q1-call-with-args",
+        f'{_HDR}\n{_MK}\ncleanup(){{ rm -rf "$tmp/$1"; }}\ncleanup ../..',
+        Risk.HIGH,
+    ),
+    (
+        "q1-redefined-after-trap",
+        f"{_HDR}\n{_MK}\n{_CLEAN}\ntrap cleanup EXIT\ncleanup(){{ rm -rf ~; }}",
+        Risk.CRITICAL,
+    ),
+    ("q1-other-trap-signal", f"{_HDR}\n{_MK}\n{_CLEAN}\ntrap cleanup INT EXIT", Risk.HIGH),
     # The own-scratchpad delete keeps working through a function (guard).
     ("scratch-delete", f'f(){{ rm -rf "{SP}/x"; }}; f', Risk.LOW),
     ("harmless-call", "g(){ echo hi; }; g", Risk.LOW),
@@ -215,6 +340,23 @@ async def test_preview_agrees_with_checkpoint(
         # CRITICAL is refused before any judge answer.
         assert allowed is not None and allowed.blocked is True
         assert allowed.rule == "dangerous-delete"
+
+
+def test_cleanup_without_errexit_ranks_as_inline(ctx: CallContext) -> None:
+    """Q1 guard: without ``set -euo pipefail`` a failed mktemp may leave
+    ``tmp`` empty, so #4116 grants no proof. The function form must rank
+    exactly as its inline equivalent, never lower."""
+    assert ctx.scratchpad is not None
+
+    def rank(command: str) -> Risk:
+        return classify_bash(
+            command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=SID
+        ).risk
+
+    inline = rank(f'{_MK}; rm -rf "$tmp"')
+    assert inline != Risk.LOW
+    assert rank(f"{_MK}; {_CLEAN}; trap cleanup EXIT") == inline
+    assert rank(f"{_MK}; {_CLEAN}; cleanup") == inline
 
 
 def test_repeated_large_body_stays_fast(ctx: CallContext) -> None:
