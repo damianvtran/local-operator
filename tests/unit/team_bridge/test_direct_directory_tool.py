@@ -60,6 +60,14 @@ class DirectoryClient(RecordingClient):
             ],
         }
 
+    async def directory_cached(
+        self, tenant_id: str, *, expected_account_id: str | None = None, refresh: bool = False
+    ) -> Any:
+        # The tool reads the directory through the client's cache; this fake has
+        # no cache, so every read (including the one forced re-read on a miss)
+        # reaches ``directory`` and is recorded there.
+        return await self.directory(tenant_id, expected_account_id=expected_account_id)
+
     async def directory(
         self, tenant_id: str, *, expected_account_id: str | None = None
     ) -> dict[str, Any]:
@@ -295,7 +303,8 @@ async def test_unreachable_agent_never_creates_or_posts(runtime, state):
     result = await execute_bridge(runtime, {"op": "dm", "account_id": "acc_2", "body": "hi"})
     assert result["ok"] is False and result["code"] == "not_reachable"
     assert result["reason"] == f"agent_{state}"
-    assert [c["method"] for c in runtime.client.calls] == ["directory"]
+    # The cached answer missed, so the directory was re-read exactly once.
+    assert [c["method"] for c in runtime.client.calls] == ["directory", "directory"]
 
 
 @pytest.mark.asyncio
@@ -309,7 +318,7 @@ async def test_disabled_member_without_agent_never_writes(runtime, target):
     )
     assert result["ok"] is False and result["code"] == "not_reachable"
     assert result["reason"] == ("bridge_disabled" if target == "human" else "no_agent_disabled")
-    assert [c["method"] for c in runtime.client.calls] == ["directory"]
+    assert [c["method"] for c in runtime.client.calls] == ["directory", "directory"]
 
 
 @pytest.mark.asyncio
@@ -327,7 +336,9 @@ async def test_unknown_or_self_target_has_no_write(runtime, address, code, reaso
     result = await execute_bridge(runtime, {"op": "dm", **address, "body": "hi"})
     assert result["ok"] is False and result["code"] == code
     assert result.get("reason") == reason
-    assert [c["method"] for c in runtime.client.calls] == ["directory"]
+    # A miss (not_reachable) re-reads once; a self-target is not about freshness.
+    expected = ["directory", "directory"] if code == "not_reachable" else ["directory"]
+    assert [c["method"] for c in runtime.client.calls] == expected
 
 
 @pytest.mark.asyncio
@@ -484,3 +495,36 @@ def test_new_ops_publish_read_write_tiers_and_no_actor_override(runtime):
     assert props["target"]["enum"] == ["agent", "human"]
     assert "account_id" in props and "endpoint_id" in props
     assert "actor_endpoint_id" not in props and "origin_session_id" not in props
+
+
+@pytest.mark.asyncio
+async def test_a_teammate_missing_from_the_cached_directory_is_found_by_one_re_read(runtime):
+    """The directory is cached (incident 2026-11-17); a newly joined teammate is
+    absent from the cached answer, and the ONE forced re-read finds them."""
+
+    fresh = runtime.client.directory_result
+    stale = {"members": [m for m in fresh["members"] if m["account_id"] != "acc_2"]}
+    refreshes: list[bool] = []
+
+    async def cached(tenant_id, *, expected_account_id=None, refresh=False):
+        refreshes.append(refresh)
+        return fresh if refresh else stale
+
+    runtime.client.directory_cached = cached
+    result = await execute_bridge(runtime, {"op": "dm", "account_id": "acc_2", "body": "hi"})
+    assert result["ok"] is True, result
+    assert refreshes == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_member_absent_after_the_re_read_is_refused_after_one_refresh_only(runtime):
+    refreshes: list[bool] = []
+
+    async def cached(tenant_id, *, expected_account_id=None, refresh=False):
+        refreshes.append(refresh)
+        return runtime.client.directory_result
+
+    runtime.client.directory_cached = cached
+    result = await execute_bridge(runtime, {"op": "dm", "account_id": "acc_gone", "body": "hi"})
+    assert result["ok"] is False and result["reason"] == "not_a_member"
+    assert refreshes == [False, True]

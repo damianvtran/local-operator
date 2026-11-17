@@ -2349,18 +2349,39 @@ def test_run_forever_never_hot_loops_on_instant_answers(tmp_path, monkeypatch, r
 
 def test_failure_delay_honours_retry_after_and_stays_bounded() -> None:
     """F1: a 429 names its own wait; re-polling sooner only extends the
-    refusal. The server's value wins over a shorter local backoff, is never
-    shorter than the backoff, and is capped so a hostile header cannot park
+    refusal. The server's value is a FLOOR (never retried sooner), spread by up
+    to one local backoff of jitter, and capped so a hostile header cannot park
     the connector for hours."""
 
     from local_operator.team_bridge.client import BridgeRefusal
 
     limited = BridgeRefusal("rate_limited", "slow down", http_status=429, retry_after_seconds=42)
-    assert loop_mod._failure_delay(limited, 1.0) == 42.0
-    assert loop_mod._failure_delay(limited, 60.0) == 60.0
+    assert loop_mod._failure_delay(limited, 1.0, rand=lambda: 0.0) == 42.0
+    assert loop_mod._failure_delay(limited, 60.0, rand=lambda: 0.0) == 42.0
+    assert loop_mod._failure_delay(limited, 60.0, rand=lambda: 0.5) == 72.0
     huge = BridgeRefusal("rate_limited", "x", http_status=429, retry_after_seconds=10**9)
-    assert loop_mod._failure_delay(huge, 1.0) == loop_mod.RETRY_AFTER_MAX_S
-    assert loop_mod._failure_delay(RuntimeError("boom"), 4.0) == 4.0
+    assert loop_mod._failure_delay(huge, 1.0, rand=lambda: 0.0) == loop_mod.RETRY_AFTER_MAX_S
+    assert loop_mod._failure_delay(RuntimeError("boom"), 4.0, rand=lambda: 1.0) == 4.0
+
+
+def test_failure_delay_is_fully_jittered_above_the_base_floor() -> None:
+    """Incident 2026-11-17: the edge blocks per ADDRESS, so every client on one
+    network is released together; a fixed wait brings them all back in the
+    same second. Full jitter spreads them, floored at the base so a failing hub
+    is never re-polled in a hot loop, and the named wait is never undercut."""
+
+    import random
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    rng = random.Random(7)
+    plain = [loop_mod._failure_delay(RuntimeError("x"), 32.0, rand=rng.random) for _ in range(200)]
+    assert min(plain) >= loop_mod.BACKOFF_BASE_S and max(plain) <= 32.0
+    assert len({round(d, 3) for d in plain}) > 150  # spread, not one fixed value
+    waf = BridgeRefusal("rate_limited", "x", http_status=429, retry_after_seconds=300)
+    named = [loop_mod._failure_delay(waf, 8.0, rand=rng.random) for _ in range(200)]
+    assert min(named) >= 300.0 and max(named) <= 308.0
+    assert loop_mod._failure_delay(RuntimeError("x"), 1.0, rand=lambda: 0.0) == 1.0
 
 
 def test_screen_item_hands_screening_the_production_status_source(tmp_path, monkeypatch) -> None:

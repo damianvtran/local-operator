@@ -135,6 +135,14 @@ class DmClient:
         self.messages_failure = messages_failure
         self.calls: list[dict[str, Any]] = []
 
+    async def directory_cached(
+        self, tenant_id: str, *, expected_account_id: str | None = None, refresh: bool = False
+    ) -> Any:
+        # The tool reads the directory through the client's cache; this fake has
+        # no cache, so every read (including the one forced re-read on a miss)
+        # reaches ``directory`` and is recorded there.
+        return await self.directory(tenant_id, expected_account_id=expected_account_id)
+
     async def directory(self, tenant_id: str, *, expected_account_id: str | None = None) -> Any:
         self.calls.append(
             {
