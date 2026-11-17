@@ -1137,7 +1137,7 @@ def test_resume_receipt_spaces_the_id_once() -> None:
             "origin": ORIGIN_AGENT_WORKSTREAM,
         },
     )
-    assert 'opened "w" as a listed workstream (session s1)' in spawn_text
+    assert 'opened "w" as a listed workstream (session s1, team: none)' in spawn_text
     unnamed = _sessions_open_body(
         SessionsParams(op="spawn", prompt="go"),
         {"op": "spawn", "session_id": "s1", "sidebar_visibility": "listed"},
@@ -1975,6 +1975,36 @@ def test_the_description_advertises_every_ops_accepted_set() -> None:
         listed = {part for part in re.split(r"[|, ]+", match.group(1)) if part}
         expected = fields - {"op"}
         assert listed == expected or (not expected and listed == {"none"})
+
+
+def test_the_sessions_guide_spawn_section_documents_every_accepted_field() -> None:
+    """The guide is hand-written; the accepted set is derived — so pin them together.
+
+    `sessions` `op='spawn'` accepts a field the description advertises, and the
+    guide's `### Spawn inputs` section is what a model reads before passing one.
+    A field added to `SessionsParams` (and therefore to
+    ``_SESSIONS_OP_FIELDS['spawn']``) that nobody wrote into the guide is a
+    silent documentation drop — the same class of drift the description test
+    above pins for the advertisement, one surface further out.
+    """
+    from local_operator.guides.discovery import discover_guides
+
+    guide = next(item for item in discover_guides() if item.name == "sessions")
+    body = guide.file_path.read_text(encoding="utf-8", errors="replace")
+    section = re.search(r"^### Spawn inputs$", body, re.M)
+    assert section is not None, "the sessions guide has no '### Spawn inputs' section"
+    rest = body[section.end() :]
+    end = re.search(r"^#{2,3} ", rest, re.M)
+    spawn_section = rest[: end.start()] if end else rest
+
+    missing = [
+        field
+        for field in sorted(_SESSIONS_OP_FIELDS["spawn"] - {"op"})
+        if f"`{field}`" not in spawn_section
+    ]
+    assert (
+        not missing
+    ), f"spawn accepts these fields but the guide's spawn section never documents them: {missing}"
 
 
 def test_the_reference_is_deterministic_bounded_and_never_raises(
@@ -3364,10 +3394,13 @@ async def test_omitting_tags_leaves_spawn_receipt_unchanged(root: Path, monkeypa
     assert "tags" not in (result.details or {}) and "tags_applied" not in (result.details or {})
     assert not (root / "tags").exists()
     assert result.text == _sessions_open_body(params, result.details or {})
+    # The receipt carries the applied binding on EVERY spawn (this slice's
+    # `team: none`), so "unchanged" here means unchanged by TAGS -- no `tags`
+    # segment, no tag write, and the one binding field still present.
     assert (
         result.text
-        == 'opened "untagged" as a listed workstream (session abcdef123456, job cafebabe0001)'
-        " — visible in the operator's sidebar, /resume and the phone list."
+        == 'opened "untagged" as a listed workstream (session abcdef123456, job cafebabe0001'
+        ", team: none) — visible in the operator's sidebar, /resume and the phone list."
         " origin: agent-workstream."
     )
 
@@ -4177,3 +4210,248 @@ async def test_a_remote_resume_parked_behind_a_busy_owner_is_an_error(
     assert resumed.is_error
     assert "NOT delivered yet" in resumed.text
     assert "--mailbox" not in seen[0]
+
+
+# --- the team binding: reported, echoed, and hinted at ----------------------
+
+
+class _TeamRow:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _TeamRegistryStub:
+    """Only what the spawn hint reads: the roster's names.
+
+    Duck-typed on purpose — the tool's contract with a registry is
+    ``list_teams``/``get_team_by_name`` (``team_tool._registry``), not a class.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self._teams = [_TeamRow(name) for name in names]
+
+    def list_teams(self) -> list[_TeamRow]:
+        return self._teams
+
+    def get_team_by_name(self, name: str) -> _TeamRow | None:
+        return next((row for row in self._teams if row.name.lower() == name.lower()), None)
+
+
+def _spawn_doubles(
+    monkeypatch: pytest.MonkeyPatch, root: Path, session_id: str = "fffaaaaabbbb"
+) -> str:
+    """The two PROCESS boundaries a spawn crosses, doubled; nothing else.
+
+    ``_sessions_launch`` (the nested CLI) and the exec ledger are the boundaries
+    the product cannot provide in a unit test — every line between them
+    (validation, argv, the readiness gate, the receipt) runs for real.
+    """
+
+    async def launch(argv: list[str], env: dict[str, str], cwd: str | None) -> tuple[int, str]:
+        _session(root, session_id, "spawned")
+        return 0, "Background job cafebabe0001: running (execution receipt)\n"
+
+    def status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        return {"status": "running", "session_id": session_id}
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", status)
+    return session_id
+
+
+@pytest.mark.asyncio
+async def test_spawn_receipt_echoes_the_team_it_applied(root: Path, monkeypatch) -> None:
+    """A spawn applies exactly `team=` and nothing by inheritance — say which."""
+    sid = _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "team": "lopdev"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    details = result.details or {}
+    assert details["team"] == "lopdev"
+    assert details["session_id"] == sid
+    assert "team: lopdev" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_receipt_echoes_the_profile_it_applied(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "profile": "coder"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["profile"] == "coder"
+    assert "profile: coder" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_receipt_says_team_none_when_nothing_is_attached(
+    root: Path, monkeypatch
+) -> None:
+    """The absence is the point: a session asked to apply a team's standards
+    without one cannot, so `team: none` is a fact rather than an omission."""
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["team"] is None
+    assert "team: none" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_warns_when_the_name_names_a_team_and_none_is_attached(
+    root: Path, monkeypatch
+) -> None:
+    """The incident: a spawn for "the lopdev work" came up with no team."""
+    sid = _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev", "platform"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "go", "name": "lopdev review pass"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "the name names the team lopdev" in result.text, result.text
+    assert (result.details or {})["team_hint"]
+    # ADVISORY: the spawn still launched and published.
+    assert (result.details or {})["session_id"] == sid
+
+
+@pytest.mark.asyncio
+async def test_spawn_warns_when_the_prompt_names_a_team_and_none_is_attached(
+    root: Path, monkeypatch
+) -> None:
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "apply the lopdev standards to this diff", "name": "audit"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "the prompt names the team lopdev" in result.text, result.text
+    assert "`team=lopdev`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_is_silent_about_a_team_it_was_given(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "go", "name": "lopdev review", "team": "lopdev"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+    assert "names the team" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_is_silent_when_no_team_name_appears(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["lopdev"]))
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "check the shard ledger", "name": "audit"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+    assert "names the team" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_ignores_a_team_name_too_short_to_be_specific(root: Path, monkeypatch) -> None:
+    """Whole words alone are not enough: "ops"/"dev"/"ai" live in ordinary prose."""
+    _spawn_doubles(monkeypatch, root)
+    context = _context(root, team_registry=_TeamRegistryStub(["ops"]))
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "start the ops run"}, None, None, context
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+
+
+@pytest.mark.asyncio
+async def test_spawn_is_silent_without_a_registry_to_ask(root: Path, monkeypatch) -> None:
+    _spawn_doubles(monkeypatch, root)
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "do the lopdev work", "name": "lopdev audit"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not result.is_error, result.text
+    assert "team_hint" not in (result.details or {})
+    assert "team: none" in result.text
+
+
+@pytest.mark.asyncio
+async def test_info_reports_the_team_binding_and_says_none_when_absent(root: Path) -> None:
+    from local_operator.resume import write_session_attachment
+
+    bound = _session(root, "aaaa11112222", "bound")
+    write_session_attachment(bound, team="lopdev", agent="", goal="")
+    _session(root, "bbbb33334444", "unbound")
+
+    attached = await execute_sessions(
+        "t", {"op": "info", "target": "bound"}, None, None, _context(root)
+    )
+    assert not attached.is_error, attached.text
+    assert (attached.details or {})["team"] == "lopdev"
+    assert "team: lopdev" in attached.text
+
+    plain = await execute_sessions(
+        "t", {"op": "info", "target": "unbound"}, None, None, _context(root)
+    )
+    assert not plain.is_error, plain.text
+    assert (plain.details or {})["team"] == ""
+    assert "team: none" in plain.text
+
+
+@pytest.mark.asyncio
+async def test_list_reports_each_rows_team_and_says_none_when_absent(root: Path) -> None:
+    from local_operator.resume import write_session_attachment
+
+    bound = _session(root, "aaaa11112222", "bound")
+    write_session_attachment(bound, team="lopdev", agent="", goal="")
+    _session(root, "bbbb33334444", "unbound")
+
+    result = await execute_sessions(
+        "t", {"op": "list", "include_stored": True}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    rows = {row["conversation_name"]: row for row in (result.details or {}).get("rows") or []}
+    lines = result.text.splitlines()
+    # By ID, not by name: "bound" is a substring of "unbound".
+    bound_line = next(line for line in lines if "aaaa11112222" in line)
+    unbound_line = next(line for line in lines if "bbbb33334444" in line)
+    assert "team: lopdev" in bound_line, result.text
+    assert "team: none" in unbound_line, result.text
+    # The published rows are the collector's shape, untouched by the text addend.
+    assert "team" not in rows["bound"]
+
+
+@pytest.mark.asyncio
+async def test_list_query_reports_the_rows_team(root: Path) -> None:
+    from local_operator.resume import write_session_attachment
+
+    bound = _session(root, "aaaa11112222", "shard bound")
+    write_session_attachment(bound, team="lopdev", agent="", goal="")
+
+    result = await execute_sessions(
+        "t", {"op": "list", "query": "shard"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "team: lopdev" in result.text, result.text
