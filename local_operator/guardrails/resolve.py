@@ -82,7 +82,13 @@ _DATE_LITERAL_RE = re.compile(r"[A-Za-z0-9_:@,+=-]")
 #: %+ %v (locale composites), the ``_`` (space-pad) flag, and every LC_TIME
 #: name — %a %A %b %B %h %p %P: ``es_ES`` prints ``a. m.`` for %p (a space,
 #: so an unquoted word splits) and ``ja_JP`` non-ASCII (review R2, PR #4147).
-_DATE_CONVERSION_RE = re.compile(r"%[-0^#]?[YCyGgmdjHIMSsNuwUVWZzFTR]")
+#: %Z is excluded too (review R11, PR #4147): it prints the zone abbreviation
+#: the TZ environment variable names, verbatim — ``TZ=..0 date +%Z`` prints
+#: ``..`` — so its output is caller-controlled. %z prints only ``[+-]hhmm``
+#: whatever TZ holds; the remaining conversions print digits (or, for %F %T
+#: %R, digits joined by ``-``/``:``) and take no locale text without the
+#: ``E``/``O`` modifiers, which this pattern does not accept.
+_DATE_CONVERSION_RE = re.compile(r"%[-0^#]?[YCyGgmdjHIMSsNuwUVWzFTR]")
 #: Substitution bodies known to print nothing. Matching is on the stripped
 #: body text; anything not in this set is opaque.
 _EMPTY_BODIES = frozenset(
@@ -105,15 +111,9 @@ CREDENTIAL_MARK = OPAQUE_MARK + "credential" + OPAQUE_MARK
 #: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
 #: unknowable, but known to be a fresh entry under the temp directory.
 TEMP_MARK = "\x02"
-#: Same, for an assignment whose only opaque stretches are CONTAINED
-#: substitutions (``L=$SP/u0-$(date -u +%Y%m%dT%H%M%SZ).log``). Without it the
-#: stored value kept a bare OPAQUE_MARK and every later ``$L`` read lost the
-#: containment proof, so a log write inside the caller's own scratchpad ranked
-#: HIGH (node2 QA, PR #4104 u0). ``_param`` maps it back to OPAQUE_MARK with
-#: ``opaque_contained`` kept, so ``..`` climb checks still see a marker. Never
-#: used for HOME/OLDPWD, whose values are read as raw paths elsewhere.
-CONTAINED_MARK = "\x03"
-#: Variables whose stored value is consumed as a path without ``_param``.
+#: Variables whose stored value is consumed as a path without ``_param``, so
+#: the setter invalidation below (``unset``, ``read``, arithmetic) leaves them
+#: alone rather than storing a marker where a raw path is expected.
 _RAW_PATH_VARS = frozenset({"HOME", "OLDPWD"})
 #: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
 #: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
@@ -574,12 +574,6 @@ class Expanded:
     #: a path climb (``date``, ``uuidgen``…). Lets a timestamped name inside the
     #: session's own scratchpad stay LOW; an arbitrary body could print ``..``.
     opaque_contained: bool = True
-    #: Some contained stretch reached this word through a variable
-    #: (CONTAINED_MARK, see ``_containment_carriers``). The carry is trusted
-    #: only for the caller's OWN scratchpad: elsewhere ``classify`` ranks the
-    #: word as main did before the carry existed, so another session's pad
-    #: reached through ``$L`` stays CRITICAL (PR #4147 round 3 probe H2).
-    carried: bool = False
     #: Every character came from an unquoted expansion that produced nothing,
     #: so bash drops the word entirely.
     vanished: bool = False
@@ -725,27 +719,6 @@ def _tilde(text: str, home: str) -> tuple[str, bool]:
     return OPAQUE_MARK + sep + tail, True
 
 
-def _unmark(value: str, out: Expanded) -> str:
-    """A stored variable value as expanded text: carry-through markers become
-    OPAQUE_MARK again, so no raw ``\x02``/``\x03`` ever reaches a target path.
-
-    Containment survives only when every opaque stretch was a contained
-    substitution (CONTAINED_MARK alone); any plain OPAQUE_MARK or TEMP_MARK
-    voids it, as before.
-    """
-    contained_only = CONTAINED_MARK in value and OPAQUE_MARK not in value and TEMP_MARK not in value
-    if TEMP_MARK in value:
-        out.temp = True
-    value = value.replace(TEMP_MARK, OPAQUE_MARK).replace(CONTAINED_MARK, OPAQUE_MARK)
-    if OPAQUE_MARK in value:
-        out.opaque = True
-        if not contained_only:
-            out.opaque_contained = False
-        else:
-            out.carried = True
-    return value
-
-
 def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: int = 0) -> str:
     """Expand one ``$NAME`` / ``${…}`` form; unknowable forms become opaque."""
     if form.startswith("${"):
@@ -757,14 +730,23 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
         if value is None or value == "":
             out.empty.append(f"${inner} expanded empty" + ("" if value == "" else " (unset)"))
             return ""
-        return _unmark(value, out)
+        if TEMP_MARK in value:
+            out.temp = True
+            value = value.replace(TEMP_MARK, OPAQUE_MARK)
+        if OPAQUE_MARK in value:
+            out.opaque = True
+            out.opaque_contained = False
+        return value
     dm = _BRACE_DEFAULT_RE.match(inner)
     if dm is not None and depth < 4:
         name, op, default = dm.group(1), dm.group(2), dm.group(3)
         current = env.get(name)
         use_default = current is None or (op.startswith(":") and current == "")
         if not use_default and current is not None:
-            return _unmark(current, out)
+            if OPAQUE_MARK in current:
+                out.opaque = True
+                out.opaque_contained = False
+            return current
         # Bash expands the default word itself: ``$``, a leading ``~`` and
         # nested ``${}`` (S1 — the incident shape was an unset variable plus a
         # fallback). Its quotes are stripped as part of that word.
@@ -777,7 +759,6 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
             if sub.opaque:
                 out.opaque = True
                 out.opaque_contained = out.opaque_contained and sub.opaque_contained
-                out.carried = out.carried or sub.carried
             pieces.append(sub.text)
         value = " ".join(pieces)
         if not value:
@@ -937,31 +918,24 @@ def _param_ref(form: str, env: Mapping[str, str]) -> str | None:
 def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
     """``exp`` with every recorded ref to a name in ``values`` rewritten."""
     text, pattern = exp.text, exp.pattern
-    opaque, contained, temp = exp.opaque, exp.opaque_contained, exp.temp
-    carried = exp.carried
     # Right to left, so earlier offsets stay valid.
     for name, ts, te, ps, pe, quoted in sorted(exp.refs, key=lambda r: r[1], reverse=True):
         if name not in values:
             continue
-        # A per-iteration value is spliced in raw, bypassing ``_param``; unmark
-        # it here so a carry-through marker never lands in a path as text.
-        probe = Expanded(text="")
-        value = _unmark(values[name], probe)
-        opaque = opaque or probe.opaque
-        contained = contained and probe.opaque_contained
-        temp = temp or probe.temp
-        carried = carried or probe.carried
-        text = text[:ts] + value + text[te:]
+        text = text[:ts] + values[name] + text[te:]
         if pattern is not None:
-            pattern = pattern[:ps] + (_glob_escape(value) if quoted else value) + pattern[pe:]
+            pattern = (
+                pattern[:ps]
+                + (_glob_escape(values[name]) if quoted else values[name])
+                + pattern[pe:]
+            )
     return Expanded(
         text=text,
         pattern=pattern,
         empty=list(exp.empty),
-        opaque=opaque,
-        opaque_contained=contained,
-        carried=carried,
-        temp=temp,
+        opaque=exp.opaque,
+        opaque_contained=exp.opaque_contained,
+        temp=exp.temp,
     )
 
 
@@ -986,9 +960,6 @@ def expand(word: _RawWord, env: Mapping[str, str], home: str) -> Expanded:
     return expand_all(word, env, home)[0]
 
 
-#: Programs whose output is a single path component in normal use, so a
-#: substitution of one cannot climb out of the directory it sits in — but only
-#: when called with no ``+FORMAT``/path-like argument (S4: ``date +../..``).
 #: ``((…))`` / ``$((…))`` bodies, and the names an arithmetic body assigns:
 #: ``N=1``, ``N+=1`` (any compound op), ``N++``, ``--N``.
 _ARITH_RE = re.compile(r"\(\((.*?)\)\)", re.S)
@@ -1002,400 +973,9 @@ def _arith_assigned(text: str) -> set[str]:
     return {a or b for a, b in _ARITH_ASSIGN_RE.findall(text)}
 
 
-#: Programs that may receive a contained ``$NAME`` as an argument without
-#: voiding its containment (see ``_containment_carriers``). Each one only
-#: names, reads, prints or removes the path it is handed; none of them can
-#: make the entry a link to somewhere else. ``printf -v`` is excluded below.
-_CARRY_SAFE_PROGRAMS = frozenset(
-    {"rm", "mkdir", "touch", "cat", "echo", "printf", "tee", "ls", "test", "["}
-)
-#: Anything that can define code, re-read text as shell, or change how later
-#: words resolve. One appearance anywhere voids every carrier in the command:
-#: a nested shell, ``eval``, a sourced file, an alias or a trap may assign the
-#: name where this pre-scan cannot see, and ``xargs``/``env``/``exec PROG``
-#: hand a value to a program it does not model. Matched on raw text, so a
-#: mention inside quotes errs strict, never loose.
-_CARRY_BAR_WORD_RE = re.compile(
-    r"(?<![\w.-])(?:bash|sh|zsh|dash|ksh|mksh|fish|eval|source|xargs|env|trap|coproc|"
-    r"alias|function)(?![\w.-])"
-)
-#: A function definition header (``f()``, ``f ()``) or a dot-source word.
-_CARRY_BAR_SHAPE_RE = re.compile(r"[A-Za-z_][\w.:-]*\s*\(\s*\)|(?:^|[\s;&|(){}])\.(?=\s|$)")
-#: Variables that change what a later word or program lookup means. Any
-#: mention other than a plain ``$NAME``/``${NAME}`` read is a possible set.
-_CARRY_BAR_VAR_RE = re.compile(r"(?<![\w$])(?<!\$\{)(?:PATH|BASH_ENV|ENV|IFS|CDPATH)(?!\w)")
-
-
-#: Every command word a carrying command may run (round 4, PR #4147). The
-#: whole command — not just the consumers of ``$NAME`` — must be built from
-#: these, plus plain assignments and unflagged ``export``/``local``/
-#: ``declare``. A rebinding builtin (``hash -p``), a link maker (``ln``,
-#: ``cp -s``, ``mv`` onto a glob or ``$(ls …)`` operand under the carried
-#: prefix) or any program this module does not model can change what the
-#: carried path resolves to without ever reading ``$NAME`` (review R7), so
-#: rather than enumerate them, anything outside this set drops the carry.
-_CARRY_STRAIGHT_PROGRAMS = _CARRY_SAFE_PROGRAMS | {"exec", "date", "true"}
-_CARRY_DECLARE_PROGRAMS = frozenset({"export", "local", "declare"})
-#: Segment separators that always run the next segment. ``&&``/``||`` make
-#: an assignment conditional, ``|`` and ``&`` run it in a subshell, so the
-#: one assignment the walker sees may never happen (review R6).
-_CARRY_STRAIGHT_OPS = frozenset({";", "\n", ""})
-
-
-def _substitution_weight(text: str) -> int:
-    """Raw substitution openers in ``text``: 2 per ``$(``/``<(``/``>(``, 1 per backtick.
-
-    A backtick substitution spends two backticks and every other form one
-    two-character opener, so each substitution the lexer yields weighs 2
-    whatever its spelling — :func:`_straight_safe_command` can compare what
-    it visited against the raw text without knowing which spelling it saw.
-    Raw text is counted on purpose: an opener in single quotes, a quoted
-    heredoc or a comment counts too and only ever errs strict.
-    """
-    return 2 * (text.count("$(") + text.count("<(") + text.count(">(")) + text.count("`")
-
-
-def _straight_safe_command(command: str, depth: int = 0) -> bool:
-    """True when ``command`` is straight-line and runs only safe programs.
-
-    WHY (PR #4147, round 4, review R6/R7). The carry trusts that the single
-    ``NAME=…`` assignment the pre-scan counts is the value every later
-    ``$NAME`` read sees. That holds only when every segment runs, in order,
-    in this shell: no ``&&``/``||``/``|``/``&``, no ``if``/``while``/
-    ``for``/``case``, no ``{ }``/``( )``/``[[ ]]``. Those keywords and
-    grouping words are never in the safe set, so the program check below
-    rejects them structurally instead of by a keyword list. Substitution
-    and process-substitution bodies are held to the same rule, recursively,
-    so ``$(hash -p …)`` cannot smuggle a program in. Any failure keeps
-    main's behaviour (opaque, judge-ranked); the supported path for a
-    command that does more is a literal log path.
-
-    Fail-closed coverage (round 5, review R8): the part scan only reaches
-    substitutions the lexer yields as ``sub``/``proc`` parts. One inside an
-    unquoted heredoc body or a ``${X:-…}``/``${X/a/…}`` parameter word runs
-    in real bash but is never yielded, so a link made there escaped the
-    check. Rather than teach the scan every place bash expands, the top call
-    compares the substitutions it visited (recursively) with the openers in
-    the raw text; any opener left over drops every carry.
-    """
-    visited = _straight_safe_visit(command, depth)
-    if visited is None:
-        return False
-    return depth > 0 or visited == _substitution_weight(command)
-
-
-def _straight_safe_visit(command: str, depth: int) -> int | None:
-    """:func:`_straight_safe_command`'s walk: the visited substitution weight, or None.
-
-    Returns the :func:`_substitution_weight` of every substitution validated
-    here and in nested bodies, so the caller can prove none went unvisited.
-    """
-    if depth > _MAX_PEEL_DEPTH:
-        return None
-    visited = 0
-    lexed = lex(command)
-    if lexed.open:
-        return None
-    for text, piped, op in lexed.segments:
-        if piped or op not in _CARRY_STRAIGHT_OPS:
-            return None
-        words, redirects = scan(text)
-        all_words = list(words) + [target for _op, target in redirects]
-        if any(w.broken for w in all_words):
-            return None
-        for w in all_words:
-            for part in w.parts:
-                if part.kind not in ("sub", "proc"):
-                    continue
-                inner = _straight_safe_visit(part.text, depth + 1)
-                if inner is None:
-                    return None
-                visited += 2 + inner
-        i = 0
-        while i < len(words) and words[i].parts and words[i].parts[0].kind == "bare":
-            if _ASSIGN_RE.match(words[i].parts[0].text) is None:
-                break
-            i += 1
-        if i >= len(words):
-            continue
-        program_word, args = words[i], words[i + 1 :]
-        if len(program_word.parts) != 1 or program_word.parts[0].kind != "bare":
-            return None
-        program = program_word.parts[0].text
-        if program in _CARRY_DECLARE_PROGRAMS:
-            if any(a.parts and a.parts[0].text.startswith("-") for a in args):
-                return None
-            continue
-        if program not in _CARRY_STRAIGHT_PROGRAMS:
-            return None
-        if program == "exec" and args:
-            return None
-        if program == "printf" and any(a.parts and a.parts[0].text.startswith("-v") for a in args):
-            return None
-    return visited
-
-
-def _plain_read_names(word: _RawWord) -> list[str]:
-    """Names this word reads as a whole plain ``$NAME``/``${NAME}`` part."""
-    names = []
-    for part in word.parts:
-        if part.kind not in ("pbare", "pdq"):
-            continue
-        inner = part.text[2:-1] if part.text.startswith("${") else part.text[1:]
-        if part.text.startswith("${") and not part.text.endswith("}"):
-            continue
-        if _NAME_RE.fullmatch(inner):
-            names.append(inner)
-    return names
-
-
-#: Characters a carrying command may contain outside quotes, ``$`` forms,
-#: redirects and allowed substitution bodies (round 6, PR #4147). Name and
-#: path characters only: none of them opens a quote, an expansion, a glob, a
-#: comment, a pipe, a background job, a heredoc or a line continuation.
-_CARRY_WORD_CHARS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:@%+=,-"
-)
-#: Characters an allowed ``$(PROGRAM …)`` body may contain: word characters,
-#: blanks and the quotes of ``date +"%Y%m%d"``. No ``$``, ``(``, ``)``,
-#: backtick, backslash or redirect, so the body is one flat call whose
-#: closing ``)`` is the first one after the opener.
-_CARRY_BODY_CHARS = _CARRY_WORD_CHARS | frozenset(" \t\"'")
-_CARRY_NAME_START = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
-_CARRY_NAME_CHARS = _CARRY_NAME_START | frozenset("0123456789")
-
-
-def _carry_charset_ok(command: str) -> bool:
-    """True when ``command`` uses only the round-6 carry character allowlist.
-
-    WHY (PR #4147, round 6). Rounds 3-5 vetted the carry by chasing routes
-    through bash's parser — functions, setters, unvisited openers — and each
-    review found another (R9: a backslash-newline splits ``$\\⏎(`` or ``<<``
-    so no opener is visible; R10: ``${Z:0:Y}``, ``${Z[Y]}`` and ``test -v``
-    re-read a carried value as arithmetic, which can run a substitution).
-    This check is a strict CHARACTER-level allowlist run first: the whole
-    raw text, outside the bodies of allowed contained substitutions, may hold
-    only word characters, blanks, ``;``/newline, double quotes, plain single
-    quotes, ``$NAME``/``${NAME}``, the redirects ``>``, ``>>``, ``2>``,
-    ``2>&1``, ``&>``, and ``$(PROG …)`` whose flat body passes
-    :func:`_contained_body`. Anything else — a backslash, ``$'``, ``$"``,
-    ``$[``, brackets, braces beyond ``${NAME}``, globs, ``~``, ``!``, ``#``,
-    ``<``, ``|``, a stray ``&``, a backtick or a bare ``(`` — drops every
-    carry, so the command keeps main's opaque, judge-ranked reading. The
-    later checks in :func:`_containment_carriers` stay as defence in depth.
-    """
-    i, n = 0, len(command)
-    quote: str | None = None
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            # Nothing special inside single quotes: words and blanks only.
-            if ch == "'":
-                quote = None
-            elif ch not in _CARRY_WORD_CHARS and ch not in " \t":
-                return False
-            i += 1
-            continue
-        if ch in _CARRY_WORD_CHARS or ch in " \t" or (quote is None and ch in ";\n"):
-            i += 1
-        elif ch == '"':
-            quote = None if quote == '"' else '"'
-            i += 1
-        elif ch == "'" and quote is None:
-            quote = "'"
-            i += 1
-        elif ch == "$":
-            nxt = command[i + 1] if i + 1 < n else ""
-            if nxt in _CARRY_NAME_START:
-                i += 2
-                while i < n and command[i] in _CARRY_NAME_CHARS:
-                    i += 1
-            elif nxt == "{":
-                j = i + 2
-                if j >= n or command[j] not in _CARRY_NAME_START:
-                    return False
-                while j < n and command[j] in _CARRY_NAME_CHARS:
-                    j += 1
-                if j >= n or command[j] != "}":
-                    return False
-                i = j + 1
-            elif nxt == "(":
-                close = command.find(")", i + 2)
-                if close == -1:
-                    return False
-                body = command[i + 2 : close]
-                # The program must follow ``$(`` immediately, the body must be
-                # flat and quote-balanced, and the call must be allowlisted.
-                if (
-                    not body
-                    or body[0] in " \t"
-                    or any(c not in _CARRY_BODY_CHARS for c in body)
-                    or body.count('"') % 2
-                    or body.count("'") % 2
-                    or not _contained_body(body)
-                ):
-                    return False
-                i = close + 1
-            else:
-                return False
-        elif quote is None and ch == ">":
-            if command.startswith(">&1", i) and i > 0 and command[i - 1] == "2":
-                i += 3
-            elif command.startswith(">>", i):
-                i += 2
-            else:
-                i += 1
-            if i < n and command[i] in ">&":
-                return False
-        elif quote is None and command.startswith("&>", i):
-            i += 2
-            if i < n and command[i] in ">&":
-                return False
-        else:
-            return False
-    if quote is not None:
-        return False
-    # R10: ``test -v WORD`` evaluates WORD's subscript as arithmetic, which
-    # re-reads a carried value as code (``[ -v`` already fails on ``[``).
-    for segment in re.split(r"[;\n]", command):
-        words = segment.replace('"', "").replace("'", "").split()
-        if "-v" in words and any(os.path.basename(w) == "test" for w in words):
-            return False
-    return True
-
-
-def _containment_carriers(command: str) -> frozenset[str]:
-    """Names that may carry a contained-substitution proof through ``$NAME``.
-
-    WHY (PR #4147, round 3). The node2 #4104 incident wrote a log to
-    ``L=<pad>/u0-$(date -u +%Y%m%dT%H%M%SZ).log; exec > "$L"``: the
-    substitution is one path component, so ``$L`` stays in the scratchpad,
-    but the walker stored a bare OPAQUE_MARK and ranked it HIGH. Teaching
-    the in-order walker every way bash can reassign, scope or reinterpret a
-    name (functions, loops, setter builtins, nested shells, link-making
-    programs) kept opening escapes in review. So the carry is a narrow,
-    fail-closed ALLOWLIST decided here, before the walk; any name not
-    returned keeps main's behaviour (opaque, judge-ranked).
-
-    A name qualifies only when ALL hold:
-
-    * the WHOLE command is straight-line and built only from safe programs
-      (:func:`_straight_safe_command`, round 4): one conditional, piped,
-      looped or grouped segment, or one program outside
-      ``_CARRY_STRAIGHT_PROGRAMS``, drops every carry;
-
-    * the command has no function definition, alias, nested shell, ``eval``,
-      ``source``/``.``, ``exec PROG``, ``xargs``, ``env``, ``trap`` or
-      ``coproc``, and no non-read mention of PATH/BASH_ENV/ENV/IFS/CDPATH;
-    * the name is assigned exactly once, as a leading ``NAME=…`` word or an
-      unflagged ``export``/``local``/``declare NAME=…`` (never HOME/OLDPWD);
-    * every other raw-text mention is a plain ``$NAME``/``${NAME}`` read —
-      so ``+=``, ``[i]``, ``${NAME%…}``, ``unset NAME``, ``read NAME``,
-      ``printf -v NAME``, ``(( NAME=… ))`` or any setter not listed here
-      leaves a bare mention and fails closed;
-    * every read is a whole word part consumed as an output-redirect target
-      or an argument of ``_CARRY_SAFE_PROGRAMS`` (``printf`` without ``-v``).
-      A read the segment scan cannot attribute that way (passed to ``ln``,
-      ``mv``, ``cp``, a variable program, another assignment, a heredoc or
-      a nested substitution) fails closed.
-
-    Whether the assigned value really is contained is still decided by the
-    walker (``_contained_body``); this only says the proof may be kept.
-
-    Round 6: :func:`_carry_charset_ok` runs first and is the primary gate;
-    every check after it is defence in depth.
-    """
-    if not _carry_charset_ok(command):
-        return frozenset()
-    if (
-        _CARRY_BAR_WORD_RE.search(command)
-        or _CARRY_BAR_SHAPE_RE.search(command)
-        or _CARRY_BAR_VAR_RE.search(command)
-    ):
-        return frozenset()
-    if not _straight_safe_command(command):
-        return frozenset()
-    lexed = lex(command)
-    if lexed.open:
-        return frozenset()
-    assigned: dict[str, int] = {}
-    reads: dict[str, int] = {}
-    for text, _piped, _op in lexed.segments:
-        words, redirects = scan(text)
-        if any(w.broken for w in words) or any(w.broken for _r, w in redirects):
-            return frozenset()
-        for op, target in redirects:
-            if ">" in op and "<" not in op:
-                for name in _plain_read_names(target):
-                    reads[name] = reads.get(name, 0) + 1
-        i = 0
-        while (
-            i < len(words)
-            and len(words[i].parts) == 1
-            and (words[i].parts[0].kind == "bare" and words[i].parts[0].text in _PREFIX_WORDS)
-        ):
-            i += 1
-        while i < len(words) and words[i].parts and words[i].parts[0].kind == "bare":
-            m = _ASSIGN_RE.match(words[i].parts[0].text)
-            if m is None:
-                break
-            assigned[m.group(1)] = assigned.get(m.group(1), 0) + 1
-            i += 1
-        if i >= len(words):
-            continue
-        program_word = words[i]
-        program = (
-            program_word.parts[0].text
-            if len(program_word.parts) == 1 and program_word.parts[0].kind == "bare"
-            else None
-        )
-        args = words[i + 1 :]
-        if program == "exec" and args:
-            return frozenset()
-        if program in ("export", "local", "declare"):
-            if any(a.parts and a.parts[0].text.startswith("-") for a in args):
-                continue
-            for a in args:
-                m = (
-                    _ASSIGN_RE.match(a.parts[0].text)
-                    if a.parts and a.parts[0].kind == "bare"
-                    else None
-                )
-                if m is not None:
-                    assigned[m.group(1)] = assigned.get(m.group(1), 0) + 1
-            continue
-        if program not in _CARRY_SAFE_PROGRAMS:
-            continue
-        if program == "printf" and any(a.parts and a.parts[0].text.startswith("-v") for a in args):
-            continue
-        for a in args:
-            for name in _plain_read_names(a):
-                reads[name] = reads.get(name, 0) + 1
-    carriers = set()
-    for name, count in assigned.items():
-        if count != 1 or name in _RAW_PATH_VARS:
-            continue
-        raw_assigns = raw_reads = 0
-        for m in re.finditer(rf"(?<!\w){re.escape(name)}(?!\w)", command):
-            before, after = command[: m.start()], command[m.end() : m.end() + 2]
-            if before.endswith("${"):
-                if not after.startswith("}"):
-                    break
-                raw_reads += 1
-            elif before.endswith("$"):
-                raw_reads += 1
-            elif (
-                after[:1] == "=" and after != "==" and (not before or before[-1] in " \t\n;&|(){}")
-            ):
-                raw_assigns += 1
-            else:
-                break
-        else:
-            if raw_assigns == 1 and raw_reads == reads.get(name, 0):
-                carriers.add(name)
-    return frozenset(carriers)
-
-
+#: Programs whose output is a single path component in normal use, so a
+#: substitution of one cannot climb out of the directory it sits in — but only
+#: when called with no ``+FORMAT``/path-like argument (S4: ``date +../..``).
 def _contained_body(body: str) -> bool:
     """True only for an exact allowlisted call whose output is one component.
 
@@ -1478,8 +1058,6 @@ class Target:
     empty: list[str] = field(default_factory=list)
     opaque: bool = False
     opaque_contained: bool = False
-    #: ``opaque_contained`` rests on a variable-carried proof (``Expanded.carried``).
-    carried: bool = False
     unknown_cwd: bool = False
     #: The word globs its CHILDREN (``dir/*.log``): ``path`` is the directory
     #: the glob lives in, and the directory itself is not removed (Q2).
@@ -2039,7 +1617,6 @@ def _plain_target(exp: Expanded, op: str, program: str, state: _State) -> Target
         empty=list(exp.empty),
         opaque=opaque,
         opaque_contained=contained,
-        carried=contained and exp.carried,
         unknown_cwd=unknown,
         glob_children=glob_children,
         glob_all=glob_all,
@@ -3776,10 +3353,6 @@ class _Walker:
         #: tell which later opaque name is that entry, so containment is void
         #: under the prefix (QA Q1, PR #4147); see ``_through_new_link``.
         self.opaque_linked: set[str] = set()
-        #: Names allowed to keep a contained-substitution proof across
-        #: ``$NAME`` reads; see ``_containment_carriers``. Empty unless
-        #: ``_walk_once`` sets it, so any other walk keeps main's behaviour.
-        self.carriers: frozenset[str] = frozenset()
         #: Every path an earlier part of THIS command deleted, moved, copied or
         #: wrote to, or created (lexical and resolved spellings, no trailing
         #: ``/``). Any of them may be a symlink by the time a later word's
@@ -4135,10 +3708,12 @@ class _Walker:
                     for var in _NAME_RE.findall(w.text.lstrip("-")):
                         self._invalidate(var)
                 elif _ASSIGN_RE.match(w.text) or _APPEND_RE.match(w.text):
-                    # Same marker handling as a bare assignment (review R3,
-                    # PR #4147): ``export L=<pad>/u-$(date +%s).log`` keeps
-                    # its containment proof; ``L+=`` appends.
-                    self._assign(self._stored_assignment(w).text)
+                    # ``L+=`` appends here as in a bare assignment (review
+                    # R1, PR #4147). The mktemp TEMP_MARK swap stays off:
+                    # main stored ``export L=$(mktemp -d)`` as a bare opaque
+                    # value, and enabling it here ranked ``rm -rf "$L"``
+                    # LOW where main said HIGH — this PR only tightens.
+                    self._assign(self._stored_assignment(w, temp=False).text)
             return
         if name in ("cd", "pushd"):
             if any(a.startswith("CDPATH=") for a in raw_assigns):
@@ -4189,14 +3764,6 @@ class _Walker:
             for var in _arith_assigned(" ".join(w.text for w in words[1:])):
                 self._invalidate(var)
             return
-        if name in ("source", "."):
-            # A sourced file can reassign anything. Literal values were never
-            # protected here (pre-existing), but a contained proof must not
-            # outlive it: those values go back to a bare OPAQUE_MARK, which is
-            # what base stored for them.
-            for var, value in list(st.env.items()):
-                if CONTAINED_MARK in value:
-                    st.env[var] = value.replace(CONTAINED_MARK, OPAQUE_MARK)
         split = _env_split(words[1:]) if name == "env" else None
         if split is not None:
             # S6 / review R2-1 on PR #3906: ``env -S 'cmd …'`` splits its value
@@ -4370,7 +3937,6 @@ class _Walker:
                         empty=w.empty,
                         opaque=w.opaque,
                         opaque_contained=w.opaque_contained,
-                        carried=w.carried,
                     )
                     self._add(w2, "overwrite", name)
             return
@@ -4482,13 +4048,18 @@ class _Walker:
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
 
-    def _stored_assignment(self, word: Expanded) -> Expanded:
+    def _stored_assignment(self, word: Expanded, *, temp: bool = True) -> Expanded:
         """The ``NAME=value`` text an assignment word stores, markers swapped.
 
-        * A single ``$(mktemp …)`` stretch becomes TEMP_MARK (R6).
-        * Only-contained opaque stretches become CONTAINED_MARK, so later
-          ``$NAME`` reads keep the containment proof — never for HOME/OLDPWD,
-          whose values are read as raw paths elsewhere.
+        * A single ``$(mktemp …)`` stretch becomes TEMP_MARK (R6) — only
+          when ``temp`` (a bare ``NAME=`` word, as on main; not a
+          declaration builtin's argument).
+        * Every other opaque stretch stays a bare OPAQUE_MARK, contained or
+          not: a later ``$NAME`` read is opaque and NOT contained, as on main.
+          Carrying the proof through a variable was tried and withdrawn on
+          PR #4147 — every gate around it (straight-line programs, a strict
+          character allowlist) still let a climb back in (``$_``, review Q6),
+          so the supported way to log under the scratchpad is a literal path.
         * ``NAME+=v`` (review R1, PR #4147) is rewritten to ``NAME=<old>v``
           against the CURRENT stored value, keeping its marker, so a climb
           appended to a contained value is checked like ``L=$L/..``. When the
@@ -4499,20 +4070,8 @@ class _Walker:
         text_value = word.text
         append = _APPEND_RE.match(text_value)
         name = append.group(1) if append else text_value.partition("=")[0]
-        if word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
+        if temp and word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
             text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
-        elif (
-            word.opaque
-            and word.opaque_contained
-            and OPAQUE_MARK in text_value
-            and CREDENTIAL_MARK not in text_value
-            and FOR_GLOB_MARK not in text_value
-            and name not in _RAW_PATH_VARS
-            and name in self.carriers
-        ):
-            # Every opaque stretch is a contained substitution: keep that
-            # proof for later ``$NAME`` reads (see CONTAINED_MARK).
-            text_value = text_value.replace(OPAQUE_MARK, CONTAINED_MARK)
         if append is None:
             # Same length (one marker char for another): the refs still line up.
             return Expanded(text=text_value, refs=list(word.refs), pattern=word.pattern)
@@ -5495,7 +5054,7 @@ class _Walker:
         ] + [(a.split("=", 1)[1], False, a.split("=", 1)[0]) for a in assigns if "=" in a]
         for text, as_output, assigned in texts:
             for raw in _MENTION_RE.findall(text):
-                if OPAQUE_MARK in raw or TEMP_MARK in raw or CONTAINED_MARK in raw:
+                if OPAQUE_MARK in raw or TEMP_MARK in raw:
                     continue  # an opaque part: the word itself is added below
                 path = _mention_path(raw, st.home, st.cwd)
                 if path is None:
@@ -7330,7 +6889,6 @@ def _walk_once(
     # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
     # because a wider walk only errs safe (review round 9, NIT-1).
     walker.result.globstar = bool(_RECURSIVE_GLOB_RE.search(command))
-    walker.carriers = _containment_carriers(command)
     token = _CWD_MODEL.set(model)
     try:
         walker.walk(command)

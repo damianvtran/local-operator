@@ -1273,8 +1273,18 @@ def test_ci_r2_directory_access_error_invalidates_state(
     assert _classify(home, command, cwd=home / ".local-operator").risk >= Risk.HIGH
 
 
-# -- Contained substitutions carried through a variable (node2 QA, #4104 u0) --
+# -- Contained substitutions (node2 QA, #4104 u0; PR #4147) -------------------
 #
+# PR #4147 first tried to carry a contained substitution's proof through a
+# variable so the incident's ``L=<pad>/u0-$(date …).log; exec > "$L"`` ranked
+# LOW. Six review rounds each found another way to steer the carried value
+# (the last, QA Q6, bash's ``$_``), so the carry was removed: a variable
+# assigned from a substitution is opaque and NOT contained, exactly as on
+# main, and those rows rank at least HIGH. The supported way to log under the
+# scratchpad is a literal path (or the substitution inline in the target
+# word). What stays from the PR only ever ranks HIGHER than main.
+#
+# Original note:
 # A log write inside the caller's OWN scratchpad, named with a timestamp held
 # in a variable, was refused as HIGH because the stored value lost the proof
 # that its opaque stretch was a contained ``$(date …)``. The architect's audit
@@ -1288,20 +1298,36 @@ _SP = "$LOCAL_OPERATOR_SCRATCHPAD"
 @pytest.mark.parametrize(
     "command",
     [
-        # The incident command, verbatim up to its tail.
-        f"L={_SP}/qa-4104-634b/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log; "
-        'exec > "$L" 2>&1; echo started',
-        f'TS=$(date -u +%Y%m%dT%H%M%SZ); exec > "{_SP}/q/u0-$TS.log"',
-        f'L={_SP}/q/u0-$(date -u +%Y%m%dT%H%M%SZ).log; rm -f "$L"',
+        # The substitution inline in the target word: contained, own pad.
+        f'exec > "{_SP}/qa-4104/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log" 2>&1',
         f'rm -rf "{_SP}"/run-$(date +"%Y%m%d")',
         f'rm -rf "{_SP}"/run-$(uuidgen)',
         f'rm -rf "{_SP}"/run-$(id -un)',
     ],
 )
-def test_contained_substitution_via_variable_in_own_scratchpad_is_low(
-    home: Path, command: str
-) -> None:
+def test_contained_substitution_inline_in_own_scratchpad_is_low(home: Path, command: str) -> None:
     assert _classify(home, command).risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # F1: the incident command, verbatim up to its tail.
+        f"L={_SP}/qa-4104-634b/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log; "
+        'exec > "$L" 2>&1; echo started',
+        # F2/F3: a timestamp variable, and a variable path removed.
+        f'TS=$(date -u +%Y%m%dT%H%M%SZ); exec > "{_SP}/q/u0-$TS.log"',
+        f'L={_SP}/q/u0-$(date -u +%Y%m%dT%H%M%SZ).log; rm -f "$L"',
+        # Declaration builtins (former R3 rows).
+        f'export L={_SP}/q/u-$(date +%s).log; exec > "$L"',
+        f'local L={_SP}/q/u-$(date +%s).log; exec > "$L"',
+        f'declare L={_SP}/q/u-$(date +%s).log; rm -f "$L"',
+    ],
+)
+def test_substitution_carried_through_a_variable_ranks_like_main(home: Path, command: str) -> None:
+    # The carry was removed (QA Q6): a variable assigned from a substitution
+    # is opaque, as on main. The supported path is a literal log path.
+    assert _classify(home, command).risk >= Risk.HIGH
 
 
 @pytest.mark.parametrize(
@@ -1449,10 +1475,6 @@ def test_unmodelled_change_voids_containment(home: Path, command: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        # R3: a declare word carries the containment proof like a bare one.
-        f'export L={_SP}/q/u-$(date +%s).log; exec > "$L"',
-        f'local L={_SP}/q/u-$(date +%s).log; exec > "$L"',
-        f'declare L={_SP}/q/u-$(date +%s).log; rm -f "$L"',
         # Trusted absolute spellings of an allowlisted program.
         f'rm -rf "{_SP}"/x-$(/bin/date +%s)',
         f'rm -rf "{_SP}"/x-$(/usr/bin/uuidgen)',
@@ -1463,6 +1485,9 @@ def test_contained_value_still_low_after_remediation(home: Path, command: str) -
 
 
 # -- Round 3, PR #4147: a fail-closed allowlist for the carry ----------------
+#
+# The carry these rounds gated was removed in round 6 (QA Q6); the rows
+# stay as regressions that must rank at least as high as main.
 #
 # Rounds 1-2 taught the in-order walker setter after setter, and each round's
 # review found another way to reassign, scope or reinterpret the name (R4/R5,
@@ -1551,41 +1576,15 @@ def test_round3_rows_stay_critical(home: Path, command: str) -> None:
         f'L={_SP}/$(date +%s).log; echo hi >> "$L"; rm -f "$L"',
     ],
 )
-def test_round3_safe_consumers_keep_the_carry(home: Path, command: str) -> None:
-    assert _classify(home, command).risk is Risk.LOW
-
-
-def test_round3_carriers_prescan_is_an_allowlist() -> None:
-    from local_operator.guardrails.resolve import _containment_carriers
-
-    sp = _SP
-    assert _containment_carriers(f'L={sp}/$(date +%s); exec > "$L" 2>&1') == {"L"}
-    assert _containment_carriers(f'TS=$(date +%s); exec > "{sp}/u-$TS.log"') == {"TS"}
-    # Each disqualifier on its own empties the set.
-    for tail in (
-        "f(){ :; }",
-        "alias x=y",
-        "eval :",
-        ". ./f",
-        "source ./f",
-        "exec true",
-        "xargs true",
-        "env true",
-        "trap : EXIT",
-        "coproc true",
-        "sh -c :",
-        "CDPATH=/",
-        "export BASH_ENV=x",
-    ):
-        assert _containment_carriers(f'L={sp}/$(date +%s); {tail}; rm -f "$L"') == set(), tail
-    # A read outside the safe consumers, a heredoc or a substitution.
-    for use in ('ln -s ~ "$L"', 'mv x "$L"', '"$L"', 'echo "$(cat $L)"', "cat <<X\n$L\nX"):
-        assert _containment_carriers(f"L={sp}/$(date +%s); {use}") == set(), use
-    # HOME/OLDPWD are read as raw paths elsewhere: never carriers.
-    assert _containment_carriers("HOME=/x/$(date +%s); rm -rf ~") == set()
+def test_round3_former_safe_consumers_rank_like_main(home: Path, command: str) -> None:
+    # Kept LOW while the carry existed; without it these follow main.
+    assert _classify(home, command).risk >= Risk.HIGH
 
 
 # -- Round 4, PR #4147: carry only in straight-line, safe-program commands ----
+#
+# The carry these rounds gated was removed in round 6 (QA Q6); the rows
+# stay as regressions that must rank at least as high as main.
 #
 # Round 3's pre-scan counted ONE assignment per name but not whether its
 # segment runs (R6: ``false && L=…``), and only vetted the programs that read
@@ -1657,44 +1656,15 @@ def test_round4_carry_needs_a_straight_line_safe_command(home: Path, command: st
         f'declare L={_SP}/u0-$(date +%s).log; echo x > "$L"',
     ],
 )
-def test_round4_straight_line_safe_commands_keep_the_carry(home: Path, command: str) -> None:
-    assert _classify(home, command).risk is Risk.LOW
-
-
-def test_round4_straight_safe_command_predicate() -> None:
-    from local_operator.guardrails.resolve import _straight_safe_command
-
-    assert _straight_safe_command('L=/x/$(date +%s); exec > "$L" 2>&1; echo hi')
-    assert _straight_safe_command("A=1\nexport B=2\ntrue")
-    for bad in (
-        "a=1 && true",
-        "true || true",
-        "echo | cat",
-        "true &",
-        "if true; then true; fi",
-        "{ true; }",
-        "(true)",
-        "[[ -n x ]]",
-        "hash -p /x date",
-        "ln -s / x",
-        "exec true",
-        "printf -v x y",
-        "export -n X",
-        "echo $(ln -s / x)",
-        "cat <(hash)",
-        "nohup true",
-        # R8: an opener the part scan never visits fails closed.
-        "cat <<EOF\n$(ln -s / x)\nEOF",
-        'echo "${X:-$(ln -s / x)}"',
-        "echo ${X:-`ln -s / x`}",
-        "echo ${X/a/<(ln -s / x)}",
-    ):
-        assert not _straight_safe_command(bad), bad
-    # Visited substitutions balance the raw count, in either spelling.
-    assert _straight_safe_command('L=/x/`date +%s`; echo "$(echo `date`)" > "$L"')
+def test_round4_former_carry_rows_rank_like_main(home: Path, command: str) -> None:
+    # Kept LOW while the carry existed; without it these follow main.
+    assert _classify(home, command).risk >= Risk.HIGH
 
 
 # -- Round 6, PR #4147: a character-level allowlist gates the carry ----------
+#
+# The carry these rounds gated was removed in round 6 (QA Q6); the rows
+# stay as regressions that must rank at least as high as main.
 #
 # Rounds 3-5 chased routes through bash's parser and each review found
 # another (R9: backslash-newline hides an opener from lexer and raw count;
@@ -1738,52 +1708,42 @@ def test_round6_carry_needs_the_character_allowlist(home: Path, command: str) ->
     assert _classify(home, command).risk >= Risk.HIGH
 
 
-def test_round6_carry_charset_predicate() -> None:
-    from local_operator.guardrails.resolve import (
-        _carry_charset_ok,
-        _containment_carriers,
-    )
+# -- Round 6 remediation, PR #4147: R11 (%Z) and Q6 (``$_``) -----------------
+#
+# R11: ``date +%Z`` prints whatever zone abbreviation TZ names, verbatim
+# (``TZ=..0 date +%Z`` prints ``..``), so %Z left the contained-format list.
+# That also tightens main, which ranked the direct form LOW. Q6: ``$_`` (the
+# previous command's last argument) slipped past the carry's character gate;
+# the carry itself is gone, so the row ranks as on main.
 
-    sp = _SP
-    for good in (
-        f'L={sp}/q/u0-$(date -u +%Y%m%dT%H%M%SZ).log; exec > "$L" 2>&1; echo started',
-        'TS=$(date +"%Y%m%d"); exec &> "${LOCAL_OPERATOR_SCRATCHPAD}/u-$TS.log"',
-        f'L={sp}/$(uuidgen); echo \'a b\' >> "$L" 2> "$L.err"',
-    ):
-        assert _carry_charset_ok(good), good
-    for bad in (
-        "echo a\\\nb",
-        "echo $'x'",
-        'echo $"x"',
-        "echo $[1]",
-        "echo ${X:-y}",
-        "echo ${X[0]}",
-        "echo ${#X}",
-        "echo {a,b}",
-        "echo *",
-        "echo ?",
-        "echo ~",
-        "echo !x",
-        "echo # c",
-        "cat < x",
-        "echo | cat",
-        "true &",
-        "true && true",
-        "echo `date`",
-        "(true)",
-        "echo $(date)",
-        "echo $( date +%s)",
-        "echo $(echo hi)",
-        "echo $(date +%s; ln -s / x)",
-        "echo 'a$b'",
-        "echo 1>&2",
-        "echo >&2",
-        "echo >| x",
-        'echo "a',
-        "test -v Y",
-        '"test" "-v" Y',
-        "/bin/test -v Y",
-        "echo $1",
-    ):
-        assert not _carry_charset_ok(bad), bad
-        assert _containment_carriers(f'L={sp}/$(date +%s); {bad}; rm -f "$L"') == set(), bad
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'export TZ=..0; L={_SP}/$(date +%Z)/$(date +%Z); rm -rf "$L"',
+        f'TZ=..0; export TZ; L={_SP}/$(date +%Z)/$(date +%Z); rm -rf "$L"',
+        f'export TZ=..0\nL={_SP}/$(date +%Z)/$(date +%Z)\nrm -rf "$L"',
+        # TZ inherited from the environment, not set in the command.
+        f'L={_SP}/$(date +%Z)/$(date +%Z); rm -rf "$L"',
+        f"rm -rf {_SP}/$(date +%Z)/$(date +%Z)",
+        f'rm -rf "{_SP}/$(date +%Z)/$(date +%Z)"',
+        f'rm -rf "{_SP}"/run-$(date -u +%Y%m%d%Z)',
+        # Q6: ``$_`` expands to ``/../../..`` here.
+        f'L={_SP}/$(date +%s); echo /../../..; rm -rf "$L$_"',
+    ],
+)
+def test_round6_tz_controlled_and_last_arg_rows_rank_high(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # %z prints only [+-]hhmm whatever TZ holds; a trailing Z is a literal.
+        f'rm -rf "{_SP}"/run-$(date +%z)',
+        f'rm -rf "{_SP}"/run-$(date -u +%Y%m%dT%H%M%SZ)',
+        f'exec > "{_SP}/u0-$(date -u +%Y%m%dT%H%M%SZ).log"',
+    ],
+)
+def test_round6_offset_and_literal_z_stay_low(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.LOW
