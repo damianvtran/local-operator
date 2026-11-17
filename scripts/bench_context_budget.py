@@ -1907,7 +1907,19 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # the ceiling: the headroom origin/main already sat at, so the next addition finds
 # the ratchet as tight as this one did. The child ceiling does not move (the
 # merged head passes ``--kind child`` with 55 of headroom).
-BUDGET_BILLED_TOKENS = 37_245
+# RAISED 37,245 -> 37,388 for the GUARDRAIL REFUSAL EXCEPTIONS (operator
+# request 2026-11-16, session 1ebbed33eae7: a refusal by a since-fixed guard,
+# and the operator's typed approval, were both read as unliftable). The
+# ``system.md`` refusal bullet now names its two exceptions and what never lifts
+# a refusal; nothing else in the start context moved. Measured with THIS
+# script, ISOLATED HOME, one host, two trees one after the other:
+#   origin/main 72dd603f   104,071 chars = ~37,436 billed
+#   this branch            104,468 chars = ~37,578 billed
+#     = +397 chars = ~+143 billed, exactly the bullet's new text.
+# The raise is that delta and nothing more, so whatever headroom main carries
+# in CI is unchanged. (This host reads main itself 191 over 37,245 — the known
+# local-vs-CI offset; the delta is the comparable number, not the absolute.)
+BUDGET_BILLED_TOKENS = 37_388
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2126,7 +2138,12 @@ BUDGET_BILLED_TOKENS = 37_245
 # inherits 31,317 and the tighten band below (1,200) is not in play.
 # Same measured music admission as the top arm:32,647 +600 slack. Keep the
 # child's narrower inventory and the shared tighten/negative controls unchanged.
-BUDGET_CHILD_BILLED_TOKENS = 33_247
+# RAISED 33,247 -> 33,390 with the top arm, for the same ``system.md``
+# refusal-exception text (children read the same bullet):
+#   origin/main 72dd603f   92,373 chars = ~33,228 billed / 19 headroom
+#   this branch            92,770 chars = ~33,371 billed
+#     = +397 chars = ~+143 billed; the raise keeps main's 19 of headroom.
+BUDGET_CHILD_BILLED_TOKENS = 33_390
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
