@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "audit_id": "ns1",
+  "locale": "fr",
+  "namespace": "wire.session_status",
+  "record": "i18n/audits/evidence/fr/wire.session_status/ns1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable record, copied byte-for-byte from its session scratchpad; it covers the single key wire.session_status.retired_label",
+  "record_sha256": "d2cb5c029168aafb289c006e9176607b96f2672211af5e71573b84129afa8206",
+  "source_sha256": "9136565eefbef704c9e9e6e4751a4a63120ab262977b5d530d3123cc57426e7d",
+  "context_sha256": "1b26a73cb5a95fdcc9ad741f4aef4f12695d8fdc98b061ca6b496b0149702568",
+  "target_sha256": "f32da9ee051a367d213620dc59370b77e4994362dc84561cf8fc560307ad2518",
+  "verdict": "passed",
+  "commit_audited": "e625e5e3ce0e64aa334abf74fa59acf79d8d820c",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, task ss-au-fr), independent subagent; not the translator (session fd22d2d6c1ef) and did not edit any value",
+    "session": "dd342367326f",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "ledger_receipt": {
+    "locale": "fr",
+    "namespace": "wire.session_status",
+    "source_sha256": "9136565eefbef704c9e9e6e4751a4a63120ab262977b5d530d3123cc57426e7d",
+    "context_sha256": "1b26a73cb5a95fdcc9ad741f4aef4f12695d8fdc98b061ca6b496b0149702568",
+    "target_sha256": "f32da9ee051a367d213620dc59370b77e4994362dc84561cf8fc560307ad2518",
+    "translator": {
+      "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+      "session": "fd22d2d6c1ef",
+      "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+      "model": "anthropic/claude-sonnet-5-5",
+      "model_kind": "served model as self-reported by the subagent",
+      "underlying_model": "anthropic/claude-sonnet-5-5",
+      "date": "2026-11-07",
+      "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (team lopdev, task ss-au-fr), independent subagent; not the translator (session fd22d2d6c1ef) and did not edit any value",
+      "session": "dd342367326f",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-16",
+      "result": "clean-with-findings",
+      "findings": 2,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 2,
+        "nit": 0
+      },
+      "finding_ids": [
+        "fr-SS1",
+        "fr-SS2"
+      ],
+      "locale_verdict": "CLEAN-WITH-FINDINGS",
+      "scope": "namespace-scoped: the single key wire.session_status.retired_label",
+      "independent_from_translator": true,
+      "translator_session": "fd22d2d6c1ef"
+    },
+    "status": "passed",
+    "note": "First NAMESPACE-SCOPED independent auditor verdict for wire.session_status.retired_label (fr); it supersedes the coder-attributed locale-level 'fail' attribution of the earlier row (which stays in history unedited: that row's auditor.result 'fail' came from a major in another namespace, attributed to this one by the coder rather than by an auditor). Independent i18n-auditor dd342367326f (anthropic/claude-opus-5-5, no fallback observed) audited the single key read-only at origin/main e625e5e3ce0e against the translator row below (job/session fd22d2d6c1ef, anthropic/claude-sonnet-5-5); no value was edited. Findings: 0 blocker, 0 major, 2 minor, 0 nit ['fr-SS1', 'fr-SS2']; verdict CLEAN-WITH-FINDINGS; minors/nits deferred, not fixed. Translation unchanged. Also reported (code, not translation, all locales, non-gating): catalog.py _stop_label fills {base} with hard-coded English 'Interrupted'/'Unseen interruption', so the row renders mixed-language. Record: i18n/audits/evidence/fr/wire.session_status/ns1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/fr/wire.session_status/ns1/record.json",
+    "round": "ns1",
+    "keys_audited": 1
+  }
+}

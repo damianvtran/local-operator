@@ -1,0 +1,104 @@
+{
+  "audit_date": "2026-11-16",
+  "locale": "fr",
+  "namespaces": [
+    "wire.session_status"
+  ],
+  "namespace": "wire.session_status",
+  "keys_in_scope": 1,
+  "commit_audited": "e625e5e3ce0e64aa334abf74fa59acf79d8d820c (origin/main, read via git show only)",
+  "round": 1,
+  "scope": "namespace-scoped independent verdict for the single key; prior audit-history row's conclusion not reused",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, ss-au-fr)",
+    "session": "dd342367326f",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "system prompt 'Model:' line of this session",
+    "fallback": "none observed",
+    "independent_from_translator_session": true,
+    "translator": "translator, job fd22d2d6c1ef, anthropic/claude-sonnet-5-5 (per audit-history row)",
+    "native_speaker": false
+  },
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/fr/wire.session_status.json": "f32da9ee051a367d213620dc59370b77e4994362dc84561cf8fc560307ad2518",
+    "local_operator/i18n/catalogues/en/wire.session_status.json": "9136565eefbef704c9e9e6e4751a4a63120ab262977b5d530d3123cc57426e7d",
+    "local_operator/i18n/catalogues/en/wire.session_status.context.json": "1b26a73cb5a95fdcc9ad741f4aef4f12695d8fdc98b061ca6b496b0149702568",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/fr.md": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+  },
+  "mechanical": {
+    "key_sets_equal_en": true,
+    "key_count": 1,
+    "placeholders": "{base} in en and fr, identical name, position leading",
+    "icu_plural_select": "none in source or target",
+    "nfc": true,
+    "stray_bidi_zero_width": "none (non-ASCII: U+2014, é, à only)",
+    "em_dash_spacing": "' — ' with spaces per fr.md",
+    "valid_json": true,
+    "cell_len_rich": {
+      "Interrupted — retiré pour une mise à jour": 41,
+      "Unseen interruption — retiré pour une mise à jour": 49,
+      "en equivalents": "35 / 43"
+    },
+    "width_budget": "no maxCells in sidecar; catalog.py _stop_label/_error_label docstrings: one logical line, sidebar row description cell truncates, tooltip wraps. +6 cells vs en."
+  },
+  "code_path": {
+    "composer": "local_operator/session/catalog.py _stop_label (completion_kind 'retired') -> wire_session_status.retired_label(base=base) rendered with _label_locale()",
+    "base_values": "hard-coded English literals 'Interrupted' (catalog.py:536) and 'Unseen interruption' (catalog.py:469); NOT localized, so in fr the row currently reads 'Interrupted — retiré pour une mise à jour'",
+    "fr_sibling_terms": {
+      "tui.chrome.banners.context_interrupted": "Interrompu",
+      "tui.chrome.banners.context_retired": "Retiré",
+      "tui.notification_kinds.word_retired": "retiré pour une mise à jour",
+      "wire.outcome_notices.retired": "Retiré pour une mise à jour — un tour en cours a été interrompu ; …"
+    }
+  },
+  "per_key": [
+    {
+      "key": "wire.session_status.retired_label",
+      "text": "{base} — retiré pour une mise à jour",
+      "verdict": "PASS with findings (accurate, consistent with fr sibling terms; 2 MINOR)",
+      "proposed": "{base} — pour cause de mise à jour"
+    }
+  ],
+  "findings": [
+    {
+      "id": "fr-SS1",
+      "key": "wire.session_status.retired_label",
+      "severity": "MINOR",
+      "text": "{base} — retiré pour une mise à jour",
+      "evidence": "Bare masculine participle 'retiré' has no visible noun to agree with. Its intended subject is the turn (le tour, m. — matches wire.outcome_notices.retired), but on a session row a reader supplies 'la session' (f.) or the status word. With a future localized base 'Interruption non vue' (f.) it would read as an agreement error ('Interruption … — retiré'). Today base is English, so no agreement is visible.",
+      "fix": "Gender-neutral cause phrase: '{base} — pour cause de mise à jour' (39/47 cells, shorter than current)."
+    },
+    {
+      "id": "fr-SS2",
+      "key": "wire.session_status.retired_label",
+      "severity": "MINOR",
+      "text": "{base} — retiré pour une mise à jour",
+      "evidence": "'retirer' is used across the fr catalogue for 'remove' (tui.tags.removed, relay.pairing.revoked, cli.mcp_help.remove_name, …), so 'retiré pour une mise à jour' on a session row can read 'removed for an update'. Mitigated by the leading interruption word and by consistency with tui.chrome.banners.context_retired / tui.notification_kinds.word_retired / wire.outcome_notices.retired; not a clear misreading, hence MINOR.",
+      "fix": "Same as fr-SS1; it drops the 'removed' sense and names the cause without agency. If 'retiré' is kept for family consistency, retain as-is (passing)."
+    }
+  ],
+  "out_of_scope_observation_non_gating": "Not a translation defect: catalog.py passes English literals 'Interrupted'/'Unseen interruption' as {base}, so fr rows render a mixed-language label 'Interrupted — retiré pour une mise à jour'. The sidecar's '{base} is the localized status word' premise does not hold at origin/main. For manager/coder.",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "ledger_status_recommended": "passed",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "fr-SS1",
+      "fr-SS2"
+    ]
+  },
+  "not_verified": [
+    "native-speaker judgement (LLM reasoning only)",
+    "rendered fit: no screenshot; sidebar width derived from code docstrings, no maxCells defined",
+    "how a client renders the row beyond the backend string"
+  ],
+  "audit_notes_not_execution_log": "commands run: git fetch origin main (ref lock warning; origin/main already at e625e5e3); git show of en/fr/context/glossary/fr style guide/audit-history; git grep retired_label/Interrupted/retir; read catalog.py 469-574, 693-716; python key-set/NFC/bidi/placeholder checks and rich cell_len on composed strings. check.py, generator, ledger not run. Read-only."
+}

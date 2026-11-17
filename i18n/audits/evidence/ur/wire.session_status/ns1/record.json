@@ -1,0 +1,125 @@
+{
+  "round": 1,
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, ss-au-ur)",
+    "session": "f5af520e9b7a",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "system prompt 'Model:' line of this session",
+    "fallback": "none observed",
+    "independent_from_translator_session": true,
+    "translator": "not this session (translator identity not re-derived here)",
+    "native_speaker": false
+  },
+  "locale": "ur",
+  "namespaces": [
+    "wire.session_status"
+  ],
+  "keys_in_scope": 1,
+  "commit_audited": "e625e5e3ce0e64aa334abf74fa59acf79d8d820c",
+  "diff_base": null,
+  "audit_date": "2026-11-16",
+  "scope": "single key wire.session_status.retired_label; namespace-scoped independent verdict replacing reliance on audit-history row (status passed / auditor.result fail, major attributed from other namespaces). That row's conclusion not reused.",
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/ur/wire.session_status.json": "8c06a1fac064e5179bb65b7aca5445729e4717e1b2653662212a103c6e49cbe4",
+    "local_operator/i18n/catalogues/en/wire.session_status.json": "9136565eefbef704c9e9e6e4751a4a63120ab262977b5d530d3123cc57426e7d",
+    "local_operator/i18n/catalogues/en/wire.session_status.context.json": "1b26a73cb5a95fdcc9ad741f4aef4f12695d8fdc98b061ca6b496b0149702568",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/ur.md": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4",
+    "i18n/audit-history/ur/wire.session_status.json (read for context only)": "c3a7b076c27da7d4b896b82774154dae23089b54a88b98e322baea4d2b066959"
+  },
+  "mechanical": {
+    "hashes_match_brief": true,
+    "check_py_catalogues_only": "NOT evidence for this namespace: ran in the primary checkout working tree (HEAD b42471d3, which does not contain wire.session_status files) -> '0 problem(s)', rc 0. Per brief no checkout of origin/main; mechanical checks below done by hand on git-show bytes.",
+    "valid_json": true,
+    "key_count": 1,
+    "key_sets_equal_en": true,
+    "placeholders": {
+      "en": [
+        "{base}"
+      ],
+      "ur": [
+        "{base}"
+      ],
+      "identical": true,
+      "icu_plural_select": "none in source or target"
+    },
+    "nfc": true,
+    "stray_bidi_or_zero_width": "none (no Cf, U+202A-E, U+2066-9, U+200E/F, U+061C)",
+    "codepoints_non_ascii": "U+0626 U+0627 U+0631 U+0644 U+0679 U+067E U+0688 U+06A9 U+06AF U+06CC U+06D2 U+2014 — Urdu yeh U+06CC / bari ye U+06D2 / keheh U+06A9, no Arabic yeh U+064A or kaf U+0643",
+    "em_dash": "U+2014 with ASCII spaces both sides, same as en",
+    "cell_len_rich": {
+      "ur_with_base_Interrupted": 42,
+      "ur_with_base_Unseen_interruption": 50,
+      "en_with_base_Interrupted": 35,
+      "en_with_base_Unseen_interruption": 43
+    },
+    "width_budget": "no maxCells in en context sidecar; catalog.py _error_label docstring: tooltip wraps, row description is one line. ur +7 cells vs en (+20%). Not rendered."
+  },
+  "code_path": {
+    "composer": "origin/main local_operator/session/catalog.py:540-576 _stop_label: completion_kind=='retired' -> render(wire.session_status.retired_label, base=base, locale=_label_locale())",
+    "base_values": "catalog.py:469 self._stop_label('Unseen interruption') and :536 self._stop_label('Interrupted') — hard-coded ENGLISH literals, not keyed; {base} is English in every locale at runtime",
+    "ur_runtime_string": "Interrupted — اپ ڈیٹ کے لیے ریٹائر کیا گیا",
+    "surfaces": "sidebar/picker row status label, printed verbatim by every client (sidebar contract)"
+  },
+  "per_key": [
+    {
+      "key": "wire.session_status.retired_label",
+      "text": "{base} — اپ ڈیٹ کے لیے ریٹائر کیا گیا",
+      "cells_with_Interrupted": 42,
+      "verdict": "PASS-WITH-FINDINGS",
+      "note": "Meaning preserved: passive 'was retired' (کیا گیا) names no agent, so it does not attribute the stop to the operator; masculine-singular passive agrees with implied ٹرن/سیشن. ریٹائر is a calque but the locale's ESTABLISHED term for this event: identical phrase in tui.notification_kinds.word_retired, also wire.outcome_notices.retired, tui.chrome.banners.context_retired 'ریٹائر', tui.app.sidebar.why_retired. Not a wrong meaning; base word 'Interrupted' anchors the stop reading."
+    }
+  ],
+  "terminology_crossref": {
+    "tui.notification_kinds.word_retired": "اپ ڈیٹ کے لیے ریٹائر کیا گیا (identical suffix)",
+    "wire.outcome_notices.retired": "اپ ڈیٹ کے لیے ریٹائر کیا گیا — جاری ٹرن بیچ میں روک دیا گیا؛ اب تک کا آؤٹ پٹ محفوظ ہے",
+    "tui.chrome.banners.context_retired": "ریٹائر",
+    "tui.app.sidebar.why_retired": "ماخذ ریٹائر ہو گیا",
+    "tui.chrome.banners.context_interrupted": "روکا گیا",
+    "update_loanword": "اپ ڈیٹ used in wire.settings.agents_auto_update_seeds.* and tui.chrome.banners.body_update",
+    "glossary": "no 'retired'/'update'/'interrupted' row in i18n/glossary.md"
+  },
+  "findings": [
+    {
+      "id": "ur-S1",
+      "severity": "MINOR",
+      "key": "wire.session_status.retired_label",
+      "text": "{base} — اپ ڈیٹ کے لیے ریٹائر کیا گیا",
+      "evidence": "ریٹائر کرنا/ہونا in everyday Urdu primarily means retiring from employment (pension); for a cut turn it reads as an English IT calque ('taken out of service'), and can suggest permanent withdrawal rather than a resumable cut. Mitigated: passive, cause clause, base 'Interrupted' alongside, and it is the locale's established term in 4 other keys — changing this key alone would split vocabulary.",
+      "fix": "Prefer a locale-wide decision across all 5 'retired' keys rather than this key alone. If changed, the terse cause-only form avoids the calque and duplicates nothing: '{base} — اپ ڈیٹ کی وجہ سے' (cf. ru '{base} — из-за обновления'). Keeping the current text is acceptable."
+    },
+    {
+      "id": "ur-S2",
+      "severity": "NIT",
+      "key": "wire.session_status.retired_label",
+      "text": "{base} — اپ ڈیٹ کے لیے ریٹائر کیا گیا",
+      "evidence": "کے لیے is purposive ('for the sake of the update'); the sidecar says the suffix names the CAUSE. Faithful to English 'for', so not wrong.",
+      "fix": "If touched: کی وجہ سے (because of), e.g. '{base} — اپ ڈیٹ کی وجہ سے ریٹائر کیا گیا' (49 cells w/ Interrupted) keeps the established term."
+    }
+  ],
+  "out_of_scope_observation_non_gating": "Code, not translation, all locales: catalog.py passes English literals 'Interrupted'/'Unseen interruption' as {base}, so ur rows render mixed script 'Interrupted — <Urdu>'. With an LTR-first-strong base, an FSI-isolated label in a dir=rtl client resolves LTR and an RTL reader meets the Urdu cause before the base. Fix belongs in catalog.py (key the base words; ur would be روکا گیا per tui.chrome.banners.context_interrupted). Code-derived, not rendered; for manager.",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1
+  },
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "ledger_status_recommended": "passed",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ur-S1",
+      "ur-S2"
+    ]
+  },
+  "proposed_value": "{base} — اپ ڈیٹ کی وجہ سے (optional; only as part of a locale-wide 'retired' decision)",
+  "not_verified": [
+    "native-speaker judgement (LLM reasoning only, no native review claimed)",
+    "rendered fit/bidi ordering in TUI and dir=rtl clients: no screenshot; FSI wrap location not located in code",
+    "translator identity",
+    "repo validator on origin/main bytes (working tree lacks the namespace)"
+  ],
+  "audit_notes_not_execution_log": "commands run: git fetch origin main (ref already at e625e5e3, lock error harmless); git show origin/main:<path> | shasum -a 256 for 6 files; git grep retired_label/Interrupted/retired across origin/main; read catalog.py 440-576, ur.md, glossary rows; .venv python NFC/bidi/codepoint/rich cell_len on git-show bytes; scripts/i18n/check.py --catalogues-only on working tree HEAD b42471d3 (rc 0, not covering this namespace). Read-only: no edits, generator or ledger."
+}
