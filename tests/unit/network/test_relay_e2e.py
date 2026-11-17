@@ -444,6 +444,46 @@ def test_a_mistype_burns_the_invite_once_the_forgiving_budget_is_spent(
     assert not store.record_path(record.network_id, server_b.root).exists()
 
 
+def test_joining_through_an_inviter_that_cannot_prove_itself_names_the_inviters_update(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #4179 L4 (UX U2, security S-5, review N2/N-2): an OLD inviter is a dead end.
+
+    The inviter's welcome carries no proof (every build before listener proofs), so a
+    current joiner refuses ``listener_unproven``. The joiner is not a member, so the
+    only way forward is ``lop update`` ON THE INVITER and a new invite from there; the
+    generic token tail ("mint a fresh one") would loop, because a fresh token from the
+    same old inviter fails the same way. Nothing may be written on the joiner.
+
+    RED before round 1: the sentence named ``lop network update <name>`` (a literal
+    placeholder a joiner cannot run) and the token tail followed it.
+    """
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    original = Handshake.welcome_frame
+
+    def old_build_welcome(self: Handshake, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        frame = original(self, *args, **kwargs)
+        frame.pop("proof", None)
+        return frame
+
+    monkeypatch.setattr(Handshake, "welcome_frame", old_build_welcome)
+    _type_the_code(monkeypatch)
+    reason = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    assert isinstance(reason, str)
+    assert getattr(reason, "code", "") == "listener_unproven", reason
+    failure = net_cli._join_failure(reason)  # noqa: SLF001 — the message the CLI raises
+    assert failure.code == "join_failed"
+    message = failure.sentence
+    assert "On the inviting device, run `lop update`" in message, message
+    assert "nothing was shared" in message, message
+    assert "<name>" not in message and "mint a fresh one" not in message, message
+    assert "lop network update" not in message, message
+    assert not store.record_path(record.network_id, server_b.root).exists()
+
+
 def test_a_joiner_slower_than_the_handshake_timeout_still_pairs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -81,6 +81,11 @@ class FakeListener:
     ) = None
     #: The build stamp the challenge reports (the dialer names it on ``listener_unproven``).
     build: dict[str, Any] = field(default_factory=dict)
+    #: A rotation statement the challenge carries (``challenge.rotation``): what a
+    #: ROTATED listener sends so a dialer holding its pre-rotation row can follow the
+    #: hop (G1D-1). The impostor sends it verbatim, modelling a replay of the public
+    #: statement by a party that does not hold the new key.
+    rotation: dict[str, Any] = field(default_factory=dict)
     auth_frame: dict[str, Any] = field(default_factory=dict)
     member_rows: list[dict[str, Any]] = field(default_factory=list)
     received: list[dict[str, Any]] = field(default_factory=list)
@@ -152,6 +157,8 @@ class FakeListener:
             capabilities=[hs_mod.MESH_NET_V1],
             build=dict(self.build),
         )
+        if self.rotation:
+            hs.challenge["rotation"] = dict(self.rotation)
         hs_mod._send_frame(conn, hs.challenge)
         auth = reader.read_line(deadline)  # never verified: no key to verify with
         self.auth_frame = dict(auth)
@@ -172,6 +179,7 @@ class FakeListener:
             build=dict(self.build),
         )
         hs.read_hello(reader, deadline)
+        hs.self_rotation = dict(self.rotation)
         hs.send_challenge(conn, self.policy)
         self.auth_frame = dict(hs.verify_auth(reader, deadline, self.policy))
         result = hs.establish()
@@ -690,7 +698,7 @@ def test_t5_the_dialers_own_auth_tags_reflected_as_proof_do_not_verify(
         fake.stop()
 
 
-def test_t6_an_honest_member_at_the_targets_address_is_refused_and_demoted(
+def test_t6_an_honest_member_at_the_targets_address_is_refused_and_marked_suspect(
     mesh: Mesh, dialer_key_derivations: list[str]
 ) -> None:
     fake = FakeListener(
@@ -718,9 +726,11 @@ def test_t6_an_honest_member_at_the_targets_address_is_refused_and_demoted(
         fake.handshake_done.wait(5)
         _assert_refused(mesh, reason, "peer_identity_mismatch", dialer_key_derivations)
         assert fake.auth_frame == {}, "refused after sending auth: the listener completes"
+        # The challenge is UNAUTHENTICATED, so the row is untouched (review M1): the
+        # address is only tried after the member's others, in memory.
         victim = _row(mesh, mesh.victim.device_id)
-        assert endpoint not in victim.endpoints, "the wrong-device endpoint was not demoted"
-        assert "127.0.0.1:1" in victim.endpoints, "an unrelated endpoint was demoted"
+        assert victim.endpoints == [endpoint, "127.0.0.1:1"]
+        assert endpoint in mesh.server._suspect_endpoints[mesh.victim.device_id]  # noqa: SLF001
         assert POISONED_ENDPOINT not in _row(mesh, mesh.other.device_id).endpoints
     finally:
         fake.stop()
@@ -816,7 +826,9 @@ def test_t9_an_impersonated_dial_never_displaces_the_real_link(
 # -- T10/T18/T22: the rollout path — an OLD dialer reaching a NEW listener ----------
 
 
-def _old_dialer_links_in(mesh: Mesh, build: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+def _old_dialer_links_in(
+    mesh: Mesh, build: dict[str, Any], *, caps: list[str] | None = None
+) -> tuple[Any, dict[str, Any]]:
     """``other`` on a pre-proof build dials the real relay; returns (its link there, welcome).
 
     The old dialer is the real ``Handshake`` minus ``verify_welcome``: it reads the
@@ -841,6 +853,9 @@ def _old_dialer_links_in(mesh: Mesh, build: dict[str, Any]) -> tuple[Any, dict[s
         instance_id="i_old_dialer",
         session_protocol=1,
         build=build,
+        # ``caps=LINK_CAPABILITIES`` models an UPDATED member dialling in first: its
+        # hello advertises ``listener-proof-v1`` inside the MAC-covered transcript.
+        capabilities=caps,
     )
     hs.send_hello(client)
     reader = wire.FrameReader(client)
@@ -1261,15 +1276,28 @@ def test_t21_the_unproven_fact_survives_later_redial_failures_and_prints_once(
     assert proof["build_source"] == "challenge"
     assert rows[mesh.other.device_id]["listener_proof"]["state"] == "unknown"
     line = net_cli._listener_proof_line(victim_row)  # noqa: SLF001
+    # "reports" (a challenge claim), never "older" (UX U4); both remedies (S-4).
+    core = (
+        "victim-admin reports build 0.101.40, which cannot prove its identity when this "
+        "device connects to it, so this device no longer opens connections to it. "
+        "Connections it opens to this device still work."
+    )
     assert line.strip() == (
-        "victim-admin reports an older build (0.101.40) that cannot prove its identity, so "
-        "this device will not dial it. Update it with: lop network update victim-admin"
+        f"{core} Update it: run `lop network update victim-admin` from this device, or, "
+        "if victim-admin cannot connect to this device, run `lop update` on victim-admin "
+        "itself."
     )
     assert net_cli._listener_proof_line(rows[mesh.other.device_id]) == ""  # noqa: SLF001
     finding = mesh.server._listener_proof_finding(_row(mesh, mesh.victim.device_id))  # noqa: SLF001
     assert finding is not None and finding["severity"] == "warn"
-    assert finding["detail"] == line.strip()
-    assert any("lop update" in remedy for remedy in finding["remedies"])
+    # ``detail`` is a code like every doctor row (U8); the remedy is said once (U5).
+    assert finding["detail"] == "listener_unproven"
+    assert finding["message"] == core
+    assert finding["remedies"] == [
+        "run `lop network update victim-admin` from this device",
+        "or, if victim-admin cannot connect to this device, run `lop update` on "
+        "victim-admin itself",
+    ]
 
 
 def test_t23_both_gloss_tables_read_the_new_codes() -> None:
@@ -1310,3 +1338,342 @@ def test_a_real_welcome_round_trips_the_wire_and_fits_the_line_budget(mesh: Mesh
         fake.stop()
     assert captured and len(captured[0]) < wire.MAX_HANDSHAKE_LINE
     assert len(captured[0]) < 4096
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation (PR #4179): L1 rotation hop, L2 no unauthenticated demotion,
+# L3 the sticky record yields to a live proof
+# ---------------------------------------------------------------------------
+
+
+def _rotated(mesh: Mesh, tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """The victim's successor identity and the statement its OLD key signed for it."""
+    new = identity.mint(tmp_path / "victim-rotated", name=mesh.victim.name)
+    return new, identity.rotation_statement(mesh.victim, new, mesh.record.network_id)
+
+
+def _only_endpoint(mesh: Mesh, endpoint: str) -> None:
+    with store.mutate(mesh.record.network_id, mesh.root) as record:
+        row = record.member(mesh.victim.device_id)
+        assert row is not None
+        row.endpoints = [endpoint]
+        store.save(record, mesh.root)
+
+
+def test_l1_a_rotated_member_answering_under_its_new_id_is_followed_not_refused(
+    mesh: Mesh, tmp_path: Path
+) -> None:
+    """G1D-1 / S-1: the dialer holds the PRE-rotation row; the member answers as A'.
+
+    RED before round 1: refused ``peer_identity_mismatch`` and the member's only
+    address was removed, so the queued ``net_identity_rotate`` could never flush.
+    """
+    new, statement = _rotated(mesh, tmp_path)
+    fake = FakeListener(
+        listener_identity=new,
+        network_id=mesh.record.network_id,
+        claim_device_id=new.device_id,
+        policy=_genuine_policy(mesh),
+        rotation=statement,
+    )
+    host, port = fake.start()
+    endpoint = f"{host}:{port}"
+    _only_endpoint(mesh, endpoint)
+    try:
+        link, reason = mesh.server.dial(
+            mesh.record.network_id,
+            host=endpoint,
+            timeout_s=5.0,
+            expected_device=mesh.victim.device_id,
+        )
+        fake.handshake_done.wait(5)
+        assert link is not None, reason
+        assert link.device_id == new.device_id and link.peer_verified is True
+        row = _row(mesh, new.device_id)
+        assert row is not None and row.public_key == new.public_key
+        assert _row(mesh, mesh.victim.device_id) is not None, "the old id must still resolve"
+        assert mesh.victim.device_id in row.previous_ids
+        assert endpoint in row.endpoints, "the rotated member's address was demoted"
+    finally:
+        fake.stop()
+
+
+def test_l1_a_replayed_rotation_statement_without_the_new_key_is_refused(
+    mesh: Mesh, tmp_path: Path, dialer_key_derivations: list[str]
+) -> None:
+    """The statement is public (every table carries it); replaying it proves nothing.
+
+    It gets the impostor exactly what claiming the victim's own id already gets (our
+    auth frame), then fails the proof under the statement's new key, and neither
+    rotates the row nor removes the member's only address.
+    """
+    new, statement = _rotated(mesh, tmp_path)
+    fake = FakeListener(
+        listener_identity=mesh.attacker,
+        network_id=mesh.record.network_id,
+        claim_device_id=new.device_id,
+        rotation=statement,
+        forge_proof=_wrong_key_proof(mesh.attacker),
+    )
+    host, port = fake.start()
+    endpoint = f"{host}:{port}"
+    _only_endpoint(mesh, endpoint)
+    try:
+        _link, reason = mesh.server.dial(
+            mesh.record.network_id,
+            host=endpoint,
+            timeout_s=5.0,
+            expected_device=mesh.victim.device_id,
+        )
+        fake.handshake_done.wait(5)
+        _assert_refused(mesh, reason, "bad_signature", dialer_key_derivations)
+        assert _row(mesh, new.device_id) is None, "an unproven hop rotated the row"
+        assert _row(mesh, mesh.victim.device_id).endpoints == [endpoint]
+    finally:
+        fake.stop()
+
+
+def test_l1_a_statement_not_signed_by_the_stored_key_is_refused_before_auth(
+    mesh: Mesh, tmp_path: Path, dialer_key_derivations: list[str]
+) -> None:
+    """A hop the STORED key never signed is a wrong device: refused pre-auth."""
+    new = identity.mint(tmp_path / "attacker-new", name="victim-admin")
+    forged = identity.rotation_statement(mesh.attacker, new, mesh.record.network_id)
+    forged["old_device_id"] = mesh.victim.device_id
+    fake = FakeListener(
+        listener_identity=new,
+        network_id=mesh.record.network_id,
+        claim_device_id=new.device_id,
+        rotation=forged,
+    )
+    try:
+        _link, reason = _dial(mesh, fake, expected_device=mesh.victim.device_id)
+        _assert_refused(mesh, reason, "peer_identity_mismatch", dialer_key_derivations)
+        assert fake.auth_frame == {}, "our auth left before the hop was verified"
+        assert _row(mesh, new.device_id) is None
+    finally:
+        fake.stop()
+
+
+def _garbage_proof(_hs: Any, _frame: Any, _auth: Any) -> dict[str, str]:
+    """What a keyless party can send for free: 64 random bytes and 32 more."""
+    return {"sig": wire.b64u(token_bytes(64)), "mac": wire.b64u(token_bytes(32))}
+
+
+@pytest.mark.parametrize(
+    ("claim", "forge", "code"),
+    [
+        ("other", None, "peer_identity_mismatch"),
+        ("victim", _garbage_proof, "bad_signature"),
+    ],
+)
+def test_l2_a_keyless_impostor_never_removes_a_members_only_address(
+    mesh: Mesh, claim: str, forge: Any, code: str
+) -> None:
+    """M1 / S-2: one unauthenticated frame must not strand a single-address member.
+
+    RED before round 1: both cells emptied the row (``ENDPOINTS_AFTER []``).
+    """
+    claimed = mesh.other.device_id if claim == "other" else mesh.victim.device_id
+    fake = FakeListener(
+        listener_identity=mesh.attacker,
+        network_id=mesh.record.network_id,
+        claim_device_id=claimed,
+        forge_proof=forge,
+    )
+    host, port = fake.start()
+    endpoint = f"{host}:{port}"
+    _only_endpoint(mesh, endpoint)
+    try:
+        _link, reason = mesh.server.dial(
+            mesh.record.network_id,
+            host=endpoint,
+            timeout_s=5.0,
+            expected_device=mesh.victim.device_id,
+        )
+        fake.handshake_done.wait(5)
+        assert reason == code
+        assert _row(mesh, mesh.victim.device_id).endpoints == [endpoint]
+        assert endpoint in mesh.server._suspect_endpoints[mesh.victim.device_id]  # noqa: SLF001
+    finally:
+        fake.stop()
+
+
+def test_l2_bad_mac_still_demotes_but_never_the_last_address(mesh: Mesh) -> None:
+    """``bad_mac`` follows a signature under the STORED key: authenticated evidence."""
+    for spare in (["127.0.0.1:1"], []):
+        fake = FakeListener(
+            listener_identity=mesh.victim,
+            network_id=mesh.record.network_id,
+            claim_device_id=mesh.victim.device_id,
+            forge_proof=_wrong_key_proof(mesh.victim),
+        )
+        host, port = fake.start()
+        endpoint = f"{host}:{port}"
+        with store.mutate(mesh.record.network_id, mesh.root) as record:
+            row = record.member(mesh.victim.device_id)
+            assert row is not None
+            row.endpoints = [endpoint, *spare]
+            store.save(record, mesh.root)
+        try:
+            _link, reason = mesh.server.dial(
+                mesh.record.network_id,
+                host=endpoint,
+                timeout_s=5.0,
+                expected_device=mesh.victim.device_id,
+            )
+            fake.handshake_done.wait(5)
+            assert reason == "bad_mac"
+            after = _row(mesh, mesh.victim.device_id).endpoints
+            assert after == (spare or [endpoint]), (spare, after)
+        finally:
+            fake.stop()
+
+
+def test_l2_a_suspect_address_is_dialled_after_the_others_and_still_dialled_alone(
+    mesh: Mesh,
+) -> None:
+    """Suspects reorder dials, never remove them: the fall-through review M1 asked for."""
+    # The suspect is a bare listening socket nobody accepts on: if the probe raced it,
+    # a connection would be queued in its backlog, which ``accept`` below would find.
+    wrong = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    wrong.bind(("127.0.0.1", 0))
+    wrong.listen(4)
+    wrong_host, wrong_port = wrong.getsockname()[:2]
+    good = FakeListener(
+        listener_identity=mesh.victim,
+        network_id=mesh.record.network_id,
+        claim_device_id=mesh.victim.device_id,
+        policy=_genuine_policy(mesh),
+    )
+    good_host, good_port = good.start()
+    suspect, healthy = f"{wrong_host}:{wrong_port}", f"{good_host}:{good_port}"
+    with store.mutate(mesh.record.network_id, mesh.root) as record:
+        row = record.member(mesh.victim.device_id)
+        assert row is not None
+        row.endpoints = [suspect, healthy]
+        store.save(record, mesh.root)
+    mesh.server._suspect_endpoints[mesh.victim.device_id] = {suspect}  # noqa: SLF001
+    try:
+        link, reason = mesh.server._ensure_link_with_reason(  # noqa: SLF001
+            mesh.victim.device_id, probe_timeout_s=5.0
+        )
+        assert link is not None, reason
+        assert link.peer_addr == healthy
+        wrong.setblocking(False)
+        with pytest.raises(BlockingIOError):
+            wrong.accept()  # nothing queued: the suspect was deferred, not raced
+    finally:
+        wrong.close()
+        good.stop()
+    for live in _links(mesh):
+        live.close("test")
+    alone = FakeListener(
+        listener_identity=mesh.victim,
+        network_id=mesh.record.network_id,
+        claim_device_id=mesh.victim.device_id,
+        policy=_genuine_policy(mesh),
+    )
+    host, port = alone.start()
+    only = f"{host}:{port}"
+    _only_endpoint(mesh, only)
+    mesh.server._suspect_endpoints[mesh.victim.device_id] = {only}  # noqa: SLF001
+    deadline = time.monotonic() + 3.0
+    while mesh.server._link_for(mesh.victim.device_id) is not None:  # noqa: SLF001
+        assert time.monotonic() < deadline, "the first link never closed"
+        time.sleep(0.02)
+    try:
+        link, reason = mesh.server._ensure_link_with_reason(  # noqa: SLF001
+            mesh.victim.device_id, probe_timeout_s=5.0
+        )
+        assert link is not None, reason
+        assert only not in mesh.server._suspect_endpoints[mesh.victim.device_id]  # noqa: SLF001
+    finally:
+        alone.stop()
+
+
+def test_l3_an_updated_member_dialling_in_first_clears_the_unproven_record(
+    mesh: Mesh,
+) -> None:
+    """U1 / m1 / S-3 / Q-1: the warning must go once the remedy worked.
+
+    RED before round 1: only an OUTBOUND admission cleared the record, and a member
+    connected inbound gets no redial, so ``peers`` kept saying "update it".
+    """
+    mesh.server._unproven_listeners[mesh.other.device_id] = {  # noqa: SLF001
+        "build": {"version": "0.99.0"},
+        "endpoint": "127.0.0.1:9",
+        "at": time.time(),
+    }
+    link, _welcome = _old_dialer_links_in(
+        mesh, {"version": "0.100.0"}, caps=list(wire.LINK_CAPABILITIES)
+    )
+    try:
+        assert "listener-proof-v1" in link.capabilities
+        assert mesh.other.device_id not in mesh.server._unproven_listeners  # noqa: SLF001
+        rows = {row["device_id"]: row for row in mesh.server.peer_status()}
+        assert rows[mesh.other.device_id]["listener_proof"]["state"] == "verified"
+    finally:
+        mesh._old_client.close()  # type: ignore[attr-defined]
+
+
+def test_l3_a_stale_unproven_address_does_not_contradict_a_live_verified_link(
+    mesh: Mesh,
+) -> None:
+    """A doctor probe of a stale address must not re-set the record (S-3)."""
+    genuine = FakeListener(
+        listener_identity=mesh.victim,
+        network_id=mesh.record.network_id,
+        claim_device_id=mesh.victim.device_id,
+        policy=_genuine_policy(mesh),
+    )
+    stale = FakeListener(
+        listener_identity=mesh.attacker,
+        network_id=mesh.record.network_id,
+        claim_device_id=mesh.victim.device_id,
+        build={"version": "0.99.0"},
+    )
+    try:
+        link, reason = _dial(mesh, genuine, expected_device=mesh.victim.device_id)
+        assert link is not None, reason
+        _link, reason = _dial(mesh, stale, expected_device=mesh.victim.device_id)
+        assert reason == "listener_unproven"
+        assert mesh.victim.device_id not in mesh.server._unproven_listeners  # noqa: SLF001
+        finding = mesh.server._listener_proof_finding(  # noqa: SLF001
+            _row(mesh, mesh.victim.device_id)
+        )
+        assert finding is None
+    finally:
+        genuine.stop()
+        stale.stop()
+
+
+def test_n1_a_welcome_before_auth_is_a_refusal_not_an_assertion(tmp_path: Path) -> None:
+    """``python -O`` strips asserts; the mis-ordered call must still be refused."""
+    signer = identity.mint(tmp_path / "peer", name="peer")
+    hs = hs_mod.Handshake.new(
+        role="dialer",
+        identity=identity.mint(tmp_path / "self", name="self"),
+        network_id="n",
+        epoch=1,
+        instance_id="i",
+        session_protocol=1,
+    )
+    hs.challenge = {"device_id": signer.device_id}
+    frame: dict[str, Any] = {
+        "net": "welcome",
+        "v": hs_mod.LINK_VERSION,
+        "device_id": signer.device_id,
+        "epoch": 1,
+    }
+    frame["proof"] = hs_mod.welcome_proof(
+        signer, hs_mod.Credential("epoch", 1, token_bytes(32)), hs.transcript_bytes, frame
+    )
+    with pytest.raises(types.HandshakeRefusal) as caught:
+        hs.verify_welcome(
+            frame,
+            hs_mod.DialerExpectation(
+                device_id=signer.device_id, public_key_for=lambda _d: signer.public_key
+            ),
+        )
+    assert caught.value.code == hs_mod.REASON_FRAME

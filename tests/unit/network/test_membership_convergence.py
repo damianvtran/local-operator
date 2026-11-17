@@ -1015,6 +1015,62 @@ def test_a_pulled_rotation_table_leaves_one_row_for_the_rotated_device(
     assert surviving.rotation_proof.get("sig_old")
 
 
+def test_a_peer_holding_the_pre_rotation_row_follows_the_hop_when_it_dials(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G1D-1 / PR #4179 S-1: a rotation must not split the mesh.
+
+    The cell above passes only because the hub's RUNNING relay still holds its
+    pre-rotation identity in memory. Here the relay runs under the NEW identity (the
+    state after a relay-path rotate or a restart), and the peer still holds the OLD
+    row and never saw the queued ``net_identity_rotate``. The hub's challenge carries
+    its rotation statement; the peer verifies it against the stored old key, the
+    welcome proof under the new key, applies the hop, and links.
+
+    RED before round 1: ``peer->hub None peer_identity_mismatch``, the hub's only
+    address removed from the peer's row, and ``hub->peer`` refused (the security
+    review's repro, verbatim setup).
+    """
+    hub = _make(devices, "hub")
+    peer = _make(devices, "peer")
+    record = _init_network(hub.server)
+    _join(peer, inviter=hub, monkeypatch=monkeypatch)
+    old_id = hub.device_id
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(hub.root))
+    monkeypatch.setattr(relay, "health", lambda *args, **kwargs: None)
+    assert net_cli._cmd_identity_rotate(Namespace(json=True)) == 0  # noqa: SLF001
+    new_id = store.load(record.network_id, hub.root).self_device_id
+    assert new_id != old_id
+    hub.server.identity = identity.load_or_mint(hub.root)
+    assert hub.server.identity.device_id == new_id
+    held = store.load(record.network_id, peer.root).member(old_id)
+    assert held is not None
+    before = list(held.endpoints)
+    assert before, "the rig gave the peer no address for the hub"
+
+    link, reason = peer.server.dial(
+        record.network_id, host=before[0], epoch=1, expected_device=old_id
+    )
+    assert link is not None, f"peer->hub {reason}"
+    assert link.device_id == new_id and link.peer_verified
+    view = store.load(record.network_id, peer.root)
+    row = view.member(new_id)
+    assert row is not None and view.member(old_id) is row
+    assert row.endpoints, "the rotated hub's address was demoted"
+    assert set(before) <= set(row.endpoints)
+    assert [r.device_id for r in view.active_members() if r.device_id != peer.device_id] == [new_id]
+    assert "device_rotated" in _events(peer), "the hop applied by the dial was not audited"
+
+    # The other half: with the hop applied, the hub's NEW id is a member on the peer.
+    back, back_reason = hub.server.dial(
+        record.network_id,
+        host=f"{peer.host}:{peer.port}",
+        epoch=1,
+        expected_device=peer.device_id,
+    )
+    assert back is not None, f"hub->peer {back_reason}"
+
+
 def test_the_announced_rotation_carries_its_statement_on_the_row(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

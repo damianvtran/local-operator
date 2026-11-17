@@ -5622,7 +5622,43 @@ def _cmd_join(args: argparse.Namespace) -> int:
                 lines=link_result[0],
             )
         return _emit(args, {"ok": True, **link_result[1]}, link_result[0])
-    failure = MeshRefusal(
+    failure = _join_failure(last_reason)
+    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
+    if explain:
+        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
+    raise failure
+
+
+class _KnownJoinCause(str):
+    """A per-host join sentence whose cause the joiner KNOWS (``code``).
+
+    A ``str`` so every caller that loops over ``_join_one``'s sentences keeps working;
+    the ``code`` lets :func:`_join_failure` drop the ambiguous-close tail, which is
+    true of a silent close and false of a refusal this device decided itself.
+    """
+
+    code: str
+
+    def __new__(cls, code: str, sentence: str) -> _KnownJoinCause:
+        made = super().__new__(cls, sentence)
+        made.code = code
+        return made
+
+
+def _join_failure(last_reason: str) -> Any:
+    """The ``join_failed`` refusal for the last host's sentence.
+
+    The token tail ("a redeemed token, a rejected one and a wrong address all end
+    the same way") explains a SILENT close, and ends in "mint a fresh one". After a
+    refusal THIS device decided (the inviter could not prove itself, or another
+    device answered) it is wrong, and re-minting from the same old inviter fails the
+    same way, so the specific sentence stands alone (UX U2, review N2).
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if isinstance(last_reason, _KnownJoinCause):
+        return MeshRefusal("join_failed", f"could not join: {last_reason}.")
+    return MeshRefusal(
         "join_failed",
         "could not join: "
         f"{last_reason or 'every endpoint in the invite refused or was unreachable'}. "
@@ -5631,10 +5667,6 @@ def _cmd_join(args: argparse.Namespace) -> int:
         "every refusal tells an attacker which tokens are real. If you are not certain "
         "the token is still open, mint a fresh one with `lop network invite`.",
     )
-    _attach_join_block(failure, _attempt_block_from_record(_attempt_record(store)))
-    if explain:
-        return _explain_refusal(args, failure, preflight, store, from_attempt=True)
-    raise failure
 
 
 def _read_token(argument: str) -> str:
@@ -6297,9 +6329,12 @@ def _join_one(
         # PINNED TO THE TOKEN'S INVITER (mesh-listener-auth §5). The joiner has no
         # member table, so the welcome proof is verified under the key the inviter
         # sends in ``welcome.inviter`` — accepted only because its fingerprint is
-        # the token's ``inviter_device_id`` — and MACed under the invite key only a
-        # token holder has. Without this the SAS digits were the only MITM defence,
-        # and ``--automated`` joins (``typed = result.sas``) skip that comparison.
+        # the token's ``inviter_device_id`` — and MACed under the invite key. That MAC
+        # is NOT the identity check: every member can derive the invite key (epoch
+        # secret + the plaintext invite id), so join security rests on the signature
+        # under the fingerprint-bound key (design §5, review N-1). Without this the SAS
+        # digits were the only MITM defence, and ``--automated`` joins
+        # (``typed = result.sas``) skip that comparison.
         handshake.read_welcome(reader, deadline, inviter)
         attempt.stage = "establish"
         result = handshake.establish()
@@ -6416,6 +6451,19 @@ def _join_one(
         # sentence below would be unreachable.
         attempt.note("handshake", refusal.code)
         _record_join_attempt(attempt, envelope, store, ok=False)
+        if refusal.code == "listener_unproven":
+            # A KNOWN CAUSE, not an ambiguous wire close (UX U2, security S-5): the
+            # inviter answered and could not prove itself. The sentence already names
+            # the only way forward (update the inviter), so the caller must not bury
+            # it under the generic "mint a fresh token" tail, which loops.
+            return _KnownJoinCause(refusal.code, refusal.sentence)
+        if refusal.code in ("invite_wrong_inviter", "peer_identity_mismatch"):
+            return _KnownJoinCause(
+                refusal.code,
+                f"a different device answered at {host}, not the one that issued this "
+                "invite, so this device stopped before joining; nothing was shared. Check "
+                "the address (or drop --host) and try again",
+            )
         return f"the handshake at {host} stopped: {refusal.sentence}"
     except MeshRefusal as exc:
         if isinstance(exc, JoinParkUnanswered):
@@ -10244,7 +10292,7 @@ def _listener_proof_line(row: Any) -> str:
     if not isinstance(proof, Mapping) or proof.get("state") != "unproven":
         return ""
     name = str(row.get("name") or "").strip() or UNNAMED_DEVICE
-    return "  " + listener_unproven_sentence(name, proof)
+    return "  " + listener_unproven_sentence(name, proof, device_id=str(row.get("device_id") or ""))
 
 
 def _cmd_peers(args: argparse.Namespace) -> int:
@@ -10953,9 +11001,30 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         else:
             clause = readiness_mod.informational_clause(check)
             detail_words = doctor_detail_words(str(check.get("detail", "")))
+            if check.get("check") == "listener_proof" and check.get("message"):
+                # The warning's own sentence; its ``detail`` stays a code (UX U8).
+                detail_words = str(check["message"])
+            elif check.get("endpoint_removed") and check.get("endpoint"):
+                # Said only when the address really left the row (UX U6): the
+                # ``bad_mac`` demotion, never an unauthenticated answer (review M1).
+                owner = str(check.get("device_name") or check.get("device_id") or "")
+                detail_words += f"; this device removed the address from {owner}'s record"
+        # Empty columns are dropped, not joined: a row with no endpoint printed two
+        # spaces where the address would be (UX U7).
+        # ``state`` keeps its padding ("ok " aligns with "FAIL"); only the columns
+        # after it collapse.
+        head = f"{state} " + " ".join(
+            str(part)
+            for part in (
+                check.get("check", ""),
+                check.get("device_id", ""),
+                check.get("endpoint", ""),
+                detail_words,
+            )
+            if part
+        )
         lines.append(
-            f"{state} {check.get('check', '')} {check.get('device_id', '')} "
-            f"{check.get('endpoint', '')} {detail_words}".rstrip()
+            head
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
             + (f" — {clause}" if clause else "")
         )

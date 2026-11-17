@@ -3093,31 +3093,70 @@ PEER_REASON_WORDS: dict[str, str] = {
     # appends this gloss to its "unreachable" sentence.
     "listener_unproven": (
         "it answered but could not prove its identity (an older build, or not that "
-        "device); update it with `lop network update`"
+        "device); update it with `lop network update`, or, if it cannot connect to "
+        "this device, run `lop update` on that device itself"
     ),
     "peer_identity_mismatch": (
-        "a different device answered at its address; the stored address is stale or " "redirected"
+        "a different device answered at its address; the stored address is stale or redirected"
     ),
 }
 
 
-def listener_unproven_sentence(name: str, proof: Mapping[str, Any] | None) -> str:
+def listener_unproven_sentence(
+    name: str,
+    proof: Mapping[str, Any] | None,
+    *,
+    device_id: str = "",
+    with_remedy: bool = True,
+) -> str:
     """The ONE sentence ``peers`` and ``doctor`` print for an unproven listener.
 
     ``proof`` is a ``peers()`` row's ``listener_proof`` block. The build is said as
     "runs" only when it came from a hello this device's listener verified, and as
     "reports" when it came from the unauthenticated challenge, because that is all
-    a challenge is. Only ``version`` is ever rendered — never a source path. One
-    function so the listing and the doctor cannot drift into two wordings.
+    a challenge is; never "older", since the version is a claim nobody compared
+    (UX U4). Only ``version`` is ever rendered — never a source path. One function
+    so the listing and the doctor cannot drift into two wordings.
+
+    THE REASSURANCE IS PART OF THE FACT (UX U4): only the connections THIS device
+    opens are refused, so the sentence says the member's own connections still work
+    instead of reading as "this device is cut off" under a ``reachable`` row.
+
+    ``with_remedy=False`` is doctor's form, whose remedies are their own bullets
+    (UX U5). The remedy names BOTH routes (security S-4): the mesh roll rides a link
+    the member opens, so a member that cannot connect here needs ``lop update`` on
+    itself. The command's argument is shell-quoted (UX U3; ``readiness`` quotes peer
+    facts the same way), or the device id when the member has no name.
     """
     block = proof if isinstance(proof, Mapping) else {}
     build = block.get("build")
     version = str(build.get("version") or "") if isinstance(build, Mapping) else ""
     verb = "runs" if block.get("build_source") == "hello" else "reports"
-    build_words = f"{verb} an older build ({version})" if version else f"{verb} an older build"
+    build_words = f"{verb} build {version}, which" if version else f"{verb} a build that"
+    sentence = (
+        f"{name} {build_words} cannot prove its identity when this device connects to "
+        "it, so this device no longer opens connections to it. Connections it opens to "
+        "this device still work."
+    )
+    if not with_remedy:
+        return sentence
+    here, itself = listener_unproven_remedies(name, device_id=device_id)
+    return f"{sentence} Update it: {here}, {itself}."
+
+
+def listener_unproven_remedies(name: str, *, device_id: str = "") -> tuple[str, str]:
+    """The two remedies for an unproven listener, shared by ``peers`` and ``doctor``.
+
+    Quoted with ``shlex.quote`` so a name like ``Bo's Mac mini`` pastes into a shell
+    as one argument (UX U3); an unnamed member is addressed by its device id.
+    """
+    import shlex
+
+    named = bool(name) and name != UNNAMED_DEVICE
+    target = shlex.quote(name) if named else (device_id or shlex.quote(name))
     return (
-        f"{name} {build_words} that cannot prove its identity, so this device will not "
-        f"dial it. Update it with: lop network update {name}"
+        f"run `lop network update {target}` from this device",
+        f"or, if {name} cannot connect to this device, run `lop update` on {name} itself",
     )
 
 
@@ -3438,9 +3477,15 @@ DOCTOR_DETAIL_WORDS: dict[str, str] = {
     # endpoint that answered, so these say what that address did, not the member.
     "listener_unproven": (
         "this address answered but could not prove it is that device (an older build, "
-        "or not that device)"
+        "or not that device; see the listener_proof warning below)"
     ),
-    "peer_identity_mismatch": "a different device answered at this address",
+    # Nothing is sent before the challenge is checked (``refuse_unexpected_peer``),
+    # and an unauthenticated answer never deletes the address (review M1), so the
+    # row says both: what was protected, and that this is an ordering change only.
+    "peer_identity_mismatch": (
+        "a different device answered at this address; nothing was sent to it, and this "
+        "device now tries the member's other addresses first"
+    ),
 }
 
 

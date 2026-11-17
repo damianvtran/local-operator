@@ -372,6 +372,7 @@ def build_challenge(
     capabilities: list[str],
     build: dict[str, Any],
 ) -> dict[str, Any]:
+    # A rotated listener's ``rotation`` statement is added by ``send_challenge``.
     return {
         "net": "challenge",
         "v": LINK_VERSION,
@@ -562,6 +563,17 @@ class Handshake:
     #: :meth:`verify_welcome` passes). Join callers read ``inviter``/``network``
     #: from here rather than a second parse of an unverified copy.
     welcome: dict[str, Any] = field(default_factory=dict)
+    #: LISTENER: this device's own rotation statement (``MemberRecord.rotation_proof``
+    #: on its self row, signed by its PREVIOUS key), sent in the challenge so a dialer
+    #: still holding the pre-rotation row can follow the hop (mesh-listener-auth §6.1,
+    #: G1D-1). ``{}`` for a device that never rotated, and on join.
+    self_rotation: dict[str, Any] = field(default_factory=dict)
+    #: DIALER: the listener's rotation statement once :meth:`refuse_unexpected_peer`
+    #: VERIFIED it against the stored key of the device this dial meant to reach.
+    #: ``{}`` unless that check passed. Read by :meth:`verify_welcome` (the key the
+    #: proof must verify under) and by ``RelayServer.dial`` (which applies the hop
+    #: through ``apply_device_rotation``, the ``net_identity_rotate`` code path).
+    peer_rotation: dict[str, Any] = field(default_factory=dict)
 
     # -- construction -------------------------------------------------------
 
@@ -691,6 +703,8 @@ class Handshake:
         claimed = str(self.challenge.get("device_id") or "")
         if expect.device_id and claimed == expect.device_id:
             return
+        if self._accept_rotation_hop(claimed, expect):
+            return
         if self.mode == "join":
             raise HandshakeRefusal(
                 REASON_INVITE_INVITER,
@@ -702,6 +716,64 @@ class Handshake:
             f"{expect.device_id or 'the device this dial meant to reach'}; the address "
             "on that member row is stale or redirected. No link was made",
         )
+
+    def _accept_rotation_hop(self, claimed: str, expect: DialerExpectation) -> bool:
+        """Whether the challenge's mismatched id is the PROVEN successor of the target.
+
+        WHY (G1D-1): a member that rotated its device key while this device was
+        offline answers at its old address under its NEW id. Refusing that as a
+        wrong device split the mesh for good — the queued ``net_identity_rotate``
+        rides a link that could now never form. The listener therefore carries its
+        rotation statement in the challenge, and this lets the dial continue to
+        ``send_auth`` only when ALL of these hold, each against what THIS device
+        already holds rather than the frame:
+
+        * member mode with a stored-key reader (a joiner has no member table);
+        * ``old_device_id`` is the device this dial meant to reach and
+          ``new_device_id`` is the id the challenge names;
+        * the statement names this network (signed inside the body);
+        * ``verify_rotation_statement`` passes against the STORED key of the target
+          (the old id is that key's fingerprint, the new id the carried key's, and
+          ``sig_old`` verifies).
+
+        WHY SENDING AUTH IS SAFE HERE: the statement is public (it rides on every
+        copy of the member table), so passing this check proves nothing about who
+        is answering — exactly as a matching id proves nothing. It only lets the
+        handshake reach :meth:`verify_welcome`, which then requires the proof to
+        verify under the statement's ``new_public_key`` and the MAC under this
+        side's credential. A party that replays the statement gets the same auth
+        frame an impostor claiming the target's own id already gets, and fails at
+        step 7 (``bad_signature``), which demotes nothing (``_note_listener_refusal``).
+        One hop only: the self row carries the LAST statement, so a device that
+        rotated twice while this one was offline still needs the table route.
+        """
+        from local_operator.network.identity import verify_rotation_statement
+
+        statement = self.challenge.get("rotation")
+        if (
+            self.mode != "member"
+            or not isinstance(statement, dict)
+            or not expect.device_id
+            or expect.public_key_for is None
+            or not claimed
+            or claimed == self.self_device_id
+        ):
+            return False
+        if (
+            statement.get("old_device_id") != expect.device_id
+            or statement.get("new_device_id") != claimed
+            or statement.get("network_id") != self.network_id
+        ):
+            return False
+        stored = expect.public_key_for(expect.device_id)
+        if not stored:
+            return False
+        try:
+            verify_rotation_statement(statement, stored)
+        except (HandshakeRefusal, KeyError, TypeError, ValueError):
+            return False
+        self.peer_rotation = dict(statement)
+        return True
 
     def verify_welcome(self, frame: dict[str, Any], expect: DialerExpectation) -> None:
         """The dialer's half of mutual authentication: steps 1-9, in this order.
@@ -744,13 +816,27 @@ class Handshake:
                 sig_bytes = mac_bytes = b""
         if len(sig_bytes) != 64 or len(mac_bytes) != 32:
             version = str((self.challenge.get("build") or {}).get("version") or "unknown")
+            if self.mode == "join":
+                # A JOINER IS NOT A MEMBER: it cannot run `lop network update`, and a
+                # fresh token from the same not-yet-updated inviter fails the same way,
+                # so the only way forward is updating the INVITER (review N2, UX U2).
+                # The build is the challenge's claim, so it is "reports", never "older".
+                raise HandshakeRefusal(
+                    REASON_LISTENER_UNPROVEN,
+                    f"the inviting device reports build {version} and could not prove its "
+                    "identity, so this device stopped before joining; nothing was shared. "
+                    "On the inviting device, run `lop update`, then mint a new invite there "
+                    "with `lop network invite` and join again",
+                )
+            # No literal ``<name>`` (N-2): this layer knows only the claimed id, so the
+            # sentence names both remedies without one; ``peers``/``doctor`` name it.
             raise HandshakeRefusal(
                 REASON_LISTENER_UNPROVEN,
                 f"{claimed or 'the other device'} did not prove its identity: its welcome "
                 f"carried no valid signature. It reports build {version}, or it is not the "
                 "device it claims to be. This device no longer links to peers it cannot "
-                "verify; update that device (`lop network update <name>`, or `lop update` "
-                "on it)",
+                "verify; update it from a member (`lop network update`), or run "
+                "`lop update` on that device",
             )
         # STEP 3: the welcome agrees with the challenge about who is speaking.
         if str(frame.get("device_id") or "") != claimed or not isinstance(frame.get("epoch"), int):
@@ -762,7 +848,11 @@ class Handshake:
             raise HandshakeRefusal(REASON_SELF, "the other end of this dial is this device")
         # STEP 5: the claimed id only SELECTS which stored key to verify against; it
         # must be the device this side meant to reach. The evidence is step 7.
-        if claimed != expect.device_id or not expect.device_id:
+        # The ONE exception is a rotation hop :meth:`refuse_unexpected_peer` already
+        # verified against the target's stored key (G1D-1); the proof below must then
+        # verify under that statement's new key, so nothing is taken on trust.
+        rotated = bool(self.peer_rotation) and claimed == self.peer_rotation.get("new_device_id")
+        if (claimed != expect.device_id and not rotated) or not expect.device_id:
             if self.mode == "join":
                 raise HandshakeRefusal(
                     REASON_INVITE_INVITER,
@@ -788,6 +878,10 @@ class Handshake:
                     REASON_INVITE_DEVICE,
                     "the inviter's key is not the one this invite was issued by",
                 )
+        elif rotated:
+            # The successor's key, bound to ``claimed`` by fingerprint and to the
+            # target's STORED key by ``sig_old`` (both checked before our auth left).
+            key = str(self.peer_rotation.get("new_public_key") or "")
         else:
             stored = expect.public_key_for(claimed) if expect.public_key_for else None
             if not stored:
@@ -809,7 +903,12 @@ class Handshake:
         )
         # STEP 8: the MAC under the SAME credential this side MACed its auth with —
         # constant-time, so the comparison leaks nothing about the expected tag.
-        assert self.credential is not None, "verify_welcome runs after send_auth"
+        # A refusal, not an ``assert``: ``python -O`` strips asserts, and a mis-ordered
+        # call must still end as a named refusal rather than an AttributeError (N1).
+        if self.credential is None:
+            raise HandshakeRefusal(
+                REASON_FRAME, "the welcome arrived before this device sent its auth frame"
+            )
         expected_mac = hmac.new(self.credential.key, ACCEPT_MAC_LABEL + digest, "sha256").digest()
         if not hmac.compare_digest(expected_mac, mac_bytes):
             raise HandshakeRefusal(
@@ -922,6 +1021,12 @@ class Handshake:
             capabilities=self.capabilities,
             build=self.build,
         )
+        if self.mode == "member" and self.self_rotation:
+            # Our rotation statement, for a dialer that still holds our previous row
+            # (G1D-1; ``Handshake._accept_rotation_hop``). INSIDE the transcript, so
+            # the welcome proof commits to it, and harmless to an old dialer, which
+            # hashes the parsed challenge as it arrived and ignores unknown keys.
+            self.challenge["rotation"] = dict(self.self_rotation)
         _send_frame(sock, self.challenge)
         return self.challenge
 

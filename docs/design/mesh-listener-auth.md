@@ -423,11 +423,14 @@ checked against the token.
 
 **Joiner side:**
 
-- `proof.mac` is under the invite key. Only a holder of the token can produce it, and the
-  token is never sent (handshake.py:231-235).
-- `proof.sig` must verify under a key whose fingerprint equals the token's inviter id.
-- To fake the inviter, an attacker therefore needs both the token and the inviter's private
-  key.
+- `proof.mac` is under the invite key. A token holder can produce it, and so can **every
+  member of the network**: the invite key derives from the network secret plus the
+  plaintext `invite_id` (`invite.invite_credential_for`). The MAC therefore proves "a token
+  holder or a member", not "the inviter" (corrected in round 1, review N-1).
+- `proof.sig` must verify under a key whose fingerprint equals the token's inviter id. **This
+  is what join security rests on.**
+- To fake the inviter, an attacker therefore needs the inviter's private key (plus the token
+  or membership for the MAC).
 - This newly protects `--automated` joins, where `typed = result.sas` (cli.py, the
   `automated` branch) means no human compare happens. Today the SAS is the only MITM
   defence, and automated joins skip it.
@@ -487,13 +490,19 @@ could have been poisoned:
   (6685-6730).
 - Hello endpoints are inside the transcript.
 
-**Recommendation:** no migration and no sweep. Heal on negative proof:
+**Recommendation:** no migration and no sweep. Heal on negative proof, but delete an address
+only on AUTHENTICATED evidence (revised in round 1: review M1, security S-2):
 
-- **Positive wrong proof:** in `dial()`, on `peer_identity_mismatch`, `bad_signature` or
-  `bad_mac` at endpoint E for expected member M, remove E from `M.endpoints` (only if E ≠
-  `observed_endpoint`), under `store.mutate`.
-  - This matters because `probe_candidates` takes the FIRST connect (relay.py:1086-1115). A
-    nearby attacker would otherwise win every race and starve the real candidate.
+- **`bad_mac` only demotes.** It is reachable only after a signature that verified under M's
+  stored key. In `dial()` it removes E from `M.endpoints` under `store.mutate`, never when E
+  is `observed_endpoint` and **never M's last address**. Audited as `endpoint_demoted`.
+- **`peer_identity_mismatch` and `bad_signature` are unauthenticated** (a bare challenge, or
+  64 random bytes), so they write nothing durable. They put E in the relay's in-memory
+  `_suspect_endpoints[M]`. `_ensure_link_with_reason` then dials M's other addresses first and
+  falls back to the suspects within the same attempt. A verified outbound link at E clears it.
+  - This keeps the original concern: `probe_candidates` takes the FIRST connect, so a nearby
+    attacker or a stale address would otherwise win every race and starve the real candidate.
+    It now does so without letting one frame strand a member that has a single address.
 - **`listener_unproven` does NOT demote.** That is the expected answer of a legitimate
   not-yet-updated peer, and demoting would strand it after it updates. A row an attacker
   holds by omitting proof stays a DoS only (no link). It heals when M dials in (hello
@@ -515,7 +524,7 @@ RED-on-main means the assertion fails at 1d493869.
 | T3 | handshake | genuine member key but no current epoch key (removed device, dialer has rotated) | accepted (RED) | `bad_mac` |
 | T4 | handshake | MITM rewrites `welcome.endpoints` / `phase` after a valid proof | accepted, endpoints adopted (RED) | `bad_signature` |
 | T5 | handshake | reflection: dialer's own `auth.sig`/`mac` replayed as `proof` | n/a | `bad_signature` (label separation) |
-| T6 | relay | honest member B answers at A's address, `expected_device=A` | link as B, endpoint written to B's row from A's dial (RED) | `peer_identity_mismatch`, A's E demoted |
+| T6 | relay | honest member B answers at A's address, `expected_device=A` | link as B, endpoint written to B's row from A's dial (RED) | `peer_identity_mismatch`, A's E marked suspect in memory, row unchanged (round 1) |
 | T7 | relay | impersonated admin listener | link in `links`, `_pull_members` adopts rows (RED) | no link, record bytes unchanged, `adopt_members` not called |
 | T8 | relay | `member rm` rotation while an impersonated link would exist | `net_epoch` with `secret` sent (RED) | nothing sent to it; real member's frame queued |
 | T9 | relay | existing verified outbound link to A, then an impersonated dial to A | real link DISPLACED (RED) | real link untouched, no `redial.connected` |
@@ -597,3 +606,20 @@ never weaken the dialer.
 10. **Rollout.** Enforcement is immediate, and links from updated → not-updated devices
     drop. Follow the §4 runbook order. Expect `listener_unproven` rows in `peers` until the
     fleet updates. They are the intended signal, not a regression.
+
+## 9. Round-1 dispositions (PR #4179)
+
+The implementation added one step beyond §3: **a challenge naming an unexpected device is
+refused before the dialer sends `auth`** (`Handshake.refuse_unexpected_peer`). An honest
+member at a stale address would otherwise verify our auth, register the link, and its
+duplicate fence would evict our real link to it. It also keeps our auth tag away from the
+wrong party.
+
+| Item | Disposition |
+|---|---|
+| G1D-1 / S-1: key rotation while a peer was offline | **Fixed, rotation-proof design.** A rotated listener sends its `rotation_proof` (its self row's statement, signed by its previous key) in the challenge as `rotation`. When `challenge.device_id` ≠ expected, the dialer continues to `auth` only if the statement names the expected id as `old_device_id`, the challenge id as `new_device_id` and this network, and verifies against the dialer's STORED key for the expected id (`verify_rotation_statement`). The welcome proof must then verify under the statement's `new_public_key`. `dial()` applies the hop through `apply_device_rotation` (the `net_identity_rotate` path, shared with `_op_identity_rotate`) before admitting the link. The statement is inside the transcript, so the proof covers it. It is public data, so replaying it gains an attacker only the auth frame a matching-id impostor already gets, and it then fails `bad_signature`. Limit: one hop. A device that rotated twice while the peer was away still needs the table route. With the hop applied, A' → D also links (the second half of S-1). |
+| G1D-3 / M1 / S-2: unauthenticated demotion | **Fixed.** See §6 "re-learning poisoned rows": only `bad_mac` deletes, never the last address. Mismatch and `bad_signature` only reorder dials in memory. |
+| G1D-5 / U1 / m1 / S-3 / Q-1: sticky unproven state | **Fixed.** An inbound link with `listener-proof-v1` in its MAC-covered caps clears the record. `peers`/`doctor` report `verified` for a live outbound or proof-capable link before reading the record. A doctor probe does not re-set the record while such a link is live. |
+| G1D-2 / U2 / S-4 / S-5 / N2 / N-2: remedies | **Fixed.** A join through an old inviter says to run `lop update` on the inviting device and mint a new invite there, with no token tail. Member wording names both `lop network update` (shell-quoted) and `lop update` on the device itself, and no literal placeholder remains. |
+| G1D-6 / N-1: invite MAC claim | **Corrected** in §5 and at the `cli._join_one` comment. |
+
