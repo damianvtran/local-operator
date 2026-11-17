@@ -41,6 +41,7 @@ from local_operator.tunnels.errors import (
 )
 from local_operator.tunnels.gateway import (
     AUTHORIZATION_DEFERRED,
+    AUTHORIZATION_UNAVAILABLE,
     BILLING_INACTIVE,
     BILLING_LAPSED,
     CONTROL_PLANE_TIMEOUT,
@@ -51,6 +52,7 @@ from local_operator.tunnels.gateway import (
     REFUSED,
     SERVER_UNAVAILABLE,
     TERMINAL_DETAIL,
+    TRANSIENT_REASONS,
     TUNNEL_DISABLED,
     TUNNEL_INACTIVE,
     UNREACHABLE,
@@ -65,6 +67,40 @@ from local_operator.tunnels.relay.connector import (
 from local_operator.tunnels.request_log import REQUEST_LOG_NAME, RequestLog
 
 POLL_SECONDS = 10
+#: The longest the poller waits between checks while Radient gives no definitive
+#: answer. It equals the edge WAF's own window and hint ("retry in 300
+#: seconds", `rate-backend-edge` 2000 requests / 5 min per IP), so a block is
+#: waited out in about one request instead of thirty, and every blocked request
+#: the WAF would count against this computer's IP is one not sent.
+TRANSIENT_BACKOFF_CAP_S = 300.0
+
+
+def transient_poll_delay(failures: int, retry_after: float | None, *, grace_left: float) -> float:
+    """How long the poller waits after its ``failures``-th transient failure in a row.
+
+    Radient's own hint wins when it gave one (`RequestFailed.retry_after`);
+    otherwise exponential from the 10 s cadence. Two bounds, both deliberate:
+    never below `POLL_SECONDS` (a hint of 1 s must not make the poller faster
+    than it is when healthy), and never so long that the grace runs out before
+    the next check — one cadence before its end, so a recovery inside the grace
+    is seen before the relay would close.
+    """
+    if retry_after is not None:
+        delay = retry_after
+    else:
+        delay = POLL_SECONDS * 2 ** max(0, failures - 1)
+    delay = min(delay, TRANSIENT_BACKOFF_CAP_S)
+    if grace_left > 0:
+        delay = min(delay, grace_left - POLL_SECONDS)
+    return max(float(POLL_SECONDS), delay)
+
+
+def _retry_after(failure: BaseException) -> float | None:
+    """The wait Radient asked for anywhere in the failure's chain, or ``None``."""
+    for link in _failure_chain(failure):
+        if isinstance(link, RequestFailed) and link.retry_after is not None:
+            return link.retry_after
+    return None
 
 #: cloudflared's own origin idle timeout (`originRequest.keepAliveTimeout`,
 #: default 1m30s): the dual-run's other client of this gateway.
@@ -476,6 +512,22 @@ def _is_a_server_error(failure: BaseException) -> bool:
     )
 
 
+#: Radient answered, and the answer is "not now": 429 (rate limited — the edge
+#: WAF's `rate-backend-edge` among others) or 408 (it timed the request out).
+RATE_LIMIT_STATUSES = frozenset({408, 429})
+
+
+def _is_a_rate_limit(failure: BaseException) -> bool:
+    """Whether Radient answered 429/408 anywhere in the failure's chain.
+
+    Read off the chain for the same reason as `_is_a_server_error`.
+    """
+    return any(
+        isinstance(link, RequestFailed) and link.status in RATE_LIMIT_STATUSES
+        for link in _failure_chain(failure)
+    )
+
+
 def _inactive_reason(failure: BaseException) -> str | None:
     """The inactive-tunnel reason Radient's answer carries, or ``None``.
 
@@ -678,6 +730,11 @@ def authorization_failure_reason(failure: BaseException) -> str:
         return AUTHORIZATION_DEFERRED
     if _is_a_server_error(failure):
         return SERVER_UNAVAILABLE
+    if _is_a_rate_limit(failure):
+        # BEFORE the `REFUSED` fallback: a 429 is Radient (here, its edge WAF's
+        # per-IP limit) asking this computer to slow down, which says nothing
+        # about the login or the plan (field report 2026-11-17).
+        return AUTHORIZATION_UNAVAILABLE
     inactive = _inactive_reason(failure)
     if inactive is not None:
         return inactive
@@ -748,6 +805,15 @@ def classify_failure(failure: BaseException) -> Failure:
         return Failure("terminal_config", LOCAL_PREREQUISITE, str(failure))
     if isinstance(failure, ReenrolmentRequired):
         return Failure("terminal_remote", REENROLMENT_REQUIRED, str(failure))
+    if _is_a_rate_limit(failure) and not isinstance(
+        failure, (LocalPrerequisite, ReenrolmentRequired)
+    ):
+        # Same as the 5xx arm: transient, named, never the login's fault.
+        return Failure(
+            "transient",
+            AUTHORIZATION_UNAVAILABLE,
+            terminal_detail(AUTHORIZATION_UNAVAILABLE, ""),
+        )
     inactive = _inactive_reason(failure)
     if inactive is not None:
         # Transient for the reason the fallback below gives: each of these clears
@@ -1114,7 +1180,11 @@ async def run() -> int:
             async def poll() -> None:
                 nonlocal restart
                 assert gateway is not None
+                # Consecutive transient failures, for the backoff; any answer
+                # that is not transient resets it.
+                transient_failures = 0
                 while not stop.is_set():
+                    delay: float = POLL_SECONDS
                     # Read outside the try: this is this device's own file, not
                     # Radient's answer, and an unreadable one must not be
                     # recorded as a refusal. It ends the poll task, which the
@@ -1131,7 +1201,23 @@ async def run() -> int:
                         # failure is recorded rather than discarded: the phone's
                         # 503 and `lop tunnel status` both report which cause it
                         # was. authorize() clears it on the next success.
-                        gateway.note_authorization_failure(authorization_failure_reason(failure))
+                        #
+                        # A TRANSIENT cause (no definitive answer about this
+                        # tunnel) keeps the gateway serving on its last positive
+                        # check for a bounded grace, and the next check waits for
+                        # Radient's own hint or backs off: re-asking a WAF every
+                        # 10 s only keeps this IP over its limit (2026-11-17).
+                        reason = authorization_failure_reason(failure)
+                        if reason in TRANSIENT_REASONS:
+                            transient_failures += 1
+                            delay = transient_poll_delay(
+                                transient_failures,
+                                _retry_after(failure),
+                                grace_left=gateway.grace_remaining(),
+                            )
+                        else:
+                            transient_failures = 0
+                        gateway.note_authorization_failure(reason, retry_after=delay)
                     else:
                         # Configuration changes invalidate all signed requests
                         # from the old version. Restart for a new proof context,
@@ -1155,10 +1241,11 @@ async def run() -> int:
                             stop.set()
                             return
                         gateway.authorize()
+                        transient_failures = 0
                         if relay is not None:
                             await reconcile_cloudflared(record)
                     try:
-                        await asyncio.wait_for(stop.wait(), timeout=POLL_SECONDS)
+                        await asyncio.wait_for(stop.wait(), timeout=delay)
                     except TimeoutError:
                         pass
 

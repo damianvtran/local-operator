@@ -1,0 +1,5 @@
+{
+  "tunnel.transient.authorization_unavailable.label": "Radient asked to slow down",
+  "tunnel.transient.authorization_unavailable.relay": "Radient asked this computer to slow down its relay authorization checks, usually because many requests came from this network at once. Nothing is wrong with the login or this computer; it reauthorizes by itself once Radient answers again.",
+  "tunnel.transient.authorization_unavailable.terminal": "Radient answered the connector's authorization check with HTTP 429 or 408 (slow down), so the login, billing and this computer are not at fault. The connector keeps serving phones for up to 10 minutes after its last successful check, waits as long as Radient asks before checking again, and reauthorizes by itself; no local command is needed."
+}

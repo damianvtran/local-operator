@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
+import re
 from contextlib import closing
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -31,6 +34,55 @@ from local_operator.tunnels.errors import LoginRequired, RecordNotFound, Request
 #: inside the poller's 10 s cadence plus one attempt, and a store that stays
 #: busy that long surfaces as "local credential store busy" rather than hanging.
 STORE_BUSY_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0)
+
+#: The longest wait a control-plane answer may ask for and still be believed. A
+#: hint is a hint, not an instruction to go dark: the edge WAF's own hint is 300 s
+#: (radient-infra `waf.py` `RATE_LIMIT_BODY`, "retry in 300 seconds"), so an hour
+#: is generous for any honest answer while a garbled or hostile value (a year)
+#: is ignored and the caller falls back to its own backoff.
+MAX_RETRY_AFTER_S = 3600.0
+
+#: The edge WAF's 429 body (`{"error": {"code": "rate_limited", "message":
+#: "... retry in 300 seconds."}}`). The WAF cannot set a `Retry-After` header,
+#: so this sentence is the only place it states the wait.
+_WAF_RETRY_IN = re.compile(r"retry in (\d{1,5}) seconds?", re.IGNORECASE)
+
+
+def retry_after_seconds(response: httpx.Response) -> float | None:
+    """The wait, in seconds, an error answer asked for, or ``None``.
+
+    `Retry-After` first (delta-seconds or an HTTP date, RFC 9110 §10.2.3), then —
+    for a 429 only — the WAF body's "retry in N seconds". Only a NUMBER leaves
+    this function: the body itself is never returned or logged, because a
+    provider body may echo a bearer (see `request`). Anything unparseable or
+    outside `(0, MAX_RETRY_AFTER_S]` is ``None``, so the caller's own backoff
+    applies rather than a value nobody can vouch for.
+    """
+    seconds: float | None = None
+    header = response.headers.get("retry-after", "").strip()
+    if header:
+        if header.isdigit():
+            seconds = float(header)
+        else:
+            try:
+                when = email.utils.parsedate_to_datetime(header)
+            except (TypeError, ValueError):
+                when = None
+            if when is not None and when.tzinfo is not None:
+                seconds = (when - datetime.now(UTC)).total_seconds()
+    elif response.status_code == 429:
+        try:
+            answer = response.json()
+        except ValueError:
+            answer = None
+        error = answer.get("error") if isinstance(answer, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        found = _WAF_RETRY_IN.search(message) if isinstance(message, str) else None
+        if found:
+            seconds = float(found.group(1))
+    if seconds is None or not 0 < seconds <= MAX_RETRY_AFTER_S:
+        return None
+    return seconds
 
 
 async def _open_store_on_thread() -> AuthStore:
@@ -276,6 +328,7 @@ class RadientTunnels:
             raise RequestFailed(
                 f"Radient tunnel request failed (HTTP {response.status_code}).",
                 status=response.status_code,
+                retry_after=retry_after_seconds(response),
             )
         if api_path is not None:
             try:

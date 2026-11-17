@@ -78,11 +78,20 @@ class RequestFailed(ValueError):
     push worker's refusal record (``push_worker.EmitRefused``) carries the
     status as the whole of what its one drop line can say after the third try,
     and parsing it back out of a sentence would couple that log to prose.
+
+    ``retry_after`` is the wait, in seconds, Radient asked for — its
+    ``Retry-After`` header, or for the edge WAF (which cannot set a header) the
+    "retry in N seconds" of its body — or ``None`` when it named none. It is a
+    NUMBER read out of the answer, never the body itself, so the redaction rule
+    above still holds. The connector's poller backs off by it (see
+    ``service.transient_poll_delay``): re-asking inside a WAF block only keeps
+    the source IP over the limit, and the WAF counts blocked requests too.
     """
 
-    def __init__(self, message: str, *, status: int) -> None:
+    def __init__(self, message: str, *, status: int, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 class TunnelInactive(ValueError):
