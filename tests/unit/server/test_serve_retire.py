@@ -2102,14 +2102,26 @@ def stuck(disk: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> Iterator[_St
         blocker.release()
 
 
-async def _ticks_within(seconds: float, step: float = 0.01) -> int:
-    """How many ``step`` sleeps another coroutine completes in ``seconds``."""
-    ticks = 0
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+async def _max_gap_within(seconds: float, step: float = 0.01) -> float:
+    """The longest the loop went without waking a ``step`` sleeper over ``seconds``.
+
+    Why the longest gap and not a tick count (review round 3, R3-1): a count of
+    10 ms ticks in 0.3 s needs an average wakeup of 30 ms or less, and at Mac load
+    ~80 a sleep overshoots by ~20 ms, so a correct build can miss the count. The
+    discriminator needs no count: ``_StuckDisk`` blocks on ``gate.wait(10.0)`` and
+    the gate is released only in the caller's ``finally``, so a read run ON the loop
+    freezes it for ~10 s (one gap of ~10 s), while a read run off it leaves only
+    scheduler jitter (tens of ms). ``< 2.0`` sits far from both.
+    """
+    loop = asyncio.get_running_loop()
+    started = last = loop.time()
+    max_gap = 0.0
+    while last - started < seconds:
         await asyncio.sleep(step)
-        ticks += 1
-    return ticks
+        now = loop.time()
+        max_gap = max(max_gap, now - last)
+        last = now
+    return max_gap
 
 
 @pytest.mark.asyncio
@@ -2117,14 +2129,14 @@ async def test_a_blocked_disk_read_does_not_block_the_event_loop(
     disk: dict[str, Any], stuck: _StuckDisk
 ) -> None:
     """(a) The read blocks its thread, never the loop: a peer coroutine keeps
-    turning, and the stuck read is not stacked — one thread, however many ticks.
+    turning, and the stuck read is not stacked — one thread, however long it waits.
     On the previous head this peer made no progress until the read returned."""
     app, publisher = FakeApp(), FakePublisher(_record())
     task, stop, exited = await _start(app, publisher)
     try:
-        ticks = await _ticks_within(0.3)
-        # 30 possible; a loop blocked by the read would complete ~0 of them.
-        assert ticks >= 10, f"the loop made only {ticks} ticks while the read was stuck"
+        max_gap = await _max_gap_within(0.3)
+        # An on-loop read would hold the loop for the stall's ~10 s.
+        assert max_gap < 2.0, f"the loop went dark for {max_gap:.3f}s while the read was stuck"
         assert stuck.calls == 1, "a stuck read must not be re-issued each tick"
     finally:
         stuck.release()

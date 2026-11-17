@@ -444,7 +444,6 @@ async def test_a_stuck_disk_read_neither_blocks_the_reaper_loop_nor_refreshes(
     read). While it is stuck nothing is judged — no refresh, no decline — and
     once it answers, the settled move is acted on as before."""
     import threading
-    import time
 
     gate = threading.Event()
 
@@ -469,11 +468,10 @@ async def test_a_stuck_disk_read_neither_blocks_the_reaper_loop_nor_refreshes(
     handle, runtime, stop = IdleHandle(), IdleRuntime(), asyncio.Event()
     reaper = asyncio.ensure_future(process._reaper(handle, runtime, stop))
     try:
-        ticks, deadline = 0, time.monotonic() + 0.3
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-            ticks += 1
-        assert ticks >= 10, f"the loop made only {ticks} ticks while the read was stuck"
+        # The longest wakeup gap, not a tick count (R3-1): see ``_loop_ticks_while``.
+        # An on-loop read would hold the loop for the gate's ~10 s.
+        max_gap, _elapsed, _ = await _loop_ticks_while(asyncio.sleep(0.3))
+        assert max_gap < 2.0, f"the loop went dark for {max_gap:.3f}s while the read was stuck"
         assert refreshed == [], "an unanswered read is not a build to refresh onto"
         assert not reaper.done()
         gate.set()
