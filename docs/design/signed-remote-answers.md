@@ -113,8 +113,10 @@ cost: an operator typing on the Mac into a node session must answer a signed ask
 
 The signer is the **operator ES256 key** that the anchor pins: the Mac Secure
 Enclave key with a per-signature Touch ID (`docs/design/approval-authority.md`
-§2.1-2.2), or a phone key whose device cert verifies under the operator key
-(`operator/verify.py:285`) and that the anchor admits (`operator/trust.py:1501`).
+§2.1-2.2). Phone keys are **deferred to Phase 4** and then count only through
+a device cert that verifies under the operator key (`operator/verify.py:285`)
+**and** a strict listing check (`device_listed_strict`, §7d), never through
+`device_is_admitted` (`operator/trust.py:1501-1557`).
 This is the same machinery as the F4 approval decisions
 (`network/approvals.py:1077-1110` builds the message, `:1125-1160` signs it), and
 the verifier follows `operator_binding._check_signature` (`operator_binding.py:918-965`).
@@ -141,13 +143,23 @@ the installed one (`operator/handlers.py:1040-1057`), and the F4b onboarding pin
 file-only key, which a head agent can read. A head agent could therefore stage
 its own key and get it pinned. Required:
 
-1. The node-side `install` prints `key_id` and `spki_fp` (`trust.py:859-880` `anchor_trio`, the
-   one fingerprint builder) and waits for confirmation.
-2. The operator compares them against a value the agent cannot plant: the Mac's
-   **installed** root-owned anchor (`lop operator trust`/`status`, which read
-   `trust.load_anchor`), or the key agent's `public` verb
-   (`packaging/macos/lop-keyagent/se-keyagent.c:507`, `:958`), which reads the
-   Enclave key itself. Never `anchor export` while a staged statement exists.
+1. The node-side `install` pauses for confirmation after the root-owned file
+   lands. It does **not** print the values to compare (S2-5): `lop` itself is
+   user-writable code on both machines (`~/.local/share/uv/tools/local-operator`,
+   `approval-authority.md:116-120`), so anything it prints can be forged.
+2. The comparison values come **only** from sources the agent cannot rewrite:
+   - **Mac, ground truth:** the signed key-agent binary's `public` verb
+     (`packaging/macos/lop-keyagent/se-keyagent.c:507`, `:958`). It reads the
+     Enclave key itself. Check the bundle first with
+     `codesign --verify --strict` (a system tool), then hash the point with
+     `/usr/bin/shasum -a 256`.
+   - **Node:** the root-owned `/etc/local-operator/operators/<uid>.json`, read
+     with `sudo` and system tools only (`/usr/bin/python3 -I` to decode the
+     `spki` hex, `sha256sum`). Never through `lop`.
+   The values match when sha256 of the point equals sha256 of the decoded `spki`.
+   The derived `key_id`/`spki_fp` (`trust.py:859-880`) may be shown for
+   convenience, but they are not the comparison. Never `anchor export`, which
+   prefers the staged statement.
 3. The runbook states that **re-anchoring voids**: every operator-binding proof
    (`old_signer`, `operator_binding.py:938-939`), every device cert issued under
    the old key (`verify.py:285` re-verifies under the current operator key), and
@@ -187,26 +199,69 @@ modified binary loses its application identifier, so it cannot reach the key).
 - **New verb `sign-answer`.** It reads the framed bytes of §5 on stdin and
   parses them itself (fixed field order, length-prefixed, no JSON in C). It
   refuses anything that is not exactly `lop-ask-answer-v1` framing: wrong field
-  count, `exp_min > 240`, a glob character in `scope`, or over 8 KiB. It then
-  builds `localizedReason` from the parsed fields: *"approve '<label>' on
-  <target_device_id> for session <session_id>, ask <ask_id>: <first 3 scope
-  paths> (+N more), valid <exp_min> min"*. It evaluates an `LAContext` with
+  count, `exp_min > 240`, a glob character in `scope`, or over 8 KiB.
+  - **Everything signed is rendered; nothing is elided (S2-4).** The reason is
+    *"Approve: <label> | node <target_device_id> | session <session_id> ask
+    <ask_id> | paths: <every scope path, in full> | valid <exp_min> min"*. There
+    is no "+N more". If the full text would exceed `MAX_REASON_CHARS`, the
+    helper refuses with `scope_unrenderable` and the agent must split the ask
+    (for example, 17 rigs across several asks, or one parent dir it owns
+    outright). `MAX_REASON_CHARS` is fixed from the S2-3 screenshots (the
+    longest reason that rendered whole in both dialogs), not guessed.
+  - **The label is bounded and sanitised by refusal, never by rewriting.** It
+    must be at most 60 characters from `[A-Za-z0-9 ,.()+/_~-]`. Quotes,
+    backticks, `|`, `:`, `<>{}`, newlines, control and non-ASCII characters
+    fail as `label_unrenderable`, so an agent-written label cannot imitate the
+    reason's own separators or field names. Scope paths may hold printable
+    ASCII except quotes, `|` and control characters. Ids must match
+    `[A-Za-z0-9_-]{1,64}`. The node verifier applies the same character rules,
+    so a record the helper would refuse never verifies. It evaluates an `LAContext` with
   `evaluateAccessControl:operation:kLASecAccessControlOperationUseKeySign
   localizedReason:` (with `touchIDAuthenticationAllowableReuseDuration = 0`),
   finds the key with `kSecUseAuthenticationContext` set to that context, and
   signs **exactly** those bytes. LocalAuthentication is Objective-C, so the
   helper gains one `.m` unit, or `objc_msgSend` calls in the C file.
-- **Raw `sign` refuses reserved prefixes:** `lop-ask-answer-v1\0`, and
-  (recommended, same line) `lop-operator-device-v1\0`, so blind device-cert
-  minting dies too.
-- **Settling evidence:** one operator-run `sign-answer` on the Mac whose sheet
-  shows the payload's node, session and scope. CI cannot raise a sheet.
+- **Raw `sign` refuses the `lop-ask-answer-v1\0` prefix only.** It must NOT
+  refuse `lop-operator-device-v1\0` (S2-2). `lop pair` on a Secure Enclave
+  anchor issues device certs through raw `sign`
+  (`operator/sign.py:216-247` `issue_device_cert` → `_KeyagentSigner`;
+  the bytes are `DEVICE_CERT_DOMAIN` + JSON, `operator/verify.py:47`, `:217`).
+  Blind cert minting is closed in Phase 4 by a parsed `sign-device-cert` verb
+  (§11), and until then by strict listing (§7d).
+- **Downgrade bypass closed by a new keychain access group (S2-1).** Older,
+  validly signed helper builds stay on disk (`~/.cache/uv/archive-v0/…/lop-keyagent.app`).
+  They carry the same application identifier
+  (`SHA2U6KT7V.com.local-operator.lopkeyagent`, `keyagent.entitlements:34`), and
+  their raw `sign` has no prefix refusal. Today the key's access group is that
+  application identifier (the entitlement file deliberately carries no
+  `keychain-access-groups`, `keyagent.entitlements:7-20`), so any old build can
+  sign answer bytes. Fix: the Phase 3 re-anchor creates the operator key with
+  `kSecAttrAccessGroup = SHA2U6KT7V.com.local-operator.lopkeyagent.v2`. Only
+  prefix-enforcing builds carry that group in `keychain-access-groups`, and the
+  provisioning profile lists it. `assemble_keyagent_bundle.sh` already asserts
+  profile/entitlement equality (`:177-194`); extend it to the group, because a
+  profile missing a claimed group gets the bundle SIGKILLed
+  (`keyagent.entitlements:12-16`). An older helper cannot see the new item.
+  **Consequence, stated for the operator:** after the re-anchor, rolling `lop`
+  back to a build without the v2 group loses **all** operator signing (F4
+  approvals, loosening, answers) until roll-forward or another re-anchor.
+- **Ship gate, not a hope (S2-3).** Apple documents a custom `localizedReason`,
+  but nothing here has measured it, and no code in the tree uses `LAContext`
+  yet. Phase 3 ships only with operator-run screenshots of **both** the
+  Touch ID sheet and the password-fallback dialog, each showing the full reason
+  for a real `sign-answer`. If the reason does not render in either, signing
+  does not ship and remote answers stay excluded. CI cannot raise a sheet.
 - *Tests* (source pins in the style of `tests/unit/operator/test_operator_keyagent.py:44-62`,
   plus the `keyagent-macos` publish job that compiles the helper):
   `test_raw_sign_refuses_answer_domain_prefix`,
-  `test_raw_sign_refuses_device_cert_prefix`,
+  `test_raw_sign_still_signs_device_cert_domain` (S2-2, `lop pair` keeps working),
+  `test_entitlements_carry_v2_access_group` and
+  `test_answer_key_created_in_v2_access_group` (S2-1: source pins on
+  `keyagent.entitlements` and on `cmd_create` setting `kSecAttrAccessGroup`),
   `test_sign_answer_reason_built_from_parsed_fields` (no reason text arrives from
   argv or env), `test_sign_answer_rejects_glob_and_long_exp`,
+  `test_sign_answer_refuses_unrenderable_scope` and
+  `test_sign_answer_refuses_unsafe_label` (S2-4),
   `test_sign_answer_uses_authentication_context` (the context is passed to the key
   lookup, so there is one gesture with our text, not a second generic sheet).
 - *Residual, for the operator to accept:* a head agent can still raise a sheet,
@@ -429,15 +484,16 @@ plus the Phase 1 headline test below.
 
 | Threat | Outcome under D |
 | --- | --- |
-| Compromised head agent (same uid as the surface) | Cannot sign: no readable presence key (a). Raw `sign` refuses the domain (§4.3). Can raise a `sign-answer` sheet, but its text names the forged node, session and scope. Cannot mint an admitted phone cert (strict listing, S-2). Cannot plant a re-anchor without failing the human fingerprint check (S-4). |
+| Compromised head agent (same uid as the surface) | Cannot sign: no readable presence key (a). Raw `sign` refuses the domain, and old helpers cannot reach the v2 key (§4.3). Can raise a `sign-answer` sheet, but its text renders every signed field, so it names the forged node, session and full scope. Cannot mint an admitted phone cert (strict listing, S-2). Cannot plant a re-anchor without failing the human fingerprint check (S-4). |
 | Compromised node agent | Cannot forge a record. Can replay a record onto the same ask and qid only, which yields the same answer and is refused by nonce at ingest and consent (c). Can append a fake `desktop` row: the store-integrity residual (`surfaces.py:52-53`), unchanged by this design. |
 | Compromised node (root) | Out of scope: it owns its own guard. Passwordless sudo makes the anchor advisory (`operator_binding.py:57-60`). |
 | Replay or reorder over the mesh | Refused by nonce, freshness, and the per-write rule. |
 | Roster change mid-flight | The roster is never trusted. Anchor re-key or phone revocation is read live at consent time (d). |
 | Relay rewrites the question | `question_mismatch` (b). |
 | Delegating agent quotes an approval | Closed in Phase 1 (§2, §11). |
-| Agent re-issues a refused call hoping the judge flips | Refused deterministically unless newer consent exists (S-8, Phase 2). |
-| Remote typed prompt | Consent today; the #4164 lane, not this design (S-3). |
+| Agent re-issues a refused call hoping the judge flips | Refused deterministically, before any judge, unless the tree holds a trusted or verified-signed consent row (or a direct operator turn) newer than the refusal; a different installed guard version is re-evaluated normally (exception 1). Phase 2, S-8. |
+| Old signed helper build used to sign answer bytes | The v2 key lives in an access group old builds lack (S2-1). |
+| Remote typed prompt | Follows the `exclude_remote_prompts` decision (Phase 1, S-3): excluded until signed, or today's documented risk. |
 
 ## 10. Migration
 
@@ -469,6 +525,26 @@ plus the Phase 1 headline test below.
   `test_steer_and_hub_message_never_operator`;
   `test_user_rule_judge_gets_no_delegated_words`;
   `test_operator_opened_session_keeps_direct_words` (no regression).
+- **Decision point `exclude_remote_prompts` (S-3; the operator's answer sets the
+  default).** The runtime already stamps a remote prompt's row with the
+  `remote_origin` sender key (`session/runtime/serving.py:636-637`, `:4484`, set
+  from `server.py:9081-9088`/`:9128` and `process.py:5324-5325`). One
+  module-level constant in `guardrails/provenance.py`, deliberately not a config
+  key: `config.yml` is model-writable, and the guard may only be tightened by
+  anything the agent can reach (`check.py:303-345`, guide "Neither layer can be
+  loosened").
+  - **`True` (excluded):** `operator_brief` (`provenance.py:5130-5144`) and
+    `last_user_request` (`check.py:2097-2119`) skip `remote_origin` rows and
+    count them as `remote prompt` in `excluded`. A remote "delete ~/x" stops
+    counting as consent until the operator answers a signed ask (§6). UX cost:
+    every guarded node action approved by typing from the Mac needs one
+    Touch ID ask.
+  - **`False` (included):** today's behaviour. The documented risk is that
+    whoever holds a `drive` link, or the phone portal cookie, can type the words
+    that lift a delete (`check.py:1089`).
+  Tests are parametrised over both values: `test_remote_prompt_consent_follows_decision`
+  and `test_remote_prompt_never_lifts_critical`. The shipped value is set by the
+  operator's answer; until then this lane holds that one line.
 
 **Phase 2: verify at the node (feature, ~2 h).** New
 `local_operator/asks/signed_answers.py` (payload builder, digest, scope,
@@ -497,19 +573,26 @@ and node) over a loopback mesh.
 its operator-run sheet evidence).** Signing goes in
 `mobile/attach_client.py` (beside `_present_operator_signature`, `:1922`); the
 desktop facade and the TUI dock call it. The node sets `signable`
-(`asks/queue.py`), and the wire capability is declared. The sheet copy lives in
-`operator/sign.py`. Tests: `test_signable_only_on_path_asks`,
+(`asks/queue.py`), and the wire capability is declared. The sheet text lives
+only in the helper (§4.3). The phase includes the v2 access-group re-anchor
+(S2-1) and the S2-3 screenshot gate. Tests: `test_signable_only_on_path_asks`,
 `test_payload_binds_origin_for_relayed_card`,
 `test_no_signature_offered_to_old_node`. Visual before/after frames of the card
 go to the designer.
 
-**Phase 4 (deferred; separate PR): phone signing**, gated on the phone rendering
-the parsed payload (S-7), with `device_listed_strict` and its two tests (S-2).
+**Phase 4 (deferred; separate PR): phone signing.** It is gated on the phone
+rendering the parsed payload (S-7), with `device_listed_strict` and its two tests
+(S-2). It adds a `sign-device-cert` helper verb that parses the cert JSON and
+builds its reason from `device_id`, `label` and `not_after`, and it moves
+`issue_device_cert` (`operator/sign.py:216-247`) onto that verb (S2-2). Only
+then may raw `sign` refuse `lop-operator-device-v1\0`. Tests:
+`test_issue_device_cert_uses_parsed_verb`,
+`test_raw_sign_refuses_device_cert_after_phase4`.
 
 **Docs:** `guides/guardrails/GUIDE.md:48-52` and `check.REFUSAL_SCOPE`
 (`check.py:303-345`) replace "not built yet" with "an answer signed with the
-operator key (Touch ID or a paired phone) counts; an unsigned remote answer
-never does".
+operator key (Touch ID; a strictly listed phone from Phase 4) counts; an
+unsigned remote answer never does".
 
 ## 12. Risks to watch during rollout
 
@@ -536,7 +619,7 @@ never does".
 
 | Finding | Severity | Disposition | Where |
 | --- | --- | --- | --- |
-| S-1 generic Touch ID sheet | MAJOR | Fixed: `sign-answer` verb with an LAContext reason built from the parsed bytes; raw `sign` refuses reserved prefixes; 5 tests; residual stated | §4.2(1), §4.3, §5, §9 |
+| S-1 generic Touch ID sheet | MAJOR | **Designed; pending operator-run sheet evidence.** `sign-answer` verb with a parsed, fully rendered LAContext reason, and raw `sign` refuses the answer prefix. Ships only on the Phase 3 screenshot gate (S2-3). | §4.2(1), §4.3, §5, §9 |
 | S-2 `device_is_admitted` exemptions | BLOCKER | Fixed: phone signing deferred (`device_signing_deferred`); Phase 4 requires `device_listed_strict` with no presence or migration exemption; 2 named tests | §7a, §7d, §11 Phase 4 |
 | S-3 remote prompts are consent | MAJOR (not this lane) | Noted, with UX cost; owned by the #4164 Phase 1 lane, pending Damian | §2, §9 |
 | S-4 unauthenticated re-anchor | MAJOR | Fixed: install prints `key_id`/`spki_fp`, compared against the Mac's installed anchor or the keyagent `public` verb, never staged export; re-anchor voids proofs, certs and signed answers | §4.1 |
@@ -546,3 +629,16 @@ never does".
 | S-8 deterministic re-issue rule | minor | Added to Phase 2 with 3 tests | §11 Phase 2, §9, §12(5) |
 | S-9 globs in scope | nit | `scope_glob` refusal in the verifier and the helper | §5.2, §4.3, §7g |
 | S-10 skew facts | nit | `ts`, `now`, delta and `SKEW_S` in the facts | §7e |
+
+### Security review round 2 — disposition
+
+| Finding | Severity | Disposition | Where |
+| --- | --- | --- | --- |
+| S2-1 downgrade via old signed helpers | MAJOR | Fixed: the re-anchor creates the key in the `…lopkeyagent.v2` access group, which only prefix-enforcing builds carry; source pins on the entitlements and on `cmd_create`; a rollback loses all operator signing, as stated | §4.3, §9, §11 Phase 3 |
+| S2-2 device-prefix refusal breaks `lop pair` | MAJOR | Fixed: refusal and its test dropped from Phase 3 (`test_raw_sign_still_signs_device_cert_domain` added); Phase 4 adds a parsed `sign-device-cert` verb and moves `issue_device_cert` onto it | §4.3, §11 Phase 4 |
+| S2-3 custom reason not measured | MINOR | §13 S-1 now reads "designed; pending operator-run sheet evidence"; screenshots of the Touch ID and password-fallback dialogs are a Phase 3 ship gate | §4.3, §13 |
+| S2-4 elided scope, raw label | MINOR | Every scope path is rendered in full or the signature is refused (`scope_unrenderable`, limit taken from the S2-3 screenshots); the label is bounded and charset-restricted by refusal, and the verifier applies the same rules | §4.3 |
+| S2-5 fingerprints from user-writable code | MINOR | The comparison uses only the signed helper's `public` verb plus system tools on the Mac, and `sudo` plus system tools on the node's root-owned file; `lop` prints nothing that is compared | §4.1 |
+| S2-6 stale re-issue row | NIT | Threat-table row restated with the exact S-8 rule, including exception 1 | §9 |
+| S2-7 stale phone wording | NIT | §4 and the docs line say phones arrive in Phase 4 with strict listing | §4, §11 Docs |
+| Manager: S-3 decision point | — | `exclude_remote_prompts` constant in Phase 1, with both outcomes specified and tests parametrised over both | §11 Phase 1, §9 |
