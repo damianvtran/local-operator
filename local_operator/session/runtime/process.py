@@ -414,6 +414,30 @@ def _should_refresh(handle: object, boot: "BuildStamp | None") -> "BuildStamp | 
     return _build_changed(boot)
 
 
+async def _recheck_refresh(
+    handle: object, boot: "BuildStamp | None", read: _buildwatch.OffLoopBuildRead
+) -> "BuildStamp | None":
+    """:func:`_should_refresh` for a COROUTINE: the same answer, read off the loop.
+
+    WHY A TWIN rather than calling the sync predicate. ``_build_changed`` ends in
+    ``importlib.metadata`` reads, and a blocked one is what wedged a loop for
+    145 s on 2026-11-17 (``buildwatch.OffLoopBuildRead``). The reaper's first
+    read of a tick already went off the loop; the re-checks inside
+    :func:`_refresh_for` read the same disk again AFTER the stagger, so leaving
+    them on the loop kept the stall one await later (review round 1, M1).
+
+    An unanswered read is ``None`` — KEEP. It is no evidence the build moved,
+    and a refresh is the rung that can always wait for the next check. The idle
+    gate stays first and stays synchronous: it reads memory, not disk.
+    """
+    if not _idle_for_refresh(handle):
+        return None
+    newer = await read(_build_changed, boot)
+    if newer is _buildwatch.READ_UNKNOWN:
+        return None
+    return newer
+
+
 @dataclass(frozen=True, slots=True)
 class _BuildPoll:
     """One build check's verdict, so the reaper acts on ONE read of the disk.
@@ -750,7 +774,7 @@ def _drain_detail(
     return f"{', '.join(reasons)}{pair}"
 
 
-def _drain_detail_at_exit(drain: "_Drain") -> str:
+async def _drain_detail_at_exit(drain: "_Drain", read: _buildwatch.OffLoopBuildRead) -> str:
     """The why-now the EXIT logs, with its build pair RE-READ.
 
     WHY NOT ``drain.detail``. That string was composed at the latch, and the
@@ -782,7 +806,20 @@ def _drain_detail_at_exit(drain: "_Drain") -> str:
     three settled builds, or its tree was gone, and neither fact expires. See
     :func:`_drain_reasons`.
     """
-    return _drain_detail(drain.reasons, drain.boot, _handover_build(drain.boot))
+    # OFF THE LOOP (review round 1, M1): ``handover_build`` is the same
+    # ``importlib.metadata`` read that stalled a loop for 145 s, and this runs at
+    # the drain's exit, on the loop. A boot-less drain (the signal trigger) reads
+    # nothing — ``handover_build(None)`` is ``None`` without touching the disk —
+    # so it skips the thread hop. An unanswered read DROPS the pair, the same
+    # direction as ``None`` above: the exit still happens on the latch's reasons,
+    # it just asserts no transition it could not read. Never raises: the reader
+    # turns every failure into ``READ_UNKNOWN`` (caller cancellation aside).
+    if drain.boot is None:
+        return _drain_detail(drain.reasons, None, None)
+    standing = await read(_handover_build, drain.boot)
+    if standing is _buildwatch.READ_UNKNOWN:
+        standing = None
+    return _drain_detail(drain.reasons, drain.boot, standing)
 
 
 def _viewer_attached(runtime: object) -> bool:
@@ -1976,7 +2013,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # counted, no refresh, no new drain). A drain ALREADY latched keeps
             # its departure — it acts on the commitment, not on this read.
             if drain is not None:
-                return await _drain_for(drain, handle, runtime, stop)
+                return await _drain_for(drain, handle, runtime, stop, read=read_build)
             return False
         poll = watch.judge(handle, newer)
         if drain is not None:
@@ -1992,15 +2029,17 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # (``_abandon_move``): the commitment is what is being kept, not the
             # refusal, so the tick still retries the departure and the clean idle
             # exit is still what ends it.
-            return await _drain_for(drain, handle, runtime, stop)
+            return await _drain_for(drain, handle, runtime, stop, read=read_build)
         if poll.refreshable():
-            return await _refresh_for(cast("BuildStamp", poll.newer), handle, runtime, stop)
+            return await _refresh_for(
+                cast("BuildStamp", poll.newer), handle, runtime, stop, read=read_build
+            )
         if not poll.draining():
             return False
         drain = await _begin_drain(poll, handle, runtime, stop)
         if drain is None:
             return False
-        return await _drain_for(drain, handle, runtime, stop)
+        return await _drain_for(drain, handle, runtime, stop, read=read_build)
 
     while not stop.is_set():
         await asyncio.sleep(REAP_CHECK_S)
@@ -2017,7 +2056,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # drain start at the latest, and often minutes ago), and a grace
             # window is for a runtime that might still be wanted — this one has
             # already stopped taking work.
-            retired = await _drain_for(drain, handle, runtime, stop)
+            retired = await _drain_for(drain, handle, runtime, stop, read=read_build)
             if retired:
                 return True
             continue
@@ -2295,7 +2334,12 @@ def _another_move_in_flight() -> "int | None":
 
 
 async def _refresh_for(
-    newer: "BuildStamp", handle: object, runtime: object, stop: asyncio.Event
+    newer: "BuildStamp",
+    handle: object,
+    runtime: object,
+    stop: asyncio.Event,
+    *,
+    read: "_buildwatch.OffLoopBuildRead | None" = None,
 ) -> bool:
     """Announce and retire so the next engage runs ``newer``. True if exited.
 
@@ -2365,7 +2409,11 @@ async def _refresh_for(
         return False  # a stop landed during the stagger; its path owns the exit
     except asyncio.TimeoutError:
         pass
-    if _should_refresh(handle, boot) is None:
+    # The reaper's own reader when it is the caller, so the one-in-flight bound
+    # and the warn-once streak span its tick; a fresh one for direct callers.
+    # A new non-optional name, because the closure below re-checks through it.
+    build_read = read if read is not None else _buildwatch.OffLoopBuildRead("session runtime")
+    if await _recheck_refresh(handle, boot, build_read) is None:
         logger.info("session runtime: work arrived during the refresh stagger; keeping")
         return False
 
@@ -2434,7 +2482,7 @@ async def _refresh_for(
             if not begin_retire("runtime-retired", _build_pair(boot, newer)):
                 logger.info("session runtime: work arrived while retiring was announced; keeping")
                 return False
-        elif _should_refresh(handle, boot) is None:
+        elif await _recheck_refresh(handle, boot, build_read) is None:
             # A handle without the latch (an older or reduced host, e.g. the tests'
             # stub handles): keep today's re-check rather than retiring unguarded.
             # Refusing AFTER announcing is safe for the same reason it is for
@@ -3908,6 +3956,7 @@ async def _drain_for(
     stop: asyncio.Event,
     *,
     now: float | None = None,
+    read: "_buildwatch.OffLoopBuildRead | None" = None,
 ) -> bool:
     """Leave at the first instant this runtime's own work is done. True if exited.
 
@@ -4012,8 +4061,16 @@ async def _drain_for(
             await _abandon_move(drain, handle, runtime, at=at, dwell=True)
             return False
         return False
+    # The exit's pair re-read goes through the reaper's reader when it is the
+    # caller (one read in flight per runtime); a fresh one otherwise.
+    if read is None:
+        read = _buildwatch.OffLoopBuildRead("session runtime")
     begin_retire = getattr(handle, "begin_retire", None)
-    if callable(begin_retire) and not begin_retire(drain.cause, _drain_detail_at_exit(drain)):
+    # The read may await (up to the reader's bound) after the idle check above.
+    # That gap is safe: ``begin_retire`` re-checks work itself and refuses if a
+    # turn slipped in, which is the arm just below.
+    detail = await _drain_detail_at_exit(drain, read)
+    if callable(begin_retire) and not begin_retire(drain.cause, detail):
         logger.info("session runtime: work arrived as the drain closed; keeping")
         return False
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
@@ -4022,7 +4079,8 @@ async def _drain_for(
     # latch: ``_drain_detail_at_exit`` is already this path's answer, and the
     # durable record now carries it so a later reader does not have to find the
     # log line to learn why the build handover happened.
-    await _clean_exit(handle, runtime, reason=drain.reason, detail=_drain_detail_at_exit(drain))
+    detail = await _drain_detail_at_exit(drain, read)
+    await _clean_exit(handle, runtime, reason=drain.reason, detail=detail)
     stop.set()  # amain's wait() returns; exit code stays 0
     return True
 

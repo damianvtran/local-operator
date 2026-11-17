@@ -397,6 +397,38 @@ class TestOffLoopBuildRead:
         assert levels.count(logging.INFO) == 1, levels
 
     @pytest.mark.asyncio
+    async def test_a_read_raising_timeout_is_not_logged_as_a_slow_disk(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review round 1, n1: ``asyncio.TimeoutError`` is the builtin since 3.11,
+        so a read that RAISED TimeoutError reached the reader's own timeout arm
+        and was logged as "no answer within 5 s". Both are unknown; the log now
+        names which one happened. The stuck read is the control."""
+
+        def raises_timeout() -> BuildStamp:
+            raise TimeoutError("nfs deadline")
+
+        gate = threading.Event()
+        with caplog.at_level(logging.WARNING, logger="local_operator.buildwatch"):
+            fast = buildwatch.OffLoopBuildRead("fast", timeout_s=5.0)
+            started = time.monotonic()
+            assert await fast(raises_timeout) is buildwatch.READ_UNKNOWN
+            assert time.monotonic() - started < 1.0, "a raising read is not waited out"
+            slow = buildwatch.OffLoopBuildRead("slow", timeout_s=0.05)
+            try:
+                assert await slow(lambda: gate.wait(10.0)) is buildwatch.READ_UNKNOWN
+            finally:
+                gate.set()
+        by_reader = {
+            r.getMessage().split(":", 1)[0]: r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        }
+        assert "raised TimeoutError: nfs deadline" in by_reader["fast"], by_reader
+        assert "no answer within" not in by_reader["fast"], by_reader
+        assert "no answer within 0.05 s" in by_reader["slow"], by_reader
+
+    @pytest.mark.asyncio
     async def test_a_stuck_read_times_out_without_a_second_thread(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

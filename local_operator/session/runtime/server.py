@@ -77,6 +77,7 @@ from local_operator.session.runtime.types import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from local_operator.buildwatch import OffLoopBuildRead
     from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
 from local_operator.asks.surfaces import stamp_answer_surface
@@ -2908,6 +2909,9 @@ class RuntimeServer:
         #: so the boot snapshot cannot drift toward the disk value it is
         #: compared against.
         self._boot_build = build
+        #: The ``refresh_if_idle`` op's off-loop build reader, created lazily
+        #: there (one per server so a stuck read is never re-issued per request).
+        self._build_read: "OffLoopBuildRead | None" = None
         from local_operator.session.model_admission import native_chat_provider_ids
 
         self._record = SessionRecord(
@@ -8116,9 +8120,14 @@ class RuntimeServer:
             return "kept: already leaving"
         # OFF THE LOOP, bounded: both reads end in ``importlib.metadata``, which
         # stalled a daemon's loop for 145 s under swap (see
-        # ``buildwatch.OffLoopBuildRead``). A per-op reader: this is a viewer's
-        # one-shot request, not a poll, so there is no streak to carry over.
-        read = buildwatch.OffLoopBuildRead("session runtime refresh")
+        # ``buildwatch.OffLoopBuildRead``). ONE reader per server, made on first
+        # use (review round 1, m1): a per-request reader cannot see the read a
+        # previous request left stuck, so every ``lop refresh`` during a stall
+        # parked another thread on the same swapped-out pages and logged its own
+        # warning. Shared, a request arriving mid-stall answers unknown at once.
+        read = self._build_read
+        if read is None:
+            read = self._build_read = buildwatch.OffLoopBuildRead("session runtime refresh")
         newer = await read(process_mod._build_changed, self._boot_build)
         if newer is buildwatch.READ_UNKNOWN:
             return buildwatch.KEPT_UNREADABLE

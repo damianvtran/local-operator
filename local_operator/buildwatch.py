@@ -273,7 +273,15 @@ class OffLoopBuildRead:
             # cancel the future, or ``done()`` would turn true while the thread
             # is still stuck and the next tick would start a second one.
             value = await asyncio.wait_for(asyncio.shield(future), self._timeout_s)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
+            # Since 3.11 ``asyncio.TimeoutError`` IS the builtin, so a read that
+            # itself raised TimeoutError (a network mount's own deadline) lands
+            # here too. Only the future tells the two apart: a read that gave up
+            # is done with that exception, a read still running is not done.
+            # Both are unknown either way; the log must name the one that
+            # happened, or a fast failure reads as a slow disk (review n1).
+            if future.done() and not future.cancelled() and future.exception() is exc:
+                return self._unanswered(f"the read raised {type(exc).__name__}: {exc}")
             return self._unanswered(f"no answer within {self._timeout_s:g} s")
         except asyncio.CancelledError:
             raise
