@@ -2262,6 +2262,7 @@ def stale_background_daemons(
     table: Callable[[], list[tuple[int, str]]] | None = None,
     staleness: Callable[[int], bool | None] | None = None,
     generation: Callable[[int], Path | None] | None = None,
+    wake_census: Callable[[], int | None] | None = None,
 ) -> list[StaleDaemon]:
     """Every known background daemon whose RUNNING process is on an old build.
 
@@ -2286,6 +2287,8 @@ def stale_background_daemons(
             if module is None or stale_of(pid) is not True:
                 continue
             name, reason = _DAEMON_MODULES[module]
+            if module == "local_operator.wakes.supervisor":
+                reason = _wakes_left_reason(wake_census or update._wake_owned_runtime_count)
             running = generation_of(pid)
             found.append(
                 StaleDaemon(
@@ -2298,6 +2301,27 @@ def stale_background_daemons(
     except Exception:  # noqa: BLE001 — a report must never fail its command
         logger.debug("background daemon inventory failed", exc_info=True)
     return found
+
+
+def _wakes_left_reason(census: Callable[[], int | None]) -> str:
+    """Why a stale wakes supervisor is still running, read NOW (review R1-3).
+
+    The common reason on a ``KillMode=process`` unit is not the unit file at
+    all: the update defers the restart while wake-started conversations run,
+    because the supervisor's stop SIGTERMs them (``update._UNIT_CHILD_CENSUS``).
+    So status asks the same census the refresher gates on and prints the same
+    sentence (``update.wake_children_deferral``); with none running it names
+    the move that now works, plus the unit rewrite an older install still needs.
+    """
+    from local_operator import update
+
+    running = census()
+    if running != 0:
+        return update.wake_children_deferral(running)
+    return (
+        "no wake-started conversations are running, so `lop services restart` moves it "
+        "now (run `lop wake install` first if its unit predates KillMode=process)"
+    )
 
 
 def stale_daemon_lines(daemons: Sequence[StaleDaemon] | None = None) -> list[str]:

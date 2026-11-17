@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,7 +59,14 @@ class FakeSystemctl:
         return sum(1 for call in self.calls if call[0] == "restart")
 
 
-def _move(fake: FakeSystemctl, stale_pids: set[int], *, keeps_children: bool) -> Any:
+def _move(
+    fake: FakeSystemctl,
+    stale_pids: set[int],
+    *,
+    keeps_children: bool,
+    child_census: Any = lambda: 0,
+    verify_of: Any = None,
+) -> Any:
     return update._systemd_restart_if_build_moved(
         name="wakes supervisor",
         unit="local-operator-wakes.service",
@@ -66,6 +76,9 @@ def _move(fake: FakeSystemctl, stale_pids: set[int], *, keeps_children: bool) ->
         stale_of=lambda pid: OLD if pid in stale_pids else None,
         unit_installed=lambda unit: True,
         addressable=lambda unit: True,
+        child_census=child_census,
+        # The tri-state post-restart reader, consistent with ``stale_pids``.
+        verify_of=verify_of or (lambda pid: pid in stale_pids),
     )
 
 
@@ -163,6 +176,7 @@ def _stale_inventory() -> list[services.StaleDaemon]:
         table=_inventory_table,
         staleness=lambda pid: pid in old,
         generation=lambda pid: OLD,
+        wake_census=lambda: 0,
     )
 
 
@@ -207,6 +221,7 @@ def test_a_non_movable_daemon_is_stale_in_services_status(monkeypatch: pytest.Mo
     monkeypatch.setattr(update, "generation_staleness_of_process", lambda pid: pid in old)
     monkeypatch.setattr(update, "generation_of_process", lambda pid: OLD)
     monkeypatch.setattr(update, "current_generation", lambda: OLD.parent / "current-gen")
+    monkeypatch.setattr(update, "_wake_owned_runtime_count", lambda: 0)
     lines = services.status_lines()
     broker = [line for line in lines if line.startswith("STALE daemon: secret broker")]
     assert broker and "pid 3663" in broker[0] and OLD.name in broker[0]
@@ -355,3 +370,130 @@ def test_a_no_generation_layout_means_no_process_scan(monkeypatch: pytest.Monkey
     scanned: list[bool] = []
     assert services.stale_background_daemons(table=lambda: scanned.append(True) or []) == []
     assert scanned == []
+
+
+# ------------------------------------------------------------- review round 1
+
+
+def test_r1_1_a_wake_started_conversation_defers_the_wakes_restart() -> None:
+    """KillMode=process is not enough: the supervisor's stop sweeps its runtimes."""
+    fake = FakeSystemctl([3106, 4200], kill_mode="process")
+    outcome = _move(fake, {3106}, keeps_children=True, child_census=lambda: 1)
+    assert fake.restarts == 0
+    assert outcome.kind == "stale"
+    assert "1 wake-started conversation running" in outcome.detail
+    assert update._plist_status(outcome.kind) == "pending"
+
+
+def test_r1_1_an_uncountable_census_defers_like_a_positive_one() -> None:
+    fake = FakeSystemctl([3106, 4200], kill_mode="process")
+    outcome = _move(fake, {3106}, keeps_children=True, child_census=lambda: None)
+    assert fake.restarts == 0
+    assert outcome.kind == "stale"
+    assert "could not be counted" in outcome.detail
+
+
+def test_r1_1_only_the_wakes_unit_carries_a_child_census() -> None:
+    """The bridge connector's stop signals nothing (see the KILLMODE block)."""
+    assert set(update._UNIT_CHILD_CENSUS) == {update._WAKES_UNIT}
+    assert update._UNIT_CHILD_CENSUS[update._WAKES_UNIT] is update._wake_owned_runtime_count
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process census")
+def test_r1_1_a_live_wake_owned_runtime_survives_the_refresh(tmp_path: Path) -> None:
+    """A REAL process carrying the wake-owner marker is counted and left running."""
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.session.runtime.types import RUNTIME_MODULE
+    from local_operator.wakes import owned_runtimes
+
+    root = tmp_path / "lop-config"
+    root.mkdir()
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        owned_runtimes.OWNER_ENV: "r1-1-synthetic-token",
+        CONFIG_DIR_ENV: str(root),
+        "LOP_MOBILE_CHILD_RESUME": "r1-1-synthetic-session",
+    }
+    # ``-c`` runs the sleep; the trailing ``-m <runtime module>`` words are only
+    # argv, which is exactly what the census's spawn-contract match reads.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time;time.sleep(120)", "-m", RUNTIME_MODULE],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while owned_runtimes.count_owned(root) != 1 and time.monotonic() < deadline:
+            time.sleep(0.05)  # until exec has replaced the forked argv
+        fake = FakeSystemctl([3106, 4200], kill_mode="process")
+        outcome = _move(
+            fake,
+            {3106},
+            keeps_children=True,
+            child_census=lambda: owned_runtimes.count_owned(root),
+        )
+        assert child.poll() is None, "the wake-owned runtime must still be running"
+        assert fake.restarts == 0
+        assert outcome.kind == "stale"
+        assert "1 wake-started conversation running" in outcome.detail
+        # The production census (every root) sees it too, so it would defer as well.
+        unscoped = update._wake_owned_runtime_count()
+        assert unscoped is not None and unscoped >= 1
+        assert re.search(r"\b[1-9]\d* wake-started", update.wake_children_deferral(unscoped))
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
+def test_r1_2_an_unreadable_new_build_is_unverified_not_moved() -> None:
+    fake = FakeSystemctl([3106, 4200])
+    outcome = _move(fake, {3106}, keeps_children=False, verify_of=lambda pid: None)
+    assert fake.restarts == 1
+    assert outcome.kind == "unverified"
+    assert update._plist_status(outcome.kind) == "pending"
+    assert "MainPID 4200" in outcome.detail
+    assert "unverified" in outcome.warning()
+    assert outcome.summary() == ""
+
+
+def test_r1_3_status_says_why_the_wakes_supervisor_was_left() -> None:
+    def inventory(count: int | None) -> list[services.StaleDaemon]:
+        return services.stale_background_daemons(
+            table=_inventory_table,
+            staleness=lambda pid: pid == 3106,
+            generation=lambda pid: OLD,
+            wake_census=lambda: count,
+        )
+
+    (busy,) = inventory(2)
+    assert busy.reason == update.wake_children_deferral(2)
+    assert "2 wake-started conversations running" in busy.reason
+    (idle,) = inventory(0)
+    assert "`lop services restart` moves it now" in idle.reason
+
+
+def _failed_serve_run(root: Path) -> None:
+    run = root / f"serve-{update._run_stamp(time.time())}-x1"
+    run.mkdir(parents=True)
+    (run / "spec.json").write_text(json.dumps({"started_at": time.time(), "bound_s": 1.0}))
+    (run / "result.json").write_text(json.dumps({"rc": 1, "finished_at": time.time()}))
+
+
+def test_r1_4_a_later_manual_move_clears_a_failed_serve_retry_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "refresh"
+    _failed_serve_run(root)
+    monkeypatch.setattr(update, "_refresh_runs_root", lambda: root)
+
+    monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: [object()])
+    (failed,) = [line for line in update.background_refresh_lines() if "serve" in line]
+    assert "FAILED" in failed
+
+    # No stamp to compare against: not a proof of a move, so the failure stays.
+    monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: None)
+    assert any("FAILED" in line for line in update.background_refresh_lines())
+
+    # ``lop services restart`` moved serve and wrote no run record.
+    monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: [])
+    assert [line for line in update.background_refresh_lines() if "serve" in line] == []

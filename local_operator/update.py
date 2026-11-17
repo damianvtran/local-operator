@@ -7947,6 +7947,25 @@ def _run_refresh_child(body: Callable[[], int], *, unit: str, bound_s: float) ->
         return body()
 
 
+def _serve_since_moved() -> bool:
+    """Is every live ``serve`` daemon PROVABLY on the current build now?
+
+    WHY (review R1-4, 2026-11-17): a serve retry run is the only record this
+    status reads, and a later manual ``lop services restart`` writes none (it
+    passes no ``schedule_retry``). Without this a failed retry kept printing
+    "FAILED … run `lop services restart`" after that very command had moved
+    serve. Only a proven ``[]`` clears the row — ``None`` (no build stamp to
+    compare against) keeps the failure visible, because "none stale" would then
+    be a claim nobody read.
+    """
+    try:
+        from local_operator import services
+
+        return services.stale_serve_daemons() == []
+    except Exception:  # noqa: BLE001 — a status row must not fail the command
+        return False
+
+
 def background_refresh_lines() -> list[str]:
     """``lop services status`` rows for each unit's LATEST background refresh.
 
@@ -7975,6 +7994,8 @@ def background_refresh_lines() -> list[str]:
         result = latest / "result.json"
         if not result.exists():
             if _run_abandoned(latest):
+                if unit == "serve" and _serve_since_moved():
+                    continue
                 started = _read_json(latest / "spec.json").get("started_at")
                 when = time.strftime(
                     "%Y-%m-%d %H:%M",
@@ -8001,6 +8022,8 @@ def background_refresh_lines() -> list[str]:
         ]
         if record.get("rc") == 0 and not failed_daemons:
             lines.append(f"background {unit} refresh: finished {when}, ok")
+            continue
+        if unit == "serve" and _serve_since_moved():
             continue
         if record.get("timed_out"):
             why = f"did not finish within {_bound_label(float(record.get('bound_s') or 0))}"
@@ -8953,12 +8976,29 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
 #: CONTINUITY block in :func:`refresh_daemons_after_upgrade`); the browser bridge
 #: starts no children.
 #:
+#: KILLMODE IS NECESSARY, NOT SUFFICIENT (review R1-1, 2026-11-17). It keeps
+#: SYSTEMD's signal off the children, but a main process that forwards its own
+#: stop reaches them anyway. The wakes supervisor does exactly that: its stop
+#: handler calls ``owned_runtimes.sweep(any_owner=True)``
+#: (``wakes/supervisor.py``, the ``if stop_requested:`` block after the loop),
+#: which SIGTERMs every wake-started runtime in the store. So the wakes row is
+#: also gated on :data:`_UNIT_CHILD_CENSUS` — restarted only when that census
+#: proves zero such runtimes. The bridge connector needs no census: its stop
+#: (``team_bridge/connector/__main__.py`` ``_supervise``, ~line 499) only sets
+#: an ``asyncio.Event``, lets the in-flight iteration finish or cancels it, and
+#: exits; nothing under ``team_bridge/connector/`` signals another process
+#: except ``reap.py``, which targets only an OLDER connector holding the store
+#: lock. The sessions it engages (``wake.py`` → ``launch.engage_runtime``) are
+#: therefore left running under ``KillMode=process``.
+#:
 #: The relay is not here: its own ``refresh_unit_if_stale`` also rewrites its
 #: unit and owns that installer's guards.
+_WAKES_UNIT = "local-operator-wakes.service"
+
 _LINUX_RESTART_UNITS: tuple[tuple[str, str, str, bool], ...] = (
     ("browser bridge", "local-operator-browser.service", "lop browser install", False),
     ("tunnel", "lop-tunnel.service", "lop tunnel install", False),
-    ("wakes supervisor", "local-operator-wakes.service", "lop wake install", True),
+    ("wakes supervisor", _WAKES_UNIT, "lop wake install", True),
     (
         "bridge connector",
         "local-operator-bridge-connector.service",
@@ -8966,6 +9006,46 @@ _LINUX_RESTART_UNITS: tuple[tuple[str, str, str, bool], ...] = (
         True,
     ),
 )
+
+
+def _wake_owned_runtime_count() -> int | None:
+    """Wake-started runtimes a wakes-supervisor stop would end; ``None`` if unknown.
+
+    Every config root, not just this process's: the refresh child cannot read
+    which root the installed unit serves, and over-counting only defers.
+    """
+    from local_operator.wakes import owned_runtimes
+
+    return owned_runtimes.count_owned(None)
+
+
+def wake_children_deferral(count: int | None) -> str:
+    """The one sentence both the update report and ``lop services status`` print.
+
+    Shared so the two surfaces cannot drift (review R1-3: status used to print
+    a static recovery that did not say why the update left the daemon). The
+    recovery names the next move, not an override: ``lop services restart``
+    takes the same guard, so it moves the supervisor only once they have ended.
+    """
+    if count is None:
+        return (
+            "left running because the wake-started conversations could not be counted "
+            "(a restart would stop them); it moves on the next `lop update` or `lop "
+            "services restart` that can count them"
+        )
+    noun = "conversation" if count == 1 else "conversations"
+    return (
+        f"{count} wake-started {noun} running; moves when they end — the next "
+        "`lop update` or `lop services restart` after that"
+    )
+
+
+#: Unit → census of the conversations its main process would stop on SIGTERM.
+#: Only units whose stop handler forwards the signal belong here (see the
+#: KILLMODE block above :data:`_LINUX_RESTART_UNITS`).
+_UNIT_CHILD_CENSUS: dict[str, Callable[[], int | None]] = {
+    _WAKES_UNIT: _wake_owned_runtime_count,
+}
 
 
 def _linux_restart_units_installed() -> bool:
@@ -9021,6 +9101,8 @@ def _systemd_restart_if_build_moved(
     stale_of: Callable[[int], Path | None] | None = None,
     unit_installed: Callable[[str], bool] | None = None,
     addressable: Callable[[str], bool] | None = None,
+    child_census: Callable[[], int | None] | None = None,
+    verify_of: Callable[[int], bool | None] | None = None,
 ) -> launchd.PlistRefresh:
     """Restart ``unit`` when its RUNNING process is on a superseded generation.
 
@@ -9039,7 +9121,13 @@ def _systemd_restart_if_build_moved(
     * stale but ``keeps_children`` and the LOADED ``KillMode`` is not
       ``process`` → ``stale`` with the reason (the restart would stop the
       conversations it started; the rolling-no-kill contract forbids that);
-    * restarted and the new MainPID is no longer stale → ``restarted``;
+    * stale, and ``child_census`` (a unit whose main process forwards its stop
+      to the conversations it started) counts any, or cannot count →
+      ``stale`` with :func:`wake_children_deferral`'s reason (review R1-1);
+    * restarted and the new MainPID is PROVABLY current (``verify_of`` is the
+      tri-state reader and must answer ``False``) → ``restarted``;
+    * restarted onto a new MainPID whose build cannot be read → ``unverified``
+      (reported pending, never counted as moved; review R1-2);
     * restart refused, or the new process is still on an old build →
       ``failed`` naming the recovery.
 
@@ -9076,6 +9164,18 @@ def _systemd_restart_if_build_moved(
                     "restart`"
                 ),
             )
+        if child_census is not None:
+            # Read-only and taken LAST, right before the restart, so the window in
+            # which a wake can start a conversation the restart would end is as
+            # short as this code can make it. Unknown (``None``) defers like a
+            # positive count: the asymmetry is a stale daemon vs a killed turn.
+            running = child_census()
+            if running != 0:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="stale",
+                    detail=f"left on {stale.name}: {wake_children_deferral(running)}",
+                )
         restarted = run("restart", unit, timeout=120)
         if getattr(restarted, "returncode", 1) != 0:
             return launchd.PlistRefresh(
@@ -9088,7 +9188,8 @@ def _systemd_restart_if_build_moved(
                 ),
             )
         after = _main_pid(_systemd_show(run, unit))
-        if after is None or after == pid or staleness(after) is not None:
+        verdict = (verify_of or generation_staleness_of_process)(after) if after else True
+        if after is None or after == pid or verdict is True:
             # A restart that brought no NEW process onto the current build is
             # not a move, whatever systemctl's exit code said.
             return launchd.PlistRefresh(
@@ -9097,6 +9198,19 @@ def _systemd_restart_if_build_moved(
                 detail=(
                     f"restarted {unit} but it is not running the new build "
                     f"(MainPID {after or 'none'}) — run `{recovery}`"
+                ),
+            )
+        if verdict is None:
+            # A NEW pid whose build cannot be read is not proof of a move (review
+            # R1-2): the two-state reader maps "unreadable" to "not stale", which
+            # would have counted it as restarted. The shim makes the new build
+            # likely, but the report claims only what was read.
+            return launchd.PlistRefresh(
+                name=name,
+                kind="unverified",
+                detail=(
+                    f"restarted {unit} (was on {stale.name}) but could not read which "
+                    f"build MainPID {after} runs — check `lop services status`"
                 ),
             )
         return launchd.PlistRefresh(name=name, kind="restarted", detail=stale.name)
@@ -9131,7 +9245,11 @@ def _linux_refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRe
             keeps: bool = keeps_children,
         ) -> launchd.PlistRefresh:
             return _systemd_restart_if_build_moved(
-                name=name, unit=unit, recovery=recovery, keeps_children=keeps
+                name=name,
+                unit=unit,
+                recovery=recovery,
+                keeps_children=keeps,
+                child_census=_UNIT_CHILD_CENSUS.get(unit),
             )
 
         steps.append((name, recovery, step))
@@ -9303,6 +9421,10 @@ _PLIST_STATUS: dict[str, DaemonStatusKind] = {
     # ``failed`` because nothing was attempted and nothing broke; the outcome's
     # detail rides out as the status's ``reason`` so the report says why.
     "stale": "pending",
+    # RESTARTED, BUILD UNREAD (review R1-2): a new process exists but its
+    # generation could not be read, so the move is not claimed. ``pending``, not
+    # ``refreshed``; the detail rides out as the reason like ``stale``'s.
+    "unverified": "pending",
 }
 
 # ``pending`` is accepted from a child since the slow-restart hand-off: a daemon
@@ -9485,7 +9607,7 @@ def daemons_refresh_command() -> int:
                 _daemon_report_line(
                     name,
                     status or outcome.kind,
-                    outcome.detail if outcome.kind == "stale" else "",
+                    outcome.detail if outcome.kind in ("stale", "unverified") else "",
                 ),
                 flush=True,
             )
