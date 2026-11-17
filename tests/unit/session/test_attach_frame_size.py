@@ -1308,6 +1308,13 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         # ``cause``) are unaffected. That is the whole size policy: there is no
         # string here to cap.
         "notify",
+        # ADR 0009's routing facts. The STORE carries them; the attach frame
+        # does NOT (``FrontendSessionState._attention_wire`` drops them, and
+        # the frame assertion below pins that), because every routing reader
+        # queries ``attention.db`` itself and ``origin`` is an uncapped string
+        # replayed from the transcript. Their size policy is "not on the wire".
+        "origin",
+        "needs_user",
     }
     # Published at the store's own cap: the field is one string per
     # conversation, and the ceiling this fixture exists to police is why it is
@@ -1599,7 +1606,13 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
     }
 
-    assert frame["data"]["snapshot"]["attention"] == attention
+    # The frame carries the store's state minus ADR 0009's routing facts
+    # (spelled literally, not via the module constant, so emptying that
+    # constant fails here instead of passing tautologically).
+    assert frame["data"]["snapshot"]["attention"] == {
+        key: value for key, value in attention.items() if key not in {"origin", "needs_user"}
+    }
+    assert not {"origin", "needs_user"} & set(frame["data"]["snapshot"]["attention"])
     # The settings outcomes ride the frame whole, so the size below charges them.
     assert frame["data"]["snapshot"]["settings_results"] == populated["settings_results"]
     # The all-year frame already spends its line budget. Complete proof stays

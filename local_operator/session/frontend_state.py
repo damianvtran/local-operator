@@ -3742,6 +3742,12 @@ def effort_displacement(selected: Any, effective: Any, chosen: str | None = None
     }
 
 
+#: ``AttentionStore`` state keys that never ride the attach frame: ADR 0009's
+#: per-run routing facts, read only by surfaces that query ``attention.db``
+#: themselves. See ``FrontendSessionState._attention_wire``.
+ATTACH_FRAME_ATTENTION_OMITTED_KEYS: frozenset[str] = frozenset({"origin", "needs_user"})
+
+
 class FrontendSessionState(BaseModel):
     """Versioned JSON-safe source of truth for one standard terminal UI."""
 
@@ -4029,6 +4035,8 @@ class FrontendSessionState(BaseModel):
     history_generation: int = 0
     attachment_root: str | None = None
     # Durable receipts are independent of the runtime epoch and pending action gates.
+    #: The store's state MINUS :data:`ATTACH_FRAME_ATTENTION_OMITTED_KEYS` —
+    #: see :meth:`_attention_wire` for why the routing facts stay off the frame.
     attention: dict[str, Any] = Field(default_factory=dict)
 
     @model_serializer(mode="wrap")
@@ -4073,6 +4081,38 @@ class FrontendSessionState(BaseModel):
     @classmethod
     def _model_wire(cls, value: Any) -> Any:
         return value.model_dump(mode="json") if isinstance(value, ModelSpec) else value
+
+    @field_validator("attention", mode="before")
+    @classmethod
+    def _attention_wire(cls, value: Any) -> Any:
+        """Drop the ADR 0009 routing facts from the attach frame's attention copy.
+
+        WHY: ``AttentionStore.state`` grew ``origin``/``needs_user`` so the
+        surfaces that ROUTE a completion (push worker, desktop feed banner,
+        ``serving._announce_completion``) can decide who hears about a run.
+        Every one of those reads ``attention.db`` directly; no attach reader
+        (the phone, the desktop app, the attached TUI) renders or routes on
+        them. Carrying them anyway would put an UNCAPPED string on every frame
+        — ``origin`` is replayed verbatim from the transcript's outcome marker
+        (``_import_transcript_outcome``), with no wire cap like ``reason``'s —
+        on a frame whose released arm already sits at its measured ceiling
+        (``test_attach_frame_size``). So the frame projection stays the
+        pre-ADR-0009 shape; a future surface that needs them over attach must
+        add them back here, with a cap and a size-policy review.
+
+        Validated at construction rather than stripped at one call site, so
+        both the snapshot build and ``FrontendStateStore``'s
+        ``model_validate`` refresh path apply it.
+        """
+        if isinstance(value, dict) and any(
+            key in value for key in ATTACH_FRAME_ATTENTION_OMITTED_KEYS
+        ):
+            return {
+                key: item
+                for key, item in value.items()
+                if key not in ATTACH_FRAME_ATTENTION_OMITTED_KEYS
+            }
+        return value
 
     @field_validator("last_usage", mode="before")
     @classmethod
