@@ -266,6 +266,18 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.action.stopping": "stopping",
     },
   },
+  "relay.diagram": {
+    "en": {
+      "relay.diagram.close": "Close diagram",
+      "relay.diagram.copied": "Copied",
+      "relay.diagram.copy": "Copy source",
+      "relay.diagram.copy_failed": "Couldn't copy",
+      "relay.diagram.error.title": "Couldn't draw this diagram",
+      "relay.diagram.full_size": "Full size",
+      "relay.diagram.save": "Save SVG",
+      "relay.diagram.view": "Diagram",
+    },
+  },
   "relay.health": {
     "en": {
       "relay.health.dropped_detail": "Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.",

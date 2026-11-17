@@ -1,0 +1,55 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Phone frame</title>
+<style>body{margin:0;padding:8px;background:#ccc;font:13px system-ui}
+header{display:flex;gap:6px;margin-bottom:6px}
+iframe{display:block;border:0;width:__W__px;height:__H__px;background:#fff}
+pre{position:absolute;inset-inline-start:__PRE_LEFT__px;top:40px;max-width:760px;white-space:pre-wrap}</style>
+<header><button id="full">open full size</button><button id="close">close viewer</button>
+<button id="metrics">metrics</button><button id="bottom">scroll transcript to end</button>
+<button id="vscroll">scroll viewer right+down</button></header>
+<pre id="out"></pre>
+<iframe id="phone" title="Phone relay"></iframe>
+<script>
+localStorage.setItem("lo-mobile-theme", __THEME__);
+const frame = document.getElementById("phone");
+frame.src = "/#/s/" + encodeURIComponent(__SESSION__);
+const doc = () => frame.contentDocument;
+const out = (v) => (document.getElementById("out").textContent = JSON.stringify(v, null, 1));
+const q = (sel) => doc().querySelector(sel);
+/* Log every diagram-state change with its time since load, so "did it draw, and how
+   late" is a reading rather than a screenshot's luck. */
+const trail = [];
+frame.addEventListener("load", () => {
+  const t0 = performance.now();
+  const seen = () => [...doc().querySelectorAll("[data-diagram-state]")].map((e) => e.dataset.diagramState).join(",");
+  let last = "";
+  new MutationObserver(() => {
+    const now = seen();
+    if (now !== last) { last = now; trail.push([Math.round(performance.now() - t0), now || "none"]); document.title = "trail " + JSON.stringify(trail); }
+  }).observe(doc().documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["data-diagram-state"] });
+});
+document.getElementById("full").onclick = () => q('[data-testid="diagram-full-size"]').click();
+document.getElementById("close").onclick = () => doc().querySelector('[data-diagram-viewer] button[aria-label]').click();
+document.getElementById("bottom").onclick = () => {
+  const sc = q('.lo-scroll'); sc.scrollTop = sc.scrollHeight;
+};
+document.getElementById("vscroll").onclick = () => {
+  const sc = q('[data-testid="diagram-viewer-scroll"]'); sc.scrollLeft += 200; sc.scrollTop += 200;
+};
+document.getElementById("metrics").onclick = () => {
+  const d = doc(); const de = d.documentElement; const svg = d.querySelector("figure svg");
+  const viewer = d.querySelector('[data-testid="diagram-viewer-scroll"]');
+  const fig = d.querySelector("figure");
+  out({
+    viewport: [de.clientWidth, de.clientHeight],
+    documentScrollWidth: de.scrollWidth, bodyScrollWidth: d.body.scrollWidth,
+    figure: fig && [fig.getBoundingClientRect().width, fig.getBoundingClientRect().height],
+    svg: svg && [svg.getBoundingClientRect().width, svg.getBoundingClientRect().height, svg.getAttribute("viewBox")],
+    svgClass: svg && svg.getAttribute("class"),
+    viewer: viewer && {client: [viewer.clientWidth, viewer.clientHeight], scroll: [viewer.scrollWidth, viewer.scrollHeight], at: [viewer.scrollLeft, viewer.scrollTop],
+      svg: (() => { const v = viewer.querySelector("svg"); return v && [v.getBoundingClientRect().width, v.getBoundingClientRect().height]; })()},
+    theme: de.dataset.theme, trail,
+    states: [...d.querySelectorAll("[data-diagram-state]")].map((e) => e.dataset.diagramState),
+    imgs: d.querySelectorAll("img,script[src*=evil],foreignObject,iframe,a[href^=javascript]").length,
+  });
+};
+</script></html>

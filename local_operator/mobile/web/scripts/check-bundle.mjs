@@ -108,6 +108,20 @@ for (const assetPath of [...scripts, ...styles]) {
 }
 
 /**
+ * THE DIAGRAM RENDERER STAYS OUT OF THE ENTRY CHUNK. Pele is fetched when the
+ * first diagram appears (`src/lib/diagram-pele.ts` imports it dynamically); a
+ * static import anywhere would put it, and every diagram kind, in the script the
+ * phone downloads before it can paint the session list. "pele-flowchart" is the
+ * class name Pele's flowchart drawing writes, so it appears in the renderer and
+ * nowhere in this app's own code.
+ */
+for (const assetPath of scripts) {
+	if (readFileSync(onDisk(assetPath), "utf8").includes("pele-flowchart")) {
+		fail(`${assetPath} carries the Pele diagram renderer; it must be loaded with a dynamic import("pele/lazy")`);
+	}
+}
+
+/**
  * Every class selector the stylesheet defines, in UNESCAPED form — Tailwind
  * escapes the characters a class name cannot carry, so a fraction-bearing
  * width and a variant-prefixed utility are written with backslashes in the CSS
