@@ -1721,9 +1721,14 @@ def _checked_preferences(value: object) -> dict[str, Any]:
 
     Strict like the body around it: a non-object, an unknown key (echoed
     BOUNDED, the same rule as the body's own unknown-field refusal) or a
-    non-bool value refuses the whole register. A key the app left out is
-    stored resolved to ``True``, so the row always holds every switch
-    and a reader never re-derives the default.
+    non-bool value refuses the whole register. A BOOLEAN key the app left out
+    is stored resolved to ``True``, so the row always holds every switch.
+
+    An ENUM key (ADR 0009) is stored only when the app SENT it (review round 1,
+    m3): absent already resolves to its default (:func:`resolved_preferences`),
+    and writing the default would put a key a pre-1b build does not know into
+    every row, which that build's ``_validated_record`` refuses wholesale on a
+    rollback, taking every registry route down with it.
     """
     if not isinstance(value, dict):
         raise PushDeviceRefusal("preferences must be an object when provided")
@@ -1740,7 +1745,11 @@ def _checked_preferences(value: object) -> dict[str, Any]:
             allowed = ", ".join(ENUM_PREFERENCES[key])
             raise PushDeviceRefusal(f"preferences.{key} must be one of: {allowed}")
         raise PushDeviceRefusal(f"preferences.{key} must be true or false")
-    return {key: value.get(key, PREFERENCE_DEFAULTS[key]) for key in PREFERENCE_KEYS}
+    return {
+        key: value.get(key, PREFERENCE_DEFAULTS[key])
+        for key in PREFERENCE_KEYS
+        if key not in ENUM_PREFERENCES or key in value
+    }
 
 
 def _install_id(value: object) -> str:
@@ -1981,10 +1990,17 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
         )
     if "preferences" in entry:
         stored = entry["preferences"]
+        # An enum key holding a STRING this build does not know is readable,
+        # not corrupt (review round 1, m3): a later build may have added the
+        # value before a rollback, and ``resolved_preferences`` resolves it to
+        # the key's default. Refusing it would refuse every registry route.
         if (
             not isinstance(stored, dict)
             or set(stored) - set(PREFERENCE_KEYS)
-            or not all(_valid_preference(key, flag) for key, flag in stored.items())
+            or not all(
+                isinstance(flag, str) if key in ENUM_PREFERENCES else _valid_preference(key, flag)
+                for key, flag in stored.items()
+            )
         ):
             raise PushRegistryCorrupt(
                 f"push device registry record {index} has invalid preferences;"

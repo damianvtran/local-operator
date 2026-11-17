@@ -61,6 +61,7 @@ from typing import (
     Mapping,
     Protocol,
     Sequence,
+    TypeVar,
     cast,
 )
 
@@ -2190,20 +2191,63 @@ def _input_surface_for(*, declared_origin: str, kind: str, locality: str, surfac
     return "unknown"
 
 
-def _note_answer_surface(handle: Any, ask_id: str | None, authority: _ConnectionAuthority) -> None:
+def _note_answer_surface(
+    handle: Any, ask_id: str | None, authority: _ConnectionAuthority
+) -> Callable[[], None]:
     """Tell the session which surface answered (ADR 0009 R10), when it can hear it.
 
     Probed like every optional handle capability: a test double or an older
     owner without ``note_answer_surface`` is left exactly as it was. A direct
     ``_dispatch`` with no connection (``input_surface == ""``) notes nothing.
+
+    Returns the note's UNDO, which :func:`_answer_noting_surface` runs when the
+    answer is refused (review round 1, m2). The note has to land BEFORE the
+    answer: the answer op itself starts delivery (``reconcile_asks``) on the
+    session's loop, so a note made after it returns can arrive after the
+    ``ask_response`` row was drained. Undo-on-refusal keeps that ordering while
+    a refused answer no longer relabels the run.
     """
     note = getattr(handle, "note_answer_surface", None)
     if not authority.input_surface or not callable(note):
-        return
+        return _no_answer_surface_undo
     try:
-        note(ask_id or None, authority.input_surface)
+        undo = note(ask_id or None, authority.input_surface)
     except Exception:  # noqa: BLE001 — routing must never cost an answer
         logger.debug("origin: could not note the answer surface", exc_info=True)
+        return _no_answer_surface_undo
+    # An older handle returns nothing: it cannot undo, which is the old behaviour.
+    return cast(Callable[[], None], undo) if callable(undo) else _no_answer_surface_undo
+
+
+_T = TypeVar("_T")
+
+
+def _no_answer_surface_undo() -> None:
+    return None
+
+
+async def _answer_noting_surface(
+    handle: Any,
+    ask_id: str | None,
+    authority: _ConnectionAuthority,
+    answer: Awaitable[_T],
+) -> _T:
+    """Await an answer op with its surface noted first and retracted on refusal.
+
+    ``answer`` is an un-started coroutine, so nothing of the answer runs before
+    the note is in place. Any exception is a refusal (the handles raise
+    ``ValueError`` in the queue's own words) and undoes the note before it
+    propagates; the undo itself never costs the refusal its error.
+    """
+    undo = _note_answer_surface(handle, ask_id, authority)
+    try:
+        return await answer
+    except BaseException:
+        try:
+            undo()
+        except Exception:  # noqa: BLE001 — routing must never mask the refusal
+            logger.debug("origin: could not undo the answer surface", exc_info=True)
+        raise
 
 
 def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
@@ -9408,12 +9452,16 @@ class RuntimeServer:
             )
         if op == "approval_answer":
             # ADR 0009 R10: an answer is human input; a live one flips the run in
-            # flight to the answering connection's surface.
-            _note_answer_surface(h, None, authority)
-            return await h.approval_answer(
-                frame["request_id"],
-                frame["approved"],
-                frame.get("remember", False),
+            # flight to the answering connection's surface (undone if refused).
+            return await _answer_noting_surface(
+                h,
+                None,
+                authority,
+                h.approval_answer(
+                    frame["request_id"],
+                    frame["approved"],
+                    frame.get("remember", False),
+                ),
             )
         if op == "recall_steer":
             # v4: follower Esc-recall parity. Optional capability — an owner
@@ -9443,8 +9491,6 @@ class RuntimeServer:
             # The frame's ``by`` is ignored; see ``asks/surfaces``.
             stamped_by = _stamp_ask_answer(authority, op=op, ask_id=str(frame.get("ask_id", "")))
             if op in ("ask_respond", "ask_revise"):
-                # ADR 0009 R10: the answer's surface rides to the run it opens.
-                _note_answer_surface(h, str(frame.get("ask_id", "")), authority)
                 raw = frame.get("answers") or {}
                 if not isinstance(raw, dict):
                     raise ValueError(f"{op} needs an answers map")
@@ -9487,6 +9533,16 @@ class RuntimeServer:
             # ``adopt_aside`` arm below uses.
             if not inspect.isawaitable(outcome):
                 raise ValueError(f"owner {op} operation must be awaitable")
+            if op in ("ask_respond", "ask_revise", "ask_decline"):
+                # ADR 0009 R10: the answer's surface rides to the run it opens. A
+                # decline is an answer too ("decide yourself"); a dismissal asks
+                # the model nothing, so it drives no run and is not noted.
+                return cast(
+                    "str",
+                    await _answer_noting_surface(
+                        h, str(frame.get("ask_id", "")), authority, outcome
+                    ),
+                )
             return cast("str", await outcome)
         if op == "bridge_decide":
             # TB-02 P1: the VERIFIED door for a bridge decision. The authority
@@ -9505,7 +9561,12 @@ class RuntimeServer:
             )
             if not inspect.isawaitable(outcome):
                 raise ValueError("owner bridge_decide operation must be awaitable")
-            return cast("str", await outcome)
+            # ADR 0009 R10: a bridge decision answers the request ask, and the
+            # decision's ``ask_response`` opens the next run like any answer.
+            return cast(
+                "str",
+                await _answer_noting_surface(h, str(frame.get("ask_id", "")), authority, outcome),
+            )
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
             # the user tapped (U8 guard): the handle rejects the answer if the
@@ -9529,8 +9590,12 @@ class RuntimeServer:
             from local_operator.asks import store as _ask_store
 
             mirrored = _ask_store.parse_mirror_request_id(str(frame.get("request_id", "")))
-            _note_answer_surface(h, mirrored[0] if mirrored else None, authority)
-            return await h.ask_answer(frame["request_id"], frame["value"], **answer_kwargs)
+            return await _answer_noting_surface(
+                h,
+                mirrored[0] if mirrored else None,
+                authority,
+                h.ask_answer(frame["request_id"], frame["value"], **answer_kwargs),
+            )
         if op == "adopt_aside":
             adopt = getattr(h, "adopt_aside", None)
             if not callable(adopt):

@@ -419,6 +419,8 @@ def _conn(*, surface: str = "desktop", kind: str = "attach") -> Any:
         kind=kind,
         operator_nonce=operator_nonce(),
         operator_salt=operator_nonce(),
+        # ADR 0009: ``_ClientConn.origin``, the auth-time declared origin.
+        origin="",
     )
 
 

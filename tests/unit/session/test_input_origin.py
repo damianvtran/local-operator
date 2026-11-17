@@ -193,7 +193,8 @@ async def test_a_steer_is_stamped_with_its_own_surface(tmp_path: Path) -> None:
     session = make_session(tmp_path, _stream(0))
     session.steer("adjust", input_surface="mobile")
     queued = session._steering_queue.get_nowait()
-    assert queued.provider_payload[INPUT_SURFACE_KEY] == "mobile"
+    assert _input_surface_of(queued) == "mobile"
+    assert INPUT_SURFACE_KEY in (getattr(queued, "provider_payload", None) or {})
     session._run_input_surface = "desktop"
     session._note_run_input_surface(queued)
     assert session._run_origin() == "mobile"
@@ -342,6 +343,7 @@ async def test_the_marker_carries_origin_and_needs_user(tmp_path: Path) -> None:
         await session.prompt("from the phone", input_surface="mobile")
         await _wait_published(session, stream)
         marker = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+        assert marker is not None
         assert marker["origin"] == "mobile"
         assert marker["needs_user"] is False
     finally:
@@ -397,3 +399,169 @@ async def test_a_quiet_bridge_wake_with_a_new_ask_still_publishes_for_the_phone(
         assert state["notify"] is False, "the desktop completion banner stays quiet"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ask_opened_by_a_run_that_leaves_a_task_running_still_reaches_the_phone(
+    tmp_path: Path,
+) -> None:
+    """Review round 1, M1: a delegating parent's idle boundary publishes no row
+    (it is not finished), but that run has already CLOSED its needs-you window,
+    so an ask it opened would never be announced by any later run. The ask must
+    still publish ``needs_user`` with ``notify`` false (no desktop completion
+    banner for an unfinished parent); a delegated end without an ask stays
+    unpublished, as before."""
+    from local_operator.harness.jobs import AsyncJob
+    from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+
+    stream = _stream(2)
+    session = make_session(tmp_path, stream)
+    queue = _Queue()
+    queue.install(session)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    # Only ``_publish_attention_outcome``'s delegation read sees the running
+    # task (a real ``AsyncJob`` row: a frontend snapshot can read the ledger
+    # while the publish awaits); the run loop and teardown never see it.
+    running = AsyncJob(id="job-1", type="task", status="running", label="child", start_time=0.0)
+    publish = session._publish_attention_outcome
+
+    async def publish_while_delegating() -> None:
+        session.jobs.list = lambda *args, **kwargs: [running]
+        try:
+            await publish()
+        finally:
+            del session.jobs.list
+
+    session._publish_attention_outcome = publish_while_delegating  # type: ignore[method-assign]
+    try:
+        from tests.unit.session.test_session import wait_for
+
+        await session.prompt("delegate without an ask")
+        await wait_for(lambda: session._attention_run_settled and not session.is_streaming)
+        marker = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+        assert marker is not None and marker["eligible"] is False, "control: no ask, no row"
+
+        original = session._run_needs_user
+
+        def open_during_run(now: float | None = None) -> bool:
+            queue.open_now("ask-1")
+            return original(now)
+
+        session._run_needs_user = open_during_run  # type: ignore[method-assign]
+        await session.prompt("delegate and ask")
+        await _wait_published(session, stream)
+        end = _ends(events)[-1]
+        assert end.needs_user is True
+        state = await session.refresh_attention()
+        assert state["completion_token"] is not None, "the phone's row exists"
+        assert state["needs_user"] is True
+        assert state["notify"] is False, "an unfinished parent rings no desktop banner"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ask_raised_between_the_last_run_end_and_a_runtime_swap_is_announced_once(
+    tmp_path: Path,
+) -> None:
+    """Review round 1, m1: the successor's first window opens just past the
+    newest durable outcome marker, not at its own construction, so an ask the
+    old runtime raised after its last run end (a retried Bridge issuance) is
+    announced by the next run. An ask the old runtime already counted (opened
+    before that marker) is not re-announced."""
+    stream = _stream(1)
+    queue = _Queue()
+    session = make_session(tmp_path, stream)
+    queue.install(session)
+    original = session._run_needs_user
+
+    def open_during_run(now: float | None = None) -> bool:
+        if not queue.records:
+            queue.open_now("counted-ask")
+        return original(now)
+
+    session._run_needs_user = open_during_run  # type: ignore[method-assign]
+    events: list[Any] = []
+    session.subscribe(events.append)
+    try:
+        await session.prompt("work")
+        await _wait_published(session, stream)
+        assert _ends(events)[-1].needs_user is True, "the old runtime counted its own ask"
+    finally:
+        await session.dispose()
+    time.sleep(0.002)
+    queue.open_now("swap-ask")  # raised while idle, before the swap
+    time.sleep(0.002)
+    resumed_stream = _stream(2)
+    resumed = make_session(tmp_path, resumed_stream)
+    queue.install(resumed)
+    resumed_events: list[Any] = []
+    resumed.subscribe(resumed_events.append)
+    try:
+        await _wake(resumed, resumed_stream, "w1")
+        assert _ends(resumed_events)[-1].needs_user is True, "the swap ask is announced"
+        queue.records = [r for r in queue.records if r["ask_id"] == "counted-ask"]
+        await _wake(resumed, resumed_stream, "w2")
+        assert _ends(resumed_events)[-1].needs_user is False
+    finally:
+        await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_counted_ask_is_not_re_announced_after_a_runtime_swap(tmp_path: Path) -> None:
+    """The exactly-once half of m1: only the old runtime's counted ask is open."""
+    stream = _stream(1)
+    queue = _Queue()
+    session = make_session(tmp_path, stream)
+    queue.install(session)
+    original = session._run_needs_user
+
+    def open_during_run(now: float | None = None) -> bool:
+        if not queue.records:
+            queue.open_now("counted-ask")
+        return original(now)
+
+    session._run_needs_user = open_during_run  # type: ignore[method-assign]
+    try:
+        await session.prompt("work")
+        await _wait_published(session, stream)
+    finally:
+        await session.dispose()
+    resumed_stream = _stream(1)
+    resumed = make_session(tmp_path, resumed_stream)
+    queue.install(resumed)
+    events: list[Any] = []
+    resumed.subscribe(events.append)
+    try:
+        await _wake(resumed, resumed_stream, "w1")
+        assert _ends(events)[-1].needs_user is False
+    finally:
+        await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_answers_undo_restores_the_session_surfaces(tmp_path: Path) -> None:
+    """m2, the session half: the undo the server runs on a refusal restores the
+    queued note and the live run's surface, and never clobbers a newer note."""
+    session = make_session(tmp_path, _stream(0))
+    undo = session.note_answer_surface("ask-1", "mobile")
+    undo()
+    assert "ask-1" not in session._ask_answer_surfaces
+
+    session.note_answer_surface("ask-2", "desktop")
+    stale = session.note_answer_surface("ask-2", "mobile")
+    stale()
+    assert session._ask_answer_surfaces["ask-2"] == "desktop", "the earlier note survives"
+
+    newer_wins = session.note_answer_surface("ask-3", "mobile")
+    session.note_answer_surface("ask-3", "desktop")
+    newer_wins()
+    assert session._ask_answer_surfaces["ask-3"] == "desktop", "a newer note is not undone"
+
+    session._is_streaming = True
+    session._run_input_surface = "desktop"
+    live = session.note_answer_surface(None, "mobile")
+    assert session._run_input_surface == "mobile"
+    live()
+    assert session._run_input_surface == "desktop"

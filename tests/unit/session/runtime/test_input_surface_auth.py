@@ -244,3 +244,105 @@ def test_the_cold_wake_errand_carries_the_origin_to_its_dial() -> None:
 
     assert PromptErrand(text="x").origin == ""
     assert PromptErrand(text="x", origin="mobile").origin == "mobile"
+
+
+class _AnswerHandle:
+    """A handle for the answer ops (review round 1, m2): records each surface
+    note and its undo, and refuses an answer when told to, the way the real
+    handles do (``ValueError`` in the queue's own words)."""
+
+    def __init__(self, *, refuse: bool = False) -> None:
+        self.refuse = refuse
+        self.notes: list[tuple[str | None, str]] = []
+        self.undone: list[tuple[str | None, str]] = []
+        self.noted_before_answer: list[bool] = []
+
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Any:
+        self.notes.append((ask_id, surface))
+        return lambda: self.undone.append((ask_id, surface))
+
+    async def _answer(self) -> str:
+        # The note must already be in place when the answer starts delivery.
+        self.noted_before_answer.append(bool(self.notes))
+        if self.refuse:
+            raise ValueError("the answer was refused")
+        return "ok"
+
+    async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
+        return await self._answer()
+
+    async def ask_respond(self, ask_id: str, answers: Any, by: str = "") -> str:
+        return await self._answer()
+
+    async def ask_decline(self, ask_id: str, by: str = "") -> str:
+        return await self._answer()
+
+    async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
+        return await self._answer()
+
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> str:
+        return await self._answer()
+
+
+def _mobile_authority() -> Any:
+    from local_operator.session.runtime.server import _ConnectionAuthority
+
+    return _ConnectionAuthority(
+        locality="remote", kind="daemon", surface="terminal", input_surface="mobile"
+    )
+
+
+async def _dispatch_answer(handle: _AnswerHandle, op: str, frame: dict[str, Any]) -> Any:
+    import types
+
+    server: Any = types.SimpleNamespace(_handle=handle)
+    return await RuntimeServer._dispatch(server, op, {"op": op, **frame}, _mobile_authority())
+
+
+@pytest.mark.parametrize(
+    ("op", "frame", "ask_id"),
+    [
+        ("ask_decline", {"ask_id": "a1"}, "a1"),
+        ("bridge_decide", {"ask_id": "a1", "question_id": "q1", "word": "approve"}, "a1"),
+        ("ask_respond", {"ask_id": "a1", "answers": {"q": ["yes"]}}, "a1"),
+        ("approval_answer", {"request_id": "r1", "approved": True}, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_answer_op_notes_its_surface_before_the_answer(
+    op: str, frame: dict[str, Any], ask_id: str | None
+) -> None:
+    """m2: ``ask_decline`` and ``bridge_decide`` are answers too, and every
+    answer's note lands before the answer starts delivery."""
+    handle = _AnswerHandle()
+    await _dispatch_answer(handle, op, frame)
+    assert handle.notes == [(ask_id, "mobile")]
+    assert handle.noted_before_answer == [True]
+    assert handle.undone == []
+
+
+@pytest.mark.parametrize(
+    ("op", "frame", "ask_id"),
+    [
+        ("ask_decline", {"ask_id": "a1"}, "a1"),
+        ("bridge_decide", {"ask_id": "a1", "question_id": "q1", "word": "approve"}, "a1"),
+        ("ask_respond", {"ask_id": "a1", "answers": {"q": ["yes"]}}, "a1"),
+        ("approval_answer", {"request_id": "r1", "approved": True}, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_refused_answer_retracts_its_surface_note(
+    op: str, frame: dict[str, Any], ask_id: str | None
+) -> None:
+    """m2: a refused answer relabels nothing; the refusal still propagates."""
+    handle = _AnswerHandle(refuse=True)
+    with pytest.raises(ValueError, match="refused"):
+        await _dispatch_answer(handle, op, frame)
+    assert handle.undone == [(ask_id, "mobile")]
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_is_not_an_answer_and_notes_nothing() -> None:
+    handle = _AnswerHandle()
+    await _dispatch_answer(handle, "ask_dismiss", {"ask_id": "a1"})
+    assert handle.notes == []

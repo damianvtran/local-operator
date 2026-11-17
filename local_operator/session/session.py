@@ -475,6 +475,11 @@ def spooled_input_surface(line: Any) -> str:
     return _input_surface(value, default="unknown")
 
 
+def _noop_answer_surface_undo() -> None:
+    """``Session.note_answer_surface``'s undo when the note changed nothing."""
+    return None
+
+
 def _input_surface_of(message: Any) -> str | None:
     """The stamped surface of one row, or ``None`` when it carries no stamp."""
     payload = getattr(message, "provider_payload", None)
@@ -4142,7 +4147,15 @@ class Session:
         #: so "opened during this run" would never announce it (ADR 0009 review
         #: round 3, R3-1, the "opened since the previous run end" remedy). Each ask
         #: still falls in exactly one window, so it is announced once.
-        self._needs_user_window_ms: int = int(time.time() * 1000)
+        #:
+        #: Seeded from the newest durable outcome marker
+        #: (``_seed_needs_user_window``): a runtime swap or resume must not drop
+        #: an ask raised between the previous runtime's last run end and this
+        #: construction (review round 1, m1). Read HERE, at construction, so the
+        #: seed is the PREVIOUS runtime's marker: any marker this runtime appends
+        #: (its own run ends, a republish) comes later and must not move it.
+        self._needs_user_constructed_ms: int = int(time.time() * 1000)
+        self._needs_user_window_ms: int = self._seed_needs_user_window()
         #: The session's last REAL typed request, kept across runs (NOT reset at the
         #: pipeline head, unlike ``_run_user_text``). A turn that resumes after an ANSWERED
         #: ask carries no typed row of its own -- the ``ask_response`` is the only input --
@@ -11826,8 +11839,12 @@ class Session:
             if surface is not None:
                 self._run_input_surface = surface
 
-    def note_answer_surface(self, ask_id: str | None, surface: str) -> None:
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None]:
         """The control server's record of WHO answered (ADR 0009, R10).
+
+        Returns an UNDO the server runs when the answer is then refused (review
+        round 1, m2), so a refused answer relabels nothing. The note itself
+        must precede the answer (see ``_answer_noting_surface``).
 
         ``ask_id`` names a QUEUED ask: its answer reaches the run later as an
         ``ask_response`` row, which picks this up in ``_note_run_input``. ``None``
@@ -11837,10 +11854,30 @@ class Session:
         """
         clamped = _input_surface(surface, default="unknown")
         if ask_id:
+            previous = self._ask_answer_surfaces.get(ask_id)
             self._ask_answer_surfaces[ask_id] = clamped
-            return
+
+            def undo_queued() -> None:
+                # Only this note's own value is retracted: a later note for the
+                # same ask (another surface answering) stays.
+                if self._ask_answer_surfaces.get(ask_id) != clamped:
+                    return
+                if previous is None:
+                    self._ask_answer_surfaces.pop(ask_id, None)
+                else:
+                    self._ask_answer_surfaces[ask_id] = previous
+
+            return undo_queued
         if self._is_streaming:
+            previous_run = self._run_input_surface
             self._run_input_surface = clamped
+
+            def undo_live() -> None:
+                if self._run_input_surface == clamped:
+                    self._run_input_surface = previous_run
+
+            return undo_live
+        return _noop_answer_surface_undo
 
     def _reconstruct_input_driver(self) -> str:
         """The conversation's last driver, rebuilt from the transcript on resume.
@@ -11903,6 +11940,29 @@ class Session:
         self._needs_user_window_ms = end_ms + 1
         records = self._open_ask_records(end_ms)
         return any(start_ms <= int(record.get("created_at") or 0) <= end_ms for record in records)
+
+    def _seed_needs_user_window(self) -> int:
+        """Where this runtime's FIRST needs-you window opens.
+
+        Just past the newest durable outcome marker, else construction. Every
+        marker is appended after its run's window closed, so an ask counted by
+        an earlier runtime (``created_at`` <= that run end <= the marker) is
+        never counted again, while one raised after it (a Bridge issuance retried
+        by ``reconcile_asks`` on a deadline tick before a swap, with no turn
+        following) still falls in this window (review round 1, m1). Capped at
+        construction so the seed can only widen the old window, never narrow it.
+        A read failure keeps construction: routing must never cost a turn.
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+
+        seed = self._needs_user_constructed_ms
+        try:
+            entry = self._transcript.latest_custom_entry(ATTENTION_CUSTOM_TYPE)
+            if entry is not None and entry.ts:
+                seed = min(seed, int(float(entry.ts) * 1000) + 1)
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the outcome marker", exc_info=True)
+        return seed
 
     def _open_ask_records(self, now_ms: int) -> list[dict[str, Any]]:
         """The queue's OPEN asks (``asks.store.open_asks``), or ``[]``.
@@ -19790,13 +19850,22 @@ class Session:
             # bypasses ``notify``), so it publishes its row; ``notify`` is forced
             # false so the desktop's completion banner stays silent, as the
             # quiet end asked (the ask keeps its own desktop banner).
-            if kind == "complete" and needs_user and (
-                not messages or self._run_ended_quiet(outcome)
+            #
+            # The DELEGATED arm gets the same exception (review round 1, M1): a
+            # run that opens an ask AND leaves a ``task`` job running has already
+            # closed its needs-you window (``_run_needs_user``), so suppressing its
+            # row here would lose the ask for good — the job_result run's window
+            # starts after it. Its desktop completion banner stays silent (the
+            # delegated parent is not finished), so ``notify`` is forced false.
+            if (
+                kind == "complete"
+                and needs_user
+                and (not messages or self._run_ended_quiet(outcome) or delegated)
             ):
                 notify = False
             if kind == "complete" and (
                 (not messages and not needs_user)
-                or delegated
+                or (delegated and not needs_user)
                 or (self._run_ended_quiet(outcome) and not needs_user)
             ):
                 await self._transcript.append_custom(

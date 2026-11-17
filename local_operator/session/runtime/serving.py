@@ -7262,17 +7262,21 @@ class ServingSessionHandle(SessionHandle):
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
-    def note_answer_surface(self, ask_id: str | None, surface: str) -> None:
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None] | None:
         """ADR 0009 R10: record which surface answered, before the answer lands.
 
         Synchronous and called by the control server just ahead of the answer
         op, so the note is in place when the answer's row reaches the run. Two
         plain attribute writes on the session (``Session.note_answer_surface``),
-        which is why it needs no loop hop.
+        which is why it needs no loop hop. Returns the session's undo (run by
+        the server when the answer is refused), or ``None`` from a session
+        without the capability.
         """
         note = getattr(self._session, "note_answer_surface", None)
         if callable(note):
-            note(ask_id, surface)
+            undo = note(ask_id, surface)
+            return cast(Callable[[], None], undo) if callable(undo) else None
+        return None
 
     @_on_session_loop
     async def ask_answer(
