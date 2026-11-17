@@ -397,6 +397,13 @@ def _message_text(message: AgentMessage) -> str:
     return ""
 
 
+def _bridge_receipt_line(details: Mapping[str, Any] | None) -> str:
+    """Human text of an inbound Team Bridge delivery, shared by live and replay."""
+    from local_operator.harness.bridge_copy import bridge_delivery_receipt_line
+
+    return bridge_delivery_receipt_line(details)
+
+
 def _bridge_summary(
     args: Mapping[str, Any], details: Mapping[str, Any] | None, *, failed: bool = False
 ) -> str:
@@ -1826,6 +1833,12 @@ def fold_messages_to_entries(
                     )
                     continue
             text = _message_text(message)
+            if message.custom_type == "team_bridge_message" and text:
+                # View projection only: the stored row keeps the model envelope
+                # and card. The phone's live arm (``note_nonpeer_delivery``)
+                # builds the same line, so replay cannot disagree with it or leak
+                # tenant/conversation ids and receiver rules.
+                text = _bridge_receipt_line(message.details)
             if text:
                 entries.append(
                     TranscriptEntry(
@@ -3153,6 +3166,10 @@ class ProjectionFold:
             }
         if custom_type == "team_bridge_message" and display_details:
             details.update(projected_display_receipt(display_details))
+        if custom_type == "team_bridge_message":
+            # The card/envelope the model reads is not the row's human text; the
+            # history fold builds the same line, so live and replay agree.
+            text = _bridge_receipt_line(display_details)
         if custom_type:
             details["custom_kind"] = _compact(custom_type, _NOTICE_CHARS)
         self._append(
