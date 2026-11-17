@@ -1324,24 +1324,40 @@ non_user_triggers = triggers − {"user"}
 notify_requested  = OR over the run's wake/monitor deliveries of their own
                     ``notify`` parameter (copied from the schedule/spec)
 awaiting_user     = a plain user message is queued but not yet consumed
+quiet_internal    = an internal trigger exists, its raw custom-type set is
+                    nonempty, and every type is peer-family or a known routine
+                    ask answer, job result or system notice (see note below)
 
 notify = ( awaiting_user
            or "user" in triggers                      # R15a: user semantics win
            or not (non_user_triggers
-                   and non_user_triggers ⊆ {"wake_prompt", "monitor_prompt"})
-                                                      # any other origin, incl.
-                                                      # wake+peer mixed: unchanged
+                   and (non_user_triggers ⊆ {"wake_prompt", "monitor_prompt"}
+                        or (quiet_internal and non_user_triggers
+                            ⊆ {"internal", "wake_prompt", "monitor_prompt"})))
+                                                      # unknown inputs fail loud
            or notify_requested )                      # wake/monitor-only runs only
          or kind == "error"                           # errors always notify
 ```
 
 Notes that make it implementable without ambiguity:
 
-- **The trigger domain is the three classes above** (round-1 review F7): the
-  delivery parameter governs only runs whose non-user triggers are exclusively
-  wake/monitor. A wake delivery joined by a peer message, a job result or any
-  other internal input falls into the third clause and behaves exactly as
-  today — notify — and a quiet delivery never suppresses such a run.
+- **Routine completion is silent everywhere** (operator decision, ask `a-91bd`,
+  relayed by mobile owner session `316765a40496`, 2026-11-16): "No, stay quiet
+  everywhere unless it errors or needs me". A routine acknowledgement is not
+  worth interrupting the operator on either desktop or phone. The session uses
+  an explicit raw-type vocabulary: `ask_response`, `job_result`,
+  `session_incident`, `session_model_switch`, `session_credential`,
+  `session_credential_redaction`, `session_mcp_recovery`,
+  `session_mcp_unavailable`, `session_credential_binding_notice.v1` and
+  `session_send_notice`. Peer-family inputs retain their quiet default, including
+  mixtures with these routine inputs and quiet wake/monitor deliveries.
+  Unknown or missing custom types keep the loud default; a `session_*` prefix
+  alone is not evidence of routine work. A delivery explicitly requesting
+  notification, a real user input (including mixed runs), an awaiting user or
+  an actual turn error still raises eligibility. Open asks and explicit
+  high-priority attention items keep their separate delivery paths: silencing
+  a completion does not hide a question or change unread state. No preference
+  or phone-only override is introduced.
 - The **discriminator is `custom_type`, never `attribution`**: wake deliveries
   ride `attribution="user"` by design (`session.py:16602-16606`), so only the
   custom type separates a delivery from a person.
