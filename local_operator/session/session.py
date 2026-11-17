@@ -13156,14 +13156,27 @@ class Session:
         from local_operator.team_bridge import ask_issuance as ledger_mod
 
         directory = asks_store.session_dir(self._config_dir, self.session_id)
+        now = _time.time()
         try:
+            # A delivered bridge row is a CustomMessage, persisted as a
+            # ``message`` row (payload kind ``custom``) — never a ``custom``
+            # entry, so ``custom_messages`` is what makes this scan see it at
+            # all. ``min_ts`` is the repair's own 24 h window pushed into the
+            # walk: this runs synchronously on the event loop at every turn
+            # start, ask op and deadline tick, and without the bound its cost
+            # tracked the journal's whole size (1.07 s warm on a 688 MB one,
+            # while matching nothing). With both, it reads back only as far as
+            # the window or the 20th row, whichever comes first.
             rows = transcript_mod.read_custom_entries(
-                directory, TEAM_BRIDGE_MESSAGE_TYPE, max_rows=20
+                directory,
+                TEAM_BRIDGE_MESSAGE_TYPE,
+                max_rows=20,
+                custom_messages=True,
+                min_ts=now - 86400,
             )
         except Exception:  # noqa: BLE001 — repair is best-effort, never a crash
             return
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
-        now = _time.time()
         for entry in rows:
             if now - float(getattr(entry, "ts", 0.0) or 0.0) > 86400:
                 continue
