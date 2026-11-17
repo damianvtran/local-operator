@@ -11024,8 +11024,8 @@ async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
     assert frames[-1]["completion_token"] == "t2"
     assert bridge.attention["origin"] == "o" * 4000
 
-    bridge.remote = SimpleNamespace(
-        frontend_state=FrontendSessionState(session_id="s1", epoch="e1")
+    bridge.remote = cast(
+        Any, SimpleNamespace(frontend_state=FrontendSessionState(session_id="s1", epoch="e1"))
     )
     capture = bridge._capture_wire_state()
     assert not {"origin", "needs_user"} & set(capture.attention)
