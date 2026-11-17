@@ -83,6 +83,7 @@ import logging
 import os
 import secrets
 import select
+import selectors
 import sys
 import time
 from dataclasses import dataclass
@@ -145,8 +146,10 @@ _TOKEN_FD_MAX_BYTES = 4096
 _TOKEN_MIN_CHARS = 16
 
 #: How long boot waits for the writer to deliver the line, on platforms where the wait can
-#: be bounded (POSIX ``select``). A spawner that names a descriptor and never writes is a
-#: bug on its side; the daemon then boots with the plane CLOSED rather than hanging.
+#: be bounded (POSIX ``poll``, or a :mod:`selectors` selector where ``poll`` is missing --
+#: never ``select()``, which refuses any descriptor at or above ``FD_SETSIZE``). A spawner
+#: that names a descriptor and never writes is a bug on its side; the daemon then boots
+#: with the plane CLOSED rather than hanging.
 _TOKEN_FD_TIMEOUT_S = 10.0
 
 #: The bearer adopted at serve start-up (descriptor, or the scrubbed environment fallback).
@@ -236,6 +239,28 @@ def desktop_posture() -> DesktopPosture:
     return DesktopPosture(token="", origins=env_origins)
 
 
+def _readable_within(fd: int, timeout_s: float) -> bool:
+    """Whether ``fd`` has data (or EOF/hang-up) within ``timeout_s`` seconds.
+
+    Not ``select.select``: it raises ``ValueError`` for any descriptor >= ``FD_SETSIZE``
+    (1024), and a serve spawned under a parent holding many descriptors -- or a long CI
+    process -- inherits a bearer descriptor numbered above that, so the plane stayed CLOSED
+    ("desktop bearer descriptor is unreadable"). ``poll`` has no such ceiling and, like
+    ``select``, reports a regular file as readable (epoll would refuse to register one), so
+    it is preferred; :mod:`selectors` covers a POSIX build without ``poll``. Any revent --
+    including ``POLLHUP``/``POLLNVAL`` -- counts as readable so the following ``os.read``
+    reports EOF or the real error instead of the wait timing out.
+    """
+    if hasattr(select, "poll"):
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        # poll() takes milliseconds; round up so a sub-millisecond remainder still waits.
+        return bool(poller.poll(max(1, int(timeout_s * 1000 + 0.999))))
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        return bool(selector.select(timeout_s))
+
+
 def _read_bearer_fd(fd: int) -> str:
     """The bearer line off an inherited descriptor, then the descriptor is closed.
 
@@ -252,14 +277,16 @@ def _read_bearer_fd(fd: int) -> str:
         while b"\n" not in data and len(data) < _TOKEN_FD_MAX_BYTES:
             if os.name == "posix":
                 left = deadline - time.monotonic()
-                if left <= 0 or not select.select([fd], [], [], left)[0]:
+                if left <= 0 or not _readable_within(fd, left):
                     logger.warning("desktop bearer descriptor delivered nothing in time")
                     return ""
             chunk = os.read(fd, _TOKEN_FD_MAX_BYTES - len(data))
             if not chunk:
                 break
             data += chunk
-    except (OSError, ValueError):  # ValueError: a number select() cannot take
+    # ValueError: a descriptor number the wait cannot register (e.g. negative). The wait no
+    # longer uses select(), whose FD_SETSIZE ceiling made every fd >= 1024 land here.
+    except (OSError, ValueError):
         logger.warning("desktop bearer descriptor is unreadable", exc_info=True)
         return ""
     finally:
