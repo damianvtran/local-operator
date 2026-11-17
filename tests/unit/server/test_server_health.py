@@ -132,18 +132,18 @@ async def test_a_probe_burst_reads_the_install_identity_once(test_app_client, mo
 
 @pytest.fixture
 def fresh_identity_reader(monkeypatch):
-    """An empty identity cache and a reader of this test's own.
+    """An empty identity cache, no shared read, no failing streak, a 0.2 s bound.
 
-    The reader is module state (one in-flight read per route), so a test that
+    The shared read is module state (one in flight per process), so a test that
     leaves a stuck read behind must not hand it to the next test. ``raising``
-    is off only so the base-code proof (which has no reader) can still run.
+    is off only so the base-code proofs (which have no shared read) still run.
     """
-    from local_operator.buildwatch import OffLoopBuildRead
     from local_operator.server.routes import health
 
     monkeypatch.setattr(health, "_install_identity", None)
-    reader = OffLoopBuildRead("test /health install identity", timeout_s=0.2)
-    monkeypatch.setattr(health, "_identity_reader", reader, raising=False)
+    monkeypatch.setattr(health, "_identity_read", None, raising=False)
+    monkeypatch.setattr(health, "_identity_read_failing", False, raising=False)
+    monkeypatch.setattr(health, "INSTALL_IDENTITY_READ_TIMEOUT_S", 0.2)
     return health
 
 
@@ -170,8 +170,10 @@ async def test_a_stuck_identity_read_does_not_stall_the_loop(
     release = threading.Event()
     safety = threading.Timer(3.0, release.set)
     safety.start()
+    entries = {"n": 0}
 
     def stuck() -> str:
+        entries["n"] += 1
         release.wait()
         return "9.9.9"
 
@@ -206,9 +208,14 @@ async def test_a_stuck_identity_read_does_not_stall_the_loop(
 
         stop.set()
         await ticking
+        # Read BEFORE releasing: the warm probe joined (or deferred to) the
+        # stuck read rather than starting a second thread (review R1-2).
+        reads_started = entries["n"]
     finally:
         release.set()
         safety.cancel()
+
+    assert reads_started == 1, f"{reads_started} identity reads ran at once"
 
     assert cold_elapsed < 1.5 and warm_elapsed < 1.5, (cold_elapsed, warm_elapsed)
     assert max(gaps) < 0.5, f"the loop stalled for {max(gaps):.2f} s"
@@ -242,7 +249,7 @@ async def test_a_fresh_identity_is_served_without_a_read(
     result = (await test_app_client.get("/health")).json()["result"]
 
     assert (result["version"], result["install_kind"]) == ("4.5.6", "pipx")
-    assert not health._identity_reader.failing
+    assert not health._identity_read_failing
 
 
 @pytest.mark.asyncio
@@ -261,3 +268,45 @@ async def test_a_cold_probe_reports_the_real_installed_version(
     assert result["version"] == expected != "unknown"
     assert result["install_kind"] == install_kind().value
     assert fresh_identity_reader._install_identity is not None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_probes_join_one_healthy_read(
+    test_app_client, monkeypatch, fresh_identity_reader, caplog
+):
+    """Review R1-1 on #4157: overlapping probes on a HEALTHY disk.
+
+    The first cut gave the route a single-caller reader that refused a second
+    read while one was in flight, so a probe arriving during another's ~50 ms
+    read answered ``unknown`` at once and logged "did not answer" on a disk
+    that was fine. Before it, the inline read made that probe wait. Both
+    probes must now get the real reading, from ONE read, with no WARNING.
+    """
+    import asyncio
+    import logging
+
+    from local_operator import update
+
+    health = fresh_identity_reader
+    # The fixture's 0.2 s bound is 4x the read, so only a refusal (not a slow
+    # CI box) can push the second probe off the real version.
+    entries = {"n": 0}
+
+    def healthy_but_not_instant() -> str:
+        entries["n"] += 1
+        time.sleep(0.05)
+        return "9.9.9"
+
+    monkeypatch.setattr(update, "installed_version", healthy_but_not_instant)
+    caplog.set_level(logging.DEBUG)
+
+    first, second = await asyncio.gather(
+        test_app_client.get("/health"), test_app_client.get("/health")
+    )
+
+    versions = [r.json()["result"]["version"] for r in (first, second)]
+    assert versions == ["9.9.9", "9.9.9"]
+    assert entries["n"] == 1, f"{entries['n']} reads for one overlapping burst"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == []
+    assert not getattr(health, "_identity_read_failing", False)
