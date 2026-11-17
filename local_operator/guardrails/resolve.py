@@ -4453,7 +4453,6 @@ class _Walker:
             or FRESH_DIR_MARK in old
             or FOR_GLOB_MARK in old
             or TEMP_MARK in suffix
-            or FRESH_DIR_MARK in suffix
         ):
             credential = CREDENTIAL_MARK in old or CREDENTIAL_MARK in suffix
             return Expanded(text=f"{name}=" + (CREDENTIAL_MARK if credential else OPAQUE_MARK))

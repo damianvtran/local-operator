@@ -123,6 +123,13 @@ def test_preview_and_real_shell_write_agree(tree) -> None:
         HEADER + ASSIGN + 'X=$(node unknown.mjs "$ROOT")\n' + WRITE,
         HEADER + ASSIGN + "PATH=/untrusted\n" + WRITE,
         HEADER + 'ln -sfn "$HOME" "$LOCAL_OPERATOR_SCRATCHPAD"\n' + ASSIGN + WRITE,
+        # Rebase onto #4147, which added ``NAME+=`` tracking: appending to a
+        # fresh binding (or appending one) must drop the proof, never extend it.
+        HEADER + ASSIGN + "ROOT+=/../..\n" + WRITE,
+        HEADER + ASSIGN + "ROOT+=old\n" + WRITE,
+        HEADER
+        + 'OTHER=x\nOTHER+=$(mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/p.XXXXXXXX")\n'
+        + 'printf proof > "$OTHER/source"\n',
     ],
 )
 def test_unsupported_or_invalidated_provenance_never_lowers(tree, command) -> None:
