@@ -413,3 +413,79 @@ def test_m1_reaped_spawn_record_is_not_believed() -> None:
     proc.returncode = 0
     assert spawned.session_of(987_654_321) is None
     assert spawned.session_of(987_654_321) is None  # pruned, not resurrected
+
+
+# -- race: a holder that exits between the inventory and the process table ------
+#
+# Main Full Suite 43718276774 (job 132827789967) and 43737923202 (job
+# 132897283649) failed ``test_a_field_shape...[rm -rf ...]`` on Linux: the
+# ``rm -rf`` rank runs ``worktree_state`` and ``worktree_activity`` together,
+# activity's ``git -C <tree>`` child was in the cwd inventory but gone from the
+# process table, so it read "unknown process" and the clean own tree busy.
+# These tests make that interleaving deterministic instead of timing-dependent.
+
+
+def _exited_pid() -> int:
+    """The pid of a real process that has exited and been reaped (holds nothing)."""
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def _inventory_plus(monkeypatch: pytest.MonkeyPatch, pid: int, cwd: Path) -> None:
+    """The real inventory, plus ``pid`` reported with its cwd in ``cwd``.
+
+    Models the field order: the cwd scan saw ``pid`` inside the tree; the
+    process table, read after it, may no longer list it.
+    """
+    real_entries = prov._cwd_entries
+    extra = (pid, os.path.realpath(cwd))
+
+    def entries(*, fresh: bool = False) -> tuple[prov.CwdEntry, ...] | None:
+        rows = real_entries(fresh=fresh)
+        return None if rows is None else (*rows, extra)
+
+    monkeypatch.setattr(prov, "_cwd_entries", entries)
+
+
+@pytest.mark.parametrize("command", FIELD)
+def test_race_holder_gone_before_attribution_does_not_hold_own_tree(
+    home: Path, repo: Path, live: list[int], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """A pid the scan listed but that no longer exists is no holder: own tree stays LOW."""
+    wt = _attr3880(home, repo)
+    child = _own_child_in(wt, live)
+    _wait_seen(wt, child.pid)
+    gone = _exited_pid()
+    _inventory_plus(monkeypatch, gone, wt)
+    holders = prov.cwd_holders(os.path.realpath(wt), S, own=True)
+    assert holders is not None
+    assert [(h.pid, h.family) for h in holders] == [(child.pid, True)], holders
+    # The field tree is dirty detached scratch by design; the point is "not busy".
+    assert prov.worktree_state(str(wt), own=True, session_id=S) == "dirty"
+    risk, reason = _rank(home, command)
+    assert risk is Risk.LOW, reason
+
+
+def test_race_live_holder_missing_from_process_table_stays_busy_and_named(
+    home: Path, repo: Path, live: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: a pid that STILL EXISTS but has no table row stays foreign.
+
+    Only a provably exited process is dropped; one whose ancestry cannot be
+    read (here: the table misses it) keeps the own tree busy — fail closed.
+    """
+    wt = _attr3880(home, repo)
+    pid = _orphan_in(wt, live)
+    _wait_seen(wt, pid)
+    real_table = prov._process_table
+
+    def table_without_orphan() -> dict[int, tuple[int, str]] | None:
+        rows = real_table()
+        return None if rows is None else {k: v for k, v in rows.items() if k != pid}
+
+    monkeypatch.setattr(prov, "_process_table", table_without_orphan)
+    assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
+    risk, reason = _rank(home, FIELD[1])
+    assert risk is Risk.HIGH, reason
+    assert f"pid {pid} ? (no session record; unknown process)" in reason, reason

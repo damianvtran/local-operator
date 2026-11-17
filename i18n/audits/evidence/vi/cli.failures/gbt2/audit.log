@@ -1,0 +1,18 @@
+# actual command output, 2026-11-16, worktree @ 80a55b208
+$ .venv/bin/python scripts/i18n/check.py  (tail)
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 229 file(s) scanned, 2681 literal(s) at or below the baseline, catalogues consistent; 100 advisory finding(s) (report-only until activated)
+check.py rc=0
+
+$ .venv/bin/python parity.py  (retained as parity.py.txt)
+keys en/vi/ctx: 5 5 5 same: True
+cli.failures.error_line ph_ok= True ['message', 'prog'] nfc= True cells en/vi= 24 22 backticks= 0 0
+cli.failures.required ph_ok= True ['names'] nfc= True cells en/vi= 45 30 backticks= 0 0
+cli.failures.invalid_choice ph_ok= True ['argument', 'choices', 'value'] nfc= True cells en/vi= 68 72 backticks= 0 0
+cli.failures.invalid_command ph_ok= True ['command', 'group'] nfc= True cells en/vi= 34 36 backticks= 0 0
+cli.failures.github_borrow_timeout ph_ok= True ['owner', 'seconds'] nfc= True cells en/vi= 83 91 backticks= 0 0
+8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea local_operator/i18n/catalogues/en/cli.failures.json
+b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f local_operator/i18n/catalogues/en/cli.failures.context.json
+81539ebce3b4185aefeec8b9b6159e4df4aa62dde82e8577317b9f04e1f7da47 local_operator/i18n/catalogues/vi/cli.failures.json
+99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51 i18n/style-guides/vi.md
+5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7 i18n/glossary.md

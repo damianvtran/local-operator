@@ -13072,7 +13072,6 @@ class OperatorApp(App[None]):
             # Adopted from the boot default / machine setting: global scope
             # (team-bridge-egress.md: "Grants"). A conversation record read below re-scopes it.
             source.draft.approve_scope = "global"
-            source.draft.approve_granted_while_latched = False
         self._interaction = source
         # Load THIS conversation's recorded approval choice (or its absence)
         # on every adoption. Doing it here rather than at boot is what stops
@@ -28521,12 +28520,13 @@ class OperatorApp(App[None]):
             return False
         # Approve-all never covers an account profile save (see
         # ``harness.approval.never_auto_approved``): that card always shows.
-        # Nor does a SESSION approve-all granted before the conversation held
-        # Team Bridge content (team-bridge-egress.md: "Grants"): the call falls through to the
-        # card. The source's own latch is read too (fail-closed), so a card
-        # whose raiser passed no flag is still person-only.
+        # It DOES cover a latched session whichever scope it came from -- a
+        # conversation's own auto exactly as the machine default (#3928,
+        # team-bridge-egress.md: "Grants"). The source's own latch is read for
+        # the CARD (fail-closed), so a card whose raiser passed no flag is
+        # still person-only.
         latched = bool(bridge_latched) or self._source_bridge_latched(source)
-        if session_grant_covers(self._draft_grant(source), title=tool_name, bridge_latched=latched):
+        if session_grant_covers(self._draft_grant(source), title=tool_name):
             return True
         # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
         # one. It is not a competing prompt — it IS this gate's card, built by
@@ -28565,12 +28565,10 @@ class OperatorApp(App[None]):
             # denied on waking by a latch that has nothing to do with it.
             if job_id is None and self._source_approvals_are_denied(source, epoch):
                 return False
-            # The queued asker's waking re-check: the same grant rule, so a
-            # pre-latch approve-all cannot answer a card queued in a latched
-            # session (T22g).
-            if session_grant_covers(
-                self._draft_grant(source), title=tool_name, bridge_latched=latched
-            ):
+            # The queued asker's waking re-check: the same grant rule as the
+            # front of this method, so an approve-all set while it waited
+            # answers it exactly as it would answer a fresh call.
+            if session_grant_covers(self._draft_grant(source), title=tool_name):
                 return True
         # The prompt is a transcript block, and the subagent page hides the
         # transcript — mounted behind it the question was invisible while
@@ -31594,11 +31592,12 @@ class OperatorApp(App[None]):
             return True
 
     def _watch_bridge_latch(self, session: Any, source: SessionInteraction) -> None:
-        """Announce once, in this pane, that a pre-latch session auto stopped covering calls.
+        """Redraw ``source``'s parked cards as latched cards when its session latches.
 
-        A session this app hosts has the real latch; a viewer facade has a
-        MIRROR of the owner's (``mirror=True``), which only redraws parked
-        cards -- the owner announces through its own notice stream.
+        Until #3928 this also announced that a pre-latch session auto had
+        stopped covering calls; the latch suspends no grant now, so it only
+        redraws. A session this app hosts has the real latch; a viewer facade
+        has a MIRROR of the owner's (``mirror=True``).
 
         Installed once PER LATCH, not once per source: a source's session is
         replaced on takeover (viewer facade -> hosted ``Session``), and the new
@@ -31610,13 +31609,9 @@ class OperatorApp(App[None]):
         source._bridge_watch_latch = latch  # type: ignore[attr-defined]
 
         def announce() -> None:
-            # A viewer's MIRROR latch (``AttachedSession.bridge_taint_latch``)
-            # fires only to redraw parked cards: the owner already announced
-            # the suspension on its own notice stream, so a second notice here
-            # would say it twice.
-            suspended = not getattr(latch, "mirror", False) and self._draft_grant_suspended(source)
-            from local_operator.harness.bridge_egress import grant_suspended_notice
-
+            # Redraw only: since #3928 the latch suspends no grant, so there is
+            # no "auto is paused" notice to announce (it would contradict the
+            # gate and the band), on the owner's latch or a viewer's mirror.
             def paint() -> None:
                 # A card parked while the session was clean was built with
                 # Allow all and the S/G escapes; it becomes the latched card
@@ -31624,9 +31619,6 @@ class OperatorApp(App[None]):
                 # the guarantee; this keeps the card from offering keys it
                 # would refuse.
                 self._latch_parked_cards(source)
-                if suspended and source is self._interaction:
-                    self._append_block(NoticeBlock(grant_suspended_notice(latch), "warning"))
-                    self._set_approve_all(self._approve_all, scope="keep")
 
             try:
                 self.call_later(paint)
@@ -31673,10 +31665,11 @@ class OperatorApp(App[None]):
         Why at PRESS time (QA Q-11): the callbacks are bound when a card is
         built (``None`` on a latched card), so a card parked before the latch
         still holds them. Pressing one then reached ``_set_approve_all`` while
-        latched, which stamps ``granted_while_latched`` -- the marker only a
-        typed ``/approvals auto`` may carry -- and the next egress ran with no
-        card. Mirrors the ``A`` check in ``_latch_approval_answer``. Writes
-        nothing; the card is turned into the latched card in the same gesture.
+        latched, a loosening a latched card must not offer (one keypress on a
+        card a teammate's agent prompted is not the typed ``/approvals auto``
+        the latch asks for), and the next egress ran with no card. Mirrors the
+        ``A`` check in ``_latch_approval_answer``. Writes nothing; the card is
+        turned into the latched card in the same gesture.
         """
         card = self._approval
         card_latched = (
@@ -31701,18 +31694,6 @@ class OperatorApp(App[None]):
         return ApprovalGrant(
             auto=bool(draft.approve_all),
             scope="global" if draft.approve_scope == "global" else "session",
-            granted_while_latched=draft.approve_granted_while_latched is True,
-        )
-
-    def _draft_grant_suspended(self, source: SessionInteraction) -> bool:
-        """Whether a live session approve-all is void because the session latched."""
-        from local_operator.harness.bridge_egress import session_grant_covers
-
-        grant = self._draft_grant(source)
-        if not grant.auto or grant.scope != "session":
-            return False
-        return not session_grant_covers(
-            grant, title="", bridge_latched=self._source_bridge_latched(source)
         )
 
     def _latch_approval_answer(self, answer: str) -> None:
@@ -31758,12 +31739,11 @@ class OperatorApp(App[None]):
         true is decided by the pair of flags this method owns.
         """
         self._approve_all = approve_all
-        # The grant's scope and latch stamp ride the same assignment
-        # (team-bridge-egress.md: "Grants"). ``scope`` defaults to ``session`` -- the fail-closed
-        # reading;
-        # only the machine-default adoptions pass ``global``, and a re-assertion
-        # of the band passes ``keep``. Stamped only when granted while the
-        # conversation ALREADY holds Team Bridge content.
+        # The grant's scope rides the same assignment (team-bridge-egress.md:
+        # "Grants"). ``scope`` defaults to ``session``; only the machine-default
+        # adoptions pass ``global``, and a re-assertion of the band passes
+        # ``keep``. It is provenance only since #3928: the latch treats both
+        # scopes alike, so there is no post-latch stamp to take.
         draft = self._interaction.draft
         if not approve_all:
             draft.approve_global_issued_here = False
@@ -31773,16 +31753,11 @@ class OperatorApp(App[None]):
             scope = "session"
         if scope != "keep":
             draft.approve_scope = scope if scope in ("session", "global") else "session"
-            draft.approve_granted_while_latched = bool(
-                approve_all
-                and draft.approve_scope == "session"
-                and self._source_bridge_latched(self._interaction)
-            )
         if self._status is not None:
-            # The band reports the EFFECTIVE mode: a suspended pre-latch
-            # session auto asks, so the band must not claim auto.
+            # The band reports the mode, which IS the effect: since #3928 the
+            # Team Bridge latch suspends no grant, so there is no fold here.
             self._status.update(
-                approvals_auto=approve_all and not self._draft_grant_suspended(self._interaction),
+                approvals_auto=approve_all,
                 approvals_always=self._approvals_default_auto,
             )
 
@@ -32352,15 +32327,6 @@ class OperatorApp(App[None]):
         self._explicit_approvals_mode = override
         if not attached and first_adoption:
             self._set_approve_all(override == "auto")
-            # The record's latch stamp, absent = False (team-bridge-egress.md: "Grants"): a
-            # pre-latch record is void once the conversation latches.
-            from local_operator.session.approval_policy import (
-                read_granted_while_latched,
-            )
-
-            source.draft.approve_granted_while_latched = (
-                override == "auto" and read_granted_while_latched(directory)
-            )
 
     def _persist_approval_override(self, source: SessionInteraction, mode: str | None) -> str:
         """Record (or clear) this conversation's choice; ``""`` on success.
@@ -32378,13 +32344,7 @@ class OperatorApp(App[None]):
         try:
             from local_operator.session.approval_policy import write_override
 
-            write_override(
-                directory,
-                mode,
-                # Stamped when chosen while the conversation already holds Team
-                # Bridge content, so a resume keeps that deliberate grant.
-                granted_while_latched=mode == "auto" and self._source_bridge_latched(source),
-            )
+            write_override(directory, mode)
         except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
             logger.warning("could not save the approval override", exc_info=True)
             return error.__class__.__name__
@@ -65570,7 +65530,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 154
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 156
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

@@ -531,6 +531,66 @@ async def test_ledger_recorded_path_stays_low_despite_the_ask(deep: Path) -> Non
     assert judge.prompts == []
 
 
+FAMILY_PARENT = "beef00000002"  # synthetic manager of S for the Q1 cases below
+
+
+def _parent_records(home: Path, rel: str) -> Path:
+    """S is FAMILY_PARENT's subagent; FAMILY_PARENT's ledger records ``~/rel``."""
+    state = home / ".local-operator"
+    prov.record_lineage(S, origin="subagent", parent=FAMILY_PARENT, state_root=state)
+    target = home / rel
+    target.mkdir(parents=True, exist_ok=True)
+    prov.write_records(
+        [(os.path.realpath(target), "mkdir")],
+        owners=[FAMILY_PARENT],
+        creator=FAMILY_PARENT,
+        command=f"mkdir -p {target}",
+        state_root=state,
+    )
+    return target
+
+
+@pytest.mark.asyncio
+async def test_parents_ledger_row_does_not_lift_the_parents_lapsed_ask(deep: Path) -> None:
+    """QA Q1, PR #3964: family ownership must not exempt a path an unanswered ask names.
+
+    The parent recorded ``~/hyperplane-cpp/build`` and asked about deleting
+    it; the ask timed out. Its subagent S deleting that path is refused as a
+    lapsed ask, without a judge, exactly as on main. Before the fix,
+    ``escalate_asked_targets`` read the parent's row as S's own and let the
+    delete run unexamined.
+    """
+    _parent_records(deep, "hyperplane-cpp/build")
+    _deep_ask(deep, session=FAMILY_PARENT)
+    from local_operator.guardrails.check import escalate_asked_targets
+
+    command = "rm -rf ~/hyperplane-cpp/build"
+    verdict = escalate_asked_targets(_rank(deep, command), _ctx(deep, command))
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+    judge = _Judge("ALLOW")
+    outcome = await _check(deep, command, judge)
+    assert outcome is not None and outcome.blocked
+    assert judge.prompts == []
+    assert NOT_CONSENT_TEXT in outcome.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rel", ["hyperplane-cpp/build", "qa-3506"])
+async def test_parents_ledger_row_still_lowers_a_delete_no_ask_names(deep: Path, rel: str) -> None:
+    """Family ownership (#3964) still applies when no ask names the path.
+
+    ``~/qa-3506`` is a top-level home directory (HIGH unless owned): it must
+    rank LOW on the parent's ledger row, and run with no judge.
+    """
+    _parent_records(deep, rel)
+    command = f"rm -rf ~/{rel}"
+    assert _rank(deep, command).risk is Risk.LOW
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, command, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
 @pytest.mark.asyncio
 async def test_unrelated_deep_path_stays_low_with_the_ask_open(deep: Path) -> None:
     _deep_ask(deep)

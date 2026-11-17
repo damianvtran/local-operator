@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tunnel.status",
-  "history_sha256": "742e68e937d5a4190eee43536ec4b20d4b73f98e8800db7efedfcb23f10c535e",
+  "history_sha256": "880499ba1d38813eaf80c81a567c1a3589c96e5050ca14aedec8deccf433fa67",
   "entries": [
     {
       "locale": "ur",
@@ -118,6 +118,40 @@
       "evidence": "i18n/audits/evidence/ur/tunnel.status/a5/record.json",
       "round": "a5",
       "keys_audited": 8
+    },
+    {
+      "locale": "ur",
+      "namespace": "tunnel.status",
+      "source_sha256": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+      "translator": {
+        "agent": "i18n-translator subagent, job a3f997956154 (Radient Console canonicalisation values, commit 3dd15d6f5559)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task brand-au-ur), independent subagent; not the translator (job a3f997956154) and did not edit any value",
+        "session": "e0a45ddcb618",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-16",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "ur-A1"
+        ],
+        "locale_verdict": "CLEAN-WITH-FINDINGS"
+      },
+      "status": "passed",
+      "note": "Delta audit of the Radient Console canonicalisation at commit 3dd15d6f5559 (diff base 220d39a96667): independent i18n-auditor e0a45ddcb618 (anthropic/claude-opus-5-5, no fallback observed) of i18n-translator job a3f997956154 (anthropic/claude-sonnet-5-5). Audited keys: tunnel.status.card_open_console, tunnel.status.tunnel_disabled.detail, tunnel.status.tunnel_inactive.detail, tunnel.status.tunnel_disabled.label (unchanged keys keep their earlier passed audits and were not re-audited). Pair findings: 0 blocker, 0 major, 1 minor, 0 nit ['ur-A1']; locale-wide verdict CLEAN-WITH-FINDINGS. Record: i18n/audits/evidence/ur/tunnel.status/rc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ur/tunnel.status/rc1/record.json",
+      "round": "rc1",
+      "keys_audited": 4
     }
   ]
 }
