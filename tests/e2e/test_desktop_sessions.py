@@ -1222,9 +1222,8 @@ async def test_a_delegating_turn_stays_silent_until_its_child_settles(
                 # a cancelled read that would make this iterator unusable.
                 after += await collect_frames(
                     lines,
-                    lambda f: f["type"] == (
-                        "notification" if settlement == "error" else "heartbeat"
-                    ),
+                    lambda f: f["type"]
+                    == ("notification" if settlement == "error" else "heartbeat"),
                 )
 
             assert len(stream.requests) == 2
@@ -1236,7 +1235,8 @@ async def test_a_delegating_turn_stays_silent_until_its_child_settles(
             # request and exactly one durable result row instead.
             assert "audit clean" in json.dumps(stream.requests[1].model_dump(mode="json"))
             result_rows = [
-                entry for entry in session._transcript.entries()
+                entry
+                for entry in session._transcript.entries()
                 if entry.type == "message" and entry.payload.get("custom_type") == "job_result"
             ]
             assert len(result_rows) == 1
