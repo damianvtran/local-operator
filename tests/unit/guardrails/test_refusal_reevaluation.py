@@ -17,6 +17,7 @@ every agent-facing surface, the field re-evaluation, and a still-refused control
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -85,7 +86,9 @@ def _settings(tmp_path: Path, block_rule: str = "") -> GuardSettings:
     return GuardSettings(rules_dirs=(rules,))
 
 
-def _may_reevaluate(refusal: str, tool: str, args: dict, ctx: CallContext, settings) -> bool:
+def _may_reevaluate(
+    refusal: str, tool: str, args: dict[str, Any], ctx: CallContext, settings
+) -> bool:
     """The re-evaluation exception exactly as ``REFUSAL_SCOPE`` states it."""
     report = preview_tool_call(tool, args, ctx, settings=settings)
     return refusing_guard_version(refusal) != report.guard_version and report.action in (
@@ -275,12 +278,15 @@ async def test_still_refused_call_stays_final_across_versions_and_approval(
     critical = {"command": "rm -rf ~/.local-operator"}
     pushed = {"command": "git push origin main"}
     _install(monkeypatch, _OLD)
-    old_critical = (
-        await check_tool_call("bash", critical, _ctx(home), judge=None, settings=settings)
-    ).text
-    old_push = (
-        await check_tool_call("bash", pushed, _ctx(home), judge=None, settings=settings)
-    ).text
+    # check_tool_call returns None when a call is allowed; both calls must refuse.
+    critical_outcome = await check_tool_call(
+        "bash", critical, _ctx(home), judge=None, settings=settings
+    )
+    push_outcome = await check_tool_call("bash", pushed, _ctx(home), judge=None, settings=settings)
+    assert critical_outcome is not None
+    assert push_outcome is not None
+    old_critical = critical_outcome.text
+    old_push = push_outcome.text
     assert refusing_guard_version(old_critical) == _OLD
 
     _install(monkeypatch, _NEW)
