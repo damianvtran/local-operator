@@ -27,6 +27,7 @@ NOW = 1_800_000_000.0
 
 #: Captured at import, before any fixture replaces it, for the negative control.
 _REAL_KICKSTART = launchd.kickstart
+_REAL_RECONCILE = install._reconcile
 
 
 def _obs(**overrides: Any) -> sr.Observation:
@@ -38,6 +39,7 @@ def _obs(**overrides: Any) -> sr.Observation:
         "uptime_s": sr.MIN_UPTIME_S + 1,
         "installed_version": "0.106.7",
         "last_kick": None,
+        "recorded_version": "0.101.42",
     }
     base.update(overrides)
     return sr.Observation(**base)
@@ -50,6 +52,11 @@ def _obs(**overrides: Any) -> sr.Observation:
         ({"reason": "no_record", "recorded_pid": None}, sr.RESTARTED),
         ({"restart_needed": False, "reason": None}, sr.NOT_NEEDED),
         ({"reason": "replaced_build"}, sr.OTHER_REPAIR),
+        # Review M1: only a receiver BEHIND the installed build is stale.
+        ({"recorded_version": "0.107.0"}, sr.NOT_OLDER),
+        ({"recorded_version": "0.106.8.dev1"}, sr.NOT_OLDER),
+        ({"recorded_version": None}, sr.NOT_OLDER),
+        ({"recorded_version": "0.106.6"}, sr.RESTARTED),
         ({"restart_needed": None}, sr.UNPROVEN),
         ({"supervised_pid": None}, sr.UNPROVEN),
         # The record names a foreground receiver: a kick would bounce the wrong one.
@@ -65,6 +72,22 @@ def _obs(**overrides: Any) -> sr.Observation:
                 }
             },
             sr.ALREADY_KICKED,
+        ),
+        # Review m3: a refused attempt backs off for MIN_INTERVAL_S, then retries.
+        (
+            {"last_kick": {"at": NOW - 60, "pid": 4242, "installed": "0.106.7", "refused": True}},
+            sr.RATE_LIMITED,
+        ),
+        (
+            {
+                "last_kick": {
+                    "at": NOW - sr.MIN_INTERVAL_S - 1,
+                    "pid": 4242,
+                    "installed": "0.106.7",
+                    "refused": True,
+                }
+            },
+            sr.RESTARTED,
         ),
         (
             {"last_kick": {"at": NOW - 60, "pid": 1, "installed": "0.106.6"}},
@@ -207,7 +230,8 @@ def test_a_sandboxed_home_never_reaches_launchd(
 
     assert sr.restart_if_stale(rig["root"], trigger="surface") == sr.REFUSED
     assert calls == []
-    assert not sr.marker_path(rig["root"]).exists()
+    # The refused ATTEMPT is stamped (review m3), so it backs off, not loops.
+    assert json.loads(sr.marker_path(rig["root"]).read_text(encoding="utf-8"))["refused"] is True
 
 
 def test_a_kick_is_never_repeated_and_the_healthy_path_never_probes(
@@ -241,13 +265,98 @@ def test_a_fresh_install_settles_the_no_record_probe(
     """``installed``/``registered`` started the receiver on this build: do not probe."""
 
     root = rig["root"]
+    # The REAL ``_reconcile`` this time (review m4 moved the marker write under
+    # its lock), with only the platform/enrolment/unit seams replaced.
+    monkeypatch.setattr(install, "_reconcile", _REAL_RECONCILE)
+    monkeypatch.setattr(install, "_platform_refusal", lambda r: None)
+    monkeypatch.setattr(install, "_wanted", lambda r: True)
+    monkeypatch.setattr(install, "_source_checkout_refusal", lambda: None)
     monkeypatch.setattr(
-        install, "_reconcile", lambda r, force_off: install.ServiceOutcome(install.CODE_INSTALLED)
+        install, "_install", lambda r: install.ServiceOutcome(install.CODE_INSTALLED)
     )
-    install.sync_connector_service(root)
+    assert install.sync_connector_service(root).code == install.CODE_INSTALLED
+    assert json.loads(sr.marker_path(root).read_text(encoding="utf-8"))["probed"] == "0.106.7"
     monkeypatch.setattr(
         install, "_reconcile", lambda r, force_off: install.ServiceOutcome(install.CODE_CURRENT)
     )
     monkeypatch.setattr(launchd, "job_pid", lambda **kw: pytest.fail("probed after install"))
     install.sync_connector_service(root)
     assert rig["kicks"] == []
+
+
+def test_an_older_surface_never_restarts_a_newer_receiver(rig: dict[str, Any]) -> None:
+    """Review M1's repro: record 0.107.0, this surface's installed 0.106.7 -> no kick.
+
+    A busy surface still on the previous build answers ``app_start`` after the
+    receiver has moved on; restarting it would only land it back on 0.107.0.
+    Settled after one probe, so later starts neither probe nor log.
+    """
+
+    root = rig["root"]
+    _seed_record(root, pid=rig["pid"], version="0.107.0", started_at=time.time() - 3600)
+    install.sync_connector_service(root)
+    assert rig["kicks"] == []
+    assert sr.needs_probe(root) is False
+    install.sync_connector_service(root)
+    assert rig["kicks"] == []
+
+
+def test_a_stale_generation_surface_declines(
+    rig: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M1: a process on a non-current generation proves nothing about the receiver."""
+
+    monkeypatch.setattr(update, "generation_staleness_of_process", lambda pid: pid == os.getpid())
+    _seed_record(rig["root"], pid=rig["pid"], version="0.101.42", started_at=time.time() - 3600)
+    assert sr.restart_if_stale(rig["root"], trigger="surface") == sr.SELF_STALE
+    assert rig["kicks"] == []
+    # Not settled: the current build's own surface must still be able to act.
+    assert not sr.marker_path(rig["root"]).exists()
+
+
+def test_an_unsupported_supervisor_settles_without_probing(
+    rig: dict[str, Any], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review m1: Windows declines once, then neither probes nor logs on later starts."""
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.SCHTASKS)
+    monkeypatch.setattr(install, "connector_state", lambda r: pytest.fail("probed on schtasks"))
+    _seed_record(rig["root"], pid=rig["pid"], version="0.101.42", started_at=time.time() - 3600)
+    with caplog.at_level(logging.INFO, logger=sr.__name__):
+        install.sync_connector_service(rig["root"])
+        install.sync_connector_service(rig["root"])
+    lines = [r.getMessage() for r in caplog.records if r.name == sr.__name__]
+    assert lines == ["bridge connector stale restart: trigger=surface code=unsupported reason=none"]
+    assert rig["kicks"] == []
+
+
+def test_a_refused_kick_backs_off_instead_of_retrying_every_start(
+    rig: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m3: the attempt is stamped, so the next start is rate-limited."""
+
+    attempts: list[str] = []
+
+    def refuse(**kw: Any) -> bool:
+        attempts.append(kw["label"])
+        return False
+
+    monkeypatch.setattr(launchd, "kickstart", refuse)
+    _seed_record(rig["root"], pid=rig["pid"], version="0.101.42", started_at=time.time() - 3600)
+    assert sr.restart_if_stale(rig["root"], trigger="surface") == sr.REFUSED
+    assert sr.restart_if_stale(rig["root"], trigger="surface") == sr.RATE_LIMITED
+    assert attempts == [install.LABEL]
+    marker = json.loads(sr.marker_path(rig["root"]).read_text(encoding="utf-8"))
+    assert marker["refused"] is True and marker["pid"] == rig["pid"]
+
+
+def test_the_healthy_path_does_not_take_the_sync_lock(
+    rig: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m2: a current record answers before ``_sync_exclusive``."""
+
+    _seed_record(rig["root"], pid=rig["pid"], version="0.106.7", started_at=time.time() - 3600)
+    monkeypatch.setattr(
+        install, "_sync_exclusive", lambda r: pytest.fail("locked on the healthy path")
+    )
+    assert install._restart_if_stale_locked(rig["root"], trigger="surface") == sr.NOT_NEEDED

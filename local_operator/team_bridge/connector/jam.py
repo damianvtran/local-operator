@@ -21,9 +21,11 @@ problem, counted from one).
 THE THRESHOLD (:data:`JAM_THRESHOLD`) is a judgement, not a measured
 distribution, and is stated as one: the loop backs off 1, 2, 4 ... 60 s
 (``loop.BACKOFF_BASE_S``/``BACKOFF_MAX_S``), so ten identical refusals in a
-row span roughly five minutes of continuous failure. A transient refusal (a
+row span about four minutes of continuous failure (the pauses before the
+tenth are 1+2+4+8+16+32+60+60+60 = 243 s, measured by QA on PR #4174, plus
+iteration time). A transient refusal (a
 busy database past its bound) clears on the next pass; a deterministic one,
-like the incident's, repeats forever. Five minutes separates the two by a wide
+like the incident's, repeats forever. Four minutes separates the two by a wide
 margin without making an owner wait an hour to see it.
 
 SHAPE. A disposable side file beside the runtime record (the same pattern as

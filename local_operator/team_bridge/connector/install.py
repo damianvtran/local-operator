@@ -1157,6 +1157,15 @@ def _reconcile(config_dir: Path, *, force_off: bool) -> ServiceOutcome:
                 if source_refusal is not None:
                     return ServiceOutcome(CODE_SOURCE_CHECKOUT, source_refusal)
             outcome = _install(Path(config_dir)) if wanted else _remove(Path(config_dir))
+            if outcome.code in (CODE_INSTALLED, CODE_REGISTERED):
+                # The supervisor just (re)started the receiver on THIS build;
+                # tell the stale-restart catch-up so the next start does not
+                # probe for it. INSIDE the lock (review m4, PR #4174): the
+                # marker is read-modify-written, and outside the lock it could
+                # drop a concurrent locked writer's kick stamp.
+                from local_operator.team_bridge.connector import stale_restart
+
+                stale_restart.note_fresh_start(Path(config_dir))
     except Exception as exc:  # noqa: BLE001 — NEVER raises: the caller already won
         logger.debug("bridge connector service sync failed", exc_info=True)
         return ServiceOutcome(CODE_FAILED, str(exc))
@@ -1214,12 +1223,6 @@ def sync_connector_service(config_dir: Path) -> ServiceOutcome:
             # a surface start runs the code that is installed NOW, so its
             # ``installed_version`` is the build a restart would land on.
             _restart_if_stale_locked(Path(config_dir), trigger="surface")
-        elif code in (CODE_INSTALLED, CODE_REGISTERED):
-            # The supervisor just (re)started the receiver on THIS build; tell
-            # the catch-up so the next start does not probe for it.
-            from local_operator.team_bridge.connector import stale_restart
-
-            stale_restart.note_fresh_start(Path(config_dir))
         return outcome
     finally:
         invalidate_connector_state_cache()
@@ -1236,6 +1239,12 @@ def _restart_if_stale_locked(config_dir: Path, *, trigger: str) -> str:
 
     from local_operator.team_bridge.connector import stale_restart
 
+    # The cheap, read-only check first (review m2): the healthy path answers
+    # from two small files and must not queue behind another sync's lock (up
+    # to 30 s) to learn there is nothing to do. The decision is re-made under
+    # the lock, so a racing writer cannot make this skip cause a wrong kick.
+    if not stale_restart.needs_probe(config_dir):
+        return stale_restart.NOT_NEEDED
     try:
         with _sync_exclusive(config_dir):
             return stale_restart.restart_if_stale(config_dir, trigger=trigger)

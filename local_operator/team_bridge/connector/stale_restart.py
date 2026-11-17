@@ -99,6 +99,15 @@ RATE_LIMITED = "rate_limited"
 UNSUPPORTED = "unsupported"
 REFUSED = "refused"
 FAILED = "failed"
+#: The record names a version that is NOT provably older than the installed
+#: one (newer, equal-but-unparseable, or unreadable). Review M1, PR #4174: a
+#: surface still on an older build reads its OWN version as "installed", so a
+#: bare ``!=`` made it restart a newer, healthy receiver about every 30 min.
+NOT_OLDER = "not_older"
+#: The calling process is itself on a generation other than ``current``
+#: (review M1): its "installed" version is the one being replaced, so nothing
+#: it concludes about the receiver's build is evidence.
+SELF_STALE = "self_stale"
 
 
 @dataclass(frozen=True)
@@ -114,8 +123,24 @@ class Observation:
     #: Seconds the supervised process has been up, or ``None`` when unreadable.
     uptime_s: float | None
     installed_version: str
-    #: The marker (``{"at", "pid", "installed", "reason", "probed"}``) or ``None``.
+    #: The marker (``{"at", "pid", "installed", "reason", "probed", "refused",
+    #: "declined"}``) or ``None``.
     last_kick: dict[str, Any] | None
+    #: The version the runtime record names, or ``None`` with no/unreadable record.
+    recorded_version: str | None = None
+
+
+def _is_older(recorded: str | None, installed: str) -> bool:
+    """True only when both versions parse and the receiver's is strictly lower.
+
+    ``update.is_behind`` is the repo's one X.Y.Z comparison; anything it cannot
+    order (a dev/rc suffix, an empty side) is "not provably older", and an
+    unproven direction never earns a restart.
+    """
+
+    from local_operator.update import is_behind
+
+    return bool(recorded) and is_behind(str(recorded), installed)
 
 
 def decide(observation: Observation, *, now: float) -> str:
@@ -128,6 +153,12 @@ def decide(observation: Observation, *, now: float) -> str:
         # ``replaced_build``: ``launchd.restart_if_build_moved`` and the
         # in-process self-check own it; a second actor would double-kick.
         return OTHER_REPAIR
+    if o.reason == "version_mismatch" and not _is_older(o.recorded_version, o.installed_version):
+        # DIRECTION, NOT INEQUALITY (review M1): only a receiver BEHIND the
+        # installed build is stale. A newer one means this reader is the stale
+        # party, and a kick would land the receiver right back on the newer
+        # build it already runs — dropping an in-flight iteration for nothing.
+        return NOT_OLDER
     if o.restart_needed is not True or o.supervised_pid is None:
         return UNPROVEN
     if o.reason == "version_mismatch" and o.recorded_pid != o.supervised_pid:
@@ -136,7 +167,14 @@ def decide(observation: Observation, *, now: float) -> str:
         return TOO_YOUNG
     last = o.last_kick
     if last is not None and "at" in last:
-        if last.get("pid") == o.supervised_pid and last.get("installed") == o.installed_version:
+        # A REFUSED attempt is stamped too (review m3) but is not "kicked": it
+        # waits out :data:`MIN_INTERVAL_S` below and is then tried again, rather
+        # than either retrying on every surface start or never retrying at all.
+        if (
+            not last.get("refused")
+            and last.get("pid") == o.supervised_pid
+            and last.get("installed") == o.installed_version
+        ):
             return ALREADY_KICKED
         at = last.get("at")
         if isinstance(at, (int, float)) and 0 <= now - at < MIN_INTERVAL_S:
@@ -240,6 +278,11 @@ def observe(config_dir: Path | str, *, now: float) -> Observation:
         reason=reason,
         supervised_pid=supervised,
         recorded_pid=running.get("pid") if running is not None else None,
+        recorded_version=(
+            str(running["version"])
+            if running is not None and isinstance(running.get("version"), str)
+            else None
+        ),
         uptime_s=_uptime_s(supervised, running, now=now) if supervised else None,
         installed_version=installed,
         last_kick=_read_marker(config_dir),
@@ -305,17 +348,56 @@ def _cheap_skip(config_dir: Path | str, installed: str) -> bool:
       the receiver is not running has no record either, so that probe runs ONCE
       per installed version (``probed`` in the marker) unless it could not
       reach a final answer (a too-young receiver is asked again next start);
-    * a record naming another version always earns the probe — that is the
-      jam this module exists for, and :func:`decide` rate-limits the kick.
+    * a record naming another version earns the probe — that is the jam this
+      module exists for, and :func:`decide` rate-limits the kick — until a
+      deterministic decline (``not_older``, ``unsupported``) settles that exact
+      (record, installed) pair in the marker's ``declined``.
     """
 
     if not installed:
         return True
     record = _runtime_record(config_dir)
-    if record is not None:
-        return record.get("version") == installed
     marker = _read_marker(config_dir) or {}
+    if record is not None:
+        if record.get("version") == installed:
+            return True
+        # A deterministic decline for exactly this (record, installed) pair —
+        # a receiver not older than us, a supervisor with no restart verb —
+        # gives the same answer every time; asking again is only cost and a
+        # log line per start (review m1).
+        return marker.get("declined") == _declined_key(record.get("version"), installed)
     return marker.get("probed") == installed
+
+
+def _declined_key(recorded: Any, installed: str) -> dict[str, Any]:
+    return {"record": recorded if isinstance(recorded, str) else None, "installed": installed}
+
+
+def needs_probe(config_dir: Path | str) -> bool:
+    """Whether :func:`restart_if_stale` has anything to ask. Read-only; never raises.
+
+    The caller runs this BEFORE taking the service-sync lock (review m2): the
+    healthy answer comes from two small files and needs no lock. A racing
+    writer can only make this read stale in one of two directions — "skip"
+    (equivalent to the next surface start asking instead) or "probe", and
+    :func:`restart_if_stale` repeats the check under the lock before acting.
+    """
+
+    try:
+        return not _cheap_skip(config_dir, _installed())
+    except Exception:  # noqa: BLE001 — unreadable means "nothing to ask now"
+        return False
+
+
+def _self_stale() -> bool:
+    """Is THIS process provably on a generation other than ``current``?"""
+
+    try:
+        from local_operator.update import generation_staleness_of_process
+
+        return generation_staleness_of_process(os.getpid()) is True
+    except Exception:  # noqa: BLE001 — unproven is not stale
+        return False
 
 
 def _runtime_record(config_dir: Path | str) -> dict[str, Any] | None:
@@ -327,7 +409,13 @@ def _runtime_record(config_dir: Path | str) -> dict[str, Any] | None:
 #: Decisions that settle the "receiver older than the record" question for this
 #: installed version. ``too_young``/``unproven`` are not final: the receiver may
 #: be mid-start, or its pid unreadable right now.
-_FINAL = frozenset({RESTARTED, NOT_NEEDED, OTHER_PROCESS, OTHER_REPAIR, ALREADY_KICKED})
+_FINAL = frozenset(
+    {RESTARTED, NOT_NEEDED, OTHER_PROCESS, OTHER_REPAIR, ALREADY_KICKED, NOT_OLDER, UNSUPPORTED}
+)
+
+#: Declines that are a pure function of (record version, installed version,
+#: platform), settled in the marker so a recorded mismatch stops re-probing.
+_SETTLED_DECLINES = frozenset({NOT_OLDER, UNSUPPORTED})
 
 
 def restart_if_stale(config_dir: Path | str, *, trigger: str) -> str:
@@ -342,24 +430,59 @@ def restart_if_stale(config_dir: Path | str, *, trigger: str) -> str:
         installed = _installed()
         if _cheap_skip(config_dir, installed):
             return NOT_NEEDED
-        observation = observe(config_dir, now=now)
-        code = decide(observation, now=now)
-        reason = observation.reason or "none"
-        marker = dict(observation.last_kick or {})
+        if _self_stale():
+            # Review M1. Deliberately NOT written to the marker: the answer is
+            # about this process, not the receiver, and settling ``probed`` at a
+            # stale build's version could silence the current build's probe when
+            # both carry one version string. Logged at DEBUG: a busy surface on
+            # an old generation is the expected, transient state of an upgrade
+            # (it rolls over when idle), not something an owner acts on.
+            logger.debug("bridge connector stale restart: trigger=%s code=%s", trigger, SELF_STALE)
+            return SELF_STALE
+        from local_operator import supervisors
+
+        if supervisors.supervisor() not in (supervisors.LAUNCHCTL, supervisors.SYSTEMCTL):
+            # Review m1: decline BEFORE the probe on a supervisor with no restart
+            # verb this module may use (Windows Task Scheduler) — and settle it,
+            # so the next start neither probes nor logs again.
+            code = UNSUPPORTED
+            reason = "none"
+            last = _read_marker(config_dir)
+            record = _runtime_record(config_dir)
+            recorded_version = record.get("version") if record is not None else None
+            has_record = record is not None
+            supervised_pid: int | None = None
+        else:
+            observation = observe(config_dir, now=now)
+            code = decide(observation, now=now)
+            reason = observation.reason or "none"
+            last = observation.last_kick
+            recorded_version = observation.recorded_version
+            has_record = observation.recorded_pid is not None
+            supervised_pid = observation.supervised_pid
+        marker = dict(last or {})
         if code == RESTARTED:
             code = _kick()
+            # Stamp the ATTEMPT, refused or not (review m3): an unstamped refusal
+            # was retried, with a WARNING, on every surface start. A refused
+            # stamp holds off for MIN_INTERVAL_S, then tries again.
+            marker.update(
+                {
+                    "at": now,
+                    "pid": supervised_pid,
+                    "installed": installed,
+                    "reason": reason,
+                }
+            )
             if code == RESTARTED:
-                marker.update(
-                    {
-                        "at": now,
-                        "pid": observation.supervised_pid,
-                        "installed": observation.installed_version,
-                        "reason": reason,
-                    }
-                )
+                marker.pop("refused", None)
+            else:
+                marker["refused"] = True
         if code in _FINAL and installed and marker.get("probed") != installed:
             marker["probed"] = installed
-        if marker != (observation.last_kick or {}):
+        if code in _SETTLED_DECLINES and has_record and installed:
+            marker["declined"] = _declined_key(recorded_version, installed)
+        if marker != (last or {}):
             _write_marker(config_dir, marker)
     except Exception as exc:  # noqa: BLE001 — a catch-up never fails its caller
         logger.warning(
