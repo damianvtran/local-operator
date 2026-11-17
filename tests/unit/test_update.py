@@ -3296,6 +3296,107 @@ def test_a_successful_report_says_ok_true_and_keeps_every_existing_key(
     assert "failure" not in report
 
 
+@pytest.mark.parametrize("capacity", [True, False])
+def test_recovery_capacity_code_survives_wrapped_command_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    capacity: bool,
+) -> None:
+    """Exercise the public report boundary without any installer or live root.
+
+    Identical English from an ordinary exception must NOT grant the machine
+    code: only the typed cause survives the wrapper as persistent pressure.
+    """
+    from local_operator import install_transaction as tx
+
+    sentence = "update recovery records are at capacity; inspect pending operations"
+    cause = tx.RecoveryCapacityError(sentence) if capacity else RuntimeError(sentence)
+
+    def refused(**_kwargs: Any) -> int:
+        # Mirror the REAL raise site: ``install_into_generation`` marks
+        # ``environment`` before ``start_operation`` and wraps its refusal with
+        # this exact prefix. Raising at the tracker's initial ``check`` stage
+        # instead would be classified ``network`` by the frozen stage table —
+        # a fake stage, not the path a full recovery store takes.
+        update_mod._reach("environment")
+        raise UpdateError(f"could not persist update recovery: {sentence}") from cause
+
+    monkeypatch.setattr(update_mod, "_update_command_body", refused)
+    monkeypatch.setattr(update_mod, "installed_version", lambda: "0.0.0")
+    assert update_command(check=False) == 1
+    report = _reported_failure(capsys.readouterr())
+    assert report["ok"] is False
+    assert report["schema"] == "update.report.v1"
+    assert report["failure"]["step"] == "environment"
+    assert report["failure"]["kind"] == "unknown"
+    assert report["failure"]["detail"] == ""
+    assert report["failure"]["error"] == f"could not persist update recovery: {sentence}"
+    if capacity:
+        assert report["failure"]["code"] == "update_recovery_capacity"
+    else:
+        assert "code" not in report["failure"]
+
+
+def test_full_recovery_store_reaches_the_bodys_own_catch_with_its_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 1, M4: the INNER catch around ``perform_upgrade`` is the real path.
+
+    ``perform_upgrade`` is faked only as far as ``install_into_generation``'s
+    recovery step: it marks ``environment`` exactly as that function does, runs
+    the REAL legacy ``start_operation`` against a synthetic root holding 255 v1
+    and 1 v2 entries (the shared cap), and wraps the refusal with the real
+    prefix. ``_update_command_body`` itself is NOT replaced, so the report comes
+    from its ``except UpdateError`` -> ``_fail(..., failure_code=...)``.
+    """
+    from local_operator import fenced_operation
+    from local_operator import install_transaction as tx
+
+    root = tmp_path / "stable-root"
+    legacy = root / tx.OPERATION_DIR
+    legacy.mkdir(parents=True, mode=0o700)
+    for index in range(tx.RecoveryCapacityError.active_limit - 1):
+        (legacy / f"{index:032x}.json").write_text("{}")
+    fenced_operation.start_operation(root, baseline="A", target="B", route="default-cli")
+
+    def upgrade(**_kwargs: object) -> str:
+        update_mod._reach("environment")
+        try:
+            tx.start_operation(root, baseline="0.27.0", target="0.28.0", route="latest")
+        except tx.InstallTransactionError as exc:
+            raise UpdateError(f"could not persist update recovery: {exc}") from exc
+        raise AssertionError("a full recovery store must refuse admission")
+
+    monkeypatch.setattr(update_mod, "check_latest", _check_latest_double("0.27.0", "0.28.0", True))
+    monkeypatch.setattr(update_mod, "install_kind", lambda: update_mod.InstallKind.UV_TOOL)
+    monkeypatch.setattr(update_mod, "is_git_snapshot", lambda: False)
+    monkeypatch.setattr(update_mod, "perform_upgrade", upgrade)
+
+    assert update_command(check=False) == 1
+    report = _reported_failure(capsys.readouterr())
+    assert report["ok"] is False
+    assert report["failure"]["step"] == "environment"
+    assert report["failure"]["kind"] == "unknown"
+    assert report["failure"]["code"] == "update_recovery_capacity"
+    assert report["failure"]["error"] == (
+        "could not persist update recovery: "
+        "update recovery records are at capacity; inspect pending operations"
+    )
+    assert len(list(legacy.iterdir())) == tx.RecoveryCapacityError.active_limit - 1
+
+
+def test_recovery_failure_code_follows_context_without_classifying_plain_text() -> None:
+    from local_operator import install_transaction as tx
+
+    wrapper = UpdateError("outer")
+    wrapper.__context__ = tx.RecoveryCapacityError("inner")
+    assert update_mod._failure_code(wrapper) == "update_recovery_capacity"
+    assert update_mod._failure_code(RuntimeError("update_recovery_capacity")) is None
+    assert update_mod._failure_code(None) is None
+
+
 def test_the_report_vocabularies_are_the_frozen_contract() -> None:
     """The two closed vocabularies the desktop parser will switch on."""
     assert update_mod._UPDATE_STEPS == (

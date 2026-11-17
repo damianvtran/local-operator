@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.session_status",
-  "history_sha256": "8f4687d8ad9786cf6803a17c7ffaa918d81adb8192b46f78f09a8c65ce8d0f1e",
+  "history_sha256": "5b709925ccf156f7113b2087b753b481e12e72dc3ecb04d845965d600f8dce43",
   "entries": [
     {
       "locale": "ru",
@@ -40,6 +40,50 @@
       },
       "status": "passed",
       "note": "Round-1 locale-level verdict was `fail` because of a major in wire.language_receipts (since fixed and delta re-audited clean of blocker/major); no blocker/major was located in this namespace, so this row passes on the round-1 audit. The per-namespace attribution of the major is derived by the coder from the key(s) the manager named, not from the auditor's per-namespace verdict. target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.session_status",
+      "source_sha256": "9136565eefbef704c9e9e6e4751a4a63120ab262977b5d530d3123cc57426e7d",
+      "context_sha256": "1b26a73cb5a95fdcc9ad741f4aef4f12695d8fdc98b061ca6b496b0149702568",
+      "target_sha256": "eccbf565af102adc9f26b5ba14a67f514336623cd54668156b8f12410dace891",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "session": "3b70672660df",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task ss-au-ru), independent subagent; not the translator (session 3b70672660df) and did not edit any value",
+        "session": "0bc0a66fa4cd",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-16",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "ru-S1"
+        ],
+        "locale_verdict": "CLEAN-WITH-FINDINGS",
+        "scope": "namespace-scoped: the single key wire.session_status.retired_label",
+        "independent_from_translator": true,
+        "translator_session": "3b70672660df"
+      },
+      "status": "passed",
+      "note": "First NAMESPACE-SCOPED independent auditor verdict for wire.session_status.retired_label (ru); it supersedes the coder-attributed locale-level 'fail' attribution of the earlier row (which stays in history unedited: that row's auditor.result 'fail' came from a major in another namespace, attributed to this one by the coder rather than by an auditor). Independent i18n-auditor 0bc0a66fa4cd (anthropic/claude-opus-5-5, no fallback observed) audited the single key read-only at origin/main e625e5e3ce0e against the translator row below (job/session 3b70672660df, anthropic/claude-sonnet-5-5); no value was edited. Findings: 0 blocker, 0 major, 1 minor, 0 nit ['ru-S1']; verdict CLEAN-WITH-FINDINGS; minors/nits deferred, not fixed. Translation unchanged. Also reported (code, not translation, all locales, non-gating): catalog.py _stop_label fills {base} with hard-coded English 'Interrupted'/'Unseen interruption', so the row renders mixed-language. Record: i18n/audits/evidence/ru/wire.session_status/ns1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/ru/wire.session_status/ns1/record.json",
+      "round": "ns1",
+      "keys_audited": 1
     }
   ]
 }

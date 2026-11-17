@@ -1386,6 +1386,12 @@ class AttachedSession:
         #: been seen; cleared when a dial reports the gap.
         self._last_drop_at: float | None = None
         self._client: AttachClient | None = None
+        # Operator proof held by the client that carried the LAST ask answer,
+        # read from that client in the same synchronous step that writes the
+        # frame (``_ask_client_method``), so a reconnect between the send and the
+        # route's read cannot swap in another connection's state (PR #4127
+        # review R1-m2). ``ask_consent_bearing`` reports it.
+        self._ask_proof_at_send = False
         #: The pid of the runtime this viewer is dialed into, ``None`` while
         #: cold or between owners. Read by the TUI's startup-cleanup notice to
         #: tell "MY runtime removed sessions" from "some other launch did":
@@ -4164,6 +4170,37 @@ class AttachedSession:
             name = "ask_respond"
         return await self._ask_client_method(name, ask_id, answers, by="desktop", images=images)
 
+    def ask_consent_bearing(self) -> bool:
+        """Whether the last ask answer this facade sent carried operator proof.
+
+        Read by the desktop answer route right after :meth:`ask_respond` (so a
+        cold bind that this process just engaged counts), and reported to the
+        card as ``consent_bearing``. The value is captured at SEND time from the
+        very client that wrote the frame (``_ask_client_method``), never re-read
+        afterwards: a reconnect in between would otherwise report the new
+        connection's state for an answer the old one carried. True only when
+        the sending client held this runtime's operator capability and the
+        runtime proved it (``AttachClient.operator_ask_proof_held``): the case
+        in which the runtime stamps ``desktop`` rather than ``unverified``.
+
+        WHY server-side state and never a request field (incident a-48e3,
+        2026-11-16): the capability is the one thing the model's own ``bash``
+        cannot obtain by dialing the socket with the record's control key, so
+        it is the one honest source for "this window's answer can authorise a
+        delete". The flag never feeds consent itself: the guard reads only the
+        runtime's stamp. Fail-closed: no answer sent yet, a send that never
+        reached a connected client, or a client predating the probe reads False.
+        """
+        return bool(getattr(self, "_ask_proof_at_send", False))
+
+    @staticmethod
+    def _client_proof_held(client: Any) -> bool:
+        """``client.operator_ask_proof_held()``, False for a disconnected or older client."""
+        if client is None or not getattr(client, "connected", False):
+            return False
+        probe = getattr(client, "operator_ask_proof_held", None)
+        return bool(probe()) if callable(probe) else False
+
     async def respond_ask(
         self,
         ask_id: str,
@@ -4294,6 +4331,7 @@ class AttachedSession:
         decision is authorized by the grant the authority seam minted for it,
         never by a caller-supplied name.
         """
+        self._ask_proof_at_send = False
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
@@ -4301,6 +4339,9 @@ class AttachedSession:
             # so this is the ask answer that lands mid-reconnect. Nothing was
             # sent; the owner's liveness decides busy vs gone.
             raise await self._refusal_while_reconnecting(self._unavailable_reason())
+        # No await between this read and the client method building its frame,
+        # so the proof reported is the one this connection presents (R1-m2).
+        self._ask_proof_at_send = self._client_proof_held(client)
         method = getattr(client, name)
         if tail:
             return await method(ask_id, *tail)
@@ -9756,6 +9797,32 @@ class AttachedSession:
                         if self._display_window_requested and frontend.display_history is not None:
                             await self._load_frontend_history(frontend)
                         else:
+                            # A DEFERRED COLD FACADE HAS PAINTED ROWS IT NEVER
+                            # RECORDED. Deferral leaves ``_history`` and the
+                            # painted-id set (``_message_events``) empty until the
+                            # first bind hydrates them, while the viewers already
+                            # painted the journal from snapshot pages. Recovery is a
+                            # bind too, and the windowed branch above hydrates via
+                            # ``_load_frontend_history``; this branch did not, so
+                            # ``_replay_durable_suffix`` saw zero painted ids and
+                            # replayed the WHOLE journal as one "gap" delta. A
+                            # prompt sent while a cold big session warmed (503
+                            # ``runtime_unreachable``, then this loop) published a
+                            # ~37 MB ``history_delta`` of 19,200 already-painted
+                            # rows (QA Q2 on #4012), past every viewer's 8 MiB
+                            # queue. Hydrating first seeds the painted set the way
+                            # an eager cold open does, so the replay below carries
+                            # only rows that became durable after the paint.
+                            await self.hydrate_deferred_history()
+                            # The hydrate seeded ``_cold_painted_ids`` for
+                            # ``_load_frontend_history``'s cold-gap replay, which
+                            # this branch never runs: the suffix replay below IS
+                            # the gap measurement. Left set, a later
+                            # ``_load_frontend_history`` on this facade (a
+                            # degraded resync, a late windowless sync) would
+                            # measure against the stale set and re-emit rows
+                            # painted live after this recovery (#4023 R1-m1).
+                            self._cold_painted_ids = None
                             history = (
                                 await self._read_transcript(through_id=frontend.live_cursor)
                                 if frontend.live_cursor is not None

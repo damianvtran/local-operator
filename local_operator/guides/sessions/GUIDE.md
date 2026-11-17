@@ -68,6 +68,20 @@ tier on the node; a node keeping its own tier map needs the tier set there. It
 is never worked around with `model=inherit` or a session unless the operator
 asks.
 
+Every session on a machine shares its memory, so `bash` ENFORCES a machine-wide
+limit on heavy jobs: one at a time on hosts with 16 GB or less (parallel builds
+OOMed one on 2026-11-16), up to four on larger ones. Switch:
+`bash.heavy_jobs.enabled`; node tuning: `LOCAL_OPERATOR_HEAVY_JOB_SLOTS` and
+`LOCAL_OPERATOR_HEAVY_JOB_WAIT_S` (queue limit, default 900 s). Builds, type
+checks, JS test runners and `pytest -n` queue for a slot and say whom they wait
+behind; watchers and dev servers never queue; `lop services status` names the
+holder.
+Wait or retry; never escape the queue by backgrounding a build with
+`nohup`/`setsid` or splitting it across sessions. `systemd-run --user --scope
+-p MemoryMax=…` caps a job in addition to the queue, never instead of it.
+Known limit: `uv cache prune` needs uv's exclusive cache lock, which no one
+gets while any session runs `uvx workspace-mcp`, so prune only a quiet node.
+
 ## Visibility: `spawn` is listed by default
 
 `spawn` opens the run as a **workstream** by default: the operator's sidebar,

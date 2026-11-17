@@ -1315,9 +1315,13 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # probes both on the facade it bridges; an owner ``Session`` is served by its
     # runtime and has neither. Declared in ``ViewerSessionProtocol`` in the same
     # commit; the floors stay put.
-    assert len(viewer_only) == 80, (
+    # 80 → 81 is ``ask_consent_bearing`` (PR #4127): the desktop answer route
+    # reads whether the answer just sent carried operator proof. Facade-only —
+    # only ``AttachedSession`` sends that frame. Declared in
+    # ``ViewerSessionProtocol`` in the same commit; the floors stay put.
+    assert len(viewer_only) == 81, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 80, and the aggregate floor is set at 40 against that number. A "
+        "says 81, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

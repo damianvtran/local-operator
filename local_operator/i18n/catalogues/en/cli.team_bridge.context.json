@@ -257,6 +257,41 @@
   "cli.team_bridge.notify.screening_model_unavailable_body": {
     "role": "local owner notification (inbox item) raised by the agent-messages receiver",
     "tone": "calm, factual, operator-facing; no alarm, no blame",
-    "note": "Body of the same notification. Facts that must survive: (1) the safety check tries Claude Sonnet 5.5 and Claude Opus 5.5 via Anthropic or Radient FIRST, then the owner's own default model and its fallbacks (product and model names stay in Latin script, untranslated); (2) none could run, so new agent messages are held; (3) nothing is lost; (4) the fix: sign in to Anthropic or Radient, add credit in the Radient console, or check that the default model works; (5) held messages are re-screened automatically. Do not imply messages were rejected, deleted, or that a human reviews them."
+    "note": "Body of the same notification. Facts that must survive: (1) the safety check tries Claude Sonnet 5.5 and Claude Opus 5.5 via Anthropic or Radient FIRST, then the owner's own default model and its fallbacks (product and model names stay in Latin script, untranslated); (2) none could run, so new agent messages are held; (3) nothing is lost; (4) the fix: sign in to Anthropic or Radient, add credit in the Radient Console, or check that the default model works; (5) held messages are re-screened automatically. Do not imply messages were rejected, deleted, or that a human reviews them."
+  },
+  "cli.team_bridge.status.running": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. pid and version are verbatim numbers (e.g. 48311, 0.102.4); started is a pre-formatted local timestamp. Names the receiver process actually running, as recorded by that process."
+  },
+  "cli.team_bridge.status.running_none": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Shown only when the service manager does NOT report a receiver running and no receiver recorded itself: none was ever started, or it stopped cleanly."
+  },
+  "cli.team_bridge.status.running_unrecorded": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. Shown when the service manager reports a receiver running but that receiver recorded no details about itself (pid, version, build). Receivers started by app versions older than this feature never record them, so this usually means an old receiver is still running: a restart is needed, and after it the details appear. 'them' refers to the details."
+  },
+  "cli.team_bridge.status.running_exited": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. pid and version are verbatim. The receiver recorded itself earlier but that process is no longer running."
+  },
+  "cli.team_bridge.status.running_detail": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. generation is a verbatim install directory name such as 20261023T142851Z-0.86.1, or an em dash when the install has none; 'build' means the installed copy of the code the process was started from. versions is a verbatim comma-separated list of identifiers such as bridge_consent_v2, bridge_consent_v3; never translate them."
+  },
+  "cli.team_bridge.status.restart_needed": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number. Shown when the background receiver runs a DIFFERENT version than the installed app (the line above shows the version it runs); it must restart to load the installed version. A same-version replaced build has its own line (restart_needed_replaced)."
+  },
+  "cli.team_bridge.status.restart_needed_replaced": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number, usually the SAME as the running version on the line above. Shown when the receiver runs the same version number, but an update has since replaced the installed files it started from; 'the last update' means the most recent update of the app. It must restart to load the installed code. Do not say the version differs."
   }
 }

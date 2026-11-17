@@ -11793,6 +11793,18 @@
           "detail": {
             "type": "string",
             "title": "Detail"
+          },
+          "consent_bearing": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Consent Bearing"
           }
         },
         "type": "object",

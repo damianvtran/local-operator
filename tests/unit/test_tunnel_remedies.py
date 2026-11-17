@@ -571,7 +571,7 @@ def test_the_inactive_label_no_longer_says_not_active():
         (gateway.TUNNEL_INACTIVE, "! /mobile enable — paused by Radient"),
         (gateway.BILLING_INACTIVE, "! /mobile enable — billing not activated"),
         (gateway.BILLING_LAPSED, "! Add Radient credit to resume phone access"),
-        (gateway.TUNNEL_DISABLED, "! Turn phone access on in the Radient console"),
+        (gateway.TUNNEL_DISABLED, "! Turn phone access on in the Radient Console"),
     ],
 )
 def test_the_card_is_keyed_by_kind_and_fits_50_cells(reason, expected):

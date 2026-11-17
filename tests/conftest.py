@@ -71,6 +71,11 @@ _AMBIENT_VARS = (
     # an operator's inherited ``=0`` would waive the refusal the admission cells
     # assert, so it is scrubbed; a cell that needs a floor sets its own.
     "LOCAL_OPERATOR_ADMISSION_FLOOR_MB",
+    # The heavy-job queue's node tuning knobs (``heavy_lease``): a node's
+    # inherited slot count or wait would change how many leases a cell can take
+    # and how long it queues. Scrubbed; lease cells set their own.
+    "LOCAL_OPERATOR_HEAVY_JOB_SLOTS",
+    "LOCAL_OPERATOR_HEAVY_JOB_WAIT_S",
     # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
     # disable the sensor in every cell, silently waiving what the sensor cells
     # assert. Scrubbed; the sensor-specific cells set it explicitly via
