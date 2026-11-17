@@ -9,8 +9,8 @@
     },
     {
       "path": "CORRECTIONS.md",
-      "bytes": 7280,
-      "sha256": "077ca1139ee9f48a144b540db0680119adb8f7aea22a03364ff1c000f4c2c5d0"
+      "bytes": 7775,
+      "sha256": "ca6d9795ad3159c085b844ec37f5402bd1df8480c9e30839f90a58ecd14a24f7"
     },
     {
       "path": "LICENSE",
@@ -24,8 +24,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 11378,
-      "sha256": "7d4dae7f648173de16ab181a6204e269ef4c74a44c46e0ef2275d05211662f80"
+      "bytes": 16278,
+      "sha256": "163adcd52223dd0ff0c22227032a745aec4200b9e33395325d92db617851ae88"
     },
     {
       "path": "REPRODUCTION.md",
