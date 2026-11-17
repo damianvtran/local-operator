@@ -1369,3 +1369,109 @@ def test_carry_through_marker_never_reaches_a_target(home: Path, command: str) -
         for value in [*vars(ranked).values(), *vars(ranked.target).values()]:
             if isinstance(value, str):
                 assert "\x03" not in value and "\x02" not in value, (command, value)
+
+
+# -- Round 1 remediation, PR #4147 (review R1-R3, QA Q1) ----------------------
+#
+# The carry-through marker made every contained value trustworthy, including
+# ones a later statement the walker did not model had changed. Each row below
+# ranked LOW on the round-1 head; the probe table in the PR thread shows base
+# (ff41034f) next to the fixed head for every one of them.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R1: ``NAME+=`` appends (base read it as a program name).
+        f'L={_SP}/$(date +%s); L+=/../../..; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); L+=/..; L+=/..; L+=/..; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); M="$L"; M+=/../../..; rm -rf "$M"',
+        f'L={_SP}/$(date +%s); L+=/../../..; find "$L" -delete',
+        f"bash -c 'L={_SP}/$(date +%s); L+=/../../..; rm -rf \"$L\"'",
+        f'export L={_SP}/$(date +%s); L+=/../../..; rm -rf "$L"',
+        # The literal spelling was LOW on base too.
+        f'L={_SP}/x; L+=/..; rm -rf "$L"',
+        f'L={_SP}; L+=/..; rm -rf "$L"',
+        # A loop body runs once per iteration; the walker reads it once.
+        f'L={_SP}/$(date +%s); for i in 1 2 3; do L+=/..; done; rm -rf "$L"',
+        f'L={_SP}/x; for i in 1 2 3; do L+=/..; done; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); for i in 1 2 3; do L=$L/..; done; rm -rf "$L"',
+        # Function bodies: the first statement hid behind the ``f(){`` header.
+        "f(){ rm -rf ~; }; f",
+        "function f { rm -rf ~; }; f",
+        'L=/; f(){ rm -rf "$L"; }; f',
+        f'L={_SP}/$(date +%s); f(){{ local L=/; rm -rf "$L"; }}; f',
+        f'L={_SP}/$(date +%s); f(){{ L=/; }}; f; rm -rf "$L"',
+        f'L={_SP}/x; f(){{ L=/; }}; f; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); f(){{ echo "}}"; L=/; }}; f; rm -rf "$L"',
+    ],
+)
+def test_untracked_mutation_of_contained_value_is_critical(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R1: builtins that set or clear a named variable.
+        f'L={_SP}/$(date +%s); unset L; rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); unset -v L; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); printf -v L /; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); printf -v L %s /; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); mapfile L < f; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); readarray L < f; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); getopts a L; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); let L=1; rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); (( L=1 )); rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); : $((L=0)); rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); declare -n R=L; R=/; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); . ./f; rm -rf "$L"',
+        f'L={_SP}/x; f(){{ local L=/; }}; f; rm -rf "$L"',
+        # Its literal reading is ``rm -rf /etc`` (an ordinary path), but a
+        # function-body value is not certain: never LOW outside the pad.
+        f'L={_SP}/$(date +%s); f(){{ local L=/etc; rm -rf "$L"; }}; f',
+        # Q1: a link or move at an opaque name, then a delete or write there.
+        f'L={_SP}/$(date +%s); ln -s "$HOME" "$L"; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); ln -s "$HOME" "$L"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); ln -s "$HOME" "$L"; rm -rf "$L"/*',
+        f'L={_SP}/$(date +%s); ln -sfn "$HOME" "$L"; echo x > "$L"/f',
+        f'L={_SP}/$(date +%s); ln "$HOME" "$L"; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); cp -s "$HOME" "$L"; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; ln -s "$HOME" -t "$L"; rm -rf "$L"/*',
+        f'L={_SP}/d-$(date +%s); mkdir -p "$L"; ln -s "$HOME" "$L/a"; rm -rf "$L"/a/',
+        f'TS=$(date +%s); ln -s "$HOME" "{_SP}/$TS"; rm -rf "{_SP}/$TS"/',
+        f'ln -s "$HOME" "{_SP}/$(date +%s)"; rm -rf "{_SP}/$(date +%s)"/',
+        f'mv "$HOME/repo" "{_SP}/$(date +%s)"; rm -rf "{_SP}/$(date +%s)"',
+        # R2: LC_TIME names can hold spaces (``es_ES`` %p is ``a. m.``).
+        f"rm -rf {_SP}/x$(date +%p)",
+        f"rm -rf {_SP}/x$(date +%a)",
+        f"rm -rf {_SP}/x$(date +%B)",
+        # Pre-existing: a program the caller may have written proves nothing.
+        f'rm -rf "{_SP}"/x-$(./date +%s)',
+        f'rm -rf "{_SP}"/x-$(/tmp/evil/date +%s)',
+    ],
+)
+def test_unmodelled_change_voids_containment(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R3: a declare word carries the containment proof like a bare one.
+        f'export L={_SP}/q/u-$(date +%s).log; exec > "$L"',
+        f'local L={_SP}/q/u-$(date +%s).log; exec > "$L"',
+        f'declare L={_SP}/q/u-$(date +%s).log; rm -f "$L"',
+        # Appending a plain suffix keeps it.
+        f'L={_SP}/$(date +%s); L+=-x.log; rm -f "$L"',
+        # Trusted absolute spellings of an allowlisted program.
+        f'rm -rf "{_SP}"/x-$(/bin/date +%s)',
+        f'rm -rf "{_SP}"/x-$(/usr/bin/uuidgen)',
+        # A function that only USES the value does not invalidate it.
+        f'L={_SP}/u-$(date +%s).log; log(){{ echo "$1" >> "$L"; }}; log hi',
+        # A function body inside the pad is read like any other command.
+        f'f(){{ local L={_SP}/x; rm -rf "$L"; }}; f',
+    ],
+)
+def test_contained_value_still_low_after_remediation(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.LOW

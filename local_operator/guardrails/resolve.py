@@ -62,14 +62,26 @@ from local_operator.tools.search_guard import (
 #: allowlist below is what keeps ``date +%D`` (prints ``/``) or ``id`` (prints
 #: spaces that word-split into extra relative paths) out.
 _CONTAINED_PROGRAMS = frozenset({"date", "gdate", "uuidgen", "hostname", "whoami", "id"})
+#: Absolute spellings of those programs that ``_contained_body`` trusts. A bare
+#: name runs whatever PATH finds; any other path (``./date``, ``/tmp/x/date``)
+#: is a program the caller may have written, whose output proves nothing
+#: (review R1, PR #4147). The Homebrew prefixes are already on PATH, so
+#: trusting them adds nothing a bare name does not.
+_CONTAINED_PROGRAM_PATHS = frozenset(
+    f"{prefix}/{program}"
+    for prefix in ("/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin")
+    for program in _CONTAINED_PROGRAMS
+)
 #: ``date +FORMAT`` literal characters that print as themselves and can never
 #: be ``/``, ``.``, whitespace or a glob/shell metacharacter.
 _DATE_LITERAL_RE = re.compile(r"[A-Za-z0-9_:@,+=-]")
 #: ``date`` conversions whose output is drawn from ``[A-Za-z0-9+-]`` only.
 #: Deliberately absent: %c %x %X %D %r (print ``/``, ``:``-and-space or
 #: locale text with spaces), %e %k %l (space-padded), %n %t (whitespace),
-#: %+ %v (locale composites), and the ``_`` (space-pad) flag.
-_DATE_CONVERSION_RE = re.compile(r"%[-0^#]?[YCyGgmdjHIMSsNuwUVWaAbBhpPZzFTR]")
+#: %+ %v (locale composites), the ``_`` (space-pad) flag, and every LC_TIME
+#: name — %a %A %b %B %h %p %P: ``es_ES`` prints ``a. m.`` for %p (a space,
+#: so an unquoted word splits) and ``ja_JP`` non-ASCII (review R2, PR #4147).
+_DATE_CONVERSION_RE = re.compile(r"%[-0^#]?[YCyGgmdjHIMSsNuwUVWZzFTR]")
 #: Substitution bodies known to print nothing. Matching is on the stripped
 #: body text; anything not in this set is opaque.
 _EMPTY_BODIES = frozenset(
@@ -77,6 +89,10 @@ _EMPTY_BODIES = frozenset(
 )
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+#: ``NAME+=value``: bash appends to the current value. Before review R1 on PR
+#: #4147 the walker read it as a program name and kept the old value, so
+#: ``L=<pad>/x; L+=/../../..; rm -rf "$L"`` ranked the pad (LOW).
+_APPEND_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+=")
 #: Words that may open a segment without being its program.
 _PREFIX_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{", "("})
 _DECLARE_WORDS = frozenset({"export", "declare", "typeset", "local", "readonly"})
@@ -960,6 +976,100 @@ def expand(word: _RawWord, env: Mapping[str, str], home: str) -> Expanded:
 #: Programs whose output is a single path component in normal use, so a
 #: substitution of one cannot climb out of the directory it sits in — but only
 #: when called with no ``+FORMAT``/path-like argument (S4: ``date +../..``).
+#: A function definition header up to its body opener: ``f() {``, ``f(){``,
+#: ``function f {``, ``function f() (``.
+_FUNC_HEAD_RE = re.compile(
+    r"(?:\bfunction\s+[^\s(){};&|<>]+(?:\s*\(\s*\))?|\b[A-Za-z_][\w.:-]*\s*\(\s*\))\s*([{(])"
+)
+#: A loop body opener; its tail runs once per iteration.
+_LOOP_DO_RE = re.compile(r"\bdo\b")
+#: Any ``NAME=``/``NAME+=`` assignment in raw text, with its right-hand side up
+#: to the next separator (``--opt=x`` and ``${L=x}`` are not matched).
+_RAW_ASSIGN_RE = re.compile(r"(?<![\w$.{}/:%-])([A-Za-z_]\w*)(\+?)=(?!=)([^;&|\n)]*)")
+#: Builtins whose operand words NAME variables they set (or clear).
+_NAME_SETTING_RE = re.compile(
+    r"\b(?:local|declare|typeset|export|readonly|unset|read|mapfile|readarray|getopts|"
+    r"printf\s+-v|let)\b([^;&|\n]*)"
+)
+#: ``((…))`` / ``$((…))`` bodies, and the names an arithmetic body assigns:
+#: ``N=1``, ``N+=1`` (any compound op), ``N++``, ``--N``.
+_ARITH_RE = re.compile(r"\(\((.*?)\)\)", re.S)
+_ARITH_ASSIGN_RE = re.compile(
+    r"([A-Za-z_]\w*)\s*(?:(?:[-+*/%&|^]|<<|>>)?=(?!=)|\+\+|--)|(?:\+\+|--)\s*([A-Za-z_]\w*)"
+)
+
+
+def _arith_assigned(text: str) -> set[str]:
+    """Names an arithmetic body (``(( … ))``, ``let`` arguments) assigns."""
+    return {a or b for a, b in _ARITH_ASSIGN_RE.findall(text)}
+
+
+def _body_end(text: str, start: int, opener: str) -> int:
+    """Index just past the ``}``/``)`` closing the body opened at ``start``.
+
+    Quote-aware so ``f(){ echo "}"; L=/; }`` does not end early. Unbalanced
+    text runs to the end: a longer body only marks more names volatile.
+    """
+    closer = "}" if opener == "{" else ")"
+    depth, i, quote = 0, start, ""
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(text)
+
+
+def _volatile_names(command: str) -> frozenset[str]:
+    """Variables whose value the walker cannot follow in ``command``.
+
+    WHY (review R1 / QA Q3, PR #4147). The walker reads a command once, in
+    order. A function body runs when (and as often as) it is called — and
+    its first statement is glued to the ``f(){`` header word, so it is not
+    even seen as an assignment — and a loop body runs once per iteration, so
+    an append or self-reference there (``L+=/..``, ``L=$L/..``) climbs more
+    than the single pass shows. A stale value for such a name ranked an
+    escaping delete as the scratchpad it started in (``L=<pad>/x; f(){ L=/;
+    }; f; rm -rf "$L"`` LOW). Every name assigned in a function body, and
+    every name appended to or self-assigned in a loop body, is therefore
+    stored as a bare OPAQUE_MARK for the whole command: never a literal and
+    never CONTAINED_MARK, so a delete through it reaches the judge (HIGH) or
+    stays CRITICAL by its protected ancestry.
+
+    Raw text, like the globstar scan: a nested ``bash -c`` script counts, and
+    a quoted string that merely looks like a body only errs strict.
+    """
+    names: set[str] = set()
+    for head in _FUNC_HEAD_RE.finditer(command):
+        body = command[head.start(1) : _body_end(command, head.start(1), head.group(1))]
+        names.update(m.group(1) for m in _RAW_ASSIGN_RE.finditer(body))
+        for m in _NAME_SETTING_RE.finditer(body):
+            names.update(_NAME_RE.findall(m.group(1)))
+        for m in _ARITH_RE.finditer(body):
+            names |= _arith_assigned(m.group(1))
+    for do in _LOOP_DO_RE.finditer(command):
+        for m in _RAW_ASSIGN_RE.finditer(command, do.end()):
+            name, plus, rhs = m.groups()
+            if plus or re.search(rf"\$\{{?{name}\b", rhs):
+                names.add(name)
+    return frozenset(names - _RAW_PATH_VARS)
+
+
 def _contained_body(body: str) -> bool:
     """True only for an exact allowlisted call whose output is one component.
 
@@ -971,9 +1081,9 @@ def _contained_body(body: str) -> bool:
     words = body.split()
     if not words:
         return False
-    program, args = os.path.basename(words[0]), words[1:]
-    if program not in _CONTAINED_PROGRAMS:
+    if words[0] not in _CONTAINED_PROGRAMS and words[0] not in _CONTAINED_PROGRAM_PATHS:
         return False
+    program, args = os.path.basename(words[0]), words[1:]
     if program in ("date", "gdate"):
         formats = [a for a in args if a.startswith("+")]
         # Bare ``date`` prints ``Mon Nov 16 …`` (spaces): never contained.
@@ -2074,6 +2184,14 @@ def _strip_grouping(text: str) -> str:
     balanced and must stay or the substitution reads as broken.
     """
     text = _peel_subshell_keyword(text.strip())
+    head = _FUNC_HEAD_RE.match(text)
+    if head is not None:
+        # ``f(){ rm -rf ~`` is the first statement of a function body behind
+        # its header. Left on, ``f(){`` read as the program and the statement
+        # as its arguments, so ``f(){ rm -rf ~; }; f`` ranked LOW (found in
+        # review R1, PR #4147). The body is walked where it is defined, as
+        # if called there; ``_volatile_names`` covers the names it assigns.
+        text = text[head.start(1) :]
     while text[:1] in ("(", "{") and text[:2] != "((":
         text = text[1:].lstrip()
     while text[-1:] in (")", "}") and (
@@ -3179,6 +3297,15 @@ class _Walker:
         #: Paths an earlier segment of THIS command made into a symlink (S7):
         #: what they point at is resolved only at run time.
         self.linked: set[str] = set()
+        #: Literal directory prefixes under which an earlier part of THIS
+        #: command made a link, or moved/copied something, at a name with an
+        #: opaque part (``ln -s ~ "<pad>/$(date +%s)"``). The walker cannot
+        #: tell which later opaque name is that entry, so containment is void
+        #: under the prefix (QA Q1, PR #4147); see ``_through_new_link``.
+        self.opaque_linked: set[str] = set()
+        #: Names assigned where a single in-order pass cannot follow them
+        #: (function bodies, loop appends); see ``_volatile_names``.
+        self.volatile: frozenset[str] = frozenset()
         #: Every path an earlier part of THIS command deleted, moved, copied or
         #: wrote to, or created (lexical and resolved spellings, no trailing
         #: ``/``). Any of them may be a symlink by the time a later word's
@@ -3475,6 +3602,12 @@ class _Walker:
         text = _strip_grouping(text)
         if not text:
             return
+        # ``(( L=1 ))`` and ``$(( L++ ))`` assign (review R1, PR #4147). Done
+        # before this segment's own words expand, so a same-word read of the
+        # name is unknowable too.
+        for body in _ARITH_RE.findall(text):
+            for var in _arith_assigned(body):
+                self._invalidate(var)
         raw_words, redirects = scan(text)
         st = self.state
         words: list[Expanded] = []
@@ -3505,26 +3638,10 @@ class _Walker:
             words = words[1:]
         raw_assigns: list[str] = []
         assign_words: list[Expanded] = []
-        while words and _ASSIGN_RE.match(words[0].text):
-            text_value = words[0].text
-            if words[0].temp and text_value.count(OPAQUE_MARK) == 1:
-                text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
-            elif (
-                words[0].opaque
-                and words[0].opaque_contained
-                and OPAQUE_MARK in text_value
-                and CREDENTIAL_MARK not in text_value
-                and not text_value.startswith(FOR_GLOB_MARK)
-                and text_value.partition("=")[0] not in _RAW_PATH_VARS
-            ):
-                # Every opaque stretch is a contained substitution: keep that
-                # proof for later ``$NAME`` reads (see CONTAINED_MARK).
-                text_value = text_value.replace(OPAQUE_MARK, CONTAINED_MARK)
-            raw_assigns.append(text_value)
-            # Same length (one marker char for another): the refs still line up.
-            assign_words.append(
-                Expanded(text=text_value, refs=list(words[0].refs), pattern=words[0].pattern)
-            )
+        while words and (_ASSIGN_RE.match(words[0].text) or _APPEND_RE.match(words[0].text)):
+            stored = self._stored_assignment(words[0])
+            raw_assigns.append(stored.text)
+            assign_words.append(stored)
             words = words[1:]
         if not words:
             # A bare assignment segment sets a shell variable for what follows.
@@ -3533,9 +3650,21 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
+            nameref = any(
+                w.text.startswith("-") and "n" in w.text and not w.text.startswith("--")
+                for w in words[1:]
+            )
             for w in words[1:]:
-                if _ASSIGN_RE.match(w.text):
-                    self._assign(w.text)
+                if nameref:
+                    # ``declare -n R=L``: a later ``R=/`` rewrites L, which
+                    # the walker does not model. Both names are unknowable.
+                    for var in _NAME_RE.findall(w.text.lstrip("-")):
+                        self._invalidate(var)
+                elif _ASSIGN_RE.match(w.text) or _APPEND_RE.match(w.text):
+                    # Same marker handling as a bare assignment (review R3,
+                    # PR #4147): ``export L=<pad>/u-$(date +%s).log`` keeps
+                    # its containment proof; ``L+=`` appends.
+                    self._assign(self._stored_assignment(w).text)
             return
         if name in ("cd", "pushd"):
             if any(a.startswith("CDPATH=") for a in raw_assigns):
@@ -3559,6 +3688,32 @@ class _Walker:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
             return
+        if name in ("unset", "mapfile", "readarray", "getopts"):
+            # Review R1, PR #4147: these set or clear the NAMED variables. A
+            # stale value (above all a contained one) would rank
+            # ``unset L; rm -rf "/$L"`` as the scratchpad instead of ``/``.
+            for w in words[1:]:
+                if not w.text.startswith("-"):
+                    self._invalidate(w.text)
+            return
+        if name == "printf":
+            for i, w in enumerate(words[1:], start=1):
+                if w.text == "-v" and i + 1 < len(words):
+                    self._invalidate(words[i + 1].text)
+                elif w.text.startswith("-v") and len(w.text) > 2:
+                    self._invalidate(w.text[2:])
+        if name == "let":
+            for var in _arith_assigned(" ".join(w.text for w in words[1:])):
+                self._invalidate(var)
+            return
+        if name in ("source", "."):
+            # A sourced file can reassign anything. Literal values were never
+            # protected here (pre-existing), but a contained proof must not
+            # outlive it: those values go back to a bare OPAQUE_MARK, which is
+            # what base stored for them.
+            for var, value in list(st.env.items()):
+                if CONTAINED_MARK in value:
+                    st.env[var] = value.replace(CONTAINED_MARK, OPAQUE_MARK)
         split = _env_split(words[1:]) if name == "env" else None
         if split is not None:
             # S6 / review R2-1 on PR #3906: ``env -S 'cmd …'`` splits its value
@@ -3579,6 +3734,7 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         args = words[1:]
+        self._note_opaque_link(name, args)
         # An inline assignment of a pager/git variable can run a program even
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
@@ -3827,9 +3983,76 @@ class _Walker:
         return
 
     # -- program handlers ------------------------------------------------------
+    def _invalidate(self, name: str) -> None:
+        """Forget ``name``'s value: a builtin or construct the walker does not
+        model set it. A credential value stays a credential (still unknowable)."""
+        if not _NAME_RE.fullmatch(name) or name in _RAW_PATH_VARS:
+            return
+        old = self.state.env.get(name, "")
+        self.state.env[name] = CREDENTIAL_MARK if CREDENTIAL_MARK in old else OPAQUE_MARK
+        self.for_lists.pop(name, None)
+        self.for_roots.pop(name, None)
+
+    def _stored_assignment(self, word: Expanded) -> Expanded:
+        """The ``NAME=value`` text an assignment word stores, markers swapped.
+
+        * A single ``$(mktemp …)`` stretch becomes TEMP_MARK (R6).
+        * Only-contained opaque stretches become CONTAINED_MARK, so later
+          ``$NAME`` reads keep the containment proof — never for HOME/OLDPWD,
+          whose values are read as raw paths elsewhere.
+        * ``NAME+=v`` (review R1, PR #4147) is rewritten to ``NAME=<old>v``
+          against the CURRENT stored value, keeping its marker, so a climb
+          appended to a contained value is checked like ``L=$L/..``. When the
+          old value is one the concatenation cannot keep honest (a ``for``
+          fan-out list, a mktemp/for-glob marker) or the appended text names
+          a loop variable, the result is a bare OPAQUE_MARK instead.
+        """
+        text_value = word.text
+        append = _APPEND_RE.match(text_value)
+        name = append.group(1) if append else text_value.partition("=")[0]
+        if word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
+            text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
+        elif (
+            word.opaque
+            and word.opaque_contained
+            and OPAQUE_MARK in text_value
+            and CREDENTIAL_MARK not in text_value
+            and FOR_GLOB_MARK not in text_value
+            and name not in _RAW_PATH_VARS
+        ):
+            # Every opaque stretch is a contained substitution: keep that
+            # proof for later ``$NAME`` reads (see CONTAINED_MARK).
+            text_value = text_value.replace(OPAQUE_MARK, CONTAINED_MARK)
+        if append is None:
+            # Same length (one marker char for another): the refs still line up.
+            return Expanded(text=text_value, refs=list(word.refs), pattern=word.pattern)
+        old = self.state.env.get(name, "")
+        suffix = text_value[append.end() :]
+        if (
+            word.refs
+            or name in self.for_lists
+            or TEMP_MARK in old
+            or FOR_GLOB_MARK in old
+            or TEMP_MARK in suffix
+        ):
+            credential = CREDENTIAL_MARK in old or CREDENTIAL_MARK in suffix
+            return Expanded(text=f"{name}=" + (CREDENTIAL_MARK if credential else OPAQUE_MARK))
+        return Expanded(text=f"{name}={old}{suffix}")
+
     def _assign(self, text: str) -> None:
         name, _, value = text.partition("=")
         value = _tilde_value(value, self.state.home)
+        if name in self.volatile and name not in _RAW_PATH_VARS:
+            # See ``_volatile_names``: assigned where the walker cannot follow.
+            # Never contained (nor a fresh-temp proof): every marker degrades
+            # to a plain OPAQUE_MARK, which ranks like base did. The visible
+            # text is kept so a climb it shows (``L=$L/..`` in a loop) still
+            # ranks CRITICAL. A wholly literal value stays literal: marking
+            # it opaque turned ``f(){ L=/; rm -rf "$L"; }`` from CRITICAL to
+            # HIGH, and the operator's red line is that CRITICAL never loosens.
+            value = value.replace(CONTAINED_MARK, OPAQUE_MARK).replace(TEMP_MARK, OPAQUE_MARK)
+            self.state.env[name] = value
+            return
         self.state.env[name] = value
         if name == "HOME":
             # S7: a later ``~`` resolves against the NEW home, as bash does.
@@ -4985,6 +5208,7 @@ class _Walker:
             return
         target = _target(exp, op, program, self.state)
         target.selected = selected
+        self._note_volatile(target, exp)
         self._unpin_relinked(target, exp.text)
         self._through_new_link(target)
         self.result.targets.append(target)
@@ -5003,6 +5227,7 @@ class _Walker:
             fanned = _fan_out(exp, values)
             extra = _target(fanned, op, program, self.state)
             extra.selected = selected
+            self._note_volatile(extra, exp)
             self._unpin_relinked(extra, fanned.text)
             # Each iteration's target can pass through a link this command
             # made (item F): the S7 test applies per fanned target, not only
@@ -5090,6 +5315,16 @@ class _Walker:
         if target.path is None:
             return
         stripped = target.path.rstrip("/") or "/"
+        for prefix in self.opaque_linked:
+            under = stripped.startswith(prefix.rstrip("/") + "/")
+            if under or (target.opaque and stripped == prefix):
+                # QA Q1, PR #4147: ``ln -s ~ "<pad>/$(date +%s)"; rm -rf
+                # "<pad>/$(date +%s)"/*`` — an opaque name here may be the
+                # entry just linked or moved in, and any deeper path may pass
+                # through it. No containment exemption: opaque, judge-ranked.
+                target.opaque = True
+                target.opaque_contained = False
+                return
         covering = [
             ln for ln in self.linked if stripped == ln or stripped.startswith(ln.rstrip("/") + "/")
         ]
@@ -5143,6 +5378,66 @@ class _Walker:
         for spelled in (target.path, os.path.normpath(raw) if raw else None):
             if spelled:
                 self._name(spelled)
+
+    def _note_volatile(self, target: Target, exp: Expanded) -> None:
+        """Note a target spelled through a ``_volatile_names`` variable.
+
+        Its literal value is the walker's single in-order reading, which a
+        function called later or a loop pass may have changed. A note (like
+        an empty expansion's) keeps any CRITICAL the reading earns but bars
+        an ordinary-path LOW outside the scratchpad: ``L=<pad>/$(date +%s);
+        f(){ local L=/etc; rm -rf "$L"; }; f`` stays HIGH, as on base.
+        """
+        names = sorted({ref[0] for ref in exp.refs} & self.volatile)
+        if names:
+            target.empty.append(
+                "$" + ", $".join(names) + " is assigned in a function or loop body, "
+                "so its value here is not certain"
+            )
+
+    def _note_opaque_link(self, name: str, args: list[Expanded]) -> None:
+        """Record the literal prefix of an opaque link/move/copy operand.
+
+        ``ln`` (hard or symbolic), ``mv`` and a link-preserving ``cp`` put a
+        new entry — possibly a link to anywhere — at their destination. When
+        that destination's name has an opaque part (even a contained one),
+        no later word can be matched against it, so ``_through_new_link``
+        voids containment under its literal directory. Only DESTINATIONS are
+        recorded (the last operand, a ``-t`` directory): a source moves away
+        and links nothing, and marking one re-ranked an unrelated ``..``
+        landing (``L=$(cat f); ln -sfn $L <pad>/lnk``).
+        """
+        if name in ("cp", "gcp"):
+            flags = [a.text for a in args if a.text.startswith("-")]
+            if not (
+                _has_short(flags, "sPdaRr")
+                or {"--symbolic-link", "--archive", "--no-dereference", "--recursive"}
+                & {f.partition("=")[0] for f in flags}
+            ):
+                return
+        elif name not in ("ln", "gln", "mv", "gmv"):
+            return
+        operands, _flags = _operands(args, frozenset({"-t", "--target-directory"}))
+        dests = operands[-1:]
+        for i, word in enumerate(args):
+            if word.text in ("-t", "--target-directory") and i + 1 < len(args):
+                dests.append(args[i + 1])
+            for prefix in ("--target-directory=", "-t"):
+                if word.text.startswith(prefix) and len(word.text) > len(prefix):
+                    dests.append(
+                        Expanded(
+                            text=word.text[len(prefix) :],
+                            opaque=word.opaque,
+                            opaque_contained=word.opaque_contained,
+                        )
+                    )
+                    break
+        for word in dests:
+            if not word.opaque:
+                continue
+            target = _target(word, "write", name, self.state)
+            if target.path is not None:
+                self.opaque_linked.add(target.path.rstrip("/") or "/")
 
     def _name(self, path: str) -> None:
         """Record that an earlier part of this command named ``path`` (see
@@ -5337,7 +5632,7 @@ class _Walker:
         name = word.text.partition("=")[0]
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
-        if "=" not in word.text or not word.refs:
+        if "=" not in word.text or not word.refs or name in self.volatile:
             return
         iterations = self._iterations(word)
         if iterations is None:
@@ -6553,6 +6848,7 @@ def _walk_once(
     # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
     # because a wider walk only errs safe (review round 9, NIT-1).
     walker.result.globstar = bool(_RECURSIVE_GLOB_RE.search(command))
+    walker.volatile = _volatile_names(command)
     token = _CWD_MODEL.set(model)
     try:
         walker.walk(command)
