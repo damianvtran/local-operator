@@ -51,7 +51,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         (state / "sessions" / sid / "scratchpad").mkdir(parents=True)
     (state / "config.yml").write_text("version: 1\n")
     # No live cwd, no forge, no running owner: the synthetic trees are idle.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     # The own-tree path scans fresh through ``cwd_holders`` -> ``_cwd_entries``
     # and never asks ``_live_cwd_inside``; idle must hold there too, or a
     # host with an unreadable same-uid ``/proc/<pid>/cwd`` (GitHub's Linux

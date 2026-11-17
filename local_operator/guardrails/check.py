@@ -299,6 +299,14 @@ class CallContext:
     #: from here, never from its own (shell-reachable) transcript file.
     #: ``None`` (preview) falls back to the disk copy.
     messages: Any = None
+    #: Lazy provider of the forge auth (``GH_TOKEN``, a mesh-borrowed github
+    #: login, …) the session's bash child would carry, for the guard's own
+    #: ``gh``/``glab`` PR-state lookups (``provenance.FORGE_AUTH``, field
+    #: report 2026-11-17). Kept out of ``env`` on purpose: ``env`` feeds path
+    #: resolution and the judge-side redactor, and resolving a borrow there
+    #: would cost a broker round trip per classified call. ``None``: the
+    #: lookups run on this process's own environment, as before.
+    forge_auth: Callable[[], Mapping[str, str]] | None = None
 
 
 #: How far a refusal reaches, appended to every refusal text. Model-facing
@@ -1990,7 +1998,12 @@ async def check_tool_call(
 
         return private_judge
 
+    from local_operator.guardrails import provenance as prov
+
     token = _OUTPUT_REDACTOR.set(redact)
+    # Never read into ``values``/facts: the provider's output goes only to the
+    # forge CLI child env (``provenance._forge_cli_env``).
+    forge_token = prov.FORGE_AUTH.set(ctx.forge_auth)
     try:
         outcome = await _check_tool_call(
             tool_name,
@@ -2017,6 +2030,7 @@ async def check_tool_call(
             rule="guardrail-error",
         )
     finally:
+        prov.FORGE_AUTH.reset(forge_token)
         _OUTPUT_REDACTOR.reset(token)
 
 

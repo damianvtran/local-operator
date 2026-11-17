@@ -270,11 +270,11 @@ def test_owner_rm_rf_of_locked_busy_or_unknown_own_worktree_is_high(
     # session's family keeps it busy. Match the keyword-only ``own`` contract:
     # a fixture TypeError becomes an unknown lookup, still HIGH but not busy.
     foreign_holder = prov.CwdHolder(4242, "vim", "session 222222222222 (another session)", False)
-    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, *, own=False: [foreign_holder])
+    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, **_kw: [foreign_holder])
     assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
     v = _rank(home, command, S)
     assert v.risk is Risk.HIGH and "busy" in v.targets[0].reason
-    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, *, own=False: [])
+    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, **_kw: [])
 
     real_git = prov._git
 

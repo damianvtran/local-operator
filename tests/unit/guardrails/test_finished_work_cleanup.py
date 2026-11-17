@@ -39,6 +39,9 @@ from local_operator.harness.types import CustomMessage
 ME = "aaaaaaaaaaa1"  # the cleaning session
 DONE = "bbbbbbbbbbb2"  # the ended session that made the tree / rig
 LIVE = "ccccccccccc3"  # a session still running
+#: The real scan, kept before the ``home`` fixture stubs it (section 4 restores it).
+_REAL_LIVE_CWD_INSIDE = prov._live_cwd_inside
+_REAL_CWD_HOLDERS = prov.cwd_holders
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -58,8 +61,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for sid in (ME, DONE, LIVE):
         (state / "sessions" / sid / "scratchpad").mkdir(parents=True)
     (state / "config.yml").write_text("version: 1\n")
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
-    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, own=False: ())
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
+    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, **_kw: ())
     monkeypatch.setattr(prov, "_github_repo", lambda _: "example/repo")
     # gh unavailable on the node (the field condition): every lookup fails.
     monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: None)
@@ -395,7 +398,7 @@ def test_rig_with_foreign_dirty_worktree_is_high(home: Path, repo: Path) -> None
 def test_rig_with_live_foreign_holder_is_high(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rig = _rig(home, "qa-held")
     holder = prov.CwdHolder(pid=4242, command="bash", owner="session x", family=False)
-    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, own=False: (holder,))
+    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid, **_kw: (holder,))
     assert _rank(home, f"rm -rf {rig}").risk is Risk.HIGH
 
 
@@ -1111,3 +1114,196 @@ async def test_m1_typed_answer_never_settles_a_file_a_running_session_recorded(
     outcome = await _check(home, f"rm -f {out}", judge, _operator("a-m104"))
     assert outcome is not None and outcome.blocked
     assert judge.prompts and MISS in judge.prompts[-1]
+
+
+# -- 4. node-2 field report 2026-11-17 (guard 0.106.6, session d5188ee174d4) -----------
+#
+# Clean merged linked worktrees removed with a plain ``git worktree remove`` were
+# judge-refused on two inputs: busy=unknown from ``(sd-pam)`` (same uid,
+# non-dumpable, so /proc/<pid>/cwd is EACCES) and "PR state unknown" from a gh
+# lookup that lacked the session's auth (see test_guard_forge_auth.py). These
+# drive the REAL cwd scan (``_live_cwd_inside``/``cwd_holders``) over a fake
+# /proc, and the real finished-work route.
+
+HIDDEN_PID = 3076  # the field pid; its name is never consulted
+
+
+class _ProcOs:
+    """``os`` whose ``readlink`` of the hidden pid's ``cwd`` raises EACCES."""
+
+    def __init__(self, hidden_cwd: str) -> None:
+        self.hidden_cwd = hidden_cwd
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+    def readlink(self, path: Any, *args: Any, **kwargs: Any) -> str:
+        if str(path) == self.hidden_cwd:
+            raise PermissionError(13, "Permission denied", str(path))
+        return os.readlink(path, *args, **kwargs)
+
+
+@pytest.fixture
+def sd_pam(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fake /proc holding ONE same-uid pid whose cwd is unreadable, nothing else."""
+    root = home / "proc"
+    (root / "self").mkdir(parents=True)
+    pid_dir = root / str(HIDDEN_PID)
+    pid_dir.mkdir()
+    monkeypatch.setattr(prov, "_PROC_ROOT", str(root))
+    monkeypatch.setattr(prov, "os", _ProcOs(str(pid_dir / "cwd")))
+    # Undo the fixture's stubs: the scan under test is the real one.
+    monkeypatch.setattr(prov, "_live_cwd_inside", _REAL_LIVE_CWD_INSIDE)
+    monkeypatch.setattr(prov, "cwd_holders", _REAL_CWD_HOLDERS)
+    monkeypatch.setattr(prov, "_process_table", lambda: {HIDDEN_PID: (1, "(sd-pam)")})
+    monkeypatch.setattr(prov, "_still_exists", lambda pid: pid == HIDDEN_PID)
+    return pid_dir
+
+
+def test_sd_pam_without_evidence_leaves_a_merged_tree_low(home: Path, repo: Path, sd_pam: Path):
+    wt = _squashed_tree(home, repo, "node2-sdpam")
+    assert prov.worktree_state(str(wt)) == "clean"
+    verdict = _rank(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is Risk.LOW, verdict.reasons
+    assert "busy" not in verdict.targets[0].reason
+
+
+def test_sd_pam_with_an_fd_inside_keeps_the_tree_busy(home: Path, repo: Path, sd_pam: Path):
+    """Positive evidence still holds the tree: fail closed, and the pid is named."""
+    wt = _squashed_tree(home, repo, "node2-held")
+    (sd_pam / "fd").mkdir()
+    (sd_pam / "fd" / "7").symlink_to(wt / "node2-held.txt")
+    assert prov.worktree_state(str(wt)) == "busy"
+    verdict = _rank(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is not Risk.LOW, verdict.reasons
+    assert f"pid {HIDDEN_PID}" in prov.busy_phrase(str(wt), ME)
+
+
+def _main_edits_again(repo: Path, name: str) -> None:
+    """main touches a path the branch changed after the squash: content proof fails."""
+    (repo / f"{name}.txt").write_text("edited on main later\n")
+    _git("commit", "-qam", f"follow-up on {name}", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+
+
+def test_merged_pr_for_this_head_proves_a_squash_content_cannot(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = _squashed_tree(home, repo, "merged-pr")
+    _main_edits_again(repo, "merged-pr")
+    head = _git("rev-parse", "HEAD", cwd=wt).strip()
+    assert not prov.content_merged(
+        str(wt), head, _git("rev-parse", "origin/main", cwd=repo).strip()
+    )
+    monkeypatch.setattr(
+        prov, "_gh_prs", lambda r, b: [prov.ForgeChange(3963, "merged", "2026-11-17", head, "main")]
+    )
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    assert got.safe, got.reasons
+    assert "merged-by-pr" in got.reasons and "no-open-pr" in got.reasons
+    assert "squash merge" in got.warning(str(wt))
+    # ``--force`` takes the finished-foreign route, which needs the merge
+    # proof (a plain remove of a clean tree with no open PR is LOW without it).
+    verdict = _rank(home, f"git -C {repo} worktree remove --force {wt}")
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+def test_merged_pr_on_an_older_head_proves_nothing(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local commit after what merged: the badge is for another head."""
+    wt = _squashed_tree(home, repo, "older-head")
+    merged_head = _git("rev-parse", "HEAD", cwd=wt).strip()
+    _main_edits_again(repo, "older-head")
+    (wt / "after.txt").write_text("unlanded\n")
+    _git("add", ".", cwd=wt)
+    _git("commit", "-qm", "after merge", cwd=wt)
+    monkeypatch.setattr(
+        prov,
+        "_gh_prs",
+        lambda r, b: [prov.ForgeChange(3963, "merged", "2026-11-17", merged_head, "main")],
+    )
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    assert not got.safe and got.reasons == ("not-merged",), got.reasons
+    verdict = _rank(home, f"git -C {repo} worktree remove --force {wt}")
+    assert verdict.risk is not Risk.LOW, verdict.reasons
+
+
+# -- 5. PR #4161 review round 1 -----------------------------------------------------
+
+
+def test_m2_a_stacked_pr_merged_into_a_feature_branch_proves_nothing(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m2: same head, but merged into ``feature/base``, not origin's default."""
+    wt = _squashed_tree(home, repo, "stacked")
+    _main_edits_again(repo, "stacked")
+    head = _git("rev-parse", "HEAD", cwd=wt).strip()
+    monkeypatch.setattr(
+        prov,
+        "_gh_prs",
+        lambda r, b: [prov.ForgeChange(3963, "merged", "2026-11-17", head, "feature/base")],
+    )
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    assert not got.safe and got.reasons == ("not-merged",), got.reasons
+    verdict = _rank(home, f"git -C {repo} worktree remove --force {wt}")
+    assert verdict.risk is not Risk.LOW, verdict.reasons
+
+
+def test_m1_a_hidden_pid_keeps_an_ended_sessions_rig_with_the_judge(
+    home: Path, sd_pam: Path
+) -> None:
+    """Review M1: ``rm -rf`` has no untracked-content refusal, so no relaxed rule.
+
+    One cwd-unreadable pid with no fd/maps evidence, an ended creator, no
+    nested repository: before the fix ``finished_rig`` answered "finished
+    work" and ``rm -rf`` ranked LOW with no review.
+    """
+    rig = _rig(home, "qa-hidden")
+    assert prov.finished_rig(str(rig), ME) == (None, "live-process scan unavailable")
+    assert f"cwd of pid {HIDDEN_PID} unreadable" in (prov._cwd_inventory_error or "")
+    verdict = _rank(home, f"rm -rf {rig}")
+    assert verdict.risk is not Risk.LOW, verdict.reasons
+
+
+def test_n1_a_hidden_pid_beside_a_definite_holder_may_hold_the_tree(
+    home: Path, sd_pam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The strict rule names an unrelated hidden pid next to a definite holder."""
+    rig = _rig(home, "qa-held")
+    holder = sd_pam.parent / "4242"
+    holder.mkdir()
+    (holder / "cwd").symlink_to(rig)
+    monkeypatch.setattr(
+        prov, "_process_table", lambda: {HIDDEN_PID: (1, "(sd-pam)"), 4242: (1, "sleep 600")}
+    )
+    monkeypatch.setattr(prov, "_still_exists", lambda pid: pid in (HIDDEN_PID, 4242))
+    strict = prov.cwd_holders(os.path.realpath(rig), ME, hidden_blocks=True)
+    assert strict is not None
+    assert {h.pid for h in strict} == {4242, HIDDEN_PID}
+    assert any(
+        h.pid == HIDDEN_PID and h.owner == "cwd unreadable; may hold the tree" for h in strict
+    )
+    relaxed = prov.cwd_holders(os.path.realpath(rig), ME)
+    assert relaxed is not None and {h.pid for h in relaxed} == {4242}
+
+
+def test_m1_a_hidden_pid_keeps_force_and_rm_rf_of_a_finished_tree_with_the_judge(
+    home: Path, repo: Path, sd_pam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the PLAIN ``git worktree remove`` ignores a hidden pid with no evidence."""
+    wt = _squashed_tree(home, repo, "hidden-force")
+    _main_edits_again(repo, "hidden-force")
+    head = _git("rev-parse", "HEAD", cwd=wt).strip()
+    monkeypatch.setattr(
+        prov, "_gh_prs", lambda r, b: [prov.ForgeChange(3963, "merged", "2026-11-17", head, "main")]
+    )
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    assert not got.safe and got.reasons == ("state-busy",), got.reasons
+    forced = _rank(home, f"git -C {repo} worktree remove --force {wt}")
+    assert forced.risk is not Risk.LOW, forced.reasons
+    assert f"pid {HIDDEN_PID}" in forced.targets[0].reason
+    assert _rank(home, f"rm -rf {wt}").risk is not Risk.LOW
+    plain = _rank(home, f"git -C {repo} worktree remove {wt}")
+    assert plain.risk is Risk.LOW, plain.reasons
