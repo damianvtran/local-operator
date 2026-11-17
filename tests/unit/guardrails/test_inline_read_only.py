@@ -69,11 +69,11 @@ def _pad(home: Path, sid: str) -> Path:
     return home / ".local-operator" / "sessions" / sid / "scratchpad"
 
 
-def _verdict(home: Path, command: str, sid: str = PARENT):
+def _verdict(home: Path, command: str, sid: str = PARENT, cwd: Path | None = None):
     pad = _pad(home, sid)
     env = {"HOME": str(home), "LOCAL_OPERATOR_SCRATCHPAD": str(pad), "PATH": INHERITED_PATH}
     return classify_bash(
-        command, cwd=str(home / "work"), env=env, scratchpad=str(pad), session_id=sid
+        command, cwd=str(cwd or home / "work"), env=env, scratchpad=str(pad), session_id=sid
     )
 
 
@@ -407,3 +407,147 @@ def test_legitimate_reads_of_a_childs_pad_rank_low(home: Path, code: str) -> Non
     command = f"python3 -c '{code.format(pad=pad)}'"
     verdict = _verdict(home, command, sid=PARENT)
     assert verdict.risk is Risk.LOW, (code, verdict.reasons)
+
+
+# -- node2 #4108 P2 QA: the proof from a repo cwd, and ``assert`` --------------------------
+#
+# A parent checking its descendant's output runs from its repo, whose cwd
+# always holds a package and a ``conftest.py``. The shadow check refused ANY
+# importable entry there, and ``assert`` was not on the node allow-list, so
+# both shapes below were HIGH on origin/main 72dd603f.
+
+
+def _repo(home: Path, *extra: str) -> Path:
+    """A repo-like cwd: a package, ``conftest.py``, plus ``extra`` entries.
+
+    An ``extra`` ending in ``/`` is a package dir (``urllib/__init__.py``).
+    """
+    repo = home / "repo"
+    (repo / "local_operator").mkdir(parents=True, exist_ok=True)
+    (repo / "local_operator" / "__init__.py").write_text("")
+    (repo / "conftest.py").write_text("")
+    (repo / "pyproject.toml").write_text("")
+    for name in extra:
+        if name.endswith("/"):
+            (repo / name).mkdir()
+            (repo / name / "__init__.py").write_text("import shutil\n")
+        else:
+            (repo / name).write_text("import shutil\n")
+    return repo
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -c 'from pathlib import Path; print(Path(\"{pad}/a.log\").read_text())'",
+        "python3 -I -c 'from pathlib import Path; print(Path(\"{pad}/a.log\").read_text())'",
+        # The pad ROOT, read and asserted on (no write names it).
+        'python3 -c \'from pathlib import Path; b = Path("{pad}").joinpath("a.log")'
+        '.read_bytes(); assert b, "empty"; print(len(b))\'',
+    ],
+)
+def test_reading_a_descendants_pad_from_a_repo_cwd_is_low(home: Path, command: str) -> None:
+    verdict = _verdict(home, command.format(pad=_pad(home, CHILD)), sid=PARENT, cwd=_repo(home))
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'from pathlib import Path; p = Path("{pad}/a.log"); assert p.exists(); p.unlink()',
+        'from pathlib import Path; p = Path("{pad}/a.log"); assert p.exists(); p.write_text("x")',
+        'import shutil; assert 1; shutil.rmtree("{pad}")',
+        'import os; assert os.remove("{pad}/a.log") is None',
+    ],
+)
+def test_assert_beside_a_delete_or_write_stays_high_from_a_repo_cwd(home: Path, code: str) -> None:
+    command = f"python3 -c '{code.format(pad=_pad(home, CHILD))}'"
+    verdict = _verdict(home, command, sid=PARENT, cwd=_repo(home))
+    assert verdict.risk >= Risk.HIGH, (code, verdict.reasons)
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    ["json.py", "JSON.py", "urllib/", "fnmatch.cpython-314-darwin.so", "sitecustomize.py"],
+)
+def test_a_stdlib_named_cwd_entry_keeps_the_read_high(home: Path, shadow: str) -> None:
+    pad = _pad(home, CHILD)
+    command = f"python3 -c 'from pathlib import Path; print(Path(\"{pad}/a.log\").read_text())'"
+    verdict = _verdict(home, command, sid=PARENT, cwd=_repo(home, shadow))
+    assert verdict.risk >= Risk.HIGH, (shadow, verdict.reasons)
+    # The judge is told what refused the proof, not only "may run code".
+    assert any("may shadow a stdlib import" in r for r in verdict.reasons), verdict.reasons
+
+
+def test_assert_read_of_a_strangers_pad_stays_high_from_a_repo_cwd(home: Path) -> None:
+    pad = _pad(home, STRANGER)
+    command = (
+        f"python3 -c 'from pathlib import Path; b = Path(\"{pad}/a.log\").read_bytes(); assert b'"
+    )
+    assert _verdict(home, command, sid=PARENT, cwd=_repo(home)).risk >= Risk.HIGH
+
+
+def test_shell_delete_in_a_descendants_pad_stays_high_from_a_repo_cwd(home: Path) -> None:
+    command = f"rm {_pad(home, CHILD)}/a.log"
+    assert _verdict(home, command, sid=PARENT, cwd=_repo(home)).risk >= Risk.HIGH
+
+
+def test_unsupported_syntax_is_named_to_the_judge(home: Path) -> None:
+    pad = _pad(home, CHILD)
+    command = f"python3 -c 'with open(\"{pad}/a.log\") as f: print(f.read())'"
+    verdict = _verdict(home, command, sid=PARENT, cwd=_repo(home))
+    assert verdict.risk >= Risk.HIGH
+    assert any("unsupported syntax With" in r for r in verdict.reasons), verdict.reasons
+
+
+# -- the name-based shadow check itself ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        ((), None),
+        (("conftest.py", "setup.py", "mypkg/", "tests/", "notes.txt"), None),
+        # A stdlib-named dir without any ``__init__`` is a namespace portion
+        # the real stdlib module beats: it shadows nothing.
+        (("json-dir-no-init:json",), None),
+        (("json.py",), "json.py"),
+        (("JSON.py",), "JSON.py"),
+        (("Fnmatch.PY.py",), "Fnmatch.PY.py"),
+        (("json.cpython-314-darwin.so",), "json.cpython-314-darwin.so"),
+        (("re.pyc",), "re.pyc"),
+        (("urllib/",), "urllib/"),
+        (("usercustomize.py",), "usercustomize.py"),
+        # Removed from this runtime's stdlib, still imported by an older one.
+        (("asyncore.py",), "asyncore.py"),
+        (("telnetlib.py",), "telnetlib.py"),
+    ],
+)
+def test_cwd_shadowing_entry_matches_by_module_name(
+    tmp_path: Path, entries: tuple[str, ...], expected: str | None
+) -> None:
+    from local_operator.guardrails.resolve import _cwd_shadowing_entry
+
+    for name in entries:
+        if name.startswith("json-dir-no-init:"):
+            (tmp_path / name.split(":", 1)[1]).mkdir()
+        elif name.endswith("/"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "__init__.py").write_text("")
+        else:
+            (tmp_path / name).write_text("")
+    assert _cwd_shadowing_entry(str(tmp_path)) == expected
+
+
+def test_a_package_with_only_a_compiled_init_still_shadows(tmp_path: Path) -> None:
+    from local_operator.guardrails.resolve import _cwd_shadowing_entry
+
+    (tmp_path / "json").mkdir()
+    (tmp_path / "json" / "__init__.cpython-314-darwin.so").write_text("")
+    assert _cwd_shadowing_entry(str(tmp_path)) == "json/"
+
+
+def test_an_unreadable_cwd_fails_closed(tmp_path: Path) -> None:
+    from local_operator.guardrails.resolve import _cwd_shadowing_entry
+
+    assert _cwd_shadowing_entry(str(tmp_path / "missing")) is not None
