@@ -24,8 +24,8 @@ from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import (
     STATE_READY,
     STATE_UNAVAILABLE,
-    BridgeRefusal,
     Boundary,
+    BridgeRefusal,
     StatusDiscipline,
 )
 from local_operator.team_bridge.tool import _failure_text
