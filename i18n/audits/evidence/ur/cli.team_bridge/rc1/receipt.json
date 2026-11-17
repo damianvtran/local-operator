@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "audit_id": "rc1",
+  "locale": "ur",
+  "namespace": "cli.team_bridge",
+  "record": "i18n/audits/evidence/ur/cli.team_bridge/rc1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable record, copied byte-for-byte from its session scratchpad; it covers both namespaces of this locale and is identical in both rc1 directories",
+  "record_sha256": "7f033a44d1ac985d667dc69d25e13eed72e0bddbc0f610a6b4dbbac9bbf51317",
+  "source_sha256": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+  "target_sha256": "973fd489e05fff2cba5b87b6f0b22308579123845867610354c971bf2b529011",
+  "verdict": "passed",
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, task brand-au-ur), independent subagent; not the translator (job a3f997956154) and did not edit any value",
+    "session": "e0a45ddcb618",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "ledger_receipt": {
+    "locale": "ur",
+    "namespace": "cli.team_bridge",
+    "source_sha256": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "translator": {
+      "agent": "i18n-translator subagent, job a3f997956154 (Radient Console canonicalisation values, commit 3dd15d6f5559)",
+      "model": "anthropic/claude-sonnet-5-5",
+      "date": "2026-11-16"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (team lopdev, task brand-au-ur), independent subagent; not the translator (job a3f997956154) and did not edit any value",
+      "session": "e0a45ddcb618",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-16",
+      "result": "clean",
+      "findings": 0,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [],
+      "locale_verdict": "CLEAN-WITH-FINDINGS"
+    },
+    "status": "passed",
+    "note": "Delta audit of the Radient Console canonicalisation at commit 3dd15d6f5559 (diff base 220d39a96667): independent i18n-auditor e0a45ddcb618 (anthropic/claude-opus-5-5, no fallback observed) of i18n-translator job a3f997956154 (anthropic/claude-sonnet-5-5). Audited keys: cli.team_bridge.notify.screening_model_unavailable_body (unchanged keys keep their earlier passed audits and were not re-audited). Pair findings: 0 blocker, 0 major, 0 minor, 0 nit ; locale-wide verdict CLEAN-WITH-FINDINGS. Record: i18n/audits/evidence/ur/cli.team_bridge/rc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/ur/cli.team_bridge/rc1/record.json",
+    "round": "rc1",
+    "keys_audited": 1
+  }
+}

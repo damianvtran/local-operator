@@ -394,18 +394,26 @@ async def test_answered_ask_settles_before_a_timed_out_judge(home: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_ask_answered_in_the_parent_covers_the_child_without_a_pointer(home: Path) -> None:
+@pytest.mark.parametrize("picked", [True, False], ids=["picked-approval", "typed-unrecoverable"])
+async def test_ask_answered_in_the_parent_covers_the_child_without_a_pointer(
+    home: Path, picked: bool
+) -> None:
     _child_of(home, CHILD, PARENT)
     files = _stranger_receipts(home)
     question = (
         f"May the coder remove ~/.local-operator/sessions/{STRANGER}/scratchpad/receipts-r2/"
         "m-{es,fr,zh-cn}-x.json, by literal path?"
     )
-    _ask(home, PARENT, "a-0bad", question, "Go ahead and remove them")
+    # Parent lineage carries a picked approval without a message pointer. A
+    # typed answer still reaches that lineage, but these foreign files have
+    # no recoverability proof: PR #4098 deliberately leaves them to the judge.
+    answer = "Go ahead and remove them"
+    options = ((answer, ""), ("Keep them", "")) if picked else ()
+    _ask(home, PARENT, "a-0bad", question, answer, options)
     judge = _TimedOutJudge()
     outcome = await _check(home, "rm -f " + " ".join(str(f) for f in files), CHILD, [], judge)
-    assert outcome is not None and not outcome.blocked, outcome
-    assert judge.calls == 0
+    assert outcome is not None and outcome.blocked is (not picked), outcome
+    assert judge.calls == (0 if picked else 1)
 
 
 class _RecordingJudge:

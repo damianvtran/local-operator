@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "b5407976acf72b6b67d3c64434c2f8caa9f9140d62ae46b5b805d64b84c8c706",
+  "history_sha256": "7aa650558c59948d417517fd4b8ba0deeb6e249b931ce36023c5f10a7dc25990",
   "entries": [
     {
       "locale": "vi",
@@ -650,6 +650,58 @@
     {
       "locale": "vi",
       "namespace": "wire.settings",
+      "source_sha256": "5237bd670369faa1dbabaf5cabd5999237bdcf08166512872b497ed3a1ce71e0",
+      "target_sha256": "b70b52816e832d3aa8eae0f840bab88b572d895fbe4b3da12923f8caa308603a",
+      "translator": {
+        "agent": "translator subagent under the lopdev manager (commit 588dfd96b3b1) — relayed by the manager, not independently verified",
+        "model": null,
+        "fallback": "not reported",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent of the translator; did not translate any key",
+        "session": "5e96a4997450",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "feat/heavy-job-lease 2026-11-16 translation-auditor 5e96a4997450 (anthropic/claude-opus-5-5, no fallback) at branch head c40c7f3e9: 6 new keys audited against en 5237bd670369 (en delta f5c40bc8a076→5237bd670369 is exactly the 6 heavy-job keys added in 7d481973b; diff vs base f0689a27c2af = 6 added lines in en and in this locale). Rest of namespace byte-identical to bytes b010a740d0f2 that carried the passed f5c40bc8a076 receipt. Keys: heavy_jobs.title, heavy_jobs.description, bash_heavy_jobs_enabled.label/.help/.choice.true.description/.choice.false.description. No ICU placeholders/markup in source or target (parity 0=0, no plural arms); no bidi/control chars; NFC. Hooks: translator committed with core.hooksPath=/dev/null; this repo installs no git hooks (only *.sample) and has no pre-commit config, so nothing was skipped — generate.py --check and check.py --audit-base origin/main were run by the auditor instead. Terms: tác vụ (glossary job), hàng đợi, phiên (glossary), công cụ bash, máy này (corpus); 'build'/'test' kept English as in bash_query_budget_enabled.help and query_budget.description (verified). Findings: V1 nit — help repeats 'chạy' ('chạy test … sẽ lần lượt chạy'); 'sẽ lần lượt được thực thi trên máy này' avoids it. Deferred, not gating. 0 blocker/major. Target bytes sha256 b70b52816e832d3aa8eae0f840bab88b572d895fbe4b3da12923f8caa308603a. Source observation, not a translation finding: the en copy says one heavy job at a time per machine, but heavy_lease.py auto-sizes up to 4 slots on hosts above 16 GB; the translations render the en faithfully, and any en correction stales this receipt. Single independent audit only; no second audit performed in this receipt."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "beb522ed359310863117d8869f3c494f4733b0346644d81780b8c3a9bcfa0b95",
+      "target_sha256": "1fc5782e36327b2a5a3d7dfe94937c427b20d47b970fa39abf097f277f495432",
+      "translator": {
+        "agent": "translator under the lopdev manager (commit 52ce8b7ef146) — relayed by the manager, not independently verified",
+        "model": null,
+        "fallback": "not reported",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent of the translator; did not translate any key",
+        "session": "d0fd6c8b5699",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "feat/heavy-job-lease 2026-11-16 translation-auditor d0fd6c8b5699 (anthropic/claude-opus-5-5, no fallback) at branch head 52ce8b7ef146: re-audit after the en K1 correction. Source en 5237bd670369→beb522ed3593 changes exactly 3 keys (heavy_jobs.description, bash_heavy_jobs_enabled.help, bash_heavy_jobs_enabled.choice.true.description; 3 changed lines, key order identical); this locale's target changes exactly the same 3 keys. The other 872 keys, including the unchanged heavy-job title/label/choice.false, are value- and order-identical to the bytes b70b52816e83 that carried the passed 5237bd670369 receipt (auditor 5e96a4997450, commit 86a617971); they were not re-scored. Changed keys audited against the en copy and context notes (slot count depends on memory; copy must not promise exactly one). No ICU placeholders/plural arms/markup in source or target (parity 0=0); NFC; no bidi/control or no-break chars. Main has not touched i18n since merge base f0689a27c2af. Prior deferred note applied: help no longer repeats 'chạy' ('chạy test … được thực thi cùng lúc'); description has one 'chạy'. 'chỉ một tác vụ mỗi lần nếu máy có từ 16 GB bộ nhớ trở xuống' accurate; choice 'tác vụ nặng thay phiên nhau'. Glossary tác vụ. 0 findings. Target bytes sha256 1fc5782e36327b2a5a3d7dfe94937c427b20d47b970fa39abf097f277f495432. Single independent audit only; no second audit performed in this receipt."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
       "source_sha256": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
       "target_sha256": "98217040aadfa13ae98c19bfcd9a3044d1ce5e35642dd91e20e38a62be4bb87b",
       "translator": {
@@ -714,6 +766,40 @@
       "evidence": "i18n/audits/evidence/vi/wire.settings/ap2/record.json",
       "round": "ap2",
       "keys_audited": 1
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "8202b3fda884e4e0c4b492d1cfabab21cb3b0e14db6aae25fa04c53309bd680f",
+      "target_sha256": "b584f95840522552c8631e6a4ac94630ba20a98682376a1e20aafc061874adcd",
+      "translator": {
+        "agent": "i18n-translator (team lopdev), session b0fe2564b811, job fe2cc984b94c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev), independent of translator b0fe2564b811 and the implementer",
+        "session": "1164c8450503",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-17",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 merge with main, round m4135: independent i18n-auditor session 1164c8450503 (anthropic/claude-opus-5-5, fallback: none observed), audited bytes target_sha256 in the uncommitted merge tree of .worktrees/auto-prune-pr. Translator: i18n-translator session b0fe2564b811 (anthropic/claude-opus-5-5), job fe2cc984b94c, 2026-11-17. Merge of PR #4135 (HEAD 1853bde32, wire.settings fa571f18d524, last receipt passed vs en d1f1d715f520) with main (MERGE_HEAD eb872993c, wire.settings 1fc5782e3632, last receipt passed vs en beb522ed3593); merge-base 23398503e. Mechanical, whole namespace (883 keys): key set equals en and the union of both parents minus deletions; every non-patched value is byte-identical to the side that changed it (no both-sides conflicts, no reverts); placeholder parity, backtick code-span parity, NFC and no bidi/control chars all pass; the source has no ICU plural/select, so there are no plural categories to check. Key order differs from en only in the session_cleanup_temporary_idle_minutes choices, which is pre-existing at the merge base and not a translation issue. Semantic: all 14 merge keys (update_auto_prune.*, update_keep_generations.{label,help}, updates.{title,description}, bash_heavy_jobs_enabled.*, heavy_jobs.{title,description}) checked against en and the en context sidecar for meaning, prune/keep safety, glossary and fit. Safety holds: every rendering deletes only unused/old installs, and keep_generations.help leads with the complete always-kept clause (current, previous, running, registered) within the 146-cell budget. The other 869 keys were not re-scored: they are value-identical to bytes that already carry passed receipts on a parent. No translator change to this locale in the merge; confirmed. Pair findings: 0 blocker, 0 major, 0 minor, 0 nit []; verdict CLEAN. Minor/nit findings are deferred and non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/wire.settings/m4135/record.json",
+      "round": "m4135",
+      "keys_audited": 883
     }
   ]
 }

@@ -1154,3 +1154,168 @@ async def test_above_an_approved_glob_the_judge_reads_and_the_citation_never_ver
     assert outcome is not None and outcome.blocked, "the operator approved runs*, not ~/osworld"
     assert len(judge.prompts) == 1
     assert (deep / "osworld").is_dir()
+
+
+# -- Incident a-48e3 (2026-11-16): an unproven answer surface ----------------------
+#
+# Session 439818272d84 asked to move a stray ``~/package.json``, lockfile and
+# ``~/node_modules`` into a backup folder. The operator answered on his desktop
+# card, but that runtime had been started by the wake supervisor, so the desktop
+# backend held no operator capability for it and the runtime stamped the answer
+# ``unverified`` (``asks.surfaces``). The guard refused the ``mv`` with "answered
+# on the 'unverified' surface, not by the operator ... have no answer from them
+# approving it", and the agent told the operator he had not answered. The refusal
+# is correct (a proof-less local dial is what the model's own ``bash`` can forge);
+# the wording was not. Rows 513/514 of that store, verbatim except the session
+# (synthetic) and times (re-based on now, so the 7-day escalation window and the
+# 24 h expiry hold whenever this runs).
+
+A48E3_QUEUED = {
+    "ask_id": "a-48e3",
+    "at": 1794857239837,
+    "created_at": 1794857239837,
+    "expires_at": 1794943639837,
+    "kind": "queued",
+    "questions": [
+        {
+            "human_required": False,
+            "id": "stray-home-pkg",
+            "multi": False,
+            "options": [
+                {
+                    "description": "Moves ~/package.json, ~/pnpm-lock.yaml and ~/node_modules "
+                    "there unchanged and nothing is deleted. Moving them back restores the "
+                    "current state exactly. pnpm works normally again in every repo.",
+                    "label": "Move them to ~/.stray-node-home-20261116/",
+                },
+                {
+                    "description": "Sessions keep working around it with "
+                    "npm_config_manage_package_manager_versions=false. Any session that misses "
+                    "that setting hits the pnpm loop.",
+                    "label": "Leave them",
+                },
+            ],
+            "persist": False,
+            "question": "Your home folder has a stray copy of the mobile app's package.json "
+            "(written Nov 10), plus a pnpm-lock.yaml and a node_modules folder with 421 "
+            "packages. Its pnpm version pin makes pnpm in every folder under your home loop "
+            "until the memory guard kills it, which is what blocked the marketing PR. Can I "
+            "move these three into a dated backup folder?",
+            "question_id": "",
+            "recommended": 0,
+            "secret": False,
+        }
+    ],
+    "timeout_s": 86400,
+    "tool_call_id": "toolu_01CropKk45Vg5fuZo9ADHvYV",
+    "urgent": False,
+    "v": 1,
+}
+A48E3_ANSWERED = {
+    "answers": {"stray-home-pkg": ["Move them to ~/.stray-node-home-20261116/"]},
+    "ask_id": "a-48e3",
+    "at": 1794858354225,
+    "by": {"surface": "unverified"},
+    "kind": "answered",
+    "tool_call_id": "toolu_01CropKk45Vg5fuZo9ADHvYV",
+    "v": 1,
+}
+A48E3_MV = (
+    "mkdir -p ~/.stray-node-home-20261116 && "
+    "mv ~/package.json ~/pnpm-lock.yaml ~/node_modules ~/.stray-node-home-20261116/"
+)
+
+
+def _a48e3(home: Path, surface: str) -> None:
+    """The incident's two rows in ``S``'s store, answered on ``surface``."""
+    shift = int(time.time() * 1000) - 60_000 - A48E3_ANSWERED["at"]
+    queued = {
+        **A48E3_QUEUED,
+        **{k: A48E3_QUEUED[k] + shift for k in ("at", "created_at", "expires_at")},
+    }
+    answered = {**A48E3_ANSWERED, "at": A48E3_ANSWERED["at"] + shift, "by": {"surface": surface}}
+    (home / "package.json").write_text('{"packageManager": "pnpm@9.0.0"}\n')
+    (home / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+    (home / "node_modules" / "left-pad").mkdir(parents=True)
+    path = home / ".local-operator" / "sessions" / S / "asks.jsonl"
+    with path.open("a") as fh:
+        for row in (queued, answered):
+            fh.write(json.dumps(row) + "\n")
+
+
+@pytest.mark.asyncio
+async def test_a48e3_unverified_answer_is_refused_and_says_it_was_unproven(home: Path) -> None:
+    _a48e3(home, "unverified")
+    [ask] = prov.unanswered_asks(S)
+    assert ask.label == prov.UNPROVEN_SURFACE_LABEL and ask.answer is None
+    judge = _Judge("ALLOW ask=a-48e3")  # would be fooled if asked
+    outcome = await _check(home, A48E3_MV, judge)
+    assert outcome is not None and outcome.blocked
+    assert judge.prompts == []  # still the deterministic refusal, never the judge
+    text = " ".join(outcome.text.split())
+    assert "could not prove it is the operator's" in text
+    assert "did not start this session's runtime" in text
+    # The recovery LEADS with the route that always works (R1-M1/Q1): a
+    # runtime the wake supervisor started has no surface that can prove the
+    # operator, so an unconditional "ask again" loops on the same card.
+    recovery = text.split("leave it in place.", 1)[1]
+    assert recovery.startswith(" To proceed, hand the exact command to the operator")
+    assert "helps only if the operator answers in the terminal or TUI process" in text
+    assert "a runtime started in the background has none" in text
+    assert "another answer on the same desktop card is refused the same way" in text
+    assert "ask again at most once, naming every exact full path" in text
+    assert "peer, bridge or relayed message" in text
+    # Never steer the proof source: no "restart the runtime" / "start it from".
+    lowered = text.lower()
+    assert "restart" not in lowered and "relaunch" not in lowered
+    assert "start the runtime" not in lowered and "start this runtime" not in lowered
+    assert "so the operator answers from" not in text
+    # Never again "no answer": the operator DID answer.
+    assert "have no answer" not in text and "got no answer" not in text
+    assert (home / "node_modules").is_dir() and (home / "package.json").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["remote", "chat", "relay", "bridge"])
+async def test_a48e3_other_untrusted_surfaces_keep_their_refusal(home: Path, surface: str) -> None:
+    """Negative controls: a phone/mesh (``remote``), the agent's own
+    ``answered_in_chat`` (``chat``) and a relayed answer stay refused with no
+    judge, and keep the not-the-operator wording (they are not "unproven
+    operator" answers)."""
+    _a48e3(home, surface)
+    judge = _Judge("ALLOW ask=a-48e3")
+    outcome = await _check(home, A48E3_MV, judge)
+    assert outcome is not None and outcome.blocked and judge.prompts == []
+    assert f"answered on the '{surface}' surface, not by the operator" in outcome.text
+    assert prov.UNPROVEN_SURFACE_LABEL not in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a48e3_even_a_proven_answer_does_not_cover_a_description_only_path(
+    home: Path,
+) -> None:
+    """The ask named ``~/node_modules`` only in an option description (the question
+    says "a node_modules folder"), so a proven desktop answer still cannot approve
+    moving it: that is the full-path rule, not the surface. A fooled judge's
+    citation is refused by the verifier."""
+    _a48e3(home, "desktop")
+    judge = _Judge("ALLOW ask=a-48e3")
+    outcome = await _check(home, A48E3_MV, judge)
+    assert outcome is not None and outcome.blocked, "node_modules was never named in full"
+    assert "node_modules" in outcome.text
+    assert (home / "node_modules").is_dir()
+
+
+def test_ask_docs_say_name_every_full_path_and_descriptions_approve_nothing() -> None:
+    from local_operator.tools.tool_docs import TOOL_NOTES
+
+    notes = " ".join(TOOL_NOTES["ask"].notes.split())
+    assert "name every exact full path" in notes
+    assert "a description approves nothing" in notes
+    assert "relayed by a peer or bridge message, never authorises" in notes
+    # Kept in sync with ``lapsed_refusal_reason`` (R1-M1/Q1): hand over the
+    # command first, re-ask at most once, never steer who starts the runtime.
+    first = notes.index("hand the operator the exact command")
+    assert first < notes.index("ask again at most once")
+    assert "background-started runtime has none" in notes
+    assert "restart" not in notes.lower()

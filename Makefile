@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test test-affected merge-gate coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test test-affected merge-gate fast-gate coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -195,6 +195,23 @@ test-affected: ## Run the tests this branch's diff affects; print PR evidence
 # I_KNOW_A_GATE_RUN_EXISTS=1 override skips the lookup with a visible warning,
 # so even an unreachable API cannot prevent an intentional arm.
 # Prints the triggered run and how to follow it.
+# One-shot client check of the cost gate the full suite's `precondition` job
+# enforces on the runner (scripts/fast_gate_check.py, GH #4074): is `CI Gate`
+# green for this PR's exact head? Prints the verdict and exits; it NEVER waits
+# (poll with `gh pr checks <n> --watch` or a monitor, not a sleeping runner or
+# a blocked make). Run it before `make merge-gate` to avoid arming a gate that
+# will fail fast on a pending/red head.
+fast-gate: ## Check fast CI is green for PR=<number>'s head (no waiting)
+	@set -e; \
+	if [ -z "$(PR)" ]; then echo "usage: make fast-gate PR=<number>" >&2; exit 2; fi; \
+	spec="$$(gh pr view "$(PR)" --json headRefOid,headRepository,headRepositoryOwner \
+	  --jq '.headRefOid + " " + .headRepositoryOwner.login + "/" + .headRepository.name')" \
+	  || { echo "make fast-gate: PR #$(PR) not found" >&2; exit 1; }; \
+	set -- $$spec; \
+	repo="$$(gh repo view --json nameWithOwner --jq .nameWithOwner)"; \
+	python3 "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/fast_gate_check.py" --local \
+	  --event pull_request --repo "$$repo" --pr "$(PR)" --head-sha "$$1" --head-repo "$$2"
+
 merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	@set -e; \
 	if [ -z "$(PR)" ]; then echo "usage: make merge-gate PR=<number>" >&2; exit 2; fi; \

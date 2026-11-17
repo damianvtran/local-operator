@@ -1851,6 +1851,28 @@ class AttachClient:
             getattr(self, "_runtime_pid", None),
         )
 
+    def operator_ask_proof_held(self) -> bool:
+        """Whether an opted-in ask answer on THIS connection carries a proof.
+
+        Exactly the condition under which :meth:`authority_proof` returns a
+        proof for an ask op with ``operator_ask=True``: this process holds the
+        runtime's operator capability (it started that runtime,
+        ``harness.approval.operator_cap_for``) AND the runtime proved it holds
+        the same one at handshake. The runtime stamps a trusted answer surface
+        only then; otherwise it stamps ``unverified`` (``asks.surfaces``).
+
+        WHY IT EXISTS (incident a-48e3, 2026-11-16): the desktop answer route
+        reports it as ``consent_bearing`` so the card can tell the operator, at
+        answer time, that a window which did not start this session's runtime
+        records his answer but cannot authorise a delete with it. A HINT, read
+        from this client's own handshake state and never from a request: the
+        runtime's stamp stays the only thing the guard reads.
+        """
+        return bool(
+            getattr(self, "_authority_bearing", False)
+            and getattr(self, "_operator_cap", None) is not None
+        )
+
     def authority_proof(
         self, op: str, fields: dict[str, Any], *, operator_ask: bool = False
     ) -> str | None:

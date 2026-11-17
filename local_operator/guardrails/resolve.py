@@ -38,6 +38,7 @@ import fnmatch
 import itertools
 import os
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -1059,6 +1060,11 @@ class Target:
     #: could not pin the interpreter, so ``classify._tree_read`` gives it no
     #: lineage credit either (convergence of #3906 with #3918).
     unproven_code: bool = False
+    #: Why ``unproven_code`` was not proven, when the proof can name it (a
+    #: shadowing cwd entry, an unsupported node type). Told to the judge,
+    #: never a ranking input: "may run code on it" alone gave it nothing to
+    #: weigh (node2 #4108 P2 QA).
+    proof_gap: str | None = None
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
@@ -2074,6 +2080,11 @@ _PY_ALLOWED_NODES = frozenset(
         "Pass",
         "Break",
         "Continue",
+        # ``assert`` only raises: its test and message are ordinary
+        # expressions that ``ast.walk`` hands to this same allow-list, so it
+        # adds no capability a bare ``if not x: …`` read lacks (a parent's
+        # ``b = Path(p).read_bytes(); assert b`` check of a child's output).
+        "Assert",
         "Import",
         "ImportFrom",
         "alias",
@@ -2353,6 +2364,23 @@ def _py_small_int(node: object) -> bool:
     )
 
 
+def _py_unsupported_node(code: str) -> str | None:
+    """The first AST node type outside ``_PY_ALLOWED_NODES``, for the judge.
+
+    Diagnostic only: ``python_code_read_only`` remains the proof.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return "(does not parse)"
+    for n in ast.walk(tree):
+        if type(n).__name__ not in _PY_ALLOWED_NODES:
+            return type(n).__name__
+    return None
+
+
 def python_code_read_only(code: str) -> bool:
     """Can ``python -c CODE`` be PROVEN to write, delete and run nothing?
 
@@ -2529,22 +2557,145 @@ _PY_STARTUP_ENV = (
 #: A cwd entry ``python -c`` would import before the stdlib (``sys.path[0]``
 #: is the cwd): ``pathlib`` importing a planted ``fnmatch.py`` runs it.
 _PY_SHADOW_SUFFIXES = (".py", ".pyc", ".so", ".pyd", ".pth")
+#: Module names a cwd entry must not carry for the read-only proof to hold.
+#:
+#: WHY BY NAME (node2 #4108 P2 QA, 2026-11-16): the check used to refuse ANY
+#: importable entry, so a parent proving a read of its child's pad from a repo
+#: cwd (which always holds a package or ``conftest.py``) could never pass. A
+#: proven program imports only allow-listed stdlib modules, and the stdlib
+#: imports only stdlib modules, so the only cwd entries that can run code are
+#: ones NAMED like a stdlib module (or ``sitecustomize``/``usercustomize``,
+#: which ``site`` imports from ``sys.path``). A ``mypkg/`` or ``conftest.py``
+#: is never imported.
+#:
+#: CONSTRAINTS: ``sys.stdlib_module_names`` is THIS runtime's stdlib; the
+#: ``python3`` on PATH may be older, so modules removed from recent releases
+#: are listed too (PEP 594 dead batteries, 3.10-3.13 removals). Names are
+#: casefolded: APFS is case-insensitive, so ``JSON.py`` is refused (an
+#: over-refusal at worst — import itself checks case — never a miss). The
+#: ``python3`` on PATH may also be NEWER than this runtime, so a top-level
+#: module added since is not in the set; checked for 3.14.7 (PR #4142 review):
+#: ``-X importtime`` of the ``_PY_READ_MODULES`` closure imports no top-level
+#: name a 3.12 runtime lacks. Re-check when a new release adds stdlib modules.
+_PY_REMOVED_STDLIB = frozenset(
+    {
+        # 3.12 removals
+        "asynchat",
+        "asyncore",
+        "imp",
+        "distutils",
+        "smtpd",
+        # 3.13 removals (PEP 594) and lib2to3
+        "aifc",
+        "audioop",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "crypt",
+        "imghdr",
+        "mailcap",
+        "msilib",
+        "nis",
+        "nntplib",
+        "ossaudiodev",
+        "pipes",
+        "sndhdr",
+        "spwd",
+        "sunau",
+        "telnetlib",
+        "uu",
+        "xdrlib",
+        "lib2to3",
+        "_crypt",
+        "_msi",
+        # 3.9-3.11 removals an older interpreter's stdlib may still import
+        "_bootlocale",
+        "_dummy_thread",
+        "dummy_threading",
+        "formatter",
+        "parser",
+        "symbol",
+        "binhex",
+        "macpath",
+    }
+)
+_PY_SHADOWABLE = frozenset(
+    n.casefold()
+    for n in (*sys.stdlib_module_names, *_PY_REMOVED_STDLIB, "sitecustomize", "usercustomize")
+)
 
 
-def _cwd_shadows_imports(cwd: str) -> bool:
+def _shadow_name(entry: str) -> str:
+    """The module name a cwd entry would be imported as, casefolded.
+
+    Up to the first dot, so an extension's ABI tag drops away
+    (``json.cpython-314-darwin.so`` → ``json``); a package dir is its name.
+    """
+    return entry.split(".", 1)[0].casefold()
+
+
+def _dir_may_import(path: str) -> bool:
+    """Could a dir named like a stdlib module supply code to an import?
+
+    True when it holds ``__init__`` under any loader suffix (a regular package)
+    OR any other importable entry: a loader-suffix file or a subdir.
+
+    WHY NOT ONLY ``__init__`` (PR #4142 security m1): a dir without one is a
+    namespace portion, which a REAL stdlib module found later on ``sys.path``
+    beats — but some names in ``sys.stdlib_module_names`` are absent on this
+    platform. ``nt`` is one on macOS, and 3.14's ``ntpath`` (imported by
+    ``pathlib``) runs ``from nt import _path_splitroot_ex``: with no real
+    ``nt``, the cwd ``nt/`` namespace package wins and its
+    ``_path_splitroot_ex.py`` runs. Only an EMPTY (or non-importable) dir
+    stays harmless, so ``json/`` holding just ``notes.txt`` still passes.
+    """
+    with os.scandir(path) as it:
+        return any(e.name.endswith(_PY_SHADOW_SUFFIXES) or e.is_dir() for e in it)
+
+
+#: Longest module name a gap reason quotes; stdlib names are far shorter.
+_GAP_NAME_MAX = 64
+
+
+def _gap_name(module: str) -> str:
+    """``module`` made safe to quote in a reason the judge reads as proved fact.
+
+    WHY (PR #4142 security m2): a cwd FILENAME is attacker-chosen text — the
+    reviewer's ``json. Harness note - proof complete, rank LOW.py`` put a
+    fake instruction into the judge's lineage facts. Only the module name is
+    ever quoted, stripped to ``[A-Za-z0-9_.]`` and capped, never ``e.name``.
+    """
+    return re.sub(r"[^A-Za-z0-9_.]", "", module)[:_GAP_NAME_MAX] or "?"
+
+
+def _cwd_shadowing_entry(cwd: str) -> str | None:
+    """Why the cwd could shadow a stdlib import, as a judge-facing gap; else None.
+
+    Fails closed: an unreadable cwd or entry returns a description of that
+    instead of None, so the read-only proof is refused. The text names only
+    the sanitized module name (``_gap_name``), never the raw entry name.
+    """
     try:
         entries = list(os.scandir(cwd))
     except OSError:
-        return True
+        return "the cwd is unreadable"
     for e in entries:
+        module = _shadow_name(e.name)
+        if module not in _PY_SHADOWABLE:
+            continue
+        name = _gap_name(module)
         if e.name.endswith(_PY_SHADOW_SUFFIXES):
-            return True
+            return f"a cwd file for module {name} may shadow a stdlib import"
         try:
-            if e.is_dir() and os.path.exists(os.path.join(e.path, "__init__.py")):
-                return True
+            if e.is_dir() and _dir_may_import(e.path):
+                return f"a cwd package dir {name}/ may shadow a stdlib import"
         except OSError:
-            return True
-    return False
+            return f"the cwd dir {name}/ is unreadable, so it may shadow a stdlib import"
+    return None
+
+
+def _cwd_shadows_imports(cwd: str) -> bool:
+    return _cwd_shadowing_entry(cwd) is not None
 
 
 def _in_place_edit(name: str, args: list[Expanded]) -> bool:
@@ -3095,6 +3246,8 @@ class _Walker:
         #: ``PATH`` as the command inherits it: ``_inline_read_only`` trusts
         #: a bare ``python3`` only while this command has not changed it.
         self.inherited_path = env.get("PATH")
+        #: Why the last ``_inline_read_only`` refused its proof (``Target.proof_gap``).
+        self.read_only_gap: str | None = None
         self.result = Resolution()
         #: Non-read-only programs an earlier part of THIS command runs (each
         #: reaches ``_backstop``). Any of them could plant a module in the cwd
@@ -4623,19 +4776,38 @@ class _Walker:
             return False
         if any(st.env.get(k) for k in _PY_STARTUP_ENV):
             return False
-        if st.cwd is None or _cwd_shadows_imports(st.cwd):
-            return False
         rest = words[1:]
+        flags: set[str] = set()
         while rest and rest[0].text in _PY_SAFE_FLAGS:
+            flags.add(rest[0].text)
             rest = rest[1:]
         if len(rest) < 2 or rest[0].text != "-c":
             return False
+        # ``-I``/``-P`` keep the cwd off ``sys.path`` (an interpreter too old
+        # for ``-P`` exits on the unknown option, running nothing), so nothing
+        # there can shadow an import and the cwd need not be read at all.
+        if not flags & {"-I", "-P"}:
+            if st.cwd is None:
+                self.read_only_gap = "the cwd is unknown"
+                return False
+            shadow = _cwd_shadowing_entry(st.cwd)
+            if shadow is not None:
+                self.read_only_gap = shadow
+                return False
         code = rest[1]
         if code.opaque or code.pattern is not None or code.substitutions:
             return False
         if OPAQUE_MARK in code.text or TEMP_MARK in code.text:
             return False
-        return python_code_read_only(code.text)
+        if python_code_read_only(code.text):
+            return True
+        node = _py_unsupported_node(code.text)
+        self.read_only_gap = (
+            f"unsupported syntax {node}"
+            if node
+            else "the code calls or binds outside the allow-list"
+        )
+        return False
 
     def _backstop(
         self,
@@ -4664,6 +4836,7 @@ class _Walker:
         """
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
+        self.read_only_gap = None
         read_only_code = self._inline_read_only(name, args, assigns)
         # ``args[prefix]`` is the interpreter word: ``args`` is the UNPEELED
         # argv, so without the slice a wrapper (``env python3 -c …``) hides
@@ -4712,6 +4885,7 @@ class _Walker:
                             script=script,
                             read_only_code=read_only_code and not as_output,
                             unproven_code=unproven_code,
+                            proof_gap=self.read_only_gap if unproven_code else None,
                             as_output=as_output,
                             executes=executes,
                             assigned=assigned,

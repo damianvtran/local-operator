@@ -753,6 +753,15 @@ def fold(
                 response_required=bool(dismissed_at and expires_at and dismissed_at < expires_at),
             ),
         }
+        if status == STATUS_WITHDRAWN and withdrawn is not None:
+            # WHO retired it, when the writer said so: the desktop's approvals
+            # batch stamps ``{"surface": "desktop", "via": ...}``, and the card's
+            # refusal must name that decision rather than claim the agent
+            # withdrew the question (QA Q2). Additive: absent for every other
+            # withdrawal, so their records are unchanged.
+            withdrawn_by = withdrawn.get("by")
+            if isinstance(withdrawn_by, Mapping):
+                record["withdrawn_by"] = dict(withdrawn_by)
         if dismissed is not None:
             # A DISMISSAL DOES NOT CANCEL A NOTICE THE MODEL NEVER GOT (fork A,
             # §14). The dismissal is the USER's act on a settled row; the notice is

@@ -261,6 +261,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The receiver's runtime record (which build is running): a config-dir
+    # sidecar published by atomic replace, the same pattern as the counter above.
+    # Every ``_write`` caller passes ``record_path(config_dir)`` =
+    # ``<config_dir>/team_bridge/connector_runtime.json``; its temp sibling is
+    # that fixed name plus ``.{pid}.tmp``. No caller input reaches either path,
+    # so neither can be a session directory or a transcript.
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ runtime record",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the record; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::clear_own_record",
+        "<path>.unlink",
+        "Removes the fixed team_bridge/connector_runtime.json FILE on exit; never a session path",
+    ),
     # The reply guard's per-install digest key (#3377, review round 1 S-3) is
     # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
     # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
@@ -3069,6 +3090,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "INSTALLROOT/.update-operations (or content-store) directory opened O_NOFOLLOW; "
         "never a sessions/ path, and unlink refuses directories",
     ),
+    # Recovery-record rotation (operator request 2026-11-16: the store must rotate
+    # so users never hit the 256-record cap). ``_move_entry`` is the ONE rename
+    # for retirement and restore: a record FILE between INSTALLROOT/.update-
+    # operations[-v2]/ and INSTALLROOT/.update-operations-archive/, both inside
+    # the canonical install root, never replacing an existing name. ``_age_archive``
+    # is the ONE deletion: archive entries past 30 days or beyond 512, matched by
+    # the archive's own ``<ms>.<v1|v2>.<id>.json`` name, regular FILES only,
+    # through one validated O_DIRECTORY|O_NOFOLLOW fd on that archive.
+    (
+        "local_operator/install_transaction.py::_move_entry",
+        "os.rename",
+        "one recovery-record FILE between an INSTALLROOT operation namespace and the "
+        "in-root archive (both owned, non-symlink directories under the install root); "
+        "refuses an existing target, never a sessions/ path",
+    ),
+    (
+        "local_operator/install_transaction.py::_age_archive",
+        "os.unlink",
+        "archive-aging only: expired or over-count INSTALLROOT/.update-operations-archive "
+        "record FILES matching the archive's own entry pattern, dir_fd-relative to the "
+        "validated archive directory; S_ISREG-checked first, never a sessions/ path",
+    ),
     # Candidate publication: the same node-local generation authority. The replace
     # swaps a staged regular FILE onto the attempt FILE, and the unlink removes
     # only that staged temp; ``generation`` is an INSTALLROOT/generations/<id> tree
@@ -4679,6 +4722,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Deletes only a marked eval fixture with both owned directories; protected "
         "operator/session roots are refused before removal",
+    ),
+    # Heavy-job lease holder records. The only production directory is
+    # `heavy_lease.lease_dir()` (`<config_dir>/run/heavy-jobs`, passed by
+    # tools/builtin.py and services.py); try_acquire builds the record path as
+    # `directory / f"slot-{slot}.json"` with an integer slot, and _write_record's
+    # temp is that name plus `.<pid>.<id>.tmp`. No session id enters either path.
+    (
+        "local_operator/heavy_lease.py::Lease.release",
+        "<path>.unlink",
+        "Removes only this lease's run/heavy-jobs/slot-<int>.json holder record FILE; "
+        "the path never carries a session id, and unlink rejects directories.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "os.replace",
+        "Publishes the run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp regular file over "
+        "slot-<int>.json; os.replace rejects a directory target.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "<path>.unlink",
+        "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
+        "temp FILE; unlink rejects directories.",
     ),
 )
 

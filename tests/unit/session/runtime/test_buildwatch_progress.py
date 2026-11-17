@@ -45,12 +45,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from local_operator import buildwatch
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.process import _Drain, _drain_for, _reaper
@@ -982,6 +984,96 @@ async def test_the_drain_never_waits_for_a_viewer(rig, disk) -> None:
     assert await _tick(rig, T0) is True, "a viewer may not hold the exit"
     assert rig.handle.retired and rig.handle.disposed and rig.stop.is_set()
     assert rig.runtime.retiring == [], "the frame went out at the latch; the exit adds nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_exit_read_neither_blocks_the_loop_nor_names_a_pair(
+    rig, disk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, M1: the drain's exit re-reads the build pair
+    (``_drain_detail_at_exit`` -> ``handover_build`` -> ``importlib.metadata``), and
+    that read used to run ON the loop at the moment the runtime leaves.
+
+    Off the loop now: a sibling coroutine keeps ticking while the read is stuck,
+    the runtime still leaves on the latch's reasons, and the exit detail carries
+    no build pair it could not read (rather than raising, or waiting it out).
+    """
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def stuck(*_a: object, **_k: object) -> BuildStamp:
+        calls.append(1)
+        gate.wait(10.0)
+        return NEW
+
+    monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(update_mod, "disk_build", stuck)
+    details: list[str] = []
+    real_exit = child_mod._clean_exit
+
+    async def recording_exit(handle: Any, runtime: Any, *, reason: str, detail: str = "") -> None:
+        details.append(detail)
+        await real_exit(handle, runtime, reason=reason, detail=detail)
+
+    monkeypatch.setattr(child_mod, "_clean_exit", recording_exit)
+    rig.drain.reasons = ("the runtime declined to hand over 3x",)
+    rig.handle._busy = False
+    # Latency, not a tick count (review round 2, R2-1): counting 5 ms ticks inside
+    # a ~50 ms read bound is load-sensitive (Mac load ~80 gave 2 ticks on a correct
+    # build). The gate is released only after the work returns, so an exit read
+    # run ON the loop would freeze it for ~10 s on ``gate.wait(10.0)``; off the
+    # loop the largest gap between wakeups is scheduler jitter.
+    loop = asyncio.get_running_loop()
+    last = loop.time()
+    max_gap = 0.0
+
+    async def tick() -> None:
+        nonlocal last, max_gap
+        while True:
+            await asyncio.sleep(0.005)
+            now = loop.time()
+            max_gap = max(max_gap, now - last)
+            last = now
+
+    ticker = asyncio.ensure_future(tick())
+    started = loop.time()
+    try:
+        exited = await asyncio.wait_for(_tick(rig, T0), 5.0)
+    finally:
+        ticker.cancel()
+        gate.set()
+    done = loop.time()
+    # The last gap (to completion) counts: a read blocking to the end leaves no wakeup.
+    max_gap = max(max_gap, done - last)
+    assert max_gap < 2.0, f"the loop went dark for {max_gap:.2f}s while the exit read was stuck"
+    assert done - started < 5.0, f"the stuck exit read held the exit for {done - started:.2f}s"
+    assert exited is True and rig.handle.retired and rig.stop.is_set()
+    # The pair is DROPPED, not guessed: both readings of the exit (the latch's and
+    # the durable record's) carry only the reasons.
+    assert rig.handle.retire_detail == "the runtime declined to hand over 3x"
+    assert details == ["the runtime declined to hand over 3x"]
+    # One reader, one stuck thread: the second exit read found the first still in
+    # flight and answered unknown at once instead of parking another thread.
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_latchless_handle_re_checks_idle_after_the_exit_read(
+    rig, disk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 2, R2-2: the exit read awaits after the idle gate. A handle
+    with ``begin_retire`` re-checks inside the latch; one without it must re-sample
+    the gate itself, so a turn admitted during the read keeps the runtime."""
+
+    def admits_a_turn(*_a: object, **_k: object) -> BuildStamp:
+        rig.handle._busy = True
+        return NEW
+
+    monkeypatch.setattr(update_mod, "disk_build", admits_a_turn)
+    rig.handle.begin_retire = None
+    rig.handle._busy = False
+    assert await _tick(rig, T0) is False, "work that arrived during the read keeps"
+    assert not rig.handle.retired and not rig.handle.disposed and not rig.stop.is_set()
 
 
 @pytest.mark.asyncio

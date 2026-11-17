@@ -72,6 +72,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MODEL_CHOICE,
         DEFAULT_SLIM_CHILD_KNOWLEDGE,
     )
+    from local_operator.heavy_lease import HEAVY_JOBS_ENABLED_DEFAULT
     from local_operator.hook_forwarding import (
         FORWARD_CLAUDE_DEFAULT,
         FORWARD_CODEX_DEFAULT,
@@ -262,6 +263,9 @@ def _consumer_defaults() -> dict[str, object]:
         "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
         "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
         "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+        # The heavy-job queue switch; its consumer constant sits beside the
+        # reader in heavy_lease.py.
+        "bash.heavy_jobs.enabled": HEAVY_JOBS_ENABLED_DEFAULT,
         # The three search_interception keys. The consumer constants live next to
         # the reader in tools/builtin.py, so this mapping is what stops the
         # registry default and the code default drifting.
@@ -1336,6 +1340,23 @@ def test_query_budget_rows_share_the_consumer_paths(manager: ConfigManager) -> N
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _query_budget_config().seconds == QUERY_BUDGET_SECONDS_DEFAULT + 5
+
+
+def test_heavy_jobs_row_shares_the_consumer_path(manager: ConfigManager) -> None:
+    """``bash.heavy_jobs.enabled`` writes exactly where ``heavy_lease`` reads.
+
+    A registry writing one path while the reader looked at another would leave
+    the kill switch painted but dead, so the path is pinned to the consumer's
+    constant and a stored ``false`` round-trips through the real reader.
+    """
+    from local_operator import heavy_lease
+
+    row = settings_io.BY_KEY["bash.heavy_jobs.enabled"]
+    assert row.path == heavy_lease.HEAVY_JOBS_ENABLED_PATH
+    settings_io.write_setting(manager, row, False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        assert heavy_lease.configured_settings().enabled is False
 
 
 def test_memory_guard_rows_share_the_consumer_paths(manager: ConfigManager) -> None:

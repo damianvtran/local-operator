@@ -470,7 +470,7 @@ def test_owner_notice_is_one_keyed_item(tmp_path) -> None:
     assert len(items) == 1
     item = items[0]
     assert item["key"] == "team-bridge-screening-model:end_1" and item["priority"] == "high"
-    for phrase in ("Claude Sonnet 5.5", "Anthropic", "Radient console", "default model"):
+    for phrase in ("Claude Sonnet 5.5", "Anthropic", "Radient Console", "default model"):
         assert phrase in item["body_md"]
 
 

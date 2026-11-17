@@ -886,6 +886,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.memory_guard_description()),
     ),
+    # The machine-wide heavy-job queue (``local_operator/heavy_lease.py``). LIVE:
+    # the reader is a fresh ``ConfigManager`` per heavy ``bash`` call. Its own
+    # section, not ``memory_guard``: that section is the PER-COMMAND ceiling,
+    # this is a NODE-WIDE concurrency limit, and the 2026-11-16 node-2 OOM is
+    # exactly the case where the one held and the other did not exist.
+    Section(
+        "heavy_jobs",
+        _t(_ws.heavy_jobs_title()),
+        Scope.LIVE,
+        _t(_ws.heavy_jobs_description()),
+    ),
     # Its own section for the reason ``memory_guard`` has one, and LIVE for the
     # same reason: the reader is a fresh ``ConfigManager`` per ``bash`` call. It is
     # NOT in ``memory_guard`` because scope is uniform within a section and these
@@ -5109,6 +5120,25 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.FLOAT,
         default=0.8,
         help=(_t(_ws.bash_memory_soft_fraction_help())),
+    ),
+    # -- heavy_jobs ---------------------------------------------------------
+    # ``path`` mirrors ``heavy_lease.HEAVY_JOBS_ENABLED_PATH``; pinned by
+    # ``test_heavy_jobs_row_shares_the_consumer_path`` rather than imported, for
+    # the same cheap-CLI reason as the ``memory_guard`` rows above. ONE row: the
+    # slot count and the queue wait are env overrides (see heavy_lease), not
+    # config keys, so they need no row.
+    Setting(
+        key="bash.heavy_jobs.enabled",
+        path=("bash", "heavy_jobs", "enabled"),
+        section="heavy_jobs",
+        label=_t(_ws.bash_heavy_jobs_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=(_t(_ws.bash_heavy_jobs_enabled_help())),
+        choices=_bool_choices(
+            _t(_ws.bash_heavy_jobs_enabled_choice_true_description()),
+            _t(_ws.bash_heavy_jobs_enabled_choice_false_description()),
+        ),
     ),
     # -- query_budget -------------------------------------------------------
     # ``path`` mirrors ``query_budget.QUERY_BUDGET_*_PATH`` in

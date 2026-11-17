@@ -317,6 +317,39 @@ def _native_hooks(_watcher: ConfigWatcher) -> bool:
     return native_hooks_enabled()
 
 
+async def _heavy_job_slot(_session: Session, _watcher: ConfigWatcher) -> bool:
+    """Observe the real per-call gate, not just the stored boolean.
+
+    A live disable must stop taking a flock; enabling again must take it on
+    the next call without constructing a new session or reloading the module.
+    No build is spawned: the lease itself is the behavior this switch controls.
+    """
+    from local_operator import heavy_lease, memory_guard
+    from local_operator.tools.builtin import BashParams, _acquire_heavy_lease
+
+    result = await _acquire_heavy_lease(
+        "syn-live-heavy-job",
+        BashParams(command="pnpm build"),
+        None,
+        None,
+        None,
+        heavy_lease.HeavyClass(reason="pnpm build"),
+        memory_guard.compute_budget(override_mb=64),
+    )
+    if result is None:
+        available = heavy_lease.try_acquire(heavy_lease.lease_dir(), 1)
+        assert available is not None, "disabled gate left the heavy-job slot locked"
+        available.release()
+        return False
+    assert isinstance(result, heavy_lease.Lease), result
+    try:
+        # The enabled arm must hold an actual OS lock, not merely report one.
+        assert heavy_lease.try_acquire(heavy_lease.lease_dir(), 1) is None
+        return True
+    finally:
+        result.release()
+
+
 def _query_budget(watcher: ConfigWatcher) -> Budget:
     """The query budget as the tool reads it, through its own reader.
 
@@ -494,6 +527,7 @@ def _librarian_name(watcher: Any) -> str:
 #: attribute to observe) read the watcher's snapshot — the mapping those
 #: consumers are being pointed at.
 LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
+    "bash.heavy_jobs.enabled": (False, _heavy_job_slot),
     # -- notification sound: re-read from config.yml on every notification -----
     # Not a session attribute: `notifications.sound.configured()` (which
     # `resolve()` builds the plan from) reads `config_dir()`'s config.yml per
@@ -1159,6 +1193,9 @@ async def test_a_write_from_another_process_reaches_the_running_session(
     # `ConfigManager`). Pointing the env at the watched directory is what makes
     # those probes read the file under test instead of the operator's real one.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    if key == "bash.heavy_jobs.enabled":
+        monkeypatch.setenv("LOCAL_OPERATOR_HEAVY_JOB_SLOTS", "1")
+        monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "syn-live-heavy-job")
     # A real file to diff against. ``hosting`` is seeded to the session's own
     # provider (``MODEL`` is ``test/m``) so the ``model_name`` probe exercises
     # the common case — a bare ``model_name`` edit with ``hosting`` unchanged —
@@ -1206,6 +1243,13 @@ async def test_a_write_from_another_process_reaches_the_running_session(
 
         assert change is not None and key in change.changed_keys
         assert await observed() == value
+        if key == "bash.heavy_jobs.enabled":
+            # Complete the on -> off -> on cycle via the same external-write
+            # and watcher path, proving the gate resumes in this session.
+            write_from_another_process(config_dir, key, True)
+            restored = watcher.poll_now()
+            assert restored is not None and key in restored.changed_keys
+            assert await observed() is True
     finally:
         await session.dispose()
 
