@@ -246,8 +246,33 @@ def test_current_permission_lease_survives_a_proactive_lookup_timeout(borrower: 
     print("CURRENT_LEASE_RESULT", {"served": True, "extended": False, "asks": len(b.calls)})
 
 
+def test_expired_lease_inside_its_hold_is_served_held_while_the_owner_is_busy(
+    borrower: Any,
+) -> None:
+    """Busy is bridged by the offline hold (incident 2026-11-17), never as the lease.
+
+    Before, an expired lease was refused on ``owner_busy`` even with hours of hold
+    left; now ``_held_or`` serves it MARKED held, bounded by its hold end, with one
+    ask and no retry. ``test_credentials_busy_hold.py`` pins the fences.
+    """
+    import time
+
+    from local_operator.network.credentials.types import Grant
+
+    b = borrower
+    original = b.client.request_grant_sync("github", session_id="synthetic")
+    assert isinstance(original, Grant)
+    original.grant_expires_at_ms = int(time.time() * 1000) - 1
+    b.response[0] = {"kind": "error", "code": "owner_busy", "key": "github"}
+    served = b.client.request_grant_sync("github", session_id="synthetic")
+    assert isinstance(served, Grant) and served.held_offline
+    assert served.access_token == original.access_token
+    assert served.held_until_ms <= original.hold_until_ms
+    assert len(b.calls) == 2, "served from the hold: no retry"
+
+
 @pytest.mark.parametrize("expired,forced", [(True, False), (False, True)])
-def test_expired_or_force_refreshed_grant_is_never_reused(
+def test_expired_past_its_hold_or_force_refreshed_grant_is_never_reused(
     borrower: Any, expired: bool, forced: bool
 ) -> None:
     import time
@@ -258,6 +283,9 @@ def test_expired_or_force_refreshed_grant_is_never_reused(
     original = b.client.request_grant_sync("github", session_id="synthetic")
     assert isinstance(original, Grant)
     original.grant_expires_at_ms = int(time.time() * 1000) + (-1 if expired else 60_000)
+    if expired:
+        # The hold ended with the lease: nothing may bridge the busy owner.
+        original.hold_until_ms = original.grant_expires_at_ms
     b.response[0] = {"kind": "error", "code": "owner_busy", "key": "github"}
     refused = b.client.request_grant_sync("github", session_id="synthetic", force_refresh=forced)
     assert isinstance(refused, BrokerError) and refused.code == "owner_busy"

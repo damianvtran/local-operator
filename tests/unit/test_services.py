@@ -670,7 +670,14 @@ def test_status_lines_says_so_when_there_are_no_daemons(
     # state, not the runner's (a Linux host that has the relay unit would
     # otherwise grow a row here).
     monkeypatch.setattr(services, "_linux_supervised_unit", lambda: None)
-    assert services.status_lines() == ["install: 0.59.0", "serve daemons: none running"]
+    # Queue status is independent of daemon/unit installation. Pin one slot
+    # rather than deriving the expected line from this runner's free memory.
+    monkeypatch.setenv("LOCAL_OPERATOR_HEAVY_JOB_SLOTS", "1")
+    assert services.status_lines() == [
+        "install: 0.59.0",
+        "serve daemons: none running",
+        "heavy jobs: 0/1 slots in use",
+    ]
 
 
 def test_status_lines_find_the_relay_unit_on_linux(
@@ -748,7 +755,14 @@ def test_status_lines_stay_silent_about_units_that_are_not_installed(
     monkeypatch.setattr(services, "serve_daemon_reports", _fleet([]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     monkeypatch.setattr(services, "_linux_supervised_unit", lambda: None)
-    assert services.status_lines() == ["install: 0.59.0", "serve daemons: none running"]
+    # Queue status is independent of daemon/unit installation. Pin one slot
+    # rather than deriving the expected line from this runner's free memory.
+    monkeypatch.setenv("LOCAL_OPERATOR_HEAVY_JOB_SLOTS", "1")
+    assert services.status_lines() == [
+        "install: 0.59.0",
+        "serve daemons: none running",
+        "heavy jobs: 0/1 slots in use",
+    ]
 
 
 def test_linux_serve_unit_installs_without_linger_or_relay_lifecycle_coupling(

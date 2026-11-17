@@ -1160,6 +1160,10 @@ VALID_DECISIONS = ("approved", "denied")
 #: Batch decide is a bounded select-and-approve (§10.2): ≤50 per call.
 BATCH_DECIDE_MAX = 50
 
+#: The requests read's closed ``state`` filter (agent-server
+#: ``GET /messaging/requests``; §10.1's request lifecycle).
+REQUEST_STATES = ("pending", "approved", "denied", "expired", "withdrawn", "revoked")
+
 #: The decide note rides the courier as a delimited field (§10.1): ≤1 KiB.
 DECIDE_NOTE_MAX_BYTES = 1024
 
@@ -3613,6 +3617,35 @@ class TeamBridgeClient:
             body={"decisions": payload},
             access=access,
         )
+
+    async def requests(
+        self,
+        *,
+        tenant_id: str,
+        state: str | None = None,
+        after: str | None = None,
+        limit: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The requests addressed to me (§6.1, §10): one cursor page, newest first.
+
+        Read-only — the decider's half of the approvals surface. ``state`` is
+        the server's closed request-state set (default ``pending`` server-side);
+        it is checked here so a mistyped value is a local ``ValueError`` rather
+        than a request the server has to refuse. The answer is passed through
+        untouched (``{"items": [BridgeMessageItem…], "next_cursor"}``): the
+        desktop route, not this transport, owns the reference-only projection.
+        """
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if state is not None:
+            if state not in REQUEST_STATES:
+                raise ValueError(f"state must be one of {REQUEST_STATES!r}; got {state!r}")
+            params["state"] = state
+        if after:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self._send("GET", "/messaging/requests", params=params, access=access)
 
     async def decisions(
         self,

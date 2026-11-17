@@ -61,6 +61,26 @@
     "maxCells": 29,
     "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). 'Timed-out' = the ask's deadline passed with no answer. The row only changes how long such an ask stays SHOWN; it does not change whether the agent hears a late answer."
   },
+  "wire.settings.bash_heavy_jobs_enabled.choice.false.description": {
+    "role": "choice description",
+    "tone": "terse",
+    "note": "Short lowercase fragment shown beside the 'off' choice."
+  },
+  "wire.settings.bash_heavy_jobs_enabled.choice.true.description": {
+    "role": "choice description",
+    "tone": "terse",
+    "note": "Short lowercase fragment shown beside the 'on' choice. Must stay true whether the machine allows one or several heavy jobs at once."
+  },
+  "wire.settings.bash_heavy_jobs_enabled.help": {
+    "role": "settings row help",
+    "tone": "plain, precise",
+    "note": "'bash tool' is the product's shell-command tool; keep 'bash' untranslated."
+  },
+  "wire.settings.bash_heavy_jobs_enabled.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "note": "On/off switch for the queue. Same wording as the section title is intentional."
+  },
   "wire.settings.desktop_remote_files_cache_bytes.help": {
     "role": "settings row help text",
     "tone": "plain",
@@ -156,6 +176,16 @@
     "note": "Label fits the 29-cell label budget. No ICU arguments.",
     "role": "Settings row label",
     "tone": "concise"
+  },
+  "wire.settings.heavy_jobs.description": {
+    "role": "settings section description",
+    "tone": "plain, precise",
+    "note": "Explains why the queue exists: parallel builds from several sessions exhausted a machine's memory. The slot count depends on the machine's memory, so the copy must not promise exactly one; the parenthesis states when it is one. 'Sessions' are agent conversations."
+  },
+  "wire.settings.heavy_jobs.title": {
+    "role": "settings section title",
+    "tone": "plain",
+    "note": "Section heading for the machine-wide queue that limits how many heavy builds/tests run at once (one at a time on machines with 16 GB or less, up to four on larger ones). 'Heavy job' = a build, type check or test run that uses a lot of memory."
   },
   "wire.settings.network_credentials_github_repositories.help": {
     "role": "settings help for the GitHub repository list",

@@ -1,0 +1,112 @@
+{
+  "round": 1,
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, ss-au-ru)",
+    "session": "0bc0a66fa4cd",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "system prompt 'Model:' line of this session",
+    "fallback": "none observed",
+    "independent_from_translator_session": true,
+    "translator": "translator (lopdev task subagent) job 3b70672660df, anthropic/claude-sonnet-5-5 (per i18n/audit-history/ru/wire.session_status.json)",
+    "native_speaker": false
+  },
+  "locale": "ru",
+  "namespaces": [
+    "wire.session_status"
+  ],
+  "keys_in_scope": 1,
+  "commit_audited": "e625e5e3ce0e64aa334abf74fa59acf79d8d820c (origin/main, read via git show only)",
+  "audit_date": "2026-11-16",
+  "scope": "namespace-scoped independent verdict for the single key wire.session_status.retired_label; prior audit-history row's conclusion not reused",
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/ru/wire.session_status.json": "eccbf565af102adc9f26b5ba14a67f514336623cd54668156b8f12410dace891",
+    "local_operator/i18n/catalogues/en/wire.session_status.json": "9136565eefbef704c9e9e6e4751a4a63120ab262977b5d530d3123cc57426e7d",
+    "local_operator/i18n/catalogues/en/wire.session_status.context.json": "1b26a73cb5a95fdcc9ad741f4aef4f12695d8fdc98b061ca6b496b0149702568",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/ru.md": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "i18n/audit-history/ru/wire.session_status.json": "05525aef4a36361e7dac4871efa507d806dbe60f52e0c60c59777958d6933c20"
+  },
+  "mechanical": {
+    "hashes_match_brief": true,
+    "valid_json": true,
+    "key_sets_equal_en": true,
+    "key_count": 1,
+    "placeholders": "{base} only, identical to source, at the head as in en",
+    "icu": "simple argument, no plural/select",
+    "nfc": true,
+    "stray_bidi_zero_width": "none",
+    "em_dash": "U+2014 with spaces (style guide ' — ')",
+    "cell_len_composed": {
+      "Interrupted": {
+        "ru": 30,
+        "en": 35
+      },
+      "Unseen interruption": {
+        "ru": 38,
+        "en": 43
+      },
+      "Прервано (hypothetical localized base)": {
+        "ru": 27,
+        "en": 32
+      }
+    },
+    "check_py": "NOT run: primary checkout's working tree is on branch fix/notifications-approval-inbox (b42471d3) which lacks this namespace; brief forbids checkout/worktree. Checks above done in Python on git-show bytes."
+  },
+  "code_path": {
+    "composer": "local_operator/session/catalog.py CatalogEntry._stop_label (origin/main L540-576): completion_kind=='retired' → render(wire.session_status.retired_label, {base}, locale=_label_locale())",
+    "base_values": "hard-coded English literals: 'Interrupted' (L536) and 'Unseen interruption' (L469); not passed through any i18n key, so at runtime in ru {base} is English",
+    "runtime_ru_text": [
+      "Interrupted — из-за обновления",
+      "Unseen interruption — из-за обновления"
+    ],
+    "surface": "sidebar/picker row status (description cell / tooltip), printed verbatim by every client; one logical line; no maxCells in the context sidecar; sibling _error_label tolerates up to 160 chars",
+    "related_ru_terms": {
+      "tui.notification_kinds.word_retired": "en 'retired for an update' → ru 'остановлено из-за обновления'",
+      "wire.outcome_notices.retired": "ru 'Рантайм остановлен из-за обновления — текущий ход прерван, …'",
+      "tui.chrome.banners.context_interrupted": "en 'Interrupted' → ru 'Прервано'"
+    }
+  },
+  "per_key": [
+    {
+      "key": "wire.session_status.retired_label",
+      "en": "{base} — retired for an update",
+      "text": "{base} — из-за обновления",
+      "verdict": "PASS with MINOR ru-S1",
+      "note": "Accurate: names the update as the cause; agentless, so it does not attribute the stop to the operator; cannot read as deleted/resigned/retired-from-work (the verb 'retired' is dropped, the meaning carried by the cause). Register terse, impersonal per ru.md. 'обновление' and 'из-за' match outcome_notices and notification_kinds."
+    }
+  ],
+  "findings": [
+    {
+      "id": "ru-S1",
+      "severity": "MINOR",
+      "key": "wire.session_status.retired_label",
+      "text": "{base} — из-за обновления",
+      "evidence": "Identical English phrase 'retired for an update' is 'остановлено из-за обновления' in tui.notification_kinds.word_retired; here the predicate is dropped, leaving a bare cause that leans on {base}. At runtime {base} is English ('Interrupted', catalog.py L536/L469), so ru users see 'Interrupted — из-за обновления': the Russian half is a headless fragment. Meaning still recoverable, hence MINOR.",
+      "fix": "{base} — остановлено из-за обновления (42 cells with 'Interrupted', 50 with 'Unseen interruption'; +7 vs en, no defined budget). Optional; current value is acceptable."
+    }
+  ],
+  "out_of_scope_observation_non_gating": "Code, not translation: catalog.py passes English literals 'Interrupted'/'Unseen interruption' as {base} (and stop-rung/error suffixes are English), so every non-en locale renders a mixed-language row label. Fix belongs in code (key the base words). Derived from source at e625e5e3, not rendered.",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "ledger_status_recommended": "passed",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ru-S1"
+    ]
+  },
+  "not_verified": [
+    "native-speaker judgement (LLM reasoning only)",
+    "rendered fit: no screenshot; widths are rich cell_len of composed strings",
+    "runtime render through messages.render against origin/main catalogues (working tree lacks the namespace; composition is plain substitution)",
+    "repo validator check.py (see mechanical.check_py)"
+  ],
+  "audit_notes_not_execution_log": "commands run: git fetch origin main; git show origin/main:<path> | shasum -a 256 (6 files); git grep retired_label/Interrupted/прерван/из-за обновлен on origin/main; git show catalog.py L462-610, L665-715; .venv python: json key/placeholder/NFC/Cf/cell_len on git-show bytes. Read-only: no edits, checkout, generator or ledger.",
+  "reference_shape": "~/.local-operator/sessions/9bf062d8d179/scratchpad/as-audits/fr.json (sha256 53897fff…)"
+}

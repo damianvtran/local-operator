@@ -1804,7 +1804,32 @@ def status_lines() -> list[str]:
             # something the tool no longer keeps. See `_install_may_repoint_daemons`.
             lines.append("      `lop services restart` repoints them only from the")
             lines.append("      install that owns them")
+    lines.extend(_heavy_job_lines())
     return lines
+
+
+def _heavy_job_lines() -> list[str]:
+    """Who holds the machine-wide heavy-job slots (``local_operator/heavy_lease.py``).
+
+    An operator whose build says "queued behind …" comes here to see the holder
+    and how long it has run. Cheap by design: it reads the JSON holder records
+    and checks each pid's liveness (a dead pid is a stale record and is
+    skipped); it never probes the flocks, so a status read can never take or
+    disturb a slot. Off or unsupported (Windows) prints that instead of a count,
+    and any failure drops the line rather than the whole status report.
+    """
+    try:
+        from local_operator import heavy_lease
+
+        if not heavy_lease.supported():
+            return ["heavy jobs: queue unavailable on this platform"]
+        settings = heavy_lease.configured_settings()
+        if not settings.enabled:
+            return ["heavy jobs: queue off (bash.heavy_jobs.enabled=false)"]
+        return [heavy_lease.status_line(heavy_lease.lease_dir(), settings.slots)]
+    except Exception:  # noqa: BLE001 - a status nicety must never fail the report
+        logger.debug("heavy-job status unreadable", exc_info=True)
+        return []
 
 
 def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
