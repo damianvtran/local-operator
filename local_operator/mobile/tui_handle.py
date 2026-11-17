@@ -1171,6 +1171,20 @@ class TuiSessionHandle(SessionHandle):
         self._refresh_state()
         return f"ran {line}"
 
+    def _already_auto_session_form(self, args: str) -> bool:
+        """Whether a refused frame is the session ``auto`` form while auto is on.
+
+        Only the session form: ``default auto`` while this conversation is auto
+        can still loosen the MACHINE default other sessions follow, so it keeps
+        the refusal. Called only after :meth:`_bridge_ack_refusal` refused.
+        """
+        from local_operator.harness.approval import APPROVALS_LOOSENING_WORDS
+
+        words = (args or "").strip().lower().split()
+        if len(words) != 1 or words[0] not in APPROVALS_LOOSENING_WORDS:
+            return False
+        return bool(getattr(self._app, "_approve_all", False))
+
     def _bridge_ack_refusal(self, command: str, args: str, bridge_ack: bool) -> Any:
         """The receipt for an unacknowledged routed loosening, or ``None``."""
         from local_operator.slash_commands import primary_slash_name
@@ -1288,8 +1302,17 @@ class TuiSessionHandle(SessionHandle):
         the gate reads as withheld.
         """
         refusal = self._bridge_ack_refusal(command, args, bridge_ack)
+        already_auto = False
         if refusal is not None:
-            return refusal
+            if not self._already_auto_session_form(args):
+                return refusal
+            # ALREADY AUTO IS NOT A LOOSENING (design r1 D2 on #4080), the twin
+            # of the runtime's rule: the refusal said "auto is still off" while
+            # every tool ran without asking. Run the bare report instead, which
+            # writes nothing (a session switch would pin a machine-default auto
+            # onto this conversation) and names the mode's real provenance.
+            args = ""
+            already_auto = True
         owner_loop = await self._on_app(asyncio.get_running_loop)
         done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
 
@@ -1339,6 +1362,12 @@ class TuiSessionHandle(SessionHandle):
         except (asyncio.TimeoutError, TimeoutError):
             raise TimeoutError(_app_hop_timeout_note()) from None
         result = await done
+        if already_auto and isinstance(result, dict):
+            # The card keys on ``ok``/``approval_mode``, never the sentence; the
+            # bare report carries neither, so add the ones every receipt sends.
+            data = result.get("data")
+            prior: dict[str, Any] = data if isinstance(data, dict) else {}
+            result = {**result, "data": {**prior, "approval_mode": "auto", "ok": True}}
         return result if isinstance(result, dict) else {"kind": "notice", "text": f"ran /{command}"}
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> AckDetail:

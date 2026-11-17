@@ -1,0 +1,19 @@
+{
+  "record_reference": "i18n/audits/evidence/fr/wire.github/gh4052r1/record.json",
+  "postappend_check": {
+    "command": "python3 scripts/i18n/check.py --audit-base aa051d55925b",
+    "exit_code": 0,
+    "log": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/postappend-check.log",
+      "sha256": "89bb2465285750a16d59095a6d1dac352536f330c603a5dc2da3c5408c3c0951"
+    }
+  },
+  "verified_records": 28,
+  "all_record_input_and_artifact_hashes_match": true,
+  "product_source_docs_unchanged_from": "0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "clean_receipts_deferred": 11,
+  "generated_shipped_unchanged": [
+    "en"
+  ],
+  "eligibility_restoration_claimed": false
+}

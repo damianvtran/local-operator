@@ -67,7 +67,7 @@ from __future__ import annotations
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import SupportsIndex
 
 #: The env var an agent sets inline to run an unbounded search as written.
@@ -337,6 +337,11 @@ class Lexed:
     segments: list[tuple[str, bool, str]]
     bodies: list[list[str]]
     open: bool
+    #: Parallel to ``bodies``: True only for a retained duplicate whose entire
+    #: owning substitution opens AND closes in this same segment. Consumers
+    #: must still prove they recursively walk that substitution before omitting
+    #: the duplicate; split/unclosed substitutions deliberately remain False.
+    nested_bodies: list[list[bool]] = field(default_factory=list)
 
 
 #: Frames of :func:`lex`'s context stack. A QUOTE frame suppresses operators,
@@ -356,6 +361,10 @@ class _FrameStack(list[str]):
         self.quotes = 0
         self.subs = 0
         self.arith = 0
+        self.segment = 0
+        self.sub_owners: list[tuple[int, int]] = []
+        self.closed_subs: dict[int, int] = {}
+        self.next_sub = 0
 
     def _count(self, frame: str, step: int) -> None:
         if frame in _QUOTE_FRAMES:
@@ -368,10 +377,16 @@ class _FrameStack(list[str]):
     def append(self, frame: str) -> None:
         super().append(frame)
         self._count(frame, 1)
+        if frame in ("$(", "`"):
+            self.sub_owners.append((self.next_sub, self.segment))
+            self.next_sub += 1
 
     def pop(self, index: SupportsIndex = -1) -> str:
         frame = super().pop(index)
         self._count(frame, -1)
+        if frame in ("$(", "`"):
+            owner, _start = self.sub_owners.pop()
+            self.closed_subs[owner] = self.segment
         return frame
 
 
@@ -407,11 +422,12 @@ def lex(command: str) -> Lexed:
     segments: list[tuple[str, bool, str]] = []
     # Bodies keyed by the index of the segment holding their ``<<`` opener.
     owned: dict[int, list[str]] = defaultdict(list)
+    body_owners: dict[int, list[tuple[int, int] | None]] = defaultdict(list)
     buf: list[str] = []
     stack = _FrameStack()
     # (delimiter, owning segment index, inside substitution, retain ownership)
     # for openers awaiting the next newline.
-    pending: list[tuple[str, int, bool, bool]] = []
+    pending: list[tuple[str, int, bool, bool, tuple[int, int] | None]] = []
     piped = False
     word_start = True
     unterminated_heredoc = False
@@ -422,6 +438,7 @@ def lex(command: str) -> Lexed:
         return stack.quotes > 0
 
     while i < n:
+        stack.segment = len(segments)
         ch = command[i]
         top = stack[-1] if stack else None
         if top == "'":
@@ -543,7 +560,8 @@ def lex(command: str) -> Lexed:
                 unterminated_heredoc = True
             elif opener is not None:
                 delim, end = opener
-                pending.append((delim, len(segments), stack.subs > 0, not quoted()))
+                sub_owner = stack.sub_owners[0] if stack.sub_owners else None
+                pending.append((delim, len(segments), stack.subs > 0, not quoted(), sub_owner))
                 buf.append(command[i:end])
                 i = end
                 word_start = False
@@ -552,9 +570,9 @@ def lex(command: str) -> Lexed:
             # Bodies start after this newline, one per opener, in order.
             pos = i + 1
             resume = i
-            captured: list[tuple[str, int, bool, bool]] = []
+            captured: list[tuple[str, int, bool, bool, tuple[int, int] | None]] = []
             ok = True
-            for delim, owner, in_sub, retain_owned in pending:
+            for delim, owner, in_sub, retain_owned, sub_owner in pending:
                 lines: list[str] = []
                 found = False
                 while pos <= n:
@@ -572,10 +590,10 @@ def lex(command: str) -> Lexed:
                 if not found:
                     ok = False
                     break
-                captured.append(("\n".join(lines), owner, in_sub, retain_owned))
+                captured.append(("\n".join(lines), owner, in_sub, retain_owned, sub_owner))
             pending = []
             if ok:
-                if any(in_sub for _b, _o, in_sub, _r in captured):
+                if any(in_sub for _b, _o, in_sub, _r, _s in captured):
                     # R9-1: an opener inside ``$(…)``/backticks belongs to the
                     # command INSIDE the substitution (``x="$(bash <<EOF …)"``),
                     # not to the outer segment. Keep the body text inline so
@@ -587,12 +605,13 @@ def lex(command: str) -> Lexed:
                     buf.append(command[i:resume])
                 else:
                     buf.append(" ")
-                for body, owner, in_sub, retain_owned in captured:
+                for body, owner, in_sub, retain_owned, sub_owner in captured:
                     # R10: an unquoted substitution can split before its shell
                     # stage; that piece has no opening substitution to recurse
                     # into. Retain its owned body as well as the inline text.
                     if not in_sub or retain_owned:
                         owned[owner].append(body)
+                        body_owners[owner].append(sub_owner)
                 # Otherwise resume AT the newline ending the last delimiter
                 # line, so it still ends the segment.
                 i = resume
@@ -639,6 +658,13 @@ def lex(command: str) -> Lexed:
         segments=segments,
         bodies=[owned.get(k, []) for k in range(len(segments))],
         open=bool(stack) or bool(pending) or unterminated_heredoc,
+        nested_bodies=[
+            [
+                sub is not None and sub[1] == k and stack.closed_subs.get(sub[0]) == k
+                for sub in body_owners.get(k, [])
+            ]
+            for k in range(len(segments))
+        ],
     )
 
 

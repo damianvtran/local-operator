@@ -16,6 +16,8 @@ import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { isolateTechnicalRuns } from "../lib/bidi";
+import { diagramKey, shouldDrawDiagram } from "../lib/diagram-fence";
+import { DiagramBlock } from "./diagram-block";
 
 let keySeq = 0;
 function key(): string {
@@ -104,6 +106,8 @@ interface Block {
 	kind: "code" | "heading" | "ul" | "ol" | "quote" | "hr" | "table" | "para";
 	level?: number;
 	lang?: string;
+	/** A fence reached its closing line; an open one is a reply still streaming in. */
+	closed?: boolean;
 	lines: string[];
 }
 
@@ -149,8 +153,9 @@ function splitBlocks(text: string): Block[] {
 				buf.push(lines[i]);
 				i++;
 			}
+			const closed = i < lines.length;
 			i++; /* consume the closing fence (or EOF, which ends the block) */
-			blocks.push({ kind: "code", lang: fence[1] || undefined, lines: buf });
+			blocks.push({ kind: "code", lang: fence[1] || undefined, closed, lines: buf });
 			continue;
 		}
 
@@ -526,12 +531,18 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 
 export function Markdown({ text }: { text: string }) {
 	const blocks = splitBlocks(text);
+	/* Every other block takes a fresh `key()` per render, so React rebuilds it. A
+	   drawn diagram must NOT: each streamed frame of the surrounding answer would
+	   tear it down and redraw it. Its key is its source, plus a count for the
+	   same source twice in one message. */
+	const diagramSeen = new Map<string, number>();
 	return (
 		<div className="flex min-w-0 flex-col gap-1.5 break-words">
 			{blocks.map((b) => {
 				switch (b.kind) {
-					case "code":
-						return (
+					case "code": {
+						const source = b.lines.join("\n");
+						const plain = (
 							/* WRAPS, NEVER SCROLLS SIDEWAYS (operator finding B): a
 							   transcript has zero horizontal play on a phone. The block
 							   used to keep long lines intact and scroll them inside the
@@ -544,9 +555,15 @@ export function Markdown({ text }: { text: string }) {
 								dir="ltr"
 								className="max-w-full rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap [overflow-wrap:anywhere]"
 							>
-								{b.lines.join("\n")}
+								{source}
 							</pre>
 						);
+						if (!shouldDrawDiagram({ lang: b.lang, closed: b.closed === true, source })) return plain;
+						const base = diagramKey(source, 0);
+						const occurrence = diagramSeen.get(base) ?? 0;
+						diagramSeen.set(base, occurrence + 1);
+						return <DiagramBlock key={diagramKey(source, occurrence)} source={source} fallback={plain} />;
+					}
 					case "heading":
 						return (
 							<div

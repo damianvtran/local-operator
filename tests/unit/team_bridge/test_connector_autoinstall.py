@@ -350,6 +350,61 @@ async def test_a_slow_launchctl_never_blocks_the_event_loop(service, monkeypatch
     assert not install.plist_path().exists()
 
 
+async def test_a_slow_opt_out_write_never_blocks_the_loop_and_lands_before_the_sync(
+    service, monkeypatch
+) -> None:
+    """Review R1-2: the Turn off opt-out write is off the loop AND ordered.
+
+    ``_apply_local_opt_out`` rewrites the config file under the writer's lock
+    (0.3-1 s under load). The slow-launchctl test above cannot catch an inline
+    regression of THIS write: on an idle disk it finishes before that test's
+    window opens. Here the write itself sleeps 0.5 s for real, so an inline
+    call leaves zero ticks, deterministically. The call-order list pins the
+    other half of the contract: the opt-out is on disk before
+    ``sync_connector_service`` reads it, or the sync would reinstall the unit.
+    """
+
+    fake, home, root = service
+    _commit(root)
+    order: list[str] = []
+    real_record = tb_client.record_local_enabled
+
+    def slow_record(config_dir: Path, enabled: bool) -> None:
+        time.sleep(0.5)
+        real_record(config_dir, enabled)
+        order.append(f"record_local_enabled({enabled})")
+
+    def recording_sync(config_dir: Path) -> None:
+        order.append("sync_connector_service")
+
+    monkeypatch.setattr(tb_client, "record_local_enabled", slow_record)
+    monkeypatch.setattr(install, "sync_connector_service", recording_sync)
+    ticks: list[float] = []
+
+    async def ticker() -> None:
+        for _ in range(12):
+            await asyncio.sleep(0.05)
+            ticks.append(time.monotonic())
+
+    write = asyncio.create_task(
+        _client(_active, root).put_settings(state="disabled", expected_account_id="acc_1")
+    )
+    ticking = asyncio.create_task(ticker())
+    # 0.3 s inside a 0.5 s sleep: an off-loop write leaves ~6 ticks here, an
+    # inline one none. Loose bound (2) so a loaded host cannot flake it.
+    await asyncio.sleep(0.3)
+    in_flight = not write.done()
+    landed = len(ticks)
+    await asyncio.gather(write, ticking)
+
+    assert landed >= 2, (
+        f"the event loop was blocked by the opt-out write: only {landed} ticks "
+        "landed in 0.3 s while the write was in flight"
+    )
+    assert in_flight, "the write finished inside the window; the fake was not slow enough"
+    assert order == ["record_local_enabled(False)", "sync_connector_service"], order
+
+
 async def test_concurrent_syncs_install_once(service) -> None:
     """Q-3: two triggers at one app start must not each reload the label.
 

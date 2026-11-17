@@ -1,0 +1,73 @@
+{
+  "record": {
+    "path": "i18n/audits/evidence/ur/wire.github/gh4052r2/record.json",
+    "sha256": "ec5ade4c67514459881fa80c8081fa6a4910a869c179d8f4279330900d59cb7a"
+  },
+  "record_reference": "i18n/audits/evidence/ur/wire.github/gh4052r2/record.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/wire.github/gh4052r2/report.md",
+      "sha256": "bda77422c8de2ff32231f3d9f85bdbc39b1e89f450de5d43f5cf0fc52d649d5a"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/result.json",
+      "sha256": "2d40c7125893cb5551e7f239982e3abfe7750058c344516fdabcfd882701ab29"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/runner.py.txt",
+      "sha256": "846cc99fc8f8a3a744c6398494d4b80c6c97d23ef31c53182217d2b2518b2e81"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/audit.log",
+      "sha256": "35c8e9cabfa42b4e0dfb3432e8a22fb2fd71930b5277a87d727c8fbdcc73cfcc"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/catalogue-check.log",
+      "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.github/gh4052s2/record.json",
+      "sha256": "472e855e4264678216bd089a96108fe155e6520fbac3daa28af06ace5adc17d6"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.github/gh4052r2/ur-before.svg",
+      "sha256": "a25e98b40c86da68a9ca8a488372da0213d1126630e432b2fc67223b72f4eaca"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.github/gh4052r2/ur-before.png",
+      "sha256": "132dbd53e034a8d7728f9da4cedd93e3079bf2f47f622da80dc27ba86fe4358f"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.github/gh4052r2/ur-after.svg",
+      "sha256": "2deb0b3997650f2e7dccd8a1bf299f56c8544456fd08ecfbf7cf7d6dd935ce8c"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.github/gh4052r2/ur-after.png",
+      "sha256": "2421aea59ef51e65b312bbe1d78867427b1c60d1622595f0e951c1a305f207e9"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.json",
+      "sha256": "81acf4e9c4e2d80855db17660257d5f86e3cf4b5b70e65c9ebfc42a257938b05"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production-runner.py.txt",
+      "sha256": "2bfed2b15d8c4b522c88039d6e3ea76163f36e28b81378d3b60520e69ba2f52e"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/production.log",
+      "sha256": "9480f848f4213dae71d54ce77eca56fbe4e12d1b527b16938a8f89b160106b3c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/generate.log",
+      "sha256": "8b2f5c78999f2648b67cdbf7d3704cd9061b108520c055ad40eef0d41633a248"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/generation-check.log",
+      "sha256": "96f4f2560bf20877b9b332cf5ecf3c13ee9f1a5c8013dc1916eba34501678db6"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r2/full-check.log",
+      "sha256": "89bb2465285750a16d59095a6d1dac352536f330c603a5dc2da3c5408c3c0951"
+    }
+  ]
+}

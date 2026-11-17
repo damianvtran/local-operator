@@ -457,6 +457,24 @@ ROLE_BY_WORDS = frozenset({"operator"})
 NOT_IN_QUEUE = "that ask is not in this session's queue — it may belong to another session."
 
 
+#: The ``by.via`` the desktop approvals batch stamps on the ``withdrawn`` row it
+#: writes (``team_bridge.approvals.SETTLED_BY``; a test pins the two together,
+#: and this module may not import the team-bridge package).
+BATCH_DECIDE_VIA = "team_bridge_batch_decide"
+
+#: The card's refusal for a request already decided from the approvals list.
+BATCH_DECIDED_COPY = "you already decided this request from the desktop's approvals list."
+
+#: The card's refusal while a desktop approvals-list decision for the request is
+#: recorded but not yet confirmed by the hub (``Session.bridge_decide``, code
+#: ``decided_from_list``; PR #4099 design (c)). One word per ask: the card may
+#: neither repeat nor contradict it, and the list is where it is sent again.
+BATCH_PENDING_COPY = (
+    "you already decided this request from the desktop's approvals list and it has "
+    "not been confirmed yet — select it there again to send it."
+)
+
+
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).
 
@@ -486,6 +504,12 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         # names a different act — the one where the agent was told to decide.
         return DISMISS_ALREADY_DISMISSED
     if status == store.STATUS_WITHDRAWN:
+        if (record.get("withdrawn_by") or {}).get("via") == BATCH_DECIDE_VIA:
+            # A team request the person already decided from the desktop's
+            # approvals list (QA Q2): the agent withdrew nothing, and "send it
+            # as a chat message" would be the wrong remedy for a decision that
+            # has already reached the requester.
+            return BATCH_DECIDED_COPY
         # DESIGN §12's sentence, verbatim: a withdrawn ask is not answerable
         # from any surface (its box hides everywhere — ``withdrawn`` is not
         # outstanding), and a stale tap reads the ONE route left — say it in
@@ -808,6 +832,60 @@ def relay_receipt(
         origin_session=origin_session,
         reach_note=reach_note,
     )
+
+
+#: A NODE session's forwarded card that this device's inbox has retired: the
+#: node's listing stopped carrying the ask, so it was answered, declined or
+#: lapsed there (``remote_attention.resurface_forwarded_ask``'s ``settled``).
+RELAY_REMOTE_SETTLED = (
+    "that card from {device} has expired or was already answered on its own "
+    "session — there is nothing left to re-surface; do not relay it."
+)
+
+#: The forwarded card is still open on the node, but the operator dismissed its
+#: inbox row here; a relay never re-raises what a person put away.
+RELAY_REMOTE_PUT_AWAY = (
+    "the operator dismissed that card from {device} in their inbox — a relay does "
+    "not re-raise a card a person put away; it is still open on its own session "
+    "there."
+)
+
+#: The receipt of a REMOTE relay. Unlike :data:`RELAY_RECEIPT` there is no relay
+#: row: the sentence must say where the answer goes and that it never comes
+#: back here, or a coordinator waits on (or treats as consent) an answer it
+#: will never be handed.
+RELAY_REMOTE_RECEIPT = (
+    "Re-surfaced card {origin_ask} from session {origin_session} on {device} in "
+    "the operator's inbox — the one existing card, unread again; no relay row was "
+    "created here. It is answered there: the desktop app or lop on the operator's "
+    "computer (a browser site card cannot be signed from the phone). The answer "
+    "goes to the ORIGINAL session on {device}; this session will NOT receive it as "
+    "an ask answer, holds no copy, and cannot withdraw it. A RE-SURFACE IS NOT "
+    "CONSENT: do not wait on it or run anything the card was meant to authorise."
+)
+
+
+#: The forwarded card is still unread in the operator's inbox, so the relay
+#: wrote nothing (a relay loop must not churn the row; PR #4082 review round 1,
+#: R1-2). Same answer-elsewhere terms as :data:`RELAY_REMOTE_RECEIPT`.
+RELAY_REMOTE_PENDING = (
+    "Card {origin_ask} from session {origin_session} on {device} is already "
+    "pending, unread, in the operator's inbox — left as it is; no relay row was "
+    "created here. It is answered there: the desktop app or lop on the operator's "
+    "computer (a browser site card cannot be signed from the phone). The answer "
+    "goes to the ORIGINAL session on {device}; this session will NOT receive it as "
+    "an ask answer, holds no copy, and cannot withdraw it. A PENDING CARD IS NOT "
+    "CONSENT: do not wait on it or run anything the card was meant to authorise."
+)
+
+#: The inbox (or the network store) could not be read, so whether the ref names
+#: a forwarded card is unknown — distinct from :data:`RELAY_ORIGIN_UNKNOWN`,
+#: which would teach the model the id is wrong (R1-4).
+RELAY_REMOTE_UNREADABLE = (
+    "this device's inbox could not be read just now, so it is not known whether "
+    "that ref names a card forwarded from another device — nothing was relayed; "
+    "try the relay again shortly."
+)
 
 
 def relay_refused_by_origin(origin_session: str, origin_ask: str, copy: str) -> str:

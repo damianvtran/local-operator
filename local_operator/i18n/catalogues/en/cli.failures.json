@@ -2,5 +2,6 @@
   "cli.failures.error_line": "{prog}: error: {message}",
   "cli.failures.required": "the following arguments are required: {names}",
   "cli.failures.invalid_choice": "argument {argument}: invalid choice: {value} (choose from {choices})",
-  "cli.failures.invalid_command": "Invalid {group} command: {command}"
+  "cli.failures.invalid_command": "Invalid {group} command: {command}",
+ "cli.failures.github_borrow_timeout": "GitHub credential from {owner} did not arrive within {seconds} s; retry the command"
 }

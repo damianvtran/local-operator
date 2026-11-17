@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import closing
@@ -2060,3 +2061,162 @@ async def test_a_flip_right_after_the_record_appears_is_still_detected(
     assert any(
         "build watch baseline" in record.getMessage() for record in records
     ), "the baseline is logged, not silent"
+
+
+# ---------------------------------------------------------------------------
+# the disk read runs OFF the loop (2026-11-17: a 145 s on-loop metadata read)
+# ---------------------------------------------------------------------------
+
+
+class _StuckDisk:
+    """A ``disk_build`` that blocks its thread until released — the swap stall.
+
+    The wait is bounded so a failing test cannot hang the run, and ``release``
+    is always called in ``finally``: the event loop's teardown joins the
+    default executor, which would otherwise wait out the bound.
+    """
+
+    def __init__(self, build: BuildStamp) -> None:
+        self.build = build
+        self.gate = threading.Event()
+        self.calls = 0
+
+    def __call__(self, *_a: object, **_k: object) -> BuildStamp:
+        self.calls += 1
+        self.gate.wait(10.0)
+        return self.build
+
+    def release(self) -> None:
+        self.gate.set()
+
+
+@pytest.fixture
+def stuck(disk: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> Iterator[_StuckDisk]:
+    """Install a blocking ``disk_build`` and a short read bound; always release."""
+    monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+    blocker = _StuckDisk(NEW)
+    monkeypatch.setattr(update_mod, "disk_build", blocker)
+    try:
+        yield blocker
+    finally:
+        blocker.release()
+
+
+async def _max_gap_within(seconds: float, step: float = 0.01) -> float:
+    """The longest the loop went without waking a ``step`` sleeper over ``seconds``.
+
+    Why the longest gap and not a tick count (review round 3, R3-1): a count of
+    10 ms ticks in 0.3 s needs an average wakeup of 30 ms or less, and at Mac load
+    ~80 a sleep overshoots by ~20 ms, so a correct build can miss the count. The
+    discriminator needs no count: ``_StuckDisk`` blocks on ``gate.wait(10.0)`` and
+    the gate is released only in the caller's ``finally``, so a read run ON the loop
+    freezes it for ~10 s (one gap of ~10 s), while a read run off it leaves only
+    scheduler jitter (tens of ms). ``< 2.0`` sits far from both.
+    """
+    loop = asyncio.get_running_loop()
+    started = last = loop.time()
+    max_gap = 0.0
+    while last - started < seconds:
+        await asyncio.sleep(step)
+        now = loop.time()
+        max_gap = max(max_gap, now - last)
+        last = now
+    return max_gap
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_disk_read_does_not_block_the_event_loop(
+    disk: dict[str, Any], stuck: _StuckDisk
+) -> None:
+    """(a) The read blocks its thread, never the loop: a peer coroutine keeps
+    turning, and the stuck read is not stacked — one thread, however long it waits.
+    On the previous head this peer made no progress until the read returned."""
+    app, publisher = FakeApp(), FakePublisher(_record())
+    task, stop, exited = await _start(app, publisher)
+    try:
+        max_gap = await _max_gap_within(0.3)
+        # An on-loop read would hold the loop for the stall's ~10 s.
+        assert max_gap < 2.0, f"the loop went dark for {max_gap:.3f}s while the read was stuck"
+        assert stuck.calls == 1, "a stuck read must not be re-issued each tick"
+    finally:
+        stuck.release()
+        stop.set()
+        await asyncio.wait_for(task, 2.0)
+    assert exited == []
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_read_announces_nothing_and_warns_once(
+    disk: dict[str, Any], stuck: _StuckDisk, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(b) NEW is on disk but the read never answers: no announcement, no latch,
+    no exit, and ONE warning for the whole streak rather than one per tick."""
+    app, publisher = FakeApp(), FakePublisher(_record())
+    with caplog.at_level(logging.DEBUG, logger="local_operator.buildwatch"):
+        task, stop, exited = await _start(app, publisher)
+        try:
+            await asyncio.sleep(QUIET_S)  # ~12 check intervals
+            assert publisher.writes == [], "an unanswered read is not a handover"
+            assert exited == []
+            assert retire.retiring(cast(Any, app)) is False
+            assert not task.done(), "the watch survives an unanswered read"
+        finally:
+            stuck.release()
+            stop.set()
+            await asyncio.wait_for(task, 2.0)
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "did not answer" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_read_never_withdraws_a_standing_announcement(
+    disk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b) The announced phase: ``handover_build`` answering ``None`` means
+    WITHDRAW, so a stalled read must not be folded into it — the record keeps
+    naming NEW and nothing is rewritten while the disk is silent."""
+    app, publisher = FakeApp(), FakePublisher(_record())
+    task, stop, exited = await _start(app, publisher)
+    # Let the poll sample its boot build (OLD) first: ``_start`` passes no
+    # ``boot``, so the baseline is read from the faked install, and moving it
+    # before the task's first step would make NEW the baseline — no move at all.
+    await asyncio.sleep(QUIET_S)
+    blocker = _StuckDisk(OLD)  # had it answered, OLD would withdraw
+    try:
+        disk["build"] = NEW
+        await _wait_for_announcement(publisher)
+        writes = list(publisher.writes)
+        monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(update_mod, "disk_build", blocker)
+        await asyncio.sleep(QUIET_S)
+        assert publisher.writes == writes, "nothing is withdrawn on an unanswered read"
+        _announced_not_latched(app, publisher, exited)
+    finally:
+        blocker.release()
+        stop.set()
+        await asyncio.wait_for(task, 2.0)
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_answers_again_still_detects_the_new_build(
+    disk: dict[str, Any], stuck: _StuckDisk, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(c) The normal path is intact: once the disk answers, the moved build is
+    announced exactly as before, and the recovery is logged once."""
+    app, publisher = FakeApp(), FakePublisher(_record())
+    with caplog.at_level(logging.INFO, logger="local_operator.buildwatch"):
+        task, stop, exited = await _start(app, publisher)
+        try:
+            await asyncio.sleep(QUIET_S)
+            assert publisher.writes == []
+            stuck.release()
+            await _wait_for_announcement(publisher)
+            _announced_not_latched(app, publisher, exited)
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 2.0)
+    assert "answering again" in caplog.text

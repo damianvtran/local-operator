@@ -349,7 +349,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # reversible" already covers the rest; trimmed on the rebase over #3926 so
     # bench_context_budget.py's start budget still passes). Measured by this test
     # on the default (queued) arm; the blocking tail is unchanged.
-    "ask": 1210,
+    # 1210 -> 1268 (+58, E2E 44ab2361d833 remote relay): one off-wire notes
+    # bullet saying a relay of a NODE session's forwarded card re-raises that
+    # card in the operator's inbox, its answer never comes back to the relaying
+    # session, and withdraw/the relay cap do not apply (manager requirement:
+    # documented where the model reads `relay`). Notes only — the wire schema
+    # and description are byte-identical, so the wire ledger above is unchanged.
+    # 1268 -> 1352 (+84, incident 2026-11-16 ask a-48e3): one off-wire notes
+    # bullet: a delete/move ask names every exact full path in the question or a
+    # label (a description approves nothing), and only an answer from a surface
+    # that started the runtime is consent. Notes only; the wire is unchanged.
+    # 1352 -> 1386 (+34, PR #4127 R1-M1/Q1): the recovery leads with handing the
+    # operator the command and re-asks at most once (a background-started
+    # runtime has no proving surface). Notes only; the wire is unchanged.
+    "ask": 1386,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only

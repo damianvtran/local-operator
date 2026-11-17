@@ -1,0 +1,35 @@
+{
+  "auditor": {"agent": "i18n-auditor (lopdev team, task brand-au-ur)", "session": "e0a45ddcb618", "model": "anthropic/claude-opus-5-5", "actual_model_source": "system prompt Model line of this session; no fallback observed", "independent_from_translator_session": true, "translator": "i18n-translator, anthropic/claude-sonnet-5-5"},
+  "locale": "ur",
+  "namespaces": ["cli.team_bridge", "tunnel.status"],
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "diff_base": "220d39a96667",
+  "audit_date": "2026-11-16",
+  "key_count": {"cli.team_bridge": 59, "tunnel.status": 24, "changed": 4},
+  "input_hashes": {
+    "local_operator/i18n/catalogues/ur/cli.team_bridge.json": "973fd489e05fff2cba5b87b6f0b22308579123845867610354c971bf2b529011",
+    "local_operator/i18n/catalogues/ur/tunnel.status.json": "674b4514699795a1a6e17d575769f9fdd19dac42b9c1a46d50c1f1cc7b4d68fe",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.json": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "local_operator/i18n/catalogues/en/tunnel.status.json": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.context.json": "6c4d922a48e5c563d2204ef4fb7dcd8ef8383e5e85d6c1ce3e86d2e7e81e1403",
+    "local_operator/i18n/catalogues/en/tunnel.status.context.json": "b69246da17bb05162c7640506a35e3eed4fab1501fa581818e89df23d339b76b",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/ur.md": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+  },
+  "commands_run": ["git diff 220d39a96667 3dd15d6f5559 -- local_operator/i18n/catalogues/ur/ (2 files, 4 values)", "scripts/i18n/check.py --catalogues-only -> 'catalogue checks: 0 problem(s)'", "rich.cells.cell_len width measurements", "key-set parity and placeholder extraction script"],
+  "per_key": {
+    "cli.team_bridge.notify.screening_model_unavailable_body": "PASS",
+    "tunnel.status.card_open_console": "PASS (37 cells, 39 with icon; English 43/budget 50)",
+    "tunnel.status.tunnel_disabled.detail": "PASS ({url} identical)",
+    "tunnel.status.tunnel_inactive.detail": "PASS ({url} identical)",
+    "tunnel.status.tunnel_disabled.label": "acceptable as generic; MINOR recommendation to name product"
+  },
+  "findings": [
+    {"id": "ur-A1", "severity": "MINOR", "key": "tunnel.status.tunnel_disabled.label", "text": "کنسول میں ٹنل بند ہے", "evidence": "Urdu has no article, so the English cue 'the console' is lost; label is printed in terminal output (lop tunnel status) where کنسول can be read as the terminal itself. gateway.py pairs it with tunnel_disabled.detail, which says 'Radient Console'. Generic form is glossary-legal (generic console concepts translate).", "fix": "Radient Console میں ٹنل بند ہے (30 cells; English 32; no maxCells set)"}
+  ],
+  "observations_out_of_scope": ["mobile.setup.disabled, .disabled_resume, .title_disabled, .action_add_credit, .action_open_console and mobile.doctor.tunnel.duplicates still read 'Radient کنسول' on this head; same brand, outside this change; mobile setup and tunnel status may be seen by the same user."],
+  "counts": {"blocker": 0, "major": 0, "minor": 1, "nit": 0},
+  "current_report_verdict": {"status": "CLEAN-WITH-FINDINGS", "ledger_status_equivalent": "passed", "unresolved_blocker_major_count": 0, "finding_ids": ["ur-A1"]},
+  "not_verified": ["native-speaker judgement (LLM reasoning only)", "rendered RTL/bidi in a real terminal, desktop or phone; bidi reasoning is per UBA only", "Nastaliq shaping/width in a rendered frame"],
+  "audit_notes_not_execution_log": true
+}

@@ -42,7 +42,6 @@ from local_operator.mobile.push_payload import (
     digest_emit_key,
 )
 from local_operator.mobile.push_worker import (
-    DEFERRAL_WINDOW_S,
     EMIT_RETRY_ATTEMPTS,
     EMIT_RETRY_INTERVAL_S,
     PRESENCE_RECHECK_S,
@@ -68,6 +67,11 @@ DEVICE_B = "device-b"
 #: (``daemon.SCAN_INTERVAL_S``, spelled here so this file's arithmetic does not
 #: import the loop's own constant).
 TICK_S = 2.0
+
+#: The ADR's retired 5-minute presence window (§2.3 decision 2, amended
+#: 2026-11-15: phone <= desktop). Kept here only so the tests can prove that
+#: crossing it no longer releases anything while the desktop is attended.
+RETIRED_DEFERRAL_WINDOW_S = 5 * 60
 
 
 @pytest.fixture(autouse=True)
@@ -171,6 +175,9 @@ class Harness:
         self.plane = ControlPlane(verdicts=verdicts)
         self.clock = Clock()
         self.presence = Presence(attended)
+        #: The session an attended desktop window shows ("" = none); the
+        #: worker's rung-1 input, read through ``attending`` below.
+        self.viewing = ""
         self.devices = Devices(live)
         self.worker = self.build()
         if arm:
@@ -194,7 +201,12 @@ class Harness:
             clock=self.clock,
             presence=self.presence,
             live_devices=self.devices,
+            attending=self.attending,
         )
+
+    def attending(self, session_id: str) -> bool:
+        """``DesktopPresence.attending``'s shape over the harness's inputs."""
+        return self.presence.attended and bool(session_id) and self.viewing == session_id
 
     def restart(self) -> PushWorker:
         """Replace the worker with a fresh one over the same durable state."""
@@ -389,24 +401,6 @@ def test_presence_defers_then_emits_when_the_presence_goes_away(harness: Harness
     assert harness.cursor()["publication_cursor"] == 1
 
 
-def test_presence_defers_to_the_window_bound_then_emits_anyway(harness: Harness) -> None:
-    """The 5-minute bound: the deferral is a delay, not a suppression.
-
-    The window is measured from the pass that SAW the completion, not from the
-    publish: the worker is the observer, and it notices within one scan
-    interval.
-    """
-    harness.presence.attended = True
-    harness.publish("still-here")
-    assert harness.worker.tick() == []
-
-    harness.clock.advance(DEFERRAL_WINDOW_S - 1)
-    assert harness.worker.tick() == []
-
-    harness.clock.advance(1)
-    assert len(harness.worker.tick()) == 1, "the window bound must release the push"
-
-
 def test_an_ack_terminates_the_deferral_without_an_emit(harness: Harness) -> None:
     """§2.3: reading the conversation in the app is exactly what makes
     ``unseen`` false, so the deferral ends and the completion is never sent."""
@@ -423,6 +417,232 @@ def test_an_ack_terminates_the_deferral_without_an_emit(harness: Harness) -> Non
     assert [record.kind for record in records] == ["attention"]
     assert _types(harness.plane.calls) == ["attention"]
     assert harness.cursor()["publication_cursor"] == 1
+
+
+def test_an_attended_desktop_holds_the_push_past_the_old_window(harness: Harness) -> None:
+    """Phone <= desktop (operator, 2026-11-15, TestFlight 1067: "I feel like I'm
+    still seeing more notifications on mobile than I see pop up on desktop").
+
+    The REPRODUCTION of the leak: the old 5-minute bound released a deferred
+    completion while the desktop was STILL attended — the desktop had decided
+    not to banner it, and the phone banner'd it anyway. No time-based expiry
+    now: hours of attendance emit nothing, and the lapse is what releases it.
+    """
+    harness.presence.attended = True
+    harness.publish("still-attended")
+    assert harness.worker.tick() == []
+
+    for _ in range(4):
+        harness.clock.advance(RETIRED_DEFERRAL_WINDOW_S)
+        assert harness.worker.tick() == [], "attendance alone must never time out"
+    harness.clock.advance(2 * 60 * 60)
+    assert harness.worker.tick() == []
+    assert harness.plane.calls == []
+    assert harness.cursor()["publication_cursor"] == 0, "still owed, not dropped"
+
+    harness.presence.attended = False
+    assert len(harness.worker.tick()) == 1, "the presence lapse releases it"
+    assert _types(harness.plane.calls) == ["completion"]
+
+
+def test_a_completion_read_while_attended_never_pushes(harness: Harness) -> None:
+    """Read in the app while attended, then the user leaves: nothing is owed."""
+    harness.presence.attended = True
+    token = harness.publish("read-then-left")
+    assert harness.worker.tick() == []
+    harness.clock.advance(RETIRED_DEFERRAL_WINDOW_S + 1)
+    assert harness.worker.tick() == []
+
+    harness.store.acknowledge("session/read-then-left", token)
+    harness.presence.attended = False
+    harness.clock.advance(PRESENCE_RECHECK_S)
+    harness.worker.tick()
+    harness.clock.advance(RETIRED_DEFERRAL_WINDOW_S)
+    harness.worker.tick()
+
+    assert "completion" not in _types(harness.plane.calls)
+    assert "digest" not in _types(harness.plane.calls)
+
+
+def test_a_completion_the_desktop_announced_is_resolved_not_deferred(harness: Harness) -> None:
+    """Attended desktop on ANOTHER session: ``desktop_feed._focus_policy_for``
+    answers ``"always"`` (the desktop banners it), and that banner claims the
+    token in ``deliveries``. The user at the desk has been told; the phone must
+    not repeat it when they walk away."""
+    harness.presence.attended = True
+    token = harness.publish("bannered-on-desk")
+    assert harness.worker.tick() == []
+
+    # The desktop's own claim path (``claim_notification`` -> ``claim_delivery``).
+    assert harness.store.claim_delivery("session/bannered-on-desk", token, "desktop")
+    harness.clock.advance(TICK_S)
+    harness.worker.tick()
+    harness.presence.attended = False
+    harness.clock.advance(TICK_S)
+    harness.worker.tick()
+
+    assert harness.plane.calls == []
+    assert harness.cursor()["publication_cursor"] == 1, "resolved: the cursor moves past it"
+
+
+def test_staggered_deferrals_release_as_one_digest(harness: Harness) -> None:
+    """RC2: deferral must not defeat coalescing. Five completions deferred at
+    different moments go out as ONE digest when the presence lapses — the old
+    per-item window expired them one by one, five banners, while attended."""
+    harness.presence.attended = True
+    for index in range(5):
+        harness.publish(f"staggered-{index}")
+        assert harness.worker.tick() == []
+        harness.clock.advance(60)
+    harness.clock.advance(RETIRED_DEFERRAL_WINDOW_S)
+    assert harness.worker.tick() == [], "nothing leaves while attended"
+
+    harness.presence.attended = False
+    records = harness.worker.tick()
+    assert [record.kind for record in records] == ["digest"]
+    assert harness.plane.calls[0][1]["count"] == 5
+
+
+def test_the_attended_session_itself_never_pushes_even_after_the_lapse(
+    harness: Harness,
+) -> None:
+    """RC1, rung 1: the desktop is SHOWING this conversation to someone looking
+    at it. ``desktop_feed._focus_policy_for`` raises nothing for that
+    (``if presence.attending(session_id): return None``), so the phone raises
+    nothing — not now, and not when the user later walks away."""
+    harness.presence.attended = True
+    harness.viewing = "on-screen"
+    harness.publish("on-screen")
+    assert harness.worker.tick() == []
+    assert harness.cursor()["publication_cursor"] == 1, "resolved, not held"
+
+    harness.viewing = ""
+    harness.presence.attended = False
+    harness.clock.advance(TICK_S)
+    assert harness.worker.tick() == []
+    assert harness.plane.calls == []
+
+
+def test_another_session_unannounced_by_the_desktop_waits_for_the_lapse(
+    harness: Harness,
+) -> None:
+    """Attended on a DIFFERENT session and the desktop raised nothing (no
+    claim): the item is neither dropped nor pushed while attended, and the lapse
+    releases it while it is still unseen."""
+    harness.presence.attended = True
+    harness.viewing = "something-else"
+    harness.publish("background")
+    assert harness.worker.tick() == []
+    harness.clock.advance(RETIRED_DEFERRAL_WINDOW_S * 3)
+    assert harness.worker.tick() == []
+
+    harness.presence.attended = False
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+
+
+def test_a_bridged_conversation_falls_out_of_the_shared_gates(harness: Harness) -> None:
+    """RC3: the desktop feed skips a BRIDGED conversation (``if identity in
+    bridged: continue``) because its session stream raises its own banner. No
+    special case here: on screen it is rung 1, and a bridge banner claims the
+    token through the same ``claim_notification`` path, so both resolve."""
+    harness.presence.attended = True
+    harness.viewing = "bridged-on-screen"
+    harness.publish("bridged-on-screen")
+    token = harness.publish("bridged-elsewhere")
+    assert harness.worker.tick() == []
+    assert harness.store.claim_delivery("session/bridged-elsewhere", token, "desktop")
+    harness.clock.advance(TICK_S)
+    harness.worker.tick()
+
+    harness.presence.attended = False
+    harness.viewing = ""
+    harness.clock.advance(TICK_S)
+    harness.worker.tick()
+    assert harness.plane.calls == []
+    assert harness.worker.pending() == 0
+
+
+def test_a_released_desktop_claim_is_not_an_announcement(harness: Harness) -> None:
+    """A desktop that claimed and then handed the claim back
+    (``release_delivery``) raised nothing; the phone still owes the push."""
+    harness.presence.attended = True
+    token = harness.publish("handed-back")
+    assert harness.worker.tick() == []
+    assert harness.store.claim_delivery("session/handed-back", token, "desktop")
+    assert harness.store.release_delivery("session/handed-back", token)
+
+    harness.presence.attended = False
+    harness.clock.advance(TICK_S)
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+
+
+def test_a_conversation_holds_at_most_one_deferred_completion(harness: Harness) -> None:
+    """Bounded state: a deferral with no time limit must not accumulate. A
+    newer completion of the same conversation absorbs the older one's
+    positions, so the queue holds one item per conversation."""
+    harness.presence.attended = True
+    for _ in range(6):
+        harness.publish("chatty")
+        harness.worker.tick()
+        harness.clock.advance(TICK_S)
+    assert harness.worker.pending() == 1
+
+    harness.presence.attended = False
+    records = harness.worker.tick()
+    assert [record.kind for record in records] == ["completion"]
+    assert harness.cursor()["publication_cursor"] == 6, "every absorbed position resolved"
+
+
+def test_a_trickle_obeys_the_desktop_burst_window(harness: Harness) -> None:
+    """RC2's other half: one completion per scan never exceeded a per-PASS
+    limit, so the phone banner'd every one. Per WINDOW, as the desktop: at most
+    ``BURST_LIMIT`` singles, then one digest, then nothing until the window
+    turns."""
+    kinds: list[str] = []
+    for index in range(5):
+        harness.publish(f"trickle-{index}")
+        kinds += [record.kind for record in harness.worker.tick()]
+        harness.clock.advance(1)
+    assert kinds == ["completion"] * worker_module.BURST_LIMIT + ["digest"]
+
+    harness.publish("trickle-late")
+    assert harness.worker.tick() == [], "the window already digested"
+    # Held, not dropped: trickle-4 and trickle-late both wait for the next
+    # window, and two fit inside its fresh single budget.
+    harness.clock.advance(worker_module.BURST_WINDOW_S)
+    assert [record.kind for record in harness.worker.tick()] == ["completion", "completion"]
+
+
+def test_every_wire_attempt_logs_one_line_without_content(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """RC6: one INFO line per attempt — kind, conversation, short emit id,
+    count, outcome, latency — and none of the content or the secrets."""
+    harness.plane = ControlPlane(verdicts=[EmitRefused(status=503), EmitAccepted("e", 1)])
+    harness.worker = harness.build()
+    token = harness.publish("logged")
+    with caplog.at_level(logging.INFO, logger=worker_module.__name__):
+        harness.worker.tick()
+        harness.clock.advance(worker_module.EMIT_RETRY_INTERVAL_S)
+        harness.worker.tick()
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("push emit ")]
+    assert len(lines) == 2, lines
+    key, body = harness.plane.calls[0]
+    assert "outcome=refused status=503" in lines[0] and "attempt=1" in lines[0]
+    assert "outcome=accepted" in lines[1] and "attempt=2" in lines[1]
+    for line in lines:
+        assert "kind=completion" in line and "conversation=session/logged" in line
+        assert f"emit={body['emit_id'][:8]} " in line and body["emit_id"] not in line
+        assert "latency_ms=" in line and "count=" in line
+        assert key not in line, "the idempotency key is not logged"
+        assert token not in line, "the completion token is not logged"
+        assert str(body.get("conversation")) not in line, "the push handle is not logged"
+        alert = body.get(ALERT_FIELD) or {}
+        for text in (alert.get(ALERT_TITLE_FIELD), alert.get(ALERT_BODY_FIELD)):
+            assert not text or f"={text}" not in line
+        for device in (DEVICE_A, DEVICE_B):
+            assert device not in line
 
 
 def test_a_deferred_completion_survives_a_restart(harness: Harness) -> None:
@@ -483,26 +703,76 @@ def test_a_catch_up_above_the_burst_limit_is_one_digest(harness: Harness) -> Non
     ), "a digest is not sequence-keyed and must not burn the attention counter"
     assert body[ALERT_FIELD] == {
         ALERT_TITLE_FIELD: APP_NAME,
-        ALERT_BODY_FIELD: "Complete · 4 conversations need you",
-    }, "a uniform batch says its real state, and the count is the batch's"
+        ALERT_BODY_FIELD: "Complete",
+    }, "a uniform batch says its real state; the count rides the payload, not the text"
     for name in ("conversation", "completion_token", "kind"):
         assert name not in body, f"a digest spans conversations and names none: {name}"
 
 
-def test_the_alert_rides_the_visible_types_and_never_the_silent_one(harness: Harness) -> None:
+def test_the_alert_rides_the_visible_types_and_never_the_silent_one(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The lane's ruling: the machine writes the text for completion and digest,
     and an attention push carries none at all — it is a silent badge correction.
     """
+    # Privacy switch off: the private form, whatever the developer's settings say.
+    # Only THAT key: since #3989 the worker also reads ``display.notifications``
+    # through the same ``settings_get``, and a blanket False silences the push.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.settings_get",
+        lambda key, default=None: (
+            False if key == "display.notification_session_name" else default
+        ),
+    )
     token = harness.publish("alert-me")
     assert [record.kind for record in harness.worker.tick()] == ["completion"]
     alert = harness.plane.calls[0][1][ALERT_FIELD]
-    assert alert[ALERT_TITLE_FIELD] == APP_NAME
-    assert alert[ALERT_BODY_FIELD].endswith("1 conversation needs you")
-    assert alert[ALERT_BODY_FIELD].startswith(BODIES["complete"])
+    assert alert == {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: BODIES["complete"]}
 
     harness.store.acknowledge("session/alert-me", token)
     assert [record.kind for record in harness.worker.tick()] == ["attention"]
     assert ALERT_FIELD not in harness.plane.calls[1][1], "the silent form has no text"
+
+
+def test_the_completion_alert_is_composed_from_the_conversations_own_directory(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call site maps ``session/<id>`` to ``<config_dir>/sessions/<id>``.
+
+    Operator request (2026-11-14): the push names the session and previews the
+    turn, as the desktop does. Real transcript files under the worker's own
+    config dir, a real tick, and the bytes the transport received — so the
+    identity → directory mapping is proven on the path that ships.
+    """
+    import json as _json
+
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    # Real registry rows for the live phones: a live id with NO row counts as
+    # previews off (N-1), so the harness's bare stub ids would read generic.
+    _devices_with(harness, None, None)
+    session = harness.root / "sessions" / "named-one"
+    session.mkdir(parents=True, exist_ok=True)
+    row = {
+        "id": "assistant-1",
+        "ts": 2.0,
+        "type": "message",
+        "payload": {"kind": "message", "role": "assistant", "content": [{"text": "Shipped v2."}]},
+    }
+    (session / "transcript.jsonl").write_text(_json.dumps(row) + "\n", encoding="utf-8")
+    (session / "title.json").write_text(
+        _json.dumps({"text": "Release prep", "user_set": True, "names": ["Release prep"]}),
+        encoding="utf-8",
+    )
+    harness.publish("named-one")
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    body = harness.plane.calls[0][1]
+    assert body[ALERT_FIELD] == {ALERT_TITLE_FIELD: "Release prep", ALERT_BODY_FIELD: "Shipped v2."}
+    assert isinstance(body["count"], int), "count still rides the payload"
+
+    # A store key that is not a bare name never reaches the filesystem.
+    assert worker_module._session_dir_of(harness.root, "../escape") is None
+    assert worker_module._session_dir_of(harness.root, "..") is None
+    assert worker_module._session_dir_of(harness.root, None) is None
 
 
 def test_the_sound_is_read_live_from_the_workers_config_and_skips_the_silent_form(
@@ -555,10 +825,15 @@ def test_an_unreadable_config_keeps_the_last_good_sound_and_never_stalls_an_emit
     config.write_text(
         "values:\n  notifications:\n    sound:\n      enabled: false\n", encoding="utf-8"
     )
+    # Each emit in its own burst window: this test is about the sound field, and
+    # four singles inside one ``BURST_WINDOW_S`` would (correctly) fold into a
+    # digest under the desktop's per-window budget.
+    harness.clock.advance(worker_module.BURST_WINDOW_S)
     harness.publish("off")
     harness.worker.tick()
     assert harness.plane.calls[1][1][SOUND_FIELD] == "none"
     config.write_bytes(b"values:\n  note: caf\xe9\n")
+    harness.clock.advance(worker_module.BURST_WINDOW_S)
     harness.publish("torn")
     harness.worker.tick()
     assert harness.plane.calls[2][1][SOUND_FIELD] == "none", "the last good value, not the default"
@@ -568,6 +843,7 @@ def test_an_unreadable_config_keeps_the_last_good_sound_and_never_stalls_an_emit
         raise RuntimeError("synthetic reader failure")
 
     monkeypatch.setattr(worker_module, "read_config_values", boom)
+    harness.clock.advance(worker_module.BURST_WINDOW_S)
     harness.publish("boom")
     assert [record.kind for record in harness.worker.tick()] == ["completion"]
     assert harness.plane.calls[3][1][SOUND_FIELD] == "none"
@@ -608,6 +884,10 @@ def test_a_new_burst_mints_a_new_window_and_key(tmp_path: Path) -> None:
     harness.worker.tick()
     assert harness.cursor()["digest_window"] is None, "the 202 closes the window"
 
+    # A GENUINE second burst is a later burst window: inside the same
+    # ``BURST_WINDOW_S`` the desktop's budget holds it (see
+    # ``test_a_trickle_obeys_the_desktop_burst_window``).
+    harness.clock.advance(worker_module.BURST_WINDOW_S)
     for index in range(worker_module.BURST_LIMIT + 1):
         harness.publish(f"burst-two-{index}")
     harness.worker.tick()
@@ -754,6 +1034,13 @@ def test_the_burst_limit_is_the_shared_one() -> None:
     from local_operator.server.utils.desktop_feed import BURST_LIMIT
 
     assert worker_module.BURST_LIMIT == BURST_LIMIT
+
+
+def test_the_burst_window_is_the_shared_one() -> None:
+    """Per-window parity with the desktop feed (phone <= desktop)."""
+    from local_operator.server.utils.desktop_feed import ITEM_BURST_WINDOW_S
+
+    assert worker_module.BURST_WINDOW_S == ITEM_BURST_WINDOW_S
 
 
 # -- the cloud's answer -------------------------------------------------------
@@ -1617,7 +1904,9 @@ def test_an_injected_listing_count_wins_over_the_store_census(tmp_path: Path) ->
     assert [record.kind for record in harness.worker.tick()] == ["completion"]
     body = harness.plane.calls[0][1]
     assert body["count"] == 3
-    assert body[ALERT_FIELD][ALERT_BODY_FIELD] == f"{BODIES['complete']} · 3 conversations need you"
+    # The banner prints no count since this PR (operator: descriptive banner,
+    # no count line); the number rides the payload's ``count`` field only.
+    assert "need" not in body[ALERT_FIELD][ALERT_BODY_FIELD]
     # The negative control: the census this replaces really is the big number.
     assert harness.worker._store_count() == 41
 
@@ -1787,6 +2076,170 @@ def test_a_widened_exclude_past_the_cloud_cap_falls_back_to_the_hint_excludes(
     assert len(body["exclude"]) <= worker_module.MAX_EXCLUDE_IDS
     assert body["exclude"] == [muted[0]]
     assert wanting not in body["exclude"]
+
+
+def test_exactly_ten_widened_excludes_are_all_sent(harness: Harness) -> None:
+    """#3991 R2-NIT: the cap's boundary. Ten opted-out devices plus one wanting
+    device widen the attention correction to exactly ``MAX_EXCLUDE_IDS`` ids,
+    which the cloud accepts, so every one is sent — no fallback below 11."""
+    ids = _devices_with(harness, *([{"enabled": False}] * 10), None)
+    muted, wanting = ids[:10], ids[10]
+    token = harness.publish("ten-muted", kind="complete")
+    harness.worker.tick()
+    harness.store.acknowledge("session/ten-muted", token)
+    harness.worker.tick()
+    _key, body = harness.plane.calls[-1]
+    assert body["type"] == "attention"
+    assert worker_module.MAX_EXCLUDE_IDS == 10
+    assert body["exclude"] == sorted(muted)
+    assert wanting not in body["exclude"]
+
+
+def _named_session(harness: Harness, name: str) -> None:
+    """A real session directory under the worker's config dir with a title and
+    a reply, so a named banner is distinguishable from the generic one."""
+    import json as _json
+
+    session = harness.root / "sessions" / name
+    session.mkdir(parents=True, exist_ok=True)
+    row = {
+        "id": "assistant-1",
+        "ts": 2.0,
+        "type": "message",
+        "payload": {"kind": "message", "role": "assistant", "content": [{"text": "Shipped v2."}]},
+    }
+    (session / "transcript.jsonl").write_text(_json.dumps(row) + "\n", encoding="utf-8")
+    (session / "title.json").write_text(
+        _json.dumps({"text": "Release prep", "user_set": True, "names": ["Release prep"]}),
+        encoding="utf-8",
+    )
+
+
+def test_previews_on_for_every_live_device_names_the_session(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator decision 2026-11-14: previews ON by default. One phone that never
+    sent ``previews`` and one that sent ``true``: the banner is descriptive."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    _devices_with(harness, None, {"previews": True})
+    _named_session(harness, "both-on")
+    harness.publish("both-on")
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body[ALERT_FIELD] == {ALERT_TITLE_FIELD: "Release prep", ALERT_BODY_FIELD: "Shipped v2."}
+
+
+def test_one_live_device_with_previews_off_makes_the_banner_generic_for_all(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cloud fans a completion out to every device with no per-device
+    ``exclude``, so one phone's "off" is honoured only by a generic banner for
+    all of them — with the desktop switch ON, and the emit still sent."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    _devices_with(harness, None, {"previews": False})
+    _named_session(harness, "one-off")
+    harness.publish("one-off")
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body[ALERT_FIELD] == {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: BODIES["complete"]}
+    import json as _json
+
+    raw = _json.dumps(body, ensure_ascii=False)
+    assert "Release prep" not in raw and "Shipped v2." not in raw
+
+
+def test_a_revoked_device_with_previews_off_does_not_block_previews(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only LIVE devices are consulted: a phone that is not in gate 4's list
+    receives nothing, so its switch does not decide the others' banner."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    live, _gone = _devices_with(harness, None, {"previews": False})
+    harness.devices.ids = [live]
+    _named_session(harness, "live-only")
+    harness.publish("live-only")
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body[ALERT_FIELD][ALERT_TITLE_FIELD] == "Release prep"
+
+
+def test_an_unreadable_registry_fails_closed_to_the_generic_banner(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_previews_allowed`` answers False when the registry cannot be read: the
+    text at stake is kept by the cloud for 14 days, so consent is never assumed."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+
+    def corrupt(_config_dir: object, **_kwargs: object) -> tuple[list[str], dict[str, bool]]:
+        raise worker_module.mobile_push_devices.PushRegistryCorrupt("corrupt")
+
+    monkeypatch.setattr(worker_module.mobile_push_devices, "preview_snapshot", corrupt)
+    assert harness.worker._previews_allowed() is False
+    harness.devices.ids = []
+    monkeypatch.undo()
+    assert harness.worker._previews_allowed() is False, "no live device: never vacuously true"
+
+
+def test_a_live_device_with_no_preferences_row_counts_as_previews_off(harness: Harness) -> None:
+    """N-1 (security review r2): a device live in gate 4 with NO row in the
+    registry snapshot — the state a registration racing the gate used to leave —
+    makes the banner generic rather than defaulting to "on"."""
+    (registered,) = _devices_with(harness, {"previews": True})
+    harness.devices.ids = [registered, "device-registered-mid-gate"]
+    assert harness.worker._previews_allowed() is False
+    harness.devices.ids = [registered]
+    assert harness.worker._previews_allowed() is True
+
+
+def test_a_row_without_a_previews_key_is_still_previews_on(harness: Harness) -> None:
+    """The distinction N-1's fix must keep: a row that EXISTS but carries no
+    ``previews`` key (an older app's register, or none of the switches sent) is
+    default-ON per the operator's rule — only a missing ROW is off."""
+    _devices_with(harness, None, {"enabled": True, "completions": True})
+    assert harness.worker._previews_allowed() is True
+
+
+def test_the_production_preview_gate_reads_the_registry_once(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-1: with gate 4 NOT injected, the live list and the switches come from
+    one registry load, so no registration can land between them."""
+    expires = int(time.time()) + 3600
+
+    def register(install: int, preferences: dict[str, bool] | None) -> None:
+        body: dict[str, Any] = {
+            "platform": "ios",
+            "token": "ab" * 32,
+            "environment": "production",
+            "app_version": "1.0.0 (449)",
+            "install_id": str(uuid.UUID(int=install)),
+        }
+        if preferences is not None:
+            body["preferences"] = preferences
+        push_devices.register(harness.root, body, credential_expires_at=expires)
+
+    register(7, None)
+    register(8, {"previews": False})
+    worker = PushWorker(
+        store=harness.store,
+        transport=harness.plane,
+        config_dir=harness.root,
+        computer=COMPUTER,
+        clock=harness.clock,
+        presence=harness.presence,
+    )
+    loads: list[object] = []
+    real_load = push_devices._load
+
+    def counting_load(config_dir: Path) -> list[dict[str, Any]]:
+        loads.append(config_dir)
+        return real_load(config_dir)
+
+    monkeypatch.setattr(push_devices, "_load", counting_load)
+    assert worker._previews_allowed() is False, "the live phone with previews off decides"
+    assert len(loads) == 1
+    register(8, {"previews": True})
+    assert worker._previews_allowed() is True
 
 
 def test_a_widened_exclude_past_the_cap_with_no_hint_sends_no_exclude(

@@ -77,6 +77,7 @@ from local_operator.session.runtime.types import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from local_operator.buildwatch import OffLoopBuildRead
     from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
 from local_operator.asks.surfaces import stamp_answer_surface
@@ -156,6 +157,44 @@ from local_operator.supplements.contract import (
 from local_operator.supplements.prompt import MAX_INSTRUCTION_CHARS
 
 logger = logging.getLogger(__name__)
+
+
+def _stamp_ask_answer(
+    authority: _ConnectionAuthority, *, op: str, ask_id: str, mirror: bool = False
+) -> str:
+    """Stamp one wire ask answer's surface (``asks.surfaces``) and log the decision.
+
+    WHY THE LOG (incident a-48e3, 2026-11-16): the operator answered on his
+    desktop card, the runtime stamped ``unverified`` because that backend did
+    not start this runtime and so held no operator capability, and afterwards
+    nothing but the stamp itself recorded which connection had answered. One
+    INFO line per stamp makes "who answered, and could they prove it" readable
+    after the fact. Connection facts only: never the answer's content, never
+    the proof.
+    """
+    stamped = stamp_answer_surface(
+        proved=authority.operator_proved,
+        surface=authority.surface,
+        locality=authority.locality,
+        kind=authority.kind,
+        mirror=mirror,
+    )
+    # ``ask`` (and ``conn.surface``, from the dialer's hello) are client-supplied
+    # and unvalidated here, so they are ``%r``: a newline in a forged id must not
+    # mint a second, fake "surface=desktop proved=True" line in the very record
+    # this log exists to be trusted for (PR #4127 review R1-m1).
+    logger.info(
+        "ask answer stamped: op=%s ask=%r surface=%s conn.kind=%s conn.surface=%r "
+        "locality=%s proved=%s",
+        op,
+        ask_id,
+        stamped,
+        authority.kind or "-",
+        authority.surface or "-",
+        authority.locality,
+        authority.operator_proved,
+    )
+    return stamped
 
 
 def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
@@ -2870,6 +2909,9 @@ class RuntimeServer:
         #: so the boot snapshot cannot drift toward the disk value it is
         #: compared against.
         self._boot_build = build
+        #: The ``refresh_if_idle`` op's off-loop build reader, created lazily
+        #: there (one per server so a stuck read is never re-issued per request).
+        self._build_read: "OffLoopBuildRead | None" = None
         from local_operator.session.model_admission import native_chat_provider_ids
 
         self._record = SessionRecord(
@@ -8076,12 +8118,27 @@ class RuntimeServer:
 
         if self._leaving:
             return "kept: already leaving"
-        newer = process_mod._build_changed(self._boot_build)
+        # OFF THE LOOP, bounded: both reads end in ``importlib.metadata``, which
+        # stalled a daemon's loop for 145 s under swap (see
+        # ``buildwatch.OffLoopBuildRead``). ONE reader per server, made on first
+        # use (review round 1, m1): a per-request reader cannot see the read a
+        # previous request left stuck, so every ``lop refresh`` during a stall
+        # parked another thread on the same swapped-out pages and logged its own
+        # warning. Shared, a request arriving mid-stall answers unknown at once.
+        read = self._build_read
+        if read is None:
+            read = self._build_read = buildwatch.OffLoopBuildRead("session runtime refresh")
+        newer = await read(process_mod._build_changed, self._boot_build)
+        if newer is buildwatch.READ_UNKNOWN:
+            return buildwatch.KEPT_UNREADABLE
         if newer is None:
             # The sentences are module constants, not literals: the caller
             # routes on them, so a reword here must break that match loudly
             # rather than fall through to its generic ``kept`` branch.
-            if buildwatch.pending_build(self._boot_build) is not None:
+            pending = await read(buildwatch.pending_build, self._boot_build)
+            if pending is buildwatch.READ_UNKNOWN:
+                return buildwatch.KEPT_UNREADABLE
+            if pending is not None:
                 return buildwatch.KEPT_UNSETTLED
             return buildwatch.KEPT_MATCHES
         logger.info(
@@ -9325,12 +9382,7 @@ class RuntimeServer:
             # own ``bash``, any same-uid process) or a mesh peer with ``prompt``
             # could record ``desktop`` and the guard took it as delete consent.
             # The frame's ``by`` is ignored; see ``asks/surfaces``.
-            stamped_by = stamp_answer_surface(
-                proved=authority.operator_proved,
-                surface=authority.surface,
-                locality=authority.locality,
-                kind=authority.kind,
-            )
+            stamped_by = _stamp_ask_answer(authority, op=op, ask_id=str(frame.get("ask_id", "")))
             if op in ("ask_respond", "ask_revise"):
                 raw = frame.get("answers") or {}
                 if not isinstance(raw, dict):
@@ -9407,12 +9459,8 @@ class RuntimeServer:
                 # label) for ANY caller. The handle now records what this seam
                 # decides; a handle without the keyword is a test double or an
                 # owner that never mirrors queued asks.
-                answer_kwargs["by"] = stamp_answer_surface(
-                    proved=authority.operator_proved,
-                    surface=authority.surface,
-                    locality=authority.locality,
-                    kind=authority.kind,
-                    mirror=True,
+                answer_kwargs["by"] = _stamp_ask_answer(
+                    authority, op=op, ask_id=str(frame.get("request_id", "")), mirror=True
                 )
             return await h.ask_answer(frame["request_id"], frame["value"], **answer_kwargs)
         if op == "adopt_aside":

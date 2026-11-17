@@ -1,0 +1,11 @@
+{
+  "record": {
+    "path": "i18n/audits/evidence/ru/wire.settings/gh4052s1/record.json",
+    "sha256": "e5b47dd850a78af25cffb53498f4e447888146c582f9dd4df07e4cab320ffba7"
+  },
+  "source_original": {
+    "path": "i18n/audits/evidence/fr/wire.github/gh4052s1/original-record.json",
+    "sha256": "c4be466b99c8320b91b6c131478871dc4c6a93e3824e2ce1f0caea2201db04fd"
+  },
+  "preservation_only": true
+}

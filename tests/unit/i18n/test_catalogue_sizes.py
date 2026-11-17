@@ -52,14 +52,12 @@ DEFERRED_MAX_BYTES = 160 * 1024
 #: Total raw bytes of eager wire files per locale. The ceiling is per locale, not
 #: per bundle, so a new locale cannot arrive with a payload no one measured.
 #:
-#: Measured basis (2026-11-12, #3872): origin/main 548f3bde1 carries hi 65,187 B
-#: (ru 54,606, ur 50,347, vi 42,903, fr 42,405, es 39,982, en 35,279, zh-CN
-#: 34,572), already within 349 B of the old 64 KiB cap; the remote-files copy
-#: brings hi, still the largest, to 69,002 B (+3,815 B). 80 KiB leaves 12,918 B
-#: (hi at 84% of the cap): room for ordinary copy edits, while about three more
-#: additions the size of #3872's would bring the split-or-defer conversation
-#: back. It stays a growth guard, not a packing target.
-EAGER_TOTAL_MAX_BYTES = 80 * 1024
+#: Measured basis (2026-11-15): merged main c7f96b4ec has 26 eager namespaces
+#: in each of 8 shipped locales; hi is largest at 67,674 raw UTF-8 bytes.
+#: The 72 KiB ceiling leaves 6,054 B for ordinary copy edits while bringing the
+#: split-or-defer conversation back before structural growth accumulates.
+#: It stays a growth guard, not a packing target or a compressed-byte budget.
+EAGER_TOTAL_MAX_BYTES = 72 * 1024
 
 
 def _eager_namespaces(locale: str) -> tuple[str, ...]:
@@ -111,6 +109,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.tool_rows.bridge",
         "wire.sessions",
         "wire.operator_setup",
+        "wire.github",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "
         "namespace. Adding one requires updating this assertion, recording its "

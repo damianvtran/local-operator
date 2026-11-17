@@ -554,6 +554,8 @@ def _lineage_facts(target: Target, *, only_assigned: bool) -> str:
     else:
         what = "the path is handed to a program that may run code on it"
     facts = [what]
+    if target.unproven_code and target.proof_gap:
+        facts.append(f"its python -c code is not proven read-only: {target.proof_gap}")
     if target.assigned and only_assigned:
         facts.append(f"it reaches this call only as the inline env assignment {target.assigned}=…")
     facts.append("no recognised delete or write op names it")
@@ -1368,8 +1370,31 @@ def _rank(
         # here only ignored ``.expo/``/``.pnpm-store/`` git deletes anyway —
         # returned HIGH below before the ledger check was ever reached, and
         # the judge saw no ledger fact, so finished own trees were refused.
-        own = _owned_by_session(target, path, prot, session_id)
-        state = worktree_state(path, own=own is not None, session_id=session_id)
+        #
+        # FAMILY (field case 2026-11-14, cleanup subagent bbb5e6c44eb8): a
+        # tree an ANCESTOR created is this session's too (``owned_record``).
+        # A SIBLING's or cousin's counts only here, for ``git worktree
+        # remove`` WITHOUT ``--force`` (``kin``): git itself refuses a tree
+        # with tracked or untracked changes and keeps the branch ref, so the
+        # removal loses nothing but ignored files — and only when the tree is
+        # clean, no PR/MR is open or unknown, and neither its creator nor any
+        # other session is running in it (all checked below). ``rm -rf``,
+        # ``--force``, any other delete and every write keep a sibling's tree
+        # foreign.
+        #
+        # IGNORED FILES follow git's own rule for a non-forced removal by the
+        # family (``git worktree remove`` deletes them without ``--force``;
+        # measured with git 2.55 on a throwaway repo: ignored ``.terraform/``
+        # plus ``.env`` removed, rc 0). A FORCED removal of an ancestor's or
+        # sibling's tree keeps the stricter rule — an ignored ``.env`` the
+        # caller never made is not known to be reproducible.
+        own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
+        relation = own[2] if own is not None else ""
+        state = worktree_state(
+            path,
+            own=own is not None and (relation == "" or not target.forced),
+            session_id=session_id,
+        )
         # Never a bare "busy" (operator directive 2026-11-14): the reason names
         # each holder (pid, command, session) or why the inventory failed.
         state_text = state_phrase(path, state, session_id)
@@ -1383,6 +1408,18 @@ def _rank(
             # the judge sees those facts. ``worktree_activity`` explains both.
             activity = worktree_activity(path, session_id)
             facts = _with_scan_note(activity.facts(), path)
+            if own is None:
+                # Whose tree it is (QA Q1, PR #3964): the foreign-tree path
+                # through ``_reached_worktrees`` already names the ledger's
+                # creator, but a direct ``git worktree remove`` of a tree
+                # outside this family did not, so neither the agent nor the
+                # judge learned who to hand it back to. Display only — the
+                # rank above never reads it.
+                from local_operator.guardrails import provenance
+
+                creators = provenance.recorded_creators(path)
+                if creators:
+                    facts += "; recorded creator: " + ", ".join(creators)
             if activity.pr_state == "open":
                 return RankedTarget(
                     target,
@@ -1405,6 +1442,10 @@ def _rank(
             # and an unproven path keep the judge, and a judge timeout there
             # stays a refusal.
             own_idle = not activity.owners_running and activity.pr_state in ("none", "unknown")
+            if relation == "kin":
+                # A sibling's tree never gets #3816's unknown-PR waiver: that
+                # waiver rests on the caller having made the tree itself.
+                own_idle = own_idle and activity.pr_state == "none"
             if own is not None and own_idle and state == "clean":
                 # Nothing uncommitted, nobody else in it, no open PR: the
                 # creator removing it loses nothing, ``--force`` or not.
@@ -1413,7 +1454,7 @@ def _rank(
                     Risk.LOW,
                     f"{own[0]}; linked worktree with no uncommitted change ({facts})",
                 )
-            if own is not None and own_idle and state == "dirty":
+            if own is not None and relation == "" and own_idle and state == "dirty":
                 # OWN + DETACHED + DIRTY (operator directive 2026-11-14, field
                 # case attr3880-ci on lop-remote-node-2; see
                 # ``provenance.own_detached_scratch``): no branch to lose and
@@ -1544,7 +1585,7 @@ def _rank(
         # ``_reached_worktrees``), already passed its bar (clean, idle, no
         # open PR); a bare ``rm link`` removes only the entry.
         if owned is not None:
-            reason, matches = owned
+            reason, matches, _relation = owned
             if scratch_facts:
                 reason = "; ".join([reason, *scratch_facts])
             shown = ""
@@ -1553,6 +1594,24 @@ def _rank(
                     f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
                 )
             return RankedTarget(target, Risk.LOW, reason, shown)
+        rig, rig_why = _finished_rig_reason(
+            target, path, reasons, notes, link is not None, session_id
+        )
+        if rig is not None:
+            if foreign is not None:
+                # Carried to the agent and journaled (``check``) like the
+                # finished-foreign-worktree notice: a LOW resting on facts says so.
+                note = (
+                    f"Guardrail dangerous-delete: {os.path.realpath(path)} removed without "
+                    f"review — {rig}."
+                )
+                if note not in foreign.notices:
+                    foreign.notices.append(note)
+            return RankedTarget(target, Risk.LOW, rig)
+        if rig_why and rig_why not in _RIG_SILENT_WHY:
+            # Say why the finished-rig route did not apply, so the judge and
+            # the agent see the one fact that kept it (e.g. creator running).
+            notes = [*notes, f"not finished work: {rig_why}"]
         return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
@@ -1781,18 +1840,26 @@ def _reached_worktrees(
         return None
     foreign: list[str] = []
     own: list[str] = []
+    # Roots only an ANCESTOR's row vouches for: still own (``owned_record``),
+    # but ``rm -rf`` deletes their ignored files too, and an ignored ``.env``
+    # the caller never made is not known to be reproducible, so their state
+    # is read with the non-own ignored rule. A sibling's row never applies
+    # here (``kin`` is for non-forced ``git worktree remove`` only).
+    inherited: set[str] = set()
     for root in roots:
-        owned = (
-            session_id
-            and not any(_under(root, st) for st in prot.state_roots)
-            and prov.owned_record(root, session_id) is not None
+        record = (
+            prov.owned_record(root, session_id)
+            if session_id and not any(_under(root, st) for st in prot.state_roots)
+            else None
         )
-        (own if owned else foreign).append(root)
+        (own if record is not None else foreign).append(root)
+        if record is not None and record.relation:
+            inherited.add(root)
     checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
     jobs: dict[str, Any] = {}
     for root in checked:
         jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(
-            r, own=True, session_id=session_id
+            r, own=r not in inherited, session_id=session_id
         )
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
@@ -1826,6 +1893,7 @@ def _reached_worktrees(
         # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
         if (
             state == "dirty"
+            and root not in inherited
             and idle
             and _scratch_location(root)
             and (phrase := prov.own_detached_scratch(root)) is not None
@@ -1920,6 +1988,54 @@ def _reached_worktrees(
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
+
+
+#: Finished-rig refusals not worth a note: the route never applied (no ledger
+#: row is the ordinary case for the operator's own ``$HOME`` directories).
+_RIG_SILENT_WHY = frozenset({"no creation ledger row for this directory", "not a directory"})
+#: The one ``_high_reason`` the finished-rig route may settle.
+_HOME_CHILD_REASON = "a top-level directory of the home directory"
+
+
+def _finished_rig_reason(
+    target: Target,
+    path: str,
+    reasons: list[tuple[str, str]],
+    notes: list[str],
+    through_link: bool,
+    session_id: str,
+) -> tuple[str | None, str]:
+    """``(LOW reason, "")`` for deleting a finished ``$HOME`` rig, else ``(None, why)``.
+
+    ``why`` is "" when the route does not apply at all (wrong shape).
+
+    WHY (node-2 census 2026-11-15; operator, ask a-798d): see
+    ``provenance.finished_rig``. Narrow by construction: only a literal
+    ``rm``-style delete (no glob, no selecting ``find``, no link entry, no
+    unresolved notes) whose EVERY spelling's only objection is "a top-level
+    directory of the home directory". Anything CRITICAL (``$HOME`` itself,
+    the state root, secrets, the install layout, credential-derived or opaque
+    targets) returned earlier in ``_rank``; a repository root ranks on its own
+    reason and never reaches here; linked worktrees inside were ranked by
+    ``_reached_worktrees`` before this, so an unfinished one already held.
+    """
+    if (
+        target.op != "delete"
+        or target.pattern is not None
+        or target.selected
+        or target.worktree_remove
+        or through_link
+        or notes
+        or target.credential_derived
+        or target.opaque
+        or not session_id
+    ):
+        return None, ""
+    if any(r != _HOME_CHILD_REASON for _, r in reasons):
+        return None, ""
+    from local_operator.guardrails import provenance as prov
+
+    return prov.finished_rig(path, session_id)
 
 
 def _finished_route_barred(root: str, prot: _Protected) -> bool:
@@ -2043,9 +2159,25 @@ def _foreign_reason(target: Target, path: str, foreign: ForeignCreations | None)
 
 
 def _owned_by_session(
-    target: Target, path: str, prot: _Protected, session_id: str
-) -> tuple[str, list[str]] | None:
+    target: Target,
+    path: str,
+    prot: _Protected,
+    session_id: str,
+    *,
+    kin: bool = False,
+    family: bool = True,
+) -> tuple[str, list[str], str] | None:
     """A LOW reason when this session created what ``target`` destroys, else ``None``.
+
+    "This session" is its family (``provenance.owned_record``): its own and
+    its descendants' creations, and its ancestors'. ``kin`` admits a
+    sibling's or cousin's ``git worktree add`` too; only the non-forced
+    ``git worktree remove`` branch of ``_rank`` passes it. The third item
+    is the matched ``CreationRecord.relation`` (``""`` when several targets
+    mix relations, the strictest one seen otherwise). ``family=False`` counts
+    only this session's own rows (``provenance.owned_record``); the
+    unanswered-ask escalation passes it so a family member's row never lifts
+    an ask that binds the whole family (QA Q1, PR #3964).
 
     Only reached for a target already ranked HIGH by ``_high_reason`` and
     already cleared of CRITICAL ancestry, credential derivation and opaque or
@@ -2067,7 +2199,7 @@ def _owned_by_session(
         record = provenance.owned_link(link, session_id)
         if record is None:
             return None
-        return f"a symlink {record.describe()}; only the link is removed", [path]
+        return f"a symlink {record.describe()}; only the link is removed", [path], ""
 
     if target.pattern is not None:
         import glob as _glob
@@ -2082,22 +2214,29 @@ def _owned_by_session(
     else:
         paths = [path]
     first: str | None = None
+    relation = ""
     for candidate in paths:
         real = os.path.realpath(candidate)
         if any(_under(real, st) for st in prot.state_roots):
             return None
-        record = provenance.owned_record(real, session_id)
+        record = provenance.owned_record(real, session_id, kin=kin and family, family=family)
         if record is None:
+            return None
+        if record.relation == "kin" and not (record.kind == "worktree" and record.path == real):
+            # A sibling vouches only for the exact linked worktree it added,
+            # never for a container or a directory it made inside one.
             return None
         if provenance.is_primary_checkout(real) and not (
             record.kind == "clone" and record.path == real
         ):
             return None
         first = first or record.describe()
+        if record.relation == "kin" or (record.relation == "ancestor" and relation == ""):
+            relation = record.relation
     if first is None:
         return None
     reason = first if len(paths) == 1 else f"{len(paths)} matches, all {first}"
-    return reason, sorted(paths)
+    return reason, sorted(paths), relation
 
 
 #: ``*.log``, ``build-*.tmp``: a last component that ends in a literal

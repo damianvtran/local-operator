@@ -14,6 +14,11 @@ behaviour through the re-exports; this file guards the seam they now share.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
+import time
+
 import pytest
 
 from local_operator import buildwatch
@@ -360,3 +365,115 @@ def test_is_older_orders_versions_and_never_guesses_on_refs() -> None:
     )
     assert buildwatch.is_older(BuildStamp("nonsense"), BuildStamp("0.54.31")) is False
     assert buildwatch.is_older(BuildStamp("0.54.30"), BuildStamp("")) is False
+
+
+class TestOffLoopBuildRead:
+    """The async callers' only way to read the disk (2026-11-17: a 145 s
+    ``importlib.metadata`` read stalled the ``serve`` loop under swap)."""
+
+    @pytest.mark.asyncio
+    async def test_an_answer_passes_through(self) -> None:
+        read = buildwatch.OffLoopBuildRead("test")
+        assert await read(lambda: NEW) == NEW
+        assert await read(lambda: None) is None, "None is an answer, not READ_UNKNOWN"
+
+    @pytest.mark.asyncio
+    async def test_a_raising_read_is_unknown_and_warns_once_per_streak(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def broken() -> BuildStamp:
+            raise OSError("metadata gone")
+
+        read = buildwatch.OffLoopBuildRead("test")
+        with caplog.at_level(logging.DEBUG, logger="local_operator.buildwatch"):
+            assert await read(broken) is buildwatch.READ_UNKNOWN
+            assert await read(broken) is buildwatch.READ_UNKNOWN
+            assert read.failing
+            assert await read(lambda: NEW) == NEW
+            assert not read.failing
+            assert await read(broken) is buildwatch.READ_UNKNOWN  # a NEW streak
+        levels = [r.levelno for r in caplog.records if r.name == "local_operator.buildwatch"]
+        assert levels.count(logging.WARNING) == 2, levels
+        assert levels.count(logging.INFO) == 1, levels
+
+    @pytest.mark.asyncio
+    async def test_a_read_raising_timeout_is_not_logged_as_a_slow_disk(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review round 1, n1: ``asyncio.TimeoutError`` is the builtin since 3.11,
+        so a read that RAISED TimeoutError reached the reader's own timeout arm
+        and was logged as "no answer within 5 s". Both are unknown; the log now
+        names which one happened. The stuck read is the control."""
+
+        def raises_timeout() -> BuildStamp:
+            raise TimeoutError("nfs deadline")
+
+        gate = threading.Event()
+        with caplog.at_level(logging.WARNING, logger="local_operator.buildwatch"):
+            fast = buildwatch.OffLoopBuildRead("fast", timeout_s=5.0)
+            started = time.monotonic()
+            assert await fast(raises_timeout) is buildwatch.READ_UNKNOWN
+            assert time.monotonic() - started < 1.0, "a raising read is not waited out"
+            slow = buildwatch.OffLoopBuildRead("slow", timeout_s=0.05)
+            try:
+                assert await slow(lambda: gate.wait(10.0)) is buildwatch.READ_UNKNOWN
+            finally:
+                gate.set()
+        by_reader = {
+            r.getMessage().split(":", 1)[0]: r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        }
+        assert "raised TimeoutError: nfs deadline" in by_reader["fast"], by_reader
+        assert "no answer within" not in by_reader["fast"], by_reader
+        assert "no answer within 0.05 s" in by_reader["slow"], by_reader
+
+    @pytest.mark.asyncio
+    async def test_a_stuck_read_times_out_without_a_second_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gate = threading.Event()
+        calls: list[int] = []
+
+        def stuck() -> BuildStamp:
+            calls.append(1)
+            gate.wait(10.0)
+            return NEW
+
+        read = buildwatch.OffLoopBuildRead("test", timeout_s=0.05)
+        try:
+            started = time.monotonic()
+            assert await read(stuck) is buildwatch.READ_UNKNOWN
+            assert time.monotonic() - started < 1.0, "the wait is bounded"
+            assert await read(stuck) is buildwatch.READ_UNKNOWN
+            assert calls == [1], "a still-running read is not re-issued"
+        finally:
+            gate.set()
+        for _ in range(200):  # the abandoned read finishes; its answer is dropped
+            if read._inflight is not None and read._inflight.done():
+                break
+            await asyncio.sleep(0.005)
+        assert await read(stuck) == NEW, "the next read is a fresh one"
+        assert calls == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_cancelling_the_caller_propagates(self) -> None:
+        gate = threading.Event()
+        read = buildwatch.OffLoopBuildRead("test", timeout_s=5.0)
+        waiter = asyncio.ensure_future(read(lambda: gate.wait(10.0)))
+        await asyncio.sleep(0.02)
+        waiter.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        finally:
+            gate.set()
+
+    def test_the_bound_is_the_check_cadence(self) -> None:
+        assert buildwatch.BUILD_READ_TIMEOUT_S == buildwatch.BUILD_CHECK_S
+
+    def test_unreadable_never_routes_as_matches(self) -> None:
+        """``control.refresh_session`` prefix-matches ``KEPT_MATCHES``; an
+        unanswered read must fall to the generic ``kept`` branch instead."""
+        assert not buildwatch.KEPT_UNREADABLE.startswith(buildwatch.KEPT_MATCHES)
+        assert buildwatch.KEPT_UNREADABLE.startswith("kept: ")

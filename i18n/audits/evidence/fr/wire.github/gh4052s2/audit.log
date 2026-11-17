@@ -1,0 +1,10 @@
+[run_bounded] memory budget 4023 MiB (auto); sampled owned child group and escaped descendants
+PASS exact 9 changed values; 474 unchanged locale-key values byte/hash retained from initial audit; all English/context hashes unchanged
+PASS delta validator rules, NFC/control/token/timing checks; 74 actual ICU candidate renders; negative controls {'missing_command': 'MessageFormatError', 'broken_icu': 'MessageSyntaxError'}
+Production source locales {'fr': 'en', 'es': 'en', 'zh-CN': 'en', 'ru': 'en', 'vi': 'en', 'ur': 'en', 'hi': 'en'} shipped ('en',)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=af61e0067d19485491a82e6337f55c95 completion=/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/run-bounded-runs/af61e0067d19485491a82e6337f55c95.completion.json
+[run_bounded] memory budget 4310 MiB (auto); sampled owned child group and escaped descendants
+PASS exact 9 changed values; 474 unchanged locale-key values byte/hash retained from initial audit; all English/context hashes unchanged
+PASS delta validator rules, NFC/control/token/timing checks; 77 actual ICU candidate renders; negative controls {'missing_command': 'MessageFormatError', 'broken_icu': 'MessageSyntaxError'}
+Production source locales {'fr': 'en', 'es': 'en', 'zh-CN': 'en', 'ru': 'en', 'vi': 'en', 'ur': 'en', 'hi': 'en'} shipped ('en',)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=c6040d5863a7434b91e7cba3ad2ba9bc completion=/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/run-bounded-runs/c6040d5863a7434b91e7cba3ad2ba9bc.completion.json

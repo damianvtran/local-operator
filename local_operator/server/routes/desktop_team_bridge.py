@@ -86,7 +86,7 @@ import logging
 import re
 import unicodedata
 import urllib.parse
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -294,8 +294,9 @@ class TeamBridgeSettingsPut(_Strict):
 
     tenant_id: str | None = Field(default=None, max_length=128)
     #: REQUIRED for every hub write. Absent ONLY on a local-preference write
-    #: (``share_typing`` alone, below): the model validator refuses any other
-    #: body without it, so "no state" can never be read as "keep the state".
+    #: (``share_typing`` and/or ``screening_model``, below): the model validator
+    #: refuses any other body without it, so "no state" can never be read as
+    #: "keep the state".
     state: Literal["active", "paused", "disabled"] | None = None
     consent_version: str | None = Field(default=None, max_length=128)
     consented_via: Literal["dialog", "settings"] | None = None
@@ -331,24 +332,31 @@ class TeamBridgeSettingsPut(_Strict):
     def _state_or_local_preference(self) -> "TeamBridgeSettingsPut":
         if self.state is not None:
             return self
-        # Without ``state`` the ONLY accepted body is the local preference plus
-        # the receipt: a stray consent/label/tenant field would otherwise be
-        # silently dropped instead of refused.
-        if self.share_typing is None:
+        # Without ``state`` the ONLY accepted body is the local preferences
+        # (``share_typing``, ``screening_model``) plus the receipt: a stray
+        # consent/label/tenant field would otherwise be silently dropped
+        # instead of refused.
+        #
+        # WHY ``screening_model`` IS ACCEPTED HERE (local-operator-ui #1928
+        # review R1 / S-2 / S-3). It used to ride only a ``state`` write, so a
+        # renderer had to re-send ``state`` to save a model pick — and a state
+        # write runs the explicit-enable commit (``_commit_explicit_enable``):
+        # on a machine that does not own the endpoint it commits an owner and a
+        # native consent receipt, installs the connector and sets
+        # ``team_bridge.enabled``; a stale ``active`` re-sent over a pause
+        # RESUMES the endpoint. A preference must never re-assert consent
+        # (#3632), so it is a state-less, machine-local write like
+        # ``share_typing``.
+        if self.share_typing is None and self.screening_model is None:
             raise ValueError("state is required")
-        # ``screening_model`` is refused here too although it is local: the
-        # state-less branch writes ``share_typing`` and returns before the
-        # screening write, so accepting it would drop a choice silently. A
-        # screening choice rides a ``state`` write, its only reviewed contract.
         other_fields = (
             self.tenant_id,
             self.consent_version,
             self.consented_via,
             self.label,
-            self.screening_model,
         )
         if any(value is not None for value in other_fields):
-            raise ValueError("a share_typing-only write carries no other fields")
+            raise ValueError("a local-preference write carries no other fields")
         return self
 
 
@@ -655,6 +663,12 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
     # malformed id and an absent message are deliberately indistinguishable, so
     # this path cannot be probed for which ids exist.
     "message_not_found": (404, "Message not found."),
+    # The approvals decide under retained-history standing: reads are fine, a
+    # decision is new outbound work and needs the feature on (approvals.py).
+    "bridge_off": (
+        409,
+        "agent messages are turned off on this machine; turn them on to decide requests",
+    ),
 }
 
 
@@ -806,6 +820,29 @@ def _screening_view(preferred: tuple[str, str] | None) -> dict[str, Any]:
         "preferred": _screening_selector(preferred),
         "models": _screening_models(),
     }
+
+
+def _current_screening_choice(config_dir: Path) -> str | None:
+    """The Screening model choice in force on this machine, as the selector."""
+
+    from local_operator.team_bridge.settings import read_screening_model
+
+    return _screening_selector(read_screening_model(config_dir))
+
+
+def _record_screening_choice(config_dir: Path, value: str) -> str | None:
+    """The state-less write's screening save; a failed write is a coded 500."""
+
+    try:
+        return _apply_screening_choice(config_dir, value)
+    except Exception:  # noqa: BLE001 - surfaced as a coded 500
+        raise HTTPException(
+            500,
+            {
+                "code": "screening_model_not_saved",
+                "message": "could not save the screening model",
+            },
+        ) from None
 
 
 def _apply_screening_choice(config_dir: Path, value: str | None) -> str | None:
@@ -1017,13 +1054,21 @@ async def status(
         #: your chief of staff a message once to receive them", #1325). ``None``
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
-        "delivery_hold": _delivery_hold(config_manager),
+        "delivery_hold": await asyncio.to_thread(_delivery_hold, config_manager),
         #: Screening's held / breaker / rejected counts — the same answer
         #: ``lop team-bridge receiver status --json`` carries under
         #: ``screening`` (``Store.screening_status_readonly``). Counts, codes,
         #: categories and ages only; ``None`` when not enrolled or unreadable.
         #: Additive: an older renderer that ignores the key loses nothing.
-        "screening_summary": read_screening_status(config_manager.config_dir),
+        #:
+        #: Both store reads above and here run IN A THREAD (serve stall,
+        #: 2026-11-15): they open the bridge's SQLite store, and a busy store
+        #: waits out its retry window (``_BUSY_TIMEOUT_MS``) inside the call --
+        #: on the loop that held ``lop serve`` past its ``/health`` deadline
+        #: (``read_screening_status`` -> ``_live_generation`` on MAIN).
+        "screening_summary": await asyncio.to_thread(
+            read_screening_status, config_manager.config_dir
+        ),
         # The receiver's SERVICE state, distinct from enrolment, on every
         # platform (launchd, systemd --user, Task Scheduler): ``loaded`` the
         # supervisor holds it; ``installed`` registered but not running;
@@ -1177,22 +1222,29 @@ async def put_settings(
 
     _refuse_write_scope(request)
     if body.state is None:
-        # The local-preference-only write (validator: ``share_typing`` and the
-        # receipt, nothing else). No hub call, so there is no full settings
-        # payload to answer with; the renderer refetches GET if it needs one.
+        # The local-preference-only write (validator: ``share_typing`` and/or
+        # ``screening_model`` plus the receipt, nothing else). It writes the
+        # machine-local keys and RETURNS: no hub call, no explicit-enable or
+        # local-owner commit, no consent receipt, no connector sync, no
+        # ``team_bridge.enabled`` write — a preference must never re-assert
+        # consent (#3632), and with no hub call there is no state to change.
+        # No full settings payload to answer with; the reply carries each
+        # preference SENT, read back as it is now in force (an off-table
+        # screening id is ignored, so ``preferred`` says what actually holds).
         # ``expected_account_id`` stays required for a uniform body contract,
-        # but there is no bearer to compare it with: the key is per machine.
-        assert body.share_typing is not None
-        _record_share_typing(config_manager.config_dir, body.share_typing)
-        return reply({"share_typing": _read_share_typing(config_manager.config_dir)})
-    # THE ONE LOCAL FIELD ON THIS BODY. It is applied BEFORE the hub call, and
-    # deliberately not forwarded: which model screens incoming mail is this
-    # machine's business (the screener runs here), and the hub only shape-checks
-    # the id it is told about elsewhere. Writing it first means a hub refusal
-    # cannot throw away a choice the user already made and this machine can
-    # honour; if the hub call then fails the caller sees its error and the
-    # choice stands, which is the half this route could actually complete.
-    screening = _apply_screening_choice(config_manager.config_dir, body.screening_model)
+        # but there is no bearer to compare it with: the keys are per machine.
+        local: dict[str, Any] = {}
+        if body.screening_model is not None:
+            local["screening"] = {
+                "preferred": _record_screening_choice(
+                    config_manager.config_dir, body.screening_model
+                ),
+                "models": _screening_models(),
+            }
+        if body.share_typing is not None:
+            _record_share_typing(config_manager.config_dir, body.share_typing)
+            local["share_typing"] = _read_share_typing(config_manager.config_dir)
+        return reply(local)
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -1232,8 +1284,21 @@ async def put_settings(
         # missing consent echo for a known-to-be-required case): caller bugs, in
         # the desktop plane's validation register.
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
-    # The local preference lands only AFTER the hub accepted the state write,
-    # so a refused write changes nothing on either side.
+    # The local preferences land only AFTER the hub accepted the state write,
+    # so a refused write changes nothing on either side (UI #1928 security
+    # S-4: written first, a refused save showed the old selection while the
+    # new model was already in force). The screening choice is LOCAL and never
+    # forwarded — which model screens incoming mail is this machine's business.
+    # A local save failure after the hub committed answers success with the
+    # value read back, like ``share_typing`` below; the renderer can re-send
+    # the preference alone on the state-less write.
+    try:
+        screening = _apply_screening_choice(config_manager.config_dir, body.screening_model)
+    except Exception:  # noqa: BLE001 - the hub has already committed the state
+        logging.getLogger(__name__).warning(
+            "team bridge: state saved upstream but the screening model was not saved locally"
+        )
+        screening = _current_screening_choice(config_manager.config_dir)
     if body.share_typing is not None:
         try:
             _record_share_typing(config_manager.config_dir, body.share_typing)
@@ -4644,3 +4709,548 @@ async def discard_hold(
     """Sign the person's Discard: the sender is told it was not delivered."""
 
     return await _decide_hold(request, response, message_id, body, config_manager, "discard")
+
+
+# -- approvals: pending requests, human batch decide, the decision ledger ----
+#
+# The desktop half of the approvals flow (TEAM-BRIDGE.md §10.2–§10.4); the
+# harness logic, and the WHY of each rule, live in ``team_bridge/approvals.py``.
+#
+# DECIDE AUTHORITY NEEDS A PERSON PRESENT, and the BEARER DOES NOT PROVE IT. Every route
+# here sits behind ``require_desktop`` (the desktop bearer, plus the Origin
+# allowlist for browser-shaped callers), but the bearer is not a same-uid
+# boundary: ``agent_shell.DAEMON_BEARER_ENVS`` only keeps it out of an agent
+# shell's environment, while the desktop persists it in a 0600 file any
+# ordinary same-uid shell can read, and a native caller with no Origin is
+# admitted by design (security review round 1, S-1). So the batch decide also
+# requires an OPERATOR PRESENCE SIGNATURE over the exact selection, minted and
+# signed through ``…/requests/decide/authorize`` (the daemon raises the OS
+# Touch ID prompt, as it does for the card path's signed ``bridge_decide``) and
+# verified by ``…/requests/decide`` BEFORE any hub call. Hosts without a
+# presence-gated operator key are refused with ``operator_presence_required``.
+#
+# WHAT THAT BUYS, HONESTLY (PR #4099 security round 2, B4). It binds CALLERS OF
+# THE DAEMON API, not every same-uid process: the hub tokens in ``auth.db`` let
+# such a process POST the hub's decide directly, with no gesture (S-9 — the
+# named residual; closing it needs the hub to verify an operator signature).
+# And the gesture proves PRESENCE, not informed consent: the OS sheet shows no
+# selection. ``…/authorize`` therefore allows one prompt at a time, spaces the
+# next one out after a dismissal, and publishes each prompt's selection on the
+# desktop feed (``team_bridge_authorize``) so the desktop can show what it is
+# for and flag one it did not start.
+#
+# ONE WORD PER ASK (design (c)). A signed batch word the hub has not confirmed
+# is never sent by a batch that does not name it; a selection naming the OTHER
+# word is refused whole (409 ``earlier_decision_unconfirmed``) by ``…/authorize``
+# before any prompt and by ``…/decide`` before any intent write or hub call.
+
+#: Query names the two approvals reads accept; anything else is refused, not
+#: dropped (the inbox read's closed-table rule).
+_APPROVALS_LIST_PARAMS = frozenset({"expected_account_id", "after", "limit"})
+_APPROVALS_LEDGER_PARAMS = frozenset({"expected_account_id", "after", "limit", "role"})
+
+#: The batch decide's refusals, WRITE-shaped (QA Q1: a decision is not a read).
+#: Codes not listed here fall through to the read table, whose sentences are
+#: about the bridge's standing (sign-in, consent) and read the same for both.
+_DECIDE_REFUSALS: dict[str, tuple[int, str]] = {
+    "invalid_request": (422, "this decision named a value the approvals decide does not accept"),
+    "account_mismatch": (
+        409,
+        "this decision was made for a different account; sign in as that account and try again",
+    ),
+    # QA round 2, Q3: one sentence for any count — the desktop sends single
+    # items through this route too.
+    "operator_presence_required": (
+        409,
+        "deciding from the approvals list needs operator authority with Touch ID on this "
+        "machine; answer the request on its card instead",
+    ),
+    "operator_signature_required": (
+        403,
+        "this decision needs your Touch ID confirmation; nothing was decided",
+    ),
+    "operator_signature_invalid": (
+        403,
+        "this confirmation does not match this decision; confirm it again — nothing was decided",
+    ),
+    "operator_signature_expired": (
+        403,
+        "this confirmation expired; confirm the decision again — nothing was decided",
+    ),
+    "operator_signature_unavailable": (
+        409,
+        "Touch ID did not confirm this decision; nothing was decided",
+    ),
+    "operator_challenge_limit": (
+        429,
+        "too many decisions are waiting for confirmation; wait a moment and try again",
+    ),
+    "operator_prompt_in_flight": (
+        429,
+        "a Touch ID confirmation is already waiting on this machine; answer it first — "
+        "nothing was decided",
+    ),
+    "operator_prompt_cooldown": (
+        429,
+        "Touch ID was just dismissed; wait a few seconds before confirming again — "
+        "nothing was decided",
+    ),
+    "earlier_decision_unconfirmed": (
+        409,
+        "an earlier decision on this request has not been confirmed yet; select it again "
+        "with the same answer to send it — nothing was decided",
+    ),
+}
+
+
+def _raise_decide(code: str, details: dict[str, Any] | None = None) -> NoReturn:
+    """One batch-decide refusal; unlisted codes take the read table's entry."""
+
+    if code not in _DECIDE_REFUSALS:
+        _raise_read(code)
+    status, message = _DECIDE_REFUSALS[code]
+    payload: dict[str, Any] = {"code": code, "message": message}
+    if details:
+        payload["details"] = details
+    headers = None
+    if details and "retry_after_s" in details:
+        headers = {"Retry-After": str(details["retry_after_s"])}
+    raise HTTPException(status, payload, headers=headers)
+
+
+class ApprovalsQuery(_Strict):
+    """The approvals reads' query, grammar-checked before any I/O."""
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    after: str | None = Field(default=None, max_length=512)
+    limit: int = Field(default=50, ge=1, le=100)
+    role: Literal["made", "requested"] = "made"
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "ApprovalsQuery":
+        from local_operator.team_bridge.read_context import CURSOR_PATTERN
+
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if self.after is not None and re.fullmatch(CURSOR_PATTERN, self.after) is None:
+            raise ValueError("after is outside the accepted grammar")
+        return self
+
+
+class ApprovalDecisionIn(_Strict):
+    """One explicitly selected item: a request id and the human's word."""
+
+    message_id: str = Field(min_length=1, max_length=80)
+    decision: Literal["approve", "deny"]
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "ApprovalDecisionIn":
+        from local_operator.team_bridge.read_context import MESSAGE_ID_PATTERN
+
+        if re.fullmatch(MESSAGE_ID_PATTERN, self.message_id) is None:
+            raise ValueError("message_id is outside the accepted grammar")
+        return self
+
+
+class ApprovalsSelectionIn(_Strict):
+    """The selection body (``…/decide/authorize``). ``items`` ≤50 (§10.2).
+
+    No "all" flag exists and none may be added: §10.2's select-and-approve is
+    per item, so the client names every request the human selected.
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    items: list[ApprovalDecisionIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "ApprovalsSelectionIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        return self
+
+
+class OperatorProofIn(_Strict):
+    """What ``…/decide/authorize`` returned, echoed verbatim to ``…/decide``.
+
+    Optional in the MODEL only so its absence is the typed 403
+    ``operator_signature_required`` rather than an anonymous 422.
+    """
+
+    challenge: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sig: str = Field(min_length=2, max_length=320, pattern=r"^[0-9a-f]+$")
+    key_id: str = Field(min_length=1, max_length=128)
+
+
+class ApprovalsAuthorizeIn(ApprovalsSelectionIn):
+    """The ``…/decide/authorize`` body: the selection plus an optional ``client_ref``.
+
+    ``client_ref`` is the caller's own correlation value, echoed on the
+    ``team_bridge_authorize`` feed frame so the desktop can tell a prompt it
+    started from one it did not (S-6). Lowercase hex, at most 32 characters:
+    bounded, and incapable of carrying copy that could pass for daemon text.
+    """
+
+    client_ref: str | None = Field(default=None, pattern=r"^[0-9a-f]{1,32}$")
+
+
+class ApprovalsDecideIn(ApprovalsSelectionIn):
+    """The batch decide body: the same selection plus its presence proof."""
+
+    operator_proof: OperatorProofIn | None = None
+
+
+def _approvals_query(request: Request, accepted: frozenset[str]) -> ApprovalsQuery:
+    from pydantic import ValidationError
+
+    params = request.query_params
+    if set(params) - accepted or any(len(params.getlist(name)) != 1 for name in params):
+        _raise_read("invalid_request")
+    try:
+        return ApprovalsQuery.model_validate(dict(params))
+    except ValidationError:
+        _raise_read("invalid_request")
+
+
+async def _approvals_context(
+    config_manager: ConfigManager,
+    expected_account_id: str,
+    refuse: Callable[[str], NoReturn] = _raise_read,
+) -> Any:
+    """The committed owner + pinned access the captured account names (read rules)."""
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        ReadRefused,
+        resolve_read_context,
+        wire_for,
+    )
+
+    wire = wire_for(config_manager.config_dir)
+    try:
+        context = await resolve_read_context(
+            config_manager.config_dir, expected_account_id=expected_account_id, wire=wire
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        refuse(exc.code)
+    return wire, context
+
+
+async def _selection_body(request: Request, model: type[ApprovalsSelectionIn]) -> Any:
+    """Parse a selection body; refused WHOLE (422) before any lookup or hub call.
+
+    The ≤50 bound is checked on the RAW list, before model validation, so an
+    oversized body is refused by its size alone (and its items never parsed).
+    """
+
+    from local_operator.team_bridge import approvals
+
+    _refuse_write_scope(request)
+    if request.query_params:
+        _raise_decide("invalid_request")
+    try:
+        raw = await request.json()
+    except ValueError:
+        _raise_decide("invalid_request")
+    if isinstance(raw, Mapping) and isinstance(raw.get("items"), list):
+        if len(raw["items"]) > approvals.BATCH_MAX:
+            _raise_decide(
+                "invalid_request",
+                {"field": "items", "rule": "max_items", "max": approvals.BATCH_MAX},
+            )
+    try:
+        body = model.model_validate(raw)
+        selection = approvals.parse_selection(item.model_dump() for item in body.items)
+    except ValueError:
+        _raise_decide("invalid_request")
+    return body, selection
+
+
+async def _decide_context(config_manager: ConfigManager, expected_account_id: str) -> Any:
+    wire, context = await _approvals_context(config_manager, expected_account_id, _raise_decide)
+    if getattr(context, "read_only", False):
+        # Retained-history standing (the local switch is off) reads; it never
+        # decides — a decision is new outbound work under the owner's authority.
+        _raise_decide("bridge_off")
+    return wire, context
+
+
+@router.get("/v1/desktop/team-bridge/requests", response_model=CRUDResponse[Any])
+async def list_requests(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """Pending requests addressed to me, one cursor page (``limit`` ≤100).
+
+    Reference fields only (``approvals.request_rows``): ids, request state and
+    expiry, the hub-resolved sender identity, the local ask the item joins to,
+    and on decidable rows the ask card's screened ``excerpt``. No body, no
+    screening rationale.
+
+    PAGING (review R1-4): ``pending_count`` counts the DECIDABLE rows on THIS
+    page — the ones an "approve all" can act on — not every row; ``has_more``
+    (``next_cursor`` non-null) says more requests wait beyond it, so a badge
+    should read "N+" then. Pass ``after=<next_cursor>`` for the next page.
+
+    Before projecting, a request the decision ledger already shows as decided
+    but whose local ask is still open is settled (R1-1, no POST — see
+    ``approvals.reconcile_with_ledger``). The ledger is read only when that can
+    matter: an unconfirmed batch intent exists, or this is the last page and a
+    decidable local ask is missing from the hub's pending set.
+    """
+
+    from local_operator.team_bridge import approvals
+
+    query = _approvals_query(request, _APPROVALS_LIST_PARAMS)
+    wire, context = await _approvals_context(config_manager, query.expected_account_id)
+    config_dir = Path(config_manager.config_dir)
+    page = await _conversation_reply(
+        wire.requests(
+            tenant_id=context.tenant_id,
+            state="pending",
+            after=query.after,
+            limit=query.limit,
+            access=context.access,
+        )
+    )
+    items = page.get("items") or []
+    asks = approvals.bridge_asks_by_message(config_dir)
+    listed = {
+        str((item.get("message") or {}).get("id") or "")
+        for item in items
+        if isinstance(item, Mapping) and isinstance(item.get("message"), Mapping)
+    }
+    stranded = page.get("next_cursor") is None and any(
+        ask.status in ("open", "timed_out") and message_id not in listed
+        for message_id, ask in asks.items()
+    )
+    if stranded or approvals.has_batch_leftovers(config_dir, context.owner):
+        ledger = await _conversation_reply(
+            wire.decisions(
+                tenant_id=context.tenant_id, role="made", limit=100, access=context.access
+            )
+        )
+        if await approvals.reconcile_with_ledger(
+            config_dir, context.owner, ledger.get("items") or []
+        ):
+            asks = approvals.bridge_asks_by_message(config_dir)
+    rows = approvals.request_rows(
+        items,
+        asks,
+        tenant_id=context.tenant_id,
+        unsent=approvals.unsent_decisions(config_dir, context.owner, asks),
+    )
+    return reply(
+        {
+            "tenant_id": context.tenant_id,
+            "items": rows,
+            "pending_count": sum(1 for row in rows if row["decidable"]),
+            "next_cursor": page.get("next_cursor"),
+            "has_more": page.get("next_cursor") is not None,
+        }
+    )
+
+
+@router.post("/v1/desktop/team-bridge/requests/decide/authorize", response_model=CRUDResponse[Any])
+async def authorize_decision(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """Confirm a selection with the operator's presence: mint, prompt, sign.
+
+    Same body as ``…/decide`` minus the proof. Refusals before any prompt:
+    a malformed selection (422), the account fence, ``bridge_off``, and
+    ``operator_presence_required`` on a host whose operator key is not
+    presence-gated. Otherwise the daemon mints a single-use 30 s challenge bound
+    to the selection digest and signs it with the operator key — THIS RAISES
+    THE OS TOUCH ID PROMPT and blocks (off the event loop) until the person
+    answers; a dismissed prompt is ``operator_signature_unavailable``.
+
+    Returns ``{operator_proof: {challenge, sig, key_id}, selection_digest,
+    expires_s}``. The desktop sends ``operator_proof`` unchanged with the SAME
+    selection to ``…/decide`` within ``expires_s``. No hub call is made here.
+
+    Also refused BEFORE any mint or prompt (S-6, design (b)/(c)):
+    ``earlier_decision_unconfirmed`` (409, ``details.items`` names each item and
+    its unconfirmed word); ``operator_prompt_in_flight`` (429, another prompt is
+    up); ``operator_prompt_cooldown`` (429, ``details.retry_after_s`` and a
+    ``Retry-After`` header, after a dismissal). Each prompt is published on the
+    desktop feed as ``team_bridge_authorize`` — ``prompting``, then ``signed``,
+    ``dismissed`` or ``refused`` — with the optional ``client_ref`` echoed.
+    """
+
+    import secrets
+
+    from local_operator.team_bridge import approvals
+
+    body, selection = await _selection_body(request, ApprovalsAuthorizeIn)
+    _wire, context = await _decide_context(config_manager, body.expected_account_id)
+    config_dir = Path(config_manager.config_dir)
+    feed = getattr(request.app.state, "desktop_feed", None)
+    try:
+        approvals.presence_anchor()
+        conflicts = approvals.conflicting_selection(config_dir, context.owner, selection)
+        if conflicts:
+            raise approvals.PresenceRefused("earlier_decision_unconfirmed", {"items": conflicts})
+        approvals.PROMPT_GATE.acquire()
+    except approvals.PresenceRefused as refusal:
+        _raise_decide(refusal.code, refusal.details)
+
+    # The gate is held from here: every path below releases it exactly once.
+    gate = approvals.PROMPT_GATE
+    frame = {
+        "authorize_id": secrets.token_hex(8),
+        "client_ref": body.client_ref,
+        "state": "prompting",
+        "items": approvals.prompt_items(config_dir, selection),
+    }
+
+    def publish(state: str) -> None:
+        # No feed means no subscriber (the desktop creates it on connect).
+        if feed is not None:
+            feed.publish_team_bridge_authorize({**frame, "state": state})
+
+    try:
+        digest = approvals.selection_digest(
+            account_id=body.expected_account_id,
+            tenant_id=context.tenant_id,
+            selection=selection,
+        )
+        challenge = approvals.mint_challenge(
+            account_id=body.expected_account_id, tenant_id=context.tenant_id, digest=digest
+        )
+    except approvals.PresenceRefused as refusal:
+        gate.release("refused")  # nothing was prompted: no frame, no cool-down
+        _raise_decide(refusal.code, refusal.details)
+    except BaseException:
+        gate.release("refused")
+        raise
+    publish("prompting")
+    loop = asyncio.get_running_loop()
+
+    def sign_then_release() -> dict[str, str]:
+        # THE GATE IS RELEASED BY THE SIGNING THREAD, not by the request: a
+        # cancelled request (the caller hung up) cannot stop a sheet that is
+        # already up, so freeing the slot on cancellation would let a second
+        # prompt open beside it. The final frame is handed back to the loop
+        # (the feed's queues are loop-bound).
+        outcome = "refused"
+        try:
+            signed = approvals.sign_selection(config_dir, challenge=challenge, digest=digest)
+            outcome = "signed"
+            return signed
+        except approvals.PresenceRefused:
+            outcome = "dismissed"
+            raise
+        finally:
+            gate.release(outcome)
+            try:
+                loop.call_soon_threadsafe(publish, outcome)
+            except RuntimeError:  # the loop is gone (shutdown): no subscriber left
+                pass
+
+    try:
+        signature = await asyncio.to_thread(sign_then_release)
+    except approvals.PresenceRefused as refusal:
+        _raise_decide(refusal.code, refusal.details)
+    return reply(
+        {
+            "operator_proof": {"challenge": challenge, **signature},
+            "selection_digest": digest,
+            "expires_s": int(approvals.CHALLENGE_TTL_S),
+        }
+    )
+
+
+@router.post("/v1/desktop/team-bridge/requests/decide", response_model=CRUDResponse[Any])
+async def decide_requests(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """Decide the human's EXPLICIT, presence-confirmed selection (≤50).
+
+    Refused WHOLE with zero hub calls: a malformed body, more than 50 items, a
+    duplicate id (422 ``invalid_request``); the account fence; ``bridge_off``;
+    ``operator_presence_required`` (409); and a missing, spent, expired,
+    mismatched or unverifiable ``operator_proof`` (403
+    ``operator_signature_*``). Otherwise each item gets ``{message_id,
+    decision, sent, ask_settled, status | error}``; only items whose local ask
+    and owner binding verify are sent, in ONE hub batch call carrying exactly
+    the signed pairs. A selection naming the other word than an unconfirmed
+    earlier batch decision is refused whole: 409 ``earlier_decision_unconfirmed``.
+    """
+
+    from local_operator.team_bridge import approvals
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+
+    body, selection = await _selection_body(request, ApprovalsDecideIn)
+    wire, context = await _decide_context(config_manager, body.expected_account_id)
+    proof = body.operator_proof.model_dump() if body.operator_proof is not None else None
+    try:
+        approvals.verify_selection_proof(
+            proof,
+            account_id=body.expected_account_id,
+            tenant_id=context.tenant_id,
+            selection=selection,
+        )
+    except approvals.PresenceRefused as refusal:
+        _raise_decide(refusal.code)
+    assert proof is not None  # verify_selection_proof refuses a missing proof
+    # One word per ask (design (c)): a selection naming the other word than an
+    # unconfirmed signed batch is refused WHOLE — before any intent write and
+    # with zero hub calls — even under a valid proof (a proof minted before the
+    # earlier batch failed, or a caller that skipped ``…/authorize``'s check).
+    conflicts = approvals.conflicting_selection(
+        Path(config_manager.config_dir), context.owner, selection
+    )
+    if conflicts:
+        _raise_decide("earlier_decision_unconfirmed", {"items": conflicts})
+    try:
+        outcome = await approvals.decide_selection(
+            wire,
+            selection,
+            config_dir=Path(config_manager.config_dir),
+            owner=context.owner,
+            access=context.access,
+            expected_account_id=body.expected_account_id,
+            batch_ref=f"{approvals.BATCH_INTENT_PREFIX}{proof['challenge'][:16]}",
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    return reply(outcome)
+
+
+@router.get("/v1/desktop/team-bridge/decisions", response_model=CRUDResponse[Any])
+async def list_decisions(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    """The decision ledger (§10.4): who asked, who decided, the decision, when.
+
+    ``role`` is ``made`` (default) or ``requested``; cursor-paginated (≤100).
+    References only — the decider's note and the body hash stay on the hub;
+    rows naming another tenant are dropped.
+    """
+
+    from local_operator.team_bridge import approvals
+
+    query = _approvals_query(request, _APPROVALS_LEDGER_PARAMS)
+    wire, context = await _approvals_context(config_manager, query.expected_account_id)
+    page = await _conversation_reply(
+        wire.decisions(
+            tenant_id=context.tenant_id,
+            role=query.role,
+            after=query.after,
+            limit=query.limit,
+            access=context.access,
+        )
+    )
+    return reply(
+        {
+            "tenant_id": context.tenant_id,
+            "role": query.role,
+            "items": approvals.ledger_rows(page.get("items") or [], tenant_id=context.tenant_id),
+            "next_cursor": page.get("next_cursor"),
+        }
+    )

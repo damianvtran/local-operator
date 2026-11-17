@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "audit_id": "rc1",
+  "locale": "ru",
+  "namespace": "tunnel.status",
+  "record": "i18n/audits/evidence/ru/tunnel.status/rc1/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable record, copied byte-for-byte from its session scratchpad; it covers both namespaces of this locale and is identical in both rc1 directories",
+  "record_sha256": "088bf5c0ceacfcb083ddd6efeab83a441e7158f97c7bc91edf2454608cde5a17",
+  "source_sha256": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+  "target_sha256": "140c8345512a5fe25316165d642f2413358d6ef3376e5e0ec940e39a7cd09dba",
+  "verdict": "passed",
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, task brand-au-ru), independent subagent; not the translator (job d0655be423a9) and did not edit any value",
+    "session": "e792be01f66b",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "ledger_receipt": {
+    "locale": "ru",
+    "namespace": "tunnel.status",
+    "source_sha256": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "translator": {
+      "agent": "i18n-translator subagent, job d0655be423a9 (Radient Console canonicalisation values, commit 3dd15d6f5559)",
+      "model": "anthropic/claude-sonnet-5-5",
+      "date": "2026-11-16"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (team lopdev, task brand-au-ru), independent subagent; not the translator (job d0655be423a9) and did not edit any value",
+      "session": "e792be01f66b",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-16",
+      "result": "clean-with-findings",
+      "findings": 2,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 2,
+        "nit": 0
+      },
+      "finding_ids": [
+        "ru-A1",
+        "ru-A2"
+      ],
+      "locale_verdict": "CLEAN-WITH-FINDINGS"
+    },
+    "status": "passed",
+    "note": "Delta audit of the Radient Console canonicalisation at commit 3dd15d6f5559 (diff base 220d39a96667): independent i18n-auditor e792be01f66b (anthropic/claude-opus-5-5, no fallback observed) of i18n-translator job d0655be423a9 (anthropic/claude-sonnet-5-5). Audited keys: tunnel.status.card_open_console, tunnel.status.tunnel_disabled.detail, tunnel.status.tunnel_inactive.detail, tunnel.status.tunnel_disabled.label (unchanged keys keep their earlier passed audits and were not re-audited). Pair findings: 0 blocker, 0 major, 2 minor, 0 nit ['ru-A1', 'ru-A2']; locale-wide verdict CLEAN-WITH-FINDINGS. Record: i18n/audits/evidence/ru/tunnel.status/rc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/ru/tunnel.status/rc1/record.json",
+    "round": "rc1",
+    "keys_audited": 4
+  }
+}

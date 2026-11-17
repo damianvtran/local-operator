@@ -530,7 +530,8 @@ Feature-detect this object on the authenticated capabilities payload:
 {"remote_sessions":{"available":true,"version":1,"view":true,"history":true,
 "supported_command_ops":["prompt","steer"],"media":true,
 "supported_media_kinds":["image","video","file"],"file_sources":["retained_document"],
-"document_upload":false,"audio_upload":false,"skill_invocation":false,"supplements":false}}
+"document_upload":false,"audio_upload":false,"skill_invocation":false,"supplements":true,
+"supplement_kinds":["document","file","sound"]}}
 ```
 
 `available` describes this relay's implemented baseline, **not** every peer's
@@ -542,10 +543,9 @@ original `command_id` UUID and inline image bytes through existing owner
 admission and staging. A retry retains that UUID; a missing acknowledgement is
 ambiguous and must not cause automatic resubmission. Remote skill expansion,
 audio and document **upload** are explicitly unsupported; the UI must not drop
-these payloads or infer support from a local capability. Generated-file callouts
-and executable Highlights/supplement previews remain a different source/contract
-(`supplements:false`), not retained document media. Disable those remote actions;
-they are not made safe by supplying an owner's filesystem path to the phone.
+these payloads or infer support from a local capability. Highlights (turn
+supplements) are a separate contract, described below under "Remote Highlights";
+`supplements:true` with `supplement_kinds` says this relay serves them.
 
 Reading a stopped conversation does not engage a runtime. History is folded at
 the owner using the mobile schema and the existing durable/journal reader,
@@ -594,11 +594,74 @@ projection with an empty one.
 | 409 | `remote_cursor_missing` (`reset:true`) | discard the history cursor and reload |
 | 409 | `remote_media_changed` | byte identity/coordinates changed; do not concatenate versions |
 | 409 | `remote_command_ambiguous` | no reliable admission acknowledgement; retain the UUID |
+| 409 | `remote_supplement_needs_running` | a Highlight file is cwd-relative and the owner has no live runtime; "Open on <owner>" |
+| 413 | `remote_too_large` | the Highlight file is over the 10 MB preview cap (component over 1 MiB) |
 
 A genuine phone authentication failure remains HTTP **401**. No peer permission,
 old-build or offline result is translated into phone logout. A view grant does
 not grant drive: the existing mesh authorizer checks every history/media read,
 and every forwarded control frame independently.
+
+#### Remote Highlights — component documents, featured files and sounds
+
+A remote row's Highlights use the **same** URLs as a local conversation's:
+`/api/sessions/{id}/supplements/{digest}/document`,
+`/api/sessions/{id}/supplements/{job}/file?i=<index>` and
+`/api/sessions/{id}/sound?digest=<digest>`. The projection already carries each
+Highlight row from the owner; only the bytes cross the mesh, on request — nothing is
+snapshotted at turn time, so a featured file is read as it is NOW on the owner,
+exactly as the owner's own phone would read it.
+
+- **Carrier.** `peer_session_history` with `mobile_session_read="supplement"` and only
+  `kind` (`document|file|sound`), `ref` (a 12-hex job for `file`, else a 32-hex
+  digest), `index` (0 for digest kinds), `offset`, `length`, `expected_media_id?`.
+  Both peers validate the shape; 512 KiB chunks under the history reply budget; the
+  answer binds session, ref, index, kind, sha256 identity, MIME and total, and later
+  chunks must match that identity (a changed file is `remote_media_changed`).
+- **Featured files are collected, then sent; sounds stream.** A featured file is
+  capped at 10 MB, so the viewer fetches every chunk of the requested window
+  (each still its own re-authorized, identity-checked frame) BEFORE it sends a
+  header: a file rewritten or a grant revoked mid-transfer is a real `409
+  remote_media_changed` / `403 remote_forbidden`, never a short `200`. A declared
+  total over the cap is `413 remote_too_large` at the viewer too — it does not
+  trust the owner's cap. Sounds (and retained media) have no cap and keep
+  streaming: once their `200`/`206` is sent, a later refusal can only end the body
+  early, so **a short read on a streamed body must be treated as
+  `remote_media_changed`** — discard it, never concatenate a retry onto it.
+- **Range differs by transport, not policy.** A remote featured file honours
+  `Range` (`206`/`416`); a LOCAL conversation's featured-file route answers `200`
+  with the whole body (pre-existing, unchanged here). Clients must accept either.
+- **Capability.** `mobile-session-supplements-v1`, checked by the viewer before
+  forwarding AND by the owner before serving. An owner without it is
+  `409 remote_unsupported` ("Update <owner>").
+- **Authorization.** Every chunk is its own mesh frame, so the view grant and the
+  session/owner binding are re-checked per chunk (#4057's S1 rule): a grant revoked
+  mid-download stops the next chunk with `403 remote_forbidden`.
+- **Documents.** The owner checks a `supplement_v1` row references the digest and
+  returns the raw component (capped at 1 MiB); the **viewer** assembles it with its
+  own `assemble_stored_component`, so the CSP comes from the build serving the phone.
+  Still JSON `{html}`, never `text/html`.
+- **Sounds.** The owner checks the digest is in a row's `sounds[]` and the stored
+  type is `audio/*`; Range is supported.
+- **Featured files — the whole local policy (operator decision, 2026-11-15).** The
+  owner runs `session/media.resolve_supplement_file`, the function its own phone route
+  runs: the path the row recorded, resolved under the owner's cwd, `~` or the
+  session's scratchpad, the §4.3 denylist, regular files only, the 10 MB cap and the
+  suffix allowlist (never `.html`/`.svg`/`+xml`). cwd comes only from the **owner's
+  own** live registry record — never from the viewer — and a cwd-relative path with no
+  live owner runtime is `409 remote_supplement_needs_running`. **This means a view
+  grant can now read files a Highlight names under the owner's cwd or home**, within
+  the denylist and cap. That is wider than `network/files.py`'s pull scope (pad +
+  referenced digests) and was chosen deliberately by the operator ("every file the
+  Highlight names, with the same rules as on that computer"), because view grants go
+  to the operator's own devices: opening a Highlight's file on the phone discloses
+  what opening it on the computer does. The policy lives in one place
+  (`resolve_supplement_file` and the scope note above it); narrowing it again is a
+  change there.
+- **The viewer never trusts the peer's MIME.** A file's type must be one of the local
+  allowlist's own values (else `application/octet-stream`); a sound's must be
+  `audio/*` (else 404). Responses carry `no-store`, `nosniff` and a sandbox CSP;
+  non-image files add `Content-Disposition: attachment`.
 
 ### Delta resume — forward history and skip-unchanged seeds
 

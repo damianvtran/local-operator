@@ -85,6 +85,7 @@ def test_register_writes_the_record_and_answers_the_shape() -> None:
         "last_seen_at",
         "name",
         "platform",
+        "push_handle_digest",
         "registered_at",
     ]
     assert record["device_id"] == payload["device_id"]
@@ -388,9 +389,16 @@ def test_delete_works_for_any_device_in_the_registry() -> None:
     """The stolen-phone case: one caller may revoke another device (ADR §4)."""
     client = _client()
     keep = client.post("/api/push/register", json=PAYLOAD).json()["device_id"]
+    # A different PHONE: its own install id AND its own push token. Sharing the
+    # token would make it the same installation under a forked id, which the
+    # registry retires (``test_push_device_dedupe.py``).
     stolen = client.post(
         "/api/push/register",
-        json={**PAYLOAD, "install_id": "00000000-1111-2222-3333-444444444444"},
+        json={
+            **PAYLOAD,
+            "install_id": "00000000-1111-2222-3333-444444444444",
+            "token": "apns-token-stolen-phone-1a2b3c",
+        },
     ).json()["device_id"]
     response = client.delete(f"/api/push/devices/{stolen}")
     assert response.status_code == 200 and response.json() == {"ok": True}
@@ -448,7 +456,12 @@ def test_list_serves_the_settings_shape_and_omits_unknown_name() -> None:
     assert entry["credential_live"] is True, "the cookie it presented is alive"
     # A register without ``preferences`` stores none; the list renders the
     # RESOLVED answer, all on, because absence has a defined meaning there.
-    assert entry["preferences"] == {"enabled": True, "completions": True, "errors": True}
+    assert entry["preferences"] == {
+        "enabled": True,
+        "completions": True,
+        "errors": True,
+        "previews": True,
+    }
     assert "name" not in entry
     assert devices[1]["name"] == "Pixel"
     assert entry["platform"] == "ios" and devices[1]["platform"] == "android"
@@ -1667,12 +1680,12 @@ def test_unrevoke_does_not_clear_the_lapse_marker() -> None:
 # store keeps them per device, and the push worker gates emits on them. These
 # cells own the store half; ``test_push_worker.py`` owns the gate.
 
-ALL_ON = {"enabled": True, "completions": True, "errors": True}
+ALL_ON = {"enabled": True, "completions": True, "errors": True, "previews": True}
 
 
 def test_register_stores_valid_preferences_and_the_list_returns_them() -> None:
     client = _client()
-    chosen = {"enabled": True, "completions": False, "errors": True}
+    chosen = {"enabled": True, "completions": False, "errors": True, "previews": False}
     answer = client.post("/api/push/register", json={**PAYLOAD, "preferences": chosen})
     assert answer.status_code == 200, answer.text
     assert _stored_records()[0]["preferences"] == chosen
@@ -1697,6 +1710,7 @@ def test_a_partial_preferences_object_stores_the_missing_keys_as_on() -> None:
         ({"enabled": "no"}, "preferences.enabled must be true or false"),
         ({"errors": 0}, "preferences.errors must be true or false"),
         ({"completions": None}, "preferences.completions must be true or false"),
+        ({"previews": "off"}, "preferences.previews must be true or false"),
     ],
 )
 def test_a_bad_preferences_shape_refuses_and_writes_nothing(
@@ -1747,9 +1761,20 @@ def test_a_row_without_preferences_means_all_on() -> None:
     assert row["preferences"] == ALL_ON
 
 
+def test_a_three_switch_row_from_before_previews_resolves_previews_on() -> None:
+    """A row #3991's build wrote holds exactly enabled/completions/errors. It
+    still loads (``previews`` is a known key, not a required one) and resolves
+    previews to ON — the operator's default (2026-11-14), so banners become
+    descriptive on upgrade with no re-registration."""
+    stored = {"enabled": True, "completions": True, "errors": False}
+    _plant([_record(preferences=stored)])
+    device_id = _VALID_RECORD["device_id"]
+    assert push_devices.device_preferences(config_dir()) == {device_id: {**ALL_ON, "errors": False}}
+
+
 @pytest.mark.parametrize(
     "stored",
-    [[True], {"enabled": "yes"}, {"enabled": True, "vibrate": False}],
+    [[True], {"enabled": "yes"}, {"enabled": True, "vibrate": False}, {"previews": None}],
 )
 def test_a_stored_row_with_invalid_preferences_refuses_the_store(stored: object) -> None:
     _plant([_record(preferences=stored)])

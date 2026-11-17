@@ -1,0 +1,73 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "audit_date": "2026-11-15T14:45:13.976629+00:00",
+  "key_count": 1,
+  "retested_keys": [],
+  "retained_key_count": 1,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "dbf144330553",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": "df4617d39efa (original); remediation translator is a distinct agent per delegation",
+    "independent_from_primary_auditor_session": "91d1e05d2d82 / d933 lane",
+    "actual_model_source": "Current resumed session system model declaration: anthropic/claude-opus-5-5",
+    "fallback": null
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "sha256": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/report.md",
+      "sha256": "b12186984acabc16f2cb557ad9b45066d664b9c51f42968801d272f418708147"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/runner.py.txt",
+      "sha256": "56add20f11f2ae3b9baeae3e71fb1ccf6e7eb4d992bbd3005441b6713a13d928"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/audit.log",
+      "sha256": "cf4ca94942b8c97360d23b67ddc59060c311d384814d7c30dc0544fa8597f3d4"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/execution.json",
+      "sha256": "71ef96451faf0563e5433f8b9ad002b960d69471a6fe644f3b06b6f3070a3425"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/rendered.txt",
+      "sha256": "798b88203d69e6a51884527d6ca4fff6630f8774b2397d4410d8e81173c490d3"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "scope_note": "Second independent R2 delta audit; unchanged entries retained by actual hashes, not re-audited. Settings group covers changed settings-help key only.",
+  "source_audit_revision": "b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "scope": "2afbb818b69074d9f11b0fc1a9a6360967218476..b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "preservation": {
+    "original_record": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/original-record.json",
+      "sha256": "738cef804176ec35519718fb2e3580b56353c306e6726883e1bd3b89c401392b"
+    },
+    "original_receipt": {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052s2/original-receipt.json",
+      "sha256": "7dd8d4ecc4a4e96f419fd49079b2b5c28d2c88e84cae40f94433acd9b093d057"
+    },
+    "relocation_only_by": "91d1e05d2d82",
+    "no_new_audit_claim": true
+  }
+}

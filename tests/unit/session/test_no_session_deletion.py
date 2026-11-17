@@ -261,6 +261,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The receiver's runtime record (which build is running): a config-dir
+    # sidecar published by atomic replace, the same pattern as the counter above.
+    # Every ``_write`` caller passes ``record_path(config_dir)`` =
+    # ``<config_dir>/team_bridge/connector_runtime.json``; its temp sibling is
+    # that fixed name plus ``.{pid}.tmp``. No caller input reaches either path,
+    # so neither can be a session directory or a transcript.
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ runtime record",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the record; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::clear_own_record",
+        "<path>.unlink",
+        "Removes the fixed team_bridge/connector_runtime.json FILE on exit; never a session path",
+    ),
     # The reply guard's per-install digest key (#3377, review round 1 S-3) is
     # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
     # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
@@ -3058,6 +3079,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "the staged operation temp FILE only (FileNotFoundError suppressed); unlink refuses "
         "directories",
     ),
+    # Legacy recovery-manifest restore/capture: the same node-local INSTALLROOT
+    # authority. ``_write_exclusive`` holds ONE ``O_DIRECTORY|O_NOFOLLOW`` fd on
+    # INSTALLROOT/.update-operations (or the content store outside it) and unlinks,
+    # through that fd, only the ``.<uuid>.restore.tmp`` name it created itself.
+    (
+        "local_operator/recovery_manifest.py::_write_exclusive",
+        "os.unlink",
+        "its own staged ``.<uuid>.restore.tmp`` FILE only, dir_fd-relative to a validated "
+        "INSTALLROOT/.update-operations (or content-store) directory opened O_NOFOLLOW; "
+        "never a sessions/ path, and unlink refuses directories",
+    ),
+    # Recovery-record rotation (operator request 2026-11-16: the store must rotate
+    # so users never hit the 256-record cap). ``_move_entry`` is the ONE rename
+    # for retirement and restore: a record FILE between INSTALLROOT/.update-
+    # operations[-v2]/ and INSTALLROOT/.update-operations-archive/, both inside
+    # the canonical install root, never replacing an existing name. ``_age_archive``
+    # is the ONE deletion: archive entries past 30 days or beyond 512, matched by
+    # the archive's own ``<ms>.<v1|v2>.<id>.json`` name, regular FILES only,
+    # through one validated O_DIRECTORY|O_NOFOLLOW fd on that archive.
+    (
+        "local_operator/install_transaction.py::_move_entry",
+        "os.rename",
+        "one recovery-record FILE between an INSTALLROOT operation namespace and the "
+        "in-root archive (both owned, non-symlink directories under the install root); "
+        "refuses an existing target, never a sessions/ path",
+    ),
+    (
+        "local_operator/install_transaction.py::_age_archive",
+        "os.unlink",
+        "archive-aging only: expired or over-count INSTALLROOT/.update-operations-archive "
+        "record FILES matching the archive's own entry pattern, dir_fd-relative to the "
+        "validated archive directory; S_ISREG-checked first, never a sessions/ path",
+    ),
     # Candidate publication: the same node-local generation authority. The replace
     # swaps a staged regular FILE onto the attempt FILE, and the unlink removes
     # only that staged temp; ``generation`` is an INSTALLROOT/generations/<id> tree
@@ -3226,10 +3280,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        # ``_join`` rather than ``subscribe``: both entry points (``subscribe``
-        # and ``subscribe_threadsafe``) admit their callback through this one
-        # private method, so the closure that removes it is qualified here.
-        "local_operator/session/frontend_state.py::FrontendStateStore._join.unsubscribe",
+        # ``_register`` rather than ``subscribe``: every entry point admits its
+        # callback through this one private method (it takes the state reference
+        # under the same lock as the append), so the closure that removes it is
+        # qualified here. The receiver is ``self._subscribers``, a
+        # ``list[Callable]``; ``.remove(callback)`` drops a listener, never a path.
+        "local_operator/session/frontend_state.py::FrontendStateStore._register.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
     ),
@@ -3512,6 +3568,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
         "never a directory, never under sessions/",
+    ),
+    # The UI browser host's health-probe failure log (2026-11-15). Source and
+    # target are `ensure_log_dir()` joined to the fixed basename
+    # `HEALTH_FAILURE_LOG_NAME` and that name + ".1" — no session id, no caller
+    # input — so the rotation can only displace that one log FILE.
+    (
+        "local_operator/ui_browser/backend.py::_open_health_log_for_append",
+        "os.replace",
+        "Rotates the browser-health.log FILE to browser-health.log.1 under log_dir(); "
+        "both names are fixed constants, never a directory, never under sessions/",
     ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes
     # these from `paths.log_dir()` and an int pid ALONE — never a session id,
@@ -4656,6 +4722,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Deletes only a marked eval fixture with both owned directories; protected "
         "operator/session roots are refused before removal",
+    ),
+    # Heavy-job lease holder records. The only production directory is
+    # `heavy_lease.lease_dir()` (`<config_dir>/run/heavy-jobs`, passed by
+    # tools/builtin.py and services.py); try_acquire builds the record path as
+    # `directory / f"slot-{slot}.json"` with an integer slot, and _write_record's
+    # temp is that name plus `.<pid>.<id>.tmp`. No session id enters either path.
+    (
+        "local_operator/heavy_lease.py::Lease.release",
+        "<path>.unlink",
+        "Removes only this lease's run/heavy-jobs/slot-<int>.json holder record FILE; "
+        "the path never carries a session id, and unlink rejects directories.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "os.replace",
+        "Publishes the run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp regular file over "
+        "slot-<int>.json; os.replace rejects a directory target.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "<path>.unlink",
+        "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
+        "temp FILE; unlink rejects directories.",
     ),
 )
 

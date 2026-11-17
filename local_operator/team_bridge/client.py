@@ -68,6 +68,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import time
 import unicodedata
 import urllib.parse
@@ -1159,6 +1160,10 @@ VALID_DECISIONS = ("approved", "denied")
 #: Batch decide is a bounded select-and-approve (§10.2): ≤50 per call.
 BATCH_DECIDE_MAX = 50
 
+#: The requests read's closed ``state`` filter (agent-server
+#: ``GET /messaging/requests``; §10.1's request lifecycle).
+REQUEST_STATES = ("pending", "approved", "denied", "expired", "withdrawn", "revoked")
+
 #: The decide note rides the courier as a delimited field (§10.1): ≤1 KiB.
 DECIDE_NOTE_MAX_BYTES = 1024
 
@@ -1630,9 +1635,12 @@ EDGE_BLOCKED_CODE = "edge_blocked"
 #:
 #: WHAT THE SENTENCE MUST NOT SAY (security review S-1). It never tells the agent
 #: what tripped the firewall or to retry without it: in the incident class the
-#: block fires BECAUSE the message quoted a credentials file, so for a credential
-#: the local guard missed, the firewall is the last barrier, and "remove the path
-#: and try again" is instructions for getting round it. Nor does it spell a
+#: block fires BECAUSE the message quoted a credentials file, and "remove the path
+#: and try again" is instructions for getting round whatever stopped it. The
+#: firewall is NOT a data-loss control — it matches request shapes, not
+#: credentials, and it is not designed to catch one. The credential control is
+#: the local guard (``secret_guard``), which runs before any byte leaves; the
+#: sentence simply must not coach a resend past a block that happened to help. Nor does it spell a
 #: trigger (a parent-directory or home-directory path): an agent that relays this
 #: sentence into a post would trip the same rule (review n1). The decision goes
 #: back to the human. A test pins both.
@@ -1650,6 +1658,56 @@ EDGE_BLOCKED_SENTENCE = (  # i18n: ignore model-facing refusal sentence, like th
 #: never the request's, so it can disclose nothing the caller sent, and it is
 #: the evidence of WHICH layer refused.
 _EDGE_HEADER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./;=+_-]{0,63}")
+
+#: The request header carrying the client correlation id, and its one accepted
+#: shape (``Root=1-<8 hex epoch seconds>-<24 hex random>``, the AWS X-Ray trace
+#: header format the ALB already understands).
+#:
+#: WHY (radient-infra #113): the edge's 403 page carries no request id, so an
+#: ``edge_blocked`` report could not be matched to anything on the Radient side.
+#: The client now mints one per hub request and repeats its root in the
+#: refusal. It is a CLIENT correlation id only: whether the ALB/WAF log records
+#: a client-supplied root as its own request id is unverified, so nothing here
+#: may promise WAF log correlation. It carries nothing about the caller — the
+#: epoch second and 96 random bits — so it is safe in a tool result and a log.
+TRACE_HEADER = "X-Amzn-Trace-Id"
+_TRACE_ROOT = re.compile(r"1-[0-9a-f]{8}-[0-9a-f]{24}")
+
+#: Cloudflare's ray id: 16 lowercase hex, optionally ``-<IATA colo>``. Checked
+#: against its OWN shape, not the generic edge alphabet (review R1-3 / S-2 /
+#: QA Q-3): the generic alphabet admits ``;`` ``=`` and spaces, so a responder
+#: could set ``cf-ray: IGNORE.PRIOR;code=ok;trace=1-0-a`` and plant a second,
+#: forged ``trace=`` / ``code=`` pair in the refusal footer — defeating the
+#: point of a correlation id. Anything else is DROPPED, never repaired: the raw
+#: header value must match as sent, with no whitespace stripping, so the id we
+#: quote is one the edge really issued.
+_CF_RAY = re.compile(r"[0-9a-f]{16}(-[A-Z]{3})?")
+
+
+def new_trace_header() -> str:
+    """A fresh ``X-Amzn-Trace-Id`` value: ``Root=1-<epoch hex>-<random hex>``."""
+
+    return f"Root=1-{int(time.time()) & 0xFFFFFFFF:08x}-{secrets.token_hex(12)}"
+
+
+def _request_trace_root(response: httpx.Response) -> str:
+    """The trace root THIS response's request carried, or ``""``.
+
+    Read off the request that was actually sent (``response.request``), so a
+    401-refresh resend reports its own id, not the first attempt's. A response
+    built without a request (a hand-built test double) has none, and a
+    value not in our own minted shape is dropped rather than echoed.
+    """
+
+    try:
+        header = response.request.headers.get(TRACE_HEADER, "")
+    except RuntimeError:  # httpx: "The request instance has not been set"
+        return ""
+    for part in header.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == "Root" and _TRACE_ROOT.fullmatch(value):
+            return value
+    return ""
 
 
 def _is_html(response: httpx.Response) -> bool:
@@ -1671,10 +1729,23 @@ def _edge_blocked(response: httpx.Response) -> BridgeRefusal:
     """
 
     details: dict[str, Any] = {}
-    for header, key in (("content-type", "content_type"), ("server", "server")):
+    for header, key in (
+        ("content-type", "content_type"),
+        ("server", "server"),
+    ):
         value = _edge_header(response, header)
         if value:
             details[key] = value
+    # Cloudflare's own id for the hop, when the block came back through it —
+    # only in its exact shape (see ``_CF_RAY``).
+    ray = response.headers.get("cf-ray", "")
+    if _CF_RAY.fullmatch(ray):
+        details["cf_ray"] = ray
+    # The client correlation id this request carried (see ``TRACE_HEADER``):
+    # the one id an edge_blocked report can always quote.
+    trace = _request_trace_root(response)
+    if trace:
+        details["trace"] = trace
     return BridgeRefusal(
         EDGE_BLOCKED_CODE,
         EDGE_BLOCKED_SENTENCE,
@@ -2106,6 +2177,10 @@ class TeamBridgeClient:
             # caller is not a pin.
             if extra_headers:
                 headers.update(extra_headers)
+            # One fresh correlation id per attempt, minted at the one dispatch
+            # every hub request passes: the edge can block any of them, and
+            # ``_edge_blocked`` repeats this root in the refusal.
+            headers[TRACE_HEADER] = new_trace_header()
             headers["Authorization"] = f"Bearer {token}"
             if if_none_match is not None:
                 headers["If-None-Match"] = if_none_match
@@ -2831,7 +2906,12 @@ class TeamBridgeClient:
             # The one-click Turn off: the hub answered, so make the opt-out
             # sticky on this machine too (see _apply_local_opt_out).
             opted_account = getattr(access, "account_id", None) or expected_account_id
-            self._apply_local_opt_out(opted_account)
+            # OFF THE EVENT LOOP, like the connector sync below: both writes
+            # take the config writer's lock, reload and rewrite the config file
+            # (0.3-1 s under load), and inline they froze every route at the
+            # Turn off click. Awaited, so the opt-out is on disk BEFORE the
+            # connector sync reads it.
+            await asyncio.to_thread(self._apply_local_opt_out, opted_account)
         if state == "disabled" and self._config_dir is not None:
             # THE OFF EVENT, and the only reconcile this method owns. An
             # ENABLE is covered by the commit hook (``_commit_explicit_enable``
@@ -3537,6 +3617,35 @@ class TeamBridgeClient:
             body={"decisions": payload},
             access=access,
         )
+
+    async def requests(
+        self,
+        *,
+        tenant_id: str,
+        state: str | None = None,
+        after: str | None = None,
+        limit: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The requests addressed to me (§6.1, §10): one cursor page, newest first.
+
+        Read-only — the decider's half of the approvals surface. ``state`` is
+        the server's closed request-state set (default ``pending`` server-side);
+        it is checked here so a mistyped value is a local ``ValueError`` rather
+        than a request the server has to refuse. The answer is passed through
+        untouched (``{"items": [BridgeMessageItem…], "next_cursor"}``): the
+        desktop route, not this transport, owns the reference-only projection.
+        """
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if state is not None:
+            if state not in REQUEST_STATES:
+                raise ValueError(f"state must be one of {REQUEST_STATES!r}; got {state!r}")
+            params["state"] = state
+        if after:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self._send("GET", "/messaging/requests", params=params, access=access)
 
     async def decisions(
         self,

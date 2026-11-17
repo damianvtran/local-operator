@@ -206,7 +206,11 @@ def new_references(
 #: resolvers bound under their own names where ``_t`` already means another
 #: namespace in the same module (``tui/app.py``); ``_sessions_copy`` is
 #: ``tools/builtin.py``'s ``tr("wire.sessions")``, named for its namespace in a
-#: module that binds several resolvers.
+#: module that binds several resolvers. ``_github_text`` is the same
+#: ``tr("wire.github")`` resolver, bound under one name in each of
+#: ``network/cli.py``, ``network/readiness.py``, ``network/credentials/github.py``
+#: and ``network/credentials/messages.py``, named for its namespace the way
+#: ``_sessions_copy`` is (PR #4052 deferred ``wire.github``).
 RENDER_WRAPPERS = frozenset(
     {
         "_sessions_copy",
@@ -219,6 +223,7 @@ RENDER_WRAPPERS = frozenset(
         "render_resolved",
         "_lang_t",
         "_kind_t",
+        "_github_text",
     }
 )
 

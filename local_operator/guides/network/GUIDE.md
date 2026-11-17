@@ -489,6 +489,38 @@ pairing whose window closed with nobody answering exits `3` as
 `pairing_unanswered`, having joined nothing. Park a fresh ceremony rather than
 reusing the invite — the scope of every exit code is in "Reference".
 
+## Reading an artifact from a peer session
+
+A review/evidence citation must carry the source **peer + exact session id +
+`scratchpad://<relative-path>` or `attachment:<id>`**. Obtain that tuple from the
+source session's reply; a peer's absolute filesystem path is not portable, and
+reading its bare scratchpad reference locally would address your own session.
+Pull the authorized artifact through the existing CLI, then read the local copy:
+
+```bash
+lop network files pull <peer> <sid> scratchpad://review/report.md --json
+lop network files pull <peer> <sid> attachment:<id> --json
+```
+
+These are templates: substitute the actual peer, session and reported reference;
+an attachment id is 32 lowercase hex characters and must be referenced by that
+session. Omit `--out` for a verified copy in this device's attachment store. On a
+successful receipt (`verified: true`), read its top-level JSON `path` with
+`read(path="<returned path>")`; `landed.store` names the store copy too. Preserve
+the original peer, session and source reference in citations: the returned local
+path is this device's inspection location, not the artifact's origin.
+
+`--out` requests an optional additional copy. A resolved destination inside
+Local Operator's config/data directory—including your own session scratchpad
+under that directory—is refused as `out_invalid`, even with `--force`. Use the
+store-only form above; do not direct `--out` into session data.
+
+**No new authority or bypass.** This recipe does not grant access to arbitrary
+remote paths or other sessions' attachments. `BLOCKED by guardrail` remains
+final for the same effect on the same targets: report it. Never pull, copy or
+import the blocked material through another path, tool or peer to reroute the
+refusal.
+
 ## Who the session on the peer runs as
 
 A create on a peer can name the agent PROFILE it runs as or the TEAM it manages,
@@ -1015,8 +1047,8 @@ trust unit: while the share stands, **any process or session on the borrowing
 device (same user) can use it**, because there is no per-session secret on a
 node for the design to bound.
 
-**The source ladder** (strongest first; resolved fresh on the owner at every
-command, so a re-login or a token rotation needs no gesture on the node):
+**The source ladder** (strongest first; checked on the owner for each new
+borrow, so a re-login or token rotation needs no gesture on the node):
 
 1. **A GitHub App**, if one is configured — the strongest route, and the only
    one GitHub-side narrowing and per-token revocation apply to (setup below).
@@ -1029,6 +1061,29 @@ command, so a re-login or a token rotation needs no gesture on the node):
    `gh` itself for its token (the login lives in gh's config file or the OS
    keychain — wherever that install keeps it); the owner is the trusted side,
    and the borrowing device never reads it.
+
+The owner's `gh` login read has a dedicated, single-flight worker: unrelated
+provider/MCP work cannot queue ahead of its keychain lookup. The raw login is
+cached **in memory for at most 30 seconds**; repository policy is still read for
+every flight. Ordinary `gh auth login/logout` hosts-file changes invalidate the
+cache on the next owner read, without waiting for the TTL. A keychain-only change is picked up by the next owner read
+after that 30-second bound. Revoke and panic invalidate the source cache; existing
+borrower permission leases are not extended by this cache.
+
+The whole source lookup is bounded at 12 seconds, above `gh`'s own 10-second
+subprocess timeout. This is a caller bound, including designation enumeration:
+a slow cold listing may outlast it, but the ONE worker finishes warming the
+existing enumeration cache; callers never spawn replacements or wait indefinitely.
+A GitHub lookup/budget timeout travels as `rate_limited` plus `reason: owner_busy`,
+so older borrowers keep their held grant. Upgraded borrowers show `owner_busy`
+and honest timeout copy, not a claim that too many requests arrived. Other
+families retain their existing codes. GitHub borrowing and explicit `credential
+refresh github` retry **once**, after 250 ms. Ordinary GitHub borrowing allows at
+least 14 seconds per control ask; explicit refresh retains its existing 75-second
+window because App minting is outside the bounded gh lane. An ordinary borrow
+may instead use its **still-current permission lease** during proactive refresh;
+an expired lease, answered deny, revoke, panic or forced refresh never gets that
+fallback. This is not a new offline lease or refresh authority.
 
 **Which repositories a share lends for — by default, every one the owner's
 login can push to.** Before a hand-picked list has been lent (or after the
@@ -1476,10 +1531,12 @@ lop network identity rotate --json    # for a suspected key compromise
 - Do not add a member by editing a member list. Membership changes through
   `invite`/`join`, `member rm`, and the epoch rotation they carry.
 - Do not force a full re-sync, and do not invent a `--force` on a verb that does
-  not take one: the only verb in this family with a `--force` is `network sessions
-  --stop`, and it means the owner's own `lop stop --force` — stop a target the
-  plain stop skipped (one already leaving, or mid-turn with a socket that will not
-  answer), accepting that the turn goes with it.
+  not take one. For session lifecycle operations, `network sessions --stop
+  --force` means the owner's own `lop stop --force` — stop a target the plain
+  stop skipped (one already leaving, or mid-turn with a socket that will not
+  answer), accepting that the turn goes with it. Separately, `network files pull
+  --force` permits replacing an existing `--out` file; it does not bypass the
+  config/data-directory restriction. Store-only pulls need neither flag.
 
 ## Reference
 

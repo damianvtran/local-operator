@@ -1,0 +1,10 @@
+{
+  "relay.diagram.close": "关闭图表",
+  "relay.diagram.copied": "已复制",
+  "relay.diagram.copy": "复制源码",
+  "relay.diagram.copy_failed": "无法复制",
+  "relay.diagram.error.title": "无法绘制此图表",
+  "relay.diagram.full_size": "完整大小",
+  "relay.diagram.save": "保存SVG",
+  "relay.diagram.view": "图表"
+}

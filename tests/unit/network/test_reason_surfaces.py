@@ -55,6 +55,13 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # These f-strings use this device's HeavyClass.reason command label
+    # (long-lived-command and acquired notices) and memory_budget.reason
+    # (why the local cap is off). Neither value comes from a mesh peer.
+    ("local_operator/tools/builtin.py", "_acquire_heavy_lease", "reason"): (
+        3,
+        "local heavy-command labels and memory-cap explanation, not mesh peer codes",
+    ),
     # Backfill parses this device's stored invite receipt to recover the minted
     # id; the coerced detail is regex input, never a rendered peer refusal.
     ("local_operator/network/operator_binding.py", "_invite_ids", "detail"): (
@@ -66,16 +73,6 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/operator_binding.py", "_log_backfill", "reason"): (
         1,
         "backfill outcome cache key used only to deduplicate developer log lines",
-    ),
-    # This is a bound formatter CALL, not a read of a peer's reason field.
-    # Designation.reason() authors the empty-list clause locally (explicit list,
-    # unavailable enumeration, all opted out, or no push access); refusal() adds
-    # its remedy. The output is already words, like approval_copy below, and a
-    # transport-reason gloss would misinterpret that prose. Keep the exact site
-    # and count: another reason read still needs its own audit.
-    ("local_operator/network/credentials/github.py", "Designation.refusal", "reason"): (
-        1,
-        "Designation.reason() is the local human-prose formatter, not a raw mesh reason token",
     ),
     # A failed credential card's "Why it stopped" line (UX review #3002 r1, U1). The value
     # is ``approval_copy.reason_for(code)`` -- this project's own sentence for a refusal code,

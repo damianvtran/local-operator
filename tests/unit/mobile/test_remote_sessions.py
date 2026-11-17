@@ -392,7 +392,10 @@ def test_remote_capability_and_unsupported_actions_are_explicit(
         "document_upload": False,
         "audio_upload": False,
         "skill_invocation": False,
-        "supplements": False,
+        # Remote Highlight bytes (document/file/sound) on the local URLs; per-owner
+        # support is negotiated on the mesh and refused as remote_unsupported.
+        "supplements": True,
+        "supplement_kinds": ["document", "file", "sound"],
     }
     for body in [
         {"op": "abort"},

@@ -136,6 +136,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
+from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr as _github_tr
+
+_github_text = _github_tr("wire.github")
+
 logger = logging.getLogger("local_operator.network.credentials.github")
 
 # ---------------------------------------------------------------------------
@@ -622,6 +627,7 @@ def enumeration_failure_words(error: str) -> str:
     one safe boundary rather than each trusting a different error string.
     """
     earlier_login = "the saved list is for an earlier GitHub login"
+    unknown_login = "the GitHub login for the saved repository list is unknown"
     words = {
         "auth": "GitHub refused that login",
         "offline": "GitHub could not be reached",
@@ -630,12 +636,42 @@ def enumeration_failure_words(error: str) -> str:
         "unknown": "GitHub repository listing failed",
         "not fetched yet": "the repository list has not been fetched yet",
         earlier_login: earlier_login,
+        unknown_login: unknown_login,
     }
     if not error:
         return ""
     if error in words.values():
         return error
     return words.get(error.partition(":")[0].strip(), words["unknown"])
+
+
+def designation_overflow_text(count: int, limit: int) -> str:
+    """The owner-localized detail; the borrower still names the lending device."""
+    return _github_text(_github_strings.owner_overflow(count=count, limit=limit))
+
+
+def listing_failure_text(error: str) -> str:
+    """Translate an owned legacy discriminator, never arbitrary upstream prose.
+
+    Cache/wire matching must not depend on the process locale. Keep the legacy
+    canonical values in enumeration_failure_words; render only at the edge.
+    """
+    canonical = enumeration_failure_words(error)
+    if not canonical:
+        return ""
+    keys = {
+        "GitHub refused that login": _github_strings.failure_auth,
+        "GitHub could not be reached": _github_strings.failure_offline,
+        "GitHub returned an error": _github_strings.failure_server,
+        "GitHub could not list every pushable repository": _github_strings.failure_coverage,
+        "GitHub repository listing failed": _github_strings.failure_unknown,
+        "the repository list has not been fetched yet": _github_strings.failure_unfetched,
+        "the saved list is for an earlier GitHub login": _github_strings.failure_earlier_login,
+        "the GitHub login for the saved repository list is unknown": (
+            _github_strings.failure_unknown_login
+        ),
+    }
+    return _github_text(keys[canonical]())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -670,67 +706,74 @@ class Designation:
         return max(0.0, (now if now is not None else time.time()) - self.fetched_at)
 
     def reason(self, whose: str = "its") -> str:
-        """Why the list is empty, as a clause with no device subject of its own.
-
-        DEVICE-NEUTRAL ON PURPOSE (QA round 1, F1): the same words travel to the
-        borrower inside the owner's refusal, where "this device" would name the
-        wrong machine. ``whose`` lets the owner's own CLI say "this device's".
-        """
+        """Localized reason clause; account/error matching stays canonical metadata."""
+        local = whose == "this device's"
         if self.origin == ORIGIN_EXPLICIT:
-            return (
-                "the hand-picked GitHub repositories setting names no repository once "
-                "opt-outs are removed"
-            )
+            return _github_text(_github_strings.reason_explicit())
         if self.origin == ORIGIN_UNAVAILABLE:
-            why = f" ({self.error})" if self.error else ""
-            return (
-                f"the list of repositories {whose} GitHub login can push to could not be "
-                f"fetched{why}, and there is no earlier list to fall back on"
+            failure = f" ({listing_failure_text(self.error)})" if self.error else ""
+            key = (
+                _github_strings.reason_unavailable_local
+                if local
+                else _github_strings.reason_unavailable_remote
             )
+            return _github_text(key(failure=failure))
         if self.candidates and self.excluded_count >= self.candidates:
-            return (
-                f"every repository {whose} GitHub login can push to ({self.candidates}) is "
-                "opted out"
+            key = (
+                _github_strings.reason_excluded_local
+                if local
+                else _github_strings.reason_excluded_remote
             )
-        return f"{whose} GitHub login can push to no repositories"
+            return _github_text(key(count=self.candidates))
+        return _github_text(
+            (
+                _github_strings.reason_no_repos_local
+                if local
+                else _github_strings.reason_no_repos_remote
+            )()
+        )
 
     def remedy(self) -> str:
-        """The one step that repairs an empty list — a command or a setting, never a key."""
+        """The repairing command is technical; its surrounding words are keyed."""
         if self.origin == ORIGIN_EXPLICIT:
-            return (
-                "add repositories to the GitHub repositories setting (search it in "
-                "/settings), or explicitly return to every pushable repository minus opt-outs "
-                "with lop network credential github repos --use-default"
+            return _github_text(
+                _github_strings.remedy_explicit(
+                    command="lop network credential github repos --use-default"
+                )
             )
         if self.origin == ORIGIN_UNAVAILABLE:
-            return "retry when GitHub is reachable: lop network credential github repos --refresh"
+            return _github_text(
+                _github_strings.remedy_unavailable(
+                    command="lop network credential github repos --refresh"
+                )
+            )
         if self.candidates and self.excluded_count >= self.candidates:
-            return "bring one back with lop network credential github include <owner/repo>"
-        return "give that GitHub login push access to a repository"
+            return _github_text(
+                _github_strings.remedy_excluded(
+                    command="lop network credential github include <owner/repo>"
+                )
+            )
+        return _github_text(_github_strings.remedy_no_repos())
 
     def refusal(self) -> str:
-        """The owner's refusal detail: reason, then remedy (callers ask only when empty)."""
-        return f"{self.reason()} — {self.remedy()}"
+        """Owner-localized detail; no upstream listing/API text crosses this boundary."""
+        return _github_text(
+            _github_strings.refusal_detail(reason=self.reason(), remedy=self.remedy())
+        )
 
 
 def listed_ago(seconds: float | None) -> str:
-    """``just now`` / ``12 min ago`` / ``5 h ago`` / ``3 days ago``.
-
-    THE ONE AGE WORDING (UX round 1, U3): the share receipt, ``credential github
-    repos`` and readiness all describe the same cached list, so they must not
-    disagree about its age or switch units mid-sentence ("1800 min old").
-    ``None`` (no timestamp) reads as "at an unknown time".
-    """
+    """One localized age formatter for owner receipts and peer readiness."""
     if seconds is None:
-        return "at an unknown time"
+        return _github_text(_github_strings.age_unknown())
     value = max(0, int(seconds))
     if value < 60:
-        return "just now"
+        return _github_text(_github_strings.age_now())
     if value < 120 * 60:
-        return f"{value // 60} min ago"
+        return _github_text(_github_strings.age_minutes(count=value // 60))
     if value < 48 * 3600:
-        return f"{value // 3600} h ago"
-    return f"{value // 86400} days ago"
+        return _github_text(_github_strings.age_hours(count=value // 3600))
+    return _github_text(_github_strings.age_days(count=value // 86400))
 
 
 def source_hint(source: str, root: Path | None = None, *, home: Path | None = None) -> str:
@@ -754,6 +797,12 @@ def source_hint(source: str, root: Path | None = None, *, home: Path | None = No
             record = access.open_store(root).describe(name)
             return f"{source}:{record.record_id}:{record.updated_at}"
         if source == SOURCE_GH:
+            # gh can resolve an environment credential instead of the hosts-file
+            # account. Presence alone cannot identify that login; guessing from
+            # hosts.yml would attribute another account's cache to this bearer.
+            # This display-only unknown NEVER changes source_identity's fence.
+            if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+                return ""
             hosts = _read_gh_hosts(home)
             entry = hosts.get("github.com") if isinstance(hosts, dict) else None
             user = entry.get("user") if isinstance(entry, dict) else None
@@ -885,7 +934,11 @@ def designation(
     fresh = ours and bool(cached) and 0.0 <= moment - fetched_at < ENUMERATION_MAX_AGE_S
     error = str(cache.get("error") or "") if ours else ""
     if not ours and not allow_fetch and cache.get("arm") == source and cached:
-        error = "the saved list is for an earlier GitHub login"
+        error = (
+            "the saved list is for an earlier GitHub login"
+            if hint and cache.get("hint") and hint != cache["hint"]
+            else "the GitHub login for the saved repository list is unknown"
+        )
     # Failure-only metadata does not replace another account's last-good list.
     # It lets read-only readiness explain a first failed listing without lending
     # any repository or re-fetching. No raw provider text is stored here.
@@ -2654,6 +2707,7 @@ def borrowed_git_env(
     root: Path | None = None,
     session_id: str = "",
     client: Any = None,
+    on_timeout: Callable[[Any], object] | None = None,
 ) -> tuple[dict[str, str], str]:
     """Fetch-on-use: ``(env, token)`` for one child, or ``({}, "")``. Never raises.
 
@@ -2677,6 +2731,15 @@ def borrowed_git_env(
         return {}, ""
     token = str(getattr(outcome, "access_token", "") or "")
     if not token:
+        from .types import BorrowTimeout
+
+        if isinstance(outcome, BorrowTimeout) and on_timeout is not None:
+            # A local diagnostic only. Denials, missing sinks and policy answers
+            # do not become timeouts, and nothing enters the child's environment.
+            try:
+                on_timeout(outcome)
+            except Exception:  # noqa: BLE001 — diagnostics cannot break a command
+                pass
         return {}, ""
     # THE BOUND LANDS WITH THE BEARER (§3.4): a grant that carries the owner's
     # narrowing writes it to this device's config HERE, before the child that
@@ -2723,7 +2786,22 @@ def borrowed_git_env(
     # hands to the next push. A PAT or ``gh`` token has no revoke endpoint.
     if is_installation_grant(outcome):
         _schedule_self_revoke(token, belt_revoke_at_ms(outcome, root))
-    return git_env_for_token(token), token
+    env = git_env_for_token(token)
+    # Optional display metadata is constructed only after the existing borrow
+    # and narrowing checks. It authorizes NOTHING and causes no extra request.
+    # A stale/missing/unapplied list gives no hint rather than guessing account.
+    try:
+        narrowing = getattr(outcome, "narrowing", None)
+        stated = narrowing.get("repositories") if isinstance(narrowing, dict) else None
+        if isinstance(stated, list) and stated and _owner_key(outcome, client):
+            checked = tuple(normalise_repository(str(item)) for item in stated)
+            if all(checked):
+                normalized = tuple(item for item in checked if item is not None)
+                if normalized == repositories_for(root):
+                    env[_DIAGNOSTIC_SCOPE_ENV] = _diagnostic_scope(token, normalized)
+    except Exception as exc:  # noqa: BLE001 — a display hint must not change credential use
+        logger.debug("github: diagnostic scope unavailable (%s)", type(exc).__name__)
+    return env, token
 
 
 def lent_github_env(
@@ -2731,6 +2809,7 @@ def lent_github_env(
     session_id: str,
     register: Callable[[str], object] | None,
     client: Any = None,
+    on_timeout: Callable[[Any], object] | None = None,
 ) -> tuple[dict[str, str], str]:
     """The ONE door a mesh-lent github bearer takes into a local consumer.
 
@@ -2769,7 +2848,10 @@ def lent_github_env(
     if not callable(register):
         return {}, ""
     try:
-        env, token = borrowed_git_env(session_id=session_id, client=client)
+        # Only when asked for: a caller (or test double) that never passes it keeps
+        # the exact call it always made.
+        extra: dict[str, Any] = {"on_timeout": on_timeout} if on_timeout is not None else {}
+        env, token = borrowed_git_env(session_id=session_id, client=client, **extra)
     except Exception:  # noqa: BLE001 — borrowed_git_env never raises; belt and braces
         return {}, ""
     if not env or not token:
@@ -2778,6 +2860,15 @@ def lent_github_env(
         register(token)
     except Exception:  # noqa: BLE001 — an unmaskable bearer is withheld, not raised
         return {}, ""
+    context = env.get(_DIAGNOSTIC_SCOPE_ENV)
+    if context:
+        try:
+            # These values are display metadata, not bearer authority, but must
+            # not leak through a caller's environment dump or recorded output.
+            register(context)
+            register(json.loads(context)["identity"])
+        except Exception:  # noqa: BLE001 — drop only the optional diagnostic
+            env = {key: value for key, value in env.items() if key != _DIAGNOSTIC_SCOPE_ENV}
     return env, token
 
 
@@ -2896,21 +2987,111 @@ def git_helper_reply(
     return f"username=x-access-token\npassword={token}\n"
 
 
+# Diagnostic-only child metadata: never a credential source or authorization input.
+_DIAGNOSTIC_SCOPE_ENV = "LOCAL_OPERATOR_GITHUB_DIAGNOSTIC_SCOPE"
+
+
+def _diagnostic_scope(token: str, repositories: Sequence[str]) -> str:
+    """Bind a human hint to this already-borrowed bearer/list; persist nothing."""
+    import hashlib
+
+    return json.dumps(
+        {
+            "version": 1,
+            "identity": hashlib.sha256(token.encode()).hexdigest(),
+            "designation": designation_digest(repositories),
+        },
+        separators=(",", ":"),
+    )
+
+
+def _repository_diagnostic(
+    operation: str, lines: Sequence[str], *, token: str, repositories: Sequence[str], context: str
+) -> str:
+    """Optional stderr only. Forged metadata cannot influence credential stdout.
+
+    The ordinary pure helper still selects credentials without this context.
+    Missing/stale/unknown context means no human attribution, not permission.
+    Reject ambiguous/malformed protocol even though the legacy core tolerates it.
+    """
+    if operation.strip().lower() != "get" or not token or not repositories or not context:
+        return ""
+    seen: set[str] = set()
+    ended = False
+    for line in lines:
+        if not line:
+            ended = True
+            continue
+        if ended or "=" not in line or any(ord(c) < 32 for c in line):
+            return ""
+        raw_name, _, value = line.partition("=")
+        if not raw_name or any(c.isspace() for c in raw_name) or value != value.strip():
+            return ""
+        name = raw_name.lower()
+        if name in {"protocol", "host", "path"}:
+            if name in seen:
+                return ""
+            seen.add(name)
+    fields = _parse_credential_request(lines)
+    repo = normalise_repository(fields.get("path", ""))
+    if (
+        fields.get("protocol", "").lower() != "https"
+        or fields.get("host", "").lower() not in _ALLOWED_HOSTS
+        or not repo
+        or _path_allowed(fields.get("path", ""), repositories)
+    ):
+        return ""
+    try:
+        metadata = json.loads(context)
+    except (ValueError, TypeError):
+        return ""
+    expected = json.loads(_diagnostic_scope(token, repositories))
+    if (
+        not isinstance(metadata, dict)
+        or type(metadata.get("version")) is not int
+        or metadata != expected
+    ):
+        return ""
+    notice = _github_text(
+        _github_strings.wrapper_denied(repo=repo, command="lop network credential github repos")
+    )
+    # Even a repository deliberately named after sensitive context must not
+    # turn a human diagnostic into a way to echo bearer/fingerprint material.
+    if any(
+        value and value.casefold() in notice.casefold()
+        for value in (token, expected["identity"], context)
+    ):
+        return ""
+    return notice
+
+
 def run_git_helper_cli(operation: str) -> int:
-    """The ``lop credential git-helper`` entry point. Always exit 0, mostly silence."""
+    """Run git's unchanged credential stdout protocol, always exit 0.
+
+    A known borrowed scope can add an owned stderr explanation for one valid
+    denied repository. Unknown/mismatched context and every other refusal stay
+    silent; no protocol input, token, fingerprint or context value is printed.
+    """
     import sys
 
     try:
         lines = sys.stdin.read().splitlines()
     except Exception:  # noqa: BLE001 — no stdin is "no request"
         lines = []
-    reply = git_helper_reply(
-        operation,
-        lines,
-        token=os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or "",
-        repositories=repositories_for(None),
-    )
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    repositories = repositories_for(None)
+    reply = git_helper_reply(operation, lines, token=token, repositories=repositories)
     if reply:
         sys.stdout.write(reply)
         sys.stdout.flush()
+    else:
+        notice = _repository_diagnostic(
+            operation,
+            lines,
+            token=token,
+            repositories=repositories,
+            context=os.environ.get(_DIAGNOSTIC_SCOPE_ENV, ""),
+        )
+        if notice:
+            print(notice, file=sys.stderr)
     return 0

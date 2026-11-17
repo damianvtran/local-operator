@@ -285,15 +285,23 @@ async def test_share_typing_only_settings_put_is_local_and_round_trips(rig, monk
             {"expected_account_id": "acc_a", "share_typing": False, "label": "x"},
             id="pref-with-hub-field",
         ),
-        # The state-less branch returns before the screening write, so a
-        # screening choice here would be dropped silently; it is refused instead.
+        # A screening choice is a local preference too (UI #1928), but it
+        # still may not carry a hub field on the state-less write.
         pytest.param(
             {
                 "expected_account_id": "acc_a",
-                "share_typing": False,
-                "screening_model": "openrouter/x",
+                "screening_model": "anthropic/claude-opus-5-5",
+                "consent_version": "bridge_consent_v1",
             },
-            id="pref-with-screening-model",
+            id="screening-with-consent-field",
+        ),
+        pytest.param(
+            {
+                "expected_account_id": "acc_a",
+                "screening_model": "anthropic/claude-opus-5-5",
+                "tenant_id": "org_1",
+            },
+            id="screening-with-tenant",
         ),
     ],
 )
@@ -420,3 +428,145 @@ async def test_combined_settings_put_local_save_failure_returns_hub_payload(rig,
     result = response.json()["result"]
     assert result.pop("screening")["preferred"] is None
     assert result == {"state": "paused", "share_typing": True}
+
+
+# -- the state-less Screening model write (local-operator-ui #1928) -------------------
+#
+# UI #1928 review R1 / security S-2..S-4: a model pick used to ride a ``state``
+# write, which runs the explicit-enable commit (owner + native consent receipt +
+# connector + ``team_bridge.enabled``) on a machine that does not own the
+# endpoint, and resumes a paused one when the renderer's ``state`` is stale. A
+# preference must never re-assert consent (#3632); these pin the local-only path.
+
+SCREENING = "anthropic/claude-opus-5-5"
+
+
+def _config_text(config_dir: Any) -> str:
+    path = config_dir / "config.yml"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _forbid_every_consent_side_effect(monkeypatch: Any) -> list[str]:
+    """Trip-wires on each effect a state write can have; returns what fired."""
+
+    from local_operator.team_bridge.connector import enrollment, install
+
+    fired: list[str] = []
+
+    def trip(name: str) -> Callable[..., Any]:
+        def tripped(*args: Any, **kwargs: Any) -> Any:
+            fired.append(name)
+            raise AssertionError(f"a preference write reached {name}")
+
+        return tripped
+
+    async def async_trip(*args: Any, **kwargs: Any) -> Any:
+        fired.append("put_settings")
+        raise AssertionError("a preference write reached the hub client")
+
+    monkeypatch.setattr(TeamBridgeClient, "put_settings", async_trip)
+    monkeypatch.setattr(
+        enrollment, "commit_settings_enrollment", trip("commit_settings_enrollment")
+    )
+    monkeypatch.setattr(install, "sync_connector_service", trip("sync_connector_service"))
+    return fired
+
+
+async def test_a_stateless_screening_write_is_local_and_never_enrolls(rig, monkeypatch):
+    """No local owner here: the write creates no receipt, no connector, no
+    ``team_bridge.enabled``, and makes no hub call."""
+
+    from local_operator.team_bridge.settings import read_screening_model
+
+    fired = _forbid_every_consent_side_effect(monkeypatch)
+    before = sorted(p.name for p in rig.config_dir.iterdir())
+    response = await rig.http.put(
+        SETTINGS, json={"expected_account_id": "acc_a", "screening_model": SCREENING}
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["screening"]["preferred"] == SCREENING
+    assert SCREENING in [entry["value"] for entry in result["screening"]["models"]]
+    assert set(result) == {"screening"}  # no state, no endpoint, no typing echo
+    assert read_screening_model(rig.config_dir) == tuple(SCREENING.split("/", 1))
+    # Nothing but the config document changed: no store (owner/receipt) file,
+    # and the document holds the screening key and NOT ``enabled``.
+    after = sorted(p.name for p in rig.config_dir.iterdir())
+    assert set(after) - set(before) <= {"config.yml", ".config-write.lock"}, (before, after)
+    import yaml
+
+    team_bridge = yaml.safe_load(_config_text(rig.config_dir))["values"]["team_bridge"]
+    assert team_bridge == {"screening": {"model": SCREENING}}  # no ``enabled``
+    assert fired == [] and rig.calls == []
+
+
+async def test_a_stateless_screening_write_ignores_an_unknown_id(rig, monkeypatch):
+    fired = _forbid_every_consent_side_effect(monkeypatch)
+    url_body = {"expected_account_id": "acc_a", "screening_model": SCREENING}
+    assert (await rig.http.put(SETTINGS, json=url_body)).status_code == 200
+    response = await rig.http.put(
+        SETTINGS, json={"expected_account_id": "acc_a", "screening_model": "openai/gpt-6-astra"}
+    )
+    assert response.status_code == 200, response.text
+    # Ignored, not refused: the reply names the model still in force.
+    assert response.json()["result"]["screening"]["preferred"] == SCREENING
+    assert "gpt-6-astra" not in _config_text(rig.config_dir)
+    cleared = await rig.http.put(
+        SETTINGS, json={"expected_account_id": "acc_a", "screening_model": ""}
+    )
+    assert cleared.json()["result"]["screening"]["preferred"] is None
+    assert fired == [] and rig.calls == []
+
+
+async def test_a_stateless_write_may_carry_both_preferences(rig, monkeypatch):
+    fired = _forbid_every_consent_side_effect(monkeypatch)
+    response = await rig.http.put(
+        SETTINGS,
+        json={"expected_account_id": "acc_a", "screening_model": SCREENING, "share_typing": False},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["share_typing"] is False and result["screening"]["preferred"] == SCREENING
+    assert _local_share_typing(rig.config_dir) is False
+    assert fired == [] and rig.calls == []
+
+
+async def test_a_state_write_refused_by_the_hub_leaves_the_screening_model(rig, monkeypatch):
+    """UI #1928 security S-4: the choice is persisted only AFTER the hub accepts."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+    from local_operator.team_bridge.settings import (
+        read_screening_model,
+        write_screening_model_choice,
+    )
+
+    async def hub_refuses(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise BridgeRefusal("bridge_disabled", "off", http_status=403)
+
+    monkeypatch.setattr(TeamBridgeClient, "put_settings", hub_refuses)
+    write_screening_model_choice(rig.config_dir, SCREENING)
+    response = await rig.http.put(
+        SETTINGS, json={"expected_account_id": "acc_a", "state": "paused", "screening_model": ""}
+    )
+    assert response.status_code == 403, response.text
+    assert read_screening_model(rig.config_dir) == tuple(SCREENING.split("/", 1))
+
+
+async def test_a_state_write_accepted_by_the_hub_saves_the_screening_model(rig, monkeypatch):
+    from local_operator.team_bridge.settings import read_screening_model
+
+    order: list[str] = []
+
+    async def hub_put(self: Any, **kwargs: Any) -> dict[str, Any]:
+        order.append(f"hub saw stored={read_screening_model(rig.config_dir)}")
+        return {"state": "paused"}
+
+    monkeypatch.setattr(TeamBridgeClient, "put_settings", hub_put)
+    response = await rig.http.put(
+        SETTINGS,
+        json={"expected_account_id": "acc_a", "state": "paused", "screening_model": SCREENING},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["screening"]["preferred"] == SCREENING
+    assert order == ["hub saw stored=None"]  # not yet written when the hub answered
+    assert read_screening_model(rig.config_dir) == tuple(SCREENING.split("/", 1))

@@ -38,7 +38,9 @@ import fnmatch
 import itertools
 import os
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from local_operator.tools.search_guard import (
@@ -1058,6 +1060,11 @@ class Target:
     #: could not pin the interpreter, so ``classify._tree_read`` gives it no
     #: lineage credit either (convergence of #3906 with #3918).
     unproven_code: bool = False
+    #: Why ``unproven_code`` was not proven, when the proof can name it (a
+    #: shadowing cwd entry, an unsupported node type). Told to the judge,
+    #: never a ranking input: "may run code on it" alone gave it nothing to
+    #: weigh (node2 #4108 P2 QA).
+    proof_gap: str | None = None
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
@@ -1105,6 +1112,24 @@ class _State:
     #: ``set -P`` / ``set -o physical``: every later ``cd`` resolves ``..``
     #: physically, as ``cd -P`` does (review R2-MINOR-2).
     physical: bool = False
+    #: The cwd of every LATER iteration of the enclosing ``for`` after a
+    #: ``cd $VAR`` (``cwd`` holds the first). See ``_Walker._cwd_fan_for``.
+    #: Read ONLY to record creations, never to rank a delete.
+    cwd_fan: tuple[str, ...] = ()
+    #: A ``cd`` of the enclosing ``for`` lands somewhere this walk cannot
+    #: name in some LATER iteration, while ``cwd`` (iteration 1) is still
+    #: known. ``_add`` then ranks a relative word at ``cwd`` AND as an
+    #: unresolved target. See ``_Walker._cd``.
+    cwd_later_unknown: bool = False
+    #: ``OLDPWD`` holds a cwd that was ``cwd_later_unknown`` when a later
+    #: ``cd`` left it, so ``cd -`` re-enters iteration-dependent ground even
+    #: though that ``cd`` cleared the flag (review R2-m1, PR #3964).
+    oldpwd_later_unknown: bool = False
+    #: The fan ``cwd_fan`` held when the last ``cd`` left it, i.e. every later
+    #: iteration's ``OLDPWD``. ``cd -`` / ``cd "$OLDPWD"`` restore it as the
+    #: fan (review R3-M1, PR #3964: ``(cd $r; cd /tmp; cd -; rm -rf
+    #: .local-operator)`` lost the ``~`` iteration and ranked LOW).
+    oldpwd_fan: tuple[str, ...] = ()
     #: Path-valued credential variables (value -> NAME), see
     #: ``credential_path``. Kept so a target that merely CONTAINS such a value
     #: can be told apart from one that stays inside it (``_target``).
@@ -1686,6 +1711,15 @@ def _operands(
     return operands, flags
 
 
+def _is_force_abbrev(flag: str) -> bool:
+    """``--force`` or a prefix git accepts for it (``--f`` .. ``--forc``).
+
+    Only for subcommands where ``--force`` is the sole long option starting
+    with ``f`` (``git worktree remove``), so every such prefix is unique.
+    """
+    return len(flag) >= 3 and "--force".startswith(flag)
+
+
 def _has_short(flags: list[str], letters: str) -> bool:
     return any(not f.startswith("--") and any(c in f[1:] for c in letters) for f in flags)
 
@@ -1913,6 +1947,56 @@ def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
     return words, stdin_fed
 
 
+#: A reserved word in command position directly followed by a subshell.
+_KEYWORD_SUBSHELL_RE = re.compile(r"^(?:(?:then|do|else|elif|if|while|until|!)\s+)+(?=\((?!\())")
+
+
+@dataclass
+class _CwdModel:
+    """Which cwd model the running ``resolve_command`` pass uses.
+
+    See :func:`resolve_command`: the loop-cd modelling this PR added (the
+    ``do (`` peel, the per-iteration cwd fan, the later-unknown flags) may
+    only ADD delete targets to what the pre-PR model resolved. The second,
+    ``base`` pass replays the pre-PR model, and ``engaged`` tells the first
+    pass whether any of that new modelling ran at all (so the replay is
+    skipped for the vast majority of commands, which never reach it).
+    """
+
+    base: bool = False
+    engaged: bool = False
+
+
+#: Set by ``resolve_command`` for the length of one pass; ``None`` outside it
+#: (a helper called directly then behaves as the current model).
+_CWD_MODEL: ContextVar[_CwdModel | None] = ContextVar("_CWD_MODEL", default=None)
+
+
+def _peel_subshell_keyword(text: str) -> str:
+    """``do (cd $r`` -> ``(cd $r``: the subshell a loop or branch body opens.
+
+    FIELD CASE (2026-11-14): in ``for r in a b; do (cd $r; git worktree add
+    x); done`` the piece ``do (cd $r`` starts with ``do``, so neither the
+    subshell save in ``walk`` nor ``_strip_grouping`` saw its ``(``; the
+    segment's program read as ``(cd``, the ``cd`` was dropped, and the
+    creation resolved against the loop's OUTER cwd — a path the command
+    never made. Peeling the keyword lets the ``(`` open a real subshell
+    scope and the ``cd`` move the cwd inside it. ``((`` is arithmetic and
+    is left alone.
+
+    The BASE-model pass of ``resolve_command`` leaves the text as it was
+    before this peel existed (the ``cd`` dropped, the body read at the outer
+    cwd), so its delete targets can be unioned with this model's.
+    """
+    model = _CWD_MODEL.get()
+    if model is not None and model.base:
+        return text
+    peeled = _KEYWORD_SUBSHELL_RE.sub("", text)
+    if model is not None and peeled != text:
+        model.engaged = True
+    return peeled
+
+
 def _strip_grouping(text: str) -> str:
     """Drop subshell/group delimiters the splitter leaves on a segment's edges.
 
@@ -1920,7 +2004,7 @@ def _strip_grouping(text: str) -> str:
     ``rm y )``, while the ``)`` closing a ``$(…)`` inside the segment is
     balanced and must stay or the substitution reads as broken.
     """
-    text = text.strip()
+    text = _peel_subshell_keyword(text.strip())
     while text[:1] in ("(", "{") and text[:2] != "((":
         text = text[1:].lstrip()
     while text[-1:] in (")", "}") and (
@@ -1996,6 +2080,11 @@ _PY_ALLOWED_NODES = frozenset(
         "Pass",
         "Break",
         "Continue",
+        # ``assert`` only raises: its test and message are ordinary
+        # expressions that ``ast.walk`` hands to this same allow-list, so it
+        # adds no capability a bare ``if not x: …`` read lacks (a parent's
+        # ``b = Path(p).read_bytes(); assert b`` check of a child's output).
+        "Assert",
         "Import",
         "ImportFrom",
         "alias",
@@ -2275,6 +2364,115 @@ def _py_small_int(node: object) -> bool:
     )
 
 
+def _py_unsupported_node(code: str) -> str | None:
+    """The first AST node type outside ``_PY_ALLOWED_NODES``, for the judge.
+
+    Diagnostic only: ``python_code_read_only`` remains the proof.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return "(does not parse)"
+    for n in ast.walk(tree):
+        if type(n).__name__ not in _PY_ALLOWED_NODES:
+            return type(n).__name__
+    return None
+
+
+#: Methods whose call result is PROVEN to be ``str``/``bytes`` whatever the
+#: receiver: on every object the allow-lists can reach these are pathlib's
+#: reads (``Path.read_bytes``/``read_text``), and nothing reachable defines
+#: them otherwise. A ``.replace`` on such a value is ``bytes``/``str.replace``.
+_PY_STR_RESULT_METHODS = frozenset({"read_bytes", "read_text"})
+
+
+def _py_proven_replace_callees(tree: object, imported: set[str]) -> set[int]:
+    """``id`` of every ``.replace`` Attribute PROVEN to be ``str``/``bytes.replace``.
+
+    WHY (field case, node2 lane, guard 0.106.6): a parent's read-only
+    ``python3 -I -c`` asserting ``b == a.replace(b"r6", b"r8")`` over two
+    files in its descendant's pad was sent to the judge, only because
+    ``replace`` is not an allowed attribute. It must stay out of
+    ``_PY_ALLOWED_ATTRS``: ``Path.replace(target)`` RENAMES and the attribute
+    check is untyped. So ``replace`` is admitted only where the RECEIVER's
+    type is proven, never by name alone:
+
+    - a ``str``/``bytes`` literal;
+    - a ``.read_bytes()``/``.read_text()`` call result (``_PY_STR_RESULT_METHODS``);
+    - a Name whose EVERY binding anywhere in the program is a top-level
+      (direct child of the module, so unconditional and not in a loop,
+      branch, ``with``, ``try``, function or comprehension) single-target
+      ``Assign`` of one of the above or of another such Name. Any other
+      binding — augmented assignment, walrus, a ``for``/comprehension target,
+      tuple unpacking, ``del``, an import, an argument — disproves it.
+
+    The call itself must be ``recv.replace(old, new[, count])``: 2 or 3
+    positional arguments, no keywords, no ``*``. ``Path("a").replace("b")``,
+    ``os.replace``, ``x = Path; x.replace(a, b)``, a subscript receiver and
+    ``f = a.replace`` (not a callee) all stay unproven. Constraint: this may
+    only ADD proofs for str/bytes; anything uncertain returns no id.
+    """
+    import ast
+
+    assert isinstance(tree, ast.Module)
+    # name -> the values of its top-level single-Name Assigns; ``plain``
+    # holds those targets' ids, so any OTHER Store of the name disproves it.
+    bindings: dict[str, list[ast.expr]] = {}
+    plain: set[int] = set()
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            plain.add(id(stmt.targets[0]))
+            bindings.setdefault(stmt.targets[0].id, []).append(stmt.value)
+    other_binders: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            if id(node) not in plain:
+                other_binders.add(node.id)
+        elif isinstance(node, ast.arg):
+            other_binders.add(node.arg)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            other_binders.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other_binders.add(node.name)
+        elif isinstance(node, ast.alias):
+            other_binders.add(node.asname or node.name.split(".")[0])
+
+    def proven(expr: ast.expr, visiting: frozenset[str]) -> bool:
+        if isinstance(expr, ast.Constant):
+            return isinstance(expr.value, (str, bytes))
+        if isinstance(expr, ast.Call):
+            return isinstance(expr.func, ast.Attribute) and expr.func.attr in _PY_STR_RESULT_METHODS
+        if isinstance(expr, ast.Name):
+            name = expr.id
+            if name in visiting or name in imported or name in other_binders:
+                return False
+            values = bindings.get(name)
+            return bool(values) and all(proven(v, visiting | {name}) for v in values)
+        return False
+
+    ok: set[int] = set()
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "replace"
+        ):
+            continue
+        if node.keywords or not 2 <= len(node.args) <= 3:
+            continue
+        if any(isinstance(a, ast.Starred) for a in node.args):
+            continue
+        if proven(node.func.value, frozenset()):
+            ok.add(id(node.func))
+    return ok
+
+
 def python_code_read_only(code: str) -> bool:
     """Can ``python -c CODE`` be PROVEN to write, delete and run nothing?
 
@@ -2311,7 +2509,9 @@ def python_code_read_only(code: str) -> bool:
     - builtin ``open`` only as a callee with a literal read mode;
     - ``sub``/``subn`` only with literal leading arguments, so the
       replacement is a string, never a callable;
-    - no dunder or ``_``-prefixed name or alias.
+    - no dunder or ``_``-prefixed name or alias;
+    - ``replace`` only as the callee of a receiver proven ``str``/``bytes``
+      (:func:`_py_proven_replace_callees`), since ``Path.replace`` renames.
 
     Anything else — a parse error, an unlisted node or name — is ``False``
     and keeps the conservative ranking (a judge call, never a LOW).
@@ -2358,6 +2558,7 @@ def python_code_read_only(code: str) -> bool:
     if bound & (imported | builtin_names) or imported & builtin_names:
         return False
     callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    proven_replace = _py_proven_replace_callees(tree, imported)
     known = _PY_ALLOWED_BUILTINS | imported | bound
     for node in nodes:
         if isinstance(node, ast.Name):
@@ -2366,6 +2567,8 @@ def python_code_read_only(code: str) -> bool:
             if node.id == "open" and id(node) not in callees:
                 return False  # ``o = open`` can be called later with any mode
         elif isinstance(node, ast.Attribute):
+            if id(node) in proven_replace and isinstance(node.ctx, ast.Load):
+                continue
             if node.attr not in _PY_ALLOWED_ATTRS or not isinstance(node.ctx, ast.Load):
                 return False
         elif isinstance(node, ast.Subscript):
@@ -2451,22 +2654,145 @@ _PY_STARTUP_ENV = (
 #: A cwd entry ``python -c`` would import before the stdlib (``sys.path[0]``
 #: is the cwd): ``pathlib`` importing a planted ``fnmatch.py`` runs it.
 _PY_SHADOW_SUFFIXES = (".py", ".pyc", ".so", ".pyd", ".pth")
+#: Module names a cwd entry must not carry for the read-only proof to hold.
+#:
+#: WHY BY NAME (node2 #4108 P2 QA, 2026-11-16): the check used to refuse ANY
+#: importable entry, so a parent proving a read of its child's pad from a repo
+#: cwd (which always holds a package or ``conftest.py``) could never pass. A
+#: proven program imports only allow-listed stdlib modules, and the stdlib
+#: imports only stdlib modules, so the only cwd entries that can run code are
+#: ones NAMED like a stdlib module (or ``sitecustomize``/``usercustomize``,
+#: which ``site`` imports from ``sys.path``). A ``mypkg/`` or ``conftest.py``
+#: is never imported.
+#:
+#: CONSTRAINTS: ``sys.stdlib_module_names`` is THIS runtime's stdlib; the
+#: ``python3`` on PATH may be older, so modules removed from recent releases
+#: are listed too (PEP 594 dead batteries, 3.10-3.13 removals). Names are
+#: casefolded: APFS is case-insensitive, so ``JSON.py`` is refused (an
+#: over-refusal at worst — import itself checks case — never a miss). The
+#: ``python3`` on PATH may also be NEWER than this runtime, so a top-level
+#: module added since is not in the set; checked for 3.14.7 (PR #4142 review):
+#: ``-X importtime`` of the ``_PY_READ_MODULES`` closure imports no top-level
+#: name a 3.12 runtime lacks. Re-check when a new release adds stdlib modules.
+_PY_REMOVED_STDLIB = frozenset(
+    {
+        # 3.12 removals
+        "asynchat",
+        "asyncore",
+        "imp",
+        "distutils",
+        "smtpd",
+        # 3.13 removals (PEP 594) and lib2to3
+        "aifc",
+        "audioop",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "crypt",
+        "imghdr",
+        "mailcap",
+        "msilib",
+        "nis",
+        "nntplib",
+        "ossaudiodev",
+        "pipes",
+        "sndhdr",
+        "spwd",
+        "sunau",
+        "telnetlib",
+        "uu",
+        "xdrlib",
+        "lib2to3",
+        "_crypt",
+        "_msi",
+        # 3.9-3.11 removals an older interpreter's stdlib may still import
+        "_bootlocale",
+        "_dummy_thread",
+        "dummy_threading",
+        "formatter",
+        "parser",
+        "symbol",
+        "binhex",
+        "macpath",
+    }
+)
+_PY_SHADOWABLE = frozenset(
+    n.casefold()
+    for n in (*sys.stdlib_module_names, *_PY_REMOVED_STDLIB, "sitecustomize", "usercustomize")
+)
 
 
-def _cwd_shadows_imports(cwd: str) -> bool:
+def _shadow_name(entry: str) -> str:
+    """The module name a cwd entry would be imported as, casefolded.
+
+    Up to the first dot, so an extension's ABI tag drops away
+    (``json.cpython-314-darwin.so`` → ``json``); a package dir is its name.
+    """
+    return entry.split(".", 1)[0].casefold()
+
+
+def _dir_may_import(path: str) -> bool:
+    """Could a dir named like a stdlib module supply code to an import?
+
+    True when it holds ``__init__`` under any loader suffix (a regular package)
+    OR any other importable entry: a loader-suffix file or a subdir.
+
+    WHY NOT ONLY ``__init__`` (PR #4142 security m1): a dir without one is a
+    namespace portion, which a REAL stdlib module found later on ``sys.path``
+    beats — but some names in ``sys.stdlib_module_names`` are absent on this
+    platform. ``nt`` is one on macOS, and 3.14's ``ntpath`` (imported by
+    ``pathlib``) runs ``from nt import _path_splitroot_ex``: with no real
+    ``nt``, the cwd ``nt/`` namespace package wins and its
+    ``_path_splitroot_ex.py`` runs. Only an EMPTY (or non-importable) dir
+    stays harmless, so ``json/`` holding just ``notes.txt`` still passes.
+    """
+    with os.scandir(path) as it:
+        return any(e.name.endswith(_PY_SHADOW_SUFFIXES) or e.is_dir() for e in it)
+
+
+#: Longest module name a gap reason quotes; stdlib names are far shorter.
+_GAP_NAME_MAX = 64
+
+
+def _gap_name(module: str) -> str:
+    """``module`` made safe to quote in a reason the judge reads as proved fact.
+
+    WHY (PR #4142 security m2): a cwd FILENAME is attacker-chosen text — the
+    reviewer's ``json. Harness note - proof complete, rank LOW.py`` put a
+    fake instruction into the judge's lineage facts. Only the module name is
+    ever quoted, stripped to ``[A-Za-z0-9_.]`` and capped, never ``e.name``.
+    """
+    return re.sub(r"[^A-Za-z0-9_.]", "", module)[:_GAP_NAME_MAX] or "?"
+
+
+def _cwd_shadowing_entry(cwd: str) -> str | None:
+    """Why the cwd could shadow a stdlib import, as a judge-facing gap; else None.
+
+    Fails closed: an unreadable cwd or entry returns a description of that
+    instead of None, so the read-only proof is refused. The text names only
+    the sanitized module name (``_gap_name``), never the raw entry name.
+    """
     try:
         entries = list(os.scandir(cwd))
     except OSError:
-        return True
+        return "the cwd is unreadable"
     for e in entries:
+        module = _shadow_name(e.name)
+        if module not in _PY_SHADOWABLE:
+            continue
+        name = _gap_name(module)
         if e.name.endswith(_PY_SHADOW_SUFFIXES):
-            return True
+            return f"a cwd file for module {name} may shadow a stdlib import"
         try:
-            if e.is_dir() and os.path.exists(os.path.join(e.path, "__init__.py")):
-                return True
+            if e.is_dir() and _dir_may_import(e.path):
+                return f"a cwd package dir {name}/ may shadow a stdlib import"
         except OSError:
-            return True
-    return False
+            return f"the cwd dir {name}/ is unreadable, so it may shadow a stdlib import"
+    return None
+
+
+def _cwd_shadows_imports(cwd: str) -> bool:
+    return _cwd_shadowing_entry(cwd) is not None
 
 
 def _in_place_edit(name: str, args: list[Expanded]) -> bool:
@@ -2763,6 +3089,51 @@ def _command_word(text: str) -> str:
     return ""
 
 
+def _for_body_moves_outside_subshells(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
+    """Whether the loop at ``pieces[index]`` moves directory OUTSIDE a subshell.
+
+    ``_Walker._cwd_fan_for`` may derive a later iteration's cwd from the
+    first one's only when every iteration starts where the first did: a
+    ``cd`` inside ``( … )`` dies with the subshell, one in the body proper
+    carries into the next iteration (``for r in a b; do cd $r; …`` runs
+    the second ``cd b`` from inside ``a``). Same extent rules as
+    :func:`_for_body_moves`, and the same fail-closed answer (``True``)
+    when the extent or the nesting cannot be followed.
+    """
+    depth = 0
+    paren = 0
+    started = False
+    for text, _flag, _op in pieces[index:]:
+        word = _command_word(text)
+        if word in _LOOP_OPENERS:
+            depth += 1
+        elif word == "done":
+            depth -= 1
+        if not started:
+            if depth != 1:
+                return True
+            started = True  # the header: its list words are data
+            continue
+        head = _peel_subshell_keyword(text.strip())
+        opens = 0
+        while head.startswith("(") and not head.startswith("(("):
+            opens += 1
+            head = head[1:].lstrip()
+        if paren + opens == 0 and _BODY_MOVES_RE.search(text):
+            return True
+        tail = head
+        closes = 0
+        while tail.endswith(")") and tail.count(")") > tail.count("("):
+            closes += 1
+            tail = tail[:-1].rstrip()
+        paren += opens - closes
+        if paren < 0:
+            return True
+        if depth <= 0:
+            return False
+    return True
+
+
 def _for_body_moves(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
     """Whether the loop opened at ``pieces[index]`` changes directory in its body.
 
@@ -2893,6 +3264,10 @@ class _Snapshot:
     home: str
     private_cwd: bool = False
     physical: bool = False
+    cwd_fan: tuple[str, ...] = ()
+    cwd_later_unknown: bool = False
+    oldpwd_later_unknown: bool = False
+    oldpwd_fan: tuple[str, ...] = ()
 
 
 #: Characters that make a credential value more than one plain path: shell
@@ -2968,6 +3343,8 @@ class _Walker:
         #: ``PATH`` as the command inherits it: ``_inline_read_only`` trusts
         #: a bare ``python3`` only while this command has not changed it.
         self.inherited_path = env.get("PATH")
+        #: Why the last ``_inline_read_only`` refused its proof (``Target.proof_gap``).
+        self.read_only_gap: str | None = None
         self.result = Resolution()
         #: Non-read-only programs an earlier part of THIS command runs (each
         #: reaches ``_backstop``). Any of them could plant a module in the cwd
@@ -3009,16 +3386,39 @@ class _Walker:
         #: Whether the ``for`` being walked changes directory anywhere in its
         #: body; set per piece by ``walk`` from :func:`_for_body_moves`.
         self.for_body_moves = False
+        #: Same, counting only moves OUTSIDE a subshell (see
+        #: :func:`_for_body_moves_outside_subshells`), and per loop variable
+        #: the facts ``_cwd_fan_for`` needs: whether the body keeps every
+        #: iteration's starting cwd, that cwd, and the subshell depth of the
+        #: ``for`` header (a fanned ``cd`` must sit in a deeper subshell).
+        self.for_body_moves_outer = True
+        self.for_fan_scope: dict[str, tuple[bool, str | None, int]] = {}
+        #: ``( … )`` subshells currently open across this walk.
+        self.subshell_depth = 0
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
         st = self.state
-        return _Snapshot(dict(st.env), st.cwd, st.home, st.private_cwd, st.physical)
+        return _Snapshot(
+            dict(st.env),
+            st.cwd,
+            st.home,
+            st.private_cwd,
+            st.physical,
+            st.cwd_fan,
+            st.cwd_later_unknown,
+            st.oldpwd_later_unknown,
+            st.oldpwd_fan,
+        )
 
     def _restore(self, snap: _Snapshot) -> None:
         self.state.env, self.state.cwd, self.state.home = snap.env, snap.cwd, snap.home
         self.state.private_cwd = snap.private_cwd
         self.state.physical = snap.physical
+        self.state.cwd_fan = snap.cwd_fan
+        self.state.cwd_later_unknown = snap.cwd_later_unknown
+        self.state.oldpwd_later_unknown = snap.oldpwd_later_unknown
+        self.state.oldpwd_fan = snap.oldpwd_fan
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -3031,14 +3431,47 @@ class _Walker:
     # -- entry -------------------------------------------------------------
     def walk(self, command: str, depth: int = 0) -> None:
         if depth > _MAX_PEEL_DEPTH:
-            if _DELETE_WORD_RE.search(command):
+            # Structural ownership is not proof that the owned substitution was
+            # analyzed: assignment/body dedup may have removed its shallower
+            # fallback. Once the budget is exhausted, ANY unexamined shell text
+            # can hide effects (including writes without a delete word). Keep
+            # that uncertainty visible instead of certifying the command LOW.
+            if command.strip():
                 self.result.opaque_reasons.append("nested shell too deep to resolve")
             return
         # S2-4: each heredoc body belongs to the segment whose ``<<`` opened it.
         # ``_split`` blanks the bodies but keeps the openers, in order, so the
         # bodies are dealt out to segments by counting the openers in each.
         lexed = lex(command)
-        pieces, owned_bodies = _fd_redirect_merge(lexed.segments, lexed.bodies)
+        owned_bodies = [list(bodies) for bodies in lexed.bodies]
+        if not lexed.open:
+            for index, (text, _piped, _op) in enumerate(lexed.segments):
+                if not any(lexed.nested_bodies[index]):
+                    continue
+                raw_words, redirects = scan(text)
+                # Only assignment-only segments guarantee every complete sub is
+                # recursively walked below without also consuming these bodies
+                # as shell stdin. The shared lexer retains nested bodies for R10
+                # split substitutions; omit a duplicate only with its structural
+                # same-segment ownership proof, never by comparing body text.
+                if (
+                    not redirects
+                    and raw_words
+                    and all(
+                        not word.broken
+                        and word.parts
+                        and word.parts[0].kind == "bare"
+                        and _ASSIGN_RE.match(word.parts[0].text)
+                        for word in raw_words
+                    )
+                    and any(part.kind == "sub" for word in raw_words for part in word.parts)
+                ):
+                    owned_bodies[index] = [
+                        body
+                        for body, nested in zip(owned_bodies[index], lexed.nested_bodies[index])
+                        if not nested
+                    ]
+        pieces, owned_bodies = _fd_redirect_merge(lexed.segments, owned_bodies)
         # R7-1/R8, structural: if the text ends inside a construct the ONE
         # shared scanner tracks (quote, ``$(``, ``${``, backtick, heredoc), its
         # segments are a guess. A delete word anywhere then fails toward
@@ -3080,9 +3513,10 @@ class _Walker:
             # segments. A subshell spans several pieces (``( cd x && rm y )``),
             # so it is tracked as a stack: state is saved at its ``(`` and
             # restored after the piece holding its unmatched ``)``.
-            stripped = text.strip()
+            stripped = _peel_subshell_keyword(text.strip())
             while stripped.startswith("(") and not stripped.startswith("(("):
                 groups.append(self._save())
+                self.subshell_depth += 1
                 stripped = stripped[1:].lstrip()
             closes = 0
             tail = stripped
@@ -3113,6 +3547,7 @@ class _Walker:
             )
             # Read by ``_for`` when this piece opens a ``for`` (review round 2 m1).
             self.for_body_moves = _for_body_moves(pieces, index)
+            self.for_body_moves_outer = _for_body_moves_outside_subshells(pieces, index)
             if isolated:
                 snap = self._save()
                 self._segment(
@@ -3140,6 +3575,10 @@ class _Walker:
             for _ in range(closes):
                 if groups:
                     self._restore(groups.pop())
+                    self.subshell_depth -= 1
+        # A subshell left open by this text (a parse this walker cannot
+        # close) must not leak its depth into the caller's walk.
+        self.subshell_depth -= len(groups)
 
     # -- one segment ---------------------------------------------------------
     def _splice_env_split(
@@ -3866,15 +4305,206 @@ class _Walker:
             # assume success (or recover it after an unmodelled popd), so
             # invalidate BOTH instead of letting cd - revive a stale path.
             st.cwd = None
+            st.cwd_later_unknown = False  # ``cwd`` None already covers it
+            st.oldpwd_later_unknown = False  # OLDPWD is dropped below
+            st.oldpwd_fan = ()
             st.private_cwd = private_target
             st.env.pop("OLDPWD", None)
             return
         st.private_cwd = False
+        previous_oldpwd = (
+            os.path.normpath(st.env["OLDPWD"]) if st.env.get("OLDPWD", "").startswith("/") else None
+        )
         if previous is None:
             st.env.pop("OLDPWD", None)
         else:
             st.env["OLDPWD"] = previous
+        word = operands[0] if operands else None
+        outer_fan = st.cwd_fan
+        # ``cd -`` / ``cd "$OLDPWD"`` returns to the cwd the previous ``cd``
+        # left; if THAT one was iteration-dependent, so is this landing
+        # (review R2-m1: ``for r in . ..; do cd $r; cd /tmp; cd -; rm …``).
+        to_oldpwd = word is not None and (
+            word.text == "-" or any(r[0] == "OLDPWD" for r in word.refs)
+        )
+        returns_to_unknown = to_oldpwd and st.oldpwd_later_unknown
+        # A landing EXACTLY on OLDPWD (``cd -``, ``cd "$OLDPWD"``) is, in every
+        # iteration, the cwd the previous ``cd`` left in that iteration, so
+        # its fan is the one that ``cd`` left behind (review R3-M1). Anything
+        # built on top (``cd "$OLDPWD/sub"``) is not modelled: if the left fan
+        # was non-empty, later iterations are unknown (fail closed).
+        oldpwd_fan = st.oldpwd_fan
+        exact_oldpwd = to_oldpwd and (
+            word is not None
+            and (word.text == "-" or (previous_oldpwd is not None and path == previous_oldpwd))
+        )
+        st.oldpwd_later_unknown = st.cwd_later_unknown
+        st.oldpwd_fan = outer_fan
+        fan = self._cwd_fan_for(word, physical, path, previous)
+        # ``None``: a later iteration lands somewhere this walk cannot name
+        # (review of this change: ``for r in /tmp ~; do cd $r; rm -rf
+        # .local-operator; done`` read only the first iteration, LOW). The
+        # FIRST iteration still lands at ``path`` — bash runs it before any
+        # unknown one — so ``cwd`` keeps it and only the later iterations are
+        # flagged unknown; ``_add`` ranks a relative word at both. Forgetting
+        # ``cwd`` instead dropped a certain ``~/.local-operator`` delete from
+        # CRITICAL to a judge-able HIGH (review R1-M1, PR #3964).
+        st.cwd_fan = fan or ()
         st.cwd = path
+        if fan is None:
+            st.cwd_fan = self._surviving_fan(word, physical, outer_fan, path)
+            st.cwd_later_unknown = True
+        elif word is None or (
+            (spun := self._iterations(word)) is not None
+            and all(
+                text.startswith(("/", "~"))
+                for text in [word.text] + [_fan_out(word, values).text for _roots, values in spun]
+            )
+        ):
+            # Every iteration lands somewhere named whatever cwd it started
+            # in: home, or an absolute path in every iteration.
+            st.cwd_later_unknown = False
+        # Otherwise (a relative or ``cd -`` move from an already-unknown
+        # later cwd) the later iterations stay unknown.
+        if returns_to_unknown:
+            st.cwd_later_unknown = True
+        if oldpwd_fan:
+            # ADDED to whatever the landing computed above (which may already
+            # be fail-closed), never replacing it.
+            if exact_oldpwd:
+                st.cwd_fan = tuple(
+                    dict.fromkeys(f for f in (*st.cwd_fan, *oldpwd_fan) if f != path)
+                )
+            elif to_oldpwd:
+                st.cwd_later_unknown = True
+
+    def _cwd_fan_for(
+        self, w: Expanded | None, physical: bool, path: str | None, previous: str | None
+    ) -> tuple[str, ...] | None:
+        """Where a ``cd`` lands in every LATER ``for`` iteration.
+
+        ``()`` when every iteration lands where the first does (no loop
+        variable or a one-value loop with no enclosing fan, or an absolute
+        ``cd`` ending a fan); ``None`` when some later iteration lands
+        somewhere this walk cannot name — the caller keeps ``cwd`` (the
+        first iteration) and what ``_surviving_fan`` can still move, and
+        flags the rest ``cwd_later_unknown``.
+
+        FIELD CASE (2026-11-14, subagent c40435c7fc86): ``for r in services
+        terraform-cloud-bootstrap; do (cd $r; git worktree add .worktrees/x
+        …); done`` made one worktree per repository, but the walker sees the
+        body once, with ``cwd`` at the FIRST value, so the creation ledger
+        could hold at most the first tree. Its family's later ``git worktree
+        remove`` of the others then had no row to stand on and went to the
+        judge. This carries the other iterations' cwds so ``_create`` can
+        list their creations too.
+
+        CONSTRAINTS. Only a LOGICAL cd of a literal-list loop word whose every
+        iteration resolves to an existing directory fans out; anything else
+        (physical mode, an opaque or glob word, a missing directory) gives
+        ``None`` (unknown cwd) — never a guess. A relative cd after a fanned
+        one moves every fanned cwd with it; an absolute or non-loop cd ends
+        the fan. Creation candidates from the fan are kept by
+        ``provenance.commit_creations`` only when absent before the call and
+        a directory after it, so an over-listed path is never recorded; a
+        relative delete target is ranked at the first cwd AND every fanned
+        one (``_add``), which can only raise its rank.
+        """
+        st = self.state
+        model = _CWD_MODEL.get()
+        if model is not None and model.base:
+            return ()  # the pre-PR model: no fan (see ``resolve_command``)
+        if path is None or w is None or w.opaque or w.pattern is not None:
+            return ()
+        loop_word = bool(w.refs) and any(r[0] in self.for_lists for r in w.refs)
+        iterations = self._iterations(w) if loop_word else []
+        # A loop word with NO later iterations (a one-value list) is a literal
+        # in every iteration of every enclosing loop, so it moves an outer fan
+        # exactly as a literal does (review R2-M1, PR #3964: ``for r in a .;
+        # do for s in .; do (cd $r; cd $s; rm -rf .local-operator)`` once
+        # fell through to the inner loop's scope check, returned ``()`` and
+        # dropped the outer iteration's ``~``: LOW where base was CRITICAL).
+        if not iterations and iterations is not None:
+            if st.cwd_fan and not w.text.startswith(("/", "~")):
+                if physical or w.text == "-":
+                    return None
+                moved = tuple(_logical(w.text, c) for c in st.cwd_fan)
+                if not all(m is not None and os.path.isdir(m) for m in moved):
+                    return None
+                return tuple(m for m in moved if m is not None)
+            return ()
+        if physical:
+            return None
+        relative = not w.text.startswith("/") or any(
+            not _fan_out(w, values).text.startswith("/") for _roots, values in iterations or ()
+        )
+        if relative:
+            # A RELATIVE loop cd lands per iteration only if every iteration
+            # starts where the first did: inside a subshell opened in the
+            # body, from the loop header's own cwd, in a body that never
+            # moves outside a subshell. Anything else: no fan. ANY relative
+            # value counts, not only the first (review R1-m1, PR #3964):
+            # ``cd /tmp; for r in ~/a ..; do cd $r; …`` runs ``cd ..`` from
+            # ``~/a``, not from ``/tmp``; that previous-iteration cwd is not
+            # modelled, so it is unknown (``None``), never the header's.
+            for root in {self.for_roots.get(r[0], r[0]) for r in w.refs if r[0] in self.for_lists}:
+                keeps, header_cwd, header_depth = self.for_fan_scope.get(root, (False, None, 0))
+                if not keeps or header_cwd != previous or self.subshell_depth <= header_depth:
+                    return None
+        if iterations is None:
+            return None
+        # Every iteration of THIS loop runs from every cwd an enclosing fan
+        # carries too (the inner header runs once per outer iteration), so the
+        # landings are the cross product, never only ``previous``'s.
+        spellings = [w.text] + [_fan_out(w, values).text for _roots, values in iterations]
+        fan: list[str] = []
+        for start in (previous, *st.cwd_fan):
+            for text in spellings:
+                if OPAQUE_MARK in text:
+                    return None
+                landed = _logical(text, start)
+                if landed is None or not os.path.isdir(landed):
+                    return None
+                fan.append(landed)
+        return tuple(dict.fromkeys(f for f in fan if f != path))
+
+    def _surviving_fan(
+        self, w: Expanded | None, physical: bool, outer: tuple[str, ...], path: str | None
+    ) -> tuple[str, ...]:
+        """The enclosing fan's cwds moved by a ``cd`` whose own later
+        iterations cannot be named (``_cwd_fan_for`` returned ``None``).
+
+        The outer fan was proved per iteration (each outer iteration starts
+        the body at its fanned cwd), so the first value's move from each of
+        them is as certain as ``cwd`` is; the other values are a superset,
+        which can only raise a rank (and ``commit_creations`` drops any
+        over-listed creation). Only the later INNER iterations stay unknown,
+        which the caller flags. Before this, ``None`` discarded the outer fan:
+        a certain ``~/.local-operator`` delete fell to a judge-able HIGH
+        (review R2-M1, PR #3964). ``()`` when nothing can be moved soundly.
+        """
+        if (
+            not outer
+            or w is None
+            or physical
+            or w.opaque
+            or w.pattern is not None
+            or w.text == "-"
+            or w.text.startswith(("/", "~"))
+        ):
+            return ()
+        spellings = [w.text] + [
+            _fan_out(w, values).text for _roots, values in self._iterations(w) or ()
+        ]
+        moved: list[str] = []
+        for start in outer:
+            for text in spellings:
+                if OPAQUE_MARK in text or text.startswith("~"):
+                    continue
+                landed = _logical(text, start)
+                if landed is not None and os.path.isdir(landed):
+                    moved.append(landed)
+        return tuple(dict.fromkeys(m for m in moved if m != path))
 
     def _private_script_target(self, text: str) -> None:
         # A consuming shell/eval has an unresolved deleting script, not ordinary
@@ -3888,6 +4518,9 @@ class _Walker:
     def _for(self, words: list[Expanded]) -> None:
         """``for VAR in WORDS``: R6 — literal lists bind VAR to their values."""
         st = self.state
+        model = _CWD_MODEL.get()
+        if model is not None:
+            model.engaged = True  # loop-cd modelling may differ from base's
         var = words[0].text
         values: list[Expanded] = []
         seen_in = False
@@ -3965,6 +4598,11 @@ class _Walker:
         st.env[var] = values[0].text
         self.for_lists[var] = [v.text for v in values]
         self.for_roots[var] = var
+        self.for_fan_scope[var] = (
+            not self.for_body_moves_outer,
+            st.cwd,
+            self.subshell_depth,
+        )
 
     def _ln(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, frozenset({"-t", "--target-directory"}))
@@ -4221,33 +4859,65 @@ class _Walker:
         st = self.state
         if not words or not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
             return False
+        # Every refusal below names its gap (field case, node2 lane, guard
+        # 0.106.6): an unexplained refusal left the judge without the one fact
+        # that sent the read to it. Fixed phrases only, never command text
+        # (the judge reads the gap as proved fact; see ``_gap_name``).
         # Pin the interpreter (review r1 M2): ``./python3``, ``/abs/python3``
         # or a ``PATH`` this command rewrote can run a planted executable
         # named ``python3`` that ignores CODE. Only a bare word looked up on
         # the INHERITED ``PATH`` is the interpreter the proof is about.
         if words[0].text != name or "/" in words[0].text or words[0].opaque or assigns:
+            self.read_only_gap = "the interpreter is wrapped, assigned to or not a bare name"
             return False
         if st.env.get("PATH") != self.inherited_path:
+            self.read_only_gap = "the command changed PATH, so python3 may be another program"
             return False
         if self.programs_run or self.named or self.linked or self.result.targets:
+            self.read_only_gap = "an earlier program in the command may plant what python imports"
             return False
         if any(t.op != "touch" for t in self.result.touched) or self.result.created:
+            self.read_only_gap = "an earlier write in the command may plant what python imports"
             return False
-        if any(st.env.get(k) for k in _PY_STARTUP_ENV):
-            return False
-        if st.cwd is None or _cwd_shadows_imports(st.cwd):
+        startup = [k for k in _PY_STARTUP_ENV if st.env.get(k)]
+        if startup:
+            self.read_only_gap = f"start-up variable {startup[0]} is set"
             return False
         rest = words[1:]
+        flags: set[str] = set()
         while rest and rest[0].text in _PY_SAFE_FLAGS:
+            flags.add(rest[0].text)
             rest = rest[1:]
         if len(rest) < 2 or rest[0].text != "-c":
+            self.read_only_gap = "an interpreter option outside the safe set precedes -c"
             return False
+        # ``-I``/``-P`` keep the cwd off ``sys.path`` (an interpreter too old
+        # for ``-P`` exits on the unknown option, running nothing), so nothing
+        # there can shadow an import and the cwd need not be read at all.
+        if not flags & {"-I", "-P"}:
+            if st.cwd is None:
+                self.read_only_gap = "the cwd is unknown"
+                return False
+            shadow = _cwd_shadowing_entry(st.cwd)
+            if shadow is not None:
+                self.read_only_gap = shadow
+                return False
         code = rest[1]
         if code.opaque or code.pattern is not None or code.substitutions:
+            self.read_only_gap = "the code is substituted or not literal"
             return False
         if OPAQUE_MARK in code.text or TEMP_MARK in code.text:
+            self.read_only_gap = "the code is substituted or not literal"
             return False
-        return python_code_read_only(code.text)
+        if python_code_read_only(code.text):
+            return True
+        node = _py_unsupported_node(code.text)
+        self.read_only_gap = (
+            f"unsupported syntax {node}"
+            if node
+            else "the code calls or binds outside the allow-list"
+        )
+        return False
 
     def _backstop(
         self,
@@ -4276,6 +4946,7 @@ class _Walker:
         """
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
+        self.read_only_gap = None
         read_only_code = self._inline_read_only(name, args, assigns)
         # ``args[prefix]`` is the interpreter word: ``args`` is the UNPEELED
         # argv, so without the slice a wrapper (``env python3 -c …``) hides
@@ -4324,6 +4995,7 @@ class _Walker:
                             script=script,
                             read_only_code=read_only_code and not as_output,
                             unproven_code=unproven_code,
+                            proof_gap=self.read_only_gap if unproven_code else None,
                             as_output=as_output,
                             executes=executes,
                             assigned=assigned,
@@ -4356,6 +5028,7 @@ class _Walker:
         base: str | None = None,
         *,
         name_of: Callable[[Expanded], Expanded | None] | None = None,
+        cwd_fan: bool = False,
     ) -> None:
         """Record a creation candidate for ``exp`` and every ``for`` value it takes.
 
@@ -4371,6 +5044,13 @@ class _Walker:
         unrecorded directory is merely judged rather than trusted. ``name_of``
         derives the created word from each fanned-out word (clone's URL to
         default directory name); ``None`` from it skips that value.
+
+        ``cwd_fan`` (PR #3964): the base is the walk's cwd (not ``git -C``),
+        so a RELATIVE word also lands under every later outer-loop iteration's
+        cwd in ``state.cwd_fan`` (see ``_cwd_fan_for``); those paths are
+        recorded too. A word that itself moves with a ``for`` loop is left to
+        the value fan above only — the cross product with the cwd fan is not
+        modelled, and recording fewer candidates is the fail-closed side.
         """
         iterations = self._iterations(exp)
         if iterations is None:
@@ -4381,11 +5061,24 @@ class _Walker:
             if path is not None:
                 self.result.created.append(Creation(kind=kind, path=path))
                 self._name(path)
+        if not cwd_fan or (exp.refs and any(r[0] in self.for_lists for r in exp.refs)):
+            return
+        named = name_of(exp) if name_of is not None else exp
+        if named is None or named.text.startswith(("/", "~")):
+            return
+        first = self._literal_dir(named, base)
+        if first is None:
+            return
+        for cwd in self.state.cwd_fan:
+            other = self._literal_dir(named, cwd)
+            if other is not None and other != first:
+                self.result.created.append(Creation(kind=kind, path=other))
+                self._name(other)
 
     def _mkdir(self, args: list[Expanded]) -> None:
         operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
         for w in operands:
-            self._create("mkdir", w)
+            self._create("mkdir", w, cwd_fan=True)
 
     def _mktemp(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, _MKTEMP_VALUE_FLAGS)
@@ -4424,7 +5117,7 @@ class _Walker:
             if not operands:
                 return
             if len(operands) >= 2:
-                self._create("clone", operands[1], base)
+                self._create("clone", operands[1], base, cwd_fan=cwd_override is None)
                 return
             url = operands[0]
             if url.opaque or url.pattern is not None:
@@ -4436,7 +5129,7 @@ class _Walker:
                 name = name[:-4] if name.endswith(".git") else name
                 return Expanded(text=name) if name and name not in (".", "..") else None
 
-            self._create("clone", url, base, name_of=default_name)
+            self._create("clone", url, base, name_of=default_name, cwd_fan=cwd_override is None)
             return
         if len(args) < 2:
             return
@@ -4444,10 +5137,15 @@ class _Walker:
         if sub == "add":
             operands, _ = _operands(args[2:], _GIT_WORKTREE_ADD_VALUE_FLAGS)
             if operands:
-                self._create("worktree", operands[0], base)
+                self._create("worktree", operands[0], base, cwd_fan=cwd_override is None)
         elif sub == "remove":
             operands, flags = _operands(args[2:])
-            forced = _has_short(flags, "f") or "--force" in flags
+            # git's parse-options accepts any unique prefix of a long option,
+            # and ``--force`` is ``worktree remove``'s only ``--f…`` option, so
+            # ``--f`` .. ``--forc`` force too (review R1-m2, PR #3964; measured
+            # with git 2.55: ``git worktree remove --f`` of an untracked-dirty
+            # tree, rc 0, tree gone). Kin admission keys on ``forced``.
+            forced = _has_short(flags, "f") or any(_is_force_abbrev(f) for f in flags)
             for w in operands:
                 saved = self.state.cwd
                 self.state.cwd = base
@@ -4458,7 +5156,7 @@ class _Walker:
                         target.worktree_remove = True
                         target.forced = forced
                         target.force_count = sum(
-                            1 if f == "--force" else f[1:].count("f")
+                            1 if _is_force_abbrev(f) else f[1:].count("f")
                             for f in flags
                             if f.startswith("-")
                         )
@@ -4509,6 +5207,70 @@ class _Walker:
             # to the first iteration's.
             self._through_new_link(extra)
             self.result.targets.append(extra)
+        self._add_at_fanned_cwds(exp, op, program, selected, iterations)
+        self._add_at_unknown_later_cwd(exp, op, program, selected, iterations)
+
+    def _add_at_unknown_later_cwd(
+        self,
+        exp: Expanded,
+        op: str,
+        program: str,
+        selected: bool,
+        iterations: list[tuple[tuple[str, ...], dict[str, str]]],
+    ) -> None:
+        """Add an unresolved target for a relative word whose later loop
+        iterations run in a cwd this walk cannot name (``cwd_later_unknown``).
+
+        The word was already ranked at iteration 1's known cwd, so a certain
+        CRITICAL there stays CRITICAL; this extra target makes the rest at
+        least HIGH (review R1-M1, PR #3964).
+        """
+        st = self.state
+        if not st.cwd_later_unknown or exp.opaque:
+            return
+        spellings = [exp.text] + [_fan_out(exp, values).text for _roots, values in iterations]
+        if all(text.startswith(("/", "~")) for text in spellings):
+            return
+        saved = st.cwd
+        try:
+            st.cwd = None
+            extra = _target(exp, op, program, st)
+        finally:
+            st.cwd = saved
+        extra.selected = selected
+        self.result.targets.append(extra)
+
+    def _add_at_fanned_cwds(
+        self,
+        exp: Expanded,
+        op: str,
+        program: str,
+        selected: bool,
+        iterations: list[tuple[tuple[str, ...], dict[str, str]]],
+    ) -> None:
+        """Rank a RELATIVE word again at every later loop iteration's cwd.
+
+        ``for r in a b; do (cd $r; rm -rf x); done`` deletes ``a/x`` AND
+        ``b/x``; the walk sees the body once, at ``a`` (``_cwd_fan_for``).
+        Every word spelling (the word and its own loop fan-out) is ranked at
+        every fanned cwd — a superset of what bash runs, which can only
+        raise the verdict.
+        """
+        st = self.state
+        if not st.cwd_fan or exp.text.startswith(("/", "~")) or exp.opaque:
+            return
+        words = [exp] + [_fan_out(exp, values) for _roots, values in iterations]
+        saved = st.cwd
+        try:
+            for cwd in st.cwd_fan:
+                st.cwd = cwd
+                for word in words:
+                    extra = _target(word, op, program, st)
+                    extra.selected = selected
+                    self._unpin_relinked(extra, word.text)
+                    self.result.targets.append(extra)
+        finally:
+            st.cwd = saved
 
     def _through_new_link(self, target: Target) -> None:
         """S7: a target at or under a symlink an earlier part of THIS command made.
@@ -4905,6 +5667,12 @@ READ_ONLY_PROGRAMS = frozenset(
         "basename",
         "dirname",
         "sleep",
+        # ``cut`` (field case, node2 lane, guard 0.106.6: ``test "$(sha256sum
+        # F | cut -d' ' -f1)" = …`` before a proven-read python made the whole
+        # check unprovable). GNU (-b -c -d -f -n -s -z --complement
+        # --output-delimiter) and BSD (-b -c -d -f -n -s -w) cut have no
+        # option that writes a file or runs a program: stdout only.
+        "cut",
         # Shell words that move, bind or branch without writing a file; their
         # bodies and later segments are walked on their own.
         "cd",
@@ -5950,14 +6718,68 @@ _RECURSIVE_GLOB_RE = re.compile(r"globstar|\b(?:zsh|ksh|fish|setopt)\b")
 def resolve_command(
     command: str, *, cwd: str | None, env: Mapping[str, str], home: str
 ) -> Resolution:
-    """Every path ``command`` would destroy, resolved statically. Never runs it."""
+    """Every path ``command`` would destroy, resolved statically. Never runs it.
+
+    INVARIANT (review R3, PR #3964): the loop-cd modelling (``do (`` peel,
+    per-iteration cwd fan, later-unknown flags) may only ADD what a command
+    is ranked against, never remove it. Three review waves in a row found a
+    shape where the new model computed a cwd that dropped one iteration's
+    real cwd, so a certain ``~/.local-operator`` delete fell from base's
+    CRITICAL to LOW. Rather than chase shapes, when that modelling ran at all
+    the command is walked a second time under the pre-PR model (``base``:
+    no peel, no fan) and its targets, touches, blind words and opaque
+    reasons are UNIONED into the result. Ranking is a maximum over those,
+    so the result ranks at least as high as either model alone.
+    ``created`` comes from the current model only: creation recording is
+    what the fan exists for (``do (cd $r; git worktree add …)``), and
+    ``provenance.commit_creations`` keeps only paths that really appeared.
+    ``tests/unit/guardrails/test_loop_cd_never_lowers.py`` pins the
+    invariant against base ``3bb7023``.
+    """
+    result = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel())
+    if result.engaged:
+        base = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel(base=True))
+        _union_ranked(result.resolution, base.resolution)
+    return result.resolution
+
+
+@dataclass
+class _Pass:
+    resolution: Resolution
+    engaged: bool
+
+
+def _walk_once(
+    command: str, *, cwd: str | None, env: Mapping[str, str], home: str, model: _CwdModel
+) -> _Pass:
     walker = _Walker(env, cwd, home)
     # Raw text, not parsed words, so a nested ``bash -c``/``zsh -c`` string
     # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
     # because a wider walk only errs safe (review round 9, NIT-1).
     walker.result.globstar = bool(_RECURSIVE_GLOB_RE.search(command))
+    token = _CWD_MODEL.set(model)
     try:
         walker.walk(command)
     except Exception as exc:  # noqa: BLE001 — a parser fault must not wave a call through
         walker.result.opaque_reasons.append(f"resolver error: {type(exc).__name__}")
-    return walker.result
+    finally:
+        _CWD_MODEL.reset(token)
+    return _Pass(walker.result, model.engaged)
+
+
+def _union_ranked(into: Resolution, extra: Resolution) -> None:
+    """Add every ranked fact of ``extra`` missing from ``into`` (not ``created``)."""
+    # Two loops, one per element type, rather than one tuple of mixed pairs:
+    # a heterogeneous tuple widens each pair to ``list[Target] | list[str]`` and
+    # pyright then rejects the append. Same pairs, same order, same dedupe.
+    for mine_t, theirs_t in ((into.targets, extra.targets), (into.touched, extra.touched)):
+        for target in theirs_t:
+            if target not in mine_t:
+                mine_t.append(target)
+    for mine_s, theirs_s in (
+        (into.blind, extra.blind),
+        (into.opaque_reasons, extra.opaque_reasons),
+    ):
+        for reason in theirs_s:
+            if reason not in mine_s:
+                mine_s.append(reason)

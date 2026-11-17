@@ -266,6 +266,18 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.action.stopping": "\u0111ang d\u1eebng",
     },
   },
+  "relay.diagram": {
+    "vi": {
+      "relay.diagram.close": "\u0110\u00f3ng s\u01a1 \u0111\u1ed3",
+      "relay.diagram.copied": "\u0110\u00e3 sao ch\u00e9p",
+      "relay.diagram.copy": "Sao ch\u00e9p m\u00e3",
+      "relay.diagram.copy_failed": "Kh\u00f4ng sao ch\u00e9p \u0111\u01b0\u1ee3c",
+      "relay.diagram.error.title": "Kh\u00f4ng v\u1ebd \u0111\u01b0\u1ee3c s\u01a1 \u0111\u1ed3 n\u00e0y",
+      "relay.diagram.full_size": "K\u00edch th\u01b0\u1edbc g\u1ed1c",
+      "relay.diagram.save": "L\u01b0u SVG",
+      "relay.diagram.view": "S\u01a1 \u0111\u1ed3",
+    },
+  },
   "relay.health": {
     "vi": {
       "relay.health.dropped_detail": "M\u00e1y t\u00ednh c\u1ee7a b\u1ea1n hi\u1ec7n kh\u00f4ng k\u1ebft n\u1ed1i \u0111\u01b0\u1ee3c v\u1edbi phi\u00ean n\u00e0y v\u00e0 v\u1eabn \u0111ang th\u1eed l\u1ea1i. Cho \u0111\u1ebfn khi k\u1ebft n\u1ed1i \u0111\u01b0\u1ee3c, g\u1eedi tin nh\u1eafn s\u1ebd th\u1ea5t b\u1ea1i ngay v\u00e0 n\u1ed9i dung \u0111\u00e3 g\u00f5 v\u1eabn c\u00f2n trong \u00f4 nh\u1eadp.",
