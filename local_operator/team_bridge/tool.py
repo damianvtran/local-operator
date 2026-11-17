@@ -202,6 +202,7 @@ from .types import (
     RecipientNameRefused,
     decode_recipient_argument,
     is_conversation_message_id,
+    resolve_member_by_name,
     validate_recipient_shape,
     validate_send_recipient,
 )
@@ -676,6 +677,14 @@ def _failure_text(failure: BaseException) -> str:
     if code:
         pairs.append(f"code={code}")
     pairs.extend(field_rule)
+    # A throttle's WAIT is the one actionable half (incident 2026-11-17): an
+    # agent that retries at once keeps a per-address edge block alive for every
+    # client on its network, so the wait the hub or edge named rides the footer
+    # in the same ``retry_after_s`` word ``_model_notes`` uses.
+    if code == "rate_limited":
+        retry = getattr(failure, "retry_after_seconds", None)
+        if isinstance(retry, int) and not isinstance(retry, bool) and retry >= 0:
+            pairs.append(f"retry_after_s={retry}")  # i18n: ignore machine key=value footer token
     # An EDGE block (client ``_edge_blocked``) has no field/rule: its evidence is
     # WHICH edge answered (``server``) and HOW (``content_type``) — header values
     # the client already bounded, never the page. They ride the footer only for
@@ -843,8 +852,14 @@ async def _resolve_named_recipient(
 
     scope_id = str(getattr(runtime, "tenant_id", "") or "")
     try:
-        directory = await runtime.client.directory(runtime.tenant_id)
+        directory = await runtime.client.directory_cached(runtime.tenant_id)
         allowlist = await runtime.client.allowlist(tenant_id=runtime.tenant_id)
+        if _name_misses(requested, members_from_allowlist(directory, allowlist)):
+            # The directory is cached (``directory_cached``): a name the cached
+            # answer cannot deliver to may be a teammate who joined or turned
+            # their bridge on since, so re-read it ONCE before the recorded
+            # resolution below decides — one forced read per miss, never more.
+            directory = await runtime.client.directory_cached(runtime.tenant_id, refresh=True)
     except Exception as failure:
         try:
             record_resolution(
@@ -875,6 +890,21 @@ async def _resolve_named_recipient(
     return {"account_id": member.account_id}, None
 
 
+def _name_misses(requested: str, candidates: Any) -> bool:
+    """Whether ``requested`` would NOT resolve to one deliverable member here.
+
+    The pure matcher only — no audit row — so the cached-directory pre-check
+    cannot add a second resolution record; ``resolve_for_delivery`` stays the
+    one recorded decision.
+    """
+
+    try:
+        member = resolve_member_by_name(requested, candidates, scope=SCOPE_ALLOWLIST)
+    except RecipientNameRefused:
+        return True
+    return not member.bridge_enabled
+
+
 # -- directory + direct messages ----------------------------------------------
 #
 # WHY THESE EXIST (operator incident, 2026-10-28). A teammate's chief of staff,
@@ -895,9 +925,14 @@ async def _resolve_named_recipient(
 # server-side unchanged (an agent target its owner's policy does not admit
 # stays ``invited``; nothing auto-joins anyone).
 #
-# NOTHING IS CACHED. Names and endpoint ids are fetched per call and never
-# written to the store (store.py's no-name-cache / no-body rules): a renamed
-# agent or a re-enrolled endpoint is correct on the next call by construction.
+# NOTHING IS PERSISTED. Names and endpoint ids are never written to the store
+# (store.py's no-name-cache / no-body rules). The directory answer is held in
+# MEMORY for ``DIRECTORY_CACHE_TTL_S`` per account and tenant
+# (``TeamBridgeClient.directory_cached``, incident 2026-11-17: a read per named
+# send multiplied traffic from an address the edge rate-limits), and every
+# resolution that misses on it re-reads once, so a new teammate, a new endpoint
+# or a bridge just turned on is found on the first call. The explicit
+# ``directory`` op always reads fresh.
 
 #: The directory's own cap (agent-server ``bridgeDirectoryMaxMembers``); the hub
 #: has no cursor, so the tool pages that bounded answer locally.
@@ -1115,7 +1150,7 @@ async def _resolve_dm_target(
 ) -> tuple[dict[str, str] | None, str, dict[str, Any] | None]:
     """``(wire member, display name, refusal)`` for a dm's recipient.
 
-    Resolved from a FRESH directory read, never from the model's word: an
+    Resolved from the directory (cached, re-read once on a miss), never from the model's word: an
     ``endpoint_id`` must be some member's CURRENT chief-of-staff endpoint (so a
     stale or invented id is refused before any write), and an ``account_id``
     with ``target=agent`` maps to that member's current agent. Reachability is
@@ -1138,18 +1173,52 @@ async def _resolve_dm_target(
         return None, "", _error("dm needs exactly one of account_id or endpoint_id")
     if endpoint_id and params.target != "agent":
         return None, "", _error("endpoint_id addresses an agent; a human needs account_id")
-    try:
-        directory = await runtime.client.directory(
-            runtime.tenant_id, expected_account_id=runtime.owner.account_id
+    # The directory is cached per account and tenant (``directory_cached``); a
+    # ``not_reachable`` answer from the cached copy may be a teammate who joined,
+    # enrolled or came back since, so it is re-read ONCE before it is believed.
+    # Any other refusal (a conflict, self-target) is not about freshness.
+    resolved: tuple[dict[str, str] | None, str, dict[str, Any] | None] = (None, "", None)
+    for refresh in (False, True):
+        try:
+            directory = await runtime.client.directory_cached(
+                runtime.tenant_id, expected_account_id=runtime.owner.account_id, refresh=refresh
+            )
+        except Exception as failure:
+            return (
+                None,
+                "",
+                _error(
+                    f"could not read the team directory: {_failure_text(failure)}",
+                    code="dm_failed",
+                ),
+            )
+        resolved = _dm_target_in(
+            directory,
+            runtime,
+            params,
+            account_id=account_id,
+            endpoint_id=endpoint_id,
+            paired=paired,
+            paired_from_to=paired_from_to,
         )
-    except Exception as failure:
-        return (
-            None,
-            "",
-            _error(
-                f"could not read the team directory: {_failure_text(failure)}", code="dm_failed"
-            ),
-        )
+        refusal = resolved[2]
+        if refusal is None or refusal.get("code") != "not_reachable":
+            break
+    return resolved
+
+
+def _dm_target_in(
+    directory: Any,
+    runtime: "BridgeRuntime",
+    params: "BridgeToolParams",
+    *,
+    account_id: str,
+    endpoint_id: str,
+    paired: bool,
+    paired_from_to: str,
+) -> tuple[dict[str, str] | None, str, dict[str, Any] | None]:
+    """One directory answer's verdict for :func:`_resolve_dm_target`."""
+
     rows = _directory_rows(directory, runtime.owner)
     own_account = str(getattr(runtime.owner, "account_id", "") or "")
     if endpoint_id:
