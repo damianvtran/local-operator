@@ -5231,6 +5231,16 @@ def _reserved_by_owner(handle: object, command_id: str) -> bool:
         return True
 
 
+def _spooled_mesh_origin(line: Any) -> dict[str, Any] | None:
+    """A spooled line's mesh origin stamp, only when the line is an OWNER row."""
+    from local_operator.session.runtime.inbox import SOURCE_USER
+
+    raw = getattr(line, "mesh_origin", None)
+    if getattr(line, "source", "") != SOURCE_USER or not isinstance(raw, dict):
+        return None
+    return dict(raw)
+
+
 async def _run_owner_prompt(
     handle: object, line: Any, *, seen: set[str], live: bool = False
 ) -> None:
@@ -5327,6 +5337,11 @@ async def _run_owner_prompt(
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
     if "owner_typed" in parameters and (getattr(line, "sender", None) or {}).get("remote_origin"):
         fields["owner_typed"] = False
+    # The mesh origin stamp the predecessor minted rides back onto the row, on an
+    # OWNER row only: a peer row's fields are the sender's to choose (M-2).
+    mesh_origin = _spooled_mesh_origin(line)
+    if "mesh_origin" in parameters and mesh_origin is not None:
+        fields["mesh_origin"] = mesh_origin
     if "input_surface" in parameters:
         # ADR 0009: a prompt spooled across a runtime swap keeps the surface it
         # was typed on, so a phone prompt replayed by the successor still routes
@@ -5391,6 +5406,8 @@ async def _run_owner_prompt(
             getattr(line, "sender", None) or {}
         ).get("remote_origin"):
             steer_fields["owner_typed"] = False
+        if "mesh_origin" in inspect.signature(steer).parameters and mesh_origin is not None:
+            steer_fields["mesh_origin"] = mesh_origin
         if "input_surface" in inspect.signature(steer).parameters:
             from local_operator.session.session import spooled_input_surface
 

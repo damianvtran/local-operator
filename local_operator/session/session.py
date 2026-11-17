@@ -430,6 +430,25 @@ def _stamp_remote_prompt(message: Any) -> None:
     message.provider_payload = payload
 
 
+def _stamp_mesh_origin(message: Any, mesh_origin: Mapping[str, Any] | None) -> None:
+    """Record the receiving runtime's mesh origin stamp on a remote user row.
+
+    ``provider_payload["lop_mesh_origin"]`` (``network/origin.py``): which mesh
+    device the row came from, over which link, and whether this runtime could
+    prove it. Invisible to providers like the two stamps beside it. MERGED into
+    whatever payload the row already has, never overwriting it: the stamp sits
+    beside ``lop_remote_prompt`` and the harness-injection marker (G5, §4).
+    Written for the future guard; nothing in this build reads it.
+    """
+    if mesh_origin is None:
+        return
+    from local_operator.network.origin import MESH_ORIGIN_PAYLOAD_KEY
+
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[MESH_ORIGIN_PAYLOAD_KEY] = dict(mesh_origin)
+    message.provider_payload = payload
+
+
 def _is_remote_prompt(message: Any) -> bool:
     payload = getattr(message, "provider_payload", None)
     return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
@@ -10487,10 +10506,15 @@ class Session:
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``mesh_origin`` is the receiving runtime's stamp for a REMOTE prompt
+        (``network/origin.py``), stored on the row's ``provider_payload`` beside
+        ``lop_remote_prompt``; ``None`` writes nothing (local, legacy).
 
         ``owner_typed=False`` marks a person's prompt that did NOT come from a
         local operator surface (a mesh ``drive`` member, a peer's ``sessions
@@ -10721,6 +10745,7 @@ class Session:
                     self._file_owner().admissions.pop(producer_command_id, None)
             if not owner_typed:
                 _stamp_remote_prompt(user)
+            _stamp_mesh_origin(user, mesh_origin)
             # ADR 0009: which surface typed this, decided by the runtime from the
             # connection (``input_surface``; ``tui`` for the in-process owner).
             # A harness-minted row is not human input, so it carries no stamp and
@@ -10736,7 +10761,14 @@ class Session:
                 # durable journal row (`encode_message_payload` keeps a non-None
                 # payload) — so this needs no new field and no protocol bump.
                 # See `docs/DESKTOP_API.md` for what a viewer does with it.
-                user.provider_payload = {RENDERED_INJECTION_KEY: True}
+                #
+                # MERGED, not assigned: an assignment here dropped the remote-
+                # prompt stamp (and would drop the mesh origin) from a harness-
+                # injected remote row (mesh-origin-stamp §4, M-12).
+                user.provider_payload = {
+                    **(user.provider_payload or {}),
+                    RENDERED_INJECTION_KEY: True,
+                }
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
             # PARKED WAKES FOLD HERE, beside the catch-up fold above: a wake that
             # fired during the operator's conversation was held rather than
@@ -10838,10 +10870,14 @@ class Session:
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
     ) -> None:
         """Inject an identified steering message into the running turn.
+
+        ``mesh_origin`` has ``prompt``'s meaning: the receiver-minted stamp,
+        merged onto the queued row's ``provider_payload``.
 
         ``owner_typed`` has ``prompt``'s meaning: False for a steer that did not
         come from a local operator surface.
@@ -10913,6 +10949,7 @@ class Session:
                 self._file_owner().admissions.pop(producer_command_id, None)
         if not owner_typed:
             _stamp_remote_prompt(message)
+        _stamp_mesh_origin(message, mesh_origin)
         # ADR 0009: a steer is human input, so it flips the run it lands in (a
         # phone steer into a desk-started run makes that run mobile-origin).
         if not harness_injected:
@@ -10923,7 +10960,11 @@ class Session:
             # up, and the reason both wires need no new field: ``provider_payload``
             # rides the live ``MessageStartEvent`` and the durable journal row
             # alike.
-            message.provider_payload = {RENDERED_INJECTION_KEY: True}
+            # Merged for the reason ``prompt`` gives (mesh-origin-stamp §4).
+            message.provider_payload = {
+                **(message.provider_payload or {}),
+                RENDERED_INJECTION_KEY: True,
+            }
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
@@ -14325,6 +14366,7 @@ class Session:
         *,
         by: str = "unknown",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Answer a queued ask (design §2.4), storing any secret values first.
 
@@ -14393,9 +14435,11 @@ class Session:
                     journal_credential=self.journal_credential_change,
                 )
             )
+        # The receiver-minted mesh origin rides to ``answered_by.mesh_origin``.
+        origin_kwargs = {"mesh_origin": mesh_origin} if mesh_origin is not None else {}
         if attachments:
-            return queue.respond(ask_id, merged, by=by, attachments=attachments)
-        return queue.respond(ask_id, merged, by=by)
+            return queue.respond(ask_id, merged, by=by, attachments=attachments, **origin_kwargs)
+        return queue.respond(ask_id, merged, by=by, **origin_kwargs)
 
     def revise_ask(
         self,
@@ -14404,6 +14448,7 @@ class Session:
         *,
         by: str = "unknown",
         attachments: Mapping[str, Sequence[ImageContent]] | None = None,
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Revise a queued ask's recorded answer while it is still undelivered.
 
@@ -14476,7 +14521,9 @@ class Session:
                     journal_credential=self.journal_credential_change,
                 )
             )
-        return queue.revise(ask_id, merged, by=by)
+        # Always passed (None included): the store folds a revision with NO stamp
+        # as unverified, so a missing stamp is information, not an omission.
+        return queue.revise(ask_id, merged, by=by, mesh_origin=mesh_origin)
 
     def answer_ask_question(
         self,
@@ -14485,6 +14532,7 @@ class Session:
         values: "Sequence[str]",
         *,
         by: str = "unknown",
+        mesh_origin: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """THE LEGACY INCREMENTAL ANSWER (design §4, A2 addendum).
 
@@ -14545,7 +14593,7 @@ class Session:
                 journal_credential=self.journal_credential_change,
             )
             cell = [str(item) for item in substituted.get(key, ())]
-        return queue.answer_one(ask_id, key, cell, by=by)
+        return queue.answer_one(ask_id, key, cell, by=by, mesh_origin=mesh_origin)
 
     def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
         """Decline a queued ask — today's Esc, made explicit (design D5)."""

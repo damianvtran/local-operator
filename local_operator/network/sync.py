@@ -4035,6 +4035,14 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         except BaseException:
             _unlink_at(target, staged_boundary.name, target_scope)
             raise
+        # IMPORTED STAMPS ARE EVIDENCE ONLY (mesh-origin-stamp M-4, R2-1): every
+        # mesh origin stamp in the recovered copy is lowered to ``verified: false``
+        # whoever minted it, while the new id is still claimed and before anything
+        # can run it. An OSError here refuses the recovery (the handler below)
+        # rather than leave a copy whose stamps still read verified.
+        from local_operator.network.origin import downgrade_stamps
+
+        downgrade_stamps(target)
     except (OSError, SyncRefused) as exc:
         release_session(target)
         if isinstance(exc, SyncRefused):

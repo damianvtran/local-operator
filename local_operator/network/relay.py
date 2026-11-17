@@ -4851,8 +4851,14 @@ class PeerLink:
         codec: wire.LinkCrypto,
         settings: NetworkSettings,
         reader: wire.FrameReader | None = None,
+        peer_verified: bool = False,
     ) -> None:
         """``reader`` is the HANDSHAKE's reader, when it still holds bytes.
+
+        ``peer_verified`` is whether THIS side proved the peer's identity in the
+        handshake (``HandshakeResult.peer_verified``). Every build site states it
+        explicitly (listener register, pair listener, dialer) so the value a mesh
+        origin stamp relies on is a reviewed decision per site, never a default.
 
         A link takes over the socket the handshake just finished on, and the
         handshake reader may already own bytes of the first record (see
@@ -4873,6 +4879,10 @@ class PeerLink:
         self.device_id = result.peer_device_id
         self.instance_id = result.peer_instance_id
         self.network_id = result.network_id
+        #: Whether this link's PEER identity was proved by the handshake (see the
+        #: constructor). Read by ``_peer_block`` into the block the owner's relay
+        #: MACs for its runtime (G6), where it caps the stamp's ``verified``.
+        self.peer_verified = bool(peer_verified)
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
@@ -7997,6 +8007,9 @@ class RelayServer:
             codec=handshake.codec(),
             settings=self.settings,
             reader=reader,
+            # The listener verified the dialer's auth MAC (``verify_auth``): its id is
+            # PROVEN, and that fact is what a mesh origin stamp may later vouch for.
+            peer_verified=result.peer_verified,
         )
         link.peer_addr = peer_addr
         # A REFUSAL HERE IS A HINT, NOT THE DECISION (see :meth:`_refusal_reason`): it
@@ -9890,13 +9903,28 @@ class RelayServer:
     # ordering rule against stream pushes on the same link.
 
     def _peer_block(self, link: PeerLink) -> dict[str, Any]:
-        """The dialing peer's identity, for a refusal that has to name it (§4.4)."""
+        """The dialing peer's identity, for a refusal that has to name it (§4.4).
+
+        Also the identity BLOCK of the relay→runtime proof (mesh-origin-stamp G6):
+        ``network_id``, ``link_id`` and ``peer_verified`` are LINK facts this relay
+        holds, and ``dial.dial_owner`` MACs this block (``origin.canonical_block``)
+        under ``K_relay``, so the runtime can stamp a remote row with the device it
+        came from and believe it only when the proof checks. ``peer_verified`` is
+        the per-link handshake fact, never a constant: a relay that has not proved
+        its peer can only produce an unverified stamp.
+        """
         name = ""
         record = self.store_view.network(link.network_id)
         if record is not None:
             member = record.member(link.device_id)
             name = member.name if member is not None else ""
-        return {"device_id": link.device_id, "name": name}
+        return {
+            "device_id": link.device_id,
+            "name": name,
+            "network_id": str(link.network_id or ""),
+            "link_id": str(link.link_id or ""),
+            "peer_verified": bool(getattr(link, "peer_verified", False)),
+        }
 
     def _session_record(self, session_id: str) -> Any:
         """The live discovery record for one of THIS device's sessions, or None.
@@ -10479,7 +10507,7 @@ class RelayServer:
         prompt_detail = ""
         waited: dict[str, float] = {}
         if prompt:
-            outcome = self._prompt_on(session_id, prompt, frame.get("images"), due=due)
+            outcome = self._prompt_on(session_id, prompt, frame.get("images"), due=due, link=link)
             admitted = bool(outcome["admitted"])
             prompt_state = str(outcome["state"])
             prompt_detail = str(outcome["detail"])
@@ -12028,7 +12056,13 @@ class RelayServer:
         return {"applied": True, "detail": ""}
 
     def _prompt_on(
-        self, session_id: str, text: str, images: Any, *, due: float | None = None
+        self,
+        session_id: str,
+        text: str,
+        images: Any,
+        *,
+        due: float | None = None,
+        link: "PeerLink | None" = None,
     ) -> dict[str, Any]:
         """Admit the first prompt of a freshly created session, and say what became of it.
 
@@ -12087,7 +12121,11 @@ class RelayServer:
         if due is None:
             due = time.monotonic() + create_op_deadline_s(self.settings.op_wait_s)
         try:
-            dial = self._dial_owned(session_id, capabilities=("prompt",))
+            # ``link`` (the creating member's) rides along so the first prompt of a
+            # remotely created session carries the same peer block, and therefore
+            # the same verifiable mesh origin, as every later relayed prompt; a
+            # linkless dial sends no block and can only stamp unverified (M-6).
+            dial = self._dial_owned(session_id, capabilities=("prompt",), link=link)
         except session_dial.OwnerUnreachable as exc:
             return {"admitted": False, "state": "refused", "detail": str(exc)}
         # After the dial, so connecting to the runtime is paid out of the budget
@@ -12295,6 +12333,16 @@ class RelayServer:
         if not isinstance(inner, dict):
             raise MeshRefusal("protocol_error", "a stream frame must carry the frame it forwards")
         inner_op = str(inner.get("op") or "")
+        from local_operator.network.origin import RELAY_ATTEST_OP
+
+        if inner_op == RELAY_ATTEST_OP:
+            # THE PROOF IS THE OWNER RELAY'S, NEVER A VIEWER'S (M-9). ``relay_attest``
+            # is what THIS relay sends as the first frame of its own dial, and the
+            # runtime already refuses one in any later position; dropping it here as
+            # well means a viewer cannot even put one on the owner's socket.
+            raise MeshRefusal(
+                "not_authorised", "relay_attest is sent by the owner's relay, not a viewer"
+            )
         from local_operator.network.types import INNER_OP_CAPABILITY
 
         required = INNER_OP_CAPABILITY.get(inner_op)
@@ -13294,6 +13342,9 @@ class RelayServer:
                 codec=codec,
                 settings=self.settings,
                 reader=reader,
+                # The pair listener ran ``verify_auth`` and the SAS ceremony proved the joiner,
+                # so the handshake's own proved fact carries over (mesh-origin-stamp §2 r3).
+                peer_verified=result.peer_verified,
             )
             link.peer_addr = peer_addr
             # NOT A FIRST CONTACT FOR THE SLICES: see ``PeerLink.link_up_hooks``.
@@ -13631,6 +13682,12 @@ class RelayServer:
                 codec=handshake.codec(),
                 settings=self.settings,
                 reader=reader,
+                # THE DIALER HAS NOT PROVED THE LISTENER (pre-G1): it reads the listener's id
+                # off the challenge unverified (``Handshake.read_challenge``), so this link may
+                # never vouch for its peer in a mesh origin stamp. G1 flips this once the dialer
+                # verifies the listener; until then False is the honest value, pinned here
+                # rather than read off the result so that change is one deliberate edit.
+                peer_verified=False,
             )
             link.peer_addr = host
             refusal = self._admit_link(link, outbound=True)

@@ -31,6 +31,7 @@ own frame, never the connection.
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import time
 from dataclasses import dataclass, field
@@ -97,6 +98,15 @@ class FrameUnreadable(Exception):
 #: The same budget ``control.py`` uses for its identity check, because it is the
 #: same wait: an authenticated dial always receives a projection first.
 WELCOME_TIMEOUT_S = 10.0
+
+#: How long the relay waits for the runtime's answer to its ``relay_attest``. No
+#: new number: the attest is answered on the runtime's READER loop with no hop
+#: into the session (``RuntimeServer._relay_attest_reply``), the same class of
+#: wait as the welcome above, so it shares that budget. A timeout is harmless —
+#: the dial proceeds unverified.
+ATTEST_TIMEOUT_S = WELCOME_TIMEOUT_S
+
+logger = logging.getLogger(__name__)
 
 
 class OwnerUnreachable(Exception):
@@ -209,6 +219,13 @@ class OwnerDial:
     #: that only sees ``None`` cannot tell "nothing yet" from "owner gone",
     #: and those are different events to a viewer.
     eof: bool = False
+    #: Frames the runtime sent while the relay's ``relay_attest`` was in flight
+    #: (``_relay_attest``), returned by :meth:`recv` before the socket is read
+    #: again. Without it the attest's reply wait would swallow them — measured:
+    #: a stream's ``frontend_sync`` frames never reached the viewer
+    #: (``test_session_plane``'s pass-through cell) — so the pump must see exactly
+    #: the frames, in exactly the order, it would have without the proof.
+    held: list[dict[str, Any]] = field(default_factory=list)
 
     def _read(self) -> "LineReader":
         if self.reader is None:
@@ -219,6 +236,8 @@ class OwnerDial:
 
     def recv(self, timeout_s: float) -> dict[str, Any] | None:
         """The next frame, or ``None`` on timeout or a closed socket."""
+        if self.held:
+            return self.held.pop(0)
         frame = self._read().read_frame(timeout_s)
         self.eof = self._read().eof
         return frame
@@ -382,6 +401,27 @@ def dial_owner(
         # the machine to act on (§4.4). Additive: a runtime that does not know the
         # field drops it and keeps its own generic sentence.
         auth_frame["peer"] = dict(peer)
+    # G6 (mesh-origin-stamp §3.1): a dial that carries a peer block offers a
+    # nonce, and proves the block to the runtime once the welcome hands back the
+    # runtime's salt. A LINKLESS dial (no ``peer``) offers nothing and its rows
+    # stamp unverified (M-6). Never taken from ``auth`` — ``AUTH_FIELDS`` does
+    # not name it — so a viewer cannot choose the nonce this proof binds.
+    attest_nonce = ""
+    attest_key: bytes | None = None
+    if peer:
+        from local_operator.network import origin
+
+        try:
+            # Derived PER DIAL (M-10): an identity rotation is picked up at once,
+            # and a runtime still holding the old key just fails the proof.
+            material = origin.relay_key_for(Path(config_dir))
+        except Exception:  # noqa: BLE001 — no proof is the fail-closed outcome
+            logger.debug("relay attest: no device key to prove with", exc_info=True)
+            material = None
+        if material is not None:
+            attest_key = material[0]
+            attest_nonce = origin.relay_nonce()
+            auth_frame["relay_nonce"] = attest_nonce
     for name in AUTH_FIELDS:
         if auth and name in auth and auth[name] is not None:
             auth_frame[name] = auth[name]
@@ -409,4 +449,55 @@ def dial_owner(
         raise OwnerUnreachable(
             f'the runtime on that port serves session "{served}", not "{session_id}"'
         )
+    _relay_attest(
+        dial, welcome, peer=peer, capabilities=capabilities, nonce=attest_nonce, key=attest_key
+    )
     return dial, welcome
+
+
+def _relay_attest(
+    dial: OwnerDial,
+    welcome: dict[str, Any],
+    *,
+    peer: dict[str, Any] | None,
+    capabilities: list[str] | None,
+    nonce: str,
+    key: bytes | None,
+) -> None:
+    """Prove this relay to the runtime: the FIRST post-welcome frame (G6, M-9).
+
+    Skipped (the dial still succeeds) when this dial offered no nonce or the
+    runtime answered no ``relay_salt`` — an older runtime (§3.4): its rows simply
+    stamp unverified. The salt is POPPED off the welcome before the caller sees
+    it, and the attest's reply is CONSUMED here, so neither reaches a viewer the
+    welcome is later forwarded to (``relay._accept_stream``). A refused or
+    unanswered attest is logged as a fact and never fails the dial: the
+    connection then runs exactly as it did before G6, unverified.
+    """
+    salt = welcome.pop("relay_salt", None)
+    if not nonce or key is None or not peer:
+        return
+    from local_operator.harness.approval import is_wire_hex
+    from local_operator.network import origin
+
+    if not is_wire_hex(salt):
+        return
+    block = origin.canonical_block(peer, capabilities or ())
+    proof = origin.relay_proof(key, relay_nonce=nonce, relay_salt=str(salt), block=block)
+    # Everything else the runtime sends meanwhile is KEPT for the caller, in
+    # order (``OwnerDial.held``). Collected locally and handed over after, never
+    # appended to ``held`` mid-exchange: ``recv`` drains ``held`` first, so that
+    # would hand the same frame back to this wait forever.
+    interleaved: list[dict[str, Any]] = []
+    try:
+        reply = dial.exchange(
+            {"op": origin.RELAY_ATTEST_OP, "req": "relay-attest", "proof": proof},
+            timeout_s=ATTEST_TIMEOUT_S,
+            on_frame=interleaved.append,
+        )
+    except OSError:
+        logger.info("relay attest: the runtime's socket failed during the proof")
+        reply = None
+    dial.held.extend(interleaved)
+    if reply is None or reply.get("op") != "ack" or reply.get("verified") is not True:
+        logger.info("relay attest: not verified (reply op=%s)", (reply or {}).get("op") or "none")

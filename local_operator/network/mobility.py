@@ -2656,6 +2656,21 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
             target,
             target_id,
         )
+    # IMPORTED STAMPS ARE EVIDENCE ONLY (mesh-origin-stamp M-4, R2-1). Every mesh
+    # origin stamp in the copy is lowered to ``verified: false`` BEFORE the one
+    # atomic promote, whoever minted it: a session shed A→D and recalled D→A can
+    # carry rows D wrote claiming ``stamped_by=A``, and nothing at rest proves
+    # otherwise. Done in staging so the live session never appears with a stamp
+    # still "verified"; a failure refuses the adoption rather than land one.
+    from local_operator.network.origin import downgrade_stamps
+
+    try:
+        downgrade_stamps(source)
+    except OSError as exc:
+        logger.warning(
+            "mobility: could not lower the imported origin stamps of %s: %s", target_id, exc
+        )
+        return _PROMOTE_REFUSED
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(str(source), str(target))

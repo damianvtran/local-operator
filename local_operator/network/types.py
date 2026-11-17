@@ -2159,3 +2159,11 @@ class HandshakeResult:
     # Keep the local MAC-covered advertisement without changing raw peer semantics.
     local_capabilities: list[str] = field(default_factory=list)
     network_name: str = ""
+    #: True only when THIS side checked the PEER's auth signature and MAC
+    #: (``Handshake.verify_auth``), i.e. the peer's ``device_id`` is PROVEN rather
+    #: than declared. Today that is the listener only: the dialer reads the
+    #: listener's id off the challenge unverified until G1 lands. Carried onto
+    #: ``PeerLink.peer_verified`` and MAC-bound into the relay→runtime proof's
+    #: block (``network/origin.py``), so a stamp can say "verified" only for a link
+    #: whose peer identity was actually proved (mesh-origin-stamp design §2 rule 3).
+    peer_verified: bool = False

@@ -937,6 +937,27 @@ def fold(
                     if len(proofs) != 1 or "" in proofs:
                         merged.pop("proof", None)
                     record["answered_by"] = merged
+                    # THE MESH ORIGIN FOLDS THE SAME WAY (mesh-origin-stamp §2
+                    # rule 4, M-8): ``verified`` survives only if EVERY revision
+                    # carries a verified stamp from the same device and runtime; a
+                    # revision with no stamp at all counts as unverified.
+                    first_origin = by.get("mesh_origin")
+                    if isinstance(first_origin, Mapping):
+                        from local_operator.network.origin import fold_answer_origin
+
+                        revision_origins = [
+                            (
+                                event.get("by", {}).get("mesh_origin")
+                                if isinstance(event.get("by"), Mapping)
+                                else None
+                            )
+                            for event in events
+                            if event.get("kind") == EVENT_REVISED
+                            and str(event.get("ask_id")) == ask_id
+                        ]
+                        record["answered_by"]["mesh_origin"] = fold_answer_origin(
+                            first_origin, revision_origins
+                        )
         records.append(record)
     return records
 
