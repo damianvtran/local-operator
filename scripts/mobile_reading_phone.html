@@ -55,7 +55,7 @@ f.addEventListener('load', () => {
       }
       out.anchor = info.dataset.anchor ? JSON.parse(info.dataset.anchor) : undefined;
       info.textContent = JSON.stringify(out);
-    }, 400);
+    }, 1000);
   }, +(q.get('wait') || 1500));
 });
 </script>
