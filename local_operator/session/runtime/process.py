@@ -4068,10 +4068,16 @@ async def _drain_for(
     begin_retire = getattr(handle, "begin_retire", None)
     # The read may await (up to the reader's bound) after the idle check above.
     # That gap is safe: ``begin_retire`` re-checks work itself and refuses if a
-    # turn slipped in, which is the arm just below.
+    # turn slipped in, which is the arm just below. A handle without the latch
+    # (reduced hosts, test doubles) has no such re-check, so it re-samples the
+    # idle gate here instead of exiting on a pre-await answer (review R2-2).
     detail = await _drain_detail_at_exit(drain, read)
-    if callable(begin_retire) and not begin_retire(drain.cause, detail):
-        logger.info("session runtime: work arrived as the drain closed; keeping")
+    if callable(begin_retire):
+        if not begin_retire(drain.cause, detail):
+            logger.info("session runtime: work arrived as the drain closed; keeping")
+            return False
+    elif not _idle_for_refresh(handle):
+        logger.info("session runtime: work arrived during the exit read; keeping")
         return False
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
     await _hand_wakes_to_successor(handle)

@@ -484,27 +484,44 @@ async def test_a_stuck_disk_read_neither_blocks_the_reaper_loop_nor_refreshes(
     assert refreshed == [NEW]
 
 
-async def _loop_ticks_while(work: "Awaitable[_R]") -> "tuple[int, _R]":
-    """Await ``work`` while counting 5 ms ticks of a sibling coroutine.
+async def _loop_ticks_while(work: "Awaitable[_R]") -> "tuple[float, float, _R]":
+    """Await ``work`` while a sibling coroutine measures how long the loop went dark.
 
-    The tick count is the observable for "the loop was not blocked": a read run ON
-    the loop holds every other coroutine for as long as the disk does, so the count
-    stays near zero; a read run off it lets the sibling tick throughout.
+    Returns ``(max_gap, elapsed, result)``: the largest gap between the sibling's
+    wakeups (including the last one to ``work`` completing) and the wall time of
+    ``work``.
+
+    Why latency and not a tick count (review round 2, R2-1): a count of 5 ms ticks
+    inside a ~50 ms read bound is load-sensitive -- at Mac load ~80 ``sleep(0.005)``
+    overshoots and the count fell to 2 on a correct build. The discriminator does
+    not need a count: the stuck read blocks on ``gate.wait(10.0)`` and the gate is
+    released only after ``work`` returns, so a read run ON the loop freezes every
+    coroutine for ~10 s (one gap of ~10 s), while a read run off it leaves only
+    scheduler jitter. ``max_gap < 2.0`` sits far from both.
     """
-    ticks = 0
+    loop = asyncio.get_running_loop()
+    last = loop.time()
+    max_gap = 0.0
 
     async def tick() -> None:
-        nonlocal ticks
+        nonlocal last, max_gap
         while True:
             await asyncio.sleep(0.005)
-            ticks += 1
+            now = loop.time()
+            max_gap = max(max_gap, now - last)
+            last = now
 
     ticker = asyncio.ensure_future(tick())
+    started = loop.time()
     try:
         result = await asyncio.wait_for(work, 5.0)
     finally:
         ticker.cancel()
-    return ticks, result
+    done = loop.time()
+    # The final gap counts too: an on-loop read that blocks to the end would
+    # otherwise leave the ticker no wakeup to record it.
+    max_gap = max(max_gap, done - last)
+    return max_gap, done - started, result
 
 
 class _StuckDisk:
@@ -553,10 +570,13 @@ async def test_a_stuck_re_check_after_the_stagger_keeps_without_blocking_the_loo
     monkeypatch.setattr(process, "_clean_exit", recording_exit)
     handle, runtime, stop = IdleHandle(), IdleRuntime(), asyncio.Event()
     try:
-        ticks, retired = await _loop_ticks_while(process._refresh_for(NEW, handle, runtime, stop))
+        max_gap, elapsed, retired = await _loop_ticks_while(
+            process._refresh_for(NEW, handle, runtime, stop)
+        )
     finally:
         disk.gate.set()
-    assert ticks >= 3, f"the loop made only {ticks} ticks while the re-check was stuck"
+    assert max_gap < 2.0, f"the loop went dark for {max_gap:.2f}s while the re-check was stuck"
+    assert elapsed < 5.0, f"the stuck re-check held the refresh for {elapsed:.2f}s"
     assert retired is False, "an unanswered re-check is not a build to leave for"
     assert disk.calls == 1, "the re-check read the disk once"
     assert handle.latched == [] and runtime.announced == [] and exits == []
@@ -591,12 +611,13 @@ async def test_a_stuck_re_check_on_a_latchless_handle_keeps_without_blocking_the
     monkeypatch.setattr(process, "_clean_exit", recording_exit)
     runtime, stop = IdleRuntime(), asyncio.Event()
     try:
-        ticks, retired = await _loop_ticks_while(
+        max_gap, elapsed, retired = await _loop_ticks_while(
             process._refresh_for(NEW, LatchlessHandle(), runtime, stop)
         )
     finally:
         disk.gate.set()
-    assert ticks >= 3, f"the loop made only {ticks} ticks while the re-check was stuck"
+    assert max_gap < 2.0, f"the loop went dark for {max_gap:.2f}s while the re-check was stuck"
+    assert elapsed < 5.0, f"the stuck re-check held the refresh for {elapsed:.2f}s"
     assert retired is False and exits == [] and not stop.is_set()
     assert runtime.announced == [("stale-build", NEW.label())], "the first re-check answered"
     assert disk.calls == 2, "the post-announce re-check is the one that stuck"
