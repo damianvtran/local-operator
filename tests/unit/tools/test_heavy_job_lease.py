@@ -752,21 +752,66 @@ def test_operator_memory_switch_still_wins_and_is_announced(lease_env: Path) -> 
     ), lines
 
 
+def _lease_fd_probe(lock: Path) -> str:
+    """A bash line whose child prints which inherited fds open ``lock``'s inode.
+
+    Why the probe enumerates ``/proc/self/fd`` and compares inodes: its first
+    version scanned only fds 3..255 by realpath. ``pass_fds`` keeps the
+    PARENT's fd number, and the parent is a long-lived pytest-xdist worker
+    whose table grows with every resource a prior test left for the GC (the
+    failing CI run, 43825535388, logged 721 ``unclosed database`` warnings on
+    that shard), so a correctly passed descriptor numbered 256+ read as
+    ``inherited 0``. Listing the real table has no ceiling, and printing the
+    numbers makes any recurrence say which side lost the descriptor.
+
+    ``false && pnpm build`` keeps pnpm from running while the classifier still
+    sees a heavy build, so the call takes the lease.
+    """
+    return (
+        f"{sys.executable} -c \"import os; s=os.stat('{lock}');"
+        " fds=sorted(int(n) for n in os.listdir('/proc/self/fd'));"
+        " hits=[f for f in fds if f > 2 and os.path.exists(f'/proc/self/fd/{f}')"
+        " and os.path.samestat(os.stat(f'/proc/self/fd/{f}'), s)];"
+        " print('inherited', len(hits), 'at', hits, 'max_fd', fds[-1])\"; false && pnpm build"
+    )
+
+
 def test_spawn_passes_the_lease_descriptor(lease_env: Path) -> None:
     """Q1 wiring: the command sees the lock description as an open descriptor."""
 
-    lock = lease_env / "slot-0.lock"
-    # A probe that finds an inherited fd pointing at the slot lock.
-    probe = (
-        f"{sys.executable} -c \"import os,sys; p=os.path.realpath('{lock}');"
-        " fds=[f for f in range(3,256) if os.path.exists(f'/dev/fd/{f}')"
-        " and os.path.realpath(f'/proc/self/fd/{f}' if os.path.exists('/proc/self/fd')"
-        " else f'/dev/fd/{f}')==p]; print('inherited', len(fds))\"; false && pnpm build"
-    )
     if not Path("/proc/self/fd").exists():
         pytest.skip("fd-to-path probe needs /proc")
-    result = _bash({"command": probe})
-    assert "inherited 1" in _text(result), _text(result)
+    result = _bash({"command": _lease_fd_probe(lease_env / "slot-0.lock")})
+    assert "inherited 1 " in _text(result), _text(result)
+
+
+def test_spawn_passes_a_lease_descriptor_numbered_above_255(lease_env: Path) -> None:
+    """Regression for CI run 43825535388: a lease fd past 255 is still inherited.
+
+    Occupies the low descriptors first so the lease's own ``os.open`` lands
+    above 255, the state a long-lived xdist worker reaches; the first probe
+    (range(3, 256)) reported ``inherited 0`` here although the fd was passed.
+    """
+    import resource
+
+    if not Path("/proc/self/fd").exists():
+        pytest.skip("fd-to-path probe needs /proc")
+    soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft != resource.RLIM_INFINITY and soft < 1024:
+        pytest.skip(f"RLIMIT_NOFILE soft limit {soft} leaves no room above fd 255")
+    fillers: list[int] = []
+    try:
+        while not fillers or fillers[-1] < 300:
+            fillers.append(os.open(os.devnull, os.O_RDONLY))
+        result = _bash({"command": _lease_fd_probe(lease_env / "slot-0.lock")})
+    finally:
+        for fd in fillers:
+            os.close(fd)
+    text = _text(result)
+    assert "inherited 1 " in text, text
+    held_at = int(text.split("at [", 1)[1].split("]", 1)[0])
+    # Proves the case under test was reached, not a low fd that happened to be free.
+    assert held_at > 255, text
 
 
 def test_build_chained_with_a_server_takes_no_slot_keeps_its_cap_and_says_so(
