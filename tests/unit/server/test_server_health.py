@@ -94,3 +94,36 @@ def test_the_identity_fields_are_additive_for_an_older_client() -> None:
         # disappear from the fresh-serving-process health report.
         "rolling_reload_contract",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_probe_burst_reads_the_install_identity_once(test_app_client, monkeypatch):
+    """Serve stall, 2026-11-15: ``/health``'s own install reads held the loop.
+
+    Under a busy snapshot worker each of the reading's filesystem calls waits
+    out a GIL switch interval, so the probe reuses one reading for
+    ``INSTALL_IDENTITY_TTL_S`` -- and still re-reads after it, so an in-place
+    ``lop-update`` shows within one poll.
+    """
+    from local_operator import update
+    from local_operator.server.routes import health
+
+    calls = {"n": 0}
+
+    def counted() -> str:
+        calls["n"] += 1
+        return f"9.9.{calls['n']}"
+
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(update, "installed_version", counted)
+    monkeypatch.setattr(health.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(health, "_install_identity", None)
+
+    first = (await test_app_client.get("/health")).json()["result"]
+    clock["now"] += health.INSTALL_IDENTITY_TTL_S / 2
+    second = (await test_app_client.get("/health")).json()["result"]
+    assert calls["n"] == 1 and first["version"] == second["version"] == "9.9.1"
+
+    clock["now"] += health.INSTALL_IDENTITY_TTL_S
+    third = (await test_app_client.get("/health")).json()["result"]
+    assert calls["n"] == 2 and third["version"] == "9.9.2"

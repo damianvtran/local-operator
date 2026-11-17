@@ -1,0 +1,3 @@
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $SCRATCH/rc-receipts/vi.cli.team_bridge.json --expected-history-sha d2233d07d96618c312d14f8fc44445a91ca460de877689cb8d83aa1365dd183c --dry-run
+i18n/audit-history/vi/cli.team_bridge.json
+exit=0

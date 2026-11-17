@@ -55,7 +55,6 @@ from typing import (
     Any,
     Awaitable,
     Callable,
-    Iterable,
     Literal,
     NamedTuple,
     Protocol,
@@ -126,6 +125,8 @@ from local_operator.mobile.types import (
 )
 from local_operator.network.types import MeshRefusal
 from local_operator.session.creation import session_created_at
+from local_operator.session.media import SUPPLEMENT_FILE_TYPES as _SUPPLEMENT_FILE_TYPES
+from local_operator.session.media import SUPPLEMENT_JOB as _SUPPLEMENT_JOB
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
 
@@ -5503,13 +5504,23 @@ class MobileDaemon:
         completion published in that window would otherwise be counted against
         a snapshot that predates it. The window left (this read to the tick's
         collect) is closed by the worker flooring a completion's count at 1.
+
+        The revision read sits INSIDE the guard (#3989 review m1): the store can
+        answer ``AttentionReadDeferred`` while a writer holds it, and that must
+        only skip this refresh to the next scan, never escape into the scan
+        loop. The listing cache is invalidated before the rebuild (#3989 QA
+        Q-1): ``summaries()`` answers from its ``SUMMARIES_CACHE_TTL_S`` cache,
+        so a rebuild "at" the new revision could otherwise return a listing
+        built before it, and the push count would lag the badge by up to a
+        second while this method records the new revision as done.
         """
         from local_operator.session.attention import AttentionStore
 
-        revision = await asyncio.to_thread(AttentionStore().revision)
-        if revision == self._push_count_revision:
-            return
         try:
+            revision = await asyncio.to_thread(AttentionStore().revision)
+            if revision == self._push_count_revision:
+                return
+            self.table.invalidate_summaries_cache()
             await self.table.summaries()
         except Exception:  # noqa: BLE001 — a push fault must not cost the tick
             logger.warning("push count refresh failed", exc_info=True)
@@ -6708,44 +6719,12 @@ async def _wait_for_owner_to_unpublish(session_id: str, retired_pid: int, timeou
 # Turn supplements (memo §2.7) -- the relay's read routes
 # ---------------------------------------------------------------------------
 
-#: A supplement JOB id: ``persistence.new_job_id`` mints 12 lowercase hex, and the
-#: file route keys on it. Shape-checked before any lookup so a crafted job segment
-#: can never be anything but a miss (it is a lookup key, never a path).
-_SUPPLEMENT_JOB = re.compile(r"^[a-f0-9]{12}$")
-
-#: The file route's per-request byte cap (memo §2.7: "a 10 MB cap"), re-applied here
-#: rather than trusted from the decision, because the bytes on disk are what is read.
-SUPPLEMENT_FILE_MAX_BYTES = 10 * 1024 * 1024
-
-#: The SUFFIX -> Content-Type allowlist for the file route. Never ``text/html``,
-#: ``image/svg+xml``, ``application/xhtml+xml``, or any ``+xml`` (memo §2.7, S15):
-#: the served type is decided by this table alone, never by the bytes, so a ``.txt``
-#: whose body opens with ``<script>`` is still served as ``text/plain`` under
-#: ``nosniff`` and cannot execute. ``svg`` and ``xml`` are deliberately absent.
-_SUPPLEMENT_FILE_TYPES: dict[str, str] = {
-    ".txt": "text/plain",
-    ".log": "text/plain",
-    ".md": "text/markdown",
-    ".markdown": "text/markdown",
-    ".csv": "text/csv",
-    ".tsv": "text/tab-separated-values",
-    ".json": "application/json",
-    ".pdf": "application/pdf",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    ".heic": "image/heic",
-    ".heif": "image/heif",
-    ".avif": "image/avif",
-    # Video for the written-video preview tile. Inert media types (the player decodes;
-    # nothing executes), still under the 10 MB cap and ``nosniff`` like every entry.
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mov": "video/quicktime",
-}
+# The job shape (``_SUPPLEMENT_JOB``), the 10 MB cap and the suffix allowlist
+# (``_SUPPLEMENT_FILE_TYPES``) are imported from
+# ``session/media.py``: they belong to the ONE featured-file resolver
+# (``resolve_supplement_file``) that this relay's local file route and a mesh owner
+# answering a remote viewer both run. The private aliases keep existing readers on
+# one spelling.
 
 #: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
 #: EVERY response of both routes, errors included -- #2134 R4's lesson is that a policy
@@ -6888,42 +6867,42 @@ def build_app(daemon: MobileDaemon):
         failure = remote_public_error(error, command=command)
         return JSONResponse(failure.payload(), status_code=failure.status)
 
-    async def remote_media_response(request: Request, owner_row: Any, kind: str) -> Response:
-        from local_operator.mobile.remote_sessions import async_media_chunk
+    async def remote_ranged_response(
+        request: Request,
+        fetch: Callable[..., Awaitable[tuple[dict[str, Any], bytes]]],
+        headers: dict[str, str],
+        *,
+        mime: Callable[[str], str] = lambda declared: declared,
+        buffer_cap: int | None = None,
+    ) -> Response:
+        """Stream one owner blob to HTTP with Range, one bounded mesh chunk at a time.
+
+        ``fetch(offset=, length=, expected_media_id=)`` is the purpose's chunk call
+        (retained media or a supplement); ``headers`` is the route family's policy;
+        ``mime`` maps the PEER'S declared type to the one this viewer will serve —
+        the supplement routes never let a peer choose ``text/html`` at this origin.
+        Refusals raise; callers map them through ``remote_failure``.
+
+        ``buffer_cap`` switches to collect-then-send for a body with a known cap
+        (featured files, 10 MB): a streamed body has already sent ``200`` before a
+        later chunk can be refused, so a mid-transfer mutation or grant revoke would
+        reach the phone as a short read, not the ``409``/``403`` the contract names.
+        Collecting the requested window first (every chunk still its own
+        re-authorized, identity-checked frame) lets those refusals be real statuses.
+        A peer-declared ``total`` over the cap is ``413 remote_too_large`` HERE: the
+        owner applies the same cap, but the viewer does not trust the owner to.
+        Uncapped bodies (retained media, sounds) keep streaming; there a mid-stream
+        refusal is a truncated body (docs/mobile.md).
+        """
         from local_operator.network.sync import SYNC_CHUNK_BYTES
 
-        entry_id = request.query_params.get("entry", "")
-        if not entry_id or kind not in ("image", "video", "file"):
-            return JSONResponse({"error": "invalid_media_reference"}, status_code=400)
-        try:
-            index = int(request.query_params.get("i", "0"))
-            if index < 0:
-                raise ValueError
-        except ValueError:
-            return JSONResponse({"error": "invalid_media_index"}, status_code=400)
-        root = relay_root
-        try:
-            metadata, first_byte = await async_media_chunk(
-                root,
-                owner_row,
-                entry_id=entry_id,
-                index=index,
-                kind=kind,
-                offset=0,
-                length=1,
-            )
-        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
-            return remote_failure(exc)
+        metadata, first_byte = await fetch(offset=0, length=1, expected_media_id=None)
         total = metadata["total"]
+        if buffer_cap is not None and total > buffer_cap:
+            raise RemoteSessionError("remote_too_large", 413)
+        served_mime = mime(metadata["mime"])
         window = _range_window(request.headers.get("range", ""), total)
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=31536000, immutable",
-            "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "default-src 'none'; sandbox",
-        }
-        if kind == "file":
-            headers["Content-Disposition"] = "attachment"
+        headers = {"Accept-Ranges": "bytes", **headers}
         if window == "unsatisfiable":
             headers["Content-Range"] = f"bytes */{total}"
             return Response(status_code=416, headers=headers)
@@ -6941,27 +6920,184 @@ def build_app(daemon: MobileDaemon):
                 # One bounded request at a time. Cancellation closes this
                 # coroutine-owned courier socket, not an uncancellable worker
                 # thread; no next byte window is requested after disconnect.
-                reply, data = await async_media_chunk(
-                    root,
-                    owner_row,
-                    entry_id=entry_id,
-                    index=index,
-                    kind=kind,
+                # Each chunk is its own mesh frame, so the owner re-authorizes
+                # the view grant before every one (a revoke stops the next).
+                reply, data = await fetch(
                     offset=offset,
                     length=min(SYNC_CHUNK_BYTES, end - offset + 1),
                     expected_media_id=metadata["media_id"],
                 )
                 if reply["total"] != total or reply["mime"] != metadata["mime"]:
                     raise RemoteSessionError("remote_media_changed", 409)
+                if buffer_cap is not None and not data:
+                    # A hostile/broken owner answering empty would spin forever
+                    # while nothing has been sent; refuse instead.
+                    raise RemoteSessionError("remote_media_changed", 409)
                 yield data
                 offset += len(data)
 
+        if buffer_cap is not None:
+            # Bounded by buffer_cap (checked above); any refusal raises before a
+            # single header leaves, so the caller answers a real status.
+            body = bytearray()
+            async for part in chunks():
+                body.extend(part)
+                if len(body) > buffer_cap:
+                    raise RemoteSessionError("remote_too_large", 413)
+            if len(body) != max(0, end - start + 1):
+                # Over/under-long replies would contradict Content-Length.
+                raise RemoteSessionError("remote_media_changed", 409)
+            return Response(
+                bytes(body),
+                status_code=206 if window is not None else 200,
+                media_type=served_mime,
+                headers=headers,
+            )
         return SessionEventResponse(
             chunks(),
             status_code=206 if window is not None else 200,
-            media_type=metadata["mime"],
+            media_type=served_mime,
             headers=headers,
         )
+
+    async def remote_media_response(request: Request, owner_row: Any, kind: str) -> Response:
+        from local_operator.mobile.remote_sessions import async_media_chunk
+
+        entry_id = request.query_params.get("entry", "")
+        if not entry_id or kind not in ("image", "video", "file"):
+            return JSONResponse({"error": "invalid_media_reference"}, status_code=400)
+        try:
+            index = int(request.query_params.get("i", "0"))
+            if index < 0:
+                raise ValueError
+        except ValueError:
+            return JSONResponse({"error": "invalid_media_index"}, status_code=400)
+        headers = {
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        }
+        if kind == "file":
+            headers["Content-Disposition"] = "attachment"
+
+        def fetch(**window: Any) -> Awaitable[tuple[dict[str, Any], bytes]]:
+            return async_media_chunk(
+                relay_root, owner_row, entry_id=entry_id, index=index, kind=kind, **window
+            )
+
+        try:
+            return await remote_ranged_response(request, fetch, headers)
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return remote_failure(exc)
+
+    async def remote_supplement_response(
+        request: Request, owner_row: Any, kind: str, ref: str, index: int
+    ) -> Response:
+        """A remote Highlight's featured file (``file``) or sound (``sound``) bytes.
+
+        Same Range streaming as retained media, but the supplement family's policy:
+        ``no-store`` (a featured file is read as it is NOW on the owner, so it must
+        not be cached as immutable) plus ``nosniff`` and a sandbox CSP. The served
+        type is re-derived HERE from the peer's declaration: a file must be one of
+        the local allowlist's own types (``_SUPPLEMENT_FILE_TYPES``) and a sound
+        must be ``audio/*``; anything else is ``application/octet-stream`` /
+        refused, so no owner — buggy or hostile — gets ``text/html`` served from
+        this relay's cookie-bearing origin.
+        """
+        from local_operator.mobile.remote_sessions import async_supplement_chunk
+        from local_operator.session.media import SUPPLEMENT_FILE_MAX_BYTES
+
+        headers = {
+            **_SUPPLEMENT_POLICY,
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        }
+        allowed_files = frozenset(_SUPPLEMENT_FILE_TYPES.values())
+
+        def served(declared: str) -> str:
+            if kind == "sound":
+                if not declared.startswith("audio/"):
+                    raise RemoteSessionError("remote_media_missing", 404)
+                return declared
+            chosen = declared if declared in allowed_files else "application/octet-stream"
+            if not chosen.startswith("image/"):
+                headers["Content-Disposition"] = "attachment"
+            return chosen
+
+        def fetch(**window: Any) -> Awaitable[tuple[dict[str, Any], bytes]]:
+            return async_supplement_chunk(
+                relay_root, owner_row, kind=kind, ref=ref, index=index, **window
+            )
+
+        try:
+            return _supplement_response(
+                await remote_ranged_response(
+                    request,
+                    fetch,
+                    headers,
+                    mime=served,
+                    # Featured files have the local 10 MB cap, so they are collected
+                    # before sending (refusals stay statuses); sounds have no cap and
+                    # keep streaming, as retained media does.
+                    buffer_cap=SUPPLEMENT_FILE_MAX_BYTES if kind == "file" else None,
+                )
+            )
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return _supplement_response(remote_failure(exc))
+
+    async def remote_supplement_document(owner_row: Any, digest: str) -> Response:
+        """A remote Highlight component, assembled HERE, answered as JSON ``{html}``.
+
+        The viewer collects the owner's RAW component (capped at
+        ``SUPPLEMENT_DOCUMENT_MAX_BYTES``) and runs its own
+        ``assemble_stored_component``, so the document's CSP comes from the build
+        serving this phone, never from the peer. Still JSON, never ``text/html``.
+        """
+        from local_operator.mobile.remote_sessions import async_supplement_chunk
+        from local_operator.network.sync import SYNC_CHUNK_BYTES
+        from local_operator.session.media import SUPPLEMENT_DOCUMENT_MAX_BYTES
+        from local_operator.supplements.document import assemble_stored_component
+
+        collected = bytearray()
+        try:
+            metadata, data = await async_supplement_chunk(
+                relay_root,
+                owner_row,
+                kind="document",
+                ref=digest,
+                index=0,
+                offset=0,
+                length=SYNC_CHUNK_BYTES,
+            )
+            total: int = metadata["total"]
+            identity: str = metadata["media_id"]
+            # Re-applied HERE, not trusted from the owner: this relay buffers the
+            # blob to assemble it, so its own cap bounds its own memory.
+            if total > SUPPLEMENT_DOCUMENT_MAX_BYTES:
+                raise RemoteSessionError("remote_too_large", 413)
+            collected.extend(data)
+            while len(collected) < total:
+                metadata, data = await async_supplement_chunk(
+                    relay_root,
+                    owner_row,
+                    kind="document",
+                    ref=digest,
+                    index=0,
+                    offset=len(collected),
+                    length=SYNC_CHUNK_BYTES,
+                    expected_media_id=identity,
+                )
+                if metadata["total"] != total or not data:
+                    raise RemoteSessionError("remote_media_changed", 409)
+                collected.extend(data)
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return _supplement_response(remote_failure(exc))
+        try:
+            html_document = assemble_stored_component(bytes(collected).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return _supplement_response(
+                JSONResponse({"error": "no such supplement"}, status_code=404)
+            )
+        return JSONResponse({"html": html_document}, headers=dict(_SUPPLEMENT_POLICY))
 
     # One per app: the memo holds the model sheet's last build for THIS daemon,
     # and a fresh app (every test's) starts cold.
@@ -7234,7 +7370,12 @@ def build_app(daemon: MobileDaemon):
                     "document_upload": False,
                     "audio_upload": False,
                     "skill_invocation": False,
-                    "supplements": False,
+                    # This relay serves remote Highlight bytes on the SAME URLs as
+                    # local ones. Per-owner support is negotiated on the mesh
+                    # (``mobile-session-supplements-v1``): an owner without it is a
+                    # 409 ``remote_unsupported`` ("Update <owner>"), never a guess.
+                    "supplements": True,
+                    "supplement_kinds": ["document", "file", "sound"],
                 },
                 # THE ``$skill`` CONTRACT (SKM-D3). Three things travel together
                 # and this key gates all of them: the catalogue route
@@ -7267,6 +7408,13 @@ def build_app(daemon: MobileDaemon):
                 # /api/push/register`` refuses unknown fields, so an older
                 # daemon would refuse the whole registration.
                 "push_preferences": {"available": True},
+                # ``preferences.previews`` (session name + reply preview in the
+                # completion banner) is accepted. Separate from
+                # ``push_preferences`` because a daemon that shipped that
+                # capability without this key refuses ``previews`` as an
+                # unknown field, failing the whole registration; the app sends
+                # the key only when this capability is present.
+                "push_previews": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".
@@ -8995,6 +9143,17 @@ def build_app(daemon: MobileDaemon):
 
         if not is_digest(digest):
             return _sound_response(JSONResponse({"error": "bad digest"}, status_code=400))
+        # A peer-hosted conversation (``remote_row``: a local live entry or durable
+        # directory always wins): the owner authorises by the same reference rule
+        # (``session/media.supplement_digest_media``) and this relay streams it.
+        try:
+            owner_row = await remote_row(session_id)
+        except (RemoteSessionError, MeshRefusal) as exc:
+            return _sound_response(_supplement_response(remote_failure(exc)))
+        if owner_row is not None:
+            return _sound_response(
+                await remote_supplement_response(request, owner_row, "sound", digest, 0)
+            )
 
         def load() -> tuple[bytes, str] | None:
             from local_operator.session import compression
@@ -9105,39 +9264,15 @@ def build_app(daemon: MobileDaemon):
             response.headers[name] = value
         return response
 
-    def _journal_references_digest(payload: bytes, digest: str) -> bool:
-        """Whether a ``supplement_v1`` row of this journal references ``digest``.
-
-        §2.7's letter for the document route: the reference is read per
-        ``supplement_v1`` row. Deliberately narrower than a raw session-wide scan
-        with sync's byte grammar -- the grammar also matches ``"attachment"``
-        references on other row types (message media carries the same key today),
-        and a future text-mime producer must not become servable through this door
-        without the authorisation being reconsidered (round-1 review R4). The cheap
-        pre-filter keeps JSON parsing to the lines that can be supplement rows.
-        """
-        from local_operator.network.sync import _ATTACHMENT_REF
-        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
-
-        marker = SUPPLEMENT_CUSTOM_TYPE.encode("ascii")
-        needle = digest.encode("ascii")
-        for line in payload.splitlines():
-            if marker not in line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            row_payload = row.get("payload")
-            if not isinstance(row_payload, dict):
-                continue
-            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
-                continue
-            if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
-                return True
-        return False
+    # The two journal-reference readers are module-level in ``session/media.py`` so a
+    # mesh owner authorises a remote supplement read by the SAME rule as these routes;
+    # their docstrings carry the authorisation reasoning (round-1 review R4, B1).
+    from local_operator.session.media import (
+        journal_references_component as _journal_references_digest,
+    )
+    from local_operator.session.media import (
+        journal_references_sound as _journal_references_sound,
+    )
 
     def _sound_response(response: Response) -> Response:
         """Stamp the sound family's policy on EVERY answer, refusals included.
@@ -9151,56 +9286,6 @@ def build_app(daemon: MobileDaemon):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         return response
-
-    def _journal_references_sound(lines: Iterable[str], digest: str) -> bool:
-        """Whether a ``supplement_v1`` row's ``sounds[]`` names ``digest``.
-
-        THE SOUND ROUTES' THIRD AUTHORISATION FACT, and deliberately a PRECISE
-        reader rather than ``_journal_references_digest`` above: that helper
-        matches any ``attachment`` reference on a supplement row, which includes
-        the COMPONENT document digests. Serving an audio route off a component
-        digest would let the bytes family be reached through a reference that
-        never meant it — the round-1 review's own distinction (B1's sibling).
-
-        Lines, not bytes: after #2798 a settled transcript may be archived, so
-        every caller passes ``session.compression.iter_lines(directory)``. A
-        plain ``transcript.jsonl`` probe would read a compressed session as
-        "no reference" and 404 its own sounds — the guard
-        ``test_no_plain_name_probe_outside_the_resolver`` exists for exactly
-        this.
-
-        Read per row, with the same cheap pre-filter (the marker and the digest
-        must both appear on the line before a parse is worth doing). A beat that
-        has not yet been journaled references nothing yet; the live projection
-        only paints a settled beat, whose row the job writes at settle.
-        """
-        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
-
-        marker = SUPPLEMENT_CUSTOM_TYPE
-        for line in lines:
-            if marker not in line or digest not in line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            row_payload = row.get("payload")
-            if not isinstance(row_payload, dict):
-                continue
-            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
-                continue
-            details = row_payload.get("details")
-            if not isinstance(details, dict):
-                continue
-            sounds = details.get("sounds")
-            if not isinstance(sounds, list):
-                continue
-            for sound in sounds:
-                if isinstance(sound, dict) and sound.get("attachment") == digest:
-                    return True
-        return False
 
     async def api_session_supplement_document(request: Request) -> Response:
         """One stored supplement component, assembled to a document, as ``{html}``.
@@ -9242,6 +9327,18 @@ def build_app(daemon: MobileDaemon):
             return _supplement_response(denied)
         session_id = str(request.path_params["session_id"])
         digest = str(request.path_params["digest"])
+        from local_operator.supplements.contract import is_digest as _is_digest
+
+        if _is_digest(digest):
+            # A peer-hosted conversation (``remote_row``): the owner checks the
+            # supplement-row reference, this relay assembles the document itself
+            # (``remote_supplement_document``).
+            try:
+                owner_row = await remote_row(session_id)
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return _supplement_response(remote_failure(exc))
+            if owner_row is not None:
+                return await remote_supplement_document(owner_row, digest)
 
         def load() -> str | None:
             import base64
@@ -9329,96 +9426,36 @@ def build_app(daemon: MobileDaemon):
             index = int(raw_index)
         except ValueError:
             return _supplement_response(JSONResponse({"error": "bad file index"}, status_code=400))
+        if index >= 0 and _SUPPLEMENT_JOB.fullmatch(job):
+            # A peer-hosted conversation (``remote_row``): the OWNER runs
+            # ``resolve_supplement_file`` -- this route's own policy -- with its own
+            # live cwd; this relay streams the bytes with Range.
+            try:
+                owner_row = await remote_row(session_id)
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return _supplement_response(remote_failure(exc))
+            if owner_row is not None:
+                return await remote_supplement_response(request, owner_row, "file", job, index)
 
         def load() -> tuple[bytes, str] | str:
-            """``(bytes, mime)``, or a refusal token the route maps to a status."""
-            import os
+            """``(bytes, mime)``, or a refusal token the route maps to a status.
 
-            from local_operator.session.transcript import Transcript
-            from local_operator.supplements import denylist
+            The policy itself is ``session/media.resolve_supplement_file`` -- the one
+            definition a mesh owner also runs for a remote viewer -- fed this relay's
+            LIVE record's cwd (``""`` when the conversation has no runtime here).
+            """
+            from local_operator.session.media import resolve_supplement_file
 
             directory = _durable_user_session_dir(session_id)
             if directory is None or not _SUPPLEMENT_JOB.fullmatch(job):
                 return "missing"
-            try:
-                entries = Transcript(directory).entries()
-            except Exception:  # noqa: BLE001 -- an odd transcript serves no file
-                return "missing"
-            newest: dict[str, Any] | None = None
-            for entry in entries:
-                if entry.type != "custom":
-                    continue
-                payload = entry.payload if isinstance(entry.payload, dict) else {}
-                details = payload.get("details")
-                if not isinstance(details, dict) or details.get("job") != job:
-                    continue
-                version = details.get("version")
-                if not isinstance(version, int) or isinstance(version, bool):
-                    continue
-                if newest is None or version >= int(newest.get("version", -1)):
-                    newest = details
-            if newest is None:
-                return "missing"
-            files = newest.get("files")
-            if not isinstance(files, list) or not 0 <= index < len(files):
-                return "missing"
-            recorded = files[index] if isinstance(files[index], dict) else {}
-            raw = recorded.get("path")
-            if not isinstance(raw, str) or not raw:
-                return "missing"
-
-            home = str(Path.home())
             entry = _entry_for_session(daemon, session_id)
-            cwd = entry.record.cwd if entry is not None else ""
-            expanded = os.path.expanduser(raw)
-            if not os.path.isabs(expanded):
-                if not cwd:
-                    # No live record: a cwd-relative path has no root we can
-                    # vouch for, and resolving it against a guess is the class
-                    # of silent wrong-directory this codebase refuses.
-                    return "no-cwd"
-                expanded = os.path.join(cwd, expanded)
-            resolved_path = Path(os.path.realpath(expanded))
-            # The row's own session scratchpad is a root beside cwd/home (a relocated config
-            # dir may sit outside ``~``), mirroring the prefilter that admitted the path.
-            from local_operator.scratchpad import scratchpad_root
-
-            own_pad = scratchpad_root(directory)
-            allowed_roots = [
-                Path(os.path.realpath(root))
-                for root in (cwd, home, str(own_pad) if own_pad is not None else "")
-                if root
-            ]
-            if not any(
-                resolved_path == root or resolved_path.is_relative_to(root)
-                for root in allowed_roots
-            ):
-                return "missing"
-            # The row's own session scratchpad is servable (the prefilter admitted it under
-            # the same carve-out); every credential rule and every OTHER session's store
-            # stay refused. Derived from the requested session's directory, never the env.
-            if denylist.is_sensitive_for_supplements(
-                str(resolved_path),
-                cwd=cwd or home,
-                session_scratchpad=str(own_pad) if own_pad is not None else None,
-            ):
-                logger.info("supplement file refused by the denylist for %s", session_id)
-                return "missing"
-            try:
-                if not resolved_path.is_file():
-                    return "missing"
-                size = resolved_path.stat().st_size
-                if size > SUPPLEMENT_FILE_MAX_BYTES:
-                    return "too-large"
-                data = resolved_path.read_bytes()
-            except OSError:
-                return "missing"
-            if len(data) > SUPPLEMENT_FILE_MAX_BYTES:
-                return "too-large"
-            mime = _SUPPLEMENT_FILE_TYPES.get(resolved_path.suffix.lower())
-            if mime is None:
-                return "missing"
-            return data, mime
+            resolved = resolve_supplement_file(
+                directory, job, index, cwd=entry.record.cwd if entry is not None else ""
+            )
+            if isinstance(resolved, str):
+                return resolved
+            return resolved.data or b"", resolved.mime
 
         outcome = await asyncio.to_thread(load)
         if outcome == "missing":

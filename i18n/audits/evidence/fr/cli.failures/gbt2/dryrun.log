@@ -1,0 +1,4 @@
+# ledger append dry-run, session e73cdb50a745, 2026-11-16
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/fr/cli.failures/gbt2/receipt.json --expected-history-sha e10c5137443b2b876b0c067fb2e1f31ade3a1498506fd0d2a09ab20805e698db --dry-run
+i18n/audit-history/fr/cli.failures.json
+rc=0

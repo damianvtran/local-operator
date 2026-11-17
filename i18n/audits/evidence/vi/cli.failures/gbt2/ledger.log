@@ -1,0 +1,5 @@
+$ ledger.py history-sha --locale vi --namespace cli.failures
+89546c4c9674875dba4a1c6dd425db39462ef5aaf565a3ef90177d226ea2f350
+$ ledger.py append --receipt i18n/audits/evidence/vi/cli.failures/gbt2/receipt.json --expected-history-sha 89546c4c9674875dba4a1c6dd425db39462ef5aaf565a3ef90177d226ea2f350 --dry-run
+i18n/audit-history/vi/cli.failures.json
+rc=0

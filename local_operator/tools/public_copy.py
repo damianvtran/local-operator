@@ -60,9 +60,9 @@ THE TRUST BOUNDARY
 The allowlisted roots are public copy by repository policy
 (``docs/security/redaction-policy.md``).  A secret committed into a catalogue is
 a policy violation, not something this reader can detect: the content check is
-structure (a JSON object of string keys to string values), not a credential
-scan, because a credential scan is exactly the false positive this route exists
-to bypass.  Review of changes under these roots is the control.
+structure (string-valued catalogues or documented English context metadata),
+not a credential scan, because a credential scan is exactly the false positive
+this route exists to bypass. Review of changes under these roots is the control.
 """
 
 from __future__ import annotations
@@ -558,6 +558,41 @@ def _read_catalogue(text: str, key: str | None) -> str:
     return json.dumps({key: payload[key]}, ensure_ascii=False, indent=1)
 
 
+def _read_context_catalogue(text: str, key: str | None) -> str:
+    """Read the documented English context schema, not arbitrary nested JSON.
+
+    These sidecars are already inside the public catalogue roots. Their values
+    differ from message catalogues, but accepting objects in every catalogue
+    would turn the redaction exemption into a general nested-data channel.
+    Validate the WHOLE sidecar before selecting a key, never silently discard
+    unknown metadata, and keep refusal diagnostics independent of its contents.
+    """
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("context catalogue must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("context catalogue must be a JSON object")
+    for name, metadata in payload.items():
+        if not isinstance(name, str) or not isinstance(metadata, dict):
+            raise ValueError("context entries must be metadata objects")
+        for field, value in metadata.items():
+            if field in {"role", "tone", "note"}:
+                valid = isinstance(value, str)
+            elif field == "maxCells":
+                # bool is an int subclass, but is not a documented width value.
+                valid = type(value) is int
+            else:
+                raise ValueError("context metadata contains an unsupported field")
+            if not valid:
+                raise ValueError("context metadata has an invalid field type")
+    if key is None:
+        return json.dumps(payload, ensure_ascii=False, indent=1)
+    if key not in payload:
+        raise KeyError(f"key not found in this catalogue: {key}")
+    return json.dumps({key: payload[key]}, ensure_ascii=False, indent=1)
+
+
 def _read_key_source(text: str, key: str) -> str:
     """Return the lines of a key module / generated map that name ``key``."""
     matches = [line for line in text.splitlines() if key in line]
@@ -1041,7 +1076,13 @@ async def execute_read_public_copy(
                     f"refused: catalogue is larger than {_MAX_UNKEYED_CHARS} characters; pass key",
                     is_error=True,
                 )
-            body = _read_catalogue(text, key)
+            # Admission, immutable HEAD retrieval and the unkeyed size gate above
+            # remain identical. Only English sidecars use the documented object
+            # schema; ordinary/localized catalogues must stay string-only.
+            if Path(relative).parent.name == "en" and relative.endswith(".context.json"):
+                body = _read_context_catalogue(text, key)
+            else:
+                body = _read_catalogue(text, key)
         else:
             if key is None:
                 return _text(

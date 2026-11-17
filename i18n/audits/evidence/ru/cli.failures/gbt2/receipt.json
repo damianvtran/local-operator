@@ -1,0 +1,34 @@
+{
+  "locale": "ru",
+  "namespace": "cli.failures",
+  "source_sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea",
+  "translator": {
+    "agent": "i18n-translator (timeout-ru)",
+    "model": "openai/gpt-6.1-sol (fallback anthropic/claude-opus-5-5)",
+    "date": "2026-11-16"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (audit2-ru, session 2753becb3d9e; independent)",
+    "model": "anthropic/claude-opus-5-5 (fallback from openai/gpt-6.1-sol)",
+    "date": "2026-11-16",
+    "result": "passed",
+    "findings": 1,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "ru cli.failures gbt2 independent audit PASS: 5 keys, 0 blocker/major, 1 minor (R1). Auditor opus-5-5 (fallback from gpt-6.1-sol, 429); translator gpt-6.1-sol+opus fallback. Evidence: i18n/audits/evidence/ru/cli.failures/gbt2/record.json",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.failures/gbt2/record.json",
+      "sha256": "09011d5faebe66c938948c0673a8df1be25fdc0411905e4fba04bd60a4e78f31"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.failures/gbt2/report.md",
+      "sha256": "047ad7743313c00f8e66a7956e016079b2d4a4a1c971ea5979c84db3454cfc0d"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.failures/gbt2/audit.log",
+      "sha256": "1aa4fdc1faff12f984f11c3a3f7f883ad2a3348aacdceaa19014787ecdc4f832"
+    }
+  ]
+}
