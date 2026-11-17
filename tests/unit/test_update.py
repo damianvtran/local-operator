@@ -5725,15 +5725,23 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     all (the wheel ships the built bundle), the announcement is printed, and
     the temporary extract is still reclaimed."""
     repo, commit = _release_repo(tmp_path)
+    previous = tmp_path / "generations" / "previous"
     snapshot = tmp_path / "extract"
     snapshot.mkdir()
     document = _release_document(
         "1.2.3", _wheel_entry("local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl")
     )
     calls: list[tuple[Any, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: Any, **kwargs: Any) -> None:
+        order.append("install")
         calls.append((source, kwargs))
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return previous
 
     monkeypatch.chdir(repo)  # ``resolve_snapshot`` archived the ref out of here
     with (
@@ -5750,10 +5758,16 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         # tail assertion below is deterministic rather than a fact about the
         # machine the suite runs on (S3b).
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="1.2.2")),
+        # The pre-flip ``current`` the snapshot path reads for the prune (R2),
+        # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
+        # host's: this fixture's pointer names ``previous``.
+        patch.object(update_mod, "previous_generation_for_reclaim", side_effect=read_previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
         assert update_mod._snapshot_command("v1.2.3") == 0
+
+    assert order == ["previous", "install"], order
 
     # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
     # terminal and may answer the signing dialog (review round 1, R2).
@@ -5774,6 +5788,7 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         before_version="1.2.2",
         via="snapshot",
         promoted_generation=None,
+        previous_generation=previous,
     )
 
 
@@ -5951,15 +5966,23 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
     """The override path on the wheel route: it installs, loudly, and the marker
     note records the deliberate downgrade rather than the silent one."""
     repo, commit = _release_repo(tmp_path, tag="v0.9.8", version="0.9.8")
+    previous = tmp_path / "generations" / "previous"
     snapshot = tmp_path / "extract"
     snapshot.mkdir()
     document = _release_document(
         "0.9.8", _wheel_entry("local_operator-0.9.8-py3-none-macosx_11_0_universal2.whl")
     )
     calls: list[tuple[Any, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: Any, **kwargs: Any) -> None:
+        order.append("install")
         calls.append((source, kwargs))
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return previous
 
     monkeypatch.chdir(repo)
     with (
@@ -5972,10 +5995,16 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         ),
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
         patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        # The pre-flip ``current`` the snapshot path reads for the prune (R2),
+        # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
+        # host's: this fixture's pointer names ``previous``.
+        patch.object(update_mod, "previous_generation_for_reclaim", side_effect=read_previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
         assert update_mod._snapshot_command("v0.9.8", allow_downgrade=True) == 0
+
+    assert order == ["previous", "install"], order
 
     # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
     # terminal and may answer the signing dialog (review round 1, R2).
@@ -5994,6 +6023,7 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         before_version="0.9.9",
         via="snapshot",
         promoted_generation=None,
+        previous_generation=previous,
     )
     captured = capsys.readouterr()
     assert (
@@ -6339,26 +6369,49 @@ def test_the_nothing_to_install_exit_queues_no_roll(
     assert rollouts.latest_active(root=root) is None
 
 
-def test_perform_upgrade_never_collects_previous_generations(
+def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The PyPI tail, like the shared snapshot tail, must never collect A."""
-    collections: list[dict[str, Any]] = []
+    """The PyPI tail hands the promoted build to the ONE reclaim step (2026-11-16).
+
+    Automatic collection replaced the frozen tail after a fleet node reached 113
+    generations; it must go through ``reclaim_after_promotion`` (the guarded
+    ``lop install prune`` policy) with the caller's ``on_prune`` reporter, and
+    never call ``prune_generations`` directly from this tail.
+    """
+    # (promoted, previous, on_prune): the stub records all three reclaim inputs.
+    reclaims: list[tuple[Path | None, Path | None, Any]] = []
+    direct: list[dict[str, Any]] = []
     notices: list[Any] = []
     generation = tmp_path / "owned-generation"
     generation.mkdir()
     # Match the real positional-source call, while observing the tail's intent;
     # this is not installer/publication/signature proof.
     installs: list[tuple[str | Path | None, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: str | Path | None, **kwargs: Any) -> Path:
+        order.append("install")
         installs.append((source, kwargs))
         return generation
 
+    before = tmp_path / "before-generation"
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return before
+
+    monkeypatch.setattr(update_mod, "previous_generation_for_reclaim", read_previous)
     monkeypatch.setattr(update_mod, "install_into_generation", install)
     monkeypatch.setattr(
-        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+        update_mod,
+        "reclaim_after_promotion",
+        lambda promoted, *, previous=None, on_prune=None: reclaims.append(
+            (promoted, previous, on_prune)
+        ),
     )
+    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: direct.append(kwargs))
     assert (
         update_mod.perform_upgrade(
             target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
@@ -6379,7 +6432,10 @@ def test_perform_upgrade_never_collects_previous_generations(
             },
         )
     ]
-    assert collections == [] and notices == []
+    # R2: the pointer's target read BEFORE the install travels as ``previous``.
+    assert reclaims == [(generation, before, notices.append)]
+    assert order == ["previous", "install"], order
+    assert direct == []
 
 
 def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
@@ -6387,9 +6443,9 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
 ) -> None:
     order: list[Any] = []
     monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
-    # Automatic collection is frozen: promotion does not retire loaded A roots.
-    # Recording calls (rather than raising in a best-effort prune) detects even
-    # a swallowed GC failure being attempted by this snapshot/shared tail.
+    # No ``promoted_generation`` means this run promoted nothing, so the shared
+    # reclaim must not prune. Recording calls (rather than raising in a
+    # best-effort prune) detects even a swallowed attempt.
     collections: list[dict[str, Any]] = []
     monkeypatch.setattr(
         update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
@@ -6428,6 +6484,55 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
         "via": "snapshot",
         "roll": False,
     }, order
+
+
+def test_the_snapshot_tail_reclaims_the_promoted_build_before_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``lop-update`` lands on this tail; it must prune like the PyPI path (2026-11-16).
+
+    The reclaim gets THIS run's promoted generation and the CLI printer, and runs
+    right after the ``current`` line — before services, the roll and the report —
+    so the removals print where the PyPI path prints them (design review D4).
+    """
+    order: list[Any] = []
+    promoted = tmp_path / "promoted"
+    previous = tmp_path / "previous"
+    monkeypatch.setattr(update_mod, "_print_current_generation", lambda: order.append("current"))
+    monkeypatch.setattr(
+        update_mod,
+        "reclaim_after_promotion",
+        lambda generation, *, previous=None, on_prune=None: order.append(
+            ("reclaim", generation, previous, on_prune)
+        ),
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "_run_services_tail",
+        lambda services: order.append("services") or update_mod.StageReport(),
+    )
+    monkeypatch.setattr(update_mod, "_roll_after_update", lambda **kwargs: order.append("roll"))
+    monkeypatch.setattr(update_mod, "_emit_update_report", lambda **kwargs: order.append("report"))
+    assert (
+        update_mod._generation_upgrade(
+            0,
+            install_version="0.28.0",
+            target="0.28.0",
+            roll=False,
+            before_version="0.27.0",
+            via="snapshot",
+            promoted_generation=promoted,
+            previous_generation=previous,
+        )
+        == 0
+    )
+    assert order == [
+        "current",
+        ("reclaim", promoted, previous, update_mod._print_prune_notice),
+        "services",
+        "roll",
+        "report",
+    ], order
 
 
 def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(

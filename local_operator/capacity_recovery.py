@@ -1,13 +1,26 @@
 """Capacity + retention recovery: reclaim disk without killing a live fleet.
 
-WHY THIS EXISTS. Every install generation is a whole venv, and iteration 1 froze
-the automatic GC at the promotion tail (``update.py`` returns right after the flip
-with no prune) because discovery/argv/open-file absence is not a lifetime-pin
-proof: an old process can load an asset later with no handle open now. Freezing GC
-is the safe POSITIVE rule, but it makes disk exhaustion possible in principle —
-so this module is the OTHER half: it reclaims a generation ONLY when positive
-evidence says nothing can still be running from it, and never by killing a
-process or by guessing that an absence means a death.
+WHY THIS EXISTS. Every install generation is a whole venv. Iteration 1 froze the
+automatic GC at the promotion tail (a589a3f27) because discovery/argv/open-file
+absence is not a lifetime-pin proof — an old process can load an asset later with
+no handle open now — and this module was written as the OTHER half: reclaim a
+generation ONLY when positive evidence says nothing can still be running from it,
+never by killing a process or by guessing that an absence means a death.
+
+THE POLICY SINCE 2026-11-16 (operator decision). The controller below never got a
+production caller: the tail recorded a ``handoff.capacity`` request that nothing
+consumed, and a fleet node reached 113 generations (~8.6 GB) before a manual
+``lop install prune --keep 2``. Every promotion tail now runs
+``update.reclaim_after_promotion`` instead: the same guarded
+``update.prune_generations`` that :func:`reclaimable_now` wraps, with the
+``update.keep_generations`` margin (default 2) and an ``update.auto_prune`` off
+switch. The protection is the census (live, persisted, reaped and boot records,
+re-read per candidate), the pointer's target, the running tree and the keep
+margin; the lifetime-pin caveat is bounded by retaining everything the census
+cannot prove dead (an incomplete read keeps every tree). That pass never moves or
+kills anything, so the cohort-move controller here stays decision-only and
+unwired; the capacity note is still written, after the prune, for pressure the
+prune could not relieve.
 
 THE THREE PIECES, and each states a boundary rather than a mechanism:
 

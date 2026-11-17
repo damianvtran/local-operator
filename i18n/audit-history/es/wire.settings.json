@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "9b2bb944317641d1166d2b186d352012b291638a4d1150ad5fe9fa56a1edb616",
+  "history_sha256": "82e7b52d5a1dc17ebcd688478993ecacbf659e0083dc64f2daefbbf719a11cd3",
   "entries": [
     {
       "locale": "es",
@@ -1055,6 +1055,144 @@
       },
       "retained_upstream_findings": [],
       "note": "#4052 main-fold bind3 independent auditor f0bc4e490816 (anthropic/claude-opus-5-5, no fallback): en f8a64b71=base f5c40bc8+PR key network_credentials_github_repositories.help+#4104 6 heavy-job keys; exact composition; 7 keys semantically re-read; 0 blocker/major. i18n/audits/evidence/es/wire.settings/merged-bind3-f0bc4e490816-f8a64b71/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+      "target_sha256": "b0acd06d72c591ff60cf2bd3020ad029380603bc291de4965c0777e7f0663225",
+      "translator": {
+        "agent": "i18n-translator (job 2e94fb7583f3); resumed/remediation job chain 2e94fb7583f3->bde68516ccdb->02be60704ad7->3379e128b390",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev), task as-au-es",
+        "session": "6d23d6953609",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-16",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "es-A1"
+        ],
+        "locale_verdict": "CLEAN-WITH-FINDINGS"
+      },
+      "status": "passed",
+      "note": "PR #4135 (fix/auto-prune-generations) update_auto_prune/update_keep_generations copy, final audit at cc66c51cb3ad + uncommitted translator edits (bytes = target_sha256). Independent i18n-auditor session 6d23d6953609 (anthropic/claude-opus-5-5, fallback: none observed) of i18n-translator job 2e94fb7583f3 (anthropic/claude-sonnet-5-5; job chain 2e94fb7583f3->bde68516ccdb->02be60704ad7->3379e128b390; translator replaced the earlier UNAUDITED implementer drafts). Audited keys: the 8 keys wire.settings.updates.title/description, update_auto_prune.label/help/choice.true.description/choice.false.description, update_keep_generations.label/help. Pair findings: 0 blocker, 0 major, 1 minor, 0 nit ['es-A1']; verdict CLEAN-WITH-FINDINGS. Earlier draft rounds of this audit (where the record has a round1 block) found MAJOR(s) that were remediated by the translator before these bytes; they were never ledger rows. Record: i18n/audits/evidence/es/wire.settings/ap1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/ap1/record.json",
+      "round": "ap1",
+      "keys_audited": 8
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6",
+      "target_sha256": "cd1ea9e66f6e35a3fe166425d56880a1dcfad71ceb9609b81bbe9ae437a497af",
+      "translator": {
+        "agent": "i18n-translator (jobs for this key's rework: 54647c7a3ac3 -> 581ae376a00e -> 8d547a25bca6; original first-pass chain in the ap1 receipt: (job 2e94fb7583f3); resumed/remediation job chain 2e94fb7583f3->bde68516ccdb->02be60704ad7->3379e128b390)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev), task as-au-es",
+        "session": "6d23d6953609",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-16",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 (fix/auto-prune-generations) FINAL round ap2: the ONE reworded key wire.settings.update_keep_generations.help (English now leads with the always-kept guarantee: 'Always kept: current, previous and running installs, and any a session or service registered. Also keeps this many newest unused installs.'; decided by the PR's code review after a real TUI render). This row supersedes the ap1 row's value for update_keep_generations.help only; the other 7 keys are unchanged from ap1 and the ap1 row stays in history (append-only). Independent i18n-auditor session 6d23d6953609 (anthropic/claude-opus-5-5, fallback: none observed), same session as ap1, now at round 5 of its record; audited bytes = target_sha256 on top of a67cdd7c7350 + uncommitted final working tree. i18n-translator (anthropic/claude-sonnet-5-5) job chain for this key: 54647c7a3ac3 -> 581ae376a00e -> 8d547a25bca6. Pair findings: 0 blocker, 0 major, 0 minor, 0 nit []; verdict CLEAN. Record: i18n/audits/evidence/es/wire.settings/ap2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/ap2/record.json",
+      "round": "ap2",
+      "keys_audited": 1
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "8202b3fda884e4e0c4b492d1cfabab21cb3b0e14db6aae25fa04c53309bd680f",
+      "target_sha256": "f394a67feba0500e0d83023938451c9355fbd6d57781fd0aea4137eb4eb42957",
+      "translator": {
+        "agent": "i18n-translator (team lopdev), session b0fe2564b811, job fe2cc984b94c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev), independent of translator b0fe2564b811 and the implementer",
+        "session": "1164c8450503",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-17",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 merge with main, round m4135: independent i18n-auditor session 1164c8450503 (anthropic/claude-opus-5-5, fallback: none observed), audited bytes target_sha256 in the uncommitted merge tree of .worktrees/auto-prune-pr. Translator: i18n-translator session b0fe2564b811 (anthropic/claude-opus-5-5), job fe2cc984b94c, 2026-11-17. Merge of PR #4135 (HEAD 1853bde32, wire.settings cd1ea9e66f6e, last receipt passed vs en d1f1d715f520) with main (MERGE_HEAD eb872993c, wire.settings f179113a0302, last receipt passed vs en beb522ed3593); merge-base 23398503e. Mechanical, whole namespace (883 keys): key set equals en and the union of both parents minus deletions; every non-patched value is byte-identical to the side that changed it (no both-sides conflicts, no reverts); placeholder parity, backtick code-span parity, NFC and no bidi/control chars all pass; the source has no ICU plural/select, so there are no plural categories to check. Key order differs from en only in the session_cleanup_temporary_idle_minutes choices, which is pre-existing at the merge base and not a translation issue. Semantic: all 14 merge keys (update_auto_prune.*, update_keep_generations.{label,help}, updates.{title,description}, bash_heavy_jobs_enabled.*, heavy_jobs.{title,description}) checked against en and the en context sidecar for meaning, prune/keep safety, glossary and fit. Safety holds: every rendering deletes only unused/old installs, and keep_generations.help leads with the complete always-kept clause (current, previous, running, registered) within the 146-cell budget. The other 869 keys were not re-scored: they are value-identical to bytes that already carry passed receipts on a parent. No translator change to this locale in the merge; confirmed. Pair findings: 0 blocker, 0 major, 0 minor, 0 nit []; verdict CLEAN. Minor/nit findings are deferred and non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/m4135/record.json",
+      "round": "m4135",
+      "keys_audited": 883
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "c62db407a0b2e1944e63504b6332a3da5dcc494b6877f2ecefed3f518851b96a",
+      "target_sha256": "1b6f0095e6fe435e4684a8b0a70e50ad7c95b769c30e35e9ccab90ec263ebf40",
+      "translator": {
+        "agent": "i18n-translator, session b0fe2564b811",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, reviewer role, round m4135b), session 634bfc6a6ee7; independent of translator b0fe2564b811 and implementer feac6b2db7a4; did not read the m4135 records or any other session scratchpad",
+        "session": "634bfc6a6ee7",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-17",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 merge 2 (MERGE_HEAD a0e458d43 into HEAD a4152e090), round m4135b: independent i18n-auditor session 634bfc6a6ee7 (anthropic/claude-opus-5-5, fallback none observed) audited target_sha256 against en c62db407a0b2 in the uncommitted merge tree of .worktrees/auto-prune-pr. Mechanical, 883 keys: key set equals en; placeholder and backtick parity, NFC, no bidi/control chars; literals lop install prune, lop update and lop network credential github repos --use-default verbatim; labels <=29 cells. Three-way vs merge-base eb872993c: 8 PR keys carry HEAD text, network_credentials_github_repositories.help carries main text, no both-sides changes, rest byte-identical. All 9 keys faithful. Prune copy deletes only unused old installs; keep help lists current, previous, running and session/service-registered first (guarantee clause 93 cells, whole 145 <=146). GitHub help keeps the two states distinct (never set = pushable minus opt-outs; clearing a shared hand-picked list stops lending) and never implies clearing widens access. Findings: 0 blocker, 0 major, 0 minor, 0 nit []; minor/nit deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/m4135b/record.json",
+      "round": "m4135b",
+      "keys_audited": 883
     }
   ]
 }

@@ -2174,10 +2174,13 @@ isolated generation, then commit `current` under the existing install-root
 transaction; busy runtimes retain their loaded package/dependency/resource roots
 and move individually only when their existing idle latch admits it. Do not
 weaken fresh-artifact/signature, duplicate-attempt, stale-target, root ownership
-or conditional rollback checks. Automatic generation collection is frozen in
-both PyPI and snapshot update tails: an absent discovery/argv/open-file reference
-is not proof that a runtime will never read a bundled asset later. An unreadable
-fleet census must not veto isolated preparation, and must never license deletion.
+or conditional rollback checks. Every promotion tail (PyPI, snapshot, mesh) then
+runs `update.reclaim_after_promotion` = `lop install prune`'s own guarded policy,
+never a second deletion path (operator, 2026-11-16, after 113 generations piled up
+under the old freeze): current, the running tree, record-named roots and the
+`update.keep_generations` (2) newest survive; `update.auto_prune: false` disables;
+no kill/move; failure never fails the update. An unreadable fleet
+census must not veto isolated preparation, and must never license deletion.
 
 Installed/current and actual service-serving builds are different outcomes.
 Daemon-owned work and unsupported old reload capabilities must defer service
