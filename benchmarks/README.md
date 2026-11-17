@@ -7,10 +7,10 @@ reproduction references, not disposable local output.
 ## Self-contained kits
 
 - [Harness-cost analysis](harness_cost/README.md): exploratory, single-run
-  historical study of harness cost under full, production-scale configuration,
+  historical study of harness cost under a production-scale configuration,
   with corrections, an independent review and zero-spend regeneration. It leads
-  with observed costs; its configuration differences and caveats are listed
-  per harness. Its manifests, snapshots, licenses, checksums and
+  with observed costs; its configuration differences are listed per harness,
+  alongside its caveats. Its manifests, snapshots, licenses, checksums and
   validation outputs are part of the reproducible artifact.
 - [OSWorld adapter](osworld_v2_adapter/README.md): adapter implementation and
   local validation. The [OSWorld apparatus documentation](../docs/benchmarks/osworld_2/README.md)

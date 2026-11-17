@@ -62,9 +62,11 @@ then set established to `max(established, read + creation)`. It includes side
 calls and is still a counterfactual, not a measured cold result or proven cache
 ownership. Timestamp order matches `reviews/cold.py`. Historical cold and this
 alternative are shown with observed values, with equal visual prominence.
-In prose the kit leads with observed cost, which includes the cache reuse that
-longer and repeated tasks get in practice, and treats both cold estimates as a
-worst-case sensitivity check for a one-off task on a cold cache. Under that
+In prose the kit leads with observed cost, which includes the measured cache
+reuse within each task and, for repeated runs, the reuse that holds only while
+a rerun lands inside the cache TTL (R2: median gap 1.1 min). It treats both
+cold estimates as a pessimistic sensitivity check for a one-off task on a cold
+cache, not an upper bound. Under that
 repricing the full-arm order changes against OpenCode (R2), and that reversal
 is reported alongside the observed result, not instead of it.
 

@@ -24,7 +24,8 @@ harness treats the provider prompt cache as a resource to be managed:
   tool schemas enter the context only when enabled; `wait` returns on job
   settle or message arrival so a long job costs one round trip, not twelve.
 
-An exploratory harness-cost kit compares harnesses under full, production-scale
+An exploratory harness-cost kit compares harnesses under a production-scale
 configuration, with observed (cached) costs first, cold-cache estimates as a
-worst-case check, and its per-harness configuration differences listed; it lives
-in [benchmarks/harness_cost](../../benchmarks/harness_cost/README.md).
+pessimistic sensitivity check, and its per-harness configuration differences
+listed; it lives in
+[benchmarks/harness_cost](../../benchmarks/harness_cost/README.md).
