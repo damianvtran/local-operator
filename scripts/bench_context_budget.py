@@ -1919,7 +1919,15 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # The raise is that delta and nothing more, so whatever headroom main carries
 # in CI is unchanged. (This host reads main itself 191 over 37,245 — the known
 # local-vs-CI offset; the delta is the comparable number, not the absolute.)
-BUDGET_BILLED_TOKENS = 37_388
+# RAISED 37,388 -> 37,389 at the convergence merge with origin/main da8f3f04,
+# which carries PR #4098's terser refusal bullet: the merged bullet keeps this
+# PR's text plus #4098's `ask`-reply exception (+47 chars over this branch).
+# Measured with THIS script, ISOLATED HOME, one host, one pass:
+#   origin/main da8f3f04   103,530 chars = ~37,241 billed (4 under 37,245)
+#   merged head            103,931 chars = ~37,385 billed
+#     = +401 chars = ~+144.2 billed; the ceiling moves by that delta (+144
+#     over main's 37,245), so main's headroom carries over unchanged.
+BUDGET_BILLED_TOKENS = 37_389
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2143,7 +2151,11 @@ BUDGET_BILLED_TOKENS = 37_388
 #   origin/main 72dd603f   92,373 chars = ~33,228 billed / 19 headroom
 #   this branch            92,770 chars = ~33,371 billed
 #     = +397 chars = ~+143 billed; the raise keeps main's 19 of headroom.
-BUDGET_CHILD_BILLED_TOKENS = 33_390
+# RAISED 33,390 -> 33,391 at the same convergence merge (same bullet):
+#   origin/main da8f3f04   91,832 chars = ~33,033 billed
+#   merged head            92,233 chars = ~33,177 billed
+#     = +401 chars = ~+144.2 billed over main's 33,247.
+BUDGET_CHILD_BILLED_TOKENS = 33_391
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

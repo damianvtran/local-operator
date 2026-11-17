@@ -1592,6 +1592,24 @@ def _rank(
                     f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
                 )
             return RankedTarget(target, Risk.LOW, reason, shown)
+        rig, rig_why = _finished_rig_reason(
+            target, path, reasons, notes, link is not None, session_id
+        )
+        if rig is not None:
+            if foreign is not None:
+                # Carried to the agent and journaled (``check``) like the
+                # finished-foreign-worktree notice: a LOW resting on facts says so.
+                note = (
+                    f"Guardrail dangerous-delete: {os.path.realpath(path)} removed without "
+                    f"review — {rig}."
+                )
+                if note not in foreign.notices:
+                    foreign.notices.append(note)
+            return RankedTarget(target, Risk.LOW, rig)
+        if rig_why and rig_why not in _RIG_SILENT_WHY:
+            # Say why the finished-rig route did not apply, so the judge and
+            # the agent see the one fact that kept it (e.g. creator running).
+            notes = [*notes, f"not finished work: {rig_why}"]
         return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
@@ -1968,6 +1986,54 @@ def _reached_worktrees(
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
+
+
+#: Finished-rig refusals not worth a note: the route never applied (no ledger
+#: row is the ordinary case for the operator's own ``$HOME`` directories).
+_RIG_SILENT_WHY = frozenset({"no creation ledger row for this directory", "not a directory"})
+#: The one ``_high_reason`` the finished-rig route may settle.
+_HOME_CHILD_REASON = "a top-level directory of the home directory"
+
+
+def _finished_rig_reason(
+    target: Target,
+    path: str,
+    reasons: list[tuple[str, str]],
+    notes: list[str],
+    through_link: bool,
+    session_id: str,
+) -> tuple[str | None, str]:
+    """``(LOW reason, "")`` for deleting a finished ``$HOME`` rig, else ``(None, why)``.
+
+    ``why`` is "" when the route does not apply at all (wrong shape).
+
+    WHY (node-2 census 2026-11-15; operator, ask a-798d): see
+    ``provenance.finished_rig``. Narrow by construction: only a literal
+    ``rm``-style delete (no glob, no selecting ``find``, no link entry, no
+    unresolved notes) whose EVERY spelling's only objection is "a top-level
+    directory of the home directory". Anything CRITICAL (``$HOME`` itself,
+    the state root, secrets, the install layout, credential-derived or opaque
+    targets) returned earlier in ``_rank``; a repository root ranks on its own
+    reason and never reaches here; linked worktrees inside were ranked by
+    ``_reached_worktrees`` before this, so an unfinished one already held.
+    """
+    if (
+        target.op != "delete"
+        or target.pattern is not None
+        or target.selected
+        or target.worktree_remove
+        or through_link
+        or notes
+        or target.credential_derived
+        or target.opaque
+        or not session_id
+    ):
+        return None, ""
+    if any(r != _HOME_CHILD_REASON for _, r in reasons):
+        return None, ""
+    from local_operator.guardrails import provenance as prov
+
+    return prov.finished_rig(path, session_id)
 
 
 def _finished_route_barred(root: str, prot: _Protected) -> bool:
