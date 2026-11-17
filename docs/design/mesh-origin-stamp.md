@@ -37,7 +37,7 @@ answer → `record["answered_by"]["mesh_origin"]`.
 | `network_id` | str | `link.network_id`; new in `_peer_block` |
 | `link_id` | str (hex) | `link.link_id`, handshake-derived (`network/handshake.py:813-818`) |
 | `capabilities` | list[str], sorted | set the relay resolved from the live member row (`relay.py:4976-4989`), sent at `dial.py:377-378` |
-| `verified` | bool | `proof_ok AND block.peer_authenticated` (§2 rule 3) on THIS connection |
+| `verified` | bool | `proof_ok AND block.peer_verified` (§2 rule 3) on THIS connection |
 | `stamped_by` | str | `device_id` of the device whose runtime minted the stamp (this install's `identity.load().device_id`, `network/identity.py:237`). Added by M-4. |
 | `operator_origin` | bool, OPTIONAL, absent by default | G7 slot (60334); this PR never writes it. Constraints in §2.2. |
 
@@ -49,13 +49,15 @@ Rules:
    `lop_mesh_origin` (M-2).
 2. **Unproved non-local connection:** stamp written with `verified:false` and the
    claimed identity (audit only). Local connections write no stamp.
-3. **Peer authentication is a per-link fact in the PROVED block (M-1).** `PeerLink`
-   gains `peer_authenticated`, copied from `handshake.auth_verified`
-   (`handshake.py:440`), set only by `verify_auth` after it checks the PEER's
-   signature and MAC (`handshake.py:777`): today inbound links only, since a dialer
-   reads the listener's id unverified (`handshake.py:531-536`); G1 sets it on the
-   dialer after verifying the listener. It is MAC-bound in the G6 block (§3.1) and
-   `verified = proof_ok and block["peer_authenticated"] is True`. No runtime-side
+3. **Peer verification is a per-link fact in the PROVED block (M-1).** `PeerLink`
+   gains `peer_verified: bool`, from `HandshakeResult.peer_verified`, true only when
+   the handshake checked the PEER's signature and MAC (today `verify_auth`,
+   `handshake.py:692-790`). Build sites (R2-4): `relay.py:7993` listener register
+   (true), `13265` pair listener (true: the SAS ceremony verified the joiner), `13602`
+   dialer (FALSE pre-G1: it reads the listener's id unverified,
+   `handshake.py:531-536`). G1 sets it on the dialer after verifying the listener,
+   and `_admit_link` then refuses `False`. It is MAC-bound in the G6 block (§3.1) and
+   `verified = proof_ok and block["peer_verified"] is True`. No runtime-side
    constant, so a post-G1 runtime dialled by a pre-G1 relay still gets `false`.
 4. **Answer merge (M-8).** The store keeps the FIRST answer's `by` and folds
    revisions only into `surface` (`asks/store.py:878-891`). The mesh stamp is
@@ -82,19 +84,26 @@ The stored `verified` is evidence, not a verdict. New stdlib-only helper in
 `local_operator/network/origin.py`:
 
 ```python
-def mesh_origin_counts(stamp: Mapping | None, *, root: Path, self_device_id: str) -> bool:
+def mesh_origin_counts(stamp: Mapping | None) -> bool:
     """True iff a delivery stamp still counts as an authenticated mesh device NOW."""
 ```
 
-It reads the LIVE record itself with `store.load(network_id, root)`
-(`network/store.py:886`; not `StoreView.network`, which catches only
-`FileNotFoundError`, `relay.py:3958-3962`); ANY exception ⇒ False (M-7). True only if:
+Every input other than the stamp is INTERNAL (R2-2, R2-3): `root` is always the
+runtime's own `paths.config_dir()` (`local_operator/paths.py:60`), never taken from
+the stamp, the session or moved data; `self_device_id = identity.load(root).device_id`
+(`network/identity.py:237`), the same source minting uses. Identity rotation
+therefore voids all own stamps (fail-closed). A test-only `_root`/`_identity` override
+is allowed if clearly marked. ANY exception ⇒ False (M-7). True only if:
+- `stamp["network_id"]` passes `store.safe_component` (`network/store.py:153-169`:
+  no `/`, `\`, `:`, `.`/`..`, control chars) BEFORE any path is built, since
+  `store.load` → `record_path` interpolates it (`store.py:172-173`, `886-891`) (R2-2);
+- the record loads via `store.load` (not `StoreView.network`, which catches only
+  `FileNotFoundError`, `relay.py:3958-3962`);
 - `stamp["verified"] is True` and `stamp["stamped_by"] == self_device_id` (M-4);
 - `record.trust == "active"` (the `_refusal_reason` term, `relay.py:7834-7859`);
 - `row = record.member(origin_device_id)` exists, `row.device_id == origin_device_id`
-  (M-7: `member()` also matches `previous_ids`, `network/types.py:1903-1907`, and a
-  rotation may answer a compromise) and `row.active` (`types.py:1543`; false once
-  `removed_at` is set, `types.py:1539`);
+  (M-7: `member()` also matches `previous_ids`, `network/types.py:1903-1907`) and
+  `row.active` (`types.py:1543`; false once `removed_at` is set, `types.py:1539`);
 - `origin_device_id not in record.removed_ids`.
 
 `record.epoch` is logged, not gated: revocation is the tombstone + `removed_ids`
@@ -108,12 +117,13 @@ rows. **Consumer:** the guard (60334). This PR ships the helper + tests, no call
 (c) B's relay sets it only when B's local client proved operator authority on that
     frame (`request_proof_ok` shape, `harness/approval.py:781-795`); never from
     `send`, `_pilot_act` or the mobile daemon unless the phone proved its own.
-(d) Inside link-AEAD frames, folded into A's G6 MAC; trust bound: B's relay is honest.
+(d) Inside link-AEAD frames, with a per-frame MAC under `K_relay` over the (b) digest
+    (G6 covers the connection start only, R2-5); trust bound: B's relay is honest.
 (e) Optional end to end: the surface signs the frame digest with a non-biometric key
     certified under the operator anchor (`server.py:2366-2385`, `_device_cert_point`
     `6942`).
-(f) At rest it inherits M-4/M-5 unless consumed in memory at delivery or gated on
-    `stamped_by == self`.
+(f) At rest it inherits M-4/M-5/R2-1: consume it in memory at delivery; a stamp
+    imported by move or replica promote is never trusted (§4).
 
 ## 3. G6 — relay proves itself to the runtime, per connection
 
@@ -128,10 +138,10 @@ domain-separated labels (`approval.py:648-649`). New label, key, and one bound i
 ```
 relay_proof = hmac_sha256(K_relay, b"lop-relay-attest-v1" || relay_nonce || ":" ||
               relay_salt || ":" || wire.canonical_json(block))   # network/wire.py:378
-block = {device_id, name, network_id, link_id, peer_authenticated, capabilities}
+block = {device_id, name, network_id, link_id, peer_verified, capabilities}
 ```
 Canonical form (M-11): exactly those six keys; the first four are `str`,
-`peer_authenticated` is `bool`, `capabilities = sorted(set(str(c) for c in caps))`,
+`peer_verified` is `bool`, `capabilities = sorted(set(str(c) for c in caps))`,
 matching `dial.py:378`. The runtime holds caps as a frozenset (`server.py:5323-5328`)
 and must re-sort the same way before recomputing.
 
@@ -142,7 +152,7 @@ Flow, mirroring the operator handshake (`server.py:10885-10896`, `10950-10966`):
 3. Relay sends `{"op":"relay_attest","proof":…}` as its first post-welcome frame.
 4. Runtime verifies, recomputing `block` from the auth frame's `peer` and
    `capabilities`; on success sets `conn.mesh_verified=True` and keeps
-   `conn.peer_authenticated` from the proved block. `_ConnectionAuthority` gains both,
+   `conn.peer_verified` from the proved block. `_ConnectionAuthority` gains both,
    filled at `server.py:8957-8970`.
 5. Frames before a valid attest run as today and stamp `verified=false`.
 6. **Position pinned (M-9):** `relay_attest` is accepted ONLY as the first
@@ -200,7 +210,7 @@ Residual risk, stated plainly:
 
 ### 3.4 Compatibility
 
-- Older relay (no `relay_nonce`/attest, or no `peer_authenticated` in its block):
+- Older relay (no `relay_nonce`/attest, or no `peer_verified` in its block):
   works as today; stamps `verified=false`.
 - Older runtime: ignores unknown auth keys (`server.py:5315-5330` reads named keys
   only) and sends no `relay_salt`; relay skips attest; no stamp ⇒ unverified.
@@ -220,12 +230,13 @@ Residual risk, stated plainly:
   and read on both drain arms, prompt (`process.py:5324-5325`) and steer
   (`process.py:5375-5378`), only when `line.source == SOURCE_USER`. Copied, never
   raised; no at-rest authenticity is claimed (§3.3 residual 5).
-- **Handover/move (M-4):** the move copies the session and promotes it with one
-  `os.replace` (`network/mobility.py:8-19`; `_promote`, `mobility.py:2554`). Source-
-  minted stamps keep `stamped_by` = source, so they never count (§2.1), and `_promote`
-  also rewrites each foreign-minted stamp to `verified=false` in place (original kept
-  for audit). Replica promotion (`network/sync.py:3874`) gets the same downgrade.
-  At-rest trust of a moved ask log's `answered_by.surface` is pre-existing, out of scope.
+- **Handover/move (M-4, R2-1):** the move copies the session and promotes it with one
+  `os.replace` (`network/mobility.py:8-19`; `_promote`, `mobility.py:2554`); replica
+  promotion is `network/sync.py:3874`. Both set EVERY imported stamp to
+  `verified=false` in place, WHATEVER its `stamped_by` (original fields kept for
+  audit): a session shed A→D and recalled D→A can carry rows D wrote with a forged
+  `stamped_by=A`. Anything at rest on another device is evidence only. At-rest trust
+  of a moved ask log's `answered_by.surface` is pre-existing, out of scope.
 - **Ask answer:** `_stamp_ask_answer` (`server.py:162-197`; calls `9385`, `9462`) also
   returns the stamp; the store writes `answered_by.mesh_origin` (`asks/store.py:839`)
   and folds revisions at `878-891` per §2 rule 4.
@@ -234,24 +245,27 @@ Residual risk, stated plainly:
 
 1. Forged `peer`/`capabilities`/`locality:"remote"` + valid `control_key`, attest
    missing/wrong label/wrong salt/other connection's ⇒ `verified=false`.
-2. Valid proof, `peer_authenticated=true` ⇒ `verified=true`; stamp = proved block;
+2. Valid proof, `peer_verified=true` ⇒ `verified=true`; stamp = proved block;
    `stamped_by` = this device.
-3. Valid proof, `peer_authenticated` false or absent (pre-G1 outbound; skew) ⇒ false.
-4. Proof over another block (`device_id` or `peer_authenticated` changed) ⇒ false.
+3. Valid proof, `peer_verified` false or absent (pre-G1 outbound; skew) ⇒ false.
+3b. The three PeerLink build sites: `7993` and `13265` true, `13602` dialer False (R2-4).
+4. Proof over another block (`device_id` or `peer_verified` changed) ⇒ false.
 5. Frame-supplied `lop_mesh_origin`/`mesh_origin` stripped on prompt, steer, answer,
    and `peer_message` live AND spooled (`InboxLine.mesh_origin` stays `None`).
 6. Spool round trip at all four sites and both drain arms: stamp byte-equal on
    `SOURCE_USER`; a forged `mesh_origin` on a `SOURCE_PEER` line is ignored.
 7. Steer AND prompt keep the stamp, plain and with `harness_injected=True`.
-8. Move and replica promote: source-minted rows/answers read `verified=false`, keep
-   `stamped_by` = source; `mesh_origin_counts` False on the destination.
+8. Move and replica promote: every imported row/answer reads `verified=false`, and
+   `mesh_origin_counts` is False on the destination, including the A→D→A round trip
+   with a forged `stamped_by=A` (R2-1).
 9. This device's phone daemon (`kind != attach`) and tunnel answers never verify.
 9b. Relayed from device B via its mobile daemon, pilot, `network sessions --send` or
    an agent `send` ⇒ `verified=true`, `origin_device_id=B`, no `operator_origin`.
 10. Legacy rows/records without the key ⇒ `mesh_origin_counts` False.
 11. `mesh_origin_counts` rejects untrusted network, tombstoned member, `removed_ids`,
-    missing record, `verified=false`, `stamped_by != self`; accepts an active member
-    after an unrelated rotation.
+    missing record, `verified=false`, `stamped_by != self`, and own stamps after THIS
+    device's identity rotation (R2-3); accepts an active member after an unrelated
+    epoch rotation.
 12. Merge of writes from different devices ⇒ false. 12b: a verified answer revised
     by an unstamped or `verified:false` write ⇒ false (M-8).
 13. Confinement (darwin-only, `confinement.py:729-734`): under
@@ -262,16 +276,18 @@ Residual risk, stated plainly:
 15. Linkless `_dial_owned` ⇒ no attest, false; create passing `link` ⇒ verifiable.
 16. Late `relay_attest` refused; one pumped from a viewer via `_accept_stream`
     dropped; the attest reply never reaches a viewer (M-9).
-17. Corrupt/unreadable record ⇒ False; stamp naming a `previous_ids` entry ⇒ False.
+17. Corrupt/unreadable record ⇒ False; stamp naming a `previous_ids` entry ⇒ False;
+    `network_id` of `../x`, `a/b`, `..` ⇒ False with no file opened (R2-2).
 
 ## 6. Files to change (estimates)
 
 | File | Change | ≈ lines |
 |---|---|---|
 | `local_operator/network/origin.py` (new) | `derive_relay_key`, `relay_proof`, `relay_proof_ok`, `mesh_origin_counts` | +170 |
-| `network/relay.py:4842-4904, 9892-9899` and the PeerLink build sites (dial and register) | `PeerLink.peer_authenticated` from `handshake.auth_verified`; `_peer_block` + `network_id`, `link_id`, `peer_authenticated` | +20 |
+| `network/relay.py:4842-4904, 9892-9899` and PeerLink build sites `7993`, `13265`, `13602` | `PeerLink.peer_verified` from `HandshakeResult.peer_verified`; `_peer_block` + `network_id`, `link_id`, `peer_verified` | +20 |
+| `network/types.py:2106`, `network/handshake.py:777, 792-835` | `HandshakeResult.peer_verified`, set from the verified-signature path (pair result too) | +8 |
 | `network/dial.py:369-400` | `relay_nonce` in auth; read `relay_salt`; send `relay_attest` | +35 |
-| `session/runtime/server.py:2119-2183, 2356-2365, 5315-5330, 8957-8970, 10885-10896` | `mesh_verified`/`peer_authenticated`; salt in welcome; `relay_attest` op; stamp builder; strip frame copies | +115 |
+| `session/runtime/server.py:2119-2183, 2356-2365, 5315-5330, 8957-8970, 10885-10896` | `mesh_verified`/`peer_verified`; salt in welcome; `relay_attest` op; stamp builder; strip frame copies | +115 |
 | `server.py:9081-9130, 162-197` | pass `mesh_origin` to prompt/steer; return it with the answer surface | +30 |
 | `session/session.py:10596-10626, 10780-10800` | `mesh_origin` kwarg; prompt and steer merge, not overwrite | +30 |
 | `session/runtime/inbox.py:208-250`, `serving.py:4484/4535/5805/5849`, `process.py:5324-5325, 5375-5378` | `InboxLine.mesh_origin`, written and read on `SOURCE_USER` only | +30 |
@@ -287,7 +303,7 @@ Residual risk, stated plainly:
 - **Inert:** nothing reads the stamp or calls `mesh_origin_counts` until 60334's guard
   change, so this can merge before G1. Only new payload keys appear, which providers
   never see (`session.py:417-423`).
-- **Order:** this PR → G1 (lane 7c), which sets `peer_authenticated` on dialer links
+- **Order:** this PR → G1 (lane 7c), which sets `peer_verified` on dialer links
   after listener verification → G7 `operator_origin` (60334) → the guard consumes.
 - **Watch:** one extra round trip per forwarded op (`relay.py:9964-9971`); attest
   failures logged as facts only (like `server.py:183-196`); no `verified=true` from an
@@ -296,7 +312,7 @@ Residual risk, stated plainly:
 ## 8. Changes from the provisional contract (flag to 60334)
 
 1. Container keys: `provider_payload["lop_mesh_origin"]`, `answered_by["mesh_origin"]`.
-2. `direction` replaced by a MAC-bound `peer_authenticated` in the G6 block, folded
+2. `direction` replaced by a MAC-bound `peer_verified` in the G6 block, folded
    into `verified`; not a stamp field (M-1).
 3. New stamp field `stamped_by` (M-4).
 4. No `epoch` field (§2.1); additive int if wanted.
@@ -309,7 +325,7 @@ Reviewer: 60334a0b4c12 (opus-5-5) · Scope: `1d493869f..5a4d7175d` · CHANGES RE
 
 | Finding | Sev | Disposition | Where |
 |---|---|---|---|
-| M-1 runtime constant downgradable by version skew | MAJOR | fixed: per-link `peer_authenticated` from `auth_verified`, MAC-bound; constant dropped | §2 r3, §3.1, §5.3-4 |
+| M-1 runtime constant downgradable by version skew | MAJOR | fixed: per-link `peer_verified` (renamed in §9b), MAC-bound; constant dropped | §2 r3, §3.1, §5.3-4 |
 | M-2 spool stamp in peer-controlled `InboxLine.sender` | MAJOR | fixed: `InboxLine.mesh_origin`, `SOURCE_USER` only; `_stamp_peer_sender` pops both keys | §2 r1, §4, §5.5-6 |
 | M-3 rule 6 false for B's phone/pilot/agents | MAJOR | fixed: "device, never human"; test 9b; G7 requirements | §2 r6, §2.2, §5.9b |
 | M-4 move/replica imports foreign stamps | MAJOR | fixed: `stamped_by`; own stamps only count; `_promote`/`promote_replica` downgrade | §2, §2.1, §4, §5.8 |
@@ -321,3 +337,17 @@ Reviewer: 60334a0b4c12 (opus-5-5) · Scope: `1d493869f..5a4d7175d` · CHANGES RE
 | M-10 runtime keeps signing seed | NIT | fixed: derive once, discard; relay derives per dial | §3.2 |
 | M-11 canonical block form | NIT | fixed: exact keys/types, sorted set | §3.1 |
 | M-12 "no guard change" not exact | NIT | fixed: stricter side effect stated | header |
+
+## 9b. Security review round 2 — disposition
+
+Reviewer: 60334a0b4c12 (opus-5-5) · Scope: `5a4d7175d..8a9a0a208` · CHANGES REQUESTED
+(1 MAJOR); M-1..M-12 verified fixed.
+
+| Finding | Sev | Disposition | Where |
+|---|---|---|---|
+| R2-1 shed-and-recall forges own stamps (A→D→A; replica promote alike) | MAJOR | fixed: `_promote`/`promote_replica` set EVERY imported stamp `verified=false` regardless of `stamped_by` | §4 Handover, §2.2(f), §5.8 |
+| R2-2 stamp `network_id` reaches `record_path` (`../`) | MINOR | fixed: `safe_component` check before any path; root internal (`config_dir()`) | §2.1, §5.17 |
+| R2-3 `self_device_id` unsourced | MINOR | fixed: `identity.load(root).device_id` internal; rotation voids own stamps; signature `mesh_origin_counts(stamp)` | §2.1, §5.11 |
+| R2-4 PeerLink build sites unlisted | NIT | fixed: `7993`/`13265` true, `13602` False pre-G1; test 3b | §2 r3, §5.3b, §6 |
+| R2-5 §2.2(d) said "G6 MAC" | NIT | fixed: per-frame MAC under `K_relay` over the (b) digest | §2.2(d) |
+| Rename (agreed 79/60334/7c) | — | name-only: `auth_verified`/`peer_authenticated` → `PeerLink.peer_verified` (from `HandshakeResult.peer_verified`; `_admit_link` refuses False after G1) and block key `peer_verified`; no semantic change | throughout |
