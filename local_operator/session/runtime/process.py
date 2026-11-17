@@ -520,9 +520,19 @@ class _BuildWatch:
         runtime that is on the current build never trips either — and the one
         way out of a trip is the process leaving.
         """
+        return self.judge(handle, _build_changed(self.boot), now=now)
+
+    def judge(
+        self, handle: object, newer: "BuildStamp | None", *, now: float | None = None
+    ) -> _BuildPoll:
+        """:meth:`poll` with the disk read already taken — the async reaper's
+        entry. It reads ``newer`` OFF the loop (``buildwatch.OffLoopBuildRead``;
+        a blocking metadata read stalled a loop for 145 s) and hands only the
+        answer here, so the counters below stay loop-confined and are never
+        touched from the read's thread.
+        """
         at = time.monotonic() if now is None else now
         idle = _idle_for_refresh(handle)
-        newer = _build_changed(self.boot)
         files_gone = self._files_gone(at)
         if newer is None or idle:
             # Nothing to be hard-stale about: no settled newer build, or one the
@@ -1942,6 +1952,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
     grace_s = _grace_seconds()
     boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
     watch = _BuildWatch(boot)
+    read_build = _buildwatch.OffLoopBuildRead("session runtime")
     next_build_check = time.monotonic() + BUILD_CHECK_S
     #: Set once this runtime has committed to leaving for the build on disk.
     #: Non-local to the tick: the exit is re-attempted on both loop levels.
@@ -1959,7 +1970,15 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         if time.monotonic() < next_build_check:
             return False
         next_build_check = time.monotonic() + BUILD_CHECK_S
-        poll = watch.poll(handle)
+        newer = await read_build(_build_changed, watch.boot)
+        if newer is _buildwatch.READ_UNKNOWN:
+            # The disk did not answer this tick: judge nothing (no decline
+            # counted, no refresh, no new drain). A drain ALREADY latched keeps
+            # its departure — it acts on the commitment, not on this read.
+            if drain is not None:
+                return await _drain_for(drain, handle, runtime, stop)
+            return False
+        poll = watch.judge(handle, newer)
         if drain is not None:
             # A LATCHED DRAIN WINS, and it is tested FIRST (review round 1,
             # MINOR 2). The drain latches while the runtime is busy by

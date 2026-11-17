@@ -8114,12 +8114,22 @@ class RuntimeServer:
 
         if self._leaving:
             return "kept: already leaving"
-        newer = process_mod._build_changed(self._boot_build)
+        # OFF THE LOOP, bounded: both reads end in ``importlib.metadata``, which
+        # stalled a daemon's loop for 145 s under swap (see
+        # ``buildwatch.OffLoopBuildRead``). A per-op reader: this is a viewer's
+        # one-shot request, not a poll, so there is no streak to carry over.
+        read = buildwatch.OffLoopBuildRead("session runtime refresh")
+        newer = await read(process_mod._build_changed, self._boot_build)
+        if newer is buildwatch.READ_UNKNOWN:
+            return buildwatch.KEPT_UNREADABLE
         if newer is None:
             # The sentences are module constants, not literals: the caller
             # routes on them, so a reword here must break that match loudly
             # rather than fall through to its generic ``kept`` branch.
-            if buildwatch.pending_build(self._boot_build) is not None:
+            pending = await read(buildwatch.pending_build, self._boot_build)
+            if pending is buildwatch.READ_UNKNOWN:
+                return buildwatch.KEPT_UNREADABLE
+            if pending is not None:
                 return buildwatch.KEPT_UNSETTLED
             return buildwatch.KEPT_MATCHES
         logger.info(

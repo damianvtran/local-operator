@@ -430,3 +430,51 @@ def test_the_no_kill_pin_ignores_a_string_that_is_not_a_name() -> None:
     assert _kill_shaped_sites('getattr(obj, "terminate_on_idle")\n') == []
     # ...and a one-argument ``getattr`` must not be an index error inside the pin.
     assert _kill_shaped_sites("getattr(obj)\n") == []
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_disk_read_neither_blocks_the_reaper_loop_nor_refreshes(
+    moved: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reaper's build check reads the disk OFF the loop (2026-11-17: a 145 s
+    on-loop metadata read wedged a ``serve`` loop; the runtime's check is the same
+    read). While it is stuck nothing is judged — no refresh, no decline — and
+    once it answers, the settled move is acted on as before."""
+    import threading
+    import time
+
+    gate = threading.Event()
+
+    def stuck(*_a: object, **_k: object) -> BuildStamp:
+        gate.wait(10.0)
+        return NEW
+
+    refreshed: list[BuildStamp] = []
+
+    async def recording_refresh(newer, _handle, _runtime, stop):  # noqa: ANN001
+        refreshed.append(newer)
+        stop.set()
+        return True
+
+    monkeypatch.setattr(update_mod, "disk_build", stuck)
+    monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(process, "REAP_CHECK_S", 0.01)
+    monkeypatch.setattr(process, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(process, "_should_exit", lambda *_a: False)
+    monkeypatch.setattr(process, "_refresh_for", recording_refresh)
+    handle, runtime, stop = IdleHandle(), IdleRuntime(), asyncio.Event()
+    reaper = asyncio.ensure_future(process._reaper(handle, runtime, stop))
+    try:
+        ticks, deadline = 0, time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+            ticks += 1
+        assert ticks >= 10, f"the loop made only {ticks} ticks while the read was stuck"
+        assert refreshed == [], "an unanswered read is not a build to refresh onto"
+        assert not reaper.done()
+        gate.set()
+        assert await asyncio.wait_for(reaper, 2.0) is True
+    finally:
+        gate.set()
+        stop.set()
+    assert refreshed == [NEW]

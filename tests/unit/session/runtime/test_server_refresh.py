@@ -9,6 +9,7 @@ asked for, a wrong "keep" costs the reaper's next check.
 
 from __future__ import annotations
 
+import threading
 from typing import Any, cast
 
 import pytest
@@ -309,3 +310,30 @@ async def test_a_runtime_that_cannot_judge_itself_is_kept(stale) -> None:
     viewer = _conn("attach")
     server._clients[id(viewer.writer)] = viewer
     assert (await _ask(server, sent, viewer)).startswith("kept: this runtime cannot judge")
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_disk_read_is_kept_not_matched(stale, monkeypatch) -> None:
+    """The op's disk read runs off the loop with a bound (2026-11-17 stall). A
+    read that does not answer keeps the runtime and says so — never ``matches``
+    (which ``lop refresh`` would report as already current) and never a retire."""
+    from local_operator import buildwatch
+
+    gate = threading.Event()
+
+    def stuck(*_a: object, **_k: object) -> BuildStamp:
+        gate.wait(10.0)
+        return NEW
+
+    monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(update_mod, "disk_build", stuck)
+    handle = RefreshableHandle(reason="")
+    server, sent = _rig(handle)
+    viewer = _conn("attach")
+    server._clients[id(viewer.writer)] = viewer
+    try:
+        assert await _ask(server, sent, viewer) == buildwatch.KEPT_UNREADABLE
+    finally:
+        gate.set()
+    assert handle.stopped is False
+    assert not [f for f in sent if f.get("op") == "retiring"]
