@@ -89,21 +89,62 @@ def test_models_fingerprint_change_rebuilds_before_answering() -> None:
     assert before["models"] == [1] and after["models"] == [2]
 
 
+# Hang backstop only, never the assertion (AGENTS.md "Wait on the event, never
+# on the clock"): the success path below never consults it. It bounds how long
+# a regressed memo -- one whose stale path awaits the rebuild -- can block
+# before the test reports that instead of hanging the shard.
+DEADLOCK_GUARD_S = 30.0
+
+
 def test_models_stale_body_answers_at_once_while_one_background_build_runs() -> None:
+    """Stale gets answer from the memo while ONE rebuild is still running.
+
+    WHY THE REBUILD IS HELD ON AN EVENT: this test used to let the rebuild run
+    free and then assert both stale answers were the OLD body. ``get`` awaits
+    its fingerprint on a worker thread *before* it reads the memo, so on a
+    loaded runner the second request's fingerprint thread could resume after
+    the (instant) background build had already landed. That request then read
+    the NEW body -- correctly, and without waiting on anything -- and the test
+    failed ``stale answers must not wait`` (CI jobs 133672129016 and
+    133758505681). It also polled 50 x 10 ms for the rebuild, a wall-clock bet
+    of its own. Holding the build open until both stale answers are back
+    makes "they did not wait for the rebuild" a structural fact: if either get
+    awaited the build, the gather could not finish while the build is held.
+    """
     builds: list[int] = []
     clock = _Clock()
-    memo = _memo(builds, ["k1"], clock)
+    release = threading.Event()
+
+    def build() -> dict[str, object]:
+        builds.append(1)
+        if len(builds) > 1:
+            release.wait()  # the background rebuild stays in flight until released
+        return {"models": [len(builds)], "default": None}
+
+    memo = _ModelsMemo(build, lambda: "k1", fresh_s=60.0, stale_s=3600.0, clock=clock)
 
     async def run() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-        await memo.get()
-        clock.now += 61.0  # past FRESH, inside STALE
-        stale_a, stale_b = await asyncio.gather(memo.get(), memo.get())
-        # Let the single background rebuild land.
-        for _ in range(50):
-            if len(builds) == 2:
-                break
-            await asyncio.sleep(0.01)
-        return stale_a, stale_b, await memo.get()
+        try:
+            await memo.get()
+            clock.now += 61.0  # past FRESH, inside STALE
+            try:
+                stale_a, stale_b = await asyncio.wait_for(
+                    asyncio.gather(memo.get(), memo.get()), DEADLOCK_GUARD_S
+                )
+            except TimeoutError:
+                raise AssertionError(
+                    "stale answers must not wait: a stale get blocked on the held rebuild"
+                ) from None
+            in_flight = memo._task
+            assert (
+                in_flight is not None and not in_flight.done()
+            ), "the stale gets must have started a background rebuild"
+            release.set()
+            await in_flight
+            return stale_a, stale_b, await memo.get()
+        finally:
+            # Never strand the worker thread: asyncio.run joins the executor.
+            release.set()
 
     stale_a, stale_b, refreshed = asyncio.run(run())
     assert stale_a["models"] == [1] and stale_b["models"] == [1], "stale answers must not wait"
