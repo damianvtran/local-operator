@@ -42,13 +42,16 @@ static replay, an old screenshot or an intended interaction as current live proo
   Inside a condensed turn a message of 8 or more wrapped lines (`MESSAGE_FOLD_MIN_LINES`,
   measured at the reader's width) keeps its whole text in the DOM and shows three
   lines; a shorter message shows in full with no control, so the fold does not
-  appear all the time. A worded "Show more" / "Show less" button (`aria-expanded`,
-  `aria-controls`, a 44 px target; chevron down to open, up to close) opens and
-  closes it. It is
-  separate from the turn bar and keeps its state through opening and re-condensing
-  the turn. The preview carries no fade of its own (the transcript scroller already
-  fades its edges). Long assistant replies are not folded: they are the primary
-  content, and the desktop does not fold them either.
+  appear all the time. The control is icon-only: a chevron (down to open, up to
+  close; never mirrored in RTL) on a faint rounded `sunken` chip about 40 x 24 with
+  no outline, in flow below the preview at the bubble's inline end, with no word on
+  screen. Its target is at least 44 px tall and wide (`lo-hit-chip`), and its
+  accessible name stays "Show more of your message" / "Show less of your message"
+  (`aria-label`, with `aria-expanded` and `aria-controls`). It is separate from the
+  turn bar and keeps its state through opening and re-condensing the turn. The
+  preview carries no fade of its own (the transcript scroller already fades its
+  edges). Long assistant replies are not folded: they are the primary content, and
+  the desktop does not fold them either.
 - A long title truncates in its own `min-w-0` flex slot, not by pushing actions
   outside the viewport. Reserve stable slots for changing status and counts.
 

@@ -7,21 +7,24 @@
 //
 // The contract here:
 //   * a condensed user message keeps its whole text in the DOM and shows the first
-//     three lines; when the text is VERY long (8+ wrapped lines) a labelled
-//     "Show more" / "Show less" control appears, with aria-expanded and a
-//     chevron that points down to open and up to close;
+//     three lines; when the text is VERY long (8+ wrapped lines) an ICON-ONLY
+//     control appears: a chevron (down to open, up to close) with NO visible
+//     text, whose accessible name is still "Show more of your message" /
+//     "Show less of your message", with aria-expanded and aria-controls;
 //   * the control appears ONLY for very long text (short and medium have none);
 //   * an uncondensed message (open turn, live turn) is full text with no control;
 //   * the reader's explicit "Show more" survives opening and re-condensing the turn;
 //   * pressing the control holds ITS place on screen (the scroll anchor).
 //
-// WHAT THIS LAYER CANNOT PROVE. happy-dom does no layout, so `scrollHeight` and
-// `clientHeight` are 0 and "how many lines is this text" is unanswerable here.
-// `stubLayout` stands in for the browser's own answer with a deterministic model
-// (20 px a line, 30 characters a line, and a clamp that caps the box at three
-// lines) so the component's DECISIONS are tested against both outcomes. Whether
-// real text at 320/360/390 reaches 8 lines is shown by the phone-size captures
-// on the PR, not by this file. The clamp is an inline style on purpose:
+// WHAT THIS LAYER CANNOT PROVE. happy-dom does no layout, so `scrollHeight` is 0
+// and "how many lines is this text" is unanswerable here. `stubLayout` stands in
+// for the browser's own answers with a deterministic model (21 px a line, 30
+// characters a line; `scrollHeight` and the computed `lineHeight` both come from
+// it) so the component's DECISIONS are tested against both outcomes. 21, not the
+// component's 20 px fallback, so the real `parseFloat` branch is the one running.
+// Whether real text at 320/360/390 reaches 8 lines, and the chip's drawn size and
+// 56 x 44 hit area, are shown by the phone-size captures on the PR, not by this
+// file (no layout here). The clamp is an inline style on purpose:
 // an inline style RESOLVES in happy-dom, so dropping the clamp fails the test
 // where a class-name echo would pass for a clamp that is present but inert.
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -35,7 +38,7 @@ vi.mock("./api", () => ({
 	imageUrl: vi.fn(() => ""),
 }));
 
-const LINE_PX = 20;
+const DEFAULT_LINE_PX = 21;
 const CHARS_PER_LINE = 30;
 const CLAMP_LINES = 3;
 
@@ -46,27 +49,29 @@ const clampOf = (el: HTMLElement): number => {
 	return Number(style.WebkitLineClamp || el.style.getPropertyValue("-webkit-line-clamp") || 0);
 };
 
-/** The browser's answer to "how tall is this text", in a layout-less DOM. */
-function stubLayout() {
+/** The browser's answers to "how tall is this text" and "what is its line height",
+ *  in a layout-less DOM. `linePx` may be fractional (text zoom): the browser
+ *  hands `scrollHeight` back as an integer, so it is floored here too. */
+function stubLayout(linePx: number) {
 	const isText = (el: Element) => el.hasAttribute("data-user-text");
 	const lines = (el: Element) => Math.max(1, Math.ceil((el.textContent ?? "").length / CHARS_PER_LINE));
 	const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
-		return isText(this) ? lines(this) * LINE_PX : 0;
+		return isText(this) ? Math.floor(lines(this) * linePx) : 0;
 	});
-	const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
-		if (!isText(this)) return 0;
-		const clamp = clampOf(this);
-		return (clamp > 0 ? Math.min(lines(this), clamp) : lines(this)) * LINE_PX;
+	const real = globalThis.getComputedStyle.bind(globalThis);
+	const computed = vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el: Element, pseudo?: string | null) => {
+		const style = real(el, pseudo);
+		return isText(el) ? new Proxy(style, { get: (target, key) => (key === "lineHeight" ? `${linePx}px` : Reflect.get(target, key)) }) : style;
 	});
 	return () => {
 		scrollHeight.mockRestore();
-		clientHeight.mockRestore();
+		computed.mockRestore();
 	};
 }
 
 let restoreLayout: () => void;
 beforeEach(() => {
-	restoreLayout = stubLayout();
+	restoreLayout = stubLayout(DEFAULT_LINE_PX);
 });
 afterEach(() => {
 	restoreLayout();
@@ -116,7 +121,8 @@ describe("a user message inside a condensed turn", () => {
 		const button = showMore()!;
 		expect(button).toBeTruthy();
 		expect(button.getAttribute("aria-expanded")).toBe("false");
-		expect(button.textContent).toContain("Show more");
+		// Icon only: no word on screen, but the name a screen reader gets is unchanged.
+		expect(button.textContent).toBe("");
 		expect(button.getAttribute("aria-controls")).toBe(userText(container).id);
 		expect(userText(container).id).not.toBe("");
 	});
@@ -129,7 +135,7 @@ describe("a user message inside a condensed turn", () => {
 		expect(showMore()).toBeNull();
 		const less = showLess()!;
 		expect(less.getAttribute("aria-expanded")).toBe("true");
-		expect(less.textContent).toContain("Show less");
+		expect(less.textContent).toBe("");
 		fireEvent.click(less);
 		expect(clampOf(userText(container))).toBe(CLAMP_LINES);
 		expect(showMore()).toBeTruthy();
@@ -155,14 +161,41 @@ describe("a user message inside a condensed turn", () => {
 		expect(showMore()).toBeTruthy();
 	});
 
-	it("points the chevron down to open and up to close", () => {
+	it("points the chevron down to open and up to close, and draws it that way", () => {
 		render(<Transcript pid="s" entries={settledTurn(LONG)} />);
-		const direction = () => showMore()?.querySelector("svg")?.getAttribute("data-direction") ?? showLess()?.querySelector("svg")?.getAttribute("data-direction");
-		expect(direction()).toBe("down");
+		const chevron = () => (showMore() ?? showLess())!.querySelector("svg")!;
+		// `data-direction` is the label; the drawn path is what the reader sees.
+		const DOWN = "M2.5 4.5 6 8l3.5-3.5";
+		const UP = "M2.5 7.5 6 4l3.5 3.5";
+		expect(chevron().getAttribute("data-direction")).toBe("down");
+		expect(chevron().querySelector("path")!.getAttribute("d")).toBe(DOWN);
+		expect(chevron().getAttribute("aria-hidden")).toBe("true");
 		fireEvent.click(showMore()!);
-		expect(direction()).toBe("up");
+		expect(chevron().getAttribute("data-direction")).toBe("up");
+		expect(chevron().querySelector("path")!.getAttribute("d")).toBe(UP);
 		fireEvent.click(showLess()!);
-		expect(direction()).toBe("down");
+		expect(chevron().getAttribute("data-direction")).toBe("down");
+		expect(chevron().querySelector("path")!.getAttribute("d")).toBe(DOWN);
+	});
+
+	it("measures against the line height the browser reports, not a fixed 20 px", () => {
+		restoreLayout();
+		restoreLayout = stubLayout(24);
+		// 7 lines at 24 px is 168 px: over a 20 px guess (160) but under the real 8 lines (192).
+		render(<Transcript pid="s" entries={settledTurn("x".repeat(CHARS_PER_LINE * 7))} />);
+		expect(showMore()).toBeNull();
+	});
+
+	it("still folds an exact 8-line message when text zoom makes the line height fractional", () => {
+		restoreLayout();
+		restoreLayout = stubLayout(20.4);
+		// 8 x 20.4 = 163.2 but `scrollHeight` comes back as the integer 163.
+		const first = render(<Transcript pid="s" entries={settledTurn("x".repeat(CHARS_PER_LINE * 8))} />);
+		expect(showMore()).toBeTruthy();
+		first.unmount();
+		// The slack is one pixel, not a line: 7 lines (142 px) still does not fold.
+		render(<Transcript pid="s" entries={settledTurn("x".repeat(CHARS_PER_LINE * 7))} />);
+		expect(showMore()).toBeNull();
 	});
 
 	it("offers no control when the text fits the three lines", () => {

@@ -12,8 +12,12 @@ Sessions, each shaped to isolate one reading surface:
 
 * ``reading-long``  -- three completed turns. The first two carry a long, wrapped
   user message plus tool work, so they fold into the condensed turn bar and the
-  user's words collapse to ONE truncated line; the last turn ends on a very long
-  assistant answer, taller than the transcript, to show the foot of a long reply.
+  user's words are folded or shown in full depending on width: the first message
+  is longer and meant to fold under the chevron control; the second is borderline
+  (7 wrapped lines at 390, 375 and 430, so in full with no control; 8 at 320, so
+  folded).
+  The last turn ends on a very long assistant answer, taller than the transcript,
+  to show the foot of a long reply.
 * ``reading-short`` -- one short user message and one short answer: the control,
   which must look the same before and after except for the user bubble's edge.
 
@@ -82,7 +86,7 @@ ANSWER_3 = "\n\n".join(
         "Here is the full write-up. It is deliberately long so the reply is "
         "taller than the visible transcript on a phone.",
         "**1. What changed.** Your own messages now carry a visible outline, and a "
-        "long one inside a finished turn shows three lines with a Show more button.",
+        "long one inside a finished turn shows three lines with a chevron button.",
         "**2. Why a control and not a fade.** A fade says there might be more but "
         "gives the reader no way to get it. A labelled control says there is more "
         "and what pressing it does.",

@@ -13,13 +13,22 @@
  *  - `folded` true AND the text is VERY long (`MESSAGE_FOLD_MIN_LINES` wrapped
  *    lines at the reader's width): the WHOLE text stays in the DOM (a screen
  *    reader reads all of it) but the box is clamped to `MESSAGE_PREVIEW_LINES`
- *    lines, with a labelled "Show more" / "Show less" button (`aria-expanded`,
- *    `aria-controls`, chevron down to open and up to close). A shorter message
- *    shows in full with no control: the fold must not appear all the time.
+ *    lines, with a button that is a chevron and NOTHING ELSE on screen (down to
+ *    open, up to close; the operator found a worded "Show more" too much). Its
+ *    accessible name is still "Show more/less of your message" (`aria-label`),
+ *    with `aria-expanded` and `aria-controls`. A shorter message shows in full
+ *    with no control: the fold must not appear all the time.
  *  - the reader's choice is this component's own state, separate from the turn
  *    bar: opening the turn (full text, no control) and condensing it again leaves
- *    an opened message opened, and "Show less" is still on screen.
+ *    an opened message opened, and the way back is still on screen.
  *
+ * THE CHIP. The chevron sits on a faint, fully rounded `sunken` chip (about
+ * 40 x 24, no outline) in flow BELOW the clamped box, at the bubble's inline end
+ * (`self-end`, logical, so RTL puts it on the other side). It never overlays the
+ * text, which is why there is no fade. The chevron points up and down, so it is
+ * not mirrored in RTL (no `lo-directional`). The drawn chip is small on purpose;
+ * `lo-hit-chip` extends the TARGET to at least 56 x 44 around it; `mt-1` plus the
+ * bubble's gap keep the 10 px upward reach off the text's last line. *
  * NO FADE ON THE PREVIEW. The transcript scroller already masks its own edges
  * (`lo-fade-y`); a second gradient here would stack with it at nested edges. The
  * ellipsis the clamp draws plus a worded control says "there is more, and this
@@ -32,8 +41,10 @@
  *
  * MEASURING. `scrollHeight` is the whole text's height clamped or not, so
  * "is it very long" has the same answer folded, open or unfolded: no latch is
- * needed and an opened message keeps its "Show less" at any width. It is re-read
- * on resize (rotation, large text, a late font).
+ * needed. It is re-read on resize (rotation, large text, a late font). An opened
+ * message that is widened until it is shorter than the threshold shows in full
+ * with no control; narrowed back above the threshold it is still open and the
+ * control is back, pointing up.
  *
  * THE SCROLL ANCHOR. The control announces itself with `MESSAGE_PRESSED_EVENT`
  * before the message changes height and with `CONTENT_RESIZED_EVENT` after, so
@@ -75,7 +86,10 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 		const measure = () => {
 			const parsed = parseFloat(getComputedStyle(el).lineHeight);
 			const lineHeight = Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
-			setLong(el.scrollHeight >= lineHeight * MESSAGE_FOLD_MIN_LINES);
+			/* 1 px of slack: under text zoom the line height is fractional and the
+			   browser rounds `scrollHeight` to an integer, which can land a hair under
+			   `lineHeight * 8` for a message that is exactly eight lines. */
+			setLong(el.scrollHeight >= lineHeight * MESSAGE_FOLD_MIN_LINES - 1);
 		};
 		measure();
 		/* A late web-font swap can add a wrapped line without resizing a clamped box,
@@ -127,20 +141,20 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 						setOpen((value) => !value);
 					}}
 					className={cn(
-						"lo-hit -my-0.5 flex h-8 shrink-0 items-center gap-1 self-end rounded-sm px-1",
-						"text-meta text-ink-muted select-none active:bg-elevated",
+						"lo-hit lo-hit-chip mt-1 flex h-6 w-10 shrink-0 items-center justify-center self-end rounded-full bg-sunken",
+						"text-ink-muted select-none active:bg-elevated",
 					)}
 				>
-					<span>{messageRuntime.t(open ? "relay.transcript.message.show_less" : "relay.transcript.message.show_more")}</span>
 					{/* Down opens, up closes: the direction the text moves. (The shared
 					    `Chevron` is a right/down disclosure caret, which says "expand a
-					    section", not "show the rest of this text".) */}
+					    section", not "show the rest of this text".) 16 px drawn from a
+					    12-unit box, so the 1.5 stroke renders about 2 px. */}
 					<svg
 						aria-hidden
 						data-direction={open ? "up" : "down"}
 						viewBox="0 0 12 12"
-						width="12"
-						height="12"
+						width="16"
+						height="16"
 						fill="none"
 						stroke="currentColor"
 						strokeWidth="1.5"

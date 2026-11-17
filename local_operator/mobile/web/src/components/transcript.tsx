@@ -163,8 +163,8 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 			   be seen. */
 			const images = entry.images ?? [];
 			/* A condensed turn shows the first lines of the message beside its
-			   outcome, with a worded "Show more" when the text really overflows
-			   them (`UserText`). Opening the turn removes `condensed`, restoring
+			   outcome, with a chevron control when the text is very long (8+
+			   wrapped lines; `UserText`). Opening the turn removes `condensed`, restoring
 			   the identical full bubble and attachments rather than a separately
 			   reconstructed row. */
 			return (
