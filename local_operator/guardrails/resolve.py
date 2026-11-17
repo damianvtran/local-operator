@@ -1041,6 +1041,19 @@ _CARRY_DECLARE_PROGRAMS = frozenset({"export", "local", "declare"})
 _CARRY_STRAIGHT_OPS = frozenset({";", "\n", ""})
 
 
+def _substitution_weight(text: str) -> int:
+    """Raw substitution openers in ``text``: 2 per ``$(``/``<(``/``>(``, 1 per backtick.
+
+    A backtick substitution spends two backticks and every other form one
+    two-character opener, so each substitution the lexer yields weighs 2
+    whatever its spelling — :func:`_straight_safe_command` can compare what
+    it visited against the raw text without knowing which spelling it saw.
+    Raw text is counted on purpose: an opener in single quotes, a quoted
+    heredoc or a comment counts too and only ever errs strict.
+    """
+    return 2 * (text.count("$(") + text.count("<(") + text.count(">(")) + text.count("`")
+
+
 def _straight_safe_command(command: str, depth: int = 0) -> bool:
     """True when ``command`` is straight-line and runs only safe programs.
 
@@ -1055,25 +1068,48 @@ def _straight_safe_command(command: str, depth: int = 0) -> bool:
     so ``$(hash -p …)`` cannot smuggle a program in. Any failure keeps
     main's behaviour (opaque, judge-ranked); the supported path for a
     command that does more is a literal log path.
+
+    Fail-closed coverage (round 5, review R8): the part scan only reaches
+    substitutions the lexer yields as ``sub``/``proc`` parts. One inside an
+    unquoted heredoc body or a ``${X:-…}``/``${X/a/…}`` parameter word runs
+    in real bash but is never yielded, so a link made there escaped the
+    check. Rather than teach the scan every place bash expands, the top call
+    compares the substitutions it visited (recursively) with the openers in
+    the raw text; any opener left over drops every carry.
+    """
+    visited = _straight_safe_visit(command, depth)
+    if visited is None:
+        return False
+    return depth > 0 or visited == _substitution_weight(command)
+
+
+def _straight_safe_visit(command: str, depth: int) -> int | None:
+    """:func:`_straight_safe_command`'s walk: the visited substitution weight, or None.
+
+    Returns the :func:`_substitution_weight` of every substitution validated
+    here and in nested bodies, so the caller can prove none went unvisited.
     """
     if depth > _MAX_PEEL_DEPTH:
-        return False
+        return None
+    visited = 0
     lexed = lex(command)
     if lexed.open:
-        return False
+        return None
     for text, piped, op in lexed.segments:
         if piped or op not in _CARRY_STRAIGHT_OPS:
-            return False
+            return None
         words, redirects = scan(text)
         all_words = list(words) + [target for _op, target in redirects]
         if any(w.broken for w in all_words):
-            return False
+            return None
         for w in all_words:
             for part in w.parts:
-                if part.kind in ("sub", "proc") and not _straight_safe_command(
-                    part.text, depth + 1
-                ):
-                    return False
+                if part.kind not in ("sub", "proc"):
+                    continue
+                inner = _straight_safe_visit(part.text, depth + 1)
+                if inner is None:
+                    return None
+                visited += 2 + inner
         i = 0
         while i < len(words) and words[i].parts and words[i].parts[0].kind == "bare":
             if _ASSIGN_RE.match(words[i].parts[0].text) is None:
@@ -1083,19 +1119,19 @@ def _straight_safe_command(command: str, depth: int = 0) -> bool:
             continue
         program_word, args = words[i], words[i + 1 :]
         if len(program_word.parts) != 1 or program_word.parts[0].kind != "bare":
-            return False
+            return None
         program = program_word.parts[0].text
         if program in _CARRY_DECLARE_PROGRAMS:
             if any(a.parts and a.parts[0].text.startswith("-") for a in args):
-                return False
+                return None
             continue
         if program not in _CARRY_STRAIGHT_PROGRAMS:
-            return False
+            return None
         if program == "exec" and args:
-            return False
+            return None
         if program == "printf" and any(a.parts and a.parts[0].text.startswith("-v") for a in args):
-            return False
-    return True
+            return None
+    return visited
 
 
 def _plain_read_names(word: _RawWord) -> list[str]:

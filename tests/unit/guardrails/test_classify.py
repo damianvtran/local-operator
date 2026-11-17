@@ -1627,6 +1627,19 @@ def test_round3_carriers_prescan_is_an_allowlist() -> None:
         # A substitution body is held to the same rule.
         f'L={_SP}/$(date +%s); echo "$(hash -p /x date)"; rm -rf "$L"',
         f'L={_SP}/$(date +%s); printf -v M x; rm -rf "$L"',
+        # R8 (round 5): substitutions the part scan never yields — inside an
+        # unquoted heredoc body or a ``${…}`` parameter word — still run in
+        # bash, so any opener the check did not visit drops the carry.
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; cat <<EOF\n$(ln -s ~ {_SP}/[0-9]*)\nEOF\n'
+        'rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; echo "${{X:-$(ln -s ~ {_SP}/[0-9]*)}}"; '
+        'rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; echo ${{X:-`ln -s ~ {_SP}/[0-9]*`}}; '
+        'rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X:+$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X=$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X/a/$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X?$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
     ],
 )
 def test_round4_carry_needs_a_straight_line_safe_command(home: Path, command: str) -> None:
@@ -1671,5 +1684,12 @@ def test_round4_straight_safe_command_predicate() -> None:
         "echo $(ln -s / x)",
         "cat <(hash)",
         "nohup true",
+        # R8: an opener the part scan never visits fails closed.
+        "cat <<EOF\n$(ln -s / x)\nEOF",
+        'echo "${X:-$(ln -s / x)}"',
+        "echo ${X:-`ln -s / x`}",
+        "echo ${X/a/<(ln -s / x)}",
     ):
         assert not _straight_safe_command(bad), bad
+    # Visited substitutions balance the raw count, in either spelling.
+    assert _straight_safe_command('L=/x/`date +%s`; echo "$(echo `date`)" > "$L"')
