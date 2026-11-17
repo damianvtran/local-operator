@@ -199,7 +199,10 @@ STATE_ABSENT = "absent"
 #: broken copy (operator report, 2026-11-16). The CLI legend prints it after the
 #: state word, where a sentence reads as well.
 STATE_DESCRIPTIONS: dict[str, str] = {
-    STATE_LIVE: "Registered. Notifications are delivered to this device.",
+    # Not "notifications are delivered": neither this registry nor the phone
+    # observes delivery (APNs/FCM do), so the live state claims only what is
+    # known here (review R1-2 / D1).
+    STATE_LIVE: "Registered with this computer.",
     STATE_EXPIRED: "Notifications are paused for this device until you sign in again.",
     STATE_UNPAIRED: "This computer is no longer paired.",
     STATE_REVOKED: "This device was revoked on this computer.",
@@ -761,10 +764,16 @@ def register(
         # without this check that fresh id would register "on nothing at all"
         # and quietly undo the operator's revoke. A reinstall gets a new token
         # from the OS, so it is a new installation and is not caught here.
+        # A SUPERSEDED row is skipped: it is a dead identity of a device whose
+        # live row speaks for it. ``revoke_linked`` tombstones those hidden rows
+        # too, but ``unrevoke`` (driven from the list, which hides them) only
+        # clears the live row — counting the hidden tombstone here would keep an
+        # un-revoked phone refused until the supersede aged out (review R1-1).
         digest = fields[PUSH_HANDLE_FIELD]
         for other in records:
             if (
                 other is not record
+                and not other.get(SUPERSEDED_AT_FIELD)
                 and other["platform"] == fields["platform"]
                 and other.get(PUSH_HANDLE_FIELD) == digest
                 and device_state(other) == STATE_REVOKED

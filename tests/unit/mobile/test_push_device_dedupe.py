@@ -177,6 +177,32 @@ def test_unrevoke_then_register_still_collapses_to_one_row() -> None:
     assert [row["device_id"] for row in _listed(client)] == [first["device_id"]]
 
 
+def test_remove_then_unrevoke_lets_the_phone_register_again() -> None:
+    """Review R1-1: a hidden superseded tombstone must not outlive the operator's unrevoke.
+
+    Removing a phone (``revoke_linked``) tombstones EVERY row linked to it,
+    including superseded ones the list hides; the operator then unrevokes the
+    one row they can see. The phone's next register must be accepted.
+    """
+    client = _client()
+    old = client.post("/api/push/register", json=_body(str(uuid.uuid4()))).json()
+    install = str(uuid.uuid4())
+    live = client.post("/api/push/register", json=_body(install)).json()
+    # Link both rows to one operator device, as a linked phone's rows would be.
+    store = json.loads(_store_path().read_text(encoding="utf-8"))
+    for row in store["devices"]:
+        row["operator_device_id"] = "op-device-1"
+    _store_path().write_text(json.dumps(store), encoding="utf-8")
+    revoked = push_devices.revoke_linked(config_dir(), "op-device-1")
+    assert set(revoked) == {old["device_id"], live["device_id"]}
+
+    push_devices.unrevoke(config_dir(), live["device_id"])
+    response = client.post("/api/push/register", json=_body(install))
+    assert response.status_code == 200, response.text
+    assert response.json()["device_id"] == live["device_id"]
+    assert [row["device_id"] for row in _listed(client)] == [live["device_id"]]
+
+
 def _legacy_row(install_id: str, stamp: int, **extra: Any) -> dict[str, Any]:
     """A row as the pre-fix build wrote it: no push handle digest."""
     return {
