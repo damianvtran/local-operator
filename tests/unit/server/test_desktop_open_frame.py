@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1625,3 +1626,94 @@ async def test_a_failing_resident_scan_is_retrieved_and_never_reaches_the_page(
             assert not unretrieved, f"the armed scan's failure leaked: {unretrieved}"
     finally:
         loop.set_exception_handler(previous)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_companion_does_not_hold_the_snapshots_first_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The journal-order companion read is bounded by the paint deadline.
+
+    REGRESSION (operator's v0.106.7 desktop, 2026-11-17): on a 743 MB
+    journal ``a.hist.journal_order`` measured 1,547 and 3,081 ms on two sidebar
+    opens, because ``_journal_order_page`` awaited ``order_facts`` with no bound
+    while every other open-frame hop was capped by #3904. The snapshot must
+    answer ``building`` inside its budget, and the existing correction must then
+    land the order as a ``journal_order`` event (what the renderer reconciles
+    from), with the resident scan armed so the next read needs no companion.
+
+    The control arm pins the other half of the contract: a companion that
+    answers inside the deadline still serves a READY first frame. Its budget is
+    a hang ceiling (as in ``test_the_first_frame_spends_only_what_is_left``), not
+    a speed claim about the runner.
+    """
+    from local_operator.server.utils import desktop_sessions as desktop_sessions_utils
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    # Steer the frame onto the page path: no summary, so no ``frame_facts`` can
+    # answer the order first and the companion is the hop under test.
+    async def no_frame_source(self: Any, *_a: Any, **_k: Any) -> Any:
+        return None
+
+    monkeypatch.setattr(DesktopSessionBridge, "_frame_source", no_frame_source)
+    published: list[dict[str, Any]] = []
+    original_publish = DesktopSessionBridge.publish
+
+    def recording(self: Any, kind: str, payload: dict[str, Any], **kwargs: Any) -> None:
+        if kind == "event" and payload.get("type") == JOURNAL_ORDER_EVENT:
+            published.append(payload)
+        original_publish(self, kind, payload, **kwargs)
+
+    monkeypatch.setattr(DesktopSessionBridge, "publish", recording)
+    original_facts = index_read_model.order_facts
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}"
+        params = {"open_frame": 1, "limit": 50, "journal_order": 1, "order_ids": ["ans05"]}
+
+        # CONTROL: a companion inside the deadline is used.
+        ti._reset_for_tests()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(desktop_sessions_utils, "OPEN_FRAME_SNAPSHOT_BUDGET_S", 600.0)
+            ready = (await harness.client.get(url, params=params)).json()["result"]["payload"]
+        assert ready["history"]["journal_order_state"] == "ready"
+
+        # THE REGRESSION: a companion that outlives the deadline is not waited on.
+        # The control armed a resident scan; let it land before forgetting it,
+        # or it would publish after the reset and answer the next read itself.
+        for _ in range(500):
+            if ti.fresh_resident(harness.root, harness.session_id) is not None:
+                break
+            await asyncio.sleep(0.01)
+        ti._reset_for_tests()
+        bridge = harness.pool.bridges[harness.session_id]
+        assert ti.fresh_resident(harness.root, harness.session_id) is None
+        published.clear()
+        released = threading.Event()
+
+        def slow_facts(*args: Any, **kwargs: Any) -> Any:
+            released.wait(5.0)
+            return original_facts(*args, **kwargs)
+
+        monkeypatch.setattr(index_read_model, "order_facts", slow_facts)
+        try:
+            started = time.monotonic()
+            slow = (await harness.client.get(url, params=params)).json()["result"]["payload"]
+            elapsed = time.monotonic() - started
+        finally:
+            released.set()
+        assert slow["history"]["journal_order_state"] == "building"
+        assert elapsed < 1.0, f"the snapshot waited {elapsed:.2f}s on the companion"
+        # The correction lands the order after first paint, and arms the resident.
+        correction = bridge._order_correction
+        assert correction is not None
+        await asyncio.wait_for(asyncio.shield(correction), timeout=30)
+        rows = [row for frame in published for row in frame.get("rows", ())]
+        assert any(
+            row["id"] == "ans05" and row.get("journal_seq") is not None for row in rows
+        ), published
+        assert ti.fresh_resident(harness.root, harness.session_id) is not None
