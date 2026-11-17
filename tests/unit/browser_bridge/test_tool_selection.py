@@ -569,6 +569,130 @@ async def test_request_access_reports_already_allowed(monkeypatch) -> None:
     assert "allowed" in result.text and "'open' or 'goto'" in result.text
 
 
+# The allowed receipt exactly as an app WITHOUT ``opened_tab`` renders it.
+# Pinned as a literal so "flags absent" cannot drift along with the new arm.
+_UI_ALLOWED_LEGACY = (
+    "https://example.com is allowed on the Local Operator desktop app's\n"
+    "browser host.\n"
+    "'open' or 'goto' the URL there now. This approval covers that host only:\n"
+    "before opening it with backend='extension', call request_access with\n"
+    "backend='extension'."
+)
+_OPENS_SENTENCE = "When they approve, the app opens this page in its browser for them."
+
+
+def test_access_text_without_app_flags_is_unchanged() -> None:
+    """An older app sends neither flag and opens nothing on Allow: every arm must
+    read as it did before the flags existed."""
+    ui = builtin.HOST_UI_PREFIX
+    url = "https://example.com/login?next=%2Fhome"
+    assert builtin._access_result_text("allowed", "https://example.com", host=ui) == (
+        _UI_ALLOWED_LEGACY
+    )
+    for state in ("allowed", "pending", "denied", "none", "await_timeout"):
+        for attached in (True, False):
+            baseline = builtin._access_result_text(
+                state, "https://example.com", host=ui, attached=attached
+            )
+            assert (
+                builtin._access_result_text(
+                    state, "https://example.com", host=ui, attached=attached, url=url
+                )
+                == baseline
+            ), state
+    pending = builtin._access_result_text("pending", "https://example.com", host=ui)
+    assert _OPENS_SENTENCE not in pending and "same tab" not in pending
+
+
+def test_pending_with_opens_on_approval_asks_for_one_round_trip() -> None:
+    """Approving opens the page, so approve + sign in + reply is ONE errand
+    (operator report, 2026-11-17) — in both the attached and unattached arms."""
+    for attached in (True, False):
+        text = builtin._access_result_text(
+            "pending",
+            "https://example.com",
+            host=builtin.HOST_UI_PREFIX,
+            attached=attached,
+            opens_on_approval=True,
+        )
+        flat = " ".join(text.split())
+        assert _OPENS_SENTENCE in flat
+        assert "ask once: approve, sign in in the tab that opens, then reply here." in flat
+        # The surrounding guidance is untouched: the new sentence is additive.
+        baseline = builtin._access_result_text(
+            "pending", "https://example.com", host=builtin.HOST_UI_PREFIX, attached=attached
+        )
+        assert text.split("\n\n", 1)[1] == baseline.split("\n\n", 1)[1]
+
+
+def test_allowed_with_opened_tab_says_wait_then_open_the_full_url() -> None:
+    url = "https://example.com/login?next=%2Fhome"
+    text = builtin._access_result_text(
+        "allowed", "https://example.com", host=builtin.HOST_UI_PREFIX, url=url, opened_tab=True
+    )
+    flat = " ".join(text.split())
+    assert "The page is open in the desktop app's browser for the operator." in flat
+    assert f"wait for their reply, then call open url={url}:" in flat
+    assert "same tab where they left it, with no new tab and no new approval" in flat
+    assert "If you hold a browser tab, close it first, or open will navigate yours" in flat
+    # The per-host warning (2026-11-02 incident) survives, and "now" does not:
+    # the operator may be mid sign-in.
+    assert "call request_access with backend='extension'" in flat
+    assert "there now" not in flat
+    # The url is never split across rows (the model hands it back verbatim).
+    assert any(url in line for line in text.split("\n"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["request_access", "await_access"])
+async def test_access_actions_pass_the_app_flags_into_text_and_details(monkeypatch, action) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    url = "https://example.com/login?next=%2Fhome"
+
+    async def fake_call(tool_call_id, wire_action, params, *, surface="", client=None):
+        assert wire_action == action
+        return {"origin": "https://example.com", "state": "allowed", "opened_tab": True}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    result = await builtin.execute_browser(
+        "t", {"action": action, "url": url}, None, None, ToolContext(browser=BrowserSurface())
+    )
+    assert result.details == {
+        "origin": "https://example.com",
+        "state": "allowed",
+        "opened_tab": True,
+    }
+    flat = " ".join(result.text.split())
+    assert f"then call open url={url}:" in flat
+
+
+@pytest.mark.asyncio
+async def test_request_access_pending_passes_opens_on_approval(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        return {
+            "origin": "https://example.com",
+            "state": "pending",
+            "position": 1,
+            "pending_count": 1,
+            "opens_on_approval": True,
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "request_access", "url": "https://example.com/a"},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert result.details is not None and result.details["opens_on_approval"] is True
+    assert _OPENS_SENTENCE in " ".join(result.text.split())
+
+
 @pytest.mark.asyncio
 async def test_cancel_access_uses_the_callers_stable_identity(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)

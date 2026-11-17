@@ -698,13 +698,27 @@ def format_error(
         # app's host never runs on a node.
         if host == HOST_EXTENSION and _on_headless_node():
             return node_approval_steps(origin, url)
-        return (
+        steps = (
             f"site {origin or '(unknown origin)'} is not allowed yet. Call browser "
             f"action='request_access' url={url} to raise the approval prompt, then NOTIFY "
             f"THE USER (via the ask tool or a message) to approve it in {approval} — the "
             "popup badge alone is not reliably seen — and only then "
             f"action='await_access' url={url} to wait for the decision."
         )
+        # A desktop app that opens the approved page in its own browser on
+        # Allow advertises it with ``opens_on_approval``. Without this sentence
+        # agents asked "approve, then sign in" and the operator, after Allow,
+        # had no tab to sign in to — a second round trip per site (operator
+        # report, 2026-11-17). Gated on the flag, never on the host alone: an
+        # older app sends no flag and opens nothing, so the text stays exactly
+        # what that app actually does.
+        if host == HOST_UI and error.data.get("opens_on_approval") is True:
+            steps += (
+                " When the user approves, the app opens this page in its browser for "
+                "them. If the site needs them to sign in, ask once: approve, sign in "
+                "in the tab that opens, then reply here."
+            )
+        return steps
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):
         return (
             f"the browser tab crashed while {action or 'the action'} was running. "

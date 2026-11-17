@@ -26691,9 +26691,21 @@ def _access_result_text(
     delegated: bool = False,
     notify: str = "a short message",
     total_s: float = 0.0,
+    url: str = "",
+    opens_on_approval: bool = False,
+    opened_tab: bool = False,
 ) -> str:
     """One agent-facing line per access state, including the next step — the
     agent discovers this flow through error/result text, not documentation.
+
+    ``opens_on_approval`` / ``opened_tab`` are the desktop app's capability
+    flags (pending and allowed responses respectively): on Allow the app opens
+    the requested page in a USER tab, and the requester's next plain
+    ``open url=…`` adopts that tab where the operator left it. Both default
+    False, and with both False every arm renders byte-identically to an app
+    that predates them — an older app opens nothing, so promising a tab there
+    would send the operator looking for one. ``url`` is the full requested URL
+    the allowed arm hands back for that ``open``; it falls back to ``origin``.
 
     ``host`` selects the sentence that tells the model WHERE the human answers.
     That sentence is the load-bearing one in this whole flow (an un-notified
@@ -26741,6 +26753,21 @@ def _access_result_text(
         # failed with "not allowed yet". Saying which host, and how to ask about
         # the other one, removes the misreading.
         other = "extension" if host == HOST_UI_PREFIX else "ui"
+        if opened_tab:
+            # The operator now has the page in front of them, possibly mid
+            # sign-in. "Open it now" would race them; the pickup `open` must wait
+            # for their reply. A HELD tab is pinned by the ownership journal, so
+            # `open` navigates it instead of adopting theirs — hence the close.
+            return _wrap_receipt(
+                f"{origin} is allowed on {_host_label(host)}.\nThe page is open in the "
+                "desktop app's browser for the operator. If you asked them to sign in, "
+                f"wait for their reply, then call open url={url or origin}: it continues "
+                "in that same tab where they left it, with no new tab and no new "
+                "approval. If you hold a browser tab, close it first, or open will "
+                f"navigate yours instead. This approval covers that host only: before "
+                f"opening it with backend={other!r}, call request_access with "
+                f"backend={other!r}."
+            )
         return _wrap_receipt(
             f"{origin} is allowed on {_host_label(host)}.\n'open' or 'goto' the URL "
             f"there now. This approval covers that host only: before opening it with "
@@ -26772,7 +26799,19 @@ def _access_result_text(
             "alone is not reliably seen"
         )
         slots = f" ({position} of {pending_count})" if position and pending_count else ""
-        head = f"approval for {origin} is pending{slots}.\nThe prompt is showing {where}.\n\n"
+        # One message to the operator instead of two: approving opens the page,
+        # so "approve, sign in, reply" is a single errand (operator report,
+        # 2026-11-17). Only when the app says so — see the docstring.
+        opens = (
+            "\nWhen they approve, the app opens this page in its browser for them. "
+            "If the site needs them to sign in, ask once: approve, sign in in the "
+            "tab that opens, then reply here."
+            if opens_on_approval
+            else ""
+        )
+        head = (
+            f"approval for {origin} is pending{slots}.\nThe prompt is showing {where}.{opens}\n\n"
+        )
         if attached:
             return _wrap_receipt(
                 f"{head}"
@@ -27397,6 +27436,9 @@ async def _bridge_access(
                 attached=_attached_here(context),
                 notify=notify,
                 delegated=delegated,
+                url=url,
+                opens_on_approval=result.get("opens_on_approval") is True,
+                opened_tab=result.get("opened_tab") is True,
             )
             + (
                 f"\n\n{fixed_origin_instruction(pinned_origin, denied=state_value == 'denied')}"
@@ -27408,7 +27450,13 @@ async def _bridge_access(
                 "state": state_value,
                 **{
                     key: result[key]
-                    for key in ("position", "pending_count", "expires_at")
+                    for key in (
+                        "position",
+                        "pending_count",
+                        "expires_at",
+                        "opens_on_approval",
+                        "opened_tab",
+                    )
                     if key in result
                 },
             },
@@ -27563,13 +27611,22 @@ async def _bridge_access(
                     attached=_attached_here(context),
                     notify=notify,
                     delegated=delegated,
+                    url=url,
+                    opens_on_approval=result.get("opens_on_approval") is True,
+                    opened_tab=result.get("opened_tab") is True,
                 ),
                 details={
                     "origin": origin,
                     "state": state_value,
                     **{
                         key: result[key]
-                        for key in ("position", "pending_count", "expires_at")
+                        for key in (
+                            "position",
+                            "pending_count",
+                            "expires_at",
+                            "opens_on_approval",
+                            "opened_tab",
+                        )
                         if key in result
                     },
                 },
@@ -31652,8 +31709,13 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "interaction needs it; 'tabs' lists every tab (handles redacted) and 'close' "
             "ends only your own tab. A subagent's unretained tab closes when it ends; "
             "'retain' hands it to the parent. "
-            "An unapproved site fails with origin_not_allowed: call 'request_access', "
-            "NOTIFY the operator, then 'await_access' before retrying. "
+            # The app's Allow opening the page is the one clause this flow adds
+            # here; the rest of the how-to rides the origin_not_allowed/access
+            # result texts. Terse on purpose: the tool:// doc sits at its 8 KiB
+            # soft cap (tests/unit/tools/test_tool_docs.py).
+            "Unapproved site → origin_not_allowed: call 'request_access', "
+            "NOTIFY the operator, then 'await_access' and retry; the app's Allow "
+            "opens the page. "
             "Never install or script a browser engine instead. Playbook: `guide://browser`."
         ),
         parameters=BrowserParams.model_json_schema(),

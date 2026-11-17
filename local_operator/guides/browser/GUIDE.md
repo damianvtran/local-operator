@@ -563,6 +563,13 @@ independently (Settings → Allowed sites). A separate **Dangerously allow all
 websites** switch in Settings skips the site prompt entirely; it requires an
 explicit confirmation dialog and is off by default.
 
+**Desktop app: approving opens the page.** When the app's responses carry
+`opens_on_approval` / `opened_tab`, Allow opens the requested URL in a tab of
+the app's browser for the operator. If the site needs a sign-in, ask ONCE:
+approve, sign in in the tab that opens, then reply. After their reply, a plain
+`open url=<url>` continues in that same tab (no new tab, no new approval). If
+you already hold a tab, `close` it first or `open` navigates yours instead.
+
 ### On a headless node: the operator decides on their device
 
 A node's Chrome has no screen, so the popup steps above do not apply there.

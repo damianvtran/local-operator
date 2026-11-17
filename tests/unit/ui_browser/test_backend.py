@@ -742,6 +742,52 @@ def test_ui_host_copy_never_sends_the_user_to_the_extension(
         assert fragment not in rendered, rendered
 
 
+# The origin_not_allowed hint exactly as an app WITHOUT ``opens_on_approval``
+# renders it. Pinned as a literal (not "flag off == default") so a change to the
+# old text cannot hide behind both sides moving together.
+_UI_NOT_ALLOWED_LEGACY = (
+    "site https://example.com is not allowed yet. Call browser "
+    "action='request_access' url=https://example.com/login?next=%2Fhome to raise the "
+    "approval prompt, then NOTIFY THE USER (via the ask tool or a message) to approve "
+    "it in the Local Operator desktop app's browser tab — the popup badge alone is not "
+    "reliably seen — and only then action='await_access' "
+    "url=https://example.com/login?next=%2Fhome to wait for the decision."
+)
+
+
+def test_origin_not_allowed_without_opens_on_approval_is_unchanged() -> None:
+    data = {"origin": "https://example.com", "url": "https://example.com/login?next=%2Fhome"}
+    rendered = format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="ui")
+    assert rendered == _UI_NOT_ALLOWED_LEGACY
+
+
+def test_origin_not_allowed_with_opens_on_approval_asks_for_one_round_trip() -> None:
+    """An app that opens the page on Allow lets the agent ask ONCE: approve,
+    sign in in the tab that opens, reply (operator report, 2026-11-17)."""
+    data = {
+        "origin": "https://example.com",
+        "url": "https://example.com/login?next=%2Fhome",
+        "opens_on_approval": True,
+    }
+    rendered = format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="ui")
+    # The legacy steps survive verbatim, with the full url, ahead of the new clause.
+    assert rendered.startswith(_UI_NOT_ALLOWED_LEGACY)
+    assert rendered.endswith(
+        " When the user approves, the app opens this page in its browser for them. "
+        "If the site needs them to sign in, ask once: approve, sign in in the tab "
+        "that opens, then reply here."
+    )
+
+
+def test_opens_on_approval_is_ignored_on_the_extension_host() -> None:
+    """The flag is the desktop app's; the extension opens nothing on Allow."""
+    data = {"origin": "https://example.com", "url": "https://example.com/a"}
+    flagged = {**data, "opens_on_approval": True}
+    assert format_error(
+        _error(ErrorCode.ORIGIN_NOT_ALLOWED, flagged), action="open", host="extension"
+    ) == format_error(_error(ErrorCode.ORIGIN_NOT_ALLOWED, data), action="open", host="extension")
+
+
 def test_shared_codes_keep_one_spelling_for_every_host() -> None:
     """Codes whose copy names no process must not fork, or the two drift."""
     for code, data in (
