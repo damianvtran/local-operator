@@ -356,6 +356,27 @@ def test_system_prompt_and_guide_scope_finality_and_keep_import_a_reroute() -> N
     assert "importing the blocked material" in guide  # still a reroute
 
 
+def test_guide_scopes_the_evidence_tool_to_worktree_briefed_review_children() -> None:
+    """The guide called the child's `evidence` tool "the sanctioned path" for any
+    fresh artifact, so a top-level agent read it as a route it had and then found
+    `tool://evidence` unknown: the tool is granted ONLY to a delegated review-type
+    child whose brief carries a valid `Worktree:` (`harness/subagent.py`,
+    `reader_evidence_root`). The grant must therefore name its condition, and the
+    unconditional path must name the tools every session actually has.
+    """
+    root = Path(prov.__file__).resolve().parents[1]
+    guide = " ".join((root / "guides" / "guardrails" / "GUIDE.md").read_text().split())
+    # The unconditional route: any session, with its own write tools.
+    assert "normal write tools" in guide
+    # The grant sentence names its condition and why that role needs it.
+    grant = [s for s in guide.split(". ") if "`evidence` tool" in s]
+    assert grant, "the guide no longer names the `evidence` tool"
+    sentence = " ".join(grant[0].split())
+    assert "`Worktree:`" in sentence and "no `write`/`edit`" in sentence
+    # The regression itself: an unscoped grant (read as every session's route).
+    assert "sanctioned path for it" not in guide
+
+
 def test_fresh_receipt_write_into_own_worktree_is_not_refused(home: Path, repo: Path) -> None:
     """Positive control: PR #1813's auditor case — no guard refuses or judges it."""
     wt = _add(repo, repo / ".worktrees" / "audit", "audit")
