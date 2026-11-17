@@ -93,12 +93,13 @@ async def test_a_user_turn_notifies_and_the_value_rides_the_end_and_the_row(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    lane = _open_phone_lane(monkeypatch)
     stream = _complete_stream()
     session = make_session(tmp_path, stream)
     events: list[Any] = []
     session.subscribe(events.append)
     try:
-        await session.prompt("Work")
+        await session.prompt("Work", input_surface="desktop")
         state = await session.refresh_attention()
         assert state["kind"] == "complete"
         assert state["unseen"] is True
@@ -107,7 +108,7 @@ async def test_a_user_turn_notifies_and_the_value_rides_the_end_and_the_row(
         ends = _ends(events)
         assert len(ends) == 1, "exactly one end per prompt — the ONE value rides it"
         assert ends[0].notify is True
-        await _assert_completion_candidates(monkeypatch, session, True)
+        await _assert_completion_candidates(monkeypatch, session, True, lane=lane, origin="desktop")
     finally:
         await session.dispose()
 
@@ -127,14 +128,51 @@ ROUTINE_INPUT_TYPES = (
 )
 
 
-async def _assert_completion_candidates(monkeypatch, session, expected: bool) -> None:
-    """Read real SQLite rows through both production consumers; never send.
+def _open_phone_lane(monkeypatch) -> Any:
+    """An ARMED production push worker over this test's real attention store.
 
-    Only unrelated host/focus/mock gates and composition are replaced, so a
-    loud positive control proves silence was not the test host's global veto.
-    Neither a desktop subscriber nor a cloud sender is started.
+    WHY a real ``PushWorker`` (built by ``tests.unit.mobile.test_push_worker``'s
+    ``Harness``) rather than a bare ``object.__new__`` shell: ADR 0009 (#4145)
+    moved candidacy behind origin routing and the per-device preference gate,
+    which read injected ``live_devices``/``preferences`` set in ``__init__``. A
+    shell skips them, so it would test nothing #4145 ships (and it raised
+    ``AttributeError: _preferences`` on main once both PRs landed).
+
+    The lane is the NON-VACUOUS control the routine-silence rule (#4120) needs:
+    two live phones, "Agent finished" scope ``all`` (Harness default), desk
+    presence AWAY, the master/category switches at their defaults. Under it a
+    loud completion of ANY origin reaches the phone, so a routine turn's
+    missing emit is the store's ``notify`` stamp at work, never a routing,
+    presence or device veto. Armed BEFORE the turn: a worker baselines at
+    enablement and never pushes what was already published.
     """
-    from local_operator.mobile.push_worker import PushWorker
+    from tests.unit.mobile.test_push_worker import Harness
+
+    monkeypatch.setattr("local_operator.tui.notify.notifications_enabled", lambda: True)
+    monkeypatch.setattr("local_operator.tui.notify.desktop_belongs_to_this_process", lambda: True)
+    monkeypatch.setattr(
+        "local_operator.session.runtime.serving.session_may_announce", lambda _: True
+    )
+    lane = Harness(AttentionStore().path.parent)
+    assert lane.scope == "all" and lane.devices() and lane.presence() is False
+    return lane
+
+
+def _completion_emits(lane: Any) -> list[dict[str, Any]]:
+    return [body for _key, body in lane.plane.calls if body.get("type") == "completion"]
+
+
+async def _assert_completion_candidates(
+    monkeypatch, session, expected: bool, *, lane: Any, origin: str
+) -> None:
+    """Read real SQLite rows through both production consumers.
+
+    The phone side is the armed worker's real ``tick`` into the in-memory
+    control plane (no network); the desktop side is ``DesktopFeed`` with its
+    publisher captured. Only host/focus/mock gates and composition are
+    replaced, so the loud positive control proves silence was not the test
+    host's global veto.
+    """
     from local_operator.server.utils.desktop_feed import DesktopFeed
     from local_operator.session.attention import conversation_identity
 
@@ -144,12 +182,10 @@ async def _assert_completion_candidates(monkeypatch, session, expected: bool) ->
     rows = [row for row in store.published_since(0) if row["conversation"] == identity]
     assert rows[-1]["notify"] is expected
     assert state["unseen"] is True
+    # The run's ADR 0009 origin rode to the row, so routing is really being
+    # asked about a phone- or desktop-started conversation.
+    assert state["origin"] == origin
 
-    monkeypatch.setattr("local_operator.tui.notify.notifications_enabled", lambda: True)
-    monkeypatch.setattr("local_operator.tui.notify.desktop_belongs_to_this_process", lambda: True)
-    monkeypatch.setattr(
-        "local_operator.session.runtime.serving.session_may_announce", lambda _: True
-    )
     monkeypatch.setattr(
         "local_operator.server.utils.desktop_feed.session_uses_test_hosting", lambda _: False
     )
@@ -157,12 +193,11 @@ async def _assert_completion_candidates(monkeypatch, session, expected: bool) ->
         "local_operator.server.utils.desktop_feed.notification_payload", lambda *a, **kw: {}
     )
 
-    worker = object.__new__(PushWorker)
-    worker.store = store
-    worker.config_dir = session.transcript.directory.parent
-    assert worker._is_candidate(identity) is expected
+    assert lane.worker._is_candidate(identity) is expected
+    lane.worker.tick()
+    assert bool(_completion_emits(lane)) is expected, lane.plane.calls
 
-    feed = DesktopFeed(worker.config_dir)
+    feed = DesktopFeed(lane.root)
     banners = []
     monkeypatch.setattr(feed, "_tick_presence", lambda: None)
     monkeypatch.setattr(feed, "_focus_policy_for", lambda *_: "background")
@@ -186,16 +221,29 @@ class _RoutineFailureStream(ScriptedStream):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["mobile", "desktop"])
 @pytest.mark.parametrize("custom_type", ROUTINE_INPUT_TYPES)
 @pytest.mark.parametrize("outcome", ["complete", "error", "awaiting_user", "mixed_user"])
 async def test_routine_internal_completion_policy(
-    tmp_path: Path, monkeypatch, custom_type: str, outcome: str
+    tmp_path: Path, monkeypatch, custom_type: str, outcome: str, origin: str
 ) -> None:
-    """Real session -> finalization -> SQLite -> desktop/phone candidate gates."""
-    from local_operator.harness.types import Message
+    """Real session -> finalization -> SQLite -> desktop/phone candidate gates.
 
+    #4120's silence is decided at finalization and stamped as ``notify`` on the
+    stored row, BEFORE #4145's origin routing reads it: a routine turn in a
+    conversation the phone (``mobile``) or the desktop started stays silent on
+    both surfaces, while an error, a waiting user input or a mixed user prompt
+    still reaches both under the same routing.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.session import INPUT_SURFACE_KEY
+
+    lane = _open_phone_lane(monkeypatch)
     stream = _RoutineFailureStream([]) if outcome == "error" else _complete_stream()
     session = make_session(tmp_path, stream)
+    # The conversation's last human driver: a routine input carries no surface
+    # of its own, so the run inherits this (``Session._run_origin``).
+    session._conversation_driver = origin
     events: list[Any] = []
     session.subscribe(events.append)
     if outcome == "awaiting_user":
@@ -215,7 +263,13 @@ async def test_routine_internal_completion_policy(
             CustomMessage(custom_type=custom_type, attribution="system", details={"text": "done"})
         ]
         if outcome == "mixed_user":
-            messages.append(Message(role="user", content=[TextContent(text="Work")]))
+            messages.append(
+                Message(
+                    role="user",
+                    content=[TextContent(text="Work")],
+                    provider_payload={INPUT_SURFACE_KEY: origin},
+                )
+            )
         await session._prompt_messages(messages)
         state = await session.refresh_attention()
         expected = outcome != "complete"
@@ -224,7 +278,9 @@ async def test_routine_internal_completion_policy(
         assert _ends(events)[-1].notify is expected
         assert session._run_input_types == {custom_type}
         assert ("user" in session._run_triggers) is (outcome == "mixed_user")
-        await _assert_completion_candidates(monkeypatch, session, expected)
+        await _assert_completion_candidates(
+            monkeypatch, session, expected, lane=lane, origin=origin
+        )
     finally:
         await session.dispose()
 
