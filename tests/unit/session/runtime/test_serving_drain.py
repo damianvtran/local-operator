@@ -1735,9 +1735,7 @@ def _wake_due(text: str = "check the deploy") -> Any:
 
 
 def _queued_custom_types(session: Session) -> list[str]:
-    return [
-        str(getattr(item, "custom_type", "")) for item in list(session._steering_queue._queue)
-    ]
+    return [str(getattr(item, "custom_type", "")) for item in list(session._steering_queue._queue)]
 
 
 @pytest.mark.asyncio

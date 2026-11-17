@@ -22493,9 +22493,7 @@ class Session:
                     logger.warning("parked peer message %s could not be spooled", message.id)
                     continue
                 custom_type = (
-                    message.custom_type
-                    if message.custom_type != PEER_MESSAGE_MESSAGE_TYPE
-                    else ""
+                    message.custom_type if message.custom_type != PEER_MESSAGE_MESSAGE_TYPE else ""
                 )
                 await await_spool_write(
                     append_for_successor,
