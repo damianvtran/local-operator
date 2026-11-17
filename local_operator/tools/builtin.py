@@ -30229,6 +30229,15 @@ async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> To
     surface = state.surface_id
     problem = await close_browser_surface(state)
     if problem:
+        # A host refusal already ends "ownership retained for retry"
+        # (`close_browser_surface`, whose text session teardown also shows);
+        # repeating the disposition here read as a stutter (QA Q1, PR #4189).
+        if state.surface_id and problem.endswith("ownership retained for retry"):
+            return _error(
+                tool_call_id,
+                "browser",
+                f"Browser surface {surface} could not be closed: {problem}.",
+            )
         disposition = "ownership retained" if state.surface_id else "dropped the handle"
         return _error(
             tool_call_id,

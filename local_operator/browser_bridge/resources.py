@@ -60,8 +60,12 @@ _REPLAY_LANES = (HOST_UI, HOST_BRIDGE)
 #: agent slots with it (2026-11-17: five completed subagent sessions, e.g.
 #: 704fdeafe9e3, d6d5022bd45e). A list rather than a second slot because the
 #: loss can repeat within one session (704fdeafe9e3 lost two). Each entry keeps
-#: the ``allocation_id`` it was opened under, so the retry names the same
-#: ownership the host recorded even after ``allocate`` rotated the id.
+#: the ``allocation_id`` current when its handle was stranded — on the
+#: ``remember`` path that can already be the id ``allocate`` rotated to, which
+#: the desktop host accepts because its ``close`` checks the tab against any
+#: allocation of the scope (local-operator-ui ``ownership.ts``). An entry whose
+#: handle becomes the live ``surface_id`` again (the host re-attributes the
+#: paused tab) is dropped: it is in use, not owed.
 #: Private like ``surface_id``: ``read_inventory`` publishes only a count.
 STRANDED_FIELD = "stranded_surfaces"
 
@@ -1273,6 +1277,7 @@ class BrowserResource:
             # stays owed and every later close retries it (see STRANDED_FIELD).
             self._strand(str(self.record.get("surface_id", "")), str(result.get("tab", "")))
         self.record["surface_id"] = str(result.get("tab", ""))
+        self._unstrand(self.record["surface_id"])
         self.record["state"] = (
             "cleanup_pending"
             if self.record.get("terminal")
@@ -1366,6 +1371,7 @@ class BrowserResource:
             # cheaper than ever guessing a live tab is dead.
             self._strand(str(self.record.get("surface_id", "")), surface_id)
         self.record["surface_id"] = surface_id
+        self._unstrand(surface_id)
         self.record["state"] = (
             "cleanup_pending"
             if self.record.get("terminal")
@@ -1394,6 +1400,29 @@ class BrowserResource:
             {"surface": previous, "allocation_id": str(self.record.get("allocation_id", ""))}
         )
         self.record[STRANDED_FIELD] = owed
+
+    def _unstrand(self, live: str) -> None:
+        """Drop the owed entry for ``live`` once it is the live handle again.
+
+        The incident's own recovery path: a tab paused behind a password-manager
+        prompt loses attribution (``recover`` strands it), the user dismisses
+        the prompt, and the host attributes the SAME handle again. Left owed,
+        ``finish`` would close it before ``owner_retain`` — closing a tab the
+        scope is using or retaining. Exact handle only, never ``_tab_key``: an
+        owed handle whose tab NUMBER was reused by the live tab is a different
+        tab and stays owed (the host refuses its stale nonce as ``tab_closed``).
+        The caller saves.
+        """
+        if not live:
+            return
+        owed = [entry for entry in self.record.get(STRANDED_FIELD) or () if isinstance(entry, dict)]
+        kept = [entry for entry in owed if entry.get("surface") != live]
+        if len(kept) == len(owed):
+            return
+        if kept:
+            self.record[STRANDED_FIELD] = kept
+        else:
+            self.record.pop(STRANDED_FIELD, None)
 
     async def close_stranded(self) -> list[str]:
         """Retry closing every tab in ``STRANDED_FIELD``; return what still fails.
@@ -1424,10 +1453,17 @@ class BrowserResource:
             return ["browser ownership could not be proven after restart; not retried"]
         failures: list[str] = []
         remaining: list[dict[str, Any]] = []
+        live = str(self.record.get("surface_id", ""))
         for entry in owed:
             surface = str(entry.get("surface", ""))
             host = surface_host(surface)
             if not host:
+                continue
+            if surface == live:
+                # Belt-and-braces for `_unstrand`: a record written before that
+                # existed (or any future path that re-adopts a handle) must never
+                # make this retry close the tab in use. The live slot's own
+                # lifecycle (`close`, `owner_finish`/`owner_retain`) owns it now.
                 continue
             params = {**self.params(), "tab": surface}
             if entry.get("allocation_id"):

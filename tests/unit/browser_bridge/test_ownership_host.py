@@ -2706,3 +2706,37 @@ async def test_an_owed_tab_still_paused_at_teardown_leaves_a_cleanable_pending_r
     record = json.loads(resource.path.read_text())
     assert [entry["surface"] for entry in record["stranded_surfaces"]] == [first]
     assert resources.cleanup_disposition(record) == (True, "")
+
+
+@pytest.mark.asyncio
+async def test_the_tools_close_settles_an_owed_tab_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3 (PR #4189): the `close` action's retry is wired in the tool
+    lane itself — with no live tab the model's explicit close is the only call
+    that can free an owed one before teardown. Deleting that hook fails here."""
+    from local_operator.ui_browser import backend as ui_backend
+
+    fake = _PausedTabUiClient()
+    monkeypatch.setattr(ui_backend, "UiHostClient", lambda root=None: fake)
+    _ui_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    first = f"ui:8:{'a' * 32}"
+    await builtin.execute_browser(
+        "o1", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    fake.paused.add(first)
+    refused = await builtin.execute_browser("c1", {"action": "close"}, None, None, context)
+    # QA Q1: the retained disposition is stated once, not twice in nested brackets.
+    assert refused.text.count("ownership retained") == 1, refused.text
+    resource.recovered = False
+    await builtin.execute_browser("r1", {"action": "recover"}, None, None, context)
+    holder = context.browser
+    assert holder is not None and holder.surface_id == ""
+
+    fake.paused.clear()
+    closed = await builtin.execute_browser("c2", {"action": "close"}, None, None, context)
+    assert fake.closed == [first]
+    assert "Also closed earlier tab" in closed.text, closed.text
+    assert fake.opened == 1, "the close must not open anything"
+    assert "stranded_surfaces" not in json.loads(resource.path.read_text())
