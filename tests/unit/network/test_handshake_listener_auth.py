@@ -703,7 +703,9 @@ def test_t6_an_honest_member_at_the_targets_address_is_refused_and_demoted(
     host, port = fake.start()
     endpoint = f"{host}:{port}"
     with store.mutate(mesh.record.network_id, mesh.root) as record:
-        record.member(mesh.victim.device_id).endpoints = [endpoint, "127.0.0.1:1"]
+        victim_row = record.member(mesh.victim.device_id)
+        assert victim_row is not None
+        victim_row.endpoints = [endpoint, "127.0.0.1:1"]
         store.save(record, mesh.root)
     try:
         _link, reason = mesh.server.dial(
@@ -734,7 +736,9 @@ def test_t6b_listener_unproven_does_not_demote_the_endpoint(mesh: Mesh) -> None:
     host, port = fake.start()
     endpoint = f"{host}:{port}"
     with store.mutate(mesh.record.network_id, mesh.root) as record:
-        record.member(mesh.victim.device_id).endpoints = [endpoint]
+        victim_row = record.member(mesh.victim.device_id)
+        assert victim_row is not None
+        victim_row.endpoints = [endpoint]
         store.save(record, mesh.root)
     try:
         _link, reason = mesh.server.dial(
@@ -1189,7 +1193,7 @@ def test_t16_admit_link_refuses_an_unverified_link(mesh: Mesh) -> None:
 
     a, b = socket.socketpair()
     try:
-        link = SimpleNamespace(
+        link: Any = SimpleNamespace(
             peer_verified=False, sock=a, network_id=mesh.record.network_id, device_id="d_x"
         )
         assert mesh.server._admit_link(link, outbound=True) == "unverified_link"  # noqa: SLF001

@@ -598,6 +598,8 @@ def test_reader_close_during_admission_keeps_its_newer_loss_schedule(
         link_id="l_synthetic",
         device_id="d_synthetic",
         network_id="n_synthetic",
+        # An authenticated link's flag: ``_admit_link`` refuses unverified links.
+        peer_verified=True,
         last_frame_at=time.time(),
         alive=False,
         epoch=1,

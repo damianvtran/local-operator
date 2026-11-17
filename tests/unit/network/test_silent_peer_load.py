@@ -188,6 +188,10 @@ class _Link:
         self.closed: list[str] = []
         self.started = False
         self.outbound = False
+        # A stand-in for an AUTHENTICATED link: ``_admit_link`` refuses any link
+        # whose peer was not verified (mesh-listener-auth), and this rig's subject
+        # is the duplicate fence, not authentication.
+        self.peer_verified = True
 
     def send(self, frame: dict[str, Any]) -> None:
         self.sent.append(frame)
