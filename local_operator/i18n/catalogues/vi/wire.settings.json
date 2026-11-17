@@ -792,7 +792,7 @@
   "wire.settings.update_auto_prune.choice.true.description": "giữ bản hiện tại, bản đang chạy, vài bản mới",
   "wire.settings.update_auto_prune.help": "Sau mỗi lần cập nhật, xóa bản cài đặt cũ không dùng, như `lop install prune`.",
   "wire.settings.update_auto_prune.label": "Dọn bản cài đặt cũ",
-  "wire.settings.update_keep_generations.help": "Số bản cài đặt không dùng mới nhất được giữ lại sau mỗi lần dọn. Luôn giữ bản hiện tại, bản trước đó, bản đang thực hiện lần cập nhật và mọi bản mà phiên hoặc dịch vụ đang chạy đã đăng ký.",
+  "wire.settings.update_keep_generations.help": "Luôn giữ: bản hiện tại, bản trước, bản đang chạy và mọi bản mà phiên hoặc dịch vụ đã đăng ký. Số này giữ thêm bấy nhiêu bản không dùng mới nhất.",
   "wire.settings.update_keep_generations.label": "Số bản không dùng giữ lại",
   "wire.settings.updates.description": "Cách mỗi lần cập nhật xử lý các bản cài đặt cũ mà nó để lại. Có hiệu lực từ lần `lop update` kế tiếp.",
   "wire.settings.updates.title": "Cập nhật",

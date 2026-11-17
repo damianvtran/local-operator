@@ -375,8 +375,8 @@
   "wire.settings.update_keep_generations.help": {
     "role": "settings row help",
     "tone": "plain",
-    "width": "one or two short sentences",
-    "note": "Must keep the guarantee: the current install, the previous install (the one that was current before this update; the code protects it), the install running the update (the one executing the update), and any install a session or background service registered (recorded its install as in use) are always kept, regardless of this number. Default 2; 0 is allowed. No ICU arguments."
+    "width": "two rows at 80 columns: aim for <=146 display cells; the \"Always kept\" clause must come FIRST and be complete within the first 146 cells even if the rest is cut",
+    "note": "The guarantee comes first because the help row is cut to two rows on narrow terminals. \"Always kept\" lists the classes that survive every prune regardless of the number: the current install; the previous install (the one that was current before this update; the code protects it); the running installs, meaning the install executing the update and any install a session is running from; and any install a session or background service registered (recorded its install as in use). The second sentence then says the number setting also keeps that many NEWEST UNUSED installs (the setting's own value: default 2; 0 is allowed). It must read as a statement attached to the number field whose label is \"Unused installs kept\". No ICU arguments."
   },
   "wire.settings.update_keep_generations.label": {
     "role": "settings row label for a number",

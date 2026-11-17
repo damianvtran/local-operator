@@ -792,7 +792,7 @@
   "wire.settings.update_auto_prune.choice.true.description": "keep current, running and the newest few",
   "wire.settings.update_auto_prune.help": "After each update, delete unused old installs, like `lop install prune`.",
   "wire.settings.update_auto_prune.label": "Prune old installs",
-  "wire.settings.update_keep_generations.help": "How many of the newest unused installs each prune keeps. The current and previous installs, the one running the update, and any that a running session or service registered are always kept.",
+  "wire.settings.update_keep_generations.help": "Always kept: current, previous and running installs, and any a session or service registered. Also keeps this many newest unused installs.",
   "wire.settings.update_keep_generations.label": "Unused installs kept",
   "wire.settings.updates.description": "What an update does with the older installs it leaves behind. Takes effect at the next `lop update`.",
   "wire.settings.updates.title": "Updates",

@@ -792,7 +792,7 @@
   "wire.settings.update_auto_prune.choice.true.description": "conserva actual, en ejecución y las últimas",
   "wire.settings.update_auto_prune.help": "Tras cada actualización, borra instalaciones antiguas sin uso, como `lop install prune`.",
   "wire.settings.update_auto_prune.label": "Limpiar instal. antiguas",
-  "wire.settings.update_keep_generations.help": "Cuántas de las instalaciones sin uso más recientes conserva cada limpieza. Siempre se conservan la actual, la anterior, la que ejecuta la actualización y las registradas por una sesión o servicio en ejecución.",
+  "wire.settings.update_keep_generations.help": "Siempre se conservan: actual, anterior, en ejecución y registradas por una sesión o servicio. Además conserva este número de las últimas sin uso.",
   "wire.settings.update_keep_generations.label": "Instal. sin uso conservadas",
   "wire.settings.updates.description": "Qué hace una actualización con las instalaciones antiguas que deja atrás. Surte efecto en el próximo `lop update`.",
   "wire.settings.updates.title": "Actualizaciones",

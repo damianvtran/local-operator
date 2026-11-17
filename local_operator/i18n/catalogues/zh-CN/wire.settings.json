@@ -792,7 +792,7 @@
   "wire.settings.update_auto_prune.choice.true.description": "保留当前、运行中及最新的几个",
   "wire.settings.update_auto_prune.help": "每次更新后自动删除未使用的旧安装，规则同`lop install prune`。",
   "wire.settings.update_auto_prune.label": "清理旧安装",
-  "wire.settings.update_keep_generations.help": "每次清理保留的最新未使用安装数量。当前安装、上一个安装、执行本次更新的安装，以及运行中的会话或服务登记过的安装，始终保留。",
+  "wire.settings.update_keep_generations.help": "始终保留：当前、上一个和运行中的安装，以及会话或服务登记过的安装。此数值另外决定保留多少个最新的未使用安装。",
   "wire.settings.update_keep_generations.label": "保留的未使用安装数",
   "wire.settings.updates.description": "更新后如何处理留下的旧安装。从下一次`lop update`起生效。",
   "wire.settings.updates.title": "更新",

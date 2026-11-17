@@ -792,7 +792,7 @@
   "wire.settings.update_auto_prune.choice.true.description": "मौजूदा, चल रहे और कुछ सबसे नए रखें",
   "wire.settings.update_auto_prune.help": "हर अपडेट के बाद अप्रयुक्त पुराने इंस्टॉल हटाएँ, `lop install prune` की तरह।",
   "wire.settings.update_auto_prune.label": "पुराने इंस्टॉल हटाएँ",
-  "wire.settings.update_keep_generations.help": "हर सफ़ाई में रखे जाने वाले सबसे नए अप्रयुक्त इंस्टॉल की संख्या। हमेशा रखे जाते हैं: मौजूदा और पिछला इंस्टॉल, अपडेट चला रहा इंस्टॉल, और चल रहे सत्र या सेवा द्वारा दर्ज कोई भी इंस्टॉल।",
+  "wire.settings.update_keep_generations.help": "हमेशा रखे जाते हैं: मौजूदा, पिछले और चल रहे इंस्टॉल, और वे भी जिन्हें किसी सत्र या सेवा ने दर्ज किया हो। साथ ही इतने सबसे नए अप्रयुक्त इंस्टॉल भी रखे जाते हैं।",
   "wire.settings.update_keep_generations.label": "रखे जाने वाले अप्रयुक्त इंस्टॉल",
   "wire.settings.updates.description": "अपडेट पीछे छूटे पुराने इंस्टॉल का क्या करता है। अगले `lop update` से लागू होता है।",
   "wire.settings.updates.title": "अपडेट",

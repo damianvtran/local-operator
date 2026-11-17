@@ -792,7 +792,7 @@
   "wire.settings.update_auto_prune.choice.true.description": "хранить текущую, запущенные и новейшие",
   "wire.settings.update_auto_prune.help": "После каждого обновления удалять неиспользуемые старые установки, как `lop install prune`.",
   "wire.settings.update_auto_prune.label": "Удалять старые установки",
-  "wire.settings.update_keep_generations.help": "Сколько новейших неиспользуемых установок хранит каждая очистка. Всегда хранятся установки: текущая, предыдущая, выполняющая обновление и все зарегистрированные запущенной сессией или службой.",
+  "wire.settings.update_keep_generations.help": "Всегда хранятся текущая, предыдущая и запущенные установки, а также зарегистрированные сессией или службой. Плюс столько новейших неиспользуемых.",
   "wire.settings.update_keep_generations.label": "Хранить неактивных установок",
   "wire.settings.updates.description": "Что происходит со старыми установками после обновления. Вступает в силу при следующем `lop update`.",
   "wire.settings.updates.title": "Обновления",
