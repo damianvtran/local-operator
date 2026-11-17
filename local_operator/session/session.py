@@ -14072,6 +14072,27 @@ class Session:
             # the user's language; the exception still carries the developer's.
             logger.debug("bridge decide refused at the word: %s", failure)
             return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
+        # ONE WORD PER ASK (PR #4099 design (c), exit 7). A desktop approvals
+        # batch recorded a signed word for this ask that the hub has not
+        # confirmed. The card may neither contradict it (the hub could later get
+        # the batch's word while the session acts on the card's) nor repeat it
+        # (its consumption would find the batch row and send nothing — a silent
+        # no-op). Refused BEFORE any ask-log write, with the grant withdrawn; the
+        # list row shows the word as ``unsent_decision`` and re-sends it there.
+        # Fails closed: an unreadable ledger cannot prove there is no such row.
+        try:
+            from local_operator.team_bridge.decide_intents import DecideIntents
+
+            unconfirmed = DecideIntents(runtime.config_dir).unconfirmed_batch_intent(
+                runtime.key(), str(ask_id), str(question_id)
+            )
+        except Exception:  # noqa: BLE001 — refused, never raised into the door
+            logger.warning("bridge decide: decide-intent ledger unreadable", exc_info=True)
+            return _refuse("this machine's decision record could not be read; nothing was sent.")
+        if unconfirmed is not None:
+            from local_operator.asks.render import BATCH_PENDING_COPY
+
+            return _refuse_with_code("decided_from_list", BATCH_PENDING_COPY)
         question_slot = str(question.get("id") or "")
         existing = record.get("answers") or {}
         picks = [str(value) for value in (existing.get(question_slot) or ())]

@@ -177,3 +177,46 @@ group on GitHub, and controlled repeated labels are needed to demonstrate pendin
 replacement. No duplicate live suites are armed just to obtain this evidence;
 CI must still prove the unchanged full matrix and required aggregate on the
 final head. Never report a dispatch or local YAML assertion as that proof.
+
+## Cost gate: fast CI first, superseded main runs skipped (GH #4074)
+
+The `precondition` job in `full-suite.yml` runs `scripts/fast_gate_check.py`
+(stdlib only, fetched from the PR's **base** commit, never the PR checkout)
+before any heavy job. Every heavy job needs it and tests `outputs.ok == 'true'`.
+
+| Event | Rule |
+|---|---|
+| `pull_request` (label arm) | newest `ci.yml` `pull_request` run bound to this PR number, head SHA and head repo; latest attempt; exactly one `CI Gate` job `success`. Pending, red, missing, fork/unbound, API error: the check goes **red in seconds**, no test job starts. |
+| `workflow_dispatch` (`train/*`, WIDE route) | newest `ci.yml` **push/dispatch** run on the same SHA, branch and repo, `CI Gate` green. A carrier PR's run tests `refs/pull/<n>/merge`, a different tree, and never counts. Train route: `gh workflow run ci.yml --ref train/<t>` -> wait for `CI Gate` on that SHA -> `gh workflow run full-suite.yml --ref train/<t>`. Always the **full** suite. |
+| `push` to `main` | after a 300 s settle, if a newer non-release, untagged tip descends from this SHA and has its own live full-suite run, this run is skipped and `Merge gate (full suite)` shows grey with `SUPERSEDED by <tip>`. Anything unknown runs in full. |
+| `schedule` | never gated or coalesced; own concurrency group `full-suite-nightly`. |
+
+There is no bypass input. The runner never waits for CI; use
+`make fast-gate PR=<n>` (one-shot client check of the same helper via `--local`;
+exits immediately) or `gh pr checks <n> --watch`, then `make merge-gate PR=<n>`
+to arm the full suite. `make merge-gate` does not itself call the helper.
+
+**Trusted helper.** For a PR the helper is fetched from `gate_base`, the live
+main tip `changes` resolved and the heavy jobs test against, not from the
+event's stale base SHA. The step summary logs the full trusted commit and the
+helper's git blob id. A trusted tree without the helper fails the job red.
+
+**Rollout is two steps; do not change flags in between.** (1) A tests-only PR
+lands `scripts/fast_gate_check.py` (+ its tests) on main with no workflow
+change. (2) Only then can the PR carrying the `full-suite.yml` change pass its
+own gate. Until step 1 is on main that PR's required check is red by design.
+
+**Coverage claims.** Every labeled PR head, the final main tip of each burst,
+every release/tagged commit and the nightly still run every test. A tag on a
+commit is found whatever its name or age: every tag ref is listed
+(`git/matching-refs/tags/`, `Link` followed on the same API origin only) and
+annotated tag objects are peeled to their commit; any cap, cycle, timeout or API
+error means UNKNOWN, which runs in full.
+
+**Limits.** The 300 s settle adds ~5 runner-minutes to a main run even when it
+turns out to be the final tip. The settle was chosen from 99 commit gaps among
+the last 100 main commits (61 < 5 min, 78 < 10 min, median 2 min): a sample, not
+fleet statistics, and no savings figure is claimed. A run cancelled by hand or
+lost to a startup failure can leave a main commit without a full verdict until
+the nightly run, which is the backstop; no extra daemon or cancel API exists.
+A red tip verdict is a legitimate result for superseded commits, not a gap.

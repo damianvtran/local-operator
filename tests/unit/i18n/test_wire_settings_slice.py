@@ -7,7 +7,10 @@ settings registry, taken from `origin/main` BEFORE the extraction
 enumeration from the live registry and requires every rendered string to
 match the golden EXACTLY — the committed form of the slice's byte-identical
 proof, re-runnable by review and QA, and the trip-wire for any later edit that
-changes a registry string without regenerating the catalogue.
+changes a registry string without regenerating the catalogue. New registry
+slots extend that snapshot from the reviewed English catalogue: the heavy-job
+section and switch add eight slots (including the shared on/off labels), with
+no change to the existing extraction-time strings or translated copy.
 
 The second test pins the resolution PATH: the registry's strings must come
 through the `wire.settings` catalogue (not from leftovers), and an unknown

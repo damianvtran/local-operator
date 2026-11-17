@@ -328,10 +328,14 @@ def test_system_prompt_and_guide_scope_finality_and_keep_import_a_reroute() -> N
     from local_operator.prompts_api import render_template
 
     prompt = " ".join(render_template("system.md", {}).split())
+    # PR #4141 merged with #4098: one prompt line carries both — the operator's
+    # `ask` reply naming the exact path (#4098) beside the re-evaluation and
+    # typed-approval exceptions (#4141); test_refusal_reevaluation pins the rest.
     assert (
         "`BLOCKED by guardrail` is final for that effect on those targets, by any "
         "route: report it. Fresh work of your own is not a reroute."
     ) in prompt
+    assert "or their own `ask` reply names the exact path" in prompt
     root = Path(prov.__file__).resolve().parents[1]
     guide = " ".join((root / "guides" / "guardrails" / "GUIDE.md").read_text().split())
     _scope_phrases(guide)
