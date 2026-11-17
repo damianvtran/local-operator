@@ -1735,7 +1735,9 @@ def _wake_due(text: str = "check the deploy") -> Any:
 
 
 def _queued_custom_types(session: Session) -> list[str]:
-    return [str(getattr(item, "custom_type", "")) for item in list(session._steering_queue._queue)]
+    # `queued_steering()` is the public, typed FIFO snapshot (the recall seam);
+    # `asyncio.Queue._queue` is a private CPython detail pyright cannot see.
+    return [str(getattr(item, "custom_type", "")) for item in session.queued_steering()]
 
 
 @pytest.mark.asyncio
