@@ -22334,10 +22334,15 @@ class Session:
                     # model-origin lookalikes cannot carry this ephemeral proof.
                     # Check each message so independently admitted A/B frames
                     # cannot cancel each other's run-level presentation evidence.
-                    if runtime is not None and any(
-                        presented_bridge_ref([message]) is not None for message in request.messages
-                    ):
-                        runtime.bridge_input_presented = True
+                    if runtime is not None:
+                        for message in request.messages:
+                            presented = presented_bridge_ref([message])
+                            if presented is not None:
+                                runtime.bridge_input_presented = True
+                                # Default thread placement for a later bound
+                                # channel_post reads the hub's own root for
+                                # this message (tool._default_thread_root).
+                                runtime.note_presented(presented)
                     if carried:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.

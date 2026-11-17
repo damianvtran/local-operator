@@ -68,6 +68,15 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   declare ``new_post: true`` intentionally. That declaration is model-supplied
   intent, NOT semantic isolation, trusted authority, or duplicate suppression.
 
+  In a CHANNEL or GROUP the binding also PLACES the reply: with no explicit
+  ``thread_root_id`` it lands in the answered message's thread — that
+  message's own root when it is a reply, else the message itself (operator,
+  2026-11-17: answers go in threads, top-level is for new topics and
+  announcements). ``new_post: true`` is the opt-out (it carries no binding,
+  so nothing to thread under); a DM stays inline. The root comes from the
+  hub's feed facts for a message this session presented; anything else posts
+  at channel level with a warning rather than guessing a thread.
+
   ``to: {"name": …}`` DIRECTS the post at one member, and the name is resolved,
   never guessed: trimmed, case-insensitive, whole DISPLAY name only (no handle,
   no email, no substring), against THIS conversation's ACTIVE members — the
@@ -343,10 +352,35 @@ class BridgeRuntime:
     # Run-local dispatch evidence, never inferred from persisted conversation
     # text. Remains true after owed cards clear; the session resets at boundaries.
     bridge_input_presented: bool = False
+    #: message id -> (conversation id, the thread root it belongs to, "" when
+    #: it is itself channel-level), for every admitted message this session
+    #: actually PRESENTED to the model. Read only by channel_post's default
+    #: thread placement (:func:`_default_thread_root`), never as authority:
+    #: reply binding stays :func:`_validate_reply_destination`'s job. The
+    #: values are the hub's own feed facts (``ConversationFeedRef``), never
+    #: parsed from body text. Session-lifetime and bounded
+    #: (:data:`_PRESENTED_PLACEMENT_MAX`); losing an entry only falls back to
+    #: the pre-threading channel-level post, with a warning.
+    presented_placements: dict[str, tuple[str, str]] = field(default_factory=dict)
     #: The ONE shared in-flight admission task (S-2): callers JOIN it instead
     #: of queueing their own fetch, and it is cancelled/discarded when the
     #: bound authority is revoked. Lazily created (no loop-bound default).
     _admission_task: Any = None
+
+    def note_presented(self, ref: Any) -> None:
+        """Remember where a presented message lives, for default thread placement."""
+        message_id = getattr(ref, "message_id", "")
+        conversation_id = getattr(ref, "conversation_id", "")
+        if not isinstance(message_id, str) or not isinstance(conversation_id, str):
+            return
+        root = getattr(ref, "thread_root_id", None) or ""
+        placements = self.presented_placements
+        placements.pop(message_id, None)
+        placements[message_id] = (conversation_id, root if isinstance(root, str) else "")
+        # Oldest-first eviction (dicts keep insertion order). An evicted id
+        # degrades to a channel-level post plus a warning, never a wrong thread.
+        while len(placements) > _PRESENTED_PLACEMENT_MAX:
+            placements.pop(next(iter(placements)))
 
     def key(self) -> str:
         if self.owner_key:
@@ -473,9 +507,17 @@ class BridgeToolParams(BaseModel):
     #: channel_post: reply in this root message's thread; channel_thread: the
     #: thread to read. A conversation message id (bcmsg_…).
     thread_root_id: str = ""
+    # Reply binding AND, in a channel/group, the default thread placement (the
+    # message's own root, or the message when it is channel-level): operator
+    # 2026-11-17 (Team Bridge #general seq 94) — channel answers belong in the
+    # thread they answer, top-level is for new topics. ``new_post: true`` is the
+    # opt-out; a DM stays inline. The description is billed on every turn of
+    # every session (the child context budget has ~2 tokens of headroom), so it
+    # stays this short and the full rule lives in the module docstring and the
+    # wake card, which is billed only when a message arrives.
     in_reply_to_message_id: str = Field(
         default="",
-        description="Exact admitted inbound bcmsg_; not thread placement.",
+        description="Exact admitted inbound bcmsg_; threads channel replies.",
     )
     new_post: bool = Field(
         default=False,
@@ -732,6 +774,18 @@ _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 #: is safe — ``re.Pattern`` is immutable and nothing here reassigns or
 #: identity-compares it.
 _CONVERSATION_MESSAGE_ID = _CANONICAL_MESSAGE_ID
+#: How many presented messages a session remembers for default thread
+#: placement. Not a measured ceiling and not a safety bound: the invariant is
+#: that a miss posts at channel level with a warning (the pre-threading
+#: behaviour), never into a guessed thread, so this only trades a few KB of
+#: memory against how far back an agent can answer and still be threaded.
+_PRESENTED_PLACEMENT_MAX = 512
+#: The warning a channel/group reply carries when its thread could not be
+#: derived here; it names the one explicit fix so the agent does not retry blind.
+_THREAD_ROOT_UNKNOWN = (
+    "not threaded: this message's thread is unknown here; "
+    "in a channel/group pass thread_root_id to reply in it"
+)
 
 
 def _resolve_reply(
@@ -2076,6 +2130,51 @@ def _validate_reply_destination(
     return None
 
 
+async def _default_thread_root(
+    runtime: BridgeRuntime,
+    channel_id: str,
+    message_id: str,
+    conversation: Mapping[str, Any] | None,
+) -> tuple[str, str | None]:
+    """Where a bound channel_post reply lands when the caller named no thread.
+
+    WHY (operator, 2026-11-17, Team Bridge #general seq 94): in channels and
+    groups an agent's answer belongs in the thread of the message it answers;
+    top-level posts are for new topics and announcements, and DMs stay inline.
+    Before this, ``in_reply_to_message_id`` bound the destination conversation
+    only, so every answer to a channel message flooded the channel timeline
+    unless the model also remembered ``thread_root_id``.
+
+    The root is the hub's own fact, never a guess: the presented message's
+    ``thread_root_id`` when it is itself a reply (threads are one level, and
+    the hub refuses a reply as a root with ``invalid_root``), else the message
+    id. A message this session never presented has no known root and posts at
+    channel level with a warning — the pre-threading behaviour, never a wrong
+    thread. The conversation KIND is read from the hub (``conversation`` when
+    the caller already fetched it for a ``to`` name), because the feed ref
+    does not carry it; an unreadable kind falls back the same way.
+
+    Returns ``(thread_root_id, warning)``; ``""`` means channel level.
+    """
+
+    placement = runtime.presented_placements.get(message_id)
+    if placement is None or placement[0] != channel_id:
+        return "", _THREAD_ROOT_UNKNOWN
+    if conversation is None:
+        try:
+            conversation = await runtime.client.conversation(
+                channel_id, tenant_id=runtime.tenant_id
+            )
+        except Exception:
+            return "", _THREAD_ROOT_UNKNOWN
+    kind = conversation.get("kind") if isinstance(conversation, Mapping) else None
+    if kind == "dm":
+        return "", None
+    if kind not in ("channel", "group"):
+        return "", _THREAD_ROOT_UNKNOWN
+    return placement[1] or message_id, None
+
+
 def _channel_create_free_text(args: Mapping[str, Any]) -> str:
     """Every free-text field ``channel_create`` sends, one per line, for the scan.
 
@@ -2740,6 +2839,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # A resolved name never reaches the wire as a name; only its ids do.
         mentions: list[dict[str, str]] = []
         recipient_account_id = ""
+        conversation_view: Mapping[str, Any] | None = None
         if params.to:
             # The ANNOTATION on ``params.to`` is the published union (object | bare
             # id), which is what the type checker sees; the field validator has
@@ -2796,6 +2896,18 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return _error(str(failure), code=failure.code)
             mentions = [member.mention()]
             recipient_account_id = member.account_id
+            conversation_view = conversation if isinstance(conversation, Mapping) else None
+        # Default THREAD placement for a bound reply (see _default_thread_root).
+        # An explicit thread_root_id always wins; new_post cannot carry a
+        # binding, so it is the opt-out for a new topic. Resolved BEFORE the
+        # fence below so its one possible hub read is covered by the same
+        # revocation recheck as the member lookup.
+        placement_warning: str | None = None
+        reply_to = params.in_reply_to_message_id.strip()
+        if reply_to and not thread_root_id and not params.new_post:
+            thread_root_id, placement_warning = await _default_thread_root(
+                runtime, channel_id, reply_to, conversation_view
+            )
         # Member resolution awaited remote I/O after the early binding check.
         # Revocation during that wait must refuse before even spending budget.
         # Keep this cheap early refusal, then repeat at each actual pre-HTTP
@@ -3011,6 +3123,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             guard_warning,
             slot.warning if slot is not None else None,
             attachment_warning,
+            placement_warning,
             _agent_run_advice(runtime, endpoint_id, channel_id, result, guard_busy=guard_busy),
         )
 

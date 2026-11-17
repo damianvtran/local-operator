@@ -36,6 +36,7 @@ from local_operator.team_bridge import pull as pull_mod
 from local_operator.team_bridge.connector import conversation as conversation_mod
 from local_operator.team_bridge.connector import loop as loop_mod
 from local_operator.team_bridge.connector.conversation import (
+    REPLY_STYLE_LINE,
     ConversationCardMetadata,
     build_conversation_card,
 )
@@ -69,6 +70,7 @@ conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
 conversation_seq: 1
 expect: reply
+{REPLY_STYLE_LINE}
 {ROOT_REPLY_LINE}
 guidance: bridge-guidance-v2"""
 
@@ -2777,3 +2779,77 @@ def test_a_mention_is_never_passive(tmp_path, monkeypatch) -> None:
     out = _run(b, config_dir)
     assert out["handled"][0]["action"] == "delivered"
     assert len(transcripts["sess_b"]) == 1
+
+
+# Default thread placement (operator, 2026-11-17, #general seq 94): a channel
+# or group ROOT card steers the answer into that message's thread through the
+# reply binding, names the opt-out, and every card carries the one style line.
+THREADED_ROOT_REPLY_LINE = (
+    "if you reply: bridge channel_post with channel_id = this conversation_id "
+    "and in_reply_to_message_id = this message_id (threads it; new_post for "
+    "a new topic); legacy send/reply never appears in a conversation"
+)
+
+
+def _kind_card(kind: str | None) -> str:
+    return build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label="#agents" if kind != "dm" else "Ada",
+            sender_label="Ada",
+            sender_kind="human",
+            mention=True,
+            message_id=MESSAGE_ID,
+            conversation_seq=5,
+            conversation_kind=kind,
+        )
+    )
+
+
+def test_channel_root_card_snapshot_steers_the_reply_into_its_thread() -> None:
+    assert _kind_card("channel") == (
+        "Channel message · #agents · from Ada (human, same tenant)\n"
+        f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
+        "\n"
+        "mention: yes\n"
+        "tenant_id: ten_1\n"
+        f"conversation_id: {CONVERSATION_ID}\n"
+        f"message_id: {MESSAGE_ID}\n"
+        "conversation_seq: 5\n"
+        "expect: reply\n"
+        "style: in channels/groups reply in the thread; no sign-off line\n"
+        f"{THREADED_ROOT_REPLY_LINE}\n"
+        "guidance: bridge-guidance-v2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "route"),
+    [
+        ("channel", THREADED_ROOT_REPLY_LINE),
+        ("group", THREADED_ROOT_REPLY_LINE),
+        ("dm", ROOT_REPLY_LINE),
+        (None, ROOT_REPLY_LINE),  # kind unstated: never promise a thread
+    ],
+)
+def test_root_route_by_conversation_kind(kind, route) -> None:
+    lines = _kind_card(kind).splitlines()
+    assert lines[-3:] == [REPLY_STYLE_LINE, route, "guidance: bridge-guidance-v2"]
+
+
+def test_threaded_route_names_only_keys_the_bridge_tool_accepts() -> None:
+    from local_operator.team_bridge.tool import BridgeToolParams
+
+    card = _kind_card("channel")
+    fields = dict(line.split(": ", 1) for line in card.splitlines() if ": " in line)
+    pairs = re.findall(r"(\w+) = this (\w+)", THREADED_ROOT_REPLY_LINE)
+    assert pairs == [("channel_id", "conversation_id"), ("in_reply_to_message_id", "message_id")]
+    params = BridgeToolParams.model_validate(
+        {"op": "channel_post", "body": "ok", **{key: fields[named] for key, named in pairs}}
+    )
+    assert params.in_reply_to_message_id == MESSAGE_ID
+    # The named opt-out is a real field too (extra="forbid" would refuse a typo).
+    assert BridgeToolParams.model_validate(
+        {"op": "channel_post", "body": "ok", "channel_id": CONVERSATION_ID, "new_post": True}
+    ).new_post
