@@ -1203,9 +1203,45 @@ def sync_connector_service(config_dir: Path) -> ServiceOutcome:
     """
 
     try:
-        return _reconcile(Path(config_dir), force_off=False)
+        outcome = _reconcile(Path(config_dir), force_off=False)
+        code = getattr(outcome, "code", None)
+        if code == CODE_CURRENT:
+            # A CURRENT UNIT IS NOT A CURRENT PROCESS (2026-11-17 incident):
+            # the supervisor may still be running a receiver started from an
+            # older ``lop``. Only after ``current`` — every refusal (isolated
+            # store, no supervisor, not addressable, not wanted) has already
+            # returned. THE SURFACE START IS THE ONE HOOK, not ``lop update``:
+            # a surface start runs the code that is installed NOW, so its
+            # ``installed_version`` is the build a restart would land on.
+            _restart_if_stale_locked(Path(config_dir), trigger="surface")
+        elif code in (CODE_INSTALLED, CODE_REGISTERED):
+            # The supervisor just (re)started the receiver on THIS build; tell
+            # the catch-up so the next start does not probe for it.
+            from local_operator.team_bridge.connector import stale_restart
+
+            stale_restart.note_fresh_start(Path(config_dir))
+        return outcome
     finally:
         invalidate_connector_state_cache()
+
+
+def _restart_if_stale_locked(config_dir: Path, *, trigger: str) -> str:
+    """``stale_restart.restart_if_stale`` under the service-sync lock. Never raises.
+
+    The lock serialises the marker's read-decide-kick-write across surfaces
+    that start together, the same reason ``_reconcile`` holds it; a busy lock
+    means another sync is in flight, and skipping is the safe direction (the
+    next surface start asks again).
+    """
+
+    from local_operator.team_bridge.connector import stale_restart
+
+    try:
+        with _sync_exclusive(config_dir):
+            return stale_restart.restart_if_stale(config_dir, trigger=trigger)
+    except Exception:  # noqa: BLE001 — a catch-up never fails its caller
+        logger.debug("bridge connector stale restart skipped", exc_info=True)
+        return stale_restart.FAILED
 
 
 def remove_connector_service(config_dir: Path) -> ServiceOutcome:

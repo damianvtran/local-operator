@@ -1243,6 +1243,11 @@ async def run_forever(
     # The idle state last LOGGED (``no_owner`` or a refusal code), so a state
     # that persists for hours writes one line, not one per re-check.
     idle_code: str | None = None
+    # Consecutive identical persistence refusals (the 2026-11-17 jam): see
+    # ``connector.jam``. Per loop, so a re-arm starts from a clean count.
+    from local_operator.team_bridge.connector.jam import JamTracker
+
+    jam = JamTracker(config_dir)
     while stop is None or not stop.is_set():
         current = owner_source()
         if current is not None and current != owner:
@@ -1293,6 +1298,7 @@ async def run_forever(
             )
             backoff = BACKOFF_BASE_S
             idle_code = None
+            jam.note_success()
             # F1 (live E2E): an answer used to re-poll IMMEDIATELY. Against a
             # real hub that answered at once (resync arms, a caught-up cursor
             # without ``wait``) it never yielded — 124 reads in under 2 s, then
@@ -1342,6 +1348,7 @@ async def run_forever(
             # repeating it as ``store_code=`` would only restate the line.
             suffix = "" if code in _DIAGNOSTIC_FAILURE_CODES else _store_code_suffix(failure)
             logger.warning("bridge connector failure: stage=iteration code=%s%s", code, suffix)
+            jam.note_failure(failure)
             await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
     return None
