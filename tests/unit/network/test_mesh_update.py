@@ -798,11 +798,18 @@ def test_the_generation_install_runs_the_shared_post_promotion_reclaim(
     monkeypatch.setattr(
         update_mod,
         "reclaim_after_promotion",
-        lambda generation, **kwargs: log.append(("reclaim", generation)),
+        lambda generation, **kwargs: log.append(("reclaim", generation, kwargs["previous"])),
+    )
+    # R2: the pre-flip ``current`` is read BEFORE the install and handed on.
+    previous = tmp_path / "previous"
+    monkeypatch.setattr(
+        update_mod,
+        "previous_generation_for_reclaim",
+        lambda: log.append("previous") or previous,
     )
     monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: log.append("prune"))
     assert meshupdate.install_build("0.99.0") == meshupdate.METHOD_GENERATION
-    assert log == [("install", "0.99.0"), ("reclaim", promoted)]
+    assert log == ["previous", ("install", "0.99.0"), ("reclaim", promoted, previous)]
 
 
 def test_a_failed_classic_install_is_labelled_with_the_shape_that_ran(

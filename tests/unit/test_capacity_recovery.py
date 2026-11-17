@@ -485,16 +485,82 @@ def test_a_reclaim_failure_does_not_fail_the_update(
     )
 
 
-def test_the_policy_reader_defaults_and_rejects_bad_values(home: Path) -> None:
-    """Missing keys read the defaults; a bad keep reads the default, never 0."""
+def test_the_policy_reader_defaults_and_skips_on_bad_values(
+    home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Missing keys read the defaults; a bad keep or block SKIPS, never falls back (R1)."""
     default = update_mod.AutoPrunePolicy(enabled=True, keep=update_mod.DEFAULT_KEEP_GENERATIONS)
     _write_update_settings(home, {})
     assert update_mod.auto_prune_policy() == default
-    for bad in (-1, True, "3", 1.5):
+    for bad in (-1, True, "3", 1.5, [2]):
+        caplog.clear()
         _write_update_settings(home, {"keep_generations": bad})
-        assert update_mod.auto_prune_policy() == default, bad
+        with caplog.at_level("WARNING", logger=update_mod.logger.name):
+            assert update_mod.auto_prune_policy() is None, bad
+        assert "keep_generations" in caplog.text, bad
+    # A non-mapping ``update`` block is the same doubt one level up.
+    caplog.clear()
+    _write_update_settings(home, "values:\n  update: 3\n")
+    with caplog.at_level("WARNING", logger=update_mod.logger.name):
+        assert update_mod.auto_prune_policy() is None
+    assert "not a mapping" in caplog.text
+    # An explicit ``null`` is UNSET, not bad: it reads the defaults.
+    _write_update_settings(home, {"keep_generations": None, "auto_prune": None})
+    assert update_mod.auto_prune_policy() == default
     _write_update_settings(home, {"keep_generations": 5})
     assert update_mod.auto_prune_policy() == update_mod.AutoPrunePolicy(enabled=True, keep=5)
+
+
+def test_a_bad_keep_value_removes_nothing(home: Path) -> None:
+    """R1 end to end: ``keep_generations: "0"`` is not a licence to prune at 2."""
+    generations = [_install_only(f"0.52.{index}") for index in range(5)]
+    _write_update_settings(home, {"keep_generations": "0"})
+    assert update_mod.reclaim_after_promotion(generations[-1]) is None
+    assert all(path.is_dir() for path in generations)
+
+
+def test_a_non_boolean_auto_prune_warns_and_reads_off(
+    home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """N2: the off reading is said out loud, naming the value."""
+    _write_update_settings(home, {"auto_prune": "yes"})
+    with caplog.at_level("WARNING", logger=update_mod.logger.name):
+        policy = update_mod.auto_prune_policy()
+    assert policy is not None and policy.enabled is False
+    assert "update.auto_prune is 'yes'" in caplog.text
+
+
+def test_the_build_current_before_the_flip_survives_keep_zero(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 / QA Q2: the pre-flip ``current`` survives keep=0 even when the
+    updater runs from an OLDER build — the running tree is not the previous one.
+    """
+    _write_update_settings(home, {"keep_generations": 0})
+    running = _install_only("0.51.9")
+    monkeypatch.setattr(update_mod, "_running_generation", lambda: running.resolve())
+    older = _install_only("0.52.0")
+    previous = _install_only("0.52.1")
+    captured = update_mod.previous_generation_for_reclaim()
+    assert captured == previous.resolve()
+    promoted = _install_only("0.52.2")
+    plan = update_mod.reclaim_after_promotion(promoted, previous=captured)
+    assert plan is not None
+    assert previous.is_dir(), "the build replaced by this update was removed"
+    assert running.is_dir(), "the tree the updater runs from was removed"
+    # The control: keep=0 really ran, so the older unprotected build went.
+    assert not older.exists()
+    assert promoted.is_dir()
+
+
+def test_the_previous_root_keeps_an_incomplete_census_incomplete() -> None:
+    """Adding the protection must never turn an incomplete read into a complete one."""
+    incomplete = update_mod.ReferencedTrees(roots=(), complete=False, gaps=("torn",))
+    merged = update_mod._with_named_generation(incomplete, Path("/g/prev"))
+    assert merged.complete is False and merged.gaps == ("torn",)
+    assert merged.roots == (Path("/g/prev") / "tools" / DIST,)
+    plain = update_mod._with_named_generation([Path("/g/a/tools/x")], Path("/g/prev"))
+    assert plain.complete is True and len(plain.roots) == 2
 
 
 def _install_only(version: str) -> Path:

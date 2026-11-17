@@ -5587,6 +5587,7 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     all (the wheel ships the built bundle), the announcement is printed, and
     the temporary extract is still reclaimed."""
     repo, commit = _release_repo(tmp_path)
+    previous = tmp_path / "generations" / "previous"
     snapshot = tmp_path / "extract"
     snapshot.mkdir()
     document = _release_document(
@@ -5612,6 +5613,10 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         # tail assertion below is deterministic rather than a fact about the
         # machine the suite runs on (S3b).
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="1.2.2")),
+        # The pre-flip ``current`` the snapshot path reads for the prune (R2),
+        # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
+        # host's: this fixture's pointer names ``previous``.
+        patch.object(update_mod, "previous_generation_for_reclaim", return_value=previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
@@ -5636,6 +5641,7 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         before_version="1.2.2",
         via="snapshot",
         promoted_generation=None,
+        previous_generation=previous,
     )
 
 
@@ -5813,6 +5819,7 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
     """The override path on the wheel route: it installs, loudly, and the marker
     note records the deliberate downgrade rather than the silent one."""
     repo, commit = _release_repo(tmp_path, tag="v0.9.8", version="0.9.8")
+    previous = tmp_path / "generations" / "previous"
     snapshot = tmp_path / "extract"
     snapshot.mkdir()
     document = _release_document(
@@ -5834,6 +5841,10 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         ),
         patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
         patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        # The pre-flip ``current`` the snapshot path reads for the prune (R2),
+        # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
+        # host's: this fixture's pointer names ``previous``.
+        patch.object(update_mod, "previous_generation_for_reclaim", return_value=previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
@@ -5856,6 +5867,7 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         before_version="0.9.9",
         via="snapshot",
         promoted_generation=None,
+        previous_generation=previous,
     )
     captured = capsys.readouterr()
     assert (
@@ -6224,11 +6236,15 @@ def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
         installs.append((source, kwargs))
         return generation
 
+    before = tmp_path / "before-generation"
+    monkeypatch.setattr(update_mod, "previous_generation_for_reclaim", lambda: before)
     monkeypatch.setattr(update_mod, "install_into_generation", install)
     monkeypatch.setattr(
         update_mod,
         "reclaim_after_promotion",
-        lambda promoted, *, on_prune=None: reclaims.append((promoted, on_prune)),
+        lambda promoted, *, previous=None, on_prune=None: reclaims.append(
+            (promoted, previous, on_prune)
+        ),
     )
     monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: direct.append(kwargs))
     assert (
@@ -6251,7 +6267,8 @@ def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
             },
         )
     ]
-    assert reclaims == [(generation, notices.append)]
+    # R2: the pointer's target read BEFORE the install travels as ``previous``.
+    assert reclaims == [(generation, before, notices.append)]
     assert direct == []
 
 
@@ -6314,11 +6331,14 @@ def test_the_snapshot_tail_reclaims_the_promoted_build_before_services(
     """
     order: list[Any] = []
     promoted = tmp_path / "promoted"
+    previous = tmp_path / "previous"
     monkeypatch.setattr(update_mod, "_print_current_generation", lambda: order.append("current"))
     monkeypatch.setattr(
         update_mod,
         "reclaim_after_promotion",
-        lambda generation, *, on_prune=None: order.append(("reclaim", generation, on_prune)),
+        lambda generation, *, previous=None, on_prune=None: order.append(
+            ("reclaim", generation, previous, on_prune)
+        ),
     )
     monkeypatch.setattr(
         update_mod,
@@ -6336,12 +6356,13 @@ def test_the_snapshot_tail_reclaims_the_promoted_build_before_services(
             before_version="0.27.0",
             via="snapshot",
             promoted_generation=promoted,
+            previous_generation=previous,
         )
         == 0
     )
     assert order == [
         "current",
-        ("reclaim", promoted, update_mod._print_prune_notice),
+        ("reclaim", promoted, previous, update_mod._print_prune_notice),
         "services",
         "roll",
         "report",

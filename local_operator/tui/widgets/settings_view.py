@@ -360,6 +360,27 @@ def _paint_facts_lines(facts: str, room: int, *, muted: "Style", faint: "Style")
     ]
 
 
+#: Non-bridge rows whose help may take the detail band's WRAP rung. Each one
+#: is a help sentence whose GUARANTEE sits at its end, so the one-row cut
+#: (`…`) removes exactly the clause the row exists to state. First member:
+#: ``update.keep_generations`` — "… are always kept" is what makes keep=0 a
+#: safe value to type, and QA's render at 80/100/120 cols (PR #4135) showed the
+#: one-row ladder cutting it in en and fr. Keep this list SHORT: every member
+#: trades the band's blank top row for a second line of help, and the band
+#: height stays fixed at two rows, so a sentence needing three still falls to
+#: the marked cut.
+_WRAPPED_HELP_KEYS: frozenset[str] = frozenset({"update.keep_generations"})
+
+
+def _help_wraps(setting: settings_io.Setting, *, bridge_row: bool) -> bool:
+    """Whether ``setting``'s detail ladder carries the two-row WRAP rung.
+
+    Bridge rows always do (design round 1, D1/D4: their consent explanation);
+    other rows only when listed in :data:`_WRAPPED_HELP_KEYS`.
+    """
+    return bridge_row or setting.key in _WRAPPED_HELP_KEYS
+
+
 def _wrap_cells(text: str, width: int, *, max_lines: int = 2) -> list[str] | None:
     """Greedy CELL-aware word wrap, bounded to ``max_lines`` — else ``None``.
 
@@ -4968,8 +4989,10 @@ class SettingsView(Vertical):
             help_alone_part = (help_text, Style(color=theme_mod.semantic_color("dim")), False)
             clause_part = (clause, clause_style, False)
             key_part = (key_suffix.strip(), key_style, True)
-            #: A ``None`` rung is the WRAP slot (bridge rows only): render the
+            #: A ``None`` rung is the WRAP slot (bridge rows and
+            #: ``_WRAPPED_HELP_KEYS``, see ``_help_wraps``): render the
             #: explanation across the band's two rows when one cannot hold it.
+            wraps_help = _help_wraps(row.setting, bridge_row=bridge_row)
             base_rungs: list[list[tuple[str, Style, bool]] | None] = []
             if row.setting.hotkey_scope == "desktop":
                 # SENTENCE FIRST on desktop rows. Same shed mechanics, same
@@ -5002,6 +5025,19 @@ class SettingsView(Vertical):
                     [clause_part, key_part],
                     [clause_part],
                 ]
+            elif clause and wraps_help:
+                # A LISTED HELP ROW off its default (``_WRAPPED_HELP_KEYS``): the
+                # sentence is the payload, so it outranks the clause like the
+                # bridge ladder above, and its floor is the help itself — the
+                # wrap first, then the MARKED cut — never a clause-only line
+                # that drops the guarantee entirely.
+                base_rungs = [
+                    [help_part, clause_part, key_part],
+                    [help_part, clause_part],
+                    [help_part, key_part],
+                    None,
+                    [help_alone_part],
+                ]
             elif clause:
                 base_rungs = [
                     [help_part, clause_part, key_part],
@@ -5011,7 +5047,7 @@ class SettingsView(Vertical):
                     [help_part, key_part],
                     [help_alone_part],
                 ]
-            elif bridge_row:
+            elif wraps_help:
                 # WRAP, THEN CUT (design round 1, D1). The wrap rung must not be
                 # the LAST rung: `_wrap_cells` returns None for copy it cannot
                 # split into two rows (a greedy wrap that needs three, or any

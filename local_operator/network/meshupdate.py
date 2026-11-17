@@ -388,7 +388,12 @@ def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
     nobody runs ``lop install prune`` on by hand, which is how a fleet node
     reached 113 generations under the old freeze. Best-effort: a reclaim failure
     is logged and never turns an installed build into a failed receipt.
+
+    The build ``current`` named before the flip is kept too (R2), and the
+    removals are LOGGED at INFO (R3): this runs inside the relay, where no one
+    watches stdout, so the log is the only place a deletion can be read back.
     """
+    previous = update_mod.previous_generation_for_reclaim()
     capture = _CapturedInstall()
     try:
         promoted = update_mod.install_into_generation(
@@ -400,7 +405,15 @@ def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
                 f"{' '.join(str(exc).split())} — installer output: {capture.output}"
             ) from exc
         raise
-    update_mod.reclaim_after_promotion(promoted)
+    update_mod.reclaim_after_promotion(
+        promoted, previous=previous, on_prune=lambda plan: _log_prune(plan, update_mod)
+    )
+
+
+def _log_prune(plan: Any, update_mod: Any) -> None:
+    """One INFO line per ``prune_notice_lines`` entry — the mesh path's reporter."""
+    for line in update_mod.prune_notice_lines(plan):
+        logger.info("%s", line)
 
 
 def _install_classic(

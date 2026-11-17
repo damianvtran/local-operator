@@ -83,9 +83,11 @@ def test_mesh_promotion_reclaims_only_through_the_shared_tail():
     the policy's pointer, running-tree, record and keep-margin protections.
     """
     promoted = object()
+    previous = object()
     module = SimpleNamespace(
         install_into_generation=Mock(return_value=promoted),
         reclaim_after_promotion=Mock(),
+        previous_generation_for_reclaim=Mock(return_value=previous),
         prune_generations=Mock(),
         referenced_install_roots=Mock(),
         prune_notice_lines=Mock(return_value=[]),
@@ -94,6 +96,28 @@ def test_mesh_promotion_reclaims_only_through_the_shared_tail():
     )
     meshupdate._install_generation("0.0.0", runner=Mock(), update_mod=module)
     module.install_into_generation.assert_called_once()
-    module.reclaim_after_promotion.assert_called_once_with(promoted)
+    module.reclaim_after_promotion.assert_called_once()
+    args, kwargs = module.reclaim_after_promotion.call_args
+    assert args == (promoted,) and kwargs["previous"] is previous
+    assert callable(kwargs["on_prune"])
     module.prune_generations.assert_not_called()
     module.referenced_install_roots.assert_not_called()
+
+
+def test_mesh_prune_removals_are_logged_at_info(caplog):
+    """R3: the relay has no stdout reader, so each removal line goes to the log."""
+    plan = object()
+    module = SimpleNamespace(
+        install_into_generation=Mock(return_value=object()),
+        previous_generation_for_reclaim=Mock(return_value=None),
+        reclaim_after_promotion=Mock(side_effect=lambda _p, **kw: kw["on_prune"](plan)),
+        prune_notice_lines=Mock(return_value=["pruned superseded generation g-1"]),
+        UpdateError=RuntimeError,
+    )
+    with caplog.at_level("INFO", logger=meshupdate.logger.name):
+        meshupdate._install_generation("0.0.0", runner=Mock(), update_mod=module)
+    module.prune_notice_lines.assert_called_once_with(plan)
+    records = [r for r in caplog.records if r.name == meshupdate.logger.name]
+    assert [(r.levelname, r.getMessage()) for r in records] == [
+        ("INFO", "pruned superseded generation g-1")
+    ]

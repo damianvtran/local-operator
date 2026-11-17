@@ -7299,10 +7299,15 @@ def auto_prune_policy(config_root: Path | None = None) -> AutoPrunePolicy | None
       nothing this time — the operator may have switched this off, and a read
       that did not finish cannot say they did not;
     * a non-boolean ``auto_prune`` (a hand-edited ``"no"``) reads as OFF, not as
-      the default: the registry refuses such a value on write, so only a hand
-      edit produces it, and a hand edit of this key is someone trying to stop it;
-    * a ``keep_generations`` that is not a non-negative integer reads as the
-      default (2). ``bool`` is excluded explicitly because ``True`` is an ``int``.
+      the default, with a warning naming the value: the registry refuses such a
+      value on write, so only a hand edit produces it, and a hand edit of this key
+      is someone trying to stop it;
+    * an ``update`` block that is not a mapping, or a ``keep_generations`` that is
+      not a non-negative integer (a float, a string, a negative, a ``bool`` —
+      ``True`` is an ``int``), returns ``None`` with a warning: the prune is
+      SKIPPED, never run at the default 2. Falling back would delete with a margin
+      the operator did not choose — someone who typed ``keep_generations: "10"``
+      meant to keep more, not fewer (review round 1, R1).
     """
     from local_operator.config import read_config_values
     from local_operator.paths import config_dir
@@ -7311,19 +7316,41 @@ def auto_prune_policy(config_root: Path | None = None) -> AutoPrunePolicy | None
     if values is None:
         return None
     block = values.get(AUTO_PRUNE_PATH[0])
-    section: Mapping[str, Any] = block if isinstance(block, Mapping) else {}
-    raw_enabled = section.get(AUTO_PRUNE_PATH[1], DEFAULT_AUTO_PRUNE_GENERATIONS)
+    if block is None:
+        section: Mapping[str, Any] = {}
+    elif isinstance(block, Mapping):
+        section = block
+    else:
+        logger.warning(
+            "config.yml 'update' is %s, not a mapping; skipping the automatic prune",
+            type(block).__name__,
+        )
+        return None
+    # An explicit ``null`` is UNSET (a reset or a bare ``key:`` line), not a bad
+    # value: it reads the default exactly as a missing key does.
+    raw_enabled = section.get(AUTO_PRUNE_PATH[1])
+    if raw_enabled is None:
+        raw_enabled = DEFAULT_AUTO_PRUNE_GENERATIONS
+    if not isinstance(raw_enabled, bool):
+        # N2: said out loud, because "off" is not what the value looks like it says.
+        logger.warning("update.auto_prune is %r, not true/false; treating it as off", raw_enabled)
     enabled = raw_enabled if isinstance(raw_enabled, bool) else False
-    raw_keep = section.get(KEEP_GENERATIONS_PATH[1], DEFAULT_KEEP_GENERATIONS)
-    keep = (
-        raw_keep
-        if isinstance(raw_keep, int) and not isinstance(raw_keep, bool) and raw_keep >= 0
-        else DEFAULT_KEEP_GENERATIONS
-    )
-    return AutoPrunePolicy(enabled=enabled, keep=keep)
+    raw_keep = section.get(KEEP_GENERATIONS_PATH[1])
+    if raw_keep is None:
+        raw_keep = DEFAULT_KEEP_GENERATIONS
+    if not isinstance(raw_keep, int) or isinstance(raw_keep, bool) or raw_keep < 0:
+        logger.warning(
+            "update.keep_generations is %r, not a non-negative integer; "
+            "skipping the automatic prune",
+            raw_keep,
+        )
+        return None
+    return AutoPrunePolicy(enabled=enabled, keep=raw_keep)
 
 
-def auto_prune_after_promotion(promoted: Path | None) -> PrunePlan | None:
+def auto_prune_after_promotion(
+    promoted: Path | None, *, previous: Path | None = None
+) -> PrunePlan | None:
     """Apply ``lop install prune``'s retention policy after a promotion; ``None`` if skipped.
 
     WHY THIS EXISTS (operator decision, 2026-11-16). Automatic collection had been
@@ -7349,7 +7376,14 @@ def auto_prune_after_promotion(promoted: Path | None) -> PrunePlan | None:
       everything, and an unmarked tree younger than the partial TTL is kept as an
       install in flight;
     * ``keep`` newest unreferenced generations survive as the margin for a
-      runtime with no record yet.
+      runtime with no record yet;
+    * ``previous`` — the build ``current`` named BEFORE this run's flip, captured
+      by the caller — is kept too, whatever ``keep`` says (review round 1, R2).
+      Anything launched just before the flip started from it and may not have
+      published a record yet; the running-tree rule covers only THIS process,
+      and a mesh relay or desktop updater can run from an older tree than the
+      one the pointer named. It is added to the census as one more named root,
+      so the protection is ``prune_generations``' own record rule, not a new one.
 
     THE LIFETIME-PIN CAVEAT IS NOT CLOSED, IT IS BOUNDED: a process no supported
     namespace describes is not protected by the census, which is why the keep
@@ -7372,10 +7406,9 @@ def auto_prune_after_promotion(promoted: Path | None) -> PrunePlan | None:
         return None
     policy = auto_prune_policy()
     if policy is None:
-        logger.warning(
-            "config.yml could not be read, so update.auto_prune is unknown; "
-            "keeping every install generation this time"
-        )
+        # The reader already warned with the specific reason (unreadable file,
+        # non-mapping block or invalid keep); this line names the consequence.
+        logger.warning("keeping every install generation this time")
         return None
     if not policy.enabled:
         return None
@@ -7385,14 +7418,50 @@ def auto_prune_after_promotion(promoted: Path | None) -> PrunePlan | None:
     if current is None or _real(current) != _real(Path(promoted)):
         logger.info("install pointer no longer names %s; skipping the automatic prune", promoted)
         return None
-    return prune_generations(
-        keep=policy.keep, referenced=referenced_install_roots(), actor=ACTOR_UPGRADE
-    )
+    census = referenced_install_roots()
+    if previous is not None:
+        census = _with_named_generation(census, Path(previous))
+    return prune_generations(keep=policy.keep, referenced=census, actor=ACTOR_UPGRADE)
+
+
+def _with_named_generation(
+    census: Iterable[str | Path] | ReferencedTrees, generation: Path
+) -> ReferencedTrees:
+    """``census`` plus ``generation``'s venv as one more named root.
+
+    The venv (``<gen>/tools/<dist>``) is the shape a record carries and the shape
+    ``prune_generations`` normalises two levels up, so the added root is kept by
+    the existing record rule. ``complete``/``gaps`` are carried over unchanged —
+    adding a protection must never turn an incomplete read into a complete one.
+    """
+    extra = generation / "tools" / DISTRIBUTION_NAME
+    if isinstance(census, ReferencedTrees):
+        return ReferencedTrees(
+            roots=(*census.roots, extra), complete=census.complete, gaps=census.gaps
+        )
+    return ReferencedTrees(roots=(*(Path(root) for root in census), extra))
+
+
+def previous_generation_for_reclaim() -> Path | None:
+    """The generation ``current`` names now, read BEFORE a flip; ``None`` on doubt.
+
+    Callers capture this before installing and hand it to
+    :func:`reclaim_after_promotion` so the build being replaced survives the
+    post-promotion prune (R2). A read that fails returns ``None``: the prune
+    then relies on its other protections, and a failed READ must not fail an
+    update that has not started yet.
+    """
+    try:
+        return current_generation()
+    except (OSError, RuntimeError):  # pragma: no cover — an unreadable pointer
+        logger.warning("could not read the install pointer before the update", exc_info=True)
+        return None
 
 
 def reclaim_after_promotion(
     promoted: Path | None,
     *,
+    previous: Path | None = None,
     on_prune: Callable[["PrunePlan"], None] | None = None,
 ) -> PrunePlan | None:
     """The one post-promotion disk step every update tail runs; never raises.
@@ -7408,10 +7477,12 @@ def reclaim_after_promotion(
     raised) is logged and the update still succeeds. ``on_prune`` receives the
     plan so the front end prints removals on its own surface
     (:func:`prune_notice_lines`); it is not called when the pass was skipped.
+    ``previous`` is the pre-flip ``current`` (:func:`previous_generation_for_reclaim`),
+    kept by the prune whatever the keep margin says.
     """
     plan: PrunePlan | None = None
     try:
-        plan = auto_prune_after_promotion(promoted)
+        plan = auto_prune_after_promotion(promoted, previous=previous)
     except Exception:  # noqa: BLE001 — a reclaim never fails an install
         logger.warning(
             "automatic generation prune failed; the update itself succeeded", exc_info=True
@@ -7518,6 +7589,8 @@ def perform_upgrade(
         # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
         # ``commit``/``ref`` describe that case, and leaving them empty is what
         # makes the marker say ``pypi <version>``.
+        # Read BEFORE the flip: the build being replaced survives the prune (R2).
+        previous = previous_generation_for_reclaim()
         promoted = install_into_generation(
             source,
             version=target,
@@ -7540,7 +7613,7 @@ def perform_upgrade(
         # note still runs, after the prune, for pressure the prune could not
         # relieve. Best-effort: the build is already current, so nothing here
         # may fail the upgrade (see ``reclaim_after_promotion``).
-        reclaim_after_promotion(promoted, on_prune=on_prune)
+        reclaim_after_promotion(promoted, previous=previous, on_prune=on_prune)
         return target
     argv, image = installer_invocation(
         detected,
@@ -10140,6 +10213,7 @@ def _generation_upgrade(
     before_version: str = "",
     via: str = "snapshot",
     promoted_generation: Path | None = None,
+    previous_generation: Path | None = None,
 ) -> int:
     """The tail successful installs share: report, retain roots, refresh, succeed.
 
@@ -10168,7 +10242,9 @@ def _generation_upgrade(
     # perform_upgrade's tail, for the snapshot route (``lop-update`` lands here,
     # which is how most fleet generations are made). Printed right under the
     # ``current`` line, in the same words and position the PyPI path uses (D4).
-    reclaim_after_promotion(promoted_generation, on_prune=_print_prune_notice)
+    reclaim_after_promotion(
+        promoted_generation, previous=previous_generation, on_prune=_print_prune_notice
+    )
     _reach("services")
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
@@ -10236,6 +10312,8 @@ def _snapshot_command(
     # ref has nothing for members to do (note §3, condition 1).
     stamp_before = disk_build()
     before_version = str(stamp_before.version) if stamp_before is not None else ""
+    # The same "before", as a TREE: the post-promotion prune keeps it (R2).
+    previous_generation = previous_generation_for_reclaim()
     _reach("download")
     try:
         snapshot = resolve_snapshot(value)
@@ -10454,6 +10532,7 @@ def _snapshot_command(
         before_version=before_version,
         via="snapshot",
         promoted_generation=promoted_generation,
+        previous_generation=previous_generation,
     )
 
 
