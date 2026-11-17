@@ -1,0 +1,246 @@
+{
+  "schema": 1,
+  "audit_id": "merged-bind3-f0bc4e490816-f8a64b71",
+  "audit_kind": "merged-source binding to the union of two independently approved, key-disjoint parent changes; no new translation, no retranslation of approved unchanged copy; semantic re-read of the 7 changed keys",
+  "locale": "ur",
+  "namespace": "wire.settings",
+  "audit_date": "2026-11-17",
+  "key_count": 875,
+  "auditor": {
+    "agent": "reviewer (lopdev team) acting as independent i18n auditor for the PR #4052 main-fold merged bind; not a translator or prior auditor of any key in this namespace",
+    "session": "f0bc4e490816",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-17",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "independent_from_translator_session": true,
+    "actual_model_source": "session system prompt declares Model: anthropic/claude-opus-5-5; no fallback observed"
+  },
+  "status": "passed",
+  "source_head": "984fe22af585131b22d5c1571c790a7ce3c2c17a",
+  "parent_revisions": [
+    "0bd1487f6a3596770242c01f4bc01fc200de75a8",
+    "3f31afb9a2480a6ae1e57d1ef811598570a92744"
+  ],
+  "common_base": "da8f3f040806fb9010cf45df73afa43e4cc807de",
+  "source_path": "local_operator/i18n/catalogues/en/wire.settings.json",
+  "source_sha256": "f8a64b715bcd9d03c4960bbafbc8f058c0e9839e69fa2b5090bbae779187fc87",
+  "base_source_sha256": "f5c40bc8a0762c3ffa8fea5ca6ab7c377f9fba8644fefed9153d760823a05da7",
+  "target_path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+  "target_sha256": "f24005824b3e51ed6af536beeb26789326e72ee9b03e126f74916dce8cf41bd6",
+  "base_target_sha256": "83fae67082d56be7c3eb3ded7fe1f2f082e48f4b47dc2d61cbea407b8f1a7783",
+  "context_path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+  "context_sha256": "3e0c5a969466aff2e3b4d9108332e8865e2a2a14038062a16d184224f28bbc59",
+  "context_composition": "key-level union of base (65), main #4104 (+6 heavy_jobs/bash_heavy_jobs_enabled) and PR #4052 (network_credentials_github_repositories.help) = 72 entries; every merged entry equals the side that changed it",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "f8a64b715bcd9d03c4960bbafbc8f058c0e9839e69fa2b5090bbae779187fc87"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "3e0c5a969466aff2e3b4d9108332e8865e2a2a14038062a16d184224f28bbc59"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+      "sha256": "f24005824b3e51ed6af536beeb26789326e72ee9b03e126f74916dce8cf41bd6"
+    }
+  },
+  "parents": [
+    {
+      "side": "feature (PR #4052)",
+      "revision": "0bd1487f6a3596770242c01f4bc01fc200de75a8",
+      "source_sha256": "04768d21849206c2617d17f000e8f513a0cd47cb4217d6a06d627da932e764d7",
+      "target_sha256": "f4e755245b8474dcae8dcf430f20f74d58a82b3a78f1295c2c086dc0f777b486",
+      "receipt_index": 22,
+      "receipt_canonical_sha256": "bc384faddeebce1a187bc0f4ab72d50661a6e0f3dab5f87037f8f306d638321a",
+      "evidence_path": "i18n/audits/evidence/ur/wire.settings/merged-bind2-1276f8eeb1e5-04768d21/record.json",
+      "evidence_sha256": "5f4a0f5f96dcc22e4a0c0772f3e586032991bb0939d93a149febdb3c38532414",
+      "keys_changed": [
+        "wire.settings.network_credentials_github_repositories.help"
+      ],
+      "delta": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "wire.settings.network_credentials_github_repositories.help"
+        ]
+      },
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, role task) — merged-source binding audit (bind2) for PR #4052; not a translator or first/second auditor of either parent key",
+        "session": "1276f8eeb1e5",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (second independent pass; not the translator and not the first auditor)",
+        "session": "dbf144330553",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.network_credentials_github_repositories.help at en source fa6a7d8e6a81, target bytes 47981cc870a5; PR #4052 parent 270d4c087d78",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "evidence": "i18n/audits/evidence/ur/wire.settings/gh4052s2/record.json",
+        "evidence_sha256": "3611ab59947e1a46ca0ede58b0a227800fb85ed65821f5f01fa673959d611bfa",
+        "retained_from": "PR #4052 receipts (fa6a7d8e, re-bound at 2261c91b); covers only wire.settings.network_credentials_github_repositories.help, carried unchanged into this source — not a second audit of this binding. #3990 key second audit: session 937c6ecbae86 (see composition_audit.parent_receipts)",
+        "first_audit_session": "91d1e05d2d82"
+      },
+      "note": "PR-side bind2 receipt; the PR key's first/second audits are carried in that receipt"
+    },
+    {
+      "side": "main (#4104 feat/heavy-job-lease)",
+      "revision": "3f31afb9a2480a6ae1e57d1ef811598570a92744",
+      "source_sha256": "beb522ed359310863117d8869f3c494f4733b0346644d81780b8c3a9bcfa0b95",
+      "target_sha256": "a651420d8ab1431bc03e6b245b75a4ab03af0e3fd6971a499b1bcc87b23a63b7",
+      "receipt_index": 17,
+      "receipt_canonical_sha256": "acf2373d057c667d2869fd64e70b0ad10ee469a85470fd9090f07767b24332f4",
+      "evidence_path": null,
+      "evidence_sha256": null,
+      "keys_changed": [
+        "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+        "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+        "wire.settings.bash_heavy_jobs_enabled.help",
+        "wire.settings.bash_heavy_jobs_enabled.label",
+        "wire.settings.heavy_jobs.description",
+        "wire.settings.heavy_jobs.title"
+      ],
+      "delta": {
+        "added": [
+          "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+          "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+          "wire.settings.bash_heavy_jobs_enabled.help",
+          "wire.settings.bash_heavy_jobs_enabled.label",
+          "wire.settings.heavy_jobs.description",
+          "wire.settings.heavy_jobs.title"
+        ],
+        "removed": [],
+        "changed": []
+      },
+      "translator": {
+        "agent": "translator under the lopdev manager (commit 52ce8b7ef146) — relayed by the manager, not independently verified",
+        "model": null,
+        "fallback": "not reported",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent of the translator; did not translate any key",
+        "session": "d0fd6c8b5699",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-16",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "second_audit": null,
+      "note": "main receipt has no evidence field; cited by auditor session d0fd6c8b5699 and canonical sha. It re-audited 3 keys changed by the en K1 correction; the other 3 heavy keys were carried from the prior passed receipt (index 16, auditor session 5e96a4997450, source 5237bd670369)."
+    }
+  ],
+  "proof": {
+    "key_count": 875,
+    "base_keys_carried_unchanged": 868,
+    "pr_delta_keys": [
+      "wire.settings.network_credentials_github_repositories.help"
+    ],
+    "main_delta_keys": [
+      "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+      "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+      "wire.settings.bash_heavy_jobs_enabled.help",
+      "wire.settings.bash_heavy_jobs_enabled.label",
+      "wire.settings.heavy_jobs.description",
+      "wire.settings.heavy_jobs.title"
+    ],
+    "collision_count": 0,
+    "composition_value_exact": true,
+    "keyset_exact": true,
+    "key_order_equals_main_parent": true,
+    "target_key_from_pr_equals_pr_parent_bytes": true,
+    "target_keys_from_main_equal_main_parent_bytes": true,
+    "target_keys_equal_main_parent": 874,
+    "target_keys_equal_pr_parent": 869,
+    "keys_equal_neither_parent": 0,
+    "en_proof": {
+      "pr_delta": {
+        "added": [],
+        "removed": [],
+        "changed": [
+          "wire.settings.network_credentials_github_repositories.help"
+        ]
+      },
+      "main_delta": {
+        "added": [
+          "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+          "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+          "wire.settings.bash_heavy_jobs_enabled.help",
+          "wire.settings.bash_heavy_jobs_enabled.label",
+          "wire.settings.heavy_jobs.description",
+          "wire.settings.heavy_jobs.title"
+        ],
+        "removed": [],
+        "changed": []
+      },
+      "keyset_exact": true,
+      "composition_value_exact": true
+    },
+    "context_proof": {
+      "pr_delta": {
+        "added": [
+          "wire.settings.network_credentials_github_repositories.help"
+        ],
+        "removed": [],
+        "changed": []
+      },
+      "main_delta": {
+        "added": [
+          "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+          "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+          "wire.settings.bash_heavy_jobs_enabled.help",
+          "wire.settings.bash_heavy_jobs_enabled.label",
+          "wire.settings.heavy_jobs.description",
+          "wire.settings.heavy_jobs.title"
+        ],
+        "removed": [],
+        "changed": []
+      },
+      "composition_value_exact": true,
+      "entries": 72
+    },
+    "worktree_bytes_equal_merge_commit": true
+  },
+  "semantic_read": {
+    "scope": "the 7 changed keys, read against en copy, context notes, i18n/glossary.md and the locale style guide",
+    "checks": [
+      "meaning fidelity incl. the two-state never-set vs cleared-list rule and 'must not promise exactly one' slot rule",
+      "idiomatic register (es tú, fr vous, hi आप)",
+      "glossary: job, session, push kept Latin",
+      "technical literals owner/repo and 'lop network credential github repos --use-default' byte-preserved",
+      "no ICU/placeholders/plural arms in source or target",
+      "no manual bidi controls (ur)"
+    ],
+    "result": "passed"
+  },
+  "retained_upstream_findings": [],
+  "new_findings": [],
+  "current_report_verdict": "passed — 0 blocker/major",
+  "not_verified": [
+    "rendered RTL/LTR display of these strings (no UI render in this audit)",
+    "native-speaker certification beyond LLM independent review"
+  ],
+  "proof_scripts": "derived in session f0bc4e490816 scratchpad (bind3/gen.py, aud.py) from git blobs of the merge commit and its parents; not committed"
+}

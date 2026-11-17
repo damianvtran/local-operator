@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "ea93f9c96886cc949d98903de99062629d66abbb4a8dfa0726f9ddbc51f8f060",
+  "history_sha256": "f7a125a506f0122e78c09d7b94165b73143fff7749f7a44d6fddb7aa040a1e14",
   "entries": [
     {
       "locale": "fr",
@@ -931,6 +931,118 @@
       },
       "retained_upstream_findings": [],
       "note": "#4052 bind2 i18n-auditor 1276f8eeb1e5 (claude-opus-5-5, no fallback): en 04768d21=base 99abc7c2+PR key network_credentials_github_repositories.help+#3990 key; exact; 0 blocker/major. i18n/audits/evidence/fr/wire.settings/merged-bind2-1276f8eeb1e5-04768d21/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "f8a64b715bcd9d03c4960bbafbc8f058c0e9839e69fa2b5090bbae779187fc87",
+      "target_sha256": "e239049fc9256739e49687a3d99135f8cf5a033345dbb8481577b952965ab65a",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "composition_translators": [
+        {
+          "side": "feature (PR #4052)",
+          "provenance": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ]
+        },
+        {
+          "side": "main (#4104)",
+          "provenance": {
+            "agent": "translator under the lopdev manager (commit 52ce8b7ef146) — relayed by the manager, not independently verified",
+            "model": null,
+            "fallback": "not reported",
+            "date": "2026-11-16"
+          },
+          "keys": [
+            "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+            "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+            "wire.settings.bash_heavy_jobs_enabled.help",
+            "wire.settings.bash_heavy_jobs_enabled.label",
+            "wire.settings.heavy_jobs.description",
+            "wire.settings.heavy_jobs.title"
+          ]
+        }
+      ],
+      "auditor": {
+        "agent": "reviewer (lopdev team) acting as independent i18n auditor for the PR #4052 main-fold merged bind; not a translator or prior auditor of any key in this namespace",
+        "session": "f0bc4e490816",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "984fe22af585131b22d5c1571c790a7ce3c2c17a",
+        "parent_revisions": [
+          "0bd1487f6a3596770242c01f4bc01fc200de75a8",
+          "3f31afb9a2480a6ae1e57d1ef811598570a92744"
+        ],
+        "common_base": "da8f3f040806fb9010cf45df73afa43e4cc807de",
+        "evidence": "i18n/audits/evidence/fr/wire.settings/merged-bind3-f0bc4e490816-f8a64b71/record.json",
+        "evidence_sha256": "e5c4f3f18db6200dcd029989530d0a1cd5362d6a41271b82ebdcd102b6b03516",
+        "parent_receipts": [
+          {
+            "side": "feature (PR #4052)",
+            "source_sha256": "04768d21849206c2617d17f000e8f513a0cd47cb4217d6a06d627da932e764d7",
+            "target_sha256": "1f961b44710aafe066cee2b51812c51f3c1cfd84a6c180bd361e4196e734f120",
+            "receipt_canonical_sha256": "dc499b3167006e119e9979991dcd07e5220b771223b409ed5d614ebf38106154",
+            "keys": [
+              "wire.settings.network_credentials_github_repositories.help"
+            ],
+            "auditor_session": "1276f8eeb1e5",
+            "evidence": "i18n/audits/evidence/fr/wire.settings/merged-bind2-1276f8eeb1e5-04768d21/record.json",
+            "evidence_sha256": "cc84c7b97fccbfec5edceef9d89bbcfcea8d51d8632f19e0d584c1245813bfaf"
+          },
+          {
+            "side": "main (#4104)",
+            "source_sha256": "beb522ed359310863117d8869f3c494f4733b0346644d81780b8c3a9bcfa0b95",
+            "target_sha256": "2dcb418149b39c93f519dff76443fc6aff69d400241f7e2993ffe458b2725da2",
+            "receipt_canonical_sha256": "b9e1c334dc018cd12d6db004d2d454549d4e1cd60fe352d760f046d80506a316",
+            "keys": [
+              "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+              "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+              "wire.settings.bash_heavy_jobs_enabled.help",
+              "wire.settings.bash_heavy_jobs_enabled.label",
+              "wire.settings.heavy_jobs.description",
+              "wire.settings.heavy_jobs.title"
+            ],
+            "auditor_session": "d0fd6c8b5699",
+            "evidence": null,
+            "evidence_sha256": null
+          }
+        ]
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (second independent pass; not the translator and not the first auditor)",
+        "session": "dbf144330553",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.network_credentials_github_repositories.help at en source fa6a7d8e6a81, target bytes e773ea8aedb8; PR #4052 parent 270d4c087d78",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "evidence": "i18n/audits/evidence/fr/wire.settings/gh4052s2/record.json",
+        "evidence_sha256": "a26ad2079e5dc6e505a5e6fe2eb414d16ec80fd46c0509b038e708853b7c2510",
+        "retained_from": "PR #4052 receipts; covers only wire.settings.network_credentials_github_repositories.help, carried unchanged — not a second audit of this binding. Main #4104 keys had no second audit.",
+        "first_audit_session": "91d1e05d2d82"
+      },
+      "retained_upstream_findings": [],
+      "note": "#4052 main-fold bind3 independent auditor f0bc4e490816 (anthropic/claude-opus-5-5, no fallback): en f8a64b71=base f5c40bc8+PR key network_credentials_github_repositories.help+#4104 6 heavy-job keys; exact composition; 7 keys semantically re-read; 0 blocker/major. i18n/audits/evidence/fr/wire.settings/merged-bind3-f0bc4e490816-f8a64b71/record.json"
     }
   ]
 }
