@@ -3069,6 +3069,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "INSTALLROOT/.update-operations (or content-store) directory opened O_NOFOLLOW; "
         "never a sessions/ path, and unlink refuses directories",
     ),
+    # Recovery-record rotation (operator request 2026-11-16: the store must rotate
+    # so users never hit the 256-record cap). ``_move_entry`` is the ONE rename
+    # for retirement and restore: a record FILE between INSTALLROOT/.update-
+    # operations[-v2]/ and INSTALLROOT/.update-operations-archive/, both inside
+    # the canonical install root, never replacing an existing name. ``_age_archive``
+    # is the ONE deletion: archive entries past 30 days or beyond 512, matched by
+    # the archive's own ``<ms>.<v1|v2>.<id>.json`` name, regular FILES only,
+    # through one validated O_DIRECTORY|O_NOFOLLOW fd on that archive.
+    (
+        "local_operator/install_transaction.py::_move_entry",
+        "os.rename",
+        "one recovery-record FILE between an INSTALLROOT operation namespace and the "
+        "in-root archive (both owned, non-symlink directories under the install root); "
+        "refuses an existing target, never a sessions/ path",
+    ),
+    (
+        "local_operator/install_transaction.py::_age_archive",
+        "os.unlink",
+        "archive-aging only: expired or over-count INSTALLROOT/.update-operations-archive "
+        "record FILES matching the archive's own entry pattern, dir_fd-relative to the "
+        "validated archive directory; S_ISREG-checked first, never a sessions/ path",
+    ),
     # Candidate publication: the same node-local generation authority. The replace
     # swaps a staged regular FILE onto the attempt FILE, and the unlink removes
     # only that staged temp; ``generation`` is an INSTALLROOT/generations/<id> tree

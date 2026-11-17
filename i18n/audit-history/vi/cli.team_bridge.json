@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.team_bridge",
+  "history_sha256": "1cb67be4ddbb8540dc62a90f4d6f6785a80b584dfd830d5ce734ca1ccbb5099d",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+      "translator": {
+        "agent": "i18n-translator subagent, job 9c61998557fb (Radient Console canonicalisation values, commit 3dd15d6f5559)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task brand-au-vi), independent subagent; not the translator (job 9c61998557fb) and did not edit any value",
+        "session": "243c87d0597c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-16",
+        "result": "clean",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "vi-A2"
+        ],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "Delta audit of the Radient Console canonicalisation at commit 3dd15d6f5559 (diff base 220d39a96667): independent i18n-auditor 243c87d0597c (anthropic/claude-opus-5-5, no fallback observed) of i18n-translator job 9c61998557fb (anthropic/claude-sonnet-5-5). Audited keys: cli.team_bridge.notify.screening_model_unavailable_body (unchanged keys keep their earlier passed audits and were not re-audited). Pair findings: 0 blocker, 0 major, 0 minor, 1 nit ['vi-A2']; locale-wide verdict CLEAN. Record: i18n/audits/evidence/vi/cli.team_bridge/rc1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/cli.team_bridge/rc1/record.json",
+      "round": "rc1",
+      "keys_audited": 1
+    }
+  ]
+}
