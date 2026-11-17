@@ -639,6 +639,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "classifier input (both dialects' codes, compared against the producers' "
         "constants); the row's sentence is rendered by the glossing renderers",
     ),
+    # The live-link silence classifier (#4110): the same dialect read as
+    # ``_no_answer_row`` — the probe's own code, compared against relay's
+    # ``DETAIL_NO_ANSWER`` / ``CONNECT_FAILED_PREFIX`` — returning only a bool that
+    # decides whether a live link covers the row. Nothing from it is printed.
+    ("local_operator/network/readiness.py", "_silent_row", "detail"): (
+        1,
+        "classifier input (the probe's own code, compared against the producer's "
+        "constants); returns a bool, never rendered",
+    ),
     # The default-model frame (PR #2923): ``model_credential_row`` wraps the verdict
     # chain's OWN sentence for the NOT_SHARED / NO_CREDENTIAL arms in the clause that
     # names the peer's default and the create refusal. That ``detail`` is composed in
