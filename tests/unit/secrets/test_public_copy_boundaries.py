@@ -137,6 +137,198 @@ def _public_repo(tmp_path: Path) -> Path:
     return root
 
 
+CONTEXT_ENTRY = {"role": "help text", "tone": "plain", "note": "one clause", "maxCells": 43}
+
+
+def _context_repo(tmp_path: Path, family: str = "core") -> tuple[Path, str]:
+    """Commit only synthetic documented metadata; never open product sidecars."""
+    if family == "core":
+        root = _public_repo(tmp_path)
+        _git(root, "remote", "add", "origin", "https://github.com/damianvtran/local-operator.git")
+        relative = "local_operator/i18n/catalogues/en/demo.context.json"
+    else:
+        root = _ui_repo(tmp_path) if family == "ui" else _mobile_repo(tmp_path)
+        relative = "src/i18n/catalogues/en/demo.context.json"
+    _commit_context(root, relative, json.dumps({"demo.x": CONTEXT_ENTRY, "demo.empty": {}}))
+    return root, relative
+
+
+def _commit_context(root: Path, relative: str, text: str) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    _git(root, "add", relative)
+    _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "synthetic context")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["core", "ui", "mobile"])
+@pytest.mark.parametrize("key", [None, "demo.x", "demo.empty"])
+async def test_documented_context_is_complete_and_audited(tmp_path, monkeypatch, family, key):
+    import hashlib
+
+    from local_operator.tools import public_copy
+
+    root, relative = _context_repo(tmp_path, family)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    fsynced = []
+    original_fsync = os.fsync
+
+    def record_fsync(fd):
+        original_fsync(fd)
+        fsynced.append(fd)
+
+    monkeypatch.setattr(public_copy.os, "fsync", record_fsync)
+    tool = public_copy.build_read_public_copy_tool()
+    result = await tool.execute(
+        "context",
+        {"path": relative, "key": key, "repo_root": str(root)},
+        None,
+        None,
+        _context(tmp_path, tmp_path),
+    )
+    assert not result.is_error, result.text
+    expected = {"demo.x": CONTEXT_ENTRY, "demo.empty": {}}
+    assert json.loads(result.text) == (expected if key is None else {key: expected[key]})
+    assert fsynced, "the real audit writer must flush before serving metadata"
+    assert result.details is not None
+    audit = json.loads(Path(result.details["audit_log"]).read_text().splitlines()[-1])
+    digest = hashlib.sha256(result.text.encode("utf-8")).hexdigest()
+    assert audit["sha256"] == result.details["sha256"] == digest
+    assert audit["commit"] == result.details["commit"]
+    assert audit["path"] == relative
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "{",
+        "[]",
+        "null",
+        '"synthetic-sensitive-value"',
+        json.dumps({"demo.bad": None}),
+        json.dumps({"demo.bad": []}),
+        json.dumps({"demo.bad": "synthetic-sensitive-value"}),
+        json.dumps({"demo.bad": {"unknown-sensitive-field": "synthetic-sensitive-value"}}),
+        json.dumps({"demo.bad": {"note": {"secret": "synthetic-sensitive-value"}}}),
+        json.dumps({"demo.bad": {"role": ["synthetic-sensitive-value"]}}),
+        json.dumps({"demo.bad": {"tone": None}}),
+        json.dumps({"demo.bad": {"note": 12}}),
+        json.dumps({"demo.bad": {"maxCells": True}}),
+        json.dumps({"demo.bad": {"maxCells": 43.0}}),
+        json.dumps({"demo.bad": {"maxCells": "synthetic-sensitive-value"}}),
+    ],
+)
+async def test_invalid_context_never_leaks_contents(tmp_path, monkeypatch, invalid):
+    root, relative = _context_repo(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    # A valid selected entry must not hide invalid metadata elsewhere in a file.
+    try:
+        payload = json.loads(invalid)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        payload["demo.x"] = CONTEXT_ENTRY
+        invalid = json.dumps(payload)
+    _commit_context(root, relative, invalid)
+    result = await execute_read_public_copy(
+        "invalid",
+        {"path": relative, "key": "demo.x", "repo_root": str(root)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert result.is_error
+    assert "synthetic-sensitive-value" not in result.text
+    assert "unknown-sensitive-field" not in result.text
+    assert "secret" not in result.text
+    assert result.details is None
+    assert not (tmp_path / "config/audit/public-copy-reads.jsonl").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "local_operator/i18n/catalogues/en/demo.json",
+        "local_operator/i18n/catalogues/fr/demo.context.json",
+    ],
+)
+async def test_context_objects_do_not_relax_other_catalogues(tmp_path, relative):
+    root = _public_repo(tmp_path)
+    _commit_context(root, relative, json.dumps({"demo.x": CONTEXT_ENTRY}))
+    result = await execute_read_public_copy(
+        "ordinary",
+        {"path": relative},
+        context=_context(root, tmp_path),
+    )
+    assert result.is_error
+    assert "keys and values must be strings" in result.text
+
+
+@pytest.mark.asyncio
+async def test_context_preserves_size_gate_key_selection_and_optional_widths(tmp_path):
+    root, relative = _context_repo(tmp_path)
+    payload = {"demo.x": {"note": "x" * 200_001, "maxCells": -1}, "demo.zero": {"maxCells": 0}}
+    _commit_context(root, relative, json.dumps(payload))
+    context = _context(tmp_path, tmp_path)
+    args = {"path": relative, "repo_root": str(root)}
+    result = await execute_read_public_copy("large", args, context=context)
+    assert result.is_error and "pass key" in result.text
+    result = await execute_read_public_copy("keyed", {**args, "key": "demo.x"}, context=context)
+    assert not result.is_error, result.text
+    assert json.loads(result.text) == {"demo.x": payload["demo.x"]}
+    result = await execute_read_public_copy("zero", {**args, "key": "demo.zero"}, context=context)
+    assert not result.is_error, result.text
+    result = await execute_read_public_copy(
+        "missing", {**args, "key": "demo.absent"}, context=context
+    )
+    assert result.is_error and "key not found" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "control", ["unauthorized", "wrong_repo", "dirty", "untracked", "symlink", "escape", "audit"]
+)
+async def test_context_keeps_existing_security_controls(tmp_path, monkeypatch, control):
+    from local_operator.tools import public_copy
+
+    root, relative = _context_repo(tmp_path)
+    if control == "unauthorized":
+        relative = "README.md"
+    elif control == "wrong_repo":
+        _git(root, "remote", "set-url", "origin", UI_ORIGIN_SSH)
+    elif control == "dirty":
+        (root / relative).write_text('{"demo.x": {"note": "synthetic-sensitive-value"}}')
+    elif control == "untracked":
+        relative = relative.replace("demo.context", "untracked.context")
+        (root / relative).write_text(json.dumps({"demo.x": CONTEXT_ENTRY}))
+    elif control == "symlink":
+        outside = tmp_path / "outside.json"
+        outside.write_text('{"demo.x": {"note": "synthetic-sensitive-value"}}')
+        (root / relative).unlink()
+        (root / relative).symlink_to(outside)
+    elif control == "escape":
+        relative = "../outside.context.json"
+    elif control == "audit":
+
+        def failed_fsync(fd):
+            raise OSError("synthetic audit failure")
+
+        monkeypatch.setattr(public_copy.os, "fsync", failed_fsync)
+    result = await public_copy.build_read_public_copy_tool().execute(
+        "control",
+        {"path": relative, "key": "demo.x", "repo_root": str(root)},
+        None,
+        None,
+        _context(tmp_path, tmp_path),
+    )
+    assert result.is_error, result.text
+    assert "synthetic-sensitive-value" not in result.text
+    assert '"help text"' not in result.text
+    if control == "audit":
+        assert "audit record could not be written" in result.text
+
+
 def _context(root: Path, tmp_path: Path) -> ToolContext:
     return ToolContext(cwd=str(root), session_dir=str(tmp_path / "sessions" / "abc123"))
 

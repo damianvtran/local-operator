@@ -2,5 +2,6 @@
   "cli.failures.error_line": "{prog}: lỗi: {message}",
   "cli.failures.required": "thiếu đối số bắt buộc: {names}",
   "cli.failures.invalid_choice": "đối số {argument}: lựa chọn không hợp lệ: {value} (chọn trong {choices})",
-  "cli.failures.invalid_command": "Lệnh {group} không hợp lệ: {command}"
+  "cli.failures.invalid_command": "Lệnh {group} không hợp lệ: {command}",
+ "cli.failures.github_borrow_timeout": "Chưa nhận được thông tin xác thực GitHub từ {owner} trong {seconds} giây; hãy chạy lại lệnh"
 }

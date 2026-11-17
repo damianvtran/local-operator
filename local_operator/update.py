@@ -322,6 +322,19 @@ def _classify_failure(step: str, exc: BaseException | None) -> str:
     return "unknown"
 
 
+def _failure_code(exc: BaseException | None) -> str | None:
+    """Keep persistent recovery pressure typed through installer wrappers.
+
+    ``kind`` is frozen for old desktop readers. An optional code lets new ones
+    distinguish a protected full recovery store from a retryable unknown cause,
+    without parsing English error text or claiming the records are recoverable.
+    """
+    for candidate in _causes(exc):
+        if isinstance(candidate, install_transaction.RecoveryCapacityError):
+            return candidate.code
+    return None
+
+
 def _failure_step(step: str, kind: str) -> str:
     """A lock failure names ``lock``; every other stage keeps its own name."""
     return "lock" if kind == "lock" else step
@@ -348,6 +361,7 @@ def _failure_payload(
     detail: str = "",
     install_version: str | None = None,
     target: str | None = None,
+    failure_code: str | None = None,
 ) -> dict[str, Any]:
     """The frozen ``update.report.v1`` failure shape, built in ONE place.
 
@@ -370,6 +384,7 @@ def _failure_payload(
             "serve": [],
             "daemons": [],
             "failure": {
+                **({"code": failure_code} if failure_code is not None else {}),
                 "step": _failure_step(step, kind),
                 "kind": kind,
                 "exit_code": int(exit_code),
@@ -389,6 +404,7 @@ def _emit_update_failure(
     detail: str = "",
     install_version: str | None = None,
     target: str | None = None,
+    failure_code: str | None = None,
 ) -> None:
     """Emit the ONE machine-readable failure line, last on stdout.
 
@@ -404,6 +420,7 @@ def _emit_update_failure(
         detail=detail,
         install_version=install_version,
         target=target,
+        failure_code=failure_code,
     )
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
@@ -417,6 +434,7 @@ def _fail(
     exit_code: int = 1,
     target: str | None = None,
     human: str | None = None,
+    failure_code: str | None = None,
 ) -> int:
     """Print the human refusal, emit the frozen failure report, return ``code``.
 
@@ -436,6 +454,7 @@ def _fail(
         error=sentence,
         detail=detail,
         target=target,
+        failure_code=failure_code,
     )
     return exit_code
 
@@ -10131,6 +10150,7 @@ def _snapshot_command(
                     _classify_failure(step, exc),
                     str(exc),
                     target=route.version,
+                    failure_code=_failure_code(exc),
                 )
             installed_version = route.version
         else:
@@ -10245,6 +10265,7 @@ def _snapshot_command(
                     _classify_failure(step, exc),
                     str(exc),
                     target=snapshot.version,
+                    failure_code=_failure_code(exc),
                 )
             installed_version = snapshot.version
     finally:
@@ -10442,6 +10463,7 @@ def _update_command_body(
             _classify_failure(step, exc),
             str(exc),
             target=result.latest,
+            failure_code=_failure_code(exc),
         )
     print(f"installed {installed}")
     # Names the layout, not the build: on a machine with generations the build
@@ -10506,7 +10528,7 @@ def update_command(
         )
     except UpdateError as exc:
         step = _progress().step
-        return _fail(step, _classify_failure(step, exc), str(exc))
+        return _fail(step, _classify_failure(step, exc), str(exc), failure_code=_failure_code(exc))
     except Exception as exc:  # noqa: BLE001 — reported, then re-raised
         step = _progress().step
         _emit_update_failure(
@@ -10514,5 +10536,6 @@ def update_command(
             kind="unknown",
             exit_code=1,
             error=f"{type(exc).__name__}: {exc}",
+            failure_code=_failure_code(exc),
         )
         raise

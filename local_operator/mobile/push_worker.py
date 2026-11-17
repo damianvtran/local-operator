@@ -108,7 +108,11 @@ from local_operator.mobile.push_payload import (
 )
 from local_operator.notifications.catalog_view import selected_push_stem
 from local_operator.session.attention import AttentionStore
-from local_operator.session.runtime.presence import PRESENCE_TTL_S, desktop_presence
+from local_operator.session.runtime.presence import (
+    PRESENCE_TTL_S,
+    desktop_attending_session,
+    desktop_presence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,13 +130,29 @@ PUSH_WORKER_STATE_NAME = "mobile-push-worker.json"
 #: the two constants are equal, which is the guard an import would only move.
 BURST_LIMIT = 3
 
-#: The bound on a presence deferral (§2.3, decision 2). A suppressed push is
-#: DEFERRED, never dropped silently: the worker re-checks while the completion is
-#: still ``unseen`` and still inside this window, and emits when the window
-#: expires even if the user is still looking at the desktop app. The window is
-#: what keeps "do not interrupt a user who is already looking at the work" from
-#: becoming "never tell the phone".
-DEFERRAL_WINDOW_S = 5 * 60
+#: THE PRESENCE DEFERRAL HAS NO TIME BOUND, and that AMENDS ADR 0006 §2.3
+#: decision 2 (the amendment text lands in local-operator-mobile, owned by
+#: session 316765a40496; this file only implements it). The ADR's 5-minute
+#: window (``DEFERRAL_WINDOW_S``, now retired) released a deferred completion
+#: while the desktop was STILL attended — i.e. it pushed exactly the banners the
+#: desktop had deliberately not raised. The operator, 2026-11-15 on TestFlight
+#: 1067: "It still seems like a lot of routine wakes and task completions are
+#: notifying… I feel like I'm still seeing more notifications on mobile than I
+#: see pop up on desktop." The rule this file now holds is PHONE <= DESKTOP: a
+#: deferred completion leaves only when the presence lapses and it is still
+#: unseen and unannounced; a read drops it, a desktop banner (a ``deliveries``
+#: claim) drops it, and an attended window showing its own conversation drops
+#: it (:meth:`PushWorker._settle_deferred`). It is still a delay and not a
+#: silent loss for the case the window existed for — the user walks away with
+#: unread work the desktop never announced — because the lapse releases it.
+
+#: The desktop feed's burst WINDOW (``desktop_feed.ITEM_BURST_WINDOW_S``):
+#: at most ``BURST_LIMIT`` singles per window, then one digest, then nothing
+#: until the next window. A literal for the same reason ``BURST_LIMIT`` is one,
+#: and asserted equal by the same test. Per-window rather than per-pass because
+#: a trickle (one completion per 2 s scan) never exceeds a per-pass limit, so
+#: the phone banner'd every item of a burst the desktop capped at 3 + 1 digest.
+BURST_WINDOW_S = 10.0
 
 #: How often a deferred item re-reads the presence. It is the presence TTL and
 #: not an independent number on purpose: a desktop lease stops being believed one
@@ -341,8 +361,9 @@ class _PendingEmit:
 
     ``deferred_since`` is set only for a presence-deferred item, and it is what
     makes the deferral a delay rather than a drop: the item is still pending, so
-    it is still ahead of its cursor, and the window bounds how long that can
-    last.
+    it is still ahead of its cursor. Nothing time-bounds it any more; the
+    presence lapse, a read, or a desktop claim ends it (see ``BURST_WINDOW_S``'s
+    neighbour comment for the amendment).
     """
 
     key: str
@@ -397,6 +418,7 @@ class PushWorker:
         live_devices: Callable[[], Sequence[str]] | None = None,
         report_block: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         unread_count: Callable[[], int | None] | None = None,
+        attending: Callable[[str], bool] | None = None,
     ) -> None:
         """``computer`` is the opaque per-account handle §3.2 carries.
 
@@ -434,6 +456,19 @@ class PushWorker:
         self.computer = computer
         self._clock = clock
         self._presence = presence if presence is not None else _desktop_attended
+        #: ``session_id -> bool``: is an attended desktop window showing it?
+        #: UNCACHED by default for the reason ``_desktop_attended`` is: a True
+        #: here DROPS the completion, a terminal decision.
+        self._attending = (
+            attending
+            if attending is not None
+            else (lambda session_id: desktop_attending_session(session_id, cached=False))
+        )
+        #: The per-window burst budget (see ``BURST_WINDOW_S``). In memory: a
+        #: restart opens a fresh window, as the desktop feed's restart does.
+        self._window_started = float("-inf")
+        self._window_singles = 0
+        self._window_digested = False
         self._live_devices = live_devices if live_devices is not None else self._live_device_ids
         # Whether gate 4 was injected (a test seam). The preview gate derives the
         # live list from its own single registry load in production
@@ -499,6 +534,7 @@ class PushWorker:
             self._load(stamp)
             attended = self._presence()
             self._collect(stamp, attended)
+            self._settle_deferred(attended)
             records = self._drain(stamp, attended)
             self._advance(stamp)
             self._save()
@@ -915,6 +951,69 @@ class PushWorker:
         )
         if attended and existing.deferred_since is None:
             existing.deferred_since = now
+        if existing.deferred_since is not None:
+            self._absorb_superseded(conversation, existing)
+
+    def _absorb_superseded(self, conversation: str, keep: _PendingEmit) -> None:
+        """Fold this conversation's OLDER never-attempted completions into ``keep``.
+
+        BOUNDED STATE, now that a deferral has no time limit. INVARIANT: at most
+        ONE never-attempted completion per conversation is pending, so the
+        deferred set is bounded by the number of distinct conversations that are
+        unseen, ``notify``, and unannounced by the desktop — each of which a
+        read, a desktop claim or the presence lapse ends. An older completion of
+        the same conversation is already stale by construction (``_compose``
+        refuses a key the record has moved past), so pushing it is never right;
+        its positions move into ``keep`` rather than being resolved, so the
+        cursor still waits for the item that actually speaks for them.
+        """
+        for key, item in list(self._pending.items()):
+            if (
+                item is keep
+                or item.kind != EVENT_COMPLETION
+                or item.first_attempt_at is not None
+                or item.conversations != (conversation,)
+            ):
+                continue
+            keep.publications += tuple(p for p in item.publications if p not in keep.publications)
+            keep.supersedes += tuple(p for p in item.supersedes if p not in keep.supersedes)
+            del self._pending[key]
+
+    def _settle_deferred(self, attended: bool) -> None:
+        """End the deferrals the desktop has already answered: phone <= desktop.
+
+        Run every pass, BEFORE the drain, so a presence lapse never releases an
+        item the desktop has dealt with. Two ways the desktop answers, and both
+        RESOLVE the item (a drop, not a loss — the desktop is where the user is):
+
+        1. RUNG 1 — an attended window is SHOWING this conversation. Mirrors
+           ``desktop_feed.DesktopFeed._focus_policy_for``
+           (``local_operator/server/utils/desktop_feed.py`` — the
+           ``if presence.attending(session_id): return None`` branch): the card
+           is in band on its own stream and the desktop raises nothing, so the
+           phone raises nothing either, now or after the user leaves. Both read
+           the SAME predicate, ``DesktopPresence.attending``. This also covers
+           the feed's bridged-conversation skip (``if identity in bridged:
+           continue``): a bridged session the user is looking at is rung 1 here.
+        2. ANNOUNCED — a desktop surface claimed the toast
+           (``AttentionStore.delivered``). For a session the window is NOT
+           showing, ``_focus_policy_for`` answers ``"always"``: the desktop
+           banners it and that banner claims the token. The user at the desk was
+           told; repeating it on the phone when they walk away is the duplicate.
+
+        What stays deferred is what the desktop has NOT announced (e.g. a
+        bridged session whose renderer frame is ``when_unfocused`` while another
+        window is focused); the presence lapse releases those, still unseen.
+        """
+        for item in list(self._pending.values()):
+            if item.kind != EVENT_COMPLETION or item.deferred_since is None:
+                continue
+            conversation = item.conversations[0] if item.conversations else ""
+            session_id = _session_id_of(conversation) or ""
+            token = self.store.state(conversation).get("completion_token")
+            announced = isinstance(token, str) and self.store.delivered(conversation, token)
+            if announced or (attended and self._attending(session_id)):
+                self._resolve(item)
 
     # -- the emit ------------------------------------------------------------
 
@@ -936,7 +1035,8 @@ class PushWorker:
     def _emissions(self, now: float, attended: bool) -> list[tuple[str, _PendingEmit]]:
         """The queue in the order it must leave, applying the burst rule.
 
-        More than ``BURST_LIMIT`` eligible completions in ONE pass become a
+        More than the window's remaining ``BURST_LIMIT`` budget of eligible
+        completions in ONE pass become a
         single digest rather than four banners (ADR §2.1's "catch-up is bounded
         and coalesced"; the same ceiling the desktop feed holds). The digest
         replaces the batch rather than following the first ``BURST_LIMIT`` of it,
@@ -973,7 +1073,24 @@ class PushWorker:
         # one event, which is exactly the duplicate the ``Idempotency-Key``
         # exists to prevent.
         fresh = [(key, item) for key, item in ready_completions if item.first_attempt_at is None]
-        if len(fresh) > BURST_LIMIT:
+        # THE DESKTOP'S PER-WINDOW BUDGET (``desktop_feed`` BURST, "per WINDOW,
+        # not per tick"). INVARIANT: within one ``BURST_WINDOW_S`` the phone
+        # raises at most ``BURST_LIMIT`` fresh completion banners plus ONE
+        # digest — never more than the desktop's own 3 singles + 1 digest, so a
+        # trickle cannot out-buzz the desk, and deferred items released together
+        # on a presence lapse fold exactly as a fresh burst does. Retries are not
+        # counted: they are the same emit, already budgeted.
+        if now - self._window_started >= BURST_WINDOW_S:
+            self._window_started = now
+            self._window_singles = 0
+            self._window_digested = False
+        if fresh and self._window_digested:
+            # The window already said "N more"; later items wait for the next
+            # window, still pending and still re-gated, as the desktop holds them.
+            held = {key for key, _item in fresh}
+            ready_completions = [pair for pair in ready_completions if pair[0] not in held]
+            fresh = []
+        if len(fresh) > BURST_LIMIT - self._window_singles:
             digest = self._digest(fresh)
             if digest is not None:
                 key, item = digest
@@ -981,8 +1098,10 @@ class PushWorker:
                 for old_key in folded:
                     self._pending.pop(old_key, None)
                 self._pending[key] = item
+                self._window_digested = True
                 remaining = [(key, item) for key, item in ready_completions if key not in folded]
                 return [*remaining, (key, item), *others]
+        self._window_singles += len(fresh)
         ordered = sorted(
             ready_completions,
             key=lambda pair: min(pair[1].sequences) if pair[1].sequences else 0,
@@ -1076,20 +1195,19 @@ class PushWorker:
 
         Three cases, and they are the whole of the scheduling policy:
 
-        - a completion still inside its deferral is due when the presence is
-          gone, or when the window has expired — the hard bound that keeps a
-          focused window from silencing the phone for good (§2.3). The OTHER way
-          a deferral ends, an ack, never reaches here: a completion the user has
-          read is no longer a candidate at all, so ``_collect`` has already
-          discarded the item (see :meth:`_discard_positions`) and nothing is
-          emitted for it;
+        - a deferred completion is due ONLY when the presence is gone. There is
+          no time bound (ADR 0006 §2.3 decision 2, amended 2026-11-15: phone <=
+          desktop — see ``BURST_WINDOW_S``'s neighbour comment). The other ways
+          a deferral ends never reach here: an ack makes it a non-candidate, so
+          ``_collect`` discarded it (:meth:`_discard_positions`), and a desktop
+          claim or rung-1 view resolved it in :meth:`_settle_deferred`;
         - an item that has never been attempted is due as soon as it exists;
         - anything already attempted retries on the wire interval, with the same
           key. An item that has exhausted its attempts is resolved by
           :meth:`_attempt`, so it never reaches this test again.
         """
         if item.deferred_since is not None:
-            return not attended or now - item.deferred_since >= DEFERRAL_WINDOW_S
+            return not attended
         if item.last_attempt_at is None:
             return True
         return now - item.last_attempt_at >= EMIT_RETRY_INTERVAL_S
@@ -1115,7 +1233,9 @@ class PushWorker:
             item.first_attempt_at = now
         item.attempts += 1
         item.last_attempt_at = now
+        started = time.monotonic()
         verdict = self.transport(dict(item.body), idempotency_key=item.key)
+        _log_wire_attempt(item, verdict, time.monotonic() - started)
         if isinstance(verdict, EmitAccepted):
             self._resolve(item)
             return EmitRecord(kind=item.kind, idempotency_key=item.key, accepted=True, status=202)
@@ -1142,7 +1262,7 @@ class PushWorker:
 
         Composed at the first attempt rather than when the item was queued, so
         ``count`` is the machine's unread count at the moment of composition
-        (§3.2's field table) — a deferred item may sit for five minutes, and a
+        (§3.2's field table) — a deferred item may sit for hours, and a
         count taken when it was queued would be a number the phone reads as
         current.
         """
@@ -1700,6 +1820,43 @@ class PushWorker:
             raise
 
 
+def _log_wire_attempt(
+    item: _PendingEmit, verdict: EmitAccepted | EmitRefused, latency_s: float
+) -> None:
+    """ONE INFO line per wire attempt: the durable local record of what pushed.
+
+    WHY: the 2026-11-15 audit of "more notifications on mobile than on desktop"
+    found no local emit record at all (0 push lines in ``mobile.log``) and had to
+    reconstruct 17 pushes from the attention store. This line is that record.
+
+    PRIVACY CONSTRAINT: identifiers and counters only — the emit kind, the local
+    conversation key(s) (``session/<id>``, a store key already in this machine's
+    logs), the first 8 chars of the emit id, the payload's unread ``count``, the
+    attempt number, the outcome and the latency. NEVER the alert title/body,
+    previews, the idempotency key, push handles, device ids or tokens: the body
+    is not formatted here at all, only ``count`` is lifted out of it.
+    """
+    body = item.body or {}
+    count = body.get("count")
+    if isinstance(verdict, EmitAccepted):
+        outcome = "accepted"
+    else:
+        outcome = f"refused status={verdict.status}"
+    conversations = ",".join(item.conversations[:BURST_LIMIT]) or "-"
+    if len(item.conversations) > BURST_LIMIT:
+        conversations += f",+{len(item.conversations) - BURST_LIMIT}"
+    logger.info(
+        "push emit kind=%s conversation=%s emit=%s count=%s attempt=%d outcome=%s latency_ms=%d",
+        item.kind,
+        conversations,
+        (item.emit_id or "-")[:8],
+        count if isinstance(count, int) else "-",
+        item.attempts,
+        outcome,
+        round(latency_s * 1000),
+    )
+
+
 def _preference_category(kind: str) -> str:
     """The preference switch a completion ``kind`` answers to.
 
@@ -1717,7 +1874,7 @@ def _desktop_attended() -> bool:
     that for a caller whose decision is terminal, and this gate's decision is
     terminal in the direction that matters: a two-second-stale "the desktop is
     attended" defers a push the user has already walked away from, and the only
-    thing that revisits it is the 5-minute window.
+    thing that revisits it is the next pass's re-read.
 
     The TUI viewer record is NOT consulted, and that is the ADR's own correction
     (review M3): "a TUI is running on this machine" says nothing about whether a

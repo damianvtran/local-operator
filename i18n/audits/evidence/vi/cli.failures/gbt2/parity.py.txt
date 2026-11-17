@@ -1,0 +1,12 @@
+import json, re, unicodedata, hashlib, pathlib
+from rich.cells import cell_len
+C = pathlib.Path("local_operator/i18n/catalogues")
+en = json.loads((C/"en/cli.failures.json").read_text()); vi = json.loads((C/"vi/cli.failures.json").read_text())
+ctx = json.loads((C/"en/cli.failures.context.json").read_text())
+ph = lambda s: sorted(re.findall(r"\{(\w+)\}", s))
+print("keys en/vi/ctx:", len(en), len(vi), len(ctx), "same:", set(en)==set(vi)==set(ctx))
+for k in en:
+    v = vi[k]
+    print(k, "ph_ok=", ph(en[k])==ph(v), ph(v), "nfc=", unicodedata.is_normalized("NFC", v), "cells en/vi=", cell_len(en[k]), cell_len(v), "backticks=", en[k].count("`"), v.count("`"))
+for p in ["local_operator/i18n/catalogues/en/cli.failures.json","local_operator/i18n/catalogues/en/cli.failures.context.json","local_operator/i18n/catalogues/vi/cli.failures.json","i18n/style-guides/vi.md","i18n/glossary.md"]:
+    print(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest(), p)

@@ -3058,6 +3058,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "the staged operation temp FILE only (FileNotFoundError suppressed); unlink refuses "
         "directories",
     ),
+    # Legacy recovery-manifest restore/capture: the same node-local INSTALLROOT
+    # authority. ``_write_exclusive`` holds ONE ``O_DIRECTORY|O_NOFOLLOW`` fd on
+    # INSTALLROOT/.update-operations (or the content store outside it) and unlinks,
+    # through that fd, only the ``.<uuid>.restore.tmp`` name it created itself.
+    (
+        "local_operator/recovery_manifest.py::_write_exclusive",
+        "os.unlink",
+        "its own staged ``.<uuid>.restore.tmp`` FILE only, dir_fd-relative to a validated "
+        "INSTALLROOT/.update-operations (or content-store) directory opened O_NOFOLLOW; "
+        "never a sessions/ path, and unlink refuses directories",
+    ),
+    # Recovery-record rotation (operator request 2026-11-16: the store must rotate
+    # so users never hit the 256-record cap). ``_move_entry`` is the ONE rename
+    # for retirement and restore: a record FILE between INSTALLROOT/.update-
+    # operations[-v2]/ and INSTALLROOT/.update-operations-archive/, both inside
+    # the canonical install root, never replacing an existing name. ``_age_archive``
+    # is the ONE deletion: archive entries past 30 days or beyond 512, matched by
+    # the archive's own ``<ms>.<v1|v2>.<id>.json`` name, regular FILES only,
+    # through one validated O_DIRECTORY|O_NOFOLLOW fd on that archive.
+    (
+        "local_operator/install_transaction.py::_move_entry",
+        "os.rename",
+        "one recovery-record FILE between an INSTALLROOT operation namespace and the "
+        "in-root archive (both owned, non-symlink directories under the install root); "
+        "refuses an existing target, never a sessions/ path",
+    ),
+    (
+        "local_operator/install_transaction.py::_age_archive",
+        "os.unlink",
+        "archive-aging only: expired or over-count INSTALLROOT/.update-operations-archive "
+        "record FILES matching the archive's own entry pattern, dir_fd-relative to the "
+        "validated archive directory; S_ISREG-checked first, never a sessions/ path",
+    ),
     # Candidate publication: the same node-local generation authority. The replace
     # swaps a staged regular FILE onto the attempt FILE, and the unlink removes
     # only that staged temp; ``generation`` is an INSTALLROOT/generations/<id> tree
@@ -3226,10 +3259,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        # ``_join`` rather than ``subscribe``: both entry points (``subscribe``
-        # and ``subscribe_threadsafe``) admit their callback through this one
-        # private method, so the closure that removes it is qualified here.
-        "local_operator/session/frontend_state.py::FrontendStateStore._join.unsubscribe",
+        # ``_register`` rather than ``subscribe``: every entry point admits its
+        # callback through this one private method (it takes the state reference
+        # under the same lock as the append), so the closure that removes it is
+        # qualified here. The receiver is ``self._subscribers``, a
+        # ``list[Callable]``; ``.remove(callback)`` drops a listener, never a path.
+        "local_operator/session/frontend_state.py::FrontendStateStore._register.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
     ),

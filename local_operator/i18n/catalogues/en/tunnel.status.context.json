@@ -12,7 +12,7 @@
   "tunnel.status.billing_lapsed.detail": {
     "role": "connector refusal sentence shown on the phone, desktop and terminal",
     "tone": "Plain, actionable",
-    "note": "The fix is adding credit in the Radient console; the tunnel then reconnects without further action. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient console URL and stays verbatim."
+    "note": "The fix is adding credit in the Radient Console; the tunnel then reconnects without further action. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient Console URL and stays verbatim."
   },
   "tunnel.status.billing_lapsed.label": {
     "role": "short connector state label",
@@ -22,12 +22,12 @@
   "tunnel.status.card_add_credit": {
     "role": "whole TUI notice card line (no command)",
     "tone": "Plain, actionable imperative",
-    "note": "The prepaid Radient balance ran out; adding credit in the Radient console resumes phone access by itself. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+    "note": "The prepaid Radient balance ran out; adding credit in the Radient Console resumes phone access by itself. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
   },
   "tunnel.status.card_open_console": {
     "role": "whole TUI notice card line (no command)",
     "tone": "Plain, actionable imperative",
-    "note": "The owner switched phone access off in the Radient web console; only the console can turn it back on. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+    "note": "The owner switched phone access off in the Radient Console; only the console can turn it back on. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
   },
   "tunnel.status.card_paused": {
     "role": "tail of the TUI notice card after '/mobile enable — '",
@@ -102,17 +102,17 @@
   "tunnel.status.tunnel_disabled.detail": {
     "role": "connector refusal sentence shown on the phone, desktop and terminal",
     "tone": "Plain, actionable",
-    "note": "The only fix is turning the tunnel back on in the Radient console. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient console URL and stays verbatim."
+    "note": "The only fix is turning the tunnel back on in the Radient Console. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient Console URL and stays verbatim."
   },
   "tunnel.status.tunnel_disabled.label": {
     "role": "short connector state label",
     "tone": "Plain, lowercase fragment",
-    "note": "The tunnel was switched off by its owner in the Radient web console."
+    "note": "The tunnel was switched off by its owner in the Radient Console."
   },
   "tunnel.status.tunnel_inactive.detail": {
     "role": "connector refusal sentence shown on the phone, desktop and terminal",
     "tone": "Plain, calm, actionable",
-    "note": "The tunnel is suspended by Radient but billing is in order; the fix is the Reconnect action in Local Operator's phone access setup (no payment). 'phone access' is the product feature name for mobile remote access. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient console URL and stays verbatim."
+    "note": "The tunnel is suspended by Radient but billing is in order; the fix is the Reconnect action in Local Operator's phone access setup (no payment). 'phone access' is the product feature name for mobile remote access. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient Console URL and stays verbatim."
   },
   "tunnel.status.tunnel_inactive.label": {
     "role": "short connector state label (lop tunnel status, desktop)",

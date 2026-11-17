@@ -1,0 +1,34 @@
+{
+  "audit": "brand-au-ru",
+  "auditor": {"agent": "i18n-auditor (team lopdev)", "session": "e792be01f66b", "model": "anthropic/claude-opus-5-5", "actual_model_source": "session system prompt 'Model:' line; no fallback observed", "independent_from_translator_session": true, "translator": "i18n-translator, anthropic/claude-sonnet-5-5"},
+  "locale": "ru",
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "diff_scope": "220d39a96667..3dd15d6f5559 (ru: 4 values, 8 +/- lines, no other bytes changed)",
+  "input_hashes": {
+    "ru/cli.team_bridge.json": "c4e7e96904156d2dd57dfef6493cd97bb676962fc9a6e8ef68cf058f60f29ec2",
+    "ru/tunnel.status.json": "140c8345512a5fe25316165d642f2413358d6ef3376e5e0ec940e39a7cd09dba",
+    "en/cli.team_bridge.json": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "en/tunnel.status.json": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "en/cli.team_bridge.context.json": "6c4d922a48e5c563d2204ef4fb7dcd8ef8383e5e85d6c1ce3e86d2e7e81e1403",
+    "en/tunnel.status.context.json": "b69246da17bb05162c7640506a35e3eed4fab1501fa581818e89df23d339b76b",
+    "i18n/style-guides/ru.md": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  },
+  "mechanical": {"check.py --catalogues-only": "0 problem(s)", "json_valid": true, "key_parity": "59/59 and 24/24, no added/dropped", "placeholders_identical": true, "radient_console_exact_count_matches_en": true},
+  "per_key": {
+    "cli.team_bridge.notify.screening_model_unavailable_body": "PASS — 'пополните баланс в Radient Console': natural locative, undeclined brand per glossary; rest unchanged",
+    "tunnel.status.card_open_console": "PASS with MINOR ru-A1 — 44 cells (EN 43; 50-cell budget incl. icon fits); 'доступ … в Radient Console' admits a directional 'access to' reading",
+    "tunnel.status.tunnel_disabled.detail": "PASS — 'отключён в Radient Console' unambiguous locative; {url} intact; 119 cells = EN",
+    "tunnel.status.tunnel_inactive.detail": "PASS — 'проверьте его в Radient Console: {url}.' natural; {url} intact",
+    "tunnel.status.tunnel_disabled.label": "acceptable as generic; MINOR ru-A2 recommends naming the product"
+  },
+  "findings": [
+    {"id": "ru-A1", "severity": "MINOR", "key": "tunnel.status.card_open_console", "text": "Включите доступ с телефона в Radient Console", "evidence": "The undeclinable brand removes the case signal the old 'в консоли' (prepositional) gave; 'доступ … в X' is also the common directional collocation ('доступ в интернет'), so the line can be read as 'enable phone access to Radient Console'. Card context makes the intended reading likely, hence MINOR.", "fix": "В Radient Console включите доступ с телефона (44 cells, same as current)"},
+    {"id": "ru-A2", "severity": "MINOR", "key": "tunnel.status.tunnel_disabled.label", "text": "туннель отключён в консоли", "evidence": "Faithful to the generic EN label, but Russian has no article to mark 'the (Radient) console' and 'консоль' defaults to the terminal sense for a CLI user; gateway.py:589-591 emits this label paired with tunnel_disabled.detail, which now says 'в Radient Console'. EN source has the same generic/branded split, so not a ru-introduced inconsistency.", "fix": "туннель отключён в Radient Console (34 cells; EN 32)"}
+  ],
+  "counts": {"blocker": 0, "major": 0, "minor": 2, "nit": 0},
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "not_verified": ["native-speaker judgement beyond LLM reasoning", "rendered fit on phone/desktop/TUI (widths measured with rich.cells.cell_len only)", "whether label and detail are displayed adjacently on every surface (only that gateway.py returns them as a pair)"],
+  "audit_notes_not_execution_log": true,
+  "ledger": "not written — task forbids touching ledger/receipts/audit-history"
+}

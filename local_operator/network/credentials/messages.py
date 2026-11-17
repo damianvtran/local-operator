@@ -371,6 +371,9 @@ def render_broker_error(
             f"{owner} could not refresh '{label}' just now (a transient provider or network "
             "failure). This is a retryable outage, not a broken login."
         )
+    if error.code == "owner_busy":
+        source = "its GitHub login" if error.key == "github" else f"the '{label}' login"
+        return f"{owner} could not finish reading {source} in time. Retry shortly."
     if error.code == "rate_limited":
         return (
             f"{owner} is handling too many credential requests at the moment and declined this "

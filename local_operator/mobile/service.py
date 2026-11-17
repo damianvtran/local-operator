@@ -42,6 +42,12 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     # what a reader wants) would silently restore the flood.
     configure_console_logging()
     quiet_wire_clients()
+    # The push worker's one INFO line per wire attempt is the ONLY local record
+    # of what this machine pushed (the 2026-11-15 audit found 0 push lines here
+    # and had to reconstruct 17 pushes from the attention store). The root
+    # floor above is WARNING, so that one logger is raised explicitly; its only
+    # INFO record is that line, roughly one per push.
+    logging.getLogger("local_operator.mobile.push_worker").setLevel(logging.INFO)
     # Before anything opens a descriptor in volume: launchd starts this job at a
     # 256-descriptor soft limit, which a busy phone plus sessions can exhaust
     # (the "Asleep / Not answering" + sqlite "unable to open database file"

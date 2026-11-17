@@ -168,6 +168,21 @@ class DesktopPresence:
             return False
         return bool(self.kinds) if kind is None else kind in self.kinds
 
+    def attending(self, session_id: str) -> bool:
+        """Whether an attended window is showing ``session_id`` (rung 1).
+
+        THE ONE PREDICATE for "the desktop is displaying this conversation to
+        someone looking at it". Two consumers must answer it identically, or
+        the phone can push what the desktop deliberately kept quiet: the
+        desktop feed's banner gate (``desktop_feed._focus_policy_for``, which
+        raises nothing for exactly this case) and the mobile push worker's
+        presence gate (``push_worker._settle_deferred``). Operator, 2026-11-15:
+        "I feel like I'm still seeing more notifications on mobile than I see
+        pop up on desktop" — phone <= desktop is only provable if both read
+        this one method rather than two copies of its expression.
+        """
+        return self.attended and bool(session_id) and self.session_id == session_id
+
 
 #: The absent answer, shared so callers can compare against one object.
 NO_DESKTOP_PRESENCE = DesktopPresence()
@@ -435,7 +450,9 @@ def desktop_viewing_session(root: Path | None = None) -> str:
     return presence.session_id if presence.attended else ""
 
 
-def desktop_attending_session(session_id: str, root: Path | None = None) -> bool:
+def desktop_attending_session(
+    session_id: str, root: Path | None = None, *, cached: bool = True
+) -> bool:
     """Whether a desktop window is attended AND showing ``session_id``.
 
     Rung 1's desktop contribution. A desktop lease is a *machine-wide*
@@ -446,9 +463,12 @@ def desktop_attending_session(session_id: str, root: Path | None = None) -> bool
     Kinds are deliberately NOT consulted: a card already painted in-band on the
     session's own stream is a card somebody is looking at, whatever the app
     would be able to do with a banner.
+
+    ``cached`` follows :func:`desktop_presence`: a caller whose decision is
+    terminal (the push worker DROPS a completion on a True here) passes
+    ``cached=False`` so it never acts on focus the user has already left.
     """
-    presence = desktop_presence(root)
-    return presence.attended and bool(session_id) and presence.session_id == session_id
+    return desktop_presence(root, cached=cached).attending(session_id)
 
 
 def reset_cache() -> None:
