@@ -1,0 +1,33 @@
+{
+  "auditor": {"agent": "i18n-auditor (team lopdev, task brand-au-vi)", "session": "243c87d0597c", "model": "anthropic/claude-opus-5-5", "actual_model_source": "harness system prompt 'Model:' line; no fallback observed", "independent_from_translator_session": true, "translator": "i18n-translator, anthropic/claude-sonnet-5-5"},
+  "locale": "vi",
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "diff_base": "220d39a96667",
+  "audit_date": "2026-11-16",
+  "input_hashes": {
+    "vi/cli.team_bridge.json": "f2fa98ea700d41aadb9d395a374aab2347ca979f2a3adceafe818457897822eb",
+    "vi/tunnel.status.json": "7ba8781c0f9dc1769d0b03d0af08ee4304fc596346aa100dbfc011c6c03f8a77",
+    "en/cli.team_bridge.json": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "en/tunnel.status.json": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "en/cli.team_bridge.context.json": "6c4d922a48e5c563d2204ef4fb7dcd8ef8383e5e85d6c1ce3e86d2e7e81e1403",
+    "en/tunnel.status.context.json": "b69246da17bb05162c7640506a35e3eed4fab1501fa581818e89df23d339b76b",
+    "i18n/style-guides/vi.md": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  },
+  "mechanical": {"validator": "scripts/i18n/check.py --catalogues-only -> 'catalogue checks: 0 problem(s)'", "vi_diff": "exactly 4 values changed (2 files, 4+/4-)", "keysets_equal": {"cli.team_bridge": 59, "tunnel.status": 24}, "placeholders": "{url} byte-identical in both detail keys; none elsewhere", "nfc": "all changed values NFC", "brand_exact": "each changed value contains 'Radient Console' (U+0020) exactly once, same as en"},
+  "per_key": {
+    "cli.team_bridge.notify.screening_model_unavailable_body": {"verdict": "PASS", "cells_en_vi": [454, 550], "note": "'nạp thêm tín dụng trong Radient Console' grammatical; all 4 required facts preserved"},
+    "tunnel.status.card_open_console": {"verdict": "PASS (NIT vi-A1, pre-existing)", "cells": 34, "budget": "50 incl. icon (en 43)"},
+    "tunnel.status.tunnel_disabled.detail": {"verdict": "PASS", "cells_en_vi": [119, 122]},
+    "tunnel.status.tunnel_inactive.detail": {"verdict": "PASS", "cells_en_vi": [241, 265]},
+    "tunnel.status.tunnel_disabled.label": {"verdict": "ACCEPT AS GENERIC, no finding", "current": "tunnel bị tắt trong bảng điều khiển", "recommended": "keep current (35 cells); if the team chooses to name the product uniformly across locales: 'tunnel bị tắt trong Radient Console' (35 cells)"}
+  },
+  "findings": [
+    {"id": "vi-A1", "severity": "NIT", "key": "tunnel.status.card_open_console", "text": "Bật truy cập trong Radient Console", "evidence": "en 'Turn phone access on…'; 'điện thoại' omitted (pre-existing, same omission before this change; card context makes it recoverable)", "fix": "Bật truy cập điện thoại trong Radient Console (45 cells; en is 43, fits the 50-cell card if the icon+gap ≤5 cells)"},
+    {"id": "vi-A2", "severity": "NIT", "key": "cli.team_bridge.notify.screening_model_unavailable_body", "text": "Mỗi tin nhắn tác nhân gửi đến đều qua một bước kiểm tra an toàn…", "evidence": "pre-existing, unchanged sentence; 'đều qua' reads clipped", "fix": "…đều phải qua một bước kiểm tra an toàn…"}
+  ],
+  "counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 2},
+  "terminal_verdict": "CLEAN",
+  "out_of_scope_observation": "vi mobile.setup/mobile.doctor still render 'Radient console' as 'bảng điều khiển Radient', faithfully following their en source which still says lowercase 'Radient console'; not in this change; source-side decision first.",
+  "not_verified": ["native-speaker judgement (LLM reasoning only)", "rendered fit in a real TUI card / desktop callout / phone; width measured with rich.cells.cell_len only, icon width not measured", "other locales"]
+}

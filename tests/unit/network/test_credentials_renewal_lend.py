@@ -861,6 +861,15 @@ def test_q1_revoke_removal_and_panic_end_the_owners_lend(lent: Any, trigger: str
     assert net_fixtures.wait_for(
         lambda: REFRESH_DELEGATE_KEY not in _owner_row(mesh)[1], timeout_s=15.0
     ), _owner_row(mesh)[1].get(REFRESH_DELEGATE_KEY)
+    # Panic/member removal can end the lend off-thread: the auth.db commit
+    # precedes its audit write, so observing the row is not audit completion.
+    assert net_fixtures.wait_for(
+        lambda: any(
+            event["detail"]["sub"] == mesh.borrower
+            for event in _audit(mesh.a, "credential.renewal_ended")
+        ),
+        timeout_s=15.0,
+    ), _audit(mesh.a, "credential.renewal_ended")
     ended = _audit(mesh.a, "credential.renewal_ended")
     assert ended and ended[-1]["detail"]["sub"] == mesh.borrower, ended
     assert asyncio.run(_owner_refresh(mesh))["refresh"] == "refresh-1"

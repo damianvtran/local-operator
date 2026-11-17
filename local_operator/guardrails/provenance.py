@@ -367,9 +367,24 @@ class CreationRecord:
     #: ``creation_stamp`` at record time; ``None`` on a pre-stamp row, which
     #: therefore never matches.
     stamp: int | None = None
+    #: How the asking session relates to ``creator`` (set by ``owned_record``,
+    #: never stored): ``""`` its own or a descendant's creation, ``"ancestor"``
+    #: a creation of a session that launched it, ``"kin"`` a sibling's or
+    #: cousin's in the same subagent tree (``git worktree remove`` only).
+    relation: str = ""
 
     def describe(self) -> str:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
+        if self.relation == "ancestor":
+            # "ancestor", not "parent" (QA Q2, PR #3964): the relation covers
+            # every session above this one, and ``owned_record`` does not
+            # carry the depth, so a grandchild must not be told "parent".
+            return f"created by ancestor session {self.creator} of this one ({self.kind}, {when})"
+        if self.relation == "kin":
+            return (
+                f"created by sibling session {self.creator} in this subagent tree "
+                f"({self.kind}, {when})"
+            )
         return f"created by this session ({self.kind}, {when})"
 
     def ledger_fact(self) -> str:
@@ -392,13 +407,21 @@ class CreationRecord:
         # a model reads those as a close too.
         command = _CLOSE_TAG_RE.sub("<\\/", " ".join(self.command[:200].split()))
         return (
-            f"ledger: created by {self.creator} (this session or its subagent), "
+            f"ledger: created by {self.creator} ({_RELATION_WORDS[self.relation]}), "
             f"kind {self.kind}, at {when}, via <command>{command}</command>"
         )
 
 
 #: Any closing-tag opener, however cased or spaced: ``</``, ``< /``.
 _CLOSE_TAG_RE = re.compile(r"<\s*/")
+
+
+#: ``CreationRecord.ledger_fact``'s wording for each ``relation``.
+_RELATION_WORDS = {
+    "": "this session or its subagent",
+    "ancestor": "an ancestor session of this one",
+    "kin": "a sibling session in this subagent tree",
+}
 
 
 _SCHEMA = (
@@ -501,40 +524,90 @@ def write_records(
 
 
 def owned_record(
-    path: str, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+    path: str,
+    session_id: str,
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+    kin: bool = False,
+    family: bool = True,
 ) -> CreationRecord | None:
-    """The ledger row covering ``path`` for ``session_id``, or ``None``.
+    """The ledger row covering ``path`` for ``session_id``'s family, or ``None``.
 
     Covers = the recorded directory itself or anything strictly inside it,
     compared on REALPATH so a symlink inside an owned directory that points
     elsewhere is not covered. The recorded directory must still be the same
     inode generation (dev, ino and ``creation_stamp``): a path deleted and
     re-made by someone else is no longer this session's. Any error means "not owned".
+
+    FAMILY (operator request 2026-11-14, field case: cleanup subagent
+    ``bbb5e6c44eb8`` of ``2183114d32b1`` refused on its own workstream's
+    worktrees). One subagent tree is one owner's work, so a row counts when:
+
+    - ``owner`` is this session — its own creation, or a DESCENDANT's (a
+      child writes its rows under every ancestor id, ``commit_creations``);
+      a descendant proved by lineage (``same_task_tree``) counts too, for a
+      row written before the child knew its ancestors;
+    - ``creator`` is an ANCESTOR (``subagent_ancestors``: harness-written
+      ``parent`` links only) — the parent that delegated the cleanup;
+    - only with ``kin=True``: ``creator`` is a sibling or cousin under the
+      same tree root. The caller grants that for ``git worktree remove``
+      without ``--force`` ONLY (git refuses a dirty tree and keeps the
+      branch, so that removal loses nothing); see ``classify._rank``.
+
+    Lineage comes from the runtime records alone (``lineage.jsonl`` and
+    ``origin.json``, both CRITICAL to write from a session), never from
+    message text or the environment. An unrelated session stays foreign.
+    ``relation`` on the returned record says which rule matched.
+
+    ``family=False`` is the pre-family rule, unchanged: only rows whose
+    ``owner`` is ``session_id`` (its own creations and those its descendants
+    filed under it). ``check.escalate_asked_targets`` needs exactly that
+    (QA Q1, PR #3964): an ancestor's row must not lift the refusal of an
+    unanswered ask naming the path, which binds the whole family (#3966).
     """
     if not session_id or not path:
         return None
     try:
         real = os.path.realpath(path)
+        prefixes = _covering_paths(real)
+        # Family lookup is path-bounded, unlike the caller-only ledger scan on
+        # main. Include each covering directory's .git companion so a root
+        # ctime change keeps #3987's generation proof available on Linux.
+        prefixes += [os.path.join(prefix, ".git") for prefix in prefixes]
         conn = _connect(ledger_path(state_root), create=False)
         if conn is None:
             return None
         try:
             rows = conn.execute(
-                "SELECT path, dev, ino, created_at, creator, kind, command, stamp FROM created"
-                " WHERE owner = ?",
-                (session_id,),
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp, owner"
+                " FROM created WHERE path IN (" + ",".join("?" * len(prefixes)) + ")",
+                prefixes,
             ).fetchall()
         finally:
             conn.close()
     except (OSError, sqlite3.Error):
         logger.debug("guardrail ledger unreadable", exc_info=True)
         return None
+    relation_of = (
+        _family(session_id, state_root=state_root, kin=kin)
+        if family
+        else (lambda owner, _creator: "" if owner == session_id else None)
+    )
     best: CreationRecord | None = None
-    records = [CreationRecord(*row) for row in rows]
-    gitfiles = {r.path: r for r in records if r.kind == WORKTREE_GITFILE_KIND}
-    for rec in records:
-        if rec.kind == WORKTREE_GITFILE_KIND:
-            continue  # a stamp companion, never a covering row (see the kind)
+    rank = {"": 0, "ancestor": 1, "kin": 2}
+    # A family row may grant ownership, but only its own owner's .git witness
+    # may vouch for its generation. A relative's companion must never revive
+    # another owner's stale directory row.
+    gitfiles_by_owner: dict[str, dict[str, CreationRecord]] = {}
+    for row in rows:
+        if relation_of(row[8], row[4]) is not None and row[5] == WORKTREE_GITFILE_KIND:
+            gitfiles_by_owner.setdefault(row[8], {})[row[0]] = CreationRecord(*row[:8])
+    for row in rows:
+        relation = relation_of(row[8], row[4])
+        if relation is None or row[5] == WORKTREE_GITFILE_KIND:
+            continue
+        rec = CreationRecord(*row[:8], relation=relation)
+        gitfiles = gitfiles_by_owner.get(row[8], {})
         if rec.kind == "symlink":
             # A link row vouches for removing that link entry only
             # (``owned_link``), never for its pointee or anything under it.
@@ -551,11 +624,54 @@ def owned_record(
             _gitfile_generation_holds(rec, gitfiles)
         ):
             continue  # same inode number, different generation (or unstamped)
-        if best is None or len(rec.path) > len(best.path):
+        # The deepest row wins; at one depth the closest relation does.
+        if (
+            best is None
+            or len(rec.path) > len(best.path)
+            or (len(rec.path) == len(best.path) and rank[relation] < rank[best.relation])
+        ):
             best = rec
-    if best is not None and _foreign_inside(real, session_id, state_root=state_root):
+    if best is not None and _foreign_inside(
+        real, session_id, state_root=state_root, relation_of=relation_of if family else None
+    ):
         return None
     return best
+
+
+def _covering_paths(real: str) -> list[str]:
+    """``real`` and every ancestor directory below ``/``: the rows that can cover it."""
+    out = [real]
+    parent = os.path.dirname(real)
+    while parent and parent != "/" and parent != out[-1]:
+        out.append(parent)
+        parent = os.path.dirname(parent)
+    return out
+
+
+def _family(session_id: str, *, state_root: str | os.PathLike[str] | None, kin: bool) -> Any:
+    """``relation_of(owner, creator)`` for ``owned_record``: ``""``, ``"ancestor"``,
+    ``"kin"`` or ``None`` (foreign). Lineage is read once, lazily, per call."""
+    ancestors: list[str] | None = None
+    cache: dict[str, str] = {}
+
+    def relation_of(owner: str, creator: str) -> str | None:
+        nonlocal ancestors
+        if owner == session_id or creator == session_id:
+            return ""
+        if ancestors is None:
+            ancestors = subagent_ancestors(session_id, state_root=state_root)
+        if creator in ancestors:
+            return "ancestor"
+        if creator not in cache:
+            cache[creator] = same_task_tree(session_id, creator, state_root=state_root)
+        tie = cache[creator]
+        if tie == "descendant":
+            return ""
+        if kin and tie == "sibling":
+            return "kin"
+        return None
+
+    return relation_of
 
 
 @functools.lru_cache(maxsize=1)
@@ -1109,7 +1225,11 @@ _WALK_ENTRIES = 20_000
 
 
 def _foreign_inside(
-    real: str, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+    real: str,
+    session_id: str,
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+    relation_of: Any = None,
 ) -> bool:
     """Does ``real`` hold something this session's ledger does not vouch for?
 
@@ -1129,13 +1249,24 @@ def _foreign_inside(
         if conn is None:
             return False
         try:
-            rows = conn.execute("SELECT path, owner FROM created").fetchall()
+            rows = conn.execute("SELECT path, owner, creator FROM created").fetchall()
         finally:
             conn.close()
     except (OSError, sqlite3.Error):
         return True
-    own = {p for p, o in rows if o == session_id}
-    if any((p == real or p.startswith(prefix)) and p not in own for p, _ in rows):
+    # "Own" = rows ``owned_record`` would accept for this session: its own,
+    # and with ``relation_of`` its family's (see ``owned_record``). Lineage
+    # is asked only about rows at or under the target.
+    own = {p for p, o, _c in rows if o == session_id}
+    if relation_of is not None:
+        own |= {
+            p
+            for p, o, c in rows
+            if p not in own
+            and (p == real or p.startswith(prefix))
+            and relation_of(o, c) is not None
+        }
+    if any((p == real or p.startswith(prefix)) and p not in own for p, _o, _c in rows):
         return True
     seen = 0
     stack: list[tuple[str, int]] = [(real, 0)]
@@ -1853,7 +1984,50 @@ def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHo
             for pid in hidden
             if pid not in definite_pids
         )
-    return tuple(holders)
+    # A non-family holder that has EXITED by now held nothing worth refusing
+    # for: re-check each one's existence before it can make the tree busy.
+    return tuple(h for h in holders if h.family or _still_exists(h.pid))
+
+
+def _still_exists(pid: int) -> bool:
+    """Whether ``pid`` names a process right now (``False`` only for ESRCH).
+
+    WHY (main Full Suite runs 43718276774 job 132827789967 and 43737923202
+    job 132897283649, ``test_a_field_shape_with_own_process_inside_is_low[rm
+    -rf …]``, Linux 3.13 shards): ``_reached_worktrees`` runs an own tree's
+    ``worktree_state`` and ``worktree_activity`` concurrently, and activity
+    spawns ``git -C <tree> …`` (and the forge CLI) whose cwd is INSIDE the
+    tree for a few milliseconds. :func:`cwd_holders` reads the cwd inventory
+    first and the process table second; a git child caught by the first and
+    gone by the second has no table row, so its ancestry walk stops at pid 0
+    and it reads "no session record; unknown process", family False — the
+    creator's clean own tree read busy and ``rm -rf`` of it went HIGH. The
+    displayed holder list (a second scan) then showed only the family
+    ``sleep``, because the git child had already exited. Reproduced on
+    Darwin with a lingering ``git symbolic-ref`` shim: 10/10 decision-time
+    holder sets carried two such pids, both dead when re-checked.
+
+    Constraint, fail closed: only a process that provably no longer exists
+    (``ProcessLookupError``) is dropped. One that still exists keeps its
+    unknown/foreign attribution — an orphan or another session's child stays
+    busy and named. ``EPERM`` (another uid) means it exists. A pid recycled
+    between the scan and this check reads as existing and keeps the tree
+    busy: the safe direction, so no start-time comparison is needed.
+
+    Read from the SAME source as :func:`_cwd_entries`: ``<_PROC_ROOT>/<pid>``
+    where that process table exists (Linux; tests point it at a fake tree),
+    ``kill(pid, 0)`` elsewhere. The inventory lists this uid's pids only, so
+    ``hidepid`` (which hides other uids) cannot make a holder look gone.
+    """
+    if os.path.isdir(os.path.join(_PROC_ROOT, "self")):
+        return os.path.lexists(os.path.join(_PROC_ROOT, str(pid)))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM and anything else: it may exist, so it may hold the tree
+    return True
 
 
 def _spawner_owner(session_id: str, spawner: str) -> tuple[str, bool]:
@@ -2886,6 +3060,15 @@ def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tupl
     # No attributed creator is unknown ownership, not proof of an idle tree.
     if strict and not creators:
         raise OSError("worktree owner attribution unavailable")
+    # A RUNNING ANCESTOR that created the tree is the delegator, not a
+    # conflicting owner (field case 2026-11-14): a parent is live for as long
+    # as its cleanup subagent runs, so counting it as "owning session
+    # running" refused every delegated cleanup of the parent's own worktree.
+    # Parent links only (``subagent_ancestors``). A family member whose CWD is
+    # inside the tree still counts below, and a running sibling or cousin
+    # creator always counts: only the delegation chain above is waived.
+    if session_id and not strict and creators:
+        creators -= set(subagent_ancestors(session_id))
     running: list[str] = []
     try:
         from local_operator.session.runtime import registry

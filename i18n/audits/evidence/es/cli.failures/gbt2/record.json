@@ -1,0 +1,138 @@
+{
+ "schema": 1,
+ "audit_id": "gbt2",
+ "audit_round": 1,
+ "audit_kind": "fresh independent audit of the full cli.failures group after adding cli.failures.github_borrow_timeout",
+ "locale": "es",
+ "namespace": "cli.failures",
+ "audit_date": "2026-11-16",
+ "audited_revision": "80a55b208",
+ "base_revision": "f0689a27",
+ "audited_revision_note": "Local worktree commit (github-borrow-timeout-note), not on main. input_hashes bind the exact bytes audited.",
+ "key_count": {
+  "en": 5,
+  "target": 5,
+  "context": 5
+ },
+ "scoped_keys": [
+  "cli.failures.error_line",
+  "cli.failures.required",
+  "cli.failures.invalid_choice",
+  "cli.failures.invalid_command",
+  "cli.failures.github_borrow_timeout"
+ ],
+ "auditor": {
+  "agent": "i18n-auditor (audit2-es), gbt2",
+  "session": "b5fe50e51391",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-16",
+  "independent_from_translator_session": true,
+  "actual_model_source": "session model header was openai/gpt-6.1-sol; a host model-switch notice (provider quota HTTP 429) moved the run to anthropic/claude-opus-5-5 before any audit judgement, so all findings come from the fallback",
+  "fallback_used": true,
+  "fallback_from": "openai/gpt-6.1-sol"
+ },
+ "translator": {
+  "agent": "i18n-translator (timeout-es)",
+  "session": null,
+  "model": "openai/gpt-6.1-sol",
+  "fallback_model": "anthropic/claude-opus-5-5",
+  "fallback_used": true,
+  "date": "2026-11-16",
+  "provenance_source": "reported by the requesting parent session; translator session id not supplied"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/cli.failures.json",
+   "sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/cli.failures.context.json",
+   "sha256": "b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f"
+  },
+  "target_locale": {
+   "path": "local_operator/i18n/catalogues/es/cli.failures.json",
+   "sha256": "0e70ea3dea3701c9a581b0507337e73fbb2bb0f44801dc1e29e3d859a9057cd9"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/es.md",
+   "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  }
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "minor",
+   "key": "cli.failures.github_borrow_timeout",
+   "current": "La credencial de GitHub desde {owner} no llegó en {seconds} s; reintenta el comando",
+   "problem": "'desde {owner}' attached to the noun calques 'credential from'; Spanish places 'desde' beside the motion verb.",
+   "suggested": "La credencial de GitHub no llegó desde {owner} en {seconds} s; vuelve a ejecutar el comando"
+  },
+  {
+   "id": "F2",
+   "severity": "minor",
+   "key": "cli.failures.github_borrow_timeout",
+   "current": "reintenta el comando",
+   "problem": "Transitive 'reintentar el comando' is less idiomatic than, and inconsistent with, the catalogue's settled 'vuelve a ejecutar (este) comando'; 'reintentar' is otherwise used intransitively.",
+   "suggested": "vuelve a ejecutar el comando"
+  }
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "F1",
+   "F2"
+  ],
+  "counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 2,
+   "nit": 0
+  }
+ },
+ "mechanical_pass": {
+  "keys": "5/5, order identical to en, none added/dropped",
+  "placeholders": "names+types identical (message_arguments); parse_message accepts all",
+  "plural_select": "none in group",
+  "backticks": "none",
+  "json": "valid",
+  "validator": "scripts/i18n/check.py --catalogues-only: 0 problem(s), rc 0",
+  "width": "github_borrow_timeout 83 cells en / 83 es; no maxCells"
+ },
+ "safety": "Timeout meaning intact; no denial, revoke, login, extra/automatic retry or token/lease extension implied; GitHub kept; tú register per guide.",
+ "ledger_dry_run": {
+  "command": ".venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/es/cli.failures/gbt2/receipt.json --expected-history-sha <history-sha> --dry-run",
+  "expected_history_sha": "3d5c5a46c10eadb60c3f802e9714d4b728755926024e4583a611dea0015e2ff8",
+  "rc": 0,
+  "applied": false
+ },
+ "audit_notes_not_execution_log": "This record's prose fields and report.md are audit notes. Commands actually run and their output are in audit.log; the mechanical script is checks.py.txt.",
+ "artifacts": [
+  {
+   "path": "i18n/audits/evidence/es/cli.failures/gbt2/report.md",
+   "sha256": "5b8a169553849fc56ee8ca05f50ef3f7a00a7eb9259fb5a2afd9fcbc7e0e8dcc"
+  },
+  {
+   "path": "i18n/audits/evidence/es/cli.failures/gbt2/checks.py.txt",
+   "sha256": "e81116c4ba2633cdfc9930a56699899ef60e8823f53e354a04d07667a0dff501"
+  },
+  {
+   "path": "i18n/audits/evidence/es/cli.failures/gbt2/audit.log",
+   "sha256": "a52fa5cc07038e591d9daaaf633c381a8c2848359d509d4558d419248446eba1"
+  },
+  {
+   "path": "i18n/audits/evidence/es/cli.failures/gbt2/receipt.json",
+   "sha256": "d2869e018afd37269d924d3cb6e130cb8748acedde7bf9b74eb23aa69fb7a68d"
+  }
+ ],
+ "limits": [
+  "no human native-speaker review",
+  "no rendered terminal screenshot (stderr line, no maxCells; widths measured)",
+  "no translation/MT service used",
+  "receipt not appended (dry-run only, per task)"
+ ]
+}

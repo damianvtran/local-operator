@@ -1,0 +1,42 @@
+{
+  "auditor": {"agent": "i18n-auditor (team lopdev, task brand-au-fr)", "session": "72f152fb04f1", "model": "anthropic/claude-opus-5-5", "actual_model_source": "session system prompt Model line", "fallback": "none observed", "independent_from_translator_session": true, "translator": "i18n-translator, anthropic/claude-sonnet-5-5"},
+  "locale": "fr",
+  "namespaces": ["cli.team_bridge", "tunnel.status"],
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "diff_base": "220d39a96667",
+  "audit_date": "2026-11-16",
+  "input_hashes": {
+    "local_operator/i18n/catalogues/fr/cli.team_bridge.json": "4dbf316798ad29bfc76c68552eb61f59f6b0d819f89245e5fbad0bf58de1d8a1",
+    "local_operator/i18n/catalogues/fr/tunnel.status.json": "4b38e6857263ae6591462bb696375530a0c9de8cd4b81d849527d5ad595b000c",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.json": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "local_operator/i18n/catalogues/en/tunnel.status.json": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.context.json": "6c4d922a48e5c563d2204ef4fb7dcd8ef8383e5e85d6c1ce3e86d2e7e81e1403",
+    "local_operator/i18n/catalogues/en/tunnel.status.context.json": "b69246da17bb05162c7640506a35e3eed4fab1501fa581818e89df23d339b76b",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/fr.md": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+  },
+  "mechanical": {
+    "check_py_catalogues_only": "0 problem(s)",
+    "changed_keys_vs_base": ["cli.team_bridge.notify.screening_model_unavailable_body", "tunnel.status.card_open_console", "tunnel.status.tunnel_disabled.detail", "tunnel.status.tunnel_inactive.detail"],
+    "key_sets_unchanged_vs_base": true,
+    "key_set_equals_en": true,
+    "placeholders_identical_to_en": true,
+    "radient_console_exact_once_each_changed_key": true,
+    "punct_before_colon_semicolon_is_U+202F": true
+  },
+  "per_key": [
+    {"key": "cli.team_bridge.notify.screening_model_unavailable_body", "fr": "… ajoutez du crédit dans Radient Console, ou …", "verdict": "OK", "note": "bare brand, no article, per fr no-article product-name policy; matches shipped wire.errors.media precedent 'dans Radient Console'"},
+    {"key": "tunnel.status.card_open_console", "fr": "Activez l’accès téléphone sur Radient Console", "verdict": "OK (NIT fr-A2)", "cells": "45 text + 2 icon ('! ') = 47 <= 50"},
+    {"key": "tunnel.status.tunnel_disabled.detail", "fr": "L’accès téléphone de cet ordinateur est désactivé dans Radient Console. Réactivez-le sur {url} ; il se reconnecte de lui-même.", "verdict": "OK"},
+    {"key": "tunnel.status.tunnel_inactive.detail", "fr": "… S’il reste suspendu, vérifiez-le dans Radient Console : {url}.", "verdict": "OK"},
+    {"key": "tunnel.status.tunnel_disabled.label", "fr": "tunnel désactivé dans la console", "verdict": "acceptable as generic; MINOR fr-A1 recommends naming the product"}
+  ],
+  "findings": [
+    {"id": "fr-A1", "severity": "MINOR", "key": "tunnel.status.tunnel_disabled.label", "text": "tunnel désactivé dans la console", "evidence": "gateway.py pairs this label with tunnel_disabled.detail, which now says 'Radient Console'; in fr 'la console' is also the shipped term for Local Operator's own terminal console (wire.console.title 'Capacité de la console'), so the bare label can read as the local console. English has the same generic wording, so faithful translation, not an error.", "fix": "tunnel désactivé dans Radient Console (37 chars; no width hint on this key)"},
+    {"id": "fr-A2", "severity": "NIT", "key": "tunnel.status.card_open_console", "text": "Activez l’accès téléphone sur Radient Console", "evidence": "the three sibling sentences use 'dans Radient Console'; 'sur' is grammatical (platform/site sense) but inconsistent", "fix": "Activez l’accès téléphone dans Radient Console (46 cells + 2 icon = 48 <= 50)"}
+  ],
+  "counts": {"blocker": 0, "major": 0, "minor": 1, "nit": 1},
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "out_of_scope_observation": "fr mobile.setup.* still says 'la console Radient' (5 keys) because English mobile.setup.json still says 'Radient console' (5x lowercase); English-side brand gap, not a fr translation defect, not gating this PR.",
+  "not_verified": ["native-speaker judgement beyond LLM reasoning (no native review claimed)", "rendered fit in the live TUI/desktop/phone (cell counts computed with rich.cells.cell_len only)", "no ledger/record written: checkout is read-only per brief"]
+}

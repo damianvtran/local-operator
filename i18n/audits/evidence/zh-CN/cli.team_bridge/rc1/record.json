@@ -1,0 +1,42 @@
+{
+  "auditor": {"agent": "i18n-auditor (team lopdev)", "session": "208604048ca0", "model": "anthropic/claude-opus-5-5", "actual_model_source": "system prompt 'Model:' line of this session", "fallback": "none observed", "independent_from_translator_session": true, "translator": "i18n-translator, anthropic/claude-sonnet-5-5"},
+  "locale": "zh-CN",
+  "namespaces": ["cli.team_bridge", "tunnel.status"],
+  "commit_audited": "3dd15d6f5559bd42d5ddc0ee1ee14a47c058f3d4",
+  "diff_base": "220d39a96667",
+  "audit_date": "2026-11-16",
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/zh-CN/cli.team_bridge.json": "88cf714ecf8052fa634f7c9081808a9f9329a490108724a368d26564e8dc4af6",
+    "local_operator/i18n/catalogues/zh-CN/tunnel.status.json": "2a79afc4f91437734e7547cd7f082c70c4b415c93c186757cc4a660741dfc161",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.json": "20ff80eb7ec5a67cdad6f9ee8b038793fd91766753004d99276a079a1a21a94b",
+    "local_operator/i18n/catalogues/en/tunnel.status.json": "6d3a040884f19f378dbc060a9f330af05a4b083204398559d3f10a1d26b8e398",
+    "local_operator/i18n/catalogues/en/cli.team_bridge.context.json": "6c4d922a48e5c563d2204ef4fb7dcd8ef8383e5e85d6c1ce3e86d2e7e81e1403",
+    "local_operator/i18n/catalogues/en/tunnel.status.context.json": "b69246da17bb05162c7640506a35e3eed4fab1501fa581818e89df23d339b76b",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/zh-CN.md": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  },
+  "mechanical": {
+    "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), exit 0",
+    "key_sets_equal_en_and_base": true,
+    "changed_values": 4,
+    "each_change_is_exactly_Radient控制台_to_Radient_Console": true,
+    "placeholders_byte_identical": {"tunnel.status.tunnel_disabled.detail": ["{url}"], "tunnel.status.tunnel_inactive.detail": ["{url}"], "others": []},
+    "brand_uses_ascii_space_U+0020": true
+  },
+  "per_key": [
+    {"key": "cli.team_bridge.notify.screening_model_unavailable_body", "verdict": "PASS", "note": "…在Radient Console充值… matches existing zh-CN wire.errors.media.speech_radient_credit_low; all 5 required facts intact; 337 cells, no width budget."},
+    {"key": "tunnel.status.card_open_console", "text": "在Radient Console中开启手机访问", "verdict": "PASS", "cells": 31, "budget": "en line 43 cells, card fits 50 with icon"},
+    {"key": "tunnel.status.tunnel_disabled.detail", "verdict": "PASS", "cells": 84},
+    {"key": "tunnel.status.tunnel_inactive.detail", "verdict": "PASS (NIT zh-CN-A2)", "cells": 173},
+    {"key": "tunnel.status.tunnel_disabled.label", "text": "隧道已在控制台中关闭", "verdict": "acceptable, but recommend naming the product (MINOR zh-CN-A1)", "recommended": "隧道已在Radient Console中关闭", "recommended_cells": 29, "en_cells": 32}
+  ],
+  "findings": [
+    {"id": "zh-CN-A1", "severity": "MINOR", "key": "tunnel.status.tunnel_disabled.label", "text": "隧道已在控制台中关闭", "evidence": "Rendered by gateway.py reason_label paired with tunnel_disabled.detail (which now says Radient Console) and inside '连接器上次退出：{label}' in lop tunnel status. English 'console' lexically echoes 'Radient Console'; zh 控制台 does not echo the Latin brand, and in a terminal reads as the local console (zh-CN wire.console.title uses 控制台 for Local Operator's own console). Sibling labels name Radient (Radient服务器错误, 已被Radient暂停——正在重新连接).", "fix": "隧道已在Radient Console中关闭 (29 cells <= en 32)"},
+    {"id": "zh-CN-A2", "severity": "NIT", "key": "tunnel.status.tunnel_inactive.detail", "text": "…请在Radient Console查看：{url}。", "evidence": "Both sibling changed values use 在Radient Console中…; this one drops 中. Grammatical either way.", "fix": "…请在Radient Console中查看：{url}。"}
+  ],
+  "out_of_scope_observation_non_gating": "zh-CN mobile.setup (disabled, disabled_resume, title_disabled, action_add_credit, action_open_console) and mobile.doctor.tunnel.duplicates still say Radient控制台 because their English source still says lowercase 'Radient console'; after this PR the phone-access-disabled flow shows both forms. Belongs to the English branding of those namespaces, not this diff.",
+  "counts": {"blocker": 0, "major": 0, "minor": 1, "nit": 1},
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "not_verified": ["native-speaker judgement (LLM reasoning only, no native review claimed)", "rendered fit in TUI/desktop/phone (cell counts via rich.cells.cell_len only, no screenshots)", "font rendering of mixed Latin/CJK run"],
+  "audit_notes_not_execution_log": "commands run: git diff 220d39a96667 3dd15d6f5559; scripts/i18n/check.py --catalogues-only; shasum -a 256; read-only python cell/placeholder checks"
+}

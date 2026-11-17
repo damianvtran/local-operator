@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "audit_id": "gbt2",
+  "locale": "hi",
+  "namespace": "cli.failures",
+  "audit_date": "2026-11-16",
+  "key_count": 5,
+  "keys": [
+    "cli.failures.error_line",
+    "cli.failures.required",
+    "cli.failures.invalid_choice",
+    "cli.failures.invalid_command",
+    "cli.failures.github_borrow_timeout"
+  ],
+  "new_or_changed_keys": [
+    "cli.failures.github_borrow_timeout"
+  ],
+  "worktree_commit": "80a55b208",
+  "base_commit": "f0689a27c",
+  "translator": {
+    "agent": "i18n-translator (timeout-hi)",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-16",
+    "provenance_source": "as reported by the requesting (parent) session"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (audit2-hi)",
+    "session": "de3fcb4a492b",
+    "model": "anthropic/claude-opus-5-5",
+    "started_model": "openai/gpt-6.1-sol",
+    "fallback": "harness switched openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 (provider quota HTTP 429) early in the run, before any judgement or artifact; all judgement made on anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "actual_model_source": "harness model-switch notice in the auditor session's own transcript"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.json",
+      "sha256": "8bc33c0a0efda7c5eacf511d7cdaf4828235818473903872d078bf69ea5717ea"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.failures.context.json",
+      "sha256": "b13845dd49f73c7f4ec9c798c90f1ffd2c1a6d5ada4086a6c44517100051630f"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/cli.failures.json",
+      "sha256": "c0721aec5a33a5790477f2265070f7021d2d00de355ef2250fc19069ec7a2913"
+    }
+  },
+  "reference_hashes": {
+    "style_guide": {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    "i18n_doc": {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    }
+  },
+  "credential_word_verification": {
+    "display_masked_as": "[redacted]",
+    "on_disk_codepoints": "U+0915 U+094D U+0930 U+0947 U+0921 U+0947 U+0902 U+0936 U+093F U+092F U+0932",
+    "matches_style_guide_and_glossary": true
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/hi/cli.failures/gbt2/report.md",
+      "sha256": "c0f2c24bd51e9dfe9b82a22b846d92c38138e125c454b821e92cf8774bfc566a"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/hi/cli.failures/gbt2/audit.log",
+      "sha256": "dc0df2f1efbbc17caa20b068b79e66d0dbf261094fe93d7a103813ddf4e88c01"
+    }
+  },
+  "receipt": "i18n/audits/evidence/hi/cli.failures/gbt2/receipt.json (ledger row; its companions hash this record and the artifacts)",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "H1"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    }
+  },
+  "findings": [
+    {
+      "id": "H1",
+      "severity": "minor",
+      "key": "cli.failures.github_borrow_timeout",
+      "current": "… सेकंड में नहीं मिला; …",
+      "problem": "मिलना also means 'be found'; 'did not arrive/within' is more exact",
+      "suggested": "{owner} से GitHub क्रेडेंशियल {seconds} सेकंड के भीतर नहीं पहुँचा; कमांड फिर से चलाएँ"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning/notes; audit.log holds actual command output. ledger append --dry-run was run after this record was finalised and is reported to the requesting session, not stored here.",
+  "limitations": [
+    "Independent LLM review, not native-speaker certification.",
+    "No rendered terminal frame; scalar text evidence only.",
+    "No --apply, no commit, no catalogue edit by the auditor."
+  ]
+}

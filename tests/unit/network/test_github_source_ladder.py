@@ -662,14 +662,18 @@ def test_gh_that_cannot_answer_refuses_with_a_structural_message(
 def test_a_gh_re_login_reaches_the_next_serve(
     env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Per-serve, no cache (§3.3): a re-login changes what the NEXT serve carries."""
+    """A normal re-login rewrites hosts metadata and invalidates the short cache.
+
+    A keychain-only mutation with no file change is covered by the separate TTL
+    control; replacing only the stub executable did not model gh auth login.
+    """
     log = env.home / "gh-invocations.log"
     with _owner_for(
         env, github_api, github_mod.SOURCE_GH, monkeypatch=monkeypatch, gh_log=log
     ) as rig:
         first = _ask(rig)
         assert first["access_token"] == GHO
-        _install_stub_gh(env.home, GHO2, log=log)  # the "re-login"
+        _seed_gh_keyring(env, monkeypatch, token=GHO2, log=log)  # real login's hosts rewrite
         second = _ask(rig)
         assert second["access_token"] == GHO2
         assert log.read_text(encoding="utf-8").splitlines() == ["fired", "fired"]

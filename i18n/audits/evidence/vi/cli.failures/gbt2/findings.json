@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "audit_id": "gbt2",
+  "locale": "vi",
+  "namespace": "cli.failures",
+  "findings": [
+    {
+      "id": "gbt2-m1",
+      "severity": "MINOR",
+      "key": "cli.failures.github_borrow_timeout",
+      "current": "Chưa nhận được thông tin xác thực GitHub từ {owner} trong {seconds} giây; hãy chạy lại lệnh",
+      "problem": "\"Chưa\" (not yet) frames the credential as still pending, faintly suggesting the wait continues or it may still arrive, while the deadline has expired and nothing was injected; bare \"trong\" can read as a duration (\"for N seconds\") rather than \"within\". The trailing \"hãy chạy lại lệnh\" disambiguates, so meaning is not unsafe.",
+      "suggestion": "Không nhận được thông tin xác thực GitHub từ {owner} trong vòng {seconds} giây; hãy chạy lại lệnh"
+    },
+    {
+      "id": "gbt2-n1",
+      "severity": "NIT",
+      "key": "cli.failures.github_borrow_timeout",
+      "current": "… từ {owner} …",
+      "problem": "owner is a device display name; a bare name after \"từ\" may read as a person/account. Optional clarity, not required by source.",
+      "suggestion": "… từ thiết bị {owner} …"
+    },
+    {
+      "id": "gbt2-n2",
+      "severity": "NIT",
+      "key": "cli.failures.invalid_choice",
+      "current": "đối số {argument}: lựa chọn không hợp lệ: {value} (chọn trong {choices})",
+      "problem": "\"chọn trong\" is understandable but slightly clipped; \"chọn một trong\" is the more natural argparse-style phrasing.",
+      "suggestion": "đối số {argument}: lựa chọn không hợp lệ: {value} (chọn một trong {choices})"
+    },
+    {
+      "id": "gbt2-n3",
+      "severity": "NIT",
+      "key": "cli.failures.github_borrow_timeout",
+      "current": "line indented with 1 space; siblings use 2",
+      "problem": "Cosmetic JSON formatting drift (same in en and other locales); valid JSON, no runtime effect.",
+      "suggestion": "Indent with 2 spaces like sibling keys."
+    }
+  ]
+}

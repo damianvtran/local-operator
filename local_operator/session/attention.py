@@ -1955,6 +1955,45 @@ class AttentionStore:
                 )
             }
 
+    def delivered(self, conversation: str, token: str) -> bool:
+        """Whether some surface on this machine has CLAIMED the toast for ``token``.
+
+        True when ``deliveries.delivered`` has reached the completion's sequence
+        (:meth:`claim_delivery`'s own test); a :meth:`release_delivery` rolls it
+        back below, so a handed-back claim reads False again.
+
+        Read by the mobile push worker: a completion the desktop already
+        bannered while its window was attended is one the user has been told
+        about, and pushing it to the phone when they walk away is the duplicate
+        the operator reported on 2026-11-15 ("more notifications on mobile than
+        I see pop up on desktop"). Deliberately BACKEND-AGNOSTIC: the ``backend``
+        column is diagnostics only (see ``DesktopSessionPool.claim_notification``
+        \u2014 "no decision may read it"), so this answers "was it announced here",
+        never "by whom". Never writes; an absent store or table reads False.
+        """
+        if not self.path.exists():
+            return False
+        return self._retry_read(lambda: self._delivered_once(conversation, token))
+
+    def _delivered_once(self, conversation: str, token: str) -> bool:
+        """One attempt at :meth:`delivered`'s read, on its own connection."""
+        with closing(self._connect_read_only()) as conn:
+            conn.execute("BEGIN")
+            if (
+                self._uninitialized(conn)
+                or not conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='deliveries'"
+                ).fetchone()
+            ):
+                return False
+            row = conn.execute(
+                "SELECT c.sequence, d.delivered FROM completions c "
+                "JOIN deliveries d ON d.conversation = c.conversation "
+                "WHERE c.conversation=? AND c.token=?",
+                (conversation, token),
+            ).fetchone()
+            return row is not None and int(row[1]) >= int(row[0])
+
     def _retry_contention(
         self,
         operation: Callable[[], _T],

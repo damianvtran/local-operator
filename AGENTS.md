@@ -1008,6 +1008,45 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
 
+### Never install packages or copy manifests into `~` or another non-repo root
+
+Run package-manager installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`/`uv pip`)
+**only inside a repository, or inside an isolated scratch project that has its
+own manifest**. Never with the working directory in `~`, the scratchpad root,
+or any other directory that is not a project; never copy a `package.json`,
+lockfile or `pnpm-workspace.yaml` into one.
+
+**Why.** npm and pnpm do not install "here": they walk up to the nearest
+ancestor holding a `package.json` (or `node_modules`) and install *there*. A
+one-off `npm install <lib>` run from a manifest-less directory under `~` lands
+in `~/package.json`, `~/package-lock.json` and `~/node_modules`. That has
+happened repeatedly on this host (September–November 2026: several pnpm and npm
+installs, most recently a subagent fetching one library for an interop test).
+The damage outlives the install: a stray `~/package.json` carrying a
+`packageManager` pin makes pnpm in **every** directory under `~` self-switch to
+that version, recursively, until the memory guard kills it — breaking unrelated
+repositories.
+
+**A one-off dependency** (a test that needs a library directory, a script's
+helper) gets its own scratch project:
+
+```sh
+mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe" && cd "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe"
+npm init -y                       # the manifest that stops the walk-up
+npm prefix                        # MUST print this directory, not ~ or a parent
+npm install jose@6
+# or, without cd: npm install --prefix "$LOCAL_OPERATOR_SCRATCHPAD/jose-probe" jose@6
+```
+
+For pnpm, check `pnpm root` resolves to `<that dir>/node_modules` before
+installing. If the prefix/root prints `~` or any ancestor, stop: the install
+would write there.
+
+**Found a stray manifest in `~`** (`package.json`, a lockfile, `node_modules`)?
+Report the paths and what you know of their origin. Do not delete or move them
+unless the operator names those paths — other tools may be resolving through
+them right now.
+
 ### One stash list is shared by every worktree of a clone
 
 Worktrees share one `.git`, so `refs/stash` — and the `stash@{n}` index that
@@ -1481,48 +1520,76 @@ it landed.
 
 ### PyPI storage cap and per-release size
 
-PyPI caps a project at **10 GB total**, every release counts, and this project
-ships several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
-19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the cap was
-hit and v0.90.18/19 failed with `400 Project size too large`. Two changes bring
-a release to ~29 MB:
+PyPI caps this project at **30 GiB** (32,212,254,720 B), raised from the
+10 GB default on 2026-11-04 in pypi/support#12882 (#12738 closed 11-05 as
+covered). Every release counts, yanked files included, and this project ships
+several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
+19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the old
+cap was hit and v0.90.18/19 failed with `400 Project size too large`. Two
+changes cut a release's bytes:
 
 - **Slim wheels.** `publish.yml` runs `scripts/slim_wheel.py` on the pure wheel
   (the macOS wheel is retagged from it): `#` comments are stripped, while
   docstrings, shebang/coding lines, pragma comments (`# type:`, `# noqa`,
   `# pragma`, `# pyright:`, `# fmt:`) and every line number are kept. Each
   module must be `ast.dump(..., include_attributes=True)`-identical with an
-  equal line count, or the build fails. `ci.yml` `packaging-smoke-build` and
-  `release-gate.yml` run the same step, so a PR the slimmer cannot verify fails
-  before a release does.
+  equal line count, or the build fails. When the wheel carries the built phone
+  bundle (`local_operator/mobile/web/dist/index.html` plus `dist/assets/`), it
+  also drops every other `mobile/web/` member — the web build inputs (`src/`,
+  `.gen.ts`, lockfile, scripts, manifests, ~1.0 MB compressed) that only
+  `mobile/install.py` reads to rebuild a missing `dist/`; a wheel without
+  `dist/` keeps them so `lop mobile install` can still build. `ci.yml`
+  `packaging-smoke-build` and `release-gate.yml` run the same step, so a PR the
+  slimmer cannot verify fails before a release does.
 - **The sdist lives on the GitHub Release** (`sdist-release` job), not on
   PyPI. Nothing installs it from PyPI: the updater, desktop app and install
   scripts take wheels, and the Dockerfile builds from the tree.
 
-`scripts/check_dist_size.py` is the guard: a wheel over **18 MiB** fails, over
-16 MiB warns. `--wheels-only` runs on both artifacts `pypi-publish` downloads
-(in `release-build` and `keyagent-macos`); the publisher itself runs no repo
-code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
-`release-gate.yml`) passes `--budget-mib 17.5`: its wheel lacks the phone
-bundle and key-agent helper (~0.37 MiB), so the plain 18 MiB line would first
-go red in the release's `keyagent-macos` job, after the tag exists.
+**The runway check is the authoritative gate.** `scripts/check_dist_size.py
+--runway` reads `https://pypi.org/pypi/local-operator/json` and computes used
+bytes (all files, yanked too), cadence (releases first uploaded in the last 30
+days / 30), bytes per release (pure + macOS wheel; with only the pure wheel,
+pure x2 + 0.16 MiB) and `runway_days = (cap - used) / (bytes_per_release x
+cadence)`. Under **60 days** it warns: the retention decision goes to the
+operator then. Under **21 days** it fails `release-gate.yml` (before the tag) and
+`publish.yml` `release-build`. `ci.yml` `packaging-smoke-build` passes
+`--runway-warn-only`, so a low runway never blocks an unrelated PR. A PyPI
+outage or malformed JSON only warns.
+
+**The per-wheel line is a jump tripwire** derived from the cap: on 2026-11-16
+(19,249,689,996 B remaining, 6.43 releases/day) a 23.78 MiB wheel gives exactly
+60 days of linear runway, so a wheel over **23.5 MiB** fails and over
+**21.5 MiB** warns. `--wheels-only` runs on both artifacts `pypi-publish`
+downloads (in `release-build` and `keyagent-macos`); the publisher itself runs
+no repo code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
+`release-gate.yml`) passes `--budget-mib 23.25`. Since 2026-11-16 both build
+the phone bundle before `python -m build`, as `publish.yml` does, so the PR
+wheel is the release shape and the old ~0.37 MiB proxy gap (bundle plus
+helper) is now just the macOS key-agent helper (~0.16 MiB); the plain line
+would still first go red in the release's `keyagent-macos` job, after the tag
+exists.
 
 **Growth, measured.** The pure wheel grew 12.62 MiB (0.65.0, 10-01) to
-19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim. The
-0.91.0 slim wheel with the bundle is 14.41 MiB. At that rate the 16 MiB warning
-arrives in ~9 days and the 17.5 MiB PR line in ~3 weeks. **When the warning
-fires:** compare the wheel's member list and sizes against the last release
-(`unzip -l`) to find what grew; a large non-`.py` asset or a vendored file is
-the usual cause and the fix is to drop or move it. If it is genuine code
-growth, plan the next cut before the PR line is reached (docstrings are not a
-candidate: they are runtime help text), and raise the budgets only together
-with a retention change, after re-reading the script's docstring.
+19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim.
+**When a size warning fires:** compare the wheel's member list and sizes
+against the last release (`unzip -l`) to find what grew; a large non-`.py`
+asset or a vendored file is the usual cause and the fix is to drop or move it.
+Docstrings are not a candidate: they are runtime help text.
 
-**Retention is the operator's decision.** Suggested policy: keep every release
-from the last ~30 days and the last patch of every minor. Deleting a PyPI
-release is a manual, irreversible operator action on pypi.org; agents never
-delete releases or files. Quota-increase requests are pending as
-pypi/support#12738 and pypi/support#12882.
+**2026-11-16 measurement.** The 0.106.2 slim pure wheel (CI shape, no
+`dist/`) was 18,347,774 B; 0.106.1 → 0.106.2 was only +2,294 B, so growth is
+cumulative. Growth since 0.91.2 is +3.42 MB, of which `.py` +2.56 MB, i18n
+JSON +552 KB and `.flac` +181 KB. Dropping the phone web build inputs saves
+~1.0 MB per wheel. **Projection:** 12.96 GB used of 32.21 GB; after that
+relief ~35.4 MB per release at 6.43/day is a linear runway of ~85 days; with
+wheel growth of 0.189 MiB/day, ~63 days, reaching the cap around
+**2027-01-18**.
+
+**Retention is the operator's decision.** When the runway warning fires
+(<60 days), take the retention decision to the operator; the release gate fails at
+<21 days. Suggested policy: keep every release from the last ~30 days and the
+last patch of every minor. Deleting a PyPI release is a manual, irreversible
+operator action on pypi.org; agents never delete releases or files.
 
 ### What the release owner does
 
@@ -3658,6 +3725,90 @@ loaded — a rendered page, a flow, a screenshot for a PR. That is ordinary
 browser work: use the `browser` tool against the paired browser like any other
 session. Reach for a harness only when you need a browser that does not yet
 have the build you are testing.
+
+#### Testing a node browser without the operator
+
+A headless node approves a site only on the OPERATOR's signature, which the
+extension re-verifies against the anchor in Chrome managed policy
+(`browser_bridge/site_approval.py`). Never answer a card in the operator's real
+asks or notifications stores to test that, and never loosen the default-deny.
+Run the isolated harness instead (Linux node, Chrome at `/opt/google/chrome`):
+
+```sh
+SB=<path to a built storybook-static>   # see "Storybook" below
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB"   # full flow
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --storybook-dir "$SB" --preflight  # rig only
+.venv/bin/python scripts/e2e/node_browser_harness.py --harness --security-control \
+  --root "$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>"
+```
+
+- **Storybook (required, `--storybook-dir`):** the screenshots open the
+  `browser-approvals-dock--approved` story from a static Storybook build. In a
+  `local-operator-ui` checkout (or worktree) whose head has that story, run
+  `pnpm build-storybook`; it writes `storybook-static/` at that checkout's root
+  (gitignored). Any existing build that contains the story can be reused; there
+  is no default path, so a missing build is a clean refusal, not a FAIL row.
+- **Where results land:** each run writes
+  `$LOCAL_OPERATOR_SCRATCHPAD/node-browser-harness-<stamp>/` (or `--root`, which
+  must be a fresh subdirectory of the scratchpad): `results.md`/`results.json`,
+  `light.png`/`dark.png`, `inner.log` and the Chrome/daemon logs. The last
+  stdout line prints the path. A full run takes about 30 s; the backstop is
+  600 s.
+
+- **What is real:** the installed CRX the live node runs (read only; its version
+  is in the results), a fresh headless Chrome profile, the bridge daemon,
+  policy-delivered pairing, a `Session` running the real browser tool, the
+  `RuntimeServer` door, two real loopback `RelayServer` instances with separate
+  config stores and a signed synthetic operator binding, catalogue transport
+  into `RemoteAttentionWatcher` and the synthetic operator's `notifications.db`.
+  A separate operator process mounts the real desktop router and POSTs to
+  `/v1/desktop/sessions/{sid}/answers`; `DesktopSessions` resolves a real
+  mesh-backed remote facade and the handler selects the signed `bridge_decide`
+  door. The model is scripted, the pairing fixture supplies two synthetic
+  humans, the key is file-only, and the root-owned anchor is replaced
+  (`tests/fixtures/anchor_fixture.py`). No product bypass is installed.
+- **Isolation:** one `systemd-run --user --scope` (1536M, no swap) around
+  `unshare -Urmn`; scratch dirs are bind-mounted over
+  `/etc/opt/chrome/policies/managed` and `/etc/local-operator/operators`, the
+  private netns makes the real bridge on `127.0.0.1:4099` unreachable, and the
+  inner run aborts if the real policy file is visible. Every root lives under
+  `$LOCAL_OPERATOR_SCRATCHPAD`; the launcher refuses anything else, including
+  live config subtrees if the scratchpad environment is mis-set (only the
+  canonical `sessions/<id>/scratchpad/<run>` subtree is exempt). The hidden
+  `--inner`/`--operator` modes re-apply those refusals, refuse outside a
+  private netns holding only `lo`, and refuse any config root that does not
+  resolve under the run root, before writing anything.
+- **Interrupts:** the scope is named `nbh-<stamp>`; on exit, Ctrl-C, SIGTERM or
+  the backstop the launcher runs `systemctl --user stop nbh-<stamp>.scope`
+  (exact cgroup membership) and removes `/tmp/nbh-<stamp>-*`. Only a SIGKILLed
+  launcher can leave the scope; stop it by that name.
+- **Proof it touched nothing:** the launcher hashes the real policy and anchor,
+  records the live node Chrome's PID, real :4099 listener owner and the
+  paired-identity lines of `lop browser status` before and after, and fails
+  on any difference (or on a failed/empty identity probe).
+- **Rows:** open refused (`origin_not_allowed`), card raised, wrong-key
+  signature, plain `ask_respond`, the agent's own unsigned decide, signed Approve
+  (`lop browser sites --json` allows the origin), open succeeds, light/dark
+  screenshots differ, each taken only once the story rendered in its theme (the
+  tape polls `snapshot` for the story root, then checks the PNG's content and
+  page-background luminance; a spinner frame is "not rendered"), signed Deny
+  (origin in the `--json` denied list, open still refused), and a late signed
+  Approve after the AGENT withdrew its request with its own `cancel_access`
+  (`BLOCKED`, not `PASS`, unless the extension answered `cancelled`). The member
+  also withdraws its queued ask, so the late HTTP tap must receive 409 with the
+  queue's withdrawn refusal, not Phase 1's non-member extension-expiry refusal.
+  Each card is observed over real catalogue transport and its one full
+  `remote-notice:<device>:<session>:remote-ask:<ask>` inbox key is checked;
+  answered, denied and cancelled member cards must retire on the next listing.
+  Results: `results.md`/`results.json`, PNGs and logs in the run directory.
+  LOOK at both PNGs before citing them; a sha256 alone is not proof.
+- **Phase boundary:** Phase 1 used direct loopback attach and did not cover the
+  mesh/inbox/HTTP legs. This harness continuation adds those legs and real
+  membership without changing pairing policy, host anchors or product code.
+- **Testing an extension change:** the harness installs the CRX named in
+  `~/.local-operator/browser/extension/update.xml`, not `extension/` source.
+- A long `TMPDIR` breaks Chrome's singleton socket (108-byte unix path limit),
+  so Chrome gets a short private dir under `/tmp`, removed at exit.
 
 ### 7. Evidence goes on the PR, never into the repository
 

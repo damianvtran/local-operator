@@ -1,0 +1,23 @@
+# Mechanical checks for audit gbt2 (es, cli.failures). Run from worktree root:
+#   .venv/bin/python i18n/audits/evidence/es/cli.failures/gbt2/checks.py.txt
+import hashlib, json, re
+from pathlib import Path
+from rich.cells import cell_len
+from local_operator.i18n.runtime import parse_message, message_arguments
+C = Path("local_operator/i18n/catalogues")
+paths = {"en": C/"en/cli.failures.json", "context": C/"en/cli.failures.context.json", "es": C/"es/cli.failures.json"}
+for k, p in paths.items():
+    print(f"sha256 {k} {p} {hashlib.sha256(p.read_bytes()).hexdigest()}")
+en = json.loads(paths["en"].read_text()); es = json.loads(paths["es"].read_text())
+ctx = json.loads(paths["context"].read_text())
+print("keys en/es/context:", len(en), len(es), len(ctx))
+print("key order identical:", list(en) == list(es), "| context keys match:", set(ctx) == set(en))
+fails = 0
+for k in en:
+    parse_message(es[k])
+    a, b = message_arguments(en[k]), message_arguments(es[k])
+    bt = re.findall(r"`[^`]*`", en[k]) == re.findall(r"`[^`]*`", es[k])
+    ok = a == b and bt
+    fails += not ok
+    print(f"{'OK ' if ok else 'BAD'} {k} args={b} backticks_equal={bt} cells en={cell_len(en[k])} es={cell_len(es[k])} plural/select={'{' in es[k] and (',plural' in es[k].replace(' ','') or ',select' in es[k].replace(' ',''))}")
+print("failures:", fails)
