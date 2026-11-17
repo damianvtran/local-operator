@@ -27,7 +27,13 @@ f.addEventListener('load', () => {
     const s = q.get('scroll');
     if (sc && s) sc.scrollTop = s === 'top' ? 0 : s === 'bottom' ? sc.scrollHeight : +s;
     const c = q.get('click');
+    /* Where the message's own top and its toggle sit in the phone viewport, before
+       and after the click, so "what stayed put" is a number and not an impression. */
+    const probe = () => { const t = d.querySelector('[data-user-text]'), b = d.querySelector('[data-message-toggle]'), s2 = d.querySelector('.lo-fade-y.overflow-y-auto');
+      return {scrollTop: s2 && Math.round(s2.scrollTop), textTop: t && Math.round(t.getBoundingClientRect().top), toggleTop: b && Math.round(b.getBoundingClientRect().top)}; };
+    window.__before = probe();
     if (c) { const el = d.querySelector(c); if (el) el.click(); }
+    setTimeout(() => { window.__after = probe(); info.dataset.anchor = JSON.stringify({before: window.__before, after: window.__after}); }, 700);
     setTimeout(() => {
       const sc2 = d.querySelector('.lo-fade-y.overflow-y-auto');
       const out = {w, h, theme: d.documentElement.dataset.theme, scroller: sc2 && {top: Math.round(sc2.scrollTop), client: sc2.clientHeight, scroll: sc2.scrollHeight}};
@@ -47,6 +53,7 @@ f.addEventListener('load', () => {
         };
         if (btn) { const b = getComputedStyle(btn, '::before'); out.measure.button.hit = {top: b.top, bottom: b.bottom, position: b.position}; }
       }
+      out.anchor = info.dataset.anchor ? JSON.parse(info.dataset.anchor) : undefined;
       info.textContent = JSON.stringify(out);
     }, 400);
   }, +(q.get('wait') || 1500));

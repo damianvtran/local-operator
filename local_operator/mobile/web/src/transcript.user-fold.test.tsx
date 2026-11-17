@@ -184,34 +184,65 @@ describe("the reader's choice survives the turn bar", () => {
 });
 
 describe("the scroll anchor", () => {
-	it("holds the pressed control's place when the message grows", () => {
-		const { container } = render(<Transcript pid="anchor" entries={settledTurn(LONG)} />);
+	function scrollerAt(container: HTMLElement, top: number, scrollHeight = 2000) {
 		const scroller = container.querySelector<HTMLElement>(".lo-scroll")!;
-		Object.defineProperty(scroller, "scrollHeight", { value: 2000, configurable: true });
+		Object.defineProperty(scroller, "scrollHeight", { value: scrollHeight, configurable: true });
 		Object.defineProperty(scroller, "clientHeight", { value: 500, configurable: true });
-		scroller.scrollTop = 200;
+		scroller.scrollTop = top;
 		vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({ top: 100 } as DOMRect);
+		return scroller;
+	}
+
+	it("OPENING holds the message's own top, so the new lines fall below what the reader sees", () => {
+		const { container } = render(<Transcript pid="anchor-open" entries={settledTurn(LONG)} />);
+		const scroller = scrollerAt(container, 200);
+		const text = userText(container);
 		const button = showMore()!;
-		/* The tap reads 400 (300 inside the scroller). Opening the message pushes the
-		   same control down to 460 (360 inside the scroller), so the scroller has to
-		   move 60 for the finger to stay on it. */
+		/* The control sits at the foot of the text, so opening pushes IT down by 60
+		   while the text's top stays at 300. Holding the control would move the
+		   scroller 60 and slide the first lines of the message under the header
+		   (design review D1); holding the text's top moves nothing. */
+		vi.spyOn(text, "getBoundingClientRect").mockReturnValue({ top: 300 } as DOMRect);
 		vi.spyOn(button, "getBoundingClientRect")
 			.mockReturnValueOnce({ top: 400 } as DOMRect)
 			.mockReturnValue({ top: 460 } as DOMRect);
 		fireEvent.click(button);
-		expect(scroller.scrollTop).toBe(260);
+		expect(clampOf(userText(container))).toBe(0);
+		expect(scroller.scrollTop).toBe(200);
+	});
+
+	it("OPENING still follows the text if something above it moved", () => {
+		const { container } = render(<Transcript pid="anchor-open-shift" entries={settledTurn(LONG)} />);
+		const scroller = scrollerAt(container, 200);
+		const text = userText(container);
+		vi.spyOn(text, "getBoundingClientRect")
+			.mockReturnValueOnce({ top: 300 } as DOMRect)
+			.mockReturnValue({ top: 340 } as DOMRect);
+		fireEvent.click(showMore()!);
+		expect(scroller.scrollTop).toBe(240);
+	});
+
+	it("CLOSING holds the control under the thumb as the text shrinks", () => {
+		const { container } = render(<Transcript pid="anchor-close" entries={settledTurn(LONG)} />);
+		const scroller = scrollerAt(container, 260);
+		fireEvent.click(showMore()!);
+		const less = showLess()!;
+		/* Closing pulls the control UP by 60 (460 -> 400); the scroller follows it
+		   by 60 so the finger is still on it. */
+		vi.spyOn(less, "getBoundingClientRect")
+			.mockReturnValueOnce({ top: 460 } as DOMRect)
+			.mockReturnValue({ top: 400 } as DOMRect);
+		scroller.scrollTop = 260;
+		fireEvent.click(less);
+		expect(clampOf(userText(container))).toBe(CLAMP_LINES);
+		expect(scroller.scrollTop).toBe(200);
 	});
 
 	it("does not re-pin a tail reader, or move anything, when the geometry is unchanged", () => {
 		const { container } = render(<Transcript pid="tail" entries={settledTurn(LONG)} />);
-		const scroller = container.querySelector<HTMLElement>(".lo-scroll")!;
-		Object.defineProperty(scroller, "scrollHeight", { value: 1000, configurable: true });
-		Object.defineProperty(scroller, "clientHeight", { value: 500, configurable: true });
-		scroller.scrollTop = 300;
-		vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({ top: 0 } as DOMRect);
-		const button = showMore()!;
-		vi.spyOn(button, "getBoundingClientRect").mockReturnValue({ top: 300 } as DOMRect);
-		fireEvent.click(button);
+		const scroller = scrollerAt(container, 300, 1000);
+		vi.spyOn(userText(container), "getBoundingClientRect").mockReturnValue({ top: 300 } as DOMRect);
+		fireEvent.click(showMore()!);
 		// A pinned reader would have been written to scrollHeight (1000).
 		expect(scroller.scrollTop).toBe(300);
 	});

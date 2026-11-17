@@ -660,7 +660,7 @@ export function Transcript({
 	const latchSeenRef = useRef<{ seen: boolean; tailId: string | null }>({ seen: false, tailId: null });
 	const headCompletionRef = useRef(0);
 	const userPagedRef = useRef(false);
-	const pressedHeaderRef = useRef<{ id: string; top: number } | null>(null);
+	const pressedHeaderRef = useRef<{ id: string; top: number; sel?: string } | null>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const scrollCue = useScrollCues();
 	const pinnedRef = useRef(true);
@@ -937,9 +937,23 @@ export function Transcript({
 			const control = event.target as HTMLElement | null;
 			const id = (event as CustomEvent<{ id?: string }>).detail?.id;
 			if (!control || !id) return;
+			/* WHICH THING STAYS PUT depends on the direction. Opening ("Show more",
+			   `aria-expanded` still false) grows the text DOWNWARD from its own top,
+			   so holding the control (which sits at the foot) would push the new
+			   lines UP under the header and hide the start of the message the
+			   reader just asked to read (design review D1). Hold the message's own
+			   top instead and the new lines fall below it. Closing ("Show less")
+			   shrinks the text, so hold the control and it lands under the thumb. */
+			const opening = control.getAttribute("aria-expanded") === "false";
+			const sel = opening
+				? `[data-user-text][data-message-id="${CSS.escape(id)}"]`
+				: `[data-message-toggle="${CSS.escape(id)}"]`;
+			const anchor = opening ? el.querySelector(sel) : control;
+			if (!anchor) return;
 			pressedHeaderRef.current = {
 				id,
-				top: control.getBoundingClientRect().top - el.getBoundingClientRect().top,
+				sel,
+				top: anchor.getBoundingClientRect().top - el.getBoundingClientRect().top,
 			};
 			pinnedRef.current = false;
 		};
@@ -1154,10 +1168,9 @@ export function Transcript({
 		const pressed = pressedHeaderRef.current;
 		if (pressed) {
 			pressedHeaderRef.current = null;
-			/* A bar answers to `data-condense-header`, a message's own control to
-			   `data-message-toggle`; ids never collide (bar keys are `turn:`/`fold:`). */
-			const escaped = CSS.escape(pressed.id);
-			const header = el.querySelector(`[data-condense-header="${escaped}"], [data-message-toggle="${escaped}"]`);
+			/* A bar answers to `data-condense-header`; a message's own control answers
+			   with the exact selector it stored when pressed (`sel`). */
+			const header = el.querySelector(pressed.sel ?? `[data-condense-header="${CSS.escape(pressed.id)}"]`);
 			if (header) {
 				const delta = header.getBoundingClientRect().top - box.top - pressed.top;
 				if (Math.abs(delta) > 0) el.scrollTop = Math.max(0, Math.min(max, scrollTop + delta));

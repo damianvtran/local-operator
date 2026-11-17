@@ -81,34 +81,29 @@ ANSWER_3 = "\n\n".join(
     [
         "Here is the full write-up. It is deliberately long so the reply is "
         "taller than the visible transcript on a phone.",
-        "**1. What changed.** The reply row now measures its own rendered "
-        "height. Anything past the cap is folded behind a visible control that "
-        "names what it does, and the control stays reachable with one thumb.",
-        "**2. Why a control and not a fade.** A fade says there might be more "
-        "but gives the reader no way to get it. A labelled control says there "
-        "is more, how much, and what pressing it does.",
-        "**3. What does not change.** Short replies render exactly as before. "
-        "A reply that is still streaming is never folded, because the foot of a "
-        "streaming reply is the thing being read.",
-        "**4. Where it stops.** The cap is a height, not a line count, so a "
-        "code block or a table counts for what it takes on screen. A reply "
-        "taller than the cap opens to its full height inside the transcript "
-        "scroller, never inside a second scroller.",
+        "**1. What changed.** Your own messages now carry a visible outline, and a "
+        "long one inside a finished turn shows three lines with a Show more button.",
+        "**2. Why a control and not a fade.** A fade says there might be more but "
+        "gives the reader no way to get it. A labelled control says there is more "
+        "and what pressing it does.",
+        "**3. What does not change.** Replies from the agent are not folded. They "
+        "scroll, and the edge of the transcript fades where more text exists.",
+        "**4. Where it stops.** The preview is a line count, not a pixel height, so "
+        "large text settings and the 320, 360 and 390 widths all behave.",
         "**5. Checks.** Typecheck, the unit suite for the transcript, and a "
-        "phone-size capture in light and dark. The capture shows the folded "
-        "state, the opened state and the short control case.",
-        "**6. Risks.** Folding changes the height of rows above the reader, "
-        "so the scroll anchor must hold across a toggle. That is covered by a "
-        "test that toggles a row above the viewport and asserts the row under "
-        "the reader's thumb does not move.",
-        "**7. Not covered.** Tablet and desktop widths, right-to-left layout "
-        "beyond the logical-property sweep, and the live streaming transition.",
-        "**8. Next.** Review rounds, then the same treatment for the steer " "row if you want it.",
-        "**9. Notes for the record.** The numbered list above is only here to "
-        "give this reply real height. Every paragraph is a full sentence, so "
-        "the wrapped height at 390px is close to what a genuine answer takes.",
-        "**10. Last line.** If you can read this line without scrolling past "
-        "the composer, the reply is not tall enough for the check.",
+        "phone-size capture in light and dark. The capture shows the folded state, "
+        "the opened state and the short control case.",
+        "**6. Risks.** Opening a message changes the height of a row, so the scroll "
+        "position must hold. Opening keeps the start of the message where it was; "
+        "closing keeps the button under the thumb.",
+        "**7. Not covered.** Tablet and desktop widths, right-to-left layout beyond "
+        "the logical-property sweep, and the live streaming transition.",
+        "**8. Next.** Review rounds, then the same treatment for the steer row if " "you want it.",
+        "**9. Notes for the record.** The numbered list above is only here to give "
+        "this reply real height. Every paragraph is a full sentence, so the wrapped "
+        "height at 390px is close to what a genuine answer takes.",
+        "**10. Last line.** If you can read this line without scrolling past the "
+        "composer, the reply is not tall enough for the check.",
     ]
 )
 

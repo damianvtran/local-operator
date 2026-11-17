@@ -37,7 +37,10 @@
  *
  * THE SCROLL ANCHOR. The control announces itself with `MESSAGE_PRESSED_EVENT`
  * before the message changes height and with `CONTENT_RESIZED_EVENT` after, so
- * the transcript holds the control under the reader's thumb through the toggle.
+ * the transcript can hold something still through the toggle. WHICH thing depends
+ * on the direction (the Transcript's listener decides): opening holds the
+ * message's own top, so the new lines fall below what the reader already sees;
+ * closing holds the control, so it lands under the thumb.
  */
 import { useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { cn } from "../lib/cn";
@@ -67,10 +70,15 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 		if (!clamped || !el) return;
 		const measure = () => setOverflows(el.scrollHeight > el.clientHeight);
 		measure();
-		if (typeof ResizeObserver === "undefined") return;
+		/* A late web-font swap can add a wrapped line without resizing the clamped
+		   box (it stays three lines tall), so the observer below would never fire
+		   and the text would be cut with no control. Re-read once fonts settle. */
+		let live = true;
+		void document.fonts?.ready.then(() => { if (live) measure(); });
+		if (typeof ResizeObserver === "undefined") return () => { live = false; };
 		const observer = new ResizeObserver(measure);
 		observer.observe(el);
-		return () => observer.disconnect();
+		return () => { live = false; observer.disconnect(); };
 	}, [clamped, text]);
 
 	/* The message changed height after it painted: say so, so the transcript can
@@ -91,6 +99,7 @@ export function UserText({ entryId, text, folded }: { entryId: string; text: str
 				ref={box}
 				id={textId}
 				data-user-text=""
+				data-message-id={entryId}
 				style={clamped ? CLAMP : undefined}
 				className="text-body leading-normal break-words whitespace-pre-wrap"
 			>
