@@ -95,14 +95,114 @@ on:
 # false` matters most here: a queued gate run must never be evicted by the
 # nightly schedule or by a later merge onto main — an evicted run reports no
 # verdict, and the PR's required check would sit "Expected".
+#
+# THE NIGHTLY HAS ITS OWN GROUP (GH #4074). It runs on refs/heads/main, so it
+# used to share `full-suite-main` with push runs, where a newer push could
+# replace it while pending (5 of 8 nightly runs in 2026-11-08..15 ended
+# cancelled; the canceller is not named in run metadata, so this is the
+# plausible cause, not a proven one). The nightly is the full-coverage
+# backstop for the affected-only/superseded savings below, so it must never be
+# coalesced. Cost: at most one extra concurrent run per day.
 concurrency:
-  group: ${{ github.ref == 'refs/heads/main' && 'full-suite-main' || format('full-suite-{0}', github.ref) }}
+  group: >-
+    ${{ github.event_name == 'schedule' && 'full-suite-nightly'
+    || github.ref == 'refs/heads/main' && 'full-suite-main'
+    || format('full-suite-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  # THE COST GATE (GH #4074): runs before every heavy job and decides, by
+  # event, whether the full suite may spend ~380 runner-minutes. Logic and the
+  # fail-closed rules live in scripts/fast_gate_check.py; read its docstring.
+  # In short: a labeled PR head or a dispatched ref needs a GREEN fast `CI Gate`
+  # on that exact head, and a push to main yields to a newer tested main tip.
+  # schedule is never gated: the nightly and every un-superseded main push
+  # still run EVERY test, so skipped work here is only ever a redundant run.
+  #
+  # The helper is downloaded from a TRUSTED tree rather than checked out from
+  # the PR merge ref, so a PR cannot rewrite its own gate while holding the
+  # token. For a PR that tree is `needs.changes.outputs.gate_base`: the live
+  # main tip `changes` resolved and the heavy jobs will actually test against
+  # (NOT `pull_request.base.sha`, which is the stale base the PR was opened or
+  # last updated on and may predate the helper). `changes` runs no heavy tested
+  # code: it checks out, proves the merge base and classifies, and does not
+  # depend on this job (that would be a cycle). Other events use the run's own
+  # SHA. If the trusted tree has no helper the download fails and the job goes
+  # RED: fail closed, with no inline fallback and no future allowance.
+  #
+  # ROLLOUT (two steps, no workflow flag in between): (1) a tests-only PR adds
+  # scripts/fast_gate_check.py to main; (2) only then does a PR carrying this
+  # workflow pass its own gate, because its gate_base now contains the helper.
+  #
+  # Every heavy job below needs this job AND tests BOTH `result == 'success'`
+  # and `outputs.ok == 'true'`: their `!cancelled()` overrides the implicit
+  # success() of `needs`, so a failed precondition would NOT stop them without
+  # the explicit tests, and `ok` alone could survive a late post-step failure.
+  # This is a COST GATE (scripts/ci_scope.py COST_GATES), deliberately
+  # FAIL-CLOSED, unlike the fail-open scope flags of `changes`.
+  precondition:
+    needs: [changes]
+    runs-on: ubuntu-latest
+    # Settle (300 s) plus bounded tag/API lookups (120 s tag budget) on a push;
+    # PR/dispatch paths finish in seconds.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
+      superseded: ${{ steps.gate.outputs.superseded }}
+    steps:
+      - name: Fetch the cost-gate helper from a trusted tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_SHA: ${{ github.event_name == 'pull_request' && needs.changes.outputs.gate_base || github.sha }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TRUSTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error title=Fast-CI precondition::no trusted 40-hex commit to fetch the helper from (gate_base unresolved); failing closed"
+            exit 1
+          fi
+          curl -fsS --retry 3 --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github.raw" \
+            -o "$RUNNER_TEMP/fast_gate_check.py" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/scripts/fast_gate_check.py?ref=$TRUSTED_SHA" \
+            || { echo "::error title=Fast-CI precondition::scripts/fast_gate_check.py is not at $TRUSTED_SHA; failing closed"; exit 1; }
+          # Provenance for the run log: the full trusted commit and the git
+          # blob id of the helper that decided (sha1 of "blob <n>\0<bytes>"),
+          # comparable with `git rev-parse <commit>:scripts/fast_gate_check.py`.
+          blob="$(python3 - "$RUNNER_TEMP/fast_gate_check.py" <<'PY'
+          import hashlib, sys
+          data = open(sys.argv[1], "rb").read()
+          print(hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest())
+          PY
+          )"
+          {
+            echo "### Fast-CI helper provenance"
+            echo
+            echo "trusted commit: \`$TRUSTED_SHA\`  helper blob: \`$blob\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "fast-gate helper trusted=$TRUSTED_SHA blob=$blob"
+
+      - name: Decide whether the full suite may run
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          python3 "$RUNNER_TEMP/fast_gate_check.py" \
+            --event "$EVENT" --repo "$GITHUB_REPOSITORY" \
+            --pr "${PR_NUMBER:-0}" --head-sha "$PR_HEAD_SHA" --head-repo "$PR_HEAD_REPO" \
+            --ref "$GITHUB_REF" --ref-name "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
   # Same classifier job as ci.yml (kept identical; a hygiene test compares the
   # two). Off `pull_request` every flag is true, so a push/schedule/dispatch
   # run never skips anything. A labeled PR is a real PR diff, and classifying
@@ -244,9 +344,11 @@ jobs:
           fi
 
   test:
-    needs: [changes]
+    needs: [changes, precondition]
     if: >-
       !cancelled() &&
+      needs.precondition.result == 'success' &&
+      needs.precondition.outputs.ok == 'true' &&
       needs.changes.outputs.unit != 'false'
     runs-on: ubuntu-latest
     # Keep six shards within the 20-job concurrency budget. PR #643 job
@@ -816,7 +918,7 @@ jobs:
     # Moved from ci.yml with `needs: [changes, lint, type-check]`; lint and
     # type-check stay on PR CI and do not exist in this workflow, and every
     # commit reaching `main` already passed them on its PR.
-    needs: [changes]
+    needs: [changes, precondition]
     # `!cancelled()` is required, not decoration: `needs` skips a job when a
     # needed job was SKIPPED, and GitHub applies an implicit `success()` to any
     # `if` that contains no status-check function. Without it, lint's deliberate
@@ -965,6 +1067,8 @@ jobs:
     # broken it.
     if: >-
       !cancelled() &&
+      needs.precondition.result == 'success' &&
+      needs.precondition.outputs.ok == 'true' &&
       needs.changes.outputs.tui != 'false'
     # Generous relative to the ~11 s the stage takes when healthy (~14 s on a
     # macOS runner, which is slower and queues longer). The failure mode under
@@ -1178,8 +1282,15 @@ jobs:
   # go red, and still passes the gate.
   merge-gate:
     name: Merge gate (full suite)
-    if: always()
+    # `always()` so a red precondition still REPORTS red. The one exception is a
+    # push to main that a newer tip superseded (`superseded` is only ever true
+    # there): that SHA gets NO verdict, shown grey/skipped with the summary
+    # `SUPERSEDED by <tip>` from the precondition, rather than a green nobody
+    # earned. A main push SHA is not a PR required-check subject, so grey cannot
+    # satisfy a PR's gate. Data-gated, not event-gated (see the hygiene test).
+    if: always() && needs.precondition.outputs.superseded != 'true'
     needs:
+      - precondition
       - changes
       - test
       - coverage-report
@@ -1245,7 +1356,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')"
+          # `precondition` is the cost gate, not a path-filtered job: only
+          # `success` is a pass for it. A skipped one would leave every heavy
+          # job skipped (`ok` unset) and the gate green with nothing run.
+          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select((.value.result != "success" and .value.result != "skipped") or (.key == "precondition" and .value.result != "success")) | "\(.key)=\(.value.result)"')"
           if [ -n "$bad" ]; then
             echo "::error title=Merge gate (full suite)::needed jobs not success or skipped: $(echo "$bad" | tr '\n' ' ')"
             exit 1
