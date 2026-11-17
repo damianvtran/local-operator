@@ -355,6 +355,10 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
             )
             pairs = ", ".join(f'"{name}": {safe}' for safe, (name, _) in zip(sanitised, params))
         else:
+            # Bound on both branches so the long-mapping explode below is
+            # well-typed; with no parameters the mapping is `{}` and never
+            # reaches that path, so this empty list changes no output.
+            sanitised = []
             signature = ""
             pairs = ""
         statement = f'    return Msg("{key}", {{{pairs}}})'

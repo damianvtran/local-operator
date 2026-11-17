@@ -54,7 +54,10 @@ def test_long_placeholder_mapping_explodes_one_pair_per_line(i18n_generate) -> N
     assert '            "pointer": pointer,\n' in module
     tree = ast.parse(module)
     call = next(node for node in ast.walk(tree) if isinstance(node, ast.Dict))
-    assert [k.value for k in call.keys] == ["form", "last", "count", "source", "pointer", "head"]
+    # Narrow each key to a string Constant: dict keys are `expr | None`
+    # (None marks a `**splat`), and a generated mapping must carry neither.
+    keys = [k.value if isinstance(k, ast.Constant) else k for k in call.keys]
+    assert keys == ["form", "last", "count", "source", "pointer", "head"]
     compile(module, "demo.py", "exec")
 
 

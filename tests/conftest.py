@@ -585,6 +585,15 @@ _AMBIENT_VARS = (
     # than explained.
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    # Its companion: the diagnostic scope the same injection writes beside the
+    # bearer (a sha256 of that token plus the designation digest). It authorizes
+    # nothing, but it is CREDENTIAL-DERIVED and it moves the helper's stderr:
+    # `_repository_diagnostic` prints the denied-repo hint only when the value
+    # matches the token/list in play. Inherited from a lop session's bash child
+    # it would ride along with a live bearer and let a "no context → no hint"
+    # cell read the shell's value instead of the one it sets. Scrubbed, like
+    # the bearer it describes.
+    "LOCAL_OPERATOR_GITHUB_DIAGNOSTIC_SCOPE",
     # The OSC 8 hyperlink capability markers of the REAL terminal the suite is
     # run from (``terminals.py::is_hyperlinked``, the supplement file callouts'
     # paint decision): ``VTE_VERSION`` is exported by every VTE-based terminal
