@@ -3878,7 +3878,9 @@ def _verify_replica_against_cursor(root: Path, session_id: str, source: Path) ->
             )
 
 
-def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> bool:
+def _quarantine_refused_recovery(
+    root: Path, target: Path, new_id: str, created: tuple[int, int] | None
+) -> bool:
     """Move a refused recovery's partial copy out of ``sessions/`` (S-1).
 
     Before the origin-stamp work a refused copy was simply left un-promoted under
@@ -3901,14 +3903,16 @@ def _quarantine_refused_recovery(root: Path, target: Path, new_id: str) -> bool:
     # Routed through the session-cleanup module (tests/unit/session/
     # test_no_session_deletion.py): this is a rename OUT of ``sessions/``, and
     # every such call lives behind cleanup.py's guards. The guard proves the tree
-    # is the one this call created from the claim naming this pid, moves it
-    # without deleting anything, and drops the claim only at the landing.
+    # is the one this call created (``created`` is its st_dev/st_ino, recorded
+    # right after the claim) and that the claim still names this pid. It renames
+    # it to network/quarantine/<new_id> without replacing anything, deletes
+    # nothing, and drops the claim only at the landing.
     from local_operator.session.cleanup import quarantine_claimed_session_dir
 
     landing = quarantine_claimed_session_dir(
         target,
         config_dir=Path(root),
-        holding_dir=network_dir(root) / QUARANTINE_DIRNAME,
+        created=created,
         reason=f"refused recovery of {new_id}",
         actor="sync.promote_replica",
     )
@@ -3977,8 +3981,13 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
 
     claim_session(target)
     copied: list[str] = []
+    # The created directory's identity, so a refused copy can be quarantined by
+    # proof of "this call made it" (inode), not by its name alone.
+    created: tuple[int, int] | None = None
     try:
         target.mkdir(parents=True, exist_ok=True)
+        made = os.lstat(target)
+        created = (made.st_dev, made.st_ino)
         # The replica is peer-authored too. Validate its links as one graph against
         # the NEW session root before copying files or publishing shared attachments.
         carried_links = [{"name": name, "link": link} for name, link in tree_link_entries(source)]
@@ -4103,7 +4112,7 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         # verified) for listings and sweeps to pick up, briefly, or for good if
         # the move then failed. The quarantine drops the claim at the landing; a
         # failed move keeps it, and the refusal below still propagates.
-        _quarantine_refused_recovery(Path(root), target, new_id)
+        _quarantine_refused_recovery(Path(root), target, new_id, created)
         if isinstance(exc, SyncRefused):
             raise
         raise SyncRefused(

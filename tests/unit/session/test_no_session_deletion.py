@@ -3731,14 +3731,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "destination anything, so a refusal leaves the conversation where it was",
     ),
     (
-        "local_operator/session/cleanup.py::quarantine_claimed_session_dir",
+        "local_operator/session/cleanup.py::_rename_noreplace",
         "os.rename",
-        "A refused mesh recovery's own copy: renames sessions/<new_id> out to "
-        "<config>/network/quarantine/ (no deletion), and only after proving the tree "
-        "is this call's — a direct real child of <config>/sessions whose .session.pid "
-        "names os.getpid() (promote_replica refuses an existing id before claiming) "
-        "and a holding dir inside the config but outside sessions/; any other tree "
-        "is refused in place",
+        "The fallback half of the quarantine's no-replace rename (the kernel half, "
+        "renameat2 RENAME_NOREPLACE / renamex_np RENAME_EXCL via ctypes, is in the "
+        "same function and invisible to this scan, so it is named here). Reached only "
+        "from quarantine_claimed_session_dir after it proved the source is this call's "
+        "sessions/<new_id> (st_dev/st_ino recorded at creation, .session.pid naming "
+        "os.getpid(), no lease) and the destination is a not-yet-existing name under "
+        "the real <config>/network/quarantine/; refuses an existing destination; a "
+        "rename, never a delete",
     ),
     (
         "local_operator/session/cleanup.py::quarantine_claimed_session_dir",
@@ -3846,9 +3848,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/network/origin.py::_downgrade_file",
         "os.replace",
-        "Publishes this call's own mkstemp temp FILE (created beside it) over the "
-        "regular *.jsonl file it just read; os.replace of a file onto a directory "
-        "fails, so no directory is ever replaced or renamed",
+        "Publishes this call's own mkstemp temp FILE, created in the same directory, "
+        "over the file it read. It asserts in code that the target is that same "
+        "regular file: lstat S_ISREG, O_NOFOLLOW open, fstat dev/ino, re-lstat dev/ino "
+        "just before the replace. A symlink, directory or swapped target raises "
+        "ImportStampsRefused (tests in test_mesh_origin.py), so no directory is ever "
+        "replaced or renamed",
     ),
     (
         "local_operator/network/origin.py::_downgrade_file",
@@ -5065,8 +5070,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/cleanup.py::hand_off_session_dir",
         # The second, and the only other: a refused mesh recovery's partial copy,
         # renamed out to network/quarantine/ (never deleted) once its claim proves
-        # this process created it in the same call (see its allow-list row).
-        "local_operator/session/cleanup.py::quarantine_claimed_session_dir",
+        # this call created it (inode) and still claims it (see its allow-list row).
+        "local_operator/session/cleanup.py::_rename_noreplace",
         # tmp -> .session-census.json (the census baseline, beside the log)
         "local_operator/session/census.py::_write_census",
         # tmp -> <UTC>-<session>.json manifest FILE under sessions/.cleanup-manifests,

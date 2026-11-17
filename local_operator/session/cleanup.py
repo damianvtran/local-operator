@@ -79,6 +79,7 @@ runs. That pass is gated by ``enabled`` alone (QA round 1, Q4).
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -1627,67 +1628,143 @@ def sweep_handed_away(config_dir: Path, *, max_age_s: float = HANDED_AWAY_MAX_AG
     return swept
 
 
+#: Where a REFUSED mesh recovery's partial copy is parked
+#: (``<config>/network/quarantine/``) by :func:`quarantine_claimed_session_dir`.
+#: Kept, never swept: the tree is evidence of what a peer sent. Spelled here AND
+#: as ``network.sync.QUARANTINE_DIRNAME`` (sync's readers predate this helper);
+#: ``test_mesh_origin_relay`` asserts the two agree.
+QUARANTINE_DIRNAME = "quarantine"
+
+#: ``renameat2(2)``'s RENAME_NOREPLACE (Linux) and ``renamex_np(2)``'s
+#: RENAME_EXCL (macOS): the kernel refuses the rename if the destination exists,
+#: atomically. Plain ``rename(2)`` silently REPLACES an empty destination
+#: directory, so an exists-check alone leaves a window.
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+_RENAME_EXCL = 0x4
+
+
+def _noreplace_rename_call() -> Callable[[bytes, bytes], int] | None:
+    """The platform's atomic no-replace rename, or ``None`` where it has none."""
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+    except (OSError, ImportError, AttributeError):
+        return None
+    if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        fn = libc.renameat2
+        return lambda src, dst: fn(_AT_FDCWD, src, _AT_FDCWD, dst, _RENAME_NOREPLACE)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        fn = libc.renamex_np
+        return lambda src, dst: fn(src, dst, _RENAME_EXCL)
+    return None
+
+
+def _rename_noreplace(src: Path, dst: Path) -> None:
+    """Rename ``src`` to ``dst``, refusing (``FileExistsError``) if ``dst`` exists.
+
+    A RENAME, never a copy-and-delete: nothing is removed. Atomic no-replace via
+    the kernel where available. Where it is not (another OS, an old libc, or a
+    filesystem answering ENOSYS/EINVAL/ENOTSUP), it falls back to an
+    ``lexists`` check then ``os.rename``. That is safe enough HERE because the
+    only caller holds the source's claim and the destination is a fresh name in
+    a config-private directory nothing else writes to.
+    """
+    call = _noreplace_rename_call()
+    if call is not None:
+        import ctypes
+
+        if call(os.fsencode(src), os.fsencode(dst)) == 0:
+            return
+        err = ctypes.get_errno()
+        if err not in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise OSError(err, os.strerror(err), os.fspath(src), None, os.fspath(dst))
+    if os.path.lexists(dst):
+        raise FileExistsError(errno.EEXIST, "destination exists", os.fspath(dst))
+    os.rename(src, dst)
+
+
 def quarantine_claimed_session_dir(
     target: Path,
     *,
     config_dir: Path,
-    holding_dir: Path,
+    created: tuple[int, int] | None,
     reason: str,
     actor: str,
 ) -> Path | None:
-    """Move a session directory THIS PROCESS still claims out of the store, intact.
+    """Rename a session directory THIS CALL created, and still claims, out of the store.
 
     WHY THIS EXISTS. ``sync.promote_replica`` creates and claims
-    ``sessions/<new_id>`` and then copies a peer's replica into it. When the
-    import door refuses that copy (origin-stamp downgrade failure, a mismatched
-    content digest), the partial tree must leave ``sessions/``: it may still hold
-    stamps reading ``verified: true``, and every listing would offer it as a
-    conversation. It is NOT deleted — the mesh layer never deletes, and the tree
-    is evidence of what a peer sent — so neither :func:`hand_off_session_dir`
+    ``sessions/<new_id>``, then copies a peer's replica into it. When the import
+    door refuses that copy (origin-stamp downgrade failure, a mismatched content
+    digest), the partial tree must leave ``sessions/``: it may still hold stamps
+    reading ``verified: true``, and every listing would offer it as a
+    conversation. It is NOT deleted: the mesh layer never deletes, and the tree is
+    evidence of what a peer sent. That is why neither :func:`hand_off_session_dir`
     (renames, then deletes) nor :func:`remove_fresh_session_dir` (deletes) fits.
 
-    THE IDENTITY PROOF is the claim: ``target/.session.pid`` must exist and name
-    ``os.getpid()``. ``promote_replica`` refuses an existing id before it claims,
-    so a claim naming this pid on that path means this process created the
-    directory in this call; any other content (another pid, a lease-owned
-    session, no claim, an unreadable marker) is refused and the tree stays put.
-    The move happens WHILE claimed (review R2-2): the claim travels with the tree
-    and is dropped only at the landing, so no unclaimed copy is ever visible under
-    ``sessions/``. A refusal or a failed rename keeps the claim in place, so the
-    copy still reads as owned to listings and sweeps for as long as we live.
+    THE SECURITY BAR (guardrails owner, PR #4169). Every point is checked here,
+    and ANY mismatch refuses, leaving the tree exactly where it is and still
+    claimed:
 
-    Further refusals: ``target`` must be a real (non-symlink) direct child of
-    ``<config_dir>/sessions``, and ``holding_dir`` must resolve inside
-    ``config_dir`` but outside ``sessions/`` — a move from the store into the
-    store is not a quarantine.
+    1. A rename only (:func:`_rename_noreplace`). Nothing is ever removed except
+       the claim FILE, and only once the tree has landed.
+    2. The source is the directory this call created, still claimed:
+       - ``created`` is the ``(st_dev, st_ino)`` the caller recorded right after
+         creating it, and the ``lstat`` of ``target`` must match it (a name alone
+         proves nothing);
+       - ``target/.session.pid`` must name ``os.getpid()``;
+       - there must be no ``.execution-lease``;
+       - ``target`` must be a real, direct child of ``<config>/sessions``.
+    3. The destination is ``<config>/network/quarantine/<name>``, with no
+       overwrite:
+       - the holding dir must resolve to exactly that path (no symlinked
+         detour);
+       - a destination that already exists is refused, atomically where the
+         kernel allows it.
+       After the rename, the landing's inode is checked against ``created``. A
+       mismatch (something swapped the source between check and rename) is
+       renamed back and reported as a refusal.
 
-    Returns the landing path once the tree has left ``sessions/``; ``target``
-    itself when nothing was there to move (the desired post-state); ``None`` on
-    any refusal or rename failure (logged, never raised — the caller is already
-    propagating its own refusal and only needs to know whether the claim stays).
+    The move happens WHILE CLAIMED (review R2-2): the claim travels with the
+    tree, so no unclaimed copy is ever visible under ``sessions/``.
+
+    Returns:
+    - the landing path once the tree has left ``sessions/``;
+    - ``target`` itself when nothing is there (the desired post-state);
+    - ``None`` on any refusal or rename failure. This is logged, never raised:
+      the caller is already propagating its own refusal and only needs to know
+      whether the claim stays.
     """
     target = Path(target)
-    if not target.exists() and not target.is_symlink():
+    if not os.path.lexists(target):
         return target
+    config_root = Path(config_dir)
+    holding = config_root / "network" / QUARANTINE_DIRNAME
+    landing = holding / target.name
     try:
-        if target.is_symlink() or not target.is_dir():
+        if created is None:
+            raise OSError("no creation identity was recorded")
+        st = os.lstat(target)
+        if not stat.S_ISDIR(st.st_mode):
             raise OSError("not a real directory")
-        store = (Path(config_dir) / SESSIONS_DIRNAME).resolve(strict=True)
+        if (st.st_dev, st.st_ino) != tuple(created):
+            raise OSError("not the directory this call created (inode mismatch)")
+        store = (config_root / SESSIONS_DIRNAME).resolve(strict=True)
         if target.resolve(strict=True).parent != store:
             raise OSError("not a direct child of the session store")
-        holding_root = Path(holding_dir).resolve()
-        config_root = Path(config_dir).resolve(strict=True)
-        if (
-            config_root not in holding_root.parents
-            or holding_root == store
-            or store in holding_root.parents
-        ):
-            raise OSError("the holding directory is not outside sessions/ in this config")
-        if (target / ".execution-lease").exists():
+        if os.path.lexists(target / ".execution-lease"):
             raise OSError("a lease owns it")
         claimant = (target / LIVE_MARKER_NAME).read_text(encoding="utf-8").strip()
         if claimant != str(os.getpid()):
             raise OSError(f"claimed by {claimant or 'nobody'}, not this process")
+        holding.mkdir(parents=True, exist_ok=True)
+        expected_holding = config_root.resolve(strict=True) / "network" / QUARANTINE_DIRNAME
+        if holding.is_symlink() or holding.resolve(strict=True) != expected_holding:
+            raise OSError("the quarantine directory is not where it should be")
+        if os.path.lexists(landing):
+            raise FileExistsError(errno.EEXIST, "destination exists", os.fspath(landing))
     except OSError as exc:
         logger.warning(
             "session cleanup: REFUSED to quarantine %s (%s); reason=%s actor=%s",
@@ -1698,18 +1775,32 @@ def quarantine_claimed_session_dir(
         )
         return None
     try:
-        holding_dir.mkdir(parents=True, exist_ok=True)
-        landing = holding_dir / target.name
-        if landing.exists() or landing.is_symlink():
-            landing = holding_dir / f"{target.name}.{time.time_ns()}"
-        # ``os.rename``, never a copy-and-delete: same filesystem (both under
-        # ``config_dir``), atomic, and it removes nothing.
-        os.rename(target, landing)
+        _rename_noreplace(target, landing)
     except OSError as exc:
         logger.error(
             "session cleanup: could not quarantine %s (%s); its claim is kept; reason=%s actor=%s",
             target,
             exc,
+            reason,
+            actor,
+        )
+        return None
+    try:
+        moved = os.lstat(landing)
+        swapped = (moved.st_dev, moved.st_ino) != tuple(created)
+    except OSError:
+        swapped = True
+    if swapped:
+        # Something replaced the source between the checks and the rename. Put
+        # back whatever was moved (no-replace, so nothing is clobbered) and refuse.
+        try:
+            _rename_noreplace(landing, target)
+        except OSError:
+            logger.exception("session cleanup: could not restore %s after a swap", target)
+        logger.error(
+            "session cleanup: REFUSED to quarantine %s (it changed during the move); "
+            "reason=%s actor=%s",
+            target,
             reason,
             actor,
         )
@@ -1722,8 +1813,8 @@ def quarantine_claimed_session_dir(
         actor,
     )
     # ``retention.release_session`` only acts under ``sessions/``, so the claim
-    # that moved with the tree is dropped here, at its new path. Best-effort: a
-    # stale claim outside the store protects nothing and harms nothing.
+    # that travelled with the tree is dropped here, at its landing. Best-effort:
+    # a stale claim outside the store protects nothing and harms nothing.
     try:
         (landing / LIVE_MARKER_NAME).unlink()
     except OSError:

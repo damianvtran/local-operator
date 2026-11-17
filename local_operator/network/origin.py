@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -420,8 +421,41 @@ def _downgrade_value(value: Any) -> bool:
     return changed
 
 
+def _open_regular_file(path: Path) -> tuple[bytes, os.stat_result]:
+    """Read ``path`` only if it is a regular file reached without a symlink.
+
+    WHY (guardrails bar, PR #4169): ``_downgrade_file`` ends in an ``os.replace``
+    onto ``path``, and the session-deletion guard allow-lists that call only
+    because its target is provably the same regular FILE this call read, never a
+    directory and never something a symlink points at. ``O_NOFOLLOW`` refuses a
+    symlink at open where the platform has it; the ``lstat`` covers the rest; the
+    ``fstat`` of the open descriptor is the identity the replace is checked
+    against. Any mismatch raises :class:`ImportStampsRefused`, which every import
+    door treats as a refusal.
+    """
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ImportStampsRefused(f"{path.name}: cannot be read ({exc})") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise ImportStampsRefused(f"{path.name}: not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ImportStampsRefused(f"{path.name}: cannot be opened ({exc})") from exc
+    with os.fdopen(fd, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise ImportStampsRefused(f"{path.name}: changed while it was being opened")
+        return handle.read(), opened
+
+
 def _downgrade_file(path: Path) -> int:
-    raw = path.read_bytes()
+    raw, opened = _open_regular_file(path)
     if not line_may_carry_stamp(raw):
         return 0
     lines = raw.split(b"\n")
@@ -454,7 +488,17 @@ def _downgrade_file(path: Path) -> int:
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(b"\n".join(lines))
-            os.chmod(staged, path.stat().st_mode & 0o777)
+            os.chmod(staged, opened.st_mode & 0o777)
+            # Re-check, immediately before the swap, that ``path`` is still the
+            # very regular file read above (same device and inode, not a symlink):
+            # the guard's allow-list row rests on this. ``staged`` is a sibling
+            # (``mkstemp(dir=path.parent)``), so the swap never crosses a directory.
+            current = os.lstat(path)
+            if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
+                opened.st_dev,
+                opened.st_ino,
+            ):
+                raise ImportStampsRefused(f"{path.name}: replaced while it was being rewritten")
             os.replace(staged, path)
         except BaseException:
             Path(staged).unlink(missing_ok=True)

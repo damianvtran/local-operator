@@ -567,10 +567,12 @@ def _refusing_replica(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[
 def test_r2_2_quarantine_moves_the_copy_before_releasing_its_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
+    from local_operator.session import cleanup
 
     root, session_id = _refusing_replica(tmp_path, monkeypatch)
-    real_rename = os.rename
+    # The move's ONE primitive (cleanup._rename_noreplace: renameat2/renamex_np,
+    # else an exists-check plus os.rename), observed at the call.
+    real_rename = cleanup._rename_noreplace
     claimed_at_move: list[bool] = []
 
     def watching_rename(src: Any, dst: Any) -> None:
@@ -578,7 +580,7 @@ def test_r2_2_quarantine_moves_the_copy_before_releasing_its_claim(
             claimed_at_move.append((Path(src) / ".session.pid").exists())
         real_rename(src, dst)
 
-    monkeypatch.setattr(sync.os, "rename", watching_rename)
+    monkeypatch.setattr(cleanup, "_rename_noreplace", watching_rename)
     with pytest.raises(sync.SyncRefused):
         sync.promote_replica(root, session_id, new_id="recovered0001")
     assert claimed_at_move == [True]
@@ -591,17 +593,17 @@ def test_r2_2_quarantine_moves_the_copy_before_releasing_its_claim(
 def test_r2_2_a_failed_quarantine_keeps_the_claim_and_still_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
+    from local_operator.session import cleanup
 
     root, session_id = _refusing_replica(tmp_path, monkeypatch)
-    real_rename = os.rename
+    real_rename = cleanup._rename_noreplace
 
     def failing_rename(src: Any, dst: Any) -> None:
         if sync.QUARANTINE_DIRNAME in Path(dst).parts:
             raise OSError("injected: quarantine unavailable")
         real_rename(src, dst)
 
-    monkeypatch.setattr(sync.os, "rename", failing_rename)
+    monkeypatch.setattr(cleanup, "_rename_noreplace", failing_rename)
     with pytest.raises(sync.SyncRefused):
         sync.promote_replica(root, session_id, new_id="recovered0001")
     # Still under sessions/, so it stays claimed: listings and sweeps skip it.
@@ -609,31 +611,49 @@ def test_r2_2_a_failed_quarantine_keeps_the_claim_and_still_refuses(
 
 
 # The guarded quarantine (cleanup.quarantine_claimed_session_dir) that the
-# refused-recovery path routes through: it moves only a directory THIS process
-# still claims, never deletes, and refuses everything else in place.
+# refused-recovery path routes through. Security bar (PR #4169): rename only;
+# source proven by inode AND live claim; destination network/quarantine/<id>,
+# never overwritten; ANY mismatch refuses, leaving the tree in place, claimed.
 
 
-def _claimed_dir(root: Path, name: str, pid: str) -> Path:
-    target = root / "sessions" / name
-    target.mkdir(parents=True)
-    (target / ".session.pid").write_text(pid, encoding="utf-8")
-    (target / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
-    return target
-
-
-def test_quarantine_moves_only_a_dir_this_process_claims(tmp_path: Path) -> None:
+def _claimed_dir(root: Path, name: str, pid: str | None) -> tuple[Path, tuple[int, int]]:
     import os
 
+    target = root / "sessions" / name
+    target.mkdir(parents=True)
+    if pid is not None:
+        (target / ".session.pid").write_text(pid, encoding="utf-8")
+    (target / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    made = os.lstat(target)
+    return target, (made.st_dev, made.st_ino)
+
+
+def _quarantine(target: Path, config: Path, created: Any) -> Any:
     from local_operator.session import cleanup
 
-    holding = tmp_path / "network" / "quarantine"
-    mine = _claimed_dir(tmp_path, "mine0001", str(os.getpid()))
-    landing = cleanup.quarantine_claimed_session_dir(
-        mine, config_dir=tmp_path, holding_dir=holding, reason="t", actor="t"
+    return cleanup.quarantine_claimed_session_dir(
+        target, config_dir=config, created=created, reason="t", actor="t"
     )
-    assert landing == holding / "mine0001"
-    assert not mine.exists()
-    assert (landing / "transcript.jsonl").read_text(encoding="utf-8") == "{}\n"
+
+
+def _left_in_place(target: Path) -> None:
+    assert (target / "transcript.jsonl").read_text(encoding="utf-8") == "{}\n"
+
+
+def test_quarantine_dirname_agrees_with_sync() -> None:
+    from local_operator.session import cleanup
+
+    assert cleanup.QUARANTINE_DIRNAME == sync.QUARANTINE_DIRNAME
+
+
+def test_quarantine_renames_only_the_dir_this_call_created_and_claims(tmp_path: Path) -> None:
+    import os
+
+    target, created = _claimed_dir(tmp_path, "mine0001", str(os.getpid()))
+    landing = _quarantine(target, tmp_path, created)
+    assert landing == tmp_path / "network" / "quarantine" / "mine0001"
+    assert not target.exists()
+    _left_in_place(landing)  # moved whole, contents intact
     assert not (landing / ".session.pid").exists()
 
 
@@ -641,50 +661,78 @@ def test_quarantine_moves_only_a_dir_this_process_claims(tmp_path: Path) -> None
 def test_quarantine_refuses_a_dir_another_process_or_nobody_claims(
     tmp_path: Path, claim: str | None
 ) -> None:
-    from local_operator.session import cleanup
-
-    target = _claimed_dir(tmp_path, "other0001", claim or "")
-    if claim is None:
-        (target / ".session.pid").unlink()
-    landing = cleanup.quarantine_claimed_session_dir(
-        target,
-        config_dir=tmp_path,
-        holding_dir=tmp_path / "network" / "quarantine",
-        reason="t",
-        actor="t",
-    )
-    assert landing is None
-    assert (target / "transcript.jsonl").is_file()  # left exactly where it was
+    target, created = _claimed_dir(tmp_path, "other0001", claim)
+    assert _quarantine(target, tmp_path, created) is None
+    _left_in_place(target)
 
 
-def test_quarantine_refuses_a_holding_dir_inside_sessions_or_a_foreign_store(
-    tmp_path: Path,
-) -> None:
+def test_quarantine_refuses_by_inode_not_name(tmp_path: Path) -> None:
     import os
 
+    target, (dev, ino) = _claimed_dir(tmp_path, "mine0002", str(os.getpid()))
+    # Same name, same claim, but not the directory this call recorded creating.
+    assert _quarantine(target, tmp_path, (dev, ino + 1)) is None
+    assert _quarantine(target, tmp_path, None) is None
+    _left_in_place(target)
+    assert (target / ".session.pid").is_file()
+
+
+def test_quarantine_refuses_a_symlinked_source(tmp_path: Path) -> None:
+    import os
+
+    real, created = _claimed_dir(tmp_path, "real0001", str(os.getpid()))
+    link = tmp_path / "sessions" / "link0001"
+    link.symlink_to(real, target_is_directory=True)
+    assert _quarantine(link, tmp_path, created) is None
+    assert link.is_symlink()
+    _left_in_place(real)
+
+
+def test_quarantine_never_overwrites_an_existing_destination(tmp_path: Path) -> None:
+    import os
+
+    target, created = _claimed_dir(tmp_path, "mine0003", str(os.getpid()))
+    occupied = tmp_path / "network" / "quarantine" / "mine0003"
+    occupied.mkdir(parents=True)  # an EMPTY dir: plain rename(2) would replace it
+    assert _quarantine(target, tmp_path, created) is None
+    _left_in_place(target)
+    assert occupied.is_dir() and not any(occupied.iterdir())
+
+
+def test_rename_noreplace_refuses_an_existing_empty_directory(tmp_path: Path) -> None:
     from local_operator.session import cleanup
 
-    target = _claimed_dir(tmp_path, "mine0002", str(os.getpid()))
-    for holding in (tmp_path / "sessions" / "q", tmp_path.parent / "elsewhere-q"):
-        assert (
-            cleanup.quarantine_claimed_session_dir(
-                target, config_dir=tmp_path, holding_dir=holding, reason="t", actor="t"
-            )
-            is None
-        )
-    other_store = tmp_path / "other"
-    (other_store / "sessions").mkdir(parents=True)
-    assert (
-        cleanup.quarantine_claimed_session_dir(
-            target,
-            config_dir=other_store,
-            holding_dir=other_store / "network" / "quarantine",
-            reason="t",
-            actor="t",
-        )
-        is None
-    )
-    assert (target / ".session.pid").is_file()  # still claimed, still in place
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "member").write_text("x", encoding="utf-8")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with pytest.raises(FileExistsError):
+        cleanup._rename_noreplace(src, dst)
+    assert (src / "member").is_file() and not any(dst.iterdir())
+
+
+def test_quarantine_refuses_a_redirected_quarantine_dir(tmp_path: Path) -> None:
+    import os
+
+    target, created = _claimed_dir(tmp_path, "mine0004", str(os.getpid()))
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "network").mkdir()
+    (tmp_path / "network" / "quarantine").symlink_to(elsewhere, target_is_directory=True)
+    assert _quarantine(target, tmp_path, created) is None
+    _left_in_place(target)
+    assert not any(elsewhere.iterdir())
+
+
+def test_quarantine_refuses_a_dir_outside_this_config_store(tmp_path: Path) -> None:
+    import os
+
+    target, created = _claimed_dir(tmp_path, "mine0005", str(os.getpid()))
+    other = tmp_path / "other"
+    (other / "sessions").mkdir(parents=True)
+    assert _quarantine(target, other, created) is None
+    _left_in_place(target)
 
 
 # ---------------------------------------------------------------------------

@@ -478,6 +478,53 @@ def _deep(depth: int) -> Any:
     return value
 
 
+# The rewrite's ``os.replace`` is allow-listed in test_no_session_deletion.py
+# only because its target is the same regular FILE it read (PR #4169 guardrails
+# bar). ``_downgrade_file`` asserts that itself, so a caller other than
+# ``downgrade_stamps`` (which already skips links and non-files) cannot aim it at a
+# symlink or a directory.
+
+
+def test_downgrade_file_refuses_a_symlink_target(tmp_path: Path) -> None:
+    real = tmp_path / "real.jsonl"
+    _jsonl(real, [{"lop_mesh_origin": _stamp(by="dev-a")}])
+    before = real.read_bytes()
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(real)
+    with pytest.raises(origin.ImportStampsRefused, match="not a regular file"):
+        origin._downgrade_file(link)
+    assert link.is_symlink() and real.read_bytes() == before
+
+
+def test_downgrade_file_refuses_a_directory_target(tmp_path: Path) -> None:
+    folder = tmp_path / "transcript.jsonl"
+    folder.mkdir()
+    (folder / "member").write_text("x", encoding="utf-8")
+    with pytest.raises(origin.ImportStampsRefused, match="not a regular file"):
+        origin._downgrade_file(folder)
+    assert (folder / "member").read_text(encoding="utf-8") == "x"
+
+
+def test_downgrade_file_refuses_a_target_swapped_before_the_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "asks.jsonl"
+    _jsonl(path, [{"lop_mesh_origin": _stamp(by="dev-a")}])
+    real_dumps = origin.json.dumps
+
+    def swapping_dumps(*args: Any, **kwargs: Any) -> str:
+        # Between the read and the replace: the path now names another file.
+        path.unlink()
+        path.mkdir()
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(origin.json, "dumps", swapping_dumps)
+    with pytest.raises(origin.ImportStampsRefused, match="replaced while"):
+        origin._downgrade_file(path)
+    assert path.is_dir()
+    assert [p.name for p in tmp_path.iterdir()] == ["asks.jsonl"]  # temp cleaned up
+
+
 def test_s1_a_1500_deep_stamped_row_is_still_downgraded(tmp_path: Path) -> None:
     """The C decoder parses ~1500 levels; a recursive walk of them blew Python's stack."""
     session = tmp_path / "s"
