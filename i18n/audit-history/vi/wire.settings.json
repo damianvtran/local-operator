@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "fe95629256744cbc6b9a6ff51f6f37762203b9b013d7e59e65a8015d97394da8",
+  "history_sha256": "7d72653f5d245bf87dadc3e806fa64dbea7d876dadb9be382c404f8b37b49f00",
   "entries": [
     {
       "locale": "vi",
@@ -646,6 +646,40 @@
       },
       "retained_upstream_findings": [],
       "note": "Merged-source binding 2026-11-15, copy-reviewer session 5b334e35ef01 (anthropic/claude-opus-5-5, no fallback). Source f5c40bc8a076 = base 2baf6804bc41 + PR #3990 delta (1 key: display_notification_session_name.help; passed d62d8ba8b744 + second audit 937c6ecbae86) + main delta (2 keys: desktop_remote_files_cache_bytes.label/help; passed binding2 187b766ab67d, openai/gpt-6.1-sol). Exact key-disjoint value composition in en and vi; 866 other keys byte-identical to base. No translation changed, no history rewritten, no new native review claimed. Single binding audit only. Evidence: i18n/audits/evidence/vi/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+      "target_sha256": "98217040aadfa13ae98c19bfcd9a3044d1ce5e35642dd91e20e38a62be4bb87b",
+      "translator": {
+        "agent": "i18n-translator (job 6bf342c7825b); resumed/remediation job chain 6bf342c7825b->4f5e2163d473->c030bb8dc042->7f43b54c66e9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, task as-au-vi)",
+        "session": "9bde6e3b38c6",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-16",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 (fix/auto-prune-generations) update_auto_prune/update_keep_generations copy, final audit at cc66c51cb3ad + uncommitted translator edits (bytes = target_sha256). Independent i18n-auditor session 9bde6e3b38c6 (anthropic/claude-opus-5-5, fallback: none observed) of i18n-translator job 6bf342c7825b (anthropic/claude-sonnet-5-5; job chain 6bf342c7825b->4f5e2163d473->c030bb8dc042->7f43b54c66e9; translator replaced the earlier UNAUDITED implementer drafts). Audited keys: the 8 keys wire.settings.updates.title/description, update_auto_prune.label/help/choice.true.description/choice.false.description, update_keep_generations.label/help. Pair findings: 0 blocker, 0 major, 0 minor, 0 nit []; verdict CLEAN. Earlier draft rounds of this audit (where the record has a round1 block) found MAJOR(s) that were remediated by the translator before these bytes; they were never ledger rows. Record: i18n/audits/evidence/vi/wire.settings/ap1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/vi/wire.settings/ap1/record.json",
+      "round": "ap1",
+      "keys_audited": 8
     }
   ]
 }
