@@ -4901,6 +4901,9 @@ class PeerLink:
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
+        #: The reader's monotonic timeout and writer's wall-idle check can race;
+        #: the relay claims their single idle audit row under its links lock.
+        self._idle_audited = False
         #: When the writer last sent a keepalive ``ping``. The cadence is measured from
         #: the LATER of this and ``last_frame_at`` — see ``_write_loop``.
         self.last_ping_sent_at = 0.0
@@ -5254,7 +5257,28 @@ class PeerLink:
 
     def _write_loop(self) -> None:
         try:
+            last_wall, last_mono = time.time(), time.monotonic()
             while not self._closed.is_set():
+                now, mono = time.time(), time.monotonic()
+                gap_s = (now - last_wall) - (mono - last_mono)
+                last_wall, last_mono = now, mono
+                if gap_s > self.settings.keepalive_s:
+                    # macOS monotonic time excludes clamshell sleep. Explain that
+                    # gap without publishing absolute clock values, once across
+                    # all writers waking on this host. A large forward wall-clock
+                    # adjustment has the same signature, not proof of suspend.
+                    self.server.audit_host_resume(gap_s=gap_s, clock_offset=now - mono)
+                if (
+                    not self._flushing.is_set()
+                    and now - self.last_frame_at > self.settings.link_idle_s
+                ):
+                    # The reader's monotonic deadline did not spend the sleeping
+                    # minutes. Expire the wall-stale link BEFORE draining new work
+                    # on its first wake tick. An existing close still owns its
+                    # bounded control-frame flush; do not turn it into a timeout.
+                    self.server.audit_idle(self)
+                    self.close("timeout")
+                    return
                 sent = self._drain()
                 if self._flushing.is_set() and self._reliable.empty() and not self._droppable:
                     # BOTH QUEUES EMPTY AND DRAINED BY THIS THREAD: everything a
@@ -5861,8 +5885,8 @@ class RelayServer:
         #: (``network.redial``). Fed by link admission and close; read by
         #: ``_redial_loop`` and ``peer_status``.
         self.redial = redial.RedialTracker()
-        #: Collapses repeats of one identical handshake refusal into one audit row
-        #: per window (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these.
+        #: Collapses identical handshake refusals and redial failures per window
+        #: (``redial.RefusalCoalescer``); 5.3 MB of audit was mostly these repeats.
         self._refusal_rows = redial.RefusalCoalescer()
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
@@ -5872,6 +5896,9 @@ class RelayServer:
         #: accepted pair socket, so the check-and-increment must be one step.
         self._pair_parked = 0
         self._pair_parked_lock = threading.Lock()
+        #: A clock discontinuity belongs to the host, not each of its links.
+        #: Compared under _links_lock; absolute clock offsets are never audited.
+        self._resume_clock_offset: float | None = None
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
         self._control_key = wire.b64u(os.urandom(32))
@@ -7186,7 +7213,7 @@ class RelayServer:
                     # loopback on our own port) and will come back by dialling us.
                     # Counted as a failed redial WITHOUT a dial, so the grace window
                     # still escalates to ``down`` on schedule.
-                    self.redial.failed(device_id, cause="waiting_for_peer")
+                    self._note_redial_failure(device_id, cause="waiting_for_peer")
                     continue
                 try:
                     link, reason = self._ensure_link_with_reason(
@@ -7195,7 +7222,41 @@ class RelayServer:
                 except Exception as exc:  # noqa: BLE001 — the loop must survive any dial
                     link, reason = None, f"error:{type(exc).__name__}"
                 if link is None:
-                    self.redial.failed(device_id, cause=reason or "unreachable")
+                    self._note_redial_failure(device_id, cause=reason or "unreachable")
+
+    def _note_redial_failure(self, device_id: str, *, cause: str) -> None:
+        """Audit the tracker's actual retry decision, without one row per retry.
+
+        Keep this beside the scheduler's existing cause, not handshake refusal
+        handling: a capped retry can repeat all night, and no peer authenticated
+        merely because this device attempted its stored address. The actor is
+        this device; ``device`` and ``code`` are the intended peer and typed cause.
+        """
+        self.redial.failed(device_id, cause=cause)
+        status = self.redial.snapshot(device_id)
+        if "next_retry_at" not in status:
+            # A concurrent admission already cleared this loss; there is no
+            # scheduled failure left to describe or next deadline to invent.
+            return
+        admitted, repeats = self._refusal_rows.admit(("redial_failed", device_id, cause))
+        if not admitted:
+            return
+        detail: dict[str, Any] = {
+            "device": device_id,
+            "code": cause,
+            "attempt": status["attempts"],
+            "next_retry_at": status["next_retry_at"],
+        }
+        if repeats:
+            detail["repeats"] = repeats
+        self.audit.record(
+            AuditEvent(
+                event="redial_failed",
+                actor=self.identity.device_id,
+                subject=device_id,
+                detail=detail,
+            )
+        )
 
     def _members_named(self, device_id: str) -> list[MemberRecord]:
         """Every active member row for ``device_id``, across this device's networks."""
@@ -8231,7 +8292,28 @@ class RelayServer:
             )
         )
 
+    def audit_host_resume(self, *, gap_s: float, clock_offset: float) -> None:
+        """One gap-only row per host discontinuity, not one per sleeping link."""
+        with self._links_lock:
+            previous: float | None = getattr(self, "_resume_clock_offset", None)
+            if previous is not None and abs(clock_offset - previous) <= self.settings.keepalive_s:
+                return
+            self._resume_clock_offset = clock_offset
+            self.audit.record(
+                AuditEvent(
+                    event="host_resumed",
+                    actor=self.identity.device_id,
+                    detail={"gap_s": round(gap_s, 3)},
+                )
+            )
+
     def audit_idle(self, link: PeerLink) -> None:
+        # Both deadline owners can notice one dead link at once. Claim the audit
+        # fact before either closes it, rather than recording two incidents.
+        with self._links_lock:
+            if getattr(link, "_idle_audited", False):
+                return
+            link._idle_audited = True
         self.audit.record(
             AuditEvent(
                 event="link_idle",
@@ -13889,6 +13971,19 @@ class RelayServer:
             refusal = self._admit_link(link, outbound=True)
             if refusal:
                 return None, refusal
+            # Dial-only devices never reach the listener's audit site. Record
+            # this admitted handshake too, without altering either side's proof
+            # or refusal handling (including listener-auth verification).
+            self.audit.record(
+                AuditEvent(
+                    event="link_opened",
+                    actor=result.peer_device_id,
+                    subject=result.network_id,
+                    network_id=result.network_id,
+                    epoch=result.epoch,
+                    detail={"role": "dialer", "epoch": result.epoch, "phase": result.phase},
+                )
+            )
             # The listener's endpoints arrive in its ``welcome``; they are how this
             # device will re-open the link without being told the address again.
             # ``record`` was read before this handshake and is only an id source now:
