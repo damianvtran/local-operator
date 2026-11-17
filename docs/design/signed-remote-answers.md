@@ -1,5 +1,7 @@
 # Design: operator-signed remote ask answers (option D)
 
+> **Status: SUPERSEDED — not to be implemented (2026-11-17).** The operator decided against per-answer signing: requiring Touch ID per answer is not a usable design. The direction instead is to trust authenticated mesh members. Messages and ask answers from the operator over an authentic, encrypted mesh connection count as the operator, with long-lived revocable connections (refresh tokens, no repeated prompts or drops) and endpoint hardening against MITM and injection. That transport work belongs to the remote-parity lane, and the guard change (remote prompts and answers from authenticated members count as operator) to the guardrails lane. This document is kept as a record of the security analysis (§2's judge-relay trace, the rejected key options, the review rounds); nothing here should be built.
+
 Status: proposal (architect, 2026-11-17). Base: `origin/main` 14ea6de98. No code.
 Supersedes the guide's "needs a node-bound signed answer record, not built yet"
 (`local_operator/guides/guardrails/GUIDE.md:48`).
