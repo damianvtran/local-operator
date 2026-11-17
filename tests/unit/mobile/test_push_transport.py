@@ -672,6 +672,11 @@ def test_no_factory_means_the_scan_never_builds_a_lane() -> None:
 
 
 # -- the lane's count source (2026-11-14: "47502 conversations need you") ------
+#
+# The completions these cells expect to emit are published with
+# ``origin="mobile"``: under ADR 0009's default ``completions_scope: phone`` a
+# completion pushes only when the run was driven from the phone, and these cells
+# are about the COUNT the push carries, not about routing.
 
 
 def _armed_lane(
@@ -688,7 +693,7 @@ def _armed_lane(
     monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
     lane = PushLane(_transport(login, cloud), config_dir(), unread_count=unread_count)
     lane.worker._live_devices = lambda: ["phone-1"]
-    lane.worker._presence = lambda: False
+    lane.worker._legacy_presence = lambda: False
     return lane
 
 
@@ -717,7 +722,7 @@ def test_a_lane_worker_counts_the_listing_not_the_lifetime_census(
     cloud = Cloud(_accepted())
     lane = _armed_lane(login, cloud, lambda: 3, monkeypatch)
     assert lane.worker.tick() == []  # enablement: the baseline
-    store.publish("session/fresh", str(uuid.uuid4()), "entry-fresh", "complete")
+    store.publish("session/fresh", str(uuid.uuid4()), "entry-fresh", "complete", origin="mobile")
 
     lane.worker.tick()
     body = _emitted_completion(cloud)
@@ -748,7 +753,7 @@ def test_a_lane_over_a_degraded_listing_makes_no_count_claim(
     cloud = Cloud(_accepted())
     lane = _armed_lane(login, cloud, table.listing_unread_count, monkeypatch)
     lane.worker.tick()
-    store.publish("session/fresh", str(uuid.uuid4()), "entry-fresh", "complete")
+    store.publish("session/fresh", str(uuid.uuid4()), "entry-fresh", "complete", origin="mobile")
 
     lane.worker.tick()
     body = _emitted_completion(cloud)
@@ -996,7 +1001,9 @@ def test_a_completion_published_after_the_scans_revision_read_is_counted(
         assert await asyncio.to_thread(lane.worker.tick) == []
         # THIS pass: its start-of-scan read, then the mid-scan completion.
         scan_start = await asyncio.to_thread(store.revision)
-        store.publish("session/fresh", str(uuid.uuid4()), "entry-fresh", "complete")
+        store.publish(
+            "session/fresh", str(uuid.uuid4()), "entry-fresh", "complete", origin="mobile"
+        )
         assert store.revision() != scan_start  # the window is real
         await daemon._refresh_push_count()
         # Off the loop, as the scan runs it (``asyncio.to_thread(tick)``).
@@ -1032,7 +1039,7 @@ def test_a_completion_published_after_the_refresh_never_reads_zero(
         assert await asyncio.to_thread(lane.worker.tick) == []
         await daemon._refresh_push_count()  # this pass's refresh: still 0
         assert daemon.table.listing_unread_count() == 0
-        store.publish("session/late", str(uuid.uuid4()), "entry-late", "complete")
+        store.publish("session/late", str(uuid.uuid4()), "entry-late", "complete", origin="mobile")
         # Off the loop, as the scan runs it (``asyncio.to_thread(tick)``).
         await asyncio.to_thread(lane.worker.tick)
 

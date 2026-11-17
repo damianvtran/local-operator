@@ -3271,6 +3271,16 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: a synthetic end, or one produced by a pre-field build — keeps every
     #: existing reader's behaviour.
     notify: bool = True
+    #: ADR 0009 (mobile repo ``docs/adr/0009-*``): the run's ORIGIN, the surface
+    #: of its most recent human input or the conversation's inherited driver
+    #: (``mobile``/``remote``/``desktop``/``tui``/``unknown``). Stamped by the
+    #: session beside ``notify``; ``""`` (a synthetic end, an older build) reads
+    #: as ``unknown`` and routes as non-mobile.
+    origin: str = ""
+    #: ADR 0009 §3: an ask opened in this run's window is still open at its end.
+    #: Computed independently of ``notify`` (a wake run ending on ``ask_user``
+    #: has ``notify = False`` and must still reach an away phone).
+    needs_user: bool = False
     #: Permission/request is not completion. The loop may nominate a settled
     #: invocation; only the owning Session, after host continuations settle,
     #: commits acceptance. Defaults never reconstruct authority on replay.

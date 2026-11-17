@@ -10993,3 +10993,41 @@ async def test_the_desktop_route_signs_only_a_card_it_can_rebuild(answers_api, s
         assert "did not sign" in result.json()["detail"]
         assert remote.decisions == []
     assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
+    tmp_path, monkeypatch
+) -> None:
+    """A local session's attention frame and snapshot omit ``origin``/``needs_user``.
+
+    Review round 3, R3-2: the bridge publishes raw ``AttentionStore.state`` for a
+    local session and installs it on the snapshot with ``model_copy``, which
+    skips the model validator. The bridge's own copy keeps the full state, since
+    its notification edge reads the store's facts.
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    raw = {"unseen": True, "completion_token": "t2", "origin": "o" * 4000, "needs_user": True}
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.attention = {"unseen": False, "completion_token": "t1"}
+
+    async def read() -> dict[str, Any]:
+        return dict(raw)
+
+    monkeypatch.setattr(bridge, "_read_attention", read)
+    await bridge.refresh_attention()
+
+    frames = [frame["payload"] for frame, _ in bridge.replay if frame.get("type") == "attention"]
+    assert frames, "the bridge published no attention frame"
+    assert not {"origin", "needs_user"} & set(frames[-1])
+    assert frames[-1]["completion_token"] == "t2"
+    assert bridge.attention["origin"] == "o" * 4000
+
+    bridge.remote = cast(
+        Any, SimpleNamespace(frontend_state=FrontendSessionState(session_id="s1", epoch="e1"))
+    )
+    capture = bridge._capture_wire_state()
+    assert not {"origin", "needs_user"} & set(capture.attention)
+    snapshot = module._wire_state_of(capture)["snapshot"]
+    assert not {"origin", "needs_user"} & set(snapshot["attention"])

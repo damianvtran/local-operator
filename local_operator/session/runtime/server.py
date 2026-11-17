@@ -61,6 +61,7 @@ from typing import (
     Mapping,
     Protocol,
     Sequence,
+    TypeVar,
     cast,
 )
 
@@ -2153,6 +2154,101 @@ class _ConnectionAuthority:
     #: how an unproven one is told apart (``asks/surfaces.stamp_answer_surface``).
     surface: str = ""
     kind: str = ""
+    #: ADR 0009 origin of human input on this connection
+    #: (:func:`_input_surface_for`), decided once at auth time from the
+    #: connection's facts. ``""`` is no connection at all (a direct
+    #: ``_dispatch``), which leaves the handle's in-process default.
+    input_surface: str = ""
+
+
+#: The auth-frame key the mobile daemon declares on every dial that carries the
+#: phone's human input (ADR 0009 "How the tag is declared"). A NEW key rather
+#: than ``surface``: ``surface`` is in the mesh relay's forwarded allowlist
+#: (``network/dial.AUTH_FIELDS``), so an older relay would pass a peer's
+#: ``surface: "mobile"`` through, while ``origin`` is in no version of it and
+#: every relay drops it by construction. Only a process on this machine that
+#: holds the control key can therefore declare ``mobile``.
+ORIGIN_AUTH_KEY = "origin"
+
+
+def _input_surface_for(*, declared_origin: str, kind: str, locality: str, surface: str) -> str:
+    """The ADR 0009 vocabulary, from auth-time connection facts only, first match wins.
+
+    Never from an op frame. ``unknown`` is a daemon-kind LOCAL dial (``lop
+    send``, ``lop stop``, the viewer client, any CLI carrier) and routes as
+    non-mobile, which errs quiet.
+    """
+    if declared_origin == "mobile":
+        return "mobile"
+    if kind == "daemon" and locality == "remote":
+        # A mobile daemon from before the ``origin`` tag: only it dials so.
+        return "mobile"
+    if kind == "attach" and locality == "remote":
+        return "remote"
+    if kind == "attach" and surface == "desktop":
+        return "desktop"
+    if kind == "attach":
+        return "tui"
+    return "unknown"
+
+
+def _note_answer_surface(
+    handle: Any, ask_id: str | None, authority: _ConnectionAuthority
+) -> Callable[[], None]:
+    """Tell the session which surface answered (ADR 0009 R10), when it can hear it.
+
+    Probed like every optional handle capability: a test double or an older
+    owner without ``note_answer_surface`` is left exactly as it was. A direct
+    ``_dispatch`` with no connection (``input_surface == ""``) notes nothing.
+
+    Returns the note's UNDO, which :func:`_answer_noting_surface` runs when the
+    answer is refused (review round 1, m2). The note has to land BEFORE the
+    answer: the answer op itself starts delivery (``reconcile_asks``) on the
+    session's loop, so a note made after it returns can arrive after the
+    ``ask_response`` row was drained. Undo-on-refusal keeps that ordering while
+    a refused answer no longer relabels the run.
+    """
+    note = getattr(handle, "note_answer_surface", None)
+    if not authority.input_surface or not callable(note):
+        return _no_answer_surface_undo
+    try:
+        undo = note(ask_id or None, authority.input_surface)
+    except Exception:  # noqa: BLE001 — routing must never cost an answer
+        logger.debug("origin: could not note the answer surface", exc_info=True)
+        return _no_answer_surface_undo
+    # An older handle returns nothing: it cannot undo, which is the old behaviour.
+    return cast(Callable[[], None], undo) if callable(undo) else _no_answer_surface_undo
+
+
+_T = TypeVar("_T")
+
+
+def _no_answer_surface_undo() -> None:
+    return None
+
+
+async def _answer_noting_surface(
+    handle: Any,
+    ask_id: str | None,
+    authority: _ConnectionAuthority,
+    answer: Awaitable[_T],
+) -> _T:
+    """Await an answer op with its surface noted first and retracted on refusal.
+
+    ``answer`` is an un-started coroutine, so nothing of the answer runs before
+    the note is in place. Any exception is a refusal (the handles raise
+    ``ValueError`` in the queue's own words) and undoes the note before it
+    propagates; the undo itself never costs the refusal its error.
+    """
+    undo = _note_answer_surface(handle, ask_id, authority)
+    try:
+        return await answer
+    except BaseException:
+        try:
+            undo()
+        except Exception:  # noqa: BLE001 — routing must never mask the refusal
+            logger.debug("origin: could not undo the answer surface", exc_info=True)
+        raise
 
 
 def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
@@ -2297,6 +2393,11 @@ class _ClientConn:
     #: has to name the machine to act on (§4.4 — "run it on build-box" is not
     #: something this runtime could otherwise say).
     peer: dict[str, Any] = field(default_factory=dict)
+    #: ADR 0009: the routing origin the auth frame's ``origin`` key declared
+    #: (``ORIGIN_AUTH_KEY``), ``""`` when absent. Kept apart from ``surface``,
+    #: whose consumers compare only against ``"desktop"``, so a phone connection
+    #: keeps reading ``terminal`` there exactly as before.
+    origin: str = ""
     #: Which host is on the other end. ``"desktop"`` is declared in the attach
     #: frame; the remaining fields are that host's presentation state, which
     #: only it reports and only it is scored on.
@@ -5420,6 +5521,9 @@ class RuntimeServer:
             surface=(
                 "desktop" if kind == "attach" and frame.get("surface") == "desktop" else "terminal"
             ),
+            # ADR 0009: read ONCE here, for any kind, and only the exact value
+            # counts; it is never read off an op frame.
+            origin="mobile" if frame.get(ORIGIN_AUTH_KEY) == "mobile" else "",
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
@@ -8963,6 +9067,12 @@ class RuntimeServer:
                 operator_proved=proved,
                 surface=conn.surface,
                 kind=conn.kind,
+                input_surface=_input_surface_for(
+                    declared_origin=conn.origin,
+                    kind=conn.kind,
+                    locality=conn.locality,
+                    surface=conn.surface,
+                ),
             )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
@@ -9086,6 +9196,11 @@ class RuntimeServer:
                 # the operator's own devices can still answer with their
                 # capability. Local attaches keep the default.
                 fields["owner_typed"] = False
+            if authority.input_surface and "input_surface" in parameters:
+                # ADR 0009: the origin is derived from the AUTHENTICATED
+                # connection, probed like ``owner_typed``; a handle without the
+                # keyword keeps its exact old call shape.
+                fields["input_surface"] = authority.input_surface
             receipt = await h.prompt(frame["text"], **fields)
             if not honours_wait:
                 return receipt
@@ -9128,6 +9243,10 @@ class RuntimeServer:
             if authority.locality != "local" and "owner_typed" in parameters:
                 # Same rule as the prompt op above.
                 fields["owner_typed"] = False
+            if authority.input_surface and "input_surface" in parameters:
+                # Same rule as the prompt op above: a phone steer into a
+                # desk-started run makes that run mobile-origin.
+                fields["input_surface"] = authority.input_surface
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
@@ -9351,10 +9470,17 @@ class RuntimeServer:
                 tool_call_id=frame["tool_call_id"],
             )
         if op == "approval_answer":
-            return await h.approval_answer(
-                frame["request_id"],
-                frame["approved"],
-                frame.get("remember", False),
+            # ADR 0009 R10: an answer is human input; a live one flips the run in
+            # flight to the answering connection's surface (undone if refused).
+            return await _answer_noting_surface(
+                h,
+                None,
+                authority,
+                h.approval_answer(
+                    frame["request_id"],
+                    frame["approved"],
+                    frame.get("remember", False),
+                ),
             )
         if op == "recall_steer":
             # v4: follower Esc-recall parity. Optional capability — an owner
@@ -9426,6 +9552,16 @@ class RuntimeServer:
             # ``adopt_aside`` arm below uses.
             if not inspect.isawaitable(outcome):
                 raise ValueError(f"owner {op} operation must be awaitable")
+            if op in ("ask_respond", "ask_revise", "ask_decline"):
+                # ADR 0009 R10: the answer's surface rides to the run it opens. A
+                # decline is an answer too ("decide yourself"); a dismissal asks
+                # the model nothing, so it drives no run and is not noted.
+                return cast(
+                    "str",
+                    await _answer_noting_surface(
+                        h, str(frame.get("ask_id", "")), authority, outcome
+                    ),
+                )
             return cast("str", await outcome)
         if op == "bridge_decide":
             # TB-02 P1: the VERIFIED door for a bridge decision. The authority
@@ -9444,7 +9580,12 @@ class RuntimeServer:
             )
             if not inspect.isawaitable(outcome):
                 raise ValueError("owner bridge_decide operation must be awaitable")
-            return cast("str", await outcome)
+            # ADR 0009 R10: a bridge decision answers the request ask, and the
+            # decision's ``ask_response`` opens the next run like any answer.
+            return cast(
+                "str",
+                await _answer_noting_surface(h, str(frame.get("ask_id", "")), authority, outcome),
+            )
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
             # the user tapped (U8 guard): the handle rejects the answer if the
@@ -9462,7 +9603,18 @@ class RuntimeServer:
                 answer_kwargs["by"] = _stamp_ask_answer(
                     authority, op=op, ask_id=str(frame.get("request_id", "")), mirror=True
                 )
-            return await h.ask_answer(frame["request_id"], frame["value"], **answer_kwargs)
+            # ADR 0009 R10: a legacy mirrored id names a QUEUED ask (its answer
+            # reaches a later run as an ``ask_response`` row); any other id is a
+            # live picker in the run in flight.
+            from local_operator.asks import store as _ask_store
+
+            mirrored = _ask_store.parse_mirror_request_id(str(frame.get("request_id", "")))
+            return await _answer_noting_surface(
+                h,
+                mirrored[0] if mirrored else None,
+                authority,
+                h.ask_answer(frame["request_id"], frame["value"], **answer_kwargs),
+            )
         if op == "adopt_aside":
             adopt = getattr(h, "adopt_aside", None)
             if not callable(adopt):

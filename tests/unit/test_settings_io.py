@@ -161,6 +161,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_ENABLED as DEFAULT_COMPRESSION_ENABLED,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
+    from local_operator.session.runtime.presence import DEFAULT_AWAY_AFTER_S
     from local_operator.session.runtime.process import (
         DEFAULT_KEEP_ALIVE_MAX,
         DEFAULT_KEEP_ALIVE_SECONDS,
@@ -341,6 +342,9 @@ def _consumer_defaults() -> dict[str, object]:
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
         "tunnel.auto_setup_after_login": AUTO_SETUP_DEFAULT,
+        # ADR 0008: the reader's own default, which is also what a desk report
+        # omitting `away_after_s` is evaluated with.
+        "notifications.phone_away_after_s": DEFAULT_AWAY_AFTER_S,
         "memory.capture": MEMORY_DEFAULT_ENABLED,
         "memory.capture.locators": LOCATORS_DEFAULT_ENABLED,
         "memory.suggest": MEMORY_DEFAULT_ENABLED,

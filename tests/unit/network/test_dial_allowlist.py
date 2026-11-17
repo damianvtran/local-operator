@@ -69,6 +69,14 @@ _NOT_FORWARDED: dict[str, str] = {
         "dial.py, the auth_frame literal). The client kind selects the owner's lane, "
         "so it is the dialler's own fact and is never taken from a viewer's dict."
     ),
+    "origin": (
+        "ADR 0009's notification-routing tag. Only the mobile daemon on THIS device "
+        "may declare 'mobile' (session/runtime/server.py, ORIGIN_AUTH_KEY): it routes "
+        "a run's completion to the phone. A relayed dial is another device's input, "
+        "so the owner must record it as 'remote', and dropping the key here is what "
+        "guarantees that for every relay build (tests/unit/session/runtime/"
+        "test_input_surface_auth.py dials dial_owner with origin=mobile)."
+    ),
     "locality": (
         "Server-side locality is what separates the narrow watch-a-session lane from "
         "the widest one that types into the owner's terminal, and dial_owner pins it "

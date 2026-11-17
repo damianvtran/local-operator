@@ -38,9 +38,11 @@ from typing import Any
 from local_operator.session.runtime.presence import (
     PRESENCE_BEAT_S,
     PRESENCE_TTL_S,
+    DeskReport,
     delivery_dir,
     delivery_record_path,
     ensure_delivery_dir,
+    materialise_desk_report,
 )
 from local_operator.session.runtime.registry import pid_alive
 
@@ -85,6 +87,13 @@ class PresenceClaim:
     visible: bool = False
     minimized: bool = False
     seen_at: float = field(default_factory=time.monotonic)
+    #: ADR 0008: the desk report this beat carried, materialised on THIS
+    #: server's wall clock at receipt, or ``None`` for a beat with no desk
+    #: fields. Refreshed wholesale like every other field: a later beat that
+    #: omits them drops the report rather than keeping a deadline alive.
+    #: Deliberately NOT ``seen_at``'s monotonic domain — the push daemon reads
+    #: it from another process (see ``presence.DeskReport``).
+    desk: DeskReport | None = None
 
 
 class DesktopDeliveryPublisher:
@@ -123,8 +132,18 @@ class DesktopDeliveryPublisher:
         can_notify_kinds: list[str] | None = None,
         session_id: str = "",
         window: dict[str, Any] | None = None,
+        idle_s: int | None = None,
+        locked: bool | None = None,
+        idle_trusted: bool | None = None,
+        away_after_s: int | None = None,
     ) -> None:
         """Record one subscription's beat and republish the aggregate.
+
+        The four desk fields (ADR 0008) are optional. When ANY is present the
+        claim gets a :class:`DeskReport` stamped with ``time.time()`` here, at
+        receipt; when none is, the claim has no report and the published record
+        carries no ``desk`` key at all, i.e. exactly today's shape. The values
+        are never logged (ADR 0008 §3.1 privacy).
 
         Called from ``POST /v1/desktop/presence``, which is why it must not
         raise: a malformed window object degrades to "not attended" rather than
@@ -134,7 +153,17 @@ class DesktopDeliveryPublisher:
         """
         state = window if isinstance(window, dict) else {}
         raw_kinds = can_notify_kinds if isinstance(can_notify_kinds, list) else []
+        desk = None
+        if any(value is not None for value in (idle_s, locked, idle_trusted, away_after_s)):
+            desk = materialise_desk_report(
+                received_at=time.time(),
+                idle_s=idle_s,
+                locked=locked,
+                idle_trusted=idle_trusted,
+                away_after_s=away_after_s,
+            )
         self.claims[subscription_id] = PresenceClaim(
+            desk=desk,
             can_notify=bool(can_notify),
             kinds=frozenset(str(kind) for kind in raw_kinds if isinstance(kind, str)),
             has_window=bool(state.get("exists")),
@@ -365,7 +394,7 @@ class DesktopDeliveryPublisher:
         # freshest beat makes a replacement window's state take effect
         # immediately.
         newest = max(claims, key=lambda claim: claim.seen_at)
-        payload = {
+        payload: dict[str, Any] = {
             "pid": os.getpid(),
             "instance_id": self.instance_id,
             "can_notify": any(claim.can_notify for claim in claims),
@@ -385,6 +414,13 @@ class DesktopDeliveryPublisher:
             "written_at": time.time(),
             "heartbeat_at": time.time(),
         }
+        # ADR 0008: one entry per claim that sent desk fields, unioned by the
+        # reader and judged per entry ("any"). The key is OMITTED, not empty,
+        # when no claim reported, so a legacy-only server writes today's record
+        # byte-for-byte and the reader's legacy fallback is unambiguous.
+        desk = [claim.desk.as_record() for claim in claims if claim.desk is not None]
+        if desk:
+            payload["desk"] = desk
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".delivery.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as handle:

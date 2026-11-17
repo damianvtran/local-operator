@@ -57,6 +57,7 @@ from local_operator.session.runtime.presence import (
     delivery_dir,
     delivery_path,
     desktop_delivery_present,
+    read_delivery,
     reset_cache,
 )
 from local_operator.session.runtime.types import SessionRecord
@@ -476,6 +477,53 @@ async def test_an_answered_gate_reaches_the_feed_and_the_lists_stamp_agrees(
         resumed["payload"]["code"],
         resumed["payload"]["label"],
     )
+
+
+@pytest.mark.asyncio
+async def test_the_presence_route_accepts_desk_fields_and_todays_beat(desktop_server):
+    """ADR 0008 slice 1 over real HTTP: both beats are 200, and only the desk beat
+    publishes a ``desk`` entry stamped on this server's wall clock.
+
+    Today's beat (no desk fields) must stay accepted unchanged: it is what every
+    app older than ``features.desk_presence`` sends, and a 422 there would lapse
+    the lease. An off-list threshold is still a 422 (``extra="forbid"`` and the
+    Literal both stand).
+    """
+    root, client = desktop_server
+    capabilities = (await client.get("/v1/capabilities")).json()
+    assert capabilities["result"]["features"]["desk_presence"] == 1, capabilities
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        lines = response.aiter_lines()
+        opened = await _next_frame(lines, lambda f: f["type"] == "open")
+        subscription = opened["payload"]["subscription_id"]
+        base = {
+            "subscription_id": subscription,
+            "can_notify": True,
+            "can_notify_kinds": ["complete", "error"],
+            "window": {"exists": True, "focused": False, "visible": True, "minimized": False},
+        }
+
+        legacy = await client.post("/v1/desktop/presence", json=base)
+        assert legacy.status_code == 200, legacy.text
+        assert "desk" not in _published_record(root)
+
+        before = time.time()
+        desk = await client.post(
+            "/v1/desktop/presence",
+            json={**base, "idle_s": 30, "locked": False, "idle_trusted": True, "away_after_s": 300},
+        )
+        after = time.time()
+        assert desk.status_code == 200, desk.text
+        (entry,) = _published_record(root)["desk"]
+        assert before <= entry["received_at"] <= after, "receiver wall clock"
+        assert entry["last_input_at"] == entry["received_at"] - 30
+        assert entry["away_at"] == entry["received_at"] - 30 + 300
+        reset_cache()
+        assert read_delivery(root).desk_active(time.time()) is True
+
+        off_list = await client.post("/v1/desktop/presence", json={**base, "away_after_s": 90})
+        assert off_list.status_code == 422, off_list.text
 
 
 @pytest.mark.asyncio
