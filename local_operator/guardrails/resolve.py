@@ -3544,6 +3544,20 @@ def credential_path(value: str, home: str) -> str | None:
 #   ``_MAX_FUNCTION_CALLS`` are not followed: each adds an opaque reason, so
 #   they fail closed to HIGH, never LOW.
 #
+# Review round 1 (PR #4188) refinements, each failing closed:
+# * A definition may start mid-piece (``{ f(){``, ``then f(){``, ``x=$(f(){``;
+#   :func:`_definition_start`), R1.
+# * A redefinition replaces earlier bodies only when it certainly runs in
+#   this shell (top level, unconditional, not piped/backgrounded/nested);
+#   otherwise every candidate body is walked at each call, R2. A loop body's
+#   calls also see definitions made later in that body (next iteration), R6.
+# * A call from a walker state already walked, whose walk changed no state,
+#   is skipped without spending budget (``_call_memo_key``), and a definition
+#   never walked is walked even past the budget, R3/R5.
+# * ``trap NAME``/``alias g=NAME`` with a literal one-word action call NAME
+#   pinned (a trap again at the end, with the final definitions); a
+#   non-literal action still reaches every body, R4.
+#
 # Known over-approximation (fail-closed, documented): a function defined
 # inside ``( … )`` or ``$( … )`` stays registered after that subshell ends.
 
@@ -3583,6 +3597,11 @@ class _FunctionDef:
     #: Names the body declares ``local``/``declare``/``typeset``: restored
     #: to their pre-call values after the call (bash dynamic scoping).
     locals: frozenset[str]
+    #: The definition did not start its lex piece (``{ f(){``, ``then f(){``,
+    #: ``x=$(f(){``): it sits in a group, branch or substitution, so it may
+    #: not take effect in this shell and never REPLACES an earlier body
+    #: (review R1/R2, PR #4188).
+    nested: bool = False
 
 
 def _function_header(text: str) -> tuple[str, str] | None:
@@ -3605,6 +3624,108 @@ def _function_header(text: str) -> tuple[str, str] | None:
         # ``{x`` is a word, not the ``{`` reserved word.
         return None
     return name, rest
+
+
+#: A literal function name as ``trap``/``alias`` may give it (same character
+#: set as ``_FUNCTION_HEADER_RE``'s name).
+_NAME_WORD_RE = re.compile(r"[^\s()<>;&|'\"$`=]+")
+
+
+def _memo_canon(value: object) -> object:
+    """A hashable, order-independent rendering of walker state (call memo key)."""
+    if isinstance(value, dict):
+        return tuple(sorted(((repr(k), _memo_canon(v)) for k, v in value.items()), key=repr))
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted((repr(_memo_canon(v)) for v in value)))
+    if isinstance(value, (list, tuple)):
+        return tuple(_memo_canon(v) for v in value)
+    if hasattr(value, "__dataclass_fields__"):
+        return (type(value).__name__, _memo_canon(vars(value)))
+    return value
+
+
+def _blank_quoted(text: str) -> str:
+    """``text`` with quoted spans blanked, same length (offsets stay valid)."""
+    return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", lambda m: " " * len(m.group()), text)
+
+
+def _definition_start(text: str) -> tuple[str, tuple[str, str]] | None:
+    """``(prefix, (name, rest))`` when a function definition starts in a piece.
+
+    WHY (review R1, PR #4188): :func:`lex` splits on ``;``/newlines only, so
+    ``{ f(){ rm -rf ~; }; f; }`` yields the piece ``{ f(){ rm -rf ~`` and an
+    anchored header match never registered the body: the call inlined nothing
+    and ranked LOW. The definition may follow lead words (``{``, ``(``,
+    ``then``, ``do``, ``else``, ``elif``, ``!``, ``time``) or open an unquoted
+    substitution (``x=$(f(){``, ``<(f(){``). ``prefix`` is the text before the
+    header (``""`` when the piece starts with it). A ``$(`` inside quotes is
+    not tried here: that piece is walked whole, and its substitution body is
+    walked (and its definitions found) by the nested walk.
+    """
+    stripped = text.strip()
+    blanked = _blank_quoted(stripped)
+    starts = [0] + [
+        m.end() for m in re.finditer(r"[$<>]\(", blanked) if blanked[m.end() :][:1] != "("
+    ]
+    for start in starts:
+        rest = stripped[start:]
+        while True:
+            rest = rest.lstrip()
+            if (
+                rest[:1] in ("{", "(")
+                and rest[:2] != "(("
+                and (rest[:1] == "(" or rest[1:2].isspace())
+            ):
+                rest = rest[1:]
+                continue
+            word = rest.split(None, 1)[0] if rest else ""
+            if word in _DEFINITION_LEAD_WORDS:
+                rest = rest[len(word) :]
+                continue
+            break
+        header = _function_header(rest)
+        if header is not None:
+            return stripped[: len(stripped) - len(rest)], header
+    return None
+
+
+#: Words a definition may follow inside one lex piece (``then f(){ …``).
+_DEFINITION_LEAD_WORDS = frozenset({"then", "do", "else", "elif", "!", "time", "-p"})
+#: Compound openers that repeat their body: a call there can see a definition
+#: made LATER in the same body, on the next iteration (review R6, PR #4188).
+_LOOP_OPENERS = frozenset({"for", "while", "until", "select"})
+
+
+def _nest_opens(text: str) -> int:
+    """Groups/compounds a piece opens (``_group_opens`` plus a bare ``{``)."""
+    return _group_opens(text) + (1 if text.strip() == "{" else 0)
+
+
+def _nest_closes(text: str) -> int:
+    """Groups/compounds a piece closes: ``}``/``fi``/``done``/``esac`` and ``)``."""
+    tail = _strip_trailing_redirects(text)
+    parens = 0
+    while tail.endswith(")") and tail.count(")") > tail.count("("):
+        parens += 1
+        tail = tail[:-1].rstrip()
+    return _group_closes(text) + parens
+
+
+def _loop_opener(text: str) -> bool:
+    words = text.split()
+    while words and words[0] in (_DEFINITION_LEAD_WORDS | {"{", "("}):
+        words = words[1:]
+    return bool(words) and words[0].lstrip("(") in _LOOP_OPENERS
+
+
+def _matching_close(pieces: Sequence[tuple[str, bool, str]], index: int) -> int:
+    """Index of the piece closing the compound that ``pieces[index]`` opens."""
+    level = _nest_opens(pieces[index][0])
+    for k in range(index + 1, len(pieces)):
+        level += _nest_opens(pieces[k][0]) - _nest_closes(pieces[k][0])
+        if level <= 0:
+            return k
+    return len(pieces) - 1
 
 
 def _is_brace_closer(text: str) -> bool:
@@ -3673,13 +3794,13 @@ def _collapse_definitions(
     defs: dict[int, _FunctionDef] = {}
     i, n = 0, len(pieces)
     while i < n:
-        header = _function_header(pieces[i][0])
-        if header is None:
+        start = _definition_start(pieces[i][0])
+        if start is None:
             out_p.append(pieces[i])
             out_o.append(owned[i])
             i += 1
             continue
-        name, rest = header
+        prefix, (name, rest) = start
         j = i
         if not rest:
             nxt = pieces[j + 1][0].strip() if j + 1 < n else ""
@@ -3738,12 +3859,21 @@ def _collapse_definitions(
         if body:
             last_text, last_flag, _ = body[-1]
             body[-1] = (last_text, last_flag, "")
+        if prefix and "$(" not in prefix and "<(" not in prefix and ">(" not in prefix:
+            # Keep the lead words as their own piece: a ``(`` must still open
+            # the subshell scope its closing ``)`` restores, and a ``{``/``if``
+            # still counts toward the nesting ``_walk_pieces`` tracks. A
+            # substitution prefix (``x=$(``) is dropped: its words are walked
+            # by the main pass, whose facts are unioned anyway.
+            out_p.append((prefix.strip(), False, ";"))
+            out_o.append([])
         defs[len(out_p)] = _FunctionDef(
             name=name,
             pieces=body,
             owned=body_owned,
             subshell=subshell,
             locals=_declared_locals(body),
+            nested=bool(prefix),
         )
         out_p.append(("", pieces[i][1], pieces[closed_at][2]))
         out_o.append([])
@@ -3850,9 +3980,28 @@ class _Walker:
         #: Shell functions registered so far (see "Shell functions" above).
         #: ``None`` outside the ``inline_functions`` pass, so main's walk —
         #: the ranking every other guard test pins — is byte-for-byte unchanged.
-        self.functions: dict[str, _FunctionDef] | None = {} if inline_functions else None
+        #: Every body a name may hold when called. More than one when a
+        #: redefinition might not take effect (``false && f(){ :; }``, a
+        #: definition in a branch, loop, group, pipe, ``&`` or substitution):
+        #: a call walks them all (review R2, PR #4188).
+        self.functions: dict[str, list[_FunctionDef]] | None = {} if inline_functions else None
+        #: Bumped on every registration: part of the call memo's key, since a
+        #: body calling another function behaves differently once it changes.
+        self.functions_version = 0
         self.call_stack: list[_FunctionDef] = []
         self.function_calls = 0
+        #: Definitions walked at least once: one never walked is walked even
+        #: past ``_MAX_FUNCTION_CALLS``, so padding the command with cheap
+        #: calls cannot hide a destructive body (review R3, PR #4188).
+        self.walked_functions: set[int] = set()
+        #: Call memo keys (see ``_call_function``) whose walk changed no walker
+        #: state: walking again from the same state adds nothing new.
+        self.settled_calls: set[str] = set()
+        #: ``alias name=word`` with a literal one-word value (``_function_call``).
+        self.function_aliases: dict[str, str] = {}
+        #: ``trap NAME …`` with a literal function name: run again at the end
+        #: with the definitions then current, as an EXIT trap is.
+        self.trapped_functions: list[str] = []
         #: ``export -f``/``declare -fx`` ran: a child bash may call any body.
         self.functions_exported = False
         self.reaching_functions = False
@@ -3987,12 +4136,39 @@ class _Walker:
         # defeated it, so a pipe-fed shell also walks every earlier body not
         # provably sunk elsewhere (fails toward scrutiny).
         produced_so_far: list[_Produced] = []
+        # Open groups/compounds at this level before each piece: a definition
+        # inside one may not run (``if``/loop/``case``) or not persist (``(``).
+        nest_at: list[int] = []
+        level = 0
+        for piece_text, _f, _o in pieces if definitions else ():
+            level = max(0, level + _nest_opens(piece_text))
+            nest_at.append(level)
+            level = max(0, level - _nest_closes(piece_text))
         for index, (text, _flag, op) in enumerate(pieces):
             definition = definitions.get(index)
             if definition is not None and self.functions is not None:
                 # Defining runs nothing; the body is walked at each call.
-                self.functions[definition.name] = definition
+                # It REPLACES earlier bodies only when it certainly runs in
+                # this shell: unconditional, top level, outside any call,
+                # group, pipeline or job (review R2, PR #4188).
+                certain = (
+                    depth == 0
+                    and not self.call_stack
+                    and not definition.nested
+                    and nest_at[index] == 0
+                    and not piped_in[index]
+                    and op not in ("|", "|&", "&")
+                    and (index == 0 or pieces[index - 1][2] not in ("&&", "||"))
+                )
+                self._register_function(definition, certain=certain)
                 continue
+            if self.functions is not None and definitions and _loop_opener(text):
+                # R6: the body repeats, so a call early in it can run a
+                # definition made later in it (on the next iteration).
+                close = _matching_close(pieces, index)
+                for later in range(index + 1, close + 1):
+                    if later in definitions:
+                        self._register_function(definitions[later], certain=False)
             piped = piped_in[index]
             if not piped:
                 # A new pipeline starts: earlier pipelines have ENDED, so their
@@ -4072,6 +4248,24 @@ class _Walker:
         self.subshell_depth -= len(groups)
 
     # -- shell functions (inline pass only) -----------------------------------
+    def _register_function(self, definition: _FunctionDef, *, certain: bool) -> None:
+        """Make ``definition`` callable by its name.
+
+        ``certain``: it surely runs in this shell, so it replaces earlier
+        bodies. Otherwise it is ADDED to them (review R2, PR #4188):
+        ``f(){ rm -rf ~; }; false && f(){ :; }; f`` runs the first body, and
+        a replace-always registry ranked that LOW.
+        """
+        assert self.functions is not None
+        bodies = self.functions.get(definition.name)
+        if certain or not bodies:
+            self.functions[definition.name] = [definition]
+        elif definition not in bodies:
+            bodies.append(definition)
+        else:
+            return
+        self.functions_version += 1
+
     def _function_call(self, raw_words: list[_RawWord], words: list[Expanded], depth: int) -> bool:
         """Walk a called function's body here; ``True`` when the segment WAS a call.
 
@@ -4089,16 +4283,110 @@ class _Walker:
             for w in head[1:]
         ):
             self.functions_exported = True
+        if name is not None and name not in self.functions and name in self.function_aliases:
+            # ``alias g=f; g`` (with ``expand_aliases``) runs ``f``: pinned,
+            # not "any body" (review R4, PR #4188).
+            name = self.function_aliases[name]
         if name is not None and name in self.functions:
-            self._call_function(self.functions[name], depth)
+            self._call_candidates(name, depth)
             return True
         self._opaque_function_call(raw_words, head, depth)
         return False
+
+    def _call_candidates(self, name: str, depth: int) -> None:
+        """Walk every body ``name`` may hold (one, unless a redefinition was unsure).
+
+        Each candidate is walked from the same pre-call state. The last one's
+        effects carry on; if the candidates leave different variables or cwd,
+        what follows cannot know which ran, so an opaque reason keeps the
+        command at HIGH at least (fail closed, review R2, PR #4188).
+        """
+        assert self.functions is not None
+        bodies = list(self.functions.get(name, ()))
+        if len(bodies) == 1:
+            self._call_function(bodies[0], depth)
+            return
+        start = self._save()
+        outcomes: list[_Snapshot] = []
+        for number, definition in enumerate(bodies):
+            if number:
+                self._restore(_Snapshot(**{**vars(start), "env": dict(start.env)}))
+            self._call_function(definition, depth)
+            outcomes.append(self._save())
+        if any(o != outcomes[-1] for o in outcomes):
+            self.result.opaque_reasons.append(
+                f"shell function {name} has several possible definitions that "
+                "leave different state; which one ran is not known"
+            )
+
+    def _trap_or_alias_call(self, name: str, args: list[Expanded], depth: int) -> bool:
+        """``trap``/``alias`` naming one registered function: ``True`` when handled.
+
+        WHY (review R4, PR #4188): ``cleanup(){ rm -rf "$tmp"; }; trap cleanup
+        EXIT`` is the canonical own-scratch cleanup; walking EVERY body with
+        an opaque reason ranked it HIGH. A literal one-word action names its
+        function exactly, so it is walked as a pinned call. A non-literal
+        action (``trap "$x" EXIT``, ``trap 'a; b' EXIT``) is not handled here
+        and still reaches every body (fail closed).
+        """
+        assert self.functions is not None
+        # The caller passes only segments whose RAW words are literal: an
+        # unset ``$a`` expands to "" here, which must not read as ``trap ''``.
+        if any(a.opaque for a in args):
+            return False
+        if name == "trap":
+            rest = args[1:] if args[:1] and args[0].text == "--" else args
+            if not rest or (rest[0].text.startswith("-") and rest[0].text != "-"):
+                return True  # ``trap``, ``trap -p``/``-l``: lists, runs nothing.
+            action = rest[0].text.strip()
+            if action in ("", "-"):
+                return True  # ignore/reset the signal: runs nothing.
+            if not _NAME_WORD_RE.fullmatch(action):
+                return False
+            if action in self.functions:
+                self._call_candidates(action, depth)
+            # An EXIT trap runs the definition current when the shell ends,
+            # which may be a later one: ``_run_trapped_functions``.
+            self.trapped_functions.append(action)
+            return True
+        # alias: every ``name=value`` must have a literal one-word value.
+        pairs: list[tuple[str, str]] = []
+        for arg in args:
+            if arg.text.startswith("-"):
+                continue
+            alias, eq, value = arg.text.partition("=")
+            if not eq:
+                continue  # ``alias g`` prints a definition.
+            value = value.strip()
+            if not _NAME_WORD_RE.fullmatch(value):
+                return False
+            pairs.append((alias, value))
+        for alias, value in pairs:
+            self.function_aliases[alias] = value
+        return True
+
+    def _run_trapped_functions(self, depth: int) -> None:
+        """Walk ``trap NAME`` functions once more with the final definitions."""
+        if self.functions is None:
+            return
+        for name in dict.fromkeys(self.trapped_functions):
+            if name in self.functions:
+                self._call_candidates(name, depth)
 
     def _opaque_function_call(
         self, raw_words: list[_RawWord], head: list[Expanded], depth: int
     ) -> None:
         """Walk every body when this segment could call one the walker can't name."""
+        name = head[0].text if head and not head[0].opaque else ""
+        literal = not any(
+            raw.broken or any(p.kind in ("pbare", "pdq", "sub") for p in raw.parts)
+            for raw in raw_words
+        )
+        if name in ("trap", "alias") and literal and self.functions is not None:
+            # Before the "no functions yet" return: ``trap cleanup EXIT`` and
+            # ``alias g=f`` usually come BEFORE the definition they name.
+            if self._trap_or_alias_call(name, head[1:], depth):
+                return
         if not self.functions:
             return
         command = next(
@@ -4121,7 +4409,6 @@ class _Walker:
         dynamic = command is not None and (
             command.broken or any(p.kind in ("pbare", "pdq", "sub") for p in command.parts)
         )
-        name = head[0].text if head and not head[0].opaque else ""
         why: str | None = None
         if dynamic:
             why = "a command word only known at run time"
@@ -4142,8 +4429,9 @@ class _Walker:
         before = (len(res.targets), len(res.touched), len(res.opaque_reasons), len(res.blind))
         self.reaching_functions = True
         try:
-            for definition in list(self.functions.values()):
-                self._call_function(definition, depth)
+            for bodies in list(self.functions.values()):
+                for definition in list(bodies):
+                    self._call_function(definition, depth)
         finally:
             self.reaching_functions = False
         after = (len(res.targets), len(res.touched), len(res.opaque_reasons), len(res.blind))
@@ -4155,6 +4443,41 @@ class _Walker:
                 f"{why} may run a shell function this command defines ({names})"
             )
 
+    def _call_memo_key(self, definition: _FunctionDef) -> str:
+        """Everything a body's walk can depend on, except the facts it adds.
+
+        WHY (review R3/R5, PR #4188): a 65x-called ``log`` helper spent the
+        call budget and ranked HIGH, and 64 calls of a 1,500-statement body
+        took 18.8 s. A walk is deterministic in the walker's state, so a call
+        from a state already walked, whose walk changed no state, can only
+        add the same facts again: it is skipped and spends no budget. The key
+        is the whole walker state (generic, so a field added later is
+        covered), plus the few ``Resolution`` facts the walker READS back
+        (``programs_run`` counts, but is only read as a truth value).
+        """
+        res = self.result
+        skip = {
+            "result",
+            "functions",
+            "call_stack",
+            "function_calls",
+            "walked_functions",
+            "settled_calls",
+            "_landing_memo",
+            "programs_run",
+        }
+        state = [(k, _memo_canon(v)) for k, v in vars(self).items() if k not in skip]
+        reads = (
+            bool(self.programs_run),
+            bool(res.targets),
+            bool(res.created),
+            any(t.op != "touch" for t in res.touched),
+            _UNSEEN_SCRIPT_REASON in res.opaque_reasons,
+            res.globstar,
+        )
+        stack = tuple(id(d) for d in self.call_stack)
+        return repr((id(definition), stack, reads, state))
+
     def _call_function(self, definition: _FunctionDef, depth: int) -> None:
         res = self.result
         if definition in self.call_stack or len(self.call_stack) >= _MAX_FUNCTION_DEPTH:
@@ -4162,10 +4485,18 @@ class _Walker:
                 f"shell function {definition.name} recurses; the recursion is not followed"
             )
             return
-        if self.function_calls >= _MAX_FUNCTION_CALLS:
+        key = self._call_memo_key(definition)
+        if key in self.settled_calls:
+            return
+        if self.function_calls >= _MAX_FUNCTION_CALLS and id(definition) in self.walked_functions:
+            # Only a body already walked once is skipped: a never-walked one
+            # is walked below whatever the budget, so cheap padding calls
+            # cannot hide ``rm -rf ~`` (review R3). The skipped call starts
+            # from a state no walk has seen, so it may touch something.
             res.opaque_reasons.append("too many shell function calls to follow")
             return
         self.function_calls += 1
+        self.walked_functions.add(id(definition))
         snap = self._save() if definition.subshell else None
         before = {name: self.state.env.get(name) for name in definition.locals}
         self.call_stack.append(definition)
@@ -4182,6 +4513,8 @@ class _Walker:
                         env.pop(name, None)
                     else:
                         env[name] = value
+        if self._call_memo_key(definition) == key:
+            self.settled_calls.add(key)
 
     # -- one segment ---------------------------------------------------------
     def _splice_env_split(
@@ -7783,6 +8116,9 @@ def _walk_once(
     token = _CWD_MODEL.set(model)
     try:
         walker.walk(command)
+        if inline_functions:
+            # ``trap NAME EXIT`` runs NAME's definition current at exit.
+            walker._run_trapped_functions(0)
     except Exception as exc:  # noqa: BLE001 — a parser fault must not wave a call through
         walker.result.opaque_reasons.append(f"resolver error: {type(exc).__name__}")
     finally:

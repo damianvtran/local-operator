@@ -78,12 +78,73 @@ ROWS: list[tuple[str, str, Risk]] = [
     # Recursion and runaway fan-out fail closed to HIGH, never LOW.
     ("recursion", "f(){ f; }; f", Risk.HIGH),
     ("recursion-destructive", "f(){ rm -rf ./build; f; }; f", Risk.HIGH),
+    # Runaway fan-out of a body whose state changes each call: past the call
+    # budget, an already-walked body is skipped with an opaque reason.
     (
         "fan-out-budget",
-        "a(){ :; }; b(){ a; a; }; c(){ b; b; }; d(){ c; c; }; e(){ d; d; }; "
+        'a(){ n="$n."; }; b(){ a; a; }; c(){ b; b; }; d(){ c; c; }; e(){ d; d; }; '
         "g(){ e; e; }; h(){ g; g; }; i(){ h; h; }; i",
         Risk.HIGH,
     ),
+    # Review round 1 (security R1-R6, QA) on e3ed0b84. Every row below ranked
+    # wrongly there; the comment names the finding.
+    # R1: a definition that does not start its lex piece.
+    ("r1-brace-group", "{ f(){ rm -rf ~; }; f; }", Risk.CRITICAL),
+    ("r1-subshell", "(f(){ rm -rf ~; }; f)", Risk.CRITICAL),
+    ("r1-substitution", "x=$(f(){ rm -rf ~; }; f)", Risk.CRITICAL),
+    ("r1-then", "if true; then f(){ rm -rf ~; }; f; fi", Risk.CRITICAL),
+    ("r1-else", "if x; then f(){ echo a; }; else f(){ rm -rf ~; }; fi; f", Risk.CRITICAL),
+    # R2: a redefinition that may not take effect keeps the earlier body.
+    ("r2-and", "f(){ rm -rf ~; }; false && f(){ :; }; f", Risk.CRITICAL),
+    ("r2-or", "f(){ rm -rf ~; }; true || f(){ :; }; f", Risk.CRITICAL),
+    ("r2-test-and", 'f(){ rm -rf ~; }; [ -n "$X" ] && f(){ :; }; f', Risk.CRITICAL),
+    ("r2-background", "f(){ rm -rf ~; }; f(){ :; } & f", Risk.CRITICAL),
+    ("r2-pipe", "f(){ rm -rf ~; }; f(){ :; } | cat; f", Risk.CRITICAL),
+    ("r2-substitution", 'f(){ rm -rf ~; }; echo "$(f(){ :; })"; f', Risk.CRITICAL),
+    (
+        "r2-in-if",
+        f'L=/; f(){{ L="{SP}/x"; }}; if true; then f(){{ :; }}; fi; f; rm -rf "$L"',
+        Risk.CRITICAL,
+    ),
+    # Candidates that leave different state: what follows cannot know which ran.
+    (
+        "r2-state-differs",
+        f'L="{SP}/x"; f(){{ L=/; }}; false && f(){{ :; }}; f; rm -rf "$L"',
+        Risk.HIGH,
+    ),
+    # R3: repeated calls of a body that changes nothing spend no budget, and
+    # padding cannot hide a destructive body past the budget.
+    ("r3-log-65", 'log(){ echo "$@"; }; ' + "; ".join(["log hi"] * 65), Risk.LOW),
+    (
+        "r3-log-80-lines",
+        'log(){ echo "$@"; }\n' + "\n".join(f"log step{i}" for i in range(80)),
+        Risk.LOW,
+    ),
+    (
+        "r3-fan-out-inert",
+        "a(){ :; }; b(){ a; a; }; c(){ b; b; }; d(){ c; c; }; e(){ d; d; }; "
+        "g(){ e; e; }; h(){ g; g; }; i(){ h; h; }; i",
+        Risk.LOW,
+    ),
+    ("r3-padding", "; ".join(["g(){ :; }"] + ["g"] * 70) + "; f(){ rm -rf ~; }; f", Risk.CRITICAL),
+    ("r3-repeated-delete", "f(){ rm -rf ./build; }; " + "; ".join(["f"] * 70), Risk.LOW),
+    # R4: ``trap``/``alias`` naming one function call it, pinned.
+    (
+        "r4-trap-cleanup",
+        'set -e\ntmp=$(mktemp -d)\ncleanup() { rm -rf "$tmp"; }\n'
+        'trap cleanup EXIT\necho hi > "$tmp/a"',
+        Risk.LOW,
+    ),
+    ("r4-trap-pad", f'f(){{ rm -rf "{SP}/x"; }}; trap f EXIT', Risk.LOW),
+    ("r4-alias-pad", f'f(){{ rm -rf "{SP}/x"; }}; alias g=f; g', Risk.LOW),
+    ("r4-trap-before-definition", "trap cleanup EXIT; cleanup(){ rm -rf ~; }", Risk.CRITICAL),
+    ("r4-alias-before-definition", "alias g=f; f(){ rm -rf ~; }; g", Risk.CRITICAL),
+    # Non-literal actions still reach every body (fail closed).
+    ("r4-trap-variable", f'f(){{ rm -rf "{SP}/x"; }}; trap "$a" EXIT', Risk.HIGH),
+    ("r4-trap-script", "f(){ rm -rf ~; }; trap 'f; g' EXIT", Risk.CRITICAL),
+    ("r4-trap-reset", "f(){ rm -rf ~; }; trap - EXIT", Risk.LOW),
+    # R6: a loop body can call a definition made later in it.
+    ("r6-loop-carried", "for i in 1 2; do f; f(){ rm -rf ~; }; done", Risk.CRITICAL),
     # The own-scratchpad delete keeps working through a function (guard).
     ("scratch-delete", f'f(){{ rm -rf "{SP}/x"; }}; f', Risk.LOW),
     ("harmless-call", "g(){ echo hi; }; g", Risk.LOW),
@@ -154,3 +215,23 @@ async def test_preview_agrees_with_checkpoint(
         # CRITICAL is refused before any judge answer.
         assert allowed is not None and allowed.blocked is True
         assert allowed.rule == "dangerous-delete"
+
+
+def test_repeated_large_body_stays_fast(ctx: CallContext) -> None:
+    """R5 (review round 1): 64 calls of a 1,500-statement body took 18.8 s.
+
+    Calls from a state already walked, whose walk changed nothing, are not
+    walked again (``_call_memo_key``), so this costs about one body walk. The
+    bound is loose (a slow CI runner), far under the 18.8 s it replaces.
+    """
+    import time
+
+    assert ctx.scratchpad is not None
+    body = "; ".join(f"echo line{i}" for i in range(1500))
+    command = f"f(){{ {body}; }}; " + "; ".join(["f"] * 64) + "; rm -rf ~"
+    started = time.monotonic()
+    verdict = classify_bash(
+        command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=SID
+    )
+    assert time.monotonic() - started < 8.0
+    assert verdict.risk == Risk.CRITICAL
