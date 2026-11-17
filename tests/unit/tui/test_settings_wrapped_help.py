@@ -356,9 +356,25 @@ async def test_the_wrapped_keep_help_takes_dim_ink_not_faint() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(120, 30), (56, 20)])
+@pytest.mark.parametrize(
+    ("size", "note_fits"),
+    [
+        # SPACE BUDGET (en catalogue): the note " · default: 2" is 13 cells and
+        # only ever joins the LAST wrapped line, never a row of its own — the
+        # band's rows are reserved for the help's guarantee. At 120 cols the
+        # last wrapped line leaves room for it: the FIT branch. At 56 cols the
+        # detail width is 50 and the last line "Also keeps this many newest
+        # unused installs." is 44 cells, so 44 + 13 = 57 > 50: the NO-FIT
+        # branch, where the note is dropped and the help still shows whole.
+        # ``note_fits`` pins which branch each size takes, so a copy or width
+        # change that moves a size to the other branch fails loudly instead
+        # of silently leaving one branch untested.
+        ((120, 30), True),
+        ((56, 20), False),
+    ],
+)
 async def test_off_default_wrapped_help_names_the_default_when_it_fits(
-    size: tuple[int, int],
+    size: tuple[int, int], note_fits: bool
 ) -> None:
     """Design round 1, D1: wrapped off-default help still says ``default: 2``.
 
@@ -370,10 +386,21 @@ async def test_off_default_wrapped_help_names_the_default_when_it_fits(
     plain, width, view = await _paint_at(size, value=0)
     tail = " · default: 2"
     lines = _wrap_cells(help_text, width, max_lines=_DETAIL_WRAP_MAX_ROWS)
-    # Preconditions: the help wraps, and the note fits beside its last line.
+    # Precondition: the help wraps (the WRAP rung is what is under test).
     assert lines is not None and len(lines) > 1, (lines, width)
-    assert cell_len(lines[-1] + tail) <= width, (lines[-1], width)
-    assert plain.endswith(tail), plain
-    rendered = _assert_whole(plain.removesuffix(tail), width, help_text)
+    fits = cell_len(lines[-1] + tail) <= width
+    assert fits is note_fits, (lines[-1], width, cell_len(lines[-1] + tail))
+    if fits:
+        # FIT: the note ends the last wrapped line, on that line, not a new row.
+        assert plain.endswith(tail), plain
+        assert plain.split("\n")[-1] == lines[-1] + tail, plain
+        help_plain = plain.removesuffix(tail)
+    else:
+        # NO-FIT: the note is absent — never squeezed in, never a cut help.
+        assert tail.strip() not in plain, plain
+        help_plain = plain
+    # Both branches: with the note removed the wrapped lines rejoin to the
+    # full catalogue help — every word, in order, no ellipsis.
+    rendered = _assert_whole(help_plain, width, help_text)
     assert len(rendered) == len(lines) == view._detail_rows
     assert all(cell_len(line) <= width for line in plain.split("\n"))
