@@ -5922,6 +5922,26 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return "steering queued", not carries_attachments
 
+    def _admits_into_live_turn(self) -> bool:
+        """Whether a peer message can still ride the turn that is running NOW.
+
+        True only while the session is streaming a turn AND this runtime has not
+        stopped admitting: no committed exit (``begin_retire`` commits only from
+        the idle decision, so a streaming turn normally implies none — checked
+        anyway because the order is not this method's to assume) and no
+        disposal (which cancels the turn, so a message handed to it would die
+        with it). Everything else — idle, retiring at idle, disposing — keeps
+        the spool/refusal the windows were built for.
+
+        A SNAPSHOT, and that is safe in one direction only: a turn that ends
+        right after this reads True leaves the delivery parked for a boundary
+        it never reaches. ``Session._flush_parked_deliveries`` owns that tail —
+        on a leaving runtime it spools what was parked instead of dropping it.
+        """
+        if getattr(self, "_disposing", False) or getattr(self, "_exit_committed", False):
+            return False
+        return bool(getattr(self._session, "is_streaming", False))
+
     @_on_session_loop
     async def receive_peer_message(
         self,
@@ -5985,7 +6005,25 @@ class ServingSessionHandle(SessionHandle):
         # peer's wake is spooled instead of refused (see ``types.UPDATING``). The
         # window is checked as its own term because it is open BEFORE the cause
         # is latched — the announce and the latch come after it.
-        if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
+        #
+        # A LIVE TURN STILL ADMITS, and that check comes first. Both of the
+        # deferring windows above may be open while a turn is mid-flight: the
+        # build-replaced drain latches on a BUSY runtime by construction, and a
+        # checkpointed move opens the update window without sampling idleness.
+        # Spooling there held every local ``send`` (``now=True`` steers too)
+        # for a successor that only boots once the turn ends — measured on
+        # node2, 2026-11-17 10:31–11:15Z: a 0.106.5 runtime busy ~40 min after
+        # ``lop update`` answered every local send "held for the next runtime —
+        # it runs it" and delivered nothing (3 peer rows + 6 own wakes) until
+        # it rolled at idle, while mesh-relayed sends arrived. Delivering into
+        # the turn that is already running starts no NEW work, which is all
+        # invariant (i) forbids; once that turn is gone the spool is right
+        # again. See ``_admits_into_live_turn``.
+        if (
+            (self._retiring_cause or self._updating)
+            and (wake or mode != "mailbox")
+            and not self._admits_into_live_turn()
+        ):
             if self._updating or (self._draining and not self._exit_committed):
                 receipt = await self._spool_for_successor(
                     text,

@@ -4306,6 +4306,11 @@ class Session:
         #: disposal that follows it. Released by ``end_drain``'s abandon arm,
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
+        #: One-shot wake fires a leaving runtime handed to its LIVE turn, by
+        #: ``(wake_id, occurrence)``, so a fire left parked past the turn's last
+        #: boundary is re-armed rather than spooled as text
+        #: (``_spool_parked_for_successor``). Empty except while draining.
+        self._live_final_wakes: dict[tuple[str, int], DueWake] = {}
         #: Declared by a ONE-SHOT host at entry
         #: (``Session.declare_one_shot_exit``, called from ``run_print_mode``;
         #: v3, 2026-09-30). The session then arms the departure pair itself in
@@ -22430,6 +22435,114 @@ class Session:
             # turn that never reached one again (see ``_flush_parked_deliveries``).
             await self._flush_parked_deliveries()
 
+    async def _spool_parked_for_successor(self, *, disposing: bool = False) -> None:
+        """Hand peer messages and wakes parked past the last boundary to the successor.
+
+        The leaving-runtime twin of the flush below. A turn on a draining
+        runtime still takes peer messages and its own wakes (the node2
+        incident, 2026-11-17: holding them for ~40 min behind one busy turn was
+        the defect), and the busy arms park them on the steering queue for "the
+        next tool boundary". A turn that ends first has no next boundary, and
+        opening a new turn for them is exactly what a leaving runtime must not
+        do — so they go to the inbox the successor drains into its first turn
+        (``process._drain_inbox_into``), with ``wake=True`` because each was a
+        delivery somebody asked to be acted on.
+
+        Only wake and peer ``CustomMessage`` rows are taken; everything else
+        (plain steers, asks, monitors) keeps its place and its pre-existing
+        handling. A peer row carries its own ``message.id`` so the successor's
+        ``receive_peer_message`` duplicate gate answers a second copy instead of
+        appending it twice. Never raises: this runs in the turn's ``finally``.
+
+        EVERY ROW GOES THROUGH ``inbox.append_for_successor`` (review round 1,
+        R1-1), the vehicle the admission-time spool
+        (``ServingSessionHandle._spool_for_successor``) uses: it records the
+        owed turn (``wakes/spooled/<sid>.json``) BEFORE the append and raises
+        the supervisor's reader. A plain ``append_inbox`` wrote a row nothing
+        was obliged to read — on a headless session the runtime exits at idle
+        and no successor is ever started for it (the 2026-09-21 class
+        ``inbox.SPOOL_RECEIPT_WAKE`` documents).
+
+        A ONE-SHOT (``due.final``) wake keeps its re-arm: the live arm of
+        ``_spool_wake_to_inbox`` remembers the ``DueWake`` it handed the turn,
+        and here that occurrence is re-armed through ``_queue_wake_rearm``
+        exactly as an idle fire would have been, so the id the user knows stays
+        cancellable and ``hand_wakes_to_successor`` writes it at the exit.
+        ``disposing=True`` (the call from ``_dispose_impl``) skips the re-arm:
+        a disposal may come after the exit's handover already ran, or with no
+        handover at all (the signal drain), so a hold placed then could be
+        written by nobody — the owed text row is the one durable outcome there.
+        """
+        from local_operator.harness.message_types import PEER_DELIVERABLE_CUSTOM_TYPES
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import InboxLine, append_for_successor
+        from local_operator.wakes.spooled import await_spool_write
+
+        kept: list[AgentMessage] = []
+        taken: list[CustomMessage] = []
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            if isinstance(item, CustomMessage) and (
+                item.custom_type == WAKE_PROMPT_MESSAGE_TYPE
+                or item.custom_type in PEER_DELIVERABLE_CUSTOM_TYPES
+            ):
+                taken.append(item)
+            else:
+                kept.append(item)
+        for item in kept:
+            self._steering_queue.put_nowait(item)
+        # Every live-handed one-shot is settled by this pass or was already
+        # consumed by a boundary; either way the memo must not outlive it.
+        live_finals: dict[tuple[str, int], DueWake] = getattr(self, "_live_final_wakes", {})
+        self._live_final_wakes = {}
+        if not taken:
+            return
+        directory = getattr(self._transcript, "directory", None)
+        for message in taken:
+            try:
+                if message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+                    details = message.details or {}
+                    due = live_finals.get(
+                        (str(details.get("wake_id", "")), int(details.get("occurrence") or 0))
+                    )
+                    if due is not None and not disposing and self._queue_wake_rearm(due):
+                        continue
+                    await self._spool_parked_wake(message, for_successor=True)
+                    continue
+                details = message.details or {}
+                if directory is None:
+                    logger.warning("parked peer message %s could not be spooled", message.id)
+                    continue
+                custom_type = (
+                    message.custom_type if message.custom_type != PEER_MESSAGE_MESSAGE_TYPE else ""
+                )
+                await await_spool_write(
+                    append_for_successor,
+                    config_dir(),
+                    Path(directory),
+                    InboxLine(
+                        text=str(details.get("body") or details.get("text") or ""),
+                        sender=dict(details.get("sender") or {}),
+                        mode="mailbox",
+                        written_at=time.time(),
+                        wake=True,
+                        message_id=str(message.id or ""),
+                        custom_type=custom_type,
+                        # The bridge locator, which the successor cannot
+                        # re-derive (H5 F3; review round 1, R1-5) — the same
+                        # carriage the admission-time spool makes.
+                        bridge_meta=dict(details.get("bridge") or {}),
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — the turn's finally must not die here
+                logger.warning(
+                    "parked delivery %s could not be spooled while draining",
+                    getattr(message, "id", ""),
+                    exc_info=True,
+                )
+        self._courtesy_wake_count = 0
+        self.refresh_frontend_state()
+
     async def _flush_parked_deliveries(self) -> None:
         """Hand over what a busy latch parked, now that the turn has ended.
 
@@ -22506,6 +22619,14 @@ class Session:
         would cost the busy arms one shared sentence. Recorded here so the
         next reader does not re-derive the mismatch as a bug.
         """
+        if self._leaving_deliveries and not self._disposed and not self._one_shot_exit:
+            # A DRAINING RUNTIME NOW PARKS PEER MESSAGES AND WAKES HERE: they are
+            # delivered into its live turn rather than spooled
+            # (``ServingSessionHandle._admits_into_live_turn``,
+            # ``_spool_wake_to_inbox``), so one that lands past the turn's last
+            # boundary would otherwise sit in memory until the exit disposes it.
+            await self._spool_parked_for_successor()
+            return
         if self._disposed or self._leaving_deliveries or self._one_shot_exit:
             return
         drained: list[AgentMessage] = []
@@ -32262,7 +32383,9 @@ class Session:
             logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
             return False
 
-    async def _spool_parked_wake(self, wake_message: CustomMessage) -> None:
+    async def _spool_parked_wake(
+        self, wake_message: CustomMessage, *, for_successor: bool = False
+    ) -> None:
         """Spool one parked wake for the successor on retire. Never raises.
 
         A parked wake is already a fired occurrence with no schedule left to
@@ -32270,8 +32393,20 @@ class Session:
         the durable handoff — the same vehicle ``_spool_wake_to_inbox`` uses
         for a fire arriving while draining. The text is the delivery text
         the parked row carries, so the successor runs the same occurrence.
+
+        ``for_successor`` writes through ``inbox.append_for_successor`` so the
+        row also records the turn the successor owes and raises its reader —
+        the turn-end spool needs that (review round 1, R1-1): its wake was
+        handed to a live turn, so no schedule row is left to engage a runtime.
+        The retire-time caller keeps its plain append unchanged.
         """
-        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import (
+            InboxLine,
+            append_for_successor,
+            append_inbox,
+        )
+        from local_operator.wakes.spooled import await_spool_write
 
         wake_id = str(wake_message.details.get("wake_id", ""))
         text = str(wake_message.details.get("text", ""))
@@ -32279,19 +32414,21 @@ class Session:
         if directory is None or not text:
             logger.warning("parked wake %s could not be spooled (no session dir)", wake_id)
             return
+        line = InboxLine(
+            text=text,
+            sender={},
+            mode="mailbox",
+            written_at=time.time(),
+            wake=True,
+            wake_id=wake_id,
+        )
         try:
-            written = await asyncio.to_thread(
-                append_inbox,
-                Path(directory),
-                InboxLine(
-                    text=text,
-                    sender={},
-                    mode="mailbox",
-                    written_at=time.time(),
-                    wake=True,
-                    wake_id=wake_id,
-                ),
-            )
+            if for_successor:
+                written = await await_spool_write(
+                    append_for_successor, config_dir(), Path(directory), line
+                )
+            else:
+                written = await asyncio.to_thread(append_inbox, Path(directory), line)
         except Exception:  # noqa: BLE001 — a drain must not die on a spool write
             logger.warning(
                 "parked wake %s could not be spooled while draining", wake_id, exc_info=True
@@ -32325,6 +32462,59 @@ class Session:
         fallback: a wake that ended up in neither place is lost work the user is
         waiting on, and a log line is the only trace it existed
         (``design-runtime-autorefresh`` §5.3).
+        """
+        # A FIRE INTO A LIVE TURN IS DELIVERED, not spooled. The divert is
+        # installed when a drain LATCHES, and a build-replaced drain latches on a
+        # busy runtime by construction — so for the whole rest of that turn the
+        # session's own reminders went to a successor that boots only after the
+        # turn ends (node2, 2026-11-17: 6 own wakes held ~40 min behind one
+        # turn). Riding the running turn opens no new work on the leaving build,
+        # which is the only thing the divert exists to prevent; an idle fire
+        # still spools below. ``_deliver_wake``'s busy arm parks it for the next
+        # tool boundary, and a turn that ends first hands the park to
+        # ``_flush_parked_deliveries``, whose leaving arm spools it.
+        # ``getattr``: the cell harnesses bind this method onto hosts without the
+        # session's turn flags, and those hosts are idle by construction.
+        if getattr(self, "_is_streaming", False) and not getattr(self, "_disposed", False):
+            deliver = getattr(self, "_wake_hook_before_drain", None) or self._deliver_wake
+            if deliver != self._spool_wake_to_inbox:
+                if due.final:
+                    # The fire retired its schedule, so if this delivery ends
+                    # up parked past the last boundary the turn-end spool must
+                    # re-arm it rather than write text only (R1-1). Keyed like
+                    # the parked row's details so that spool can find it.
+                    finals = getattr(self, "_live_final_wakes", None)
+                    if finals is None:
+                        finals = self._live_final_wakes = {}
+                    finals[(due.schedule.id, due.occurrence)] = due
+                if deliver == self._deliver_wake:
+                    # ``_deliver_wake`` awaits before it re-samples ``busy``; a
+                    # turn that ends in that gap would take its idle arm, whose
+                    # turn a leaving runtime holds at admission (transcript
+                    # only, nobody woken — R1-3). Hand that arm back here.
+                    await self._deliver_wake(due, idle_fallback=self._spool_wake_fire)
+                else:
+                    await deliver(due)
+                # The busy arm parks AFTER an awaited emit, so the turn may have
+                # ended (and run its turn-end spool) before the park landed.
+                # Nothing else would ever drain it on a leaving runtime, so
+                # sweep it to the successor now; a no-op when nothing is parked.
+                if (
+                    getattr(self, "_leaving_deliveries", False)
+                    and not getattr(self, "_is_streaming", False)
+                    and not getattr(self, "_disposed", False)
+                    and not getattr(self, "_one_shot_exit", False)
+                ):
+                    await self._spool_parked_for_successor()
+                return
+        await self._spool_wake_fire(due)
+
+    async def _spool_wake_fire(self, due: DueWake) -> None:
+        """Re-arm (one-shot) or spool (recurring) one fire for the successor.
+
+        The idle half of :meth:`_spool_wake_to_inbox`, split out so the live
+        arm can hand a fire back to it when the turn it aimed at ended first
+        (``_deliver_wake``'s ``idle_fallback``). Never raises.
         """
         from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
@@ -34057,7 +34247,12 @@ class Session:
         except Exception:  # noqa: BLE001 — the ledger is observation
             logger.debug("aida: could not re-owe the withheld greeting", exc_info=True)
 
-    async def _deliver_wake(self, due: DueWake) -> None:
+    async def _deliver_wake(
+        self,
+        due: DueWake,
+        *,
+        idle_fallback: Callable[[DueWake], Awaitable[None]] | None = None,
+    ) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
         annotated as missed — the agent must not read it as punctual, and a
@@ -34150,6 +34345,12 @@ class Session:
         if missed_note:
             text = f"{missed_note}\n\n{text}"
         busy = self._is_streaming
+        if not busy and idle_fallback is not None:
+            # The caller aimed this fire at a live turn that has ended since it
+            # looked (only ``_spool_wake_to_inbox``'s live arm passes this): its
+            # idle arm is the one that knows what an idle fire means for it.
+            await idle_fallback(due)
+            return
         if busy:
             # The resume guidance rides the text itself: the wake reached a
             # turn that was already working, and the message is the only
@@ -36406,6 +36607,19 @@ class Session:
         if unsubscribe_state is not None:
             unsubscribe_state()
             self._unsubscribe_subagent_state = None
+        # A LEAVING RUNTIME'S PARKED PEER MESSAGES AND WAKES GO TO THE SUCCESSOR
+        # FIRST (review round 1, R1-2). A leaving runtime delivers them into its
+        # live turn (``ServingSessionHandle._admits_into_live_turn``), and the
+        # sender was told "delivered mid-turn"; the turn's own turn-end spool
+        # skips once ``_disposed`` is set, and the loop below empties the queue.
+        # A disposal that catches the turn still busy — the signal drain's reap,
+        # a SIGTERM during a build drain — would otherwise drop them. Chosen over
+        # narrowing live admission to the build drain: this covers EVERY exit
+        # that disposes mid-turn, including ones no drain cause names today,
+        # while narrowing would still lose a build drain interrupted by a signal.
+        # The one-shot host has no successor and keeps its own semantics.
+        if self._leaving_deliveries and not self._one_shot_exit:
+            await self._spool_parked_for_successor(disposing=True)
         # No later boundary can drain producer steers once disposal starts.
         # Reject them while rejection subscribers and viewers are still attached so
         # capacity is released and the producer can safely reuse the same ID.
