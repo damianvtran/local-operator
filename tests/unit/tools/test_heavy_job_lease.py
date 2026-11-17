@@ -11,6 +11,7 @@ Every cell uses an isolated config dir and a small wait so it stays fast.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
@@ -678,11 +679,24 @@ def test_killed_harness_keeps_the_slot_until_its_command_exits(
     harness = subprocess.Popen(
         [sys.executable, "-c", _BASH_HARNESS, command], env=env, start_new_session=True
     )
-    pgid = None
+    # The orphaned command is not our child: once it exits, init reaps it and
+    # its pid/pgid can be reused by an unrelated process, and this fleet forbids
+    # signalling any pid or group we do not provably own. So the cleanup kill
+    # goes through a pidfd on the group leader (pid == pgid), opened while the
+    # command is provably alive; a pidfd can never reach a recycled pid.
+    leader_fd: int | None = None
     try:
         _wait_for(started, timeout=30)
         record = (lease_env / "slot-0.json").read_text()
-        pgid = __import__("json").loads(record)["pgid"]
+        pgid = json.loads(record)["pgid"]
+        if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+            with contextlib.suppress(ProcessLookupError):
+                leader_fd = os.pidfd_open(pgid)
+            # `done` is touched before the leader exits, so its absence AFTER the
+            # open proves the fd names our live command, not a reused pid.
+            if leader_fd is not None and done.exists():
+                os.close(leader_fd)
+                leader_fd = None
         os.kill(harness.pid, signal.SIGKILL)
         harness.wait(timeout=5)
         assert not done.exists(), "command finished before the check; widen the sleep"
@@ -697,9 +711,15 @@ def test_killed_harness_keeps_the_slot_until_its_command_exits(
         assert done.exists() and done.stat().st_mtime <= acquired_at
     finally:
         _reap(harness)
-        if pgid:
-            with __import__("contextlib").suppress(ProcessLookupError):
-                os.killpg(pgid, signal.SIGKILL)
+        # No killpg fallback: without a pidfd the test leaves the (2 s) command
+        # to finish rather than risk signalling a group it no longer owns.
+        if leader_fd is not None:
+            try:
+                if not done.exists():
+                    with contextlib.suppress(ProcessLookupError):
+                        signal.pidfd_send_signal(leader_fd, signal.SIGKILL)
+            finally:
+                os.close(leader_fd)
 
 
 def test_queue_wait_is_not_capped_by_the_command_timeout(lease_env: Path, tmp_path: Path) -> None:
