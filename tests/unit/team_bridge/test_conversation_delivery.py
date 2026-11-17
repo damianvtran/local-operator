@@ -141,6 +141,10 @@ class FakeServer:
     view_calls: list[str] = field(default_factory=list)
     history_calls: list[dict[str, Any]] = field(default_factory=list)
     admits: list[dict[str, Any]] = field(default_factory=list)
+    #: A thread REPLY's root (``ids.thread_root_id``); ``None`` = a channel-level row.
+    thread_root: str | None = None
+    #: agent-server #402's ``ids.passive``; ``None`` = ABSENT (an older hub).
+    passive: bool | None = None
 
     def event_for(self, endpoint: str) -> dict[str, Any] | None:
         if not self.active.get(endpoint, False):
@@ -163,6 +167,10 @@ class FakeServer:
                     "sender_kind": self.sender["kind"],
                 }
             )
+        if self.thread_root is not None:
+            ids["thread_root_id"] = self.thread_root
+        if self.passive is not None:
+            ids["passive"] = self.passive
         return {"type": "message_available", "ids": ids, "at": HISTORY_AT}
 
     def events_answer(self, endpoint: str) -> dict[str, Any]:
@@ -1793,3 +1801,84 @@ def test_the_config_request_rule_reaches_the_model_once_per_hop() -> None:
     assert "tell your operator of real conflicts or new risk, nothing else" in peer
     assert wrapped.count(peer) == 1
     assert wrapped.index(BRIDGE_UNTRUSTED_CLAUSE) < wrapped.index(peer) < wrapped.index(rule)
+
+
+# -- passive thread replies (agent-server #402) --------------------------------
+#
+# Operator rule (Damian, Team Bridge #general seq 97, 2026-11-17): agents wake on
+# thread replies only when they take part in the thread. The hub marks a reply
+# that reaches a notify=all agent OUTSIDE the thread audience ``ids.passive: true``.
+# The connector must still screen and admit it (so the agent's next
+# channel_thread/channel_history read returns it) but must post no card.
+
+THREAD_ROOT = "bcmsg_root0001"
+
+
+@pytest.mark.parametrize(
+    ("passive", "wakes"),
+    [
+        pytest.param(True, False, id="passive-no-wake"),
+        pytest.param(False, True, id="explicit-false-wakes"),
+        pytest.param(None, True, id="older-hub-absent-wakes"),
+    ],
+)
+def test_a_passive_thread_reply_is_admitted_but_wakes_nobody(
+    tmp_path, monkeypatch, passive, wakes
+) -> None:
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        thread_root=THREAD_ROOT,
+        passive=passive,
+    )
+    transcripts, modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+
+    out = _run(b, config_dir)
+
+    handled = out["handled"]
+    assert len(handled) == 1 and handled[0]["action"] == "delivered"
+    # Recorded and readable either way: screened, admitted, body reserved.
+    assert [(row["endpoint"], row["verdict"]) for row in server.admits] == [("bep_b", "allow")]
+    rows = _reservation_rows(config_dir)
+    assert [row["message_id"] for row in rows] == [MESSAGE_ID]
+    if wakes:
+        assert len(transcripts["sess_b"]) == 1
+        assert f"thread_root_id: {THREAD_ROOT}" in transcripts["sess_b"][0]["payload"]
+        assert modes["sess_b"] == ["mailbox"]
+        assert handled[0]["detail"] != conversation_mod.CARD_PASSIVE
+    else:
+        assert transcripts["sess_b"] == []
+        assert modes["sess_b"] == []
+        assert handled[0]["detail"] == conversation_mod.CARD_PASSIVE
+        # Nothing was buffered for a later flush either: no wake can leak out late.
+        assert not out.get("coalesced_wakes")
+        # The card obligation is settled, so a replayed delivery never wakes later.
+        assert rows[0]["card_posted_at"] is not None
+
+        replay = _run(b, config_dir)
+        assert transcripts["sess_b"] == []
+        assert all(item.get("action") != "hold" for item in replay["handled"])
+
+
+def test_a_mention_is_never_passive(tmp_path, monkeypatch) -> None:
+    """A malformed hub row carrying both bits still wakes: being named is being named."""
+
+    b = _owner("b", 2)
+    config_dir = tmp_path / "b"
+    config_dir.mkdir()
+    _enroll(config_dir, b, "sess_b")
+    server = FakeServer(
+        notify={"bep_b": "all"},
+        active={"bep_b": True},
+        mentioned={"bep_b"},
+        thread_root=THREAD_ROOT,
+        passive=True,
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"b": (b, config_dir)})
+    out = _run(b, config_dir)
+    assert out["handled"][0]["action"] == "delivered"
+    assert len(transcripts["sess_b"]) == 1

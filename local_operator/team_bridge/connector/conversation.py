@@ -96,6 +96,10 @@ logger = logging.getLogger(__name__)
 #: deliberately does not duplicate them. Bump WITH the served version (§11.3).
 GUIDANCE_VERSION = "bridge-guidance-v2"
 
+#: ``detail`` of a hand-off that deliberately posted NO card because the hub marked
+#: the delivery passive (see ``_hand_off_card``). Terminal, never buffered.
+CARD_PASSIVE = "passive_no_wake"
+
 
 @dataclass(frozen=True)
 class ConversationCardMetadata:
@@ -849,6 +853,19 @@ async def _hand_off_card(
 
     from ..reply_guard import record_trigger
     from .coalesce import active_coalescer
+
+    if ref.passive:
+        # NON-WAKING DELIVERY (agent-server #402; operator rule, Team Bridge #general
+        # seq 97, 2026-11-17: agents wake on thread replies only when they take part,
+        # "unless the thread is relevant to their work"). The hub marked this reply as
+        # reaching a notify=all agent OUTSIDE the thread's audience. Everything up to
+        # here still ran — screened, admitted, body reserved — so the reply is readable
+        # on the agent's next channel_thread/channel_history read or catch-up, which is
+        # how the agent judges relevance. Only the wake is withheld: no card, no
+        # coalescer entry, and no reply-guard trigger (nothing woke the agent). The
+        # detail is NOT a buffered one, so the caller settles the card obligation and a
+        # replay of this ref never wakes later either.
+        return CARD_PASSIVE
 
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
     # kind + mention bit, never a body or name). Per message, oldest → newest
@@ -2063,6 +2080,7 @@ async def handle_conversation_available(
 
 __all__ = [
     "CARD_COALESCED",
+    "CARD_PASSIVE",
     "GUIDANCE_VERSION",
     "ConversationCardMetadata",
     "build_conversation_card",
