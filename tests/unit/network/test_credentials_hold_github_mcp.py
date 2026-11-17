@@ -183,10 +183,10 @@ def test_the_tool_github_env_survives_the_owner_and_renews_on_return(
         registered += 1
 
     def tool_has_token() -> bool:
-        env, _ = github_mod.lent_github_env(
+        tool_env, _ = github_mod.lent_github_env(
             session_id=session_id, register=register, client=client
         )
-        return bool(env.get("GH_TOKEN"))
+        return bool(tool_env.get("GH_TOKEN"))
 
     assert tool_has_token(), "the tool received no initial GitHub environment"
     first = client.grants.peek(github_mod.GITHUB_KEY, session_id)
@@ -204,8 +204,7 @@ def test_the_tool_github_env_survives_the_owner_and_renews_on_return(
     served = [
         row
         for row in _hold_records(net.b.root)
-        if row["event"] == "credential.held_served"
-        and row["detail"]["grant_id"] == first.grant_id
+        if row["event"] == "credential.held_served" and row["detail"]["grant_id"] == first.grant_id
     ]
     assert len(served) == 1
 
