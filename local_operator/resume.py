@@ -3482,9 +3482,12 @@ DOCTOR_DETAIL_WORDS: dict[str, str] = {
     # Nothing is sent before the challenge is checked (``refuse_unexpected_peer``),
     # and an unauthenticated answer never deletes the address (review M1), so the
     # row says both: what was protected, and that this is an ordering change only.
+    # "ANY OTHER ADDRESS" (review n2-1): this detail is rendered without the member's
+    # address count, and a member with a single address keeps being dialled there
+    # alone, so the sentence must hold whether or not other addresses exist.
     "peer_identity_mismatch": (
         "a different device answered at this address; nothing was sent to it, and this "
-        "device now tries the member's other addresses first"
+        "device now dials this address only after any other address the member has"
     ),
 }
 

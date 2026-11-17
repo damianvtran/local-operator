@@ -12649,6 +12649,18 @@ class RelayServer:
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
+            # THE ROW'S CURRENT ID, NOT THE CALLER'S (security S-6). ``member()``
+            # also matches ``previous_ids``, so a caller still holding the id a
+            # proven rotation retired (a stream's recorded ``peer``, a move or an
+            # attention record) lands on the rotated row. The listener can only
+            # prove the key that row now stores, so dialling — and keying suspect
+            # marks — by the retired id would refuse the real device and mark its
+            # real address suspect, where main kept reaching it through that id.
+            current_id = member.device_id
+            if current_id != device_id:
+                live = self._link_for(current_id, network_id=record.network_id)
+                if live is not None:
+                    return live, "", attempts
             # Our own listener answers a self-addressed candidate before any real
             # peer can (the self-race, ``_reaches_own_listener``), so those are
             # dropped before the race rather than lost to it.
@@ -12663,7 +12675,7 @@ class RelayServer:
             # member whose only address is suspect is still dialled.
             # ``getattr``: stand-in servers built without ``__init__`` (as the probe
             # tests build them) have no suspects, which is the honest default.
-            suspects = getattr(self, "_suspect_endpoints", {}).get(device_id, set())
+            suspects = getattr(self, "_suspect_endpoints", {}).get(current_id, set())
             tiers = [
                 tier
                 for tier in (
@@ -12691,7 +12703,7 @@ class RelayServer:
                     epoch=record.epoch,
                     timeout_s=remaining,
                     connected=probe.sock,
-                    expected_device=device_id,
+                    expected_device=current_id,
                 )
                 if link is not None:
                     return link, "", attempts
@@ -13948,6 +13960,8 @@ class RelayServer:
         budget = self.settings.handshake_timeout_s if timeout_s is None else float(timeout_s)
         record = store.load(network_id, self.root)
         state = store.require_secrets(network_id, self.root)
+        if mode != "join":
+            expected_device = _current_member_id(record, expected_device)
         if connected is not None:
             sock = connected
         else:
@@ -14037,6 +14051,12 @@ class RelayServer:
                 # ``net_identity_rotate`` frame uses, so the link is admitted under a
                 # member id this device's record already knows. A refusal here
                 # (``MeshRefusal``) closes the socket below and demotes nothing.
+                # WRITTEN EVEN IF ``_admit_link`` THEN REFUSES (review m2-2): by
+                # this point the rotation is fully proven (old-key statement plus the
+                # new key's welcome proof), and the row it writes is byte-for-byte
+                # what the queued ``net_identity_rotate`` would write. A network-level
+                # refusal of the LINK (relay stopping, network refused) says nothing
+                # against the rotation, so keeping it spares the next dial the hop.
                 self._apply_rotation_statement(record.network_id, handshake.peer_rotation)
             link = PeerLink(
                 server=self,
@@ -17386,6 +17406,26 @@ def _active_key_reader(record: NetworkRecord) -> Callable[[str], str | None]:
         return member.public_key or None
 
     return public_key_for
+
+
+def _current_member_id(record: NetworkRecord, device_id: str) -> str:
+    """The id a dial must expect for ``device_id``: the row's current one (S-6).
+
+    A caller may hold an id that a PROVEN rotation has since retired into the
+    row's ``previous_ids`` (only a verified ``rotation_proof`` or a hop puts it
+    there). The listener can prove only the key the row now stores, so expecting
+    the retired id would refuse the real device ``peer_identity_mismatch``, mark
+    its address suspect and write a misleading ``wrong_device`` audit line (QA
+    Q2-1). Resolving here, against the record ``dial`` has just re-read, covers
+    every caller, including a doctor/readiness pass that iterated a snapshot
+    taken before a concurrent hop. An exact row match wins, so a stale table that
+    still carries the old row is never redirected; an unknown id is returned
+    unchanged and refused as before.
+    """
+    if not device_id or any(row.device_id == device_id for row in record.members):
+        return device_id
+    member = record.member(device_id)
+    return member.device_id if member is not None else device_id
 
 
 def _build_version_only(build: Any) -> dict[str, Any]:

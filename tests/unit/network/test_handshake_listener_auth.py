@@ -1677,3 +1677,142 @@ def test_n1_a_welcome_before_auth_is_a_refusal_not_an_assertion(tmp_path: Path) 
             ),
         )
     assert caught.value.code == hs_mod.REASON_FRAME
+
+
+# ---------------------------------------------------------------------------
+# Round 2 remediation (PR #4179): S-6 the retired id still reaches the device;
+# N-3 / m2-1 the hop's network and chain guards
+# ---------------------------------------------------------------------------
+
+
+def _hop(
+    mesh: Mesh, tmp_path: Path, while_live: Callable[[Any], None] | None = None
+) -> tuple[Any, dict[str, Any]]:
+    """Apply a real, proven hop A -> A' on the dialer, then close its link again.
+
+    ``while_live`` runs with the hop's link while its listener is still serving it.
+    """
+    new, statement = _rotated(mesh, tmp_path)
+    fake = FakeListener(
+        listener_identity=new,
+        network_id=mesh.record.network_id,
+        claim_device_id=new.device_id,
+        policy=_genuine_policy(mesh),
+        rotation=statement,
+    )
+    try:
+        link, reason = _dial(mesh, fake, expected_device=mesh.victim.device_id)
+        assert link is not None, reason
+        assert _row(mesh, new.device_id) is not None
+        if while_live is not None:
+            while_live(link)
+    finally:
+        fake.stop()
+    return new, statement
+
+
+def _close_all(mesh: Mesh) -> None:
+    for live in _links(mesh):
+        live.close("test")
+    deadline = time.monotonic() + 3.0
+    while _links(mesh) and any(not link.closing for link in _links(mesh)):
+        assert time.monotonic() < deadline, "the link never closed"
+        time.sleep(0.02)
+
+
+@pytest.mark.parametrize("route", ["ensure_link", "dial"])
+def test_s6_after_the_hop_the_retired_id_still_reaches_the_device(
+    mesh: Mesh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """S-6 / QA Q2-1: a caller still holding the retired id A links to A'.
+
+    RED at 74d036f6: ``_ensure_link_with_reason(A)`` dialled ``expected_device=A``,
+    the hop check failed against A''s stored key, the dial was refused
+    ``peer_identity_mismatch``, A''s real address was marked suspect and a
+    ``wrong_device`` audit line was written. ``dial`` covers the doctor/readiness
+    pass that iterated a pre-hop snapshot of the record.
+    """
+    old_id = mesh.victim.device_id
+
+    def reuses(live: Any) -> None:
+        # The hop's own link is still live: the retired id reuses it, no new dial.
+        link, reason = mesh.server._ensure_link_with_reason(old_id)  # noqa: SLF001
+        assert link is live, reason
+
+    new, statement = _hop(mesh, tmp_path, reuses if route == "ensure_link" else None)
+    _close_all(mesh)
+    refusals: list[str] = []
+    original = relay.RelayServer._audit_handshake_refusal  # noqa: SLF001
+
+    def spy(self: Any, refusal: Any, *args: Any, **kwargs: Any) -> Any:
+        refusals.append(refusal.code)
+        return original(self, refusal, *args, **kwargs)
+
+    monkeypatch.setattr(relay.RelayServer, "_audit_handshake_refusal", spy)
+    fake = FakeListener(
+        listener_identity=new,
+        network_id=mesh.record.network_id,
+        claim_device_id=new.device_id,
+        policy=_genuine_policy(mesh),
+        rotation=statement,
+    )
+    host, port = fake.start()
+    endpoint = f"{host}:{port}"
+    _only_endpoint(mesh, endpoint)
+    try:
+        if route == "ensure_link":
+            link, reason = mesh.server._ensure_link_with_reason(  # noqa: SLF001
+                old_id, probe_timeout_s=5.0
+            )
+        else:
+            link, reason = mesh.server.dial(
+                mesh.record.network_id, host=endpoint, timeout_s=5.0, expected_device=old_id
+            )
+        fake.handshake_done.wait(5)
+        assert link is not None, reason
+        assert link.device_id == new.device_id and link.peer_verified is True
+        assert refusals == [], f"a wrong_device refusal was audited: {refusals}"
+        suspects = mesh.server._suspect_endpoints  # noqa: SLF001
+        assert endpoint not in suspects.get(old_id, set())
+        assert endpoint not in suspects.get(new.device_id, set())
+        assert _row(mesh, new.device_id).endpoints == [endpoint]
+    finally:
+        fake.stop()
+
+
+@pytest.mark.parametrize("shape", ["other_network", "chain"])
+def test_n3_a_hop_statement_for_another_network_or_a_chain_is_refused_before_auth(
+    mesh: Mesh, tmp_path: Path, dialer_key_derivations: list[str], shape: str
+) -> None:
+    """N-3 / m2-1: the hop's network and ``old_device_id`` guards, each alone.
+
+    ``other_network``: signed by the victim's genuine stored key for its genuine
+    successor, valid in every respect except ``network_id``. ``chain``: A' -> A''
+    signed by A' (valid), presented to a dialer that still holds A, so its
+    ``old_device_id`` is not the id this dial meant to reach. The listener holds the
+    successor key in both, so only the guard under test can refuse it.
+    """
+    first, statement = _rotated(mesh, tmp_path)
+    listener = first
+    if shape == "other_network":
+        statement = identity.rotation_statement(mesh.victim, first, "net_" + "0" * 16)
+    else:
+        listener = identity.mint(tmp_path / "victim-rotated-twice", name=mesh.victim.name)
+        statement = identity.rotation_statement(first, listener, mesh.record.network_id)
+    before = _row(mesh, mesh.victim.device_id)
+    fake = FakeListener(
+        listener_identity=listener,
+        network_id=mesh.record.network_id,
+        claim_device_id=listener.device_id,
+        policy=_genuine_policy(mesh),
+        rotation=statement,
+    )
+    try:
+        _link, reason = _dial(mesh, fake, expected_device=mesh.victim.device_id)
+        _assert_refused(mesh, reason, "peer_identity_mismatch", dialer_key_derivations)
+        assert fake.auth_frame == {}, "our auth left before the hop was refused"
+        assert _row(mesh, listener.device_id) is None
+        assert _row(mesh, first.device_id) is None
+        assert _row(mesh, mesh.victim.device_id) == before, "the row changed"
+    finally:
+        fake.stop()
