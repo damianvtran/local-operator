@@ -5095,11 +5095,16 @@ class SettingsView(Vertical):
                     # even wrapped falls through to the rungs below, whose
                     # truncation carries its own visible mark.
                     lines = _wrap_cells(help_text, width, max_lines=2)
+                    # The wrapped help is the ONLY text in the band, which is
+                    # D5's `dim` case (`help_alone_part`), not `faint` (1.97:1)
+                    # — review round 2, R2-2, for `_WRAPPED_HELP_KEYS` rows.
+                    # Bridge and recording rows keep their accessible ink.
+                    wrap_style = help_style if (bridge_row or recording_row) else help_alone_part[1]
                     if lines:
-                        text.append(lines[0], style=help_style)
+                        text.append(lines[0], style=wrap_style)
                         if len(lines) == 2:
                             text.append("\n")
-                            text.append(lines[1], style=help_style)
+                            text.append(lines[1], style=wrap_style)
                             wrap_used = True
                         break
                     continue

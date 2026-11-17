@@ -5594,9 +5594,16 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         "1.2.3", _wheel_entry("local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl")
     )
     calls: list[tuple[Any, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: Any, **kwargs: Any) -> None:
+        order.append("install")
         calls.append((source, kwargs))
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return previous
 
     monkeypatch.chdir(repo)  # ``resolve_snapshot`` archived the ref out of here
     with (
@@ -5616,11 +5623,13 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         # The pre-flip ``current`` the snapshot path reads for the prune (R2),
         # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
         # host's: this fixture's pointer names ``previous``.
-        patch.object(update_mod, "previous_generation_for_reclaim", return_value=previous),
+        patch.object(update_mod, "previous_generation_for_reclaim", side_effect=read_previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
         assert update_mod._snapshot_command("v1.2.3") == 0
+
+    assert order == ["previous", "install"], order
 
     # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
     # terminal and may answer the signing dialog (review round 1, R2).
@@ -5826,9 +5835,16 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         "0.9.8", _wheel_entry("local_operator-0.9.8-py3-none-macosx_11_0_universal2.whl")
     )
     calls: list[tuple[Any, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: Any, **kwargs: Any) -> None:
+        order.append("install")
         calls.append((source, kwargs))
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return previous
 
     monkeypatch.chdir(repo)
     with (
@@ -5844,11 +5860,13 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
         # The pre-flip ``current`` the snapshot path reads for the prune (R2),
         # pinned like ``disk_build`` so the tail kwarg is the fixture's, not the
         # host's: this fixture's pointer names ``previous``.
-        patch.object(update_mod, "previous_generation_for_reclaim", return_value=previous),
+        patch.object(update_mod, "previous_generation_for_reclaim", side_effect=read_previous),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
         assert update_mod._snapshot_command("v0.9.8", allow_downgrade=True) == 0
+
+    assert order == ["previous", "install"], order
 
     # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
     # terminal and may answer the signing dialog (review round 1, R2).
@@ -6231,13 +6249,21 @@ def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
     # Match the real positional-source call, while observing the tail's intent;
     # this is not installer/publication/signature proof.
     installs: list[tuple[str | Path | None, dict[str, Any]]] = []
+    # R2-3: the previous build must be read BEFORE the install flips current.
+    order: list[str] = []
 
     def install(source: str | Path | None, **kwargs: Any) -> Path:
+        order.append("install")
         installs.append((source, kwargs))
         return generation
 
     before = tmp_path / "before-generation"
-    monkeypatch.setattr(update_mod, "previous_generation_for_reclaim", lambda: before)
+
+    def read_previous() -> Path:
+        order.append("previous")
+        return before
+
+    monkeypatch.setattr(update_mod, "previous_generation_for_reclaim", read_previous)
     monkeypatch.setattr(update_mod, "install_into_generation", install)
     monkeypatch.setattr(
         update_mod,
@@ -6269,6 +6295,7 @@ def test_perform_upgrade_runs_the_shared_post_promotion_reclaim(
     ]
     # R2: the pointer's target read BEFORE the install travels as ``previous``.
     assert reclaims == [(generation, before, notices.append)]
+    assert order == ["previous", "install"], order
     assert direct == []
 
 

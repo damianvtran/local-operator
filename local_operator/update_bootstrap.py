@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,8 @@ from email.parser import BytesParser
 from pathlib import Path
 from urllib.parse import quote, urlparse
 from urllib.request import urlopen
+
+logger = logging.getLogger(__name__)
 
 CALLER_CONTRACT = "rolling-no-kill-v1"
 CONTROLLER_CONTRACT = "immutable-controller-v1"
@@ -450,6 +453,20 @@ def controller(args: argparse.Namespace) -> int:
         "--controller-target",
         target,
     ]
+    # THE BUILD BEING REPLACED rides to the tail (PR #4135, review round 2,
+    # R2-1). Under rolling-no-kill its processes keep running after the flip,
+    # and the tail executes from the NEW current, so nothing else there names
+    # it: without this argument a keep-0 prune deletes a tree still in use,
+    # while the keep help promises "Always kept: current, previous".
+    # `dest.baseline` is the pre-flip pointer, re-proven equal to `current`
+    # inside the admission lock above, so it is the read-before-flip value.
+    #
+    # Sent ONLY when `current` is the build this run promoted, i.e. the tail is
+    # this release's code and accepts the flag. A superseding current may be an
+    # older release whose parser rejects unknown flags; that tail would exit 2
+    # and turn a committed core into PARTIAL. Omitted, it reclaims as before.
+    if now.resolve() == Path(promoted).resolve():
+        command += ["--controller-previous", str(dest.baseline)]
     if args.no_services:
         command += ["--no-services"]
     try:
@@ -484,6 +501,15 @@ def controller_tail(args: argparse.Namespace) -> int:
     promoted = Path(args.controller_tail).resolve(strict=True)
     if promoted.parent != update.generations_dir().resolve():
         raise BootstrapError("promoted receipt is outside the canonical generation store")
+    # The pre-flip build, from `controller` (R2-1). It only ADDS a keep to the
+    # prune, never authority to delete, so it needs no store check. `getattr`
+    # because an older controller omits the flag (and a hand-built Namespace may
+    # lack it): the reclaim then runs on its other protections, as it did
+    # before this argument existed.
+    previous_arg = getattr(args, "controller_previous", None)
+    previous = Path(previous_arg) if previous_arg else None
+    if previous is None:
+        logger.debug("controller tail got no --controller-previous; reclaiming without it")
     return update._generation_upgrade(
         0,
         install_version=update.generation_version(current),
@@ -491,6 +517,7 @@ def controller_tail(args: argparse.Namespace) -> int:
         services=not args.no_services,
         roll=False,
         promoted_generation=promoted,
+        previous_generation=previous,
     )
 
 

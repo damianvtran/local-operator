@@ -17,8 +17,10 @@ from pathlib import Path
 
 import pytest
 from rich.cells import cell_len
+from rich.style import Style
 
 from local_operator import settings_io
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.settings_view import SettingsView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -54,13 +56,18 @@ def _help() -> str:
     return str(settings_io.BY_KEY[KEY].help)
 
 
-async def _paint_at(size: tuple[int, int]) -> tuple[str, int, SettingsView]:
+async def _paint_at(
+    size: tuple[int, int], *, value: int | None = None
+) -> tuple[str, int, SettingsView]:
+    """Paint the row at ``size``; ``value`` stores it first (off-default rows)."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
         app._open_settings_view()
         await pilot.pause()
         view = app.query_one(SettingsView)
+        if value is not None:
+            settings_io.write_setting(view._manager, settings_io.BY_KEY[KEY], value)
         _select_key(view, KEY)
         return view._detail_text.plain, view._detail_width(), view
 
@@ -99,12 +106,57 @@ async def test_the_keep_help_shows_whole_when_two_rows_hold_it(size: tuple[int, 
 
 
 @pytest.mark.asyncio
-async def test_too_narrow_for_two_rows_takes_the_marked_cut_guarantee_first() -> None:
+async def test_off_default_and_too_narrow_cuts_the_help_never_shows_the_clause_alone() -> None:
+    """Off its default at 56 cols the floor is the guarantee, not ``default: 2``.
+
+    Replaces the default-value 56-col guard (review round 2, R2-3b), which
+    passed on a3b90985 too: on default the old and new ladders share the same
+    ``help_alone`` floor. Off default they differ — the generic clause ladder
+    sheds the help for ``[clause, key]`` (``default: 2   update.keep_generations``
+    fits 54 cells), dropping the "always kept" sentence entirely, while the
+    listed-help ladder never goes below the help's own MARKED cut.
+    """
     help_text = _help()
-    plain, width, view = await _paint_at((56, 20))
+    plain, width, view = await _paint_at((56, 20), value=0)
     # The precondition that makes this the CUT case under any copy this row
     # has carried (189 and 138 cells, both > 2 x 54).
     assert cell_len(help_text) > 2 * width, (cell_len(help_text), width)
+    assert KEY not in plain, "the clause+key rung must not replace the help"
     _assert_marked_cut(plain, width, help_text)
     assert view._detail_two_line is False
     assert view._detail.styles.padding.top == 1
+
+
+@pytest.mark.asyncio
+async def test_the_wrapped_keep_help_takes_dim_ink_not_faint() -> None:
+    """Wrapped, the help is the band's only text: D5's ``dim``, never ``faint``.
+
+    Review round 2, R2-2: the wrap rung painted the listed row's help in
+    ``faint`` (1.97:1). Fails on 9924c5f0 (faint spans) and on a3b90985 (no
+    two-row wrap at 80 cols).
+    """
+    help_text = _help()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        _select_key(view, KEY)
+        width = view._detail_width()
+        dim = theme_mod.semantic_color("dim")
+        faint = theme_mod.semantic_color("faint")
+        text = view._detail_text
+    # Preconditions: the copy needs exactly the wrap at this width, and the
+    # two inks differ in the active theme (else the test proves nothing).
+    assert width < cell_len(help_text) <= 2 * width, (cell_len(help_text), width)
+    assert dim != faint
+    assert "\n" in text.plain and view._detail_two_line is True
+    # Every painted span is the help (the band holds nothing else when it
+    # wraps), so every span must carry the `dim` hex.
+    expected = Style(color=dim).color
+    inks = [
+        (span.style if isinstance(span.style, Style) else Style.parse(span.style)).color
+        for span in text.spans
+    ]
+    assert inks and all(ink == expected for ink in inks), (inks, expected)

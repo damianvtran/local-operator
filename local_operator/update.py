@@ -7449,13 +7449,12 @@ def previous_generation_for_reclaim() -> Path | None:
     :func:`reclaim_after_promotion` so the build being replaced survives the
     post-promotion prune (R2). A read that fails returns ``None``: the prune
     then relies on its other protections, and a failed READ must not fail an
-    update that has not started yet.
+    update that has not started yet. No ``try`` here: :func:`current_generation`
+    already answers ``None`` for an unreadable pointer (it catches the
+    ``OSError`` from ``os.readlink``, and ``is_dir`` does not raise), so a
+    handler around it could never run (review round 2, R2-N1).
     """
-    try:
-        return current_generation()
-    except (OSError, RuntimeError):  # pragma: no cover — an unreadable pointer
-        logger.warning("could not read the install pointer before the update", exc_info=True)
-        return None
+    return current_generation()
 
 
 def reclaim_after_promotion(
