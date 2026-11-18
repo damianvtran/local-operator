@@ -46,6 +46,7 @@ from local_operator.guardrails import provenance as prov
 from local_operator.guardrails import resolve as resolve_module
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
+from local_operator.guardrails.preview import preview_tool_call
 from local_operator.guardrails.resolve import resolve_command
 from local_operator.resume import mark_session_origin
 
@@ -511,6 +512,38 @@ def test_kin_rm_rf_is_high(home: Path, infra: Path) -> None:
 def test_kin_forced_remove_is_high(home: Path, infra: Path) -> None:
     wt = _add_tree(home, infra / "services", K)
     assert _rank(home, _remove(wt, force=True), C).risk is Risk.HIGH
+
+
+@pytest.mark.asyncio
+async def test_clean_sibling_removal_guidance_at_checkpoint_and_preview(
+    home: Path, infra: Path
+) -> None:
+    wt = _add_tree(home, infra / "services", K)
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=C)
+    settings = GuardSettings(enabled=True, rules_dirs=())
+    judge = _Judge("BLOCK: <judge reason>")
+
+    # Independent first-call options, not a retry of the refused effect.
+    plain = {"command": _remove(wt)}
+    plain_preview = preview_tool_call("bash", plain, ctx, settings=settings)
+    plain_outcome = await check_tool_call("bash", plain, ctx, judge=judge, settings=settings)
+    assert "verdict: ALLOW" in plain_preview.render()
+    assert plain_outcome is None or not plain_outcome.blocked
+    assert not judge.prompts
+
+    forced = {"command": _remove(wt, force=True)}
+    preview = preview_tool_call("bash", forced, ctx, settings=settings)
+    outcome = await check_tool_call("bash", forced, ctx, judge=judge, settings=settings)
+    assert preview.builtin_effect == "judge"
+    assert outcome is not None and outcome.blocked
+    assert len(judge.prompts) == 1
+    assert "`git worktree remove <exact path>` without `--force`" in outcome.text
+    assert "It does not inherit the sibling or cousin clean-removal allowance." in outcome.text
+    assert "not permission to retry an already-refused effect by changing flags" in outcome.text
+    assert preview.builtin_text == outcome.text
+    assert outcome.text in preview.render()
+    # Check and preview classify/render only; the synthetic target stays intact.
+    assert wt.joinpath("main.tf").is_file()
 
 
 def test_kin_remove_while_creator_runs_is_high(

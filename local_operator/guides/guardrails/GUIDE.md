@@ -215,9 +215,17 @@ session made. Everything CRITICAL is still refused.
   recorded too: `rm LINK` or `unlink LINK` by its exact path (no trailing slash)
   removes only the link and ranks LOW while it is still that link; `rm -r LINK/`
   reaches the pointee and is ranked as the pointee.
-- **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
-  is LOW when the path is a registered linked worktree with no tracked or
-  untracked change, no ignored entry beyond regenerable output (`node_modules`,
+- **Clean linked worktree.** Before your first removal call, verify the worktree
+  is clean and use `git worktree remove <exact path>` without `--force` for your
+  own worktree or an eligible sibling's or cousin's worktree in the same task
+  tree (see family rules above). Use `--force` only when you intend to discard a
+  dirty worktree; it does not inherit the sibling or cousin clean-removal
+  allowance. This is how to choose the first call, not permission to switch
+  flags or otherwise retry an already-refused effect. Follow the refusal and
+  approval policy at the top of this guide.
+
+  Plain removal is LOW when the path is a registered linked worktree with no
+  tracked or untracked change, no ignored entry beyond regenerable output (`node_modules`,
   `.venv`, `__pycache__`, `build`, `dist`, `dist-ssr` …) and no repository nested inside
   that output, and HEAD on a branch or in some
   ref — AND it is idle: no running session other than yours owns it (created

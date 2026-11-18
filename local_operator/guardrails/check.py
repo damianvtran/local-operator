@@ -377,10 +377,15 @@ SUPPORTED_DELETE_PATHS = (
     # Operator escalation 2026-11-11: the old "or ask the operator" here sent
     # agents to the operator about their OWN finished worktrees. Removing what
     # you created is yours to do; asking is only for what you did not create.
-    "Supported: for a path you created (this session, its parents or its subagents), remove it "
-    "yourself by its exact path — `git worktree remove <exact path>` for a linked "
-    "worktree (commit or push what you want to keep first), or the literal path the "
-    "creating call named; never ask the operator about your own worktrees or scratch. "
+    "Supported: before the first removal call, verify the linked worktree is clean and use "
+    "`git worktree remove <exact path>` without `--force` for your own worktree or an eligible "
+    "sibling's or cousin's worktree in the same task tree. `--force` can discard uncommitted work; "
+    "use it only to intentionally discard a dirty tree. It does not inherit the sibling or cousin "
+    "clean-removal allowance. This is first-call guidance, not permission to retry an "
+    "already-refused effect by changing flags. Follow the documented refusal and approval policy. "
+    "Commit or push work you want to keep before cleanup. For non-worktree paths you created "
+    "(this session, its parents or its subagents), use the literal path the creating call named; "
+    "never ask the operator about your own worktrees or scratch. "
     # Operator, ask a-798d (2026-11-15): finished work is cleaned up by default.
     "Finished work is yours to clean up by default, no operator question needed: a plain "
     "`git worktree remove <exact path>` (no --force) of a clean worktree whose branch is "
@@ -395,11 +400,11 @@ SUPPORTED_DELETE_PATHS = (
     # directive exists to end. Only a missing creation record is that case.
     "A detached worktree you created (`git worktree add --detach`) under the repo's "
     "`.worktrees/` is yours to remove even with uncommitted "
-    "changes: `git worktree remove --force <exact path>`. If that is refused, act on the "
-    "reason it names: HEAD reachable from no ref → keep the commit with `git tag` or "
-    "`git branch` first, then remove; held by a foreign pid → wait for that process to "
-    "exit, then retry; only 'not in the ledger' / no creation record means a path you "
-    "did not create, below. "
+    "changes if you intend to discard them: `git worktree remove --force <exact path>`. "
+    "If refused, read the reason: HEAD reachable from no ref → keep the commit with "
+    "`git tag` or `git branch`; held by a foreign pid → wait for that process to exit. "
+    "Neither step by itself lifts a refusal. Only 'not in the ledger' / no creation record "
+    "means a path you did not create, below. "
     "Only for a path you did not create, ask the operator with `ask`, writing each exact "
     "full path (`~/…`; a brace list is fine) in the question or the option label — a "
     "relative path, or one only in an option's description, names nothing. A message "
