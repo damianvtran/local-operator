@@ -178,6 +178,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "ask_dismiss closed-set operator token forwarded to the session, never rendered",
     ),
+    # The same ``ask_dismiss`` token, read once more with the SAME ``str(... or "")``
+    # coercion the ``_dispatch`` arm forwards with, so the app-signature attestation
+    # (``asks.app_attest``) binds exactly what the session will receive. It is a
+    # comparison key for ``AttestTable.consume``, never rendered and never peer prose.
+    ("local_operator/session/runtime/server.py", "_ask_answer_stamp", "reason"): (
+        1,
+        "ask_dismiss closed-set token bound into the app attestation key, never rendered",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # The hub-links CLI is a HUB surface, not a mesh one, and these tokens come
