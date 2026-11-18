@@ -239,3 +239,50 @@ def test_an_empty_working_set_needs_no_consent_and_adds_no_receipt_key(
     assert moved["ok"] is True, moved
     # FROZEN-CONTRACT PARITY: a chat-only move's receipt is unchanged.
     assert "working_set" not in moved
+
+
+def test_an_unreadable_working_set_fails_closed_with_working_set_unknown(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig
+) -> None:
+    """Manager ruling 2026-11-18: a manifest that cannot be computed is the silent-loss
+    case itself, so it refuses (naming the step) instead of reading as "clean"."""
+    server_a, server_b, _host, _port = pair
+    source = _session_with_worktree(pair, monkeypatch, rig)
+    # A REAL failure, not a stub: a corrupt index makes ``git status`` exit 128.
+    admin = Path(rig.feat.joinpath(".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+    admin.joinpath("index").write_bytes(b"DIRC-corrupt")
+
+    preflight = _move(server_b, monkeypatch, to="local", dry_run=True)
+    refused = _move(server_b, monkeypatch, to="local")
+    journal_after_refusal = read_handoff_journal(server_a.root)
+    escaped = _move(server_b, monkeypatch, to="local", without_working_set=True)
+
+    assert preflight["confirmation_required"] is True
+    assert preflight["working_set"]["state"] == "unknown"
+    assert refused["code"] == "working_set_unknown", refused
+    assert refused["changed"] is False
+    assert refused["working_set"]["failure"] == {"step": "status", "repo": "~/proj/.worktrees/feat"}
+    assert journal_after_refusal == {}
+    # The explicit escape still moves the conversation, and says nothing was carried.
+    assert escaped["ok"] is True, escaped
+    assert escaped["working_set"]["consent"] == "without"
+    assert escaped["working_set"]["transferred"] is False
+    assert not source.exists()
+
+
+def test_a_keep_copy_is_not_gated_but_says_it_arrives_without_the_work(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig
+) -> None:
+    _server_a, server_b, _host, _port = pair
+    source = _session_with_worktree(pair, monkeypatch, rig)
+
+    copied = _move(server_b, monkeypatch, to="local", keep=True)
+
+    assert copied["ok"] is True, copied
+    block = copied["working_set"]
+    assert block["consent"] == "not_applicable_keep"
+    assert block["transferred"] is False
+    assert [(row["path"], row["state"]) for row in block["worktrees"]] == [
+        ("~/proj/.worktrees/feat", "left_behind")
+    ]
+    assert source.is_dir()  # a keep copy never retires the source

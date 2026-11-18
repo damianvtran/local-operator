@@ -469,23 +469,65 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _git(cwd: Path | str, *args: str, binary: bool = False, limit: int = 0) -> Any:
-    """Run one read-only git command; ``None`` on any failure (absent ref, not a repo)."""
+class WorksetUnknown(Exception):
+    """A fact the consent depends on could not be read (manager ruling, 2026-11-18).
+
+    FAIL CLOSED: an unreadable ``git status`` or ``worktree list`` is exactly the
+    silent-loss case this module exists to stop, so it is never read as "clean". The
+    owner refuses the move ``working_set_unknown`` naming ``step`` and ``repo``; the
+    explicit escape is ``--without-working-set``.
+    """
+
+    def __init__(self, step: str, repo: str = "", detail: str = "") -> None:
+        super().__init__(f"{step} failed in {repo or '?'}: {detail}")
+        self.step = step
+        self.repo = repo
+        self.detail = detail
+
+
+def _git(
+    cwd: Path | str, *args: str, binary: bool = False, limit: int = 0, required: str = ""
+) -> Any:
+    """Run one read-only git command; ``None`` on failure (absent ref, not a repo).
+
+    ``required`` names the step when the answer is load-bearing for consent: a failure
+    then raises :class:`WorksetUnknown` instead of reading as "nothing there".
+
+    ``limit`` STREAMS: at most ``limit`` bytes are read and the process is killed past
+    it, so an enormous ``git log -p`` cannot be buffered whole in the relay (the
+    caller sees ``len(out) == limit`` and treats the range as unscannable).
+    """
+    command = ["git", "-C", str(cwd), *args]
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            capture_output=True,
-            env=_git_env(),
-            timeout=_GIT_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+        if limit:
+            with subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_git_env()
+            ) as process:
+                assert process.stdout is not None
+                out = process.stdout.read(limit)
+                truncated = len(out) >= limit
+                if truncated:
+                    process.kill()
+                code = process.wait(timeout=_GIT_TIMEOUT_S)
+            if truncated:
+                return out if binary else out.decode("utf-8", "replace")
+        else:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                env=_git_env(),
+                timeout=_GIT_TIMEOUT_S,
+                check=False,
+            )
+            out, code = completed.stdout, completed.returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        if required:
+            raise WorksetUnknown(required, str(cwd), type(exc).__name__) from exc
         return None
-    if completed.returncode != 0:
+    if code != 0:
+        if required:
+            raise WorksetUnknown(required, str(cwd), f"git exited {code}")
         return None
-    out = completed.stdout
-    if limit and len(out) > limit:
-        return out[:limit] if binary else out[:limit].decode("utf-8", "replace")
     return out if binary else out.decode("utf-8", "replace").strip()
 
 
@@ -528,7 +570,9 @@ class Candidate:
 
 
 def _worktree_list(top: Path) -> list[Path]:
-    listing = _git(top, "worktree", "list", "--porcelain")
+    # REQUIRED (fail closed): a directory with a ``.git`` that git cannot list is a
+    # repository whose worktrees this session may have used; "none" would be a guess.
+    listing = _git(top, "worktree", "list", "--porcelain", required="worktree_list")
     if not isinstance(listing, str):
         return [top]
     paths = []
@@ -722,6 +766,8 @@ def _history_exclusions(worktree: Path, *, home: Path) -> tuple[list[Excluded], 
     from local_operator.team_bridge.secret_guard import credential_classes
 
     names = _git(worktree, "log", "--format=", "--name-only", "HEAD", "--not", "--remotes")
+    if names is None:
+        return [], False  # unverifiable is unscannable (security ruling): never "clean"
     found: list[Excluded] = []
     for name in dict.fromkeys((names or "").splitlines() if isinstance(names, str) else []):
         if not name:
@@ -744,7 +790,7 @@ def _history_exclusions(worktree: Path, *, home: Path) -> tuple[list[Excluded], 
         binary=True,
         limit=_HISTORY_DIFF_MAX_BYTES + 1,
     )
-    if isinstance(patch, bytes) and len(patch) > _HISTORY_DIFF_MAX_BYTES:
+    if not isinstance(patch, bytes) or len(patch) > _HISTORY_DIFF_MAX_BYTES:
         return found, False
     added = "\n".join(
         line[1:]
@@ -823,8 +869,9 @@ def worktree_facts(
 
     Sets ``state: left_behind`` with a machine reason for the shapes the transfer
     cannot carry faithfully (outside home, unmerged/in-progress, submodules, LFS,
-    secret-shaped or unscannable outgoing history). Never raises for a broken repo:
-    an unreadable fact is the empty value, which the surfaces render as unknown.
+    secret-shaped or unscannable outgoing history). Descriptive facts (upstream, base,
+    remote) degrade to empty; the load-bearing ones (``status``, the unpushed count)
+    raise :class:`WorksetUnknown` rather than read as clean.
     """
     if isinstance(candidate, Candidate):
         path, primary, sources, is_primary = (
@@ -844,7 +891,13 @@ def worktree_facts(
     remote_url = _strip_userinfo(_git(path, "remote", "get-url", remote) or "")
     base_ref = upstream or "origin/HEAD"
     base = _git(path, "merge-base", "HEAD", base_ref) or ""
-    unpushed_raw = _git(path, "rev-list", "--count", "HEAD", "--not", "--remotes")
+    # An unborn branch has no HEAD and nothing unpushed; otherwise the count is
+    # load-bearing (it decides whether history is scanned) and must not read as 0.
+    unpushed_raw = (
+        _git(path, "rev-list", "--count", "HEAD", "--not", "--remotes", required="unpushed")
+        if head
+        else "0"
+    )
     unpushed = int(unpushed_raw) if isinstance(unpushed_raw, str) and unpushed_raw.isdigit() else 0
     bundle_raw = (
         _git(path, "rev-list", "--objects", "--disk-usage", "HEAD", "--not", "--remotes")
@@ -852,7 +905,15 @@ def worktree_facts(
         else "0"
     )
     bundle_bytes = int(bundle_raw) if isinstance(bundle_raw, str) and bundle_raw.isdigit() else 0
-    status = _git(path, "status", "--porcelain=v2", "-z", "--untracked-files=all", binary=True)
+    status = _git(
+        path,
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--untracked-files=all",
+        binary=True,
+        required="status",
+    )
     staged, unstaged, untracked, unmerged = _parse_status(
         status if isinstance(status, bytes) else b""
     )

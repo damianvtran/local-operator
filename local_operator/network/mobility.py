@@ -391,6 +391,7 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         "working_set_changed",  # consent given for a different scope (or device)
         "working_set_over_cap",  # the payload is over ``workset.DEFAULT_CAP_BYTES``
         "working_set_unsupported",  # the owner predates the gate; --without-working-set
+        "working_set_unknown",  # the git state could not be read: fail closed
     }
 )
 
@@ -403,6 +404,7 @@ WORKSET_REFUSAL_CODES: frozenset[str] = frozenset(
         "working_set_changed",
         "working_set_over_cap",
         "working_set_unsupported",
+        "working_set_unknown",
     }
 )
 
@@ -3865,13 +3867,14 @@ def _consent_frame(working_set: Mapping[str, Any] | None) -> dict[str, Any]:
 def _workset_manifest(
     server: "RelayServer", session_id: str, *, to_device: str, to_name: str = ""
 ) -> Any:
-    """The owner's manifest for ``session_id`` → ``to_device``, or ``None`` if it failed.
+    """The owner's manifest for ``session_id`` → ``to_device``.
 
-    FAIL-OPEN, DELIBERATELY AND LOUDLY: the manifest is a read-only inventory of git
-    state, and a bug or a missing ``git`` there must not make every move on the mesh
-    unmovable. A failure is logged at WARNING and the move proceeds as it did before
-    this gate existed — the pre-feature behaviour, never a silent widening (nothing is
-    TRANSFERRED on this path either way).
+    FAIL CLOSED (manager ruling, 2026-11-18, reversing a fail-open first cut): a
+    manifest that cannot be computed is exactly the silent-loss case the gate exists
+    to stop, so any failure — a ``git status`` that errors, a repository git cannot
+    list, a bug here — becomes :class:`workset.WorksetUnknown`, which the gate turns
+    into a ``working_set_unknown`` refusal naming the step. Logged at WARNING with the
+    exception; the explicit escape is ``--without-working-set``.
     """
     from local_operator.network import workset
 
@@ -3883,14 +3886,84 @@ def _workset_manifest(
             to_name=to_name or server._member_name(to_device),  # noqa: SLF001
             cwd_hint=_source_session_cwd(server, session_id),
         )
-    except Exception:  # noqa: BLE001 — see the docstring: an inventory bug never pins a session
+    except workset.WorksetUnknown:
         logger.warning(
-            "mobility: the working-set manifest for %s could not be computed; the move "
-            "proceeds without the gate",
+            "mobility: the working-set manifest for %s could not be read",
             session_id,
             exc_info=True,
         )
-        return None
+        raise
+    except Exception as exc:  # noqa: BLE001 — re-raised as the one fail-closed type
+        logger.warning(
+            "mobility: the working-set manifest for %s failed", session_id, exc_info=True
+        )
+        raise workset.WorksetUnknown("manifest", "", type(exc).__name__) from exc
+
+
+def _workset_block(
+    server: "RelayServer", session_id: str, *, to_device: str, to_name: str = ""
+) -> dict[str, Any]:
+    """The manifest as a wire block for a preflight or a refusal: the §3.4 block, or
+    the ``state: "unknown"`` block when it cannot be read (never an empty "all clear")."""
+    from local_operator.network import workset
+
+    try:
+        manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
+    except workset.WorksetUnknown as failure:
+        return _workset_unknown_block(server, failure, to_device=to_device, to_name=to_name)
+    return manifest.to_dict()
+
+
+def _workset_keep_block(
+    server: "RelayServer", session_id: str, *, to_device: str, to_name: str = ""
+) -> dict[str, Any] | None:
+    """What a ``--keep`` copy arrives without (manager ruling, 2026-11-18).
+
+    A keep copy retires nothing and the source keeps every worktree, so it is not
+    gated — but the copy on the destination is a fork WITHOUT the work, and the
+    receipt must say so plainly rather than let a silent fork look complete:
+    ``consent: "not_applicable_keep"``, ``transferred: false``, each worktree
+    ``left_behind``. ``None`` when the session has no working set.
+    """
+    from local_operator.network import workset
+
+    try:
+        manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
+    except workset.WorksetUnknown as failure:
+        block = _workset_unknown_block(server, failure, to_device=to_device, to_name=to_name)
+        block["transferred"] = False
+    else:
+        if manifest.empty:
+            return None
+        block = workset.arrival_block(manifest)
+    block["consent"] = "not_applicable_keep"
+    return block
+
+
+def _workset_unknown_block(
+    server: "RelayServer", failure: Any, *, to_device: str, to_name: str = ""
+) -> dict[str, Any]:
+    """The ``working_set`` block of a ``working_set_unknown`` refusal: no manifest, the
+    failing step and repository (home-relative) — never the exception text, which can
+    carry paths outside home or git's own stderr."""
+    from local_operator.network import workset
+
+    return {
+        "version": workset.WORKSET_VERSION,
+        "state": "unknown",
+        "destination": {
+            "device_id": to_device,
+            "name": to_name or server._member_name(to_device),  # noqa: SLF001
+        },
+        "failure": {
+            "step": str(getattr(failure, "step", "") or "manifest"),
+            "repo": (
+                workset.home_relative(failure.repo, Path.home())
+                if getattr(failure, "repo", "")
+                else ""
+            ),
+        },
+    }
 
 
 def _workset_refusal(
@@ -3918,6 +3991,14 @@ def _workset_refusal(
             "the working files changed since they were confirmed (a worktree, a withheld "
             f"file or the destination differs), so nothing was moved to {to_label}; review "
             "the fresh list and confirm again"
+        ),
+        "working_set_unknown": (
+            "this device could not read the git state of the working files this "
+            f"conversation uses (step: {(block.get('failure') or {}).get('step', '?')}, "
+            f"repository: {(block.get('failure') or {}).get('repo') or 'unknown'}), so it "
+            f"cannot say what a move to {to_label} would leave behind and nothing was "
+            "moved. Fix that repository, or re-run with --without-working-set to move "
+            "the conversation and leave every working file on this device."
         ),
         "working_set_over_cap": (
             f"the working files are larger than this device sends in one move "
@@ -3960,12 +4041,22 @@ def _workset_gate(
     """
     from local_operator.network import workset
 
-    manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
-    if manifest is None or manifest.empty:
+    given = _consent_frame(consent)
+    try:
+        manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
+    except workset.WorksetUnknown as failure:
+        unknown = _workset_unknown_block(server, failure, to_device=to_device, to_name=to_name)
+        if given["without"]:
+            # The explicit escape: the user said "leave whatever is there behind".
+            unknown["consent"] = "without"
+            unknown["transferred"] = False
+            return None, unknown
+        label = str(unknown["destination"]["name"] or to_device)
+        return _workset_refusal(session_id, "working_set_unknown", unknown, to_label=label), None
+    if manifest.empty:
         return None, None
     block = manifest.to_dict()
     label = manifest.to_name or to_device
-    given = _consent_frame(consent)
     if given["without"]:
         arrival = workset.arrival_block(manifest)
         arrival["consent"] = "without"
@@ -4003,12 +4094,7 @@ def _source_workset_preflight(
             "message": f"this device does not hold {session_id} any more",
             "session_id": session_id,
         }
-    manifest = _workset_manifest(server, session_id, to_device=link.device_id)
-    if manifest is None:
-        manifest = workset.Manifest(
-            to_device=link.device_id, to_name=server._member_name(link.device_id)  # noqa: SLF001
-        )
-    block = manifest.to_dict()
+    block = _workset_block(server, session_id, to_device=link.device_id)
     _audit(
         server,
         AUDIT_WORKSET_PREFLIGHT,
@@ -4066,8 +4152,6 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
     ``confirmation_required`` is the one boolean a surface branches on: an empty
     manifest moves exactly as before, a non-empty one needs the scope digest.
     """
-    from local_operator.network import workset
-
     if to == "local":
         if _owned_here(server, session_id):
             raise Moved("already_local", f"{session_id} is already on this device")
@@ -4087,13 +4171,10 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
                 f"{session_id} does not live on this device, so it cannot be moved FROM here",
             )
         target_device, target_name = _resolve_typed_peer(server, to)
-        manifest = _workset_manifest(
-            server, session_id, to_device=target_device, to_name=target_name
-        )
-        if manifest is None:
-            manifest = workset.Manifest(to_device=target_device, to_name=target_name)
-        block = manifest.to_dict()
-    required = bool(block.get("worktrees")) or block.get("state") == "unsupported"
+        block = _workset_block(server, session_id, to_device=target_device, to_name=target_name)
+    # ``unknown`` and ``unsupported`` need a decision too: only --without-working-set
+    # proceeds past either, so the surface must show them rather than "nothing here".
+    required = bool(block.get("worktrees")) or block.get("state") in ("unsupported", "unknown")
     return {
         "ok": True,
         "dry_run": True,
@@ -4425,6 +4506,11 @@ def _source_prepare(
             "session_roles_stash": roles_stash,
             "session_id": session_id,
         }
+        # What the fork arrives WITHOUT: never gated (the source keeps everything),
+        # always stated when there is a working set (see ``_workset_keep_block``).
+        keep_workset = _workset_keep_block(server, session_id, to_device=link.device_id)
+        if keep_workset is not None:
+            keep_answer["working_set"] = keep_workset
         # ADDITIVE, and absent when nothing usable is known (see the docstring).
         keep_cwd = _source_session_cwd(server, session_id)
         if keep_cwd:
@@ -6632,7 +6718,11 @@ def _offload(
     # older inviter or a third party cannot skip.
     offload_consent = _consent_frame(working_set)
     offload_workset: dict[str, Any] | None = None
-    if not keep:
+    if keep:
+        offload_workset = _workset_keep_block(
+            server, session_id, to_device=target_device, to_name=target_name
+        )
+    else:
         refused_ws, offload_workset = _workset_gate(
             server,
             session_id,
@@ -6887,10 +6977,9 @@ def _offload(
             # The source prepare's P3 refused (the scope changed during the retire's
             # wait). The refusal crossed two hops as code + sentence only, and this
             # device IS the owner, so the fresh manifest is recomputed here.
-            fresh = _workset_manifest(
+            refused_workset = _workset_block(
                 server, session_id, to_device=target_device, to_name=target_name
             )
-            refused_workset = fresh.to_dict() if fresh is not None else None
         return _move_refusal(
             session_id,
             code,
