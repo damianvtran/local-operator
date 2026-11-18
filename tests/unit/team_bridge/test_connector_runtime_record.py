@@ -471,6 +471,7 @@ def _wire_owned_receiver(
     from local_operator.team_bridge import client as client_module
     from local_operator.team_bridge import store as store_module
     from local_operator.team_bridge.connector import __main__ as connector_main
+    from local_operator.team_bridge.connector import identity_publisher
     from local_operator.team_bridge.connector import lock as lock_module
     from local_operator.team_bridge.connector import loop as loop_module
     from local_operator.team_bridge.connector import reap
@@ -521,6 +522,16 @@ def _wire_owned_receiver(
     async def refused(root: Any) -> Any:
         return argparse.Namespace(kind=reap_kind)
 
+    async def publish_identity(root: Any, **kw: Any) -> None:
+        calls.append("publisher-started")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            calls.append("publisher-stopped")
+
+    monkeypatch.setattr(identity_publisher, "run", publish_identity)
+
     async def serve_once(owner: Any, **kw: Any) -> None:
         await asyncio.sleep(0)  # let the keeper task start
         calls.append("serve")
@@ -567,7 +578,9 @@ def test_the_holder_records_held_keeps_it_and_clears_on_exit(
         "start",
         "held",
         "keeper",
+        "publisher-started",
         "serve",
+        "publisher-stopped",
         "clear",
         "release",
         "keeper-cancelled",

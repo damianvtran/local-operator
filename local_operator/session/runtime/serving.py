@@ -137,6 +137,7 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.session.transcript import (
     Transcript,
+    custom_type_proven_absent,
     is_bookkeeping_entry,
     is_bookkeeping_message,
     transcript_is_bookkeeping_only,
@@ -4259,6 +4260,7 @@ class ServingSessionHandle(SessionHandle):
             self._fold.fold_history(self._session.history())
         except Exception:  # noqa: BLE001 — history is a convenience, not a gate
             logger.debug("owned session history fold failed", exc_info=True)
+        self._seed_supplements()
         # Seed the live flag ONCE at attach (a phone subscribing mid-turn never
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
@@ -4286,6 +4288,40 @@ class ServingSessionHandle(SessionHandle):
         # held.
         self._refresh_state()
         return unsubscribe
+
+    def _seed_supplements(self) -> None:
+        """Seed the projection's supplement map from the journal, once at attach.
+
+        ``fold_history`` reads messages only and a supplement (a pin or a card) is a
+        journal ``custom`` row, so an owner that did not run the turn — a resumed,
+        idle-exited or restarted session — would serve a projection with
+        ``supplements == {}`` and every earlier Highlight would vanish from the
+        relay, which serves this projection live. The newest row per anchor is
+        taken by the cold open's own rule (``newest_per_anchor``); the fold keeps
+        only anchors of the current tail and lets an equal-version live beat win.
+        Best effort like the history fold beside it: a journal that cannot be read
+        costs the seed, never the attach.
+        """
+        try:
+            transcript = self._session.transcript
+            # The byte scan first: a journal that never wrote a supplement (most of
+            # them) must not pay a walk of every entry at attach.
+            if custom_type_proven_absent(transcript.directory, SUPPLEMENT_CUSTOM_TYPE):
+                return
+            rows: list[dict[str, Any]] = []
+            for entry in transcript.entries():
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                details = payload.get("details")
+                if payload.get("custom_type") == SUPPLEMENT_CUSTOM_TYPE and isinstance(
+                    details, dict
+                ):
+                    rows.append(details)
+            if rows:
+                self._fold.fold_supplement_rows(newest_per_anchor(rows).values())
+        except Exception:  # noqa: BLE001 — the seed is a convenience, not a gate
+            logger.debug("owned session supplement seed failed", exc_info=True)
 
     @_on_session_loop
     async def prompt(

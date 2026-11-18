@@ -711,6 +711,19 @@ html :focus-visible {
 	inset-block: -6px;
 }
 
+/*
+ * The same trick for the message fold chip, which is drawn 40 x 24 and carries
+ * no text: the target is extended to 56 x 44 (the 44 floor in BOTH directions,
+ * which `.lo-hit`'s block-only 6 px cannot give a 40 px wide control). The
+ * upward reach (10 px) is the chip's own margin plus the bubble's gap, so it
+ * never lands on the text; the downward reach is the bubble's bottom padding
+ * and a little below it.
+ */
+.lo-hit-chip::before {
+	inset-inline: -8px;
+	inset-block: -10px;
+}
+
 /* The sheet grabber: decorative, at the scrollbar's resting floor (α 0.45) so
    it reads as "this lifts" without becoming the loudest mark on the panel. */
 .lo-grabber {

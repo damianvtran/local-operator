@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sys
 import time
 import urllib.parse
 from typing import TYPE_CHECKING, Any, cast
@@ -875,22 +876,118 @@ def test_configmap_before_a_secret_without_a_separator_keeps_its_values() -> Non
     assert scrub_shapes(secret_yaml() + configmap).endswith(configmap)
 
 
+_CONCATENATED_CONFIGMAP = (
+    "apiVersion: v1\ndata:\n  LOG_LEVEL: info\n  MODE: fast\nkind: ConfigMap\n"
+    "metadata:\n  name: cfg\n" + "  labels:\n    app: jobs\n" * 3
+)
+_CONCATENATED_COPIES = 3000
+#: Interleaved rounds per text; the MINIMUM of each is compared. Thread CPU can
+#: only be inflated by interference (cache/SMT contention, a frequency dip, a GC
+#: pass over the worker's heap), never deflated below the work itself.
+_SECRET_RULE_ROUNDS = 5
+
+
+def _secret_rule_cpu_seconds(scrub: Any, text: str, control: str) -> tuple[float, float]:
+    """Min thread-CPU seconds of ``scrub`` on ``text`` and on ``control``.
+
+    WHY NOT ONE ``perf_counter`` PAIR (the original form). Main run 44136969527
+    (job 134257174497, py3.12 shard 2) failed ``took < 1.5 * base + 1.0`` with
+    ``(2.68, 1.105)``: wall seconds of ONE Secret scrub against ONE control
+    scrub, control always first. The rule is linear (the Secret text's extra
+    cost per byte is flat from 160 KB to 1.46 MB: 0.21/0.17/0.09 us
+    uninstrumented, 0.60/0.47/0.49 us under coverage), and its CPU cost is
+    1.34-1.65x the control's under coverage. The 2.43x the job read was the
+    runner descheduling the worker inside one wall sample: on a host at load
+    ~43 on 14 cores, under coverage with a 1.5M-object live heap and allocation
+    churn between runs, the single wall pair read took/base 0.96-2.19 and went
+    red 2/12 (wall samples 1.4-10.5 s for ~0.45 s of thread CPU), with no
+    generation-2 collection inside any red sample — so this is scheduling, not
+    GC, and ``gc.freeze`` would not fix it.
+
+    So: ``thread_time`` (time off-CPU does not count), several rounds with the
+    order alternating so neither text always runs first or second, and the
+    minimum of each. On that same rig, in the same process, this read took/base
+    1.34-1.65 and took/limit at most 0.44, red 0/12. The limit itself is
+    unchanged; ``test_the_secret_rule_guard_fails_a_quadratic_rule`` keeps
+    proving it can still go red.
+    """
+    took_best = base_best = float("inf")
+    for round_index in range(_SECRET_RULE_ROUNDS):
+        order = (control, text) if round_index % 2 == 0 else (text, control)
+        for sample in order:
+            started = time.thread_time()
+            scrub(sample)
+            elapsed = time.thread_time() - started
+            if sample is text:
+                took_best = min(took_best, elapsed)
+            else:
+                base_best = min(base_best, elapsed)
+    # A zero reading would make the bound vacuous rather than met.
+    assert base_best > 0, "the control scrub read 0 s of thread CPU; the clock is not live"
+    return took_best, base_best
+
+
+def _assert_secret_rule_linear(scrub: Any = None) -> None:
+    """The Q2 guard: a Secret after many concatenated objects costs ~a linear pass.
+
+    A helper so the mutation control runs this exact guard against a rule made
+    quadratic. ``scrub`` defaults to ``scrub_shapes`` looked up at call time.
+    """
+    scrub = scrub or scrub_shapes
+    text = _CONCATENATED_CONFIGMAP * _CONCATENATED_COPIES + secret_yaml()
+    assert len(text) > 400_000
+    # Same text with the structure rule inert (no ``kind: Secret``).
+    control = text.replace("kind: Secret", "kind: Opaque")
+    took, base = _secret_rule_cpu_seconds(scrub, text, control)
+    assert took < 1.5 * base + 1.0, (
+        f"Secret text {took:.3f}s vs control {base:.3f}s thread CPU "
+        f"(min of {_SECRET_RULE_ROUNDS}): superlinear secret rule"
+    )
+
+
 def test_secret_rule_is_linear_in_concatenated_objects() -> None:
     # Q2: 2,000 ConfigMaps + a Secret took over 600 s. The control is the same
     # text with the structure rule inert (no ``kind: Secret``), timed in this run.
-    configmap = "apiVersion: v1\ndata:\n  LOG_LEVEL: info\n  MODE: fast\nkind: ConfigMap\n"
-    configmap += "metadata:\n  name: cfg\n" + "  labels:\n    app: jobs\n" * 3
-    text = configmap * 3000 + secret_yaml()
-    assert len(text) > 400_000
-    control = text.replace("kind: Secret", "kind: Opaque")
-    started = time.perf_counter()
-    scrub_shapes(control)
-    base = time.perf_counter() - started
-    started = time.perf_counter()
-    out = scrub_shapes(text)
-    took = time.perf_counter() - started
-    assert out.startswith(configmap * 3000)
-    assert took < 1.5 * base + 1.0, (took, base)
+    out = scrub_shapes(_CONCATENATED_CONFIGMAP * _CONCATENATED_COPIES + secret_yaml())
+    assert out.startswith(_CONCATENATED_CONFIGMAP * _CONCATENATED_COPIES)
+    _assert_secret_rule_linear()
+
+
+def test_the_secret_rule_guard_fails_a_quadratic_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation control: the guard above must still catch the Q2 class.
+
+    The original bug walked back along the run of objects, looking for a
+    ``---``, once per ``data:`` header. The stand-in keeps the real ownership
+    check and adds exactly that walk: a Python-level pass over every line
+    before the header, per header, so ``O(objects * lines)`` — quadratic in the
+    concatenated text, with no separator to stop it.
+
+    WHAT THIS GUARD CAN CATCH. ``1.5 * base + 1.0`` carries a fixed second of
+    slack, so it only fails a quadratic costing over ~1 s more at 487 KB. Cheaper
+    per-header prefix work in C reads under it (measured uninstrumented, one
+    Secret scrub: ``sum(map(len, prefix))`` 1.44 s against a 1.66 s limit, a
+    joined-prefix ``splitlines`` 1.18 s), so the stand-in is the Python walk
+    the real bug was: one Secret scrub read 3.90 s of thread CPU against a
+    1.19 s limit uninstrumented, and 7.34 s against 1.72 s under coverage
+    (the real rule: 0.20 s against a 0.11 s control). Tightening the limit is
+    out of scope.
+
+    One round, not five: the stand-in's cost is deterministic CPU that every
+    round repeats, so more rounds only add ~4-7 s each without changing what
+    the bound sees. The timing code and the bound are the guard's own.
+    """
+    from local_operator import redaction_shapes
+
+    real = redaction_shapes._yaml_mapping_is_secret
+
+    def quadratic(contents: Any, parsed: Any, header: int, column: int) -> bool:
+        [content for content in contents[:header] if content.startswith("---")]
+        return real(contents, parsed, header, column)
+
+    monkeypatch.setattr(redaction_shapes, "_yaml_mapping_is_secret", quadratic)
+    monkeypatch.setattr(sys.modules[__name__], "_SECRET_RULE_ROUNDS", 1)
+    with pytest.raises(AssertionError, match="superlinear secret rule"):
+        _assert_secret_rule_linear()
 
 
 def test_secret_rule_reads_through_the_read_tool_gutter() -> None:

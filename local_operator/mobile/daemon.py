@@ -9492,10 +9492,13 @@ def build_app(daemon: MobileDaemon):
         ``Content-Disposition: attachment`` rides every non-image class, and nothing
         navigates a browsing context to this route (S-R6; bytes are rendered in-app).
 
-        An ended session's cwd is NOT recorded durably (the daemon's own resume notes
-        this), so a cwd-relative path without a live record is refused rather than
-        resolved against a guess; ``~``-relative paths serve in either case. A
-        peer-hosted conversation has no local directory and is refused the same way.
+        An ended session's cwd IS recorded durably (``_durable_identity``: marker,
+        frontend checkpoint, wake index), but only as a recollection: a cwd-relative
+        path without a live record is joined against it only when the file still
+        matches the row's recorded size and mtime (``resolve_supplement_file``'s
+        ``fallback_cwd``), else refused rather than resolved against a guess;
+        ``~``-relative paths serve in either case. A peer-hosted conversation has no
+        local directory and is refused the same way.
         """
         denied = gate(request)
         if denied is not None:
@@ -9532,7 +9535,13 @@ def build_app(daemon: MobileDaemon):
                 return "missing"
             entry = _entry_for_session(daemon, session_id)
             resolved = resolve_supplement_file(
-                directory, job, index, cwd=entry.record.cwd if entry is not None else ""
+                directory,
+                job,
+                index,
+                cwd=entry.record.cwd if entry is not None else "",
+                # An ended session has no live record: its durable cwd may join a
+                # relative path when the file matches the row's fingerprint.
+                fallback_cwd="" if entry is not None else _durable_identity(directory).cwd,
             )
             if isinstance(resolved, str):
                 return resolved
