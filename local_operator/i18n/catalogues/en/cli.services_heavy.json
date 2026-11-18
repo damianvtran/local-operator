@@ -1,0 +1,11 @@
+{
+  "cli.services_heavy.heavy": "Wait for, or run a command holding, the machine-wide heavy-job slot",
+  "cli.services_heavy.heavy_description": "Heavy builds and test runs share a few slots per machine so that parallel builds cannot exhaust its memory. 'wait' blocks until a slot is free without taking it; 'run' takes a slot, runs one command while holding it and frees it when the command exits; 'status' lists who holds each slot. Use these instead of polling for another process by name.",
+  "cli.services_heavy.wait": "Block until a heavy-job slot is free, without taking it",
+  "cli.services_heavy.run": "Run one command while holding a heavy-job slot, and free the slot when it exits",
+  "cli.services_heavy.status": "Show the heavy-job slots and each holder's pid, age and command",
+  "cli.services_heavy.timeout": "Longest to queue for a slot, in seconds (default: the machine's queue limit, {wait_seconds}s unless {env_name} sets another)",
+  "cli.services_heavy.command": "The command to run, after `--`",
+  "cli.services_heavy.holder": "  slot {slot}: {holder}, running {age}: {command}",
+  "cli.services_heavy.no_command": "Nothing to run: put the command after `--`, for example `lop services heavy run -- make test`"
+}

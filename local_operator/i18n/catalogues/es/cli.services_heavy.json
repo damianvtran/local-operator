@@ -1,0 +1,11 @@
+{
+  "cli.services_heavy.heavy": "Esperar la ranura de trabajos pesados de la máquina, o ejecutar un comando que la ocupe",
+  "cli.services_heavy.heavy_description": "Las compilaciones y pruebas pesadas comparten unas pocas ranuras por máquina para que las compilaciones en paralelo no agoten su memoria. «wait» espera a que haya una ranura libre sin ocuparla; «run» ocupa una ranura, ejecuta un comando mientras la tiene y la libera cuando el comando termina; «status» muestra quién ocupa cada ranura. Úsalos en lugar de vigilar otro proceso por su nombre.",
+  "cli.services_heavy.wait": "Esperar a que haya una ranura de trabajos pesados libre, sin ocuparla",
+  "cli.services_heavy.run": "Ejecutar un comando ocupando una ranura de trabajos pesados y liberarla cuando termine",
+  "cli.services_heavy.status": "Mostrar las ranuras de trabajos pesados y el pid, la antigüedad y el comando de cada ocupante",
+  "cli.services_heavy.timeout": "Tiempo máximo de espera en la cola, en segundos (predeterminado: el límite de cola de la máquina, {wait_seconds}s salvo que {env_name} fije otro)",
+  "cli.services_heavy.command": "El comando que se ejecutará, después de `--`",
+  "cli.services_heavy.holder": "  ranura {slot}: {holder}, en ejecución desde hace {age}: {command}",
+  "cli.services_heavy.no_command": "No hay nada que ejecutar: pon el comando después de `--`, por ejemplo `lop services heavy run -- make test`"
+}

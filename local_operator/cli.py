@@ -92,6 +92,7 @@ from local_operator.i18n.keys import cli_refresh_help as _re
 from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
+from local_operator.i18n.keys import cli_services_heavy as _shv
 from local_operator.i18n.keys import cli_services_help as _sr
 from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
@@ -169,6 +170,72 @@ _bt = tr("cli.browser")
 _bnt = tr("cli.browser_node")
 _spt = tr("cli.skills_push")
 _cct = tr("cli.config")
+
+
+def _add_services_heavy_parser(
+    group: argparse._SubParsersAction,  # type: ignore[type-arg]
+    parent_parser: argparse.ArgumentParser,
+    help_locale: str | None,
+) -> None:
+    """``lop services heavy {wait,run,status}`` (``local_operator/heavy_cli.py``).
+
+    Before these verbs, anything outside the agent's ``bash`` tool coordinated
+    the machine-wide heavy-job slot (#4104) by hand — peer messages, or
+    ``pgrep -f`` loops that match their own shell — so the queue had no
+    first-class door for scripts or operators.
+
+    A helper of its own, not inline in ``build_cli_parser``'s services block:
+    that block's parser protocol is frozen by the update/services/install
+    extraction slice (``tests/unit/i18n/test_cli_update_services_install_help_slice.py``),
+    and this group's copy lives in its own namespace, ``cli.services_heavy``.
+    """
+    # Constants, not the live setting: the parser must not open config.yml on
+    # every `lop` start for the sake of one help string.
+    from local_operator.heavy_lease import (
+        HEAVY_JOBS_WAIT_SECONDS_DEFAULT,
+        HEAVY_JOBS_WAIT_SECONDS_ENV,
+    )
+
+    timeout_help = _shv.timeout(
+        wait_seconds=f"{HEAVY_JOBS_WAIT_SECONDS_DEFAULT:g}",
+        env_name=HEAVY_JOBS_WAIT_SECONDS_ENV,
+    ).envelope(locale=help_locale)["text"]
+    heavy = group.add_parser(
+        "heavy",
+        help=_shv.heavy().envelope(locale=help_locale)["text"],
+        description=_shv.heavy_description().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    verbs = heavy.add_subparsers(dest="heavy_command")
+    wait = verbs.add_parser(
+        "wait",
+        help=_shv.wait().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    wait.add_argument(
+        "--timeout", type=_positive_seconds, default=None, metavar="SECONDS", help=timeout_help
+    )
+    run = verbs.add_parser(
+        "run",
+        help=_shv.run().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
+    run.add_argument(
+        "--timeout", type=_positive_seconds, default=None, metavar="SECONDS", help=timeout_help
+    )
+    # REMAINDER after `--`: the wrapped command's own flags (`pytest -x`) must
+    # reach it untouched instead of being parsed as lop's.
+    run.add_argument(
+        "heavy_argv",
+        nargs=argparse.REMAINDER,
+        metavar="COMMAND",
+        help=_shv.command().envelope(locale=help_locale)["text"],
+    )
+    verbs.add_parser(
+        "status",
+        help=_shv.status().envelope(locale=help_locale)["text"],
+        parents=[parent_parser],
+    )
 
 
 def build_cli_parser() -> LocalizedArgumentParser:
@@ -2358,6 +2425,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
         type=int,
         help=_sr.pid().envelope(locale=help_locale)["text"],
     )
+    _add_services_heavy_parser(services_subparsers, parent_parser, help_locale)
 
     # The install LAYOUT's own commands. One verb group rather than flags on
     # ``update`` because neither of these installs anything from a network: they
@@ -18917,7 +18985,26 @@ def main() -> int:
                 # script can tell it from a reclaim that ran — the same shape
                 # `lop stop`'s "turn is in flight" refusal has.
                 return 1 if reclaim.refused else 0
-            print("usage: lop services {status, restart, reclaim}", file=sys.stderr)
+            if command == "heavy":
+                from local_operator import heavy_cli
+
+                heavy = getattr(args, "heavy_command", None)
+                if heavy == "wait":
+                    return heavy_cli.wait_command(getattr(args, "timeout", None))
+                if heavy == "run":
+                    argv = list(getattr(args, "heavy_argv", None) or [])
+                    # REMAINDER keeps the separator when it follows an option.
+                    if argv and argv[0] == "--":
+                        argv = argv[1:]
+                    return heavy_cli.run_command(argv, getattr(args, "timeout", None))
+                if heavy == "status":
+                    return heavy_cli.status_command()
+                print(
+                    "usage: lop services heavy {wait, run, status}",
+                    file=sys.stderr,  # i18n: ignore usage synopsis: command tokens only
+                )
+                return 2
+            print("usage: lop services {status, restart, reclaim, heavy}", file=sys.stderr)
             return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:
