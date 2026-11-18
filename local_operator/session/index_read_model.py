@@ -947,6 +947,49 @@ def _projected_rows(
     return rows
 
 
+def _order_selection(
+    db: sqlite3.Connection, meta: dict[str, Any], rows: dict[str, int]
+) -> FrameSelection:
+    """The bounded records the journal-order rules read for ``rows``' identities.
+
+    Shared by :func:`order_facts` (one page's facts) and :func:`order_selection`
+    (the after-paint correction), so the two can never disagree about which
+    run contains a row or who opened it. ``rows`` gains the openers' ordinals.
+    """
+    records: dict[int, ti.RunRecord] = {}
+    # The CONTAINING run of every identity, which is what the opener rule
+    # reads: real run membership at an exact ordinal, never a last-user guess.
+    for seq in list(rows.values()):
+        row = db.execute(
+            "SELECT position,payload FROM runs WHERE first_seq<=? "
+            "ORDER BY first_seq DESC,position DESC LIMIT 1",
+            (seq,),
+        ).fetchone()
+        if row is not None:
+            records[row[0]] = _run(row[1])
+    # An opener's own coordinate has to be IN this projection before the pair
+    # can be proved, so it is added and its containing run resolved in the
+    # same pass — the order the frame path uses, for the same reason.
+    for run in list(records.values()):
+        if run.opening_user_id:
+            row = db.execute("SELECT seq FROM nodes WHERE id=?", (run.opening_user_id,)).fetchone()
+            if row:
+                rows[run.opening_user_id] = row[0]
+    messages: dict[int, ti.MessageDoc] = {}
+    for seq in set(rows.values()):
+        row = db.execute("SELECT id,role,injected FROM nodes WHERE seq=?", (seq,)).fetchone()
+        if row and row[1] is not None:
+            messages[seq] = ti.MessageDoc(row[0], 0.0, row[1], "", bool(row[2]), seq)
+    selection = FrameSelection(
+        [],
+        [records[n] for n in sorted(records)],
+        [messages[n] for n in sorted(messages)],
+        rows,
+        meta["journal_generation"],
+    )
+    return selection
+
+
 def order_facts(
     root: str | Path,
     sid: str,
@@ -988,39 +1031,7 @@ def order_facts(
         tail = _tail_ordinals(db, pub, meta, source, prefix_ok)
         ids = list(dict.fromkeys(collected_ids + order_ids))
         rows = _projected_rows(db, ids, collected_ids, tail=tail)
-        records: dict[int, ti.RunRecord] = {}
-        # The CONTAINING run of every identity, which is what the opener rule
-        # reads: real run membership at an exact ordinal, never a last-user guess.
-        for seq in list(rows.values()):
-            row = db.execute(
-                "SELECT position,payload FROM runs WHERE first_seq<=? "
-                "ORDER BY first_seq DESC,position DESC LIMIT 1",
-                (seq,),
-            ).fetchone()
-            if row is not None:
-                records[row[0]] = _run(row[1])
-        # An opener's own coordinate has to be IN this projection before the pair
-        # can be proved, so it is added and its containing run resolved in the
-        # same pass — the order the frame path uses, for the same reason.
-        for run in list(records.values()):
-            if run.opening_user_id:
-                row = db.execute(
-                    "SELECT seq FROM nodes WHERE id=?", (run.opening_user_id,)
-                ).fetchone()
-                if row:
-                    rows[run.opening_user_id] = row[0]
-        messages: dict[int, ti.MessageDoc] = {}
-        for seq in set(rows.values()):
-            row = db.execute("SELECT id,role,injected FROM nodes WHERE seq=?", (seq,)).fetchone()
-            if row and row[1] is not None:
-                messages[seq] = ti.MessageDoc(row[0], 0.0, row[1], "", bool(row[2]), seq)
-        selection = FrameSelection(
-            [],
-            [records[n] for n in sorted(records)],
-            [messages[n] for n in sorted(messages)],
-            rows,
-            meta["journal_generation"],
-        )
+        selection = _order_selection(db, meta, rows)
         openers: dict[str, tuple[str, int]] = {}
         for id_ in ids:
             if id_ in rows:
@@ -1036,6 +1047,39 @@ def order_facts(
             meta["journal_generation"],
             pub.signature,
         )
+
+    return _read(root, sid, select, prefix_ok=prefix_ok)
+
+
+def order_selection(
+    root: str | Path,
+    sid: str,
+    *,
+    order_ids: list[str],
+    source: tuple[int, int, float] | None,
+    prefix_ok: bool = False,
+) -> Result:
+    """The journal-order records for an after-paint correction, from the companion.
+
+    WHY (ADR ``docs/design/transcript-index-off-process.md`` step 2). A first
+    frame whose companion read missed the paint deadline answers ``building``,
+    and the bridge's ``_order_correction`` then publishes the coordinates. Base
+    did that from a RESIDENT index -- a whole-index hydration on serve's GIL,
+    ~1.1 s for the 808 MB anchor, measured on every such open of a large journal
+    under load because the 120 ms frame budget is spent before the companion
+    read can start. This answers the same question from the same projection the
+    page reads use: a :class:`FrameSelection` duck-types the ``journal_rows`` /
+    ``runs`` / ``messages`` / ``journal_generation`` surface
+    ``ti.journal_order_correction_batches`` reads, so the published events are
+    built by the one existing helper. Ids absent from the selection are simply
+    not in ``journal_rows``, which the caller treats as unknown, exactly as it
+    treats an id the resident index lacks.
+    """
+
+    def select(db: sqlite3.Connection, pub: Publication, meta: dict[str, Any]) -> FrameSelection:
+        tail = _tail_ordinals(db, pub, meta, source, prefix_ok)
+        ids = list(dict.fromkeys(order_ids))
+        return _order_selection(db, meta, _projected_rows(db, ids, [], tail=tail))
 
     return _read(root, sid, select, prefix_ok=prefix_ok)
 

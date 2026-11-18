@@ -1942,3 +1942,78 @@ async def test_a_small_journal_keeps_arming_the_resident_index(
                 break
             await asyncio.sleep(0.02)
         assert calls == [harness.session_id]
+
+
+async def _corrections_after_a_deadline_open(
+    harness: "_Harness", monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Open with every companion read past the paint deadline; return the events.
+
+    This is the loaded-host shape the real-path rig measured: the 120 ms budget
+    is gone before the first companion read, the frame says ``building``, and
+    the after-paint ``_order_correction`` publishes the coordinates.
+    """
+    from local_operator.server.utils import desktop_sessions as module
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    events: list[dict[str, Any]] = []
+    original_publish = module.DesktopSessionBridge.publish
+    original_bounded = module._bounded_frame_read
+
+    def publish(self: Any, kind: str, payload: dict[str, Any], **kwargs: Any) -> None:
+        if isinstance(payload, dict) and payload.get("type") == JOURNAL_ORDER_EVENT:
+            events.append(payload)
+        original_publish(self, kind, payload, **kwargs)
+
+    async def past_deadline(deadline: Any, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        if deadline is not None:
+            return False, None
+        return await original_bounded(deadline, func, *args, **kwargs)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "publish", publish)
+    monkeypatch.setattr(module, "_bounded_frame_read", past_deadline)
+    assert harness.client is not None
+    url = f"/v1/desktop/sessions/{harness.session_id}"
+    first = (await harness.client.get(url, params=params)).json()["result"]
+    history = first["payload"]["history"]
+    assert history.get("journal_order_state") == "building", history.get("journal_order_state")
+    for _ in range(200):
+        if events:
+            break
+        await asyncio.sleep(0.05)
+    monkeypatch.setattr(module.DesktopSessionBridge, "publish", original_publish)
+    monkeypatch.setattr(module, "_bounded_frame_read", original_bounded)
+    return events
+
+
+@pytest.mark.asyncio
+async def test_a_large_journal_correction_comes_from_the_companion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The after-paint correction publishes the resident path's events, unhydrated.
+
+    Main answered every deadline-missed open of a large journal by hydrating the
+    whole index (``start_refresh``) to publish these coordinates. Same journal,
+    same request: the companion arm's rows must equal the resident arm's, and
+    the companion arm must not call ``refresh_index`` at all.
+    """
+    params = {"open_frame": 1, "journal_order": 1, "limit": 5, "order_ids": ["user02"]}
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        ti._reset_for_tests()
+
+        monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+        calls = _count_hydrations(monkeypatch)
+        companion = await _corrections_after_a_deadline_open(harness, monkeypatch, params)
+        assert companion and all(event.get("rows") for event in companion), companion
+        assert calls == [], "the correction hydrated a large journal"
+        assert {event["journal_generation"] for event in companion} == {index.journal_generation}
+
+        monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1 << 40)
+        resident = await _corrections_after_a_deadline_open(harness, monkeypatch, params)
+        assert calls, "the control arm never took the resident path"
+        assert [event["rows"] for event in companion] == [event["rows"] for event in resident]
+        assert {event["journal_generation"] for event in resident} == {index.journal_generation}

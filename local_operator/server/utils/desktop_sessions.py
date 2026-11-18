@@ -5492,6 +5492,11 @@ class DesktopSessionBridge:
 
             async def correct() -> None:
                 try:
+                    if (
+                        transcript_index.companion_first(self.root, self.session_id)
+                        and await self._companion_order_correction()
+                    ):
+                        return
                     task, _ = transcript_index.start_refresh(self.root, self.session_id)
                     await asyncio.shield(task)
                     if self._closing:
@@ -5539,6 +5544,76 @@ class DesktopSessionBridge:
 
             self._order_correction = asyncio.create_task(correct())
         return answer
+
+    async def _companion_order_correction(self) -> bool:
+        """Publish the pending journal-order coordinates from the companion.
+
+        ``True`` when every pending row was answered (events published, rows
+        consumed); ``False`` leaves ``_order_pending`` untouched for base's
+        resident correction, which then runs exactly as before.
+
+        WHY, MEASURED (ADR ``docs/design/transcript-index-off-process.md`` step
+        2; real-path rig on this PR, 6 x 70 MB journals at load 40-100): on a
+        loaded host the 120 ms first-frame budget is spent before the companion
+        reads start, so most opens of a large journal answered ``building`` and
+        this correction's ``start_refresh`` re-hydrated the whole index on
+        serve's GIL -- 6 ``index.refresh_start`` per six-session pass, every
+        pass, because the 4-slot resident LRU evicts across the switch. The
+        correction is after paint and owes no deadline, so it can afford the
+        page-bounded SQLite read the frame could not.
+
+        SAME EVENTS AS THE RESIDENT PATH. Pending rows are grouped by the page
+        source they were read under (the resident path's ``original ==
+        expected`` rule, applied per publication instead of against one
+        index), each group is answered by ``index_read_model.order_selection``
+        under the append-prefix rule, and the batches come from the one
+        existing ``journal_order_correction_batches``. A group the companion
+        cannot prove -- missing, stale past a visible append, corrupt -- fails
+        the whole attempt rather than publishing part of an answer twice.
+        """
+        pending = dict(self._order_pending)
+        if not pending:
+            return False
+        groups: dict[Any, list[str]] = {}
+        for id_, (_descriptor, original) in pending.items():
+            if original is None:
+                return False
+            groups.setdefault(original, []).append(id_)
+        answered: list[tuple[Any, list[dict[str, Any]]]] = []
+        for original, ids in groups.items():
+            result = await asyncio.to_thread(
+                index_read_model.order_selection,
+                self.root,
+                self.session_id,
+                order_ids=ids,
+                source=original,
+                prefix_ok=True,
+            )
+            if result.state != "ready" or not result.value.journal_generation:
+                return False
+            selection = result.value
+            rows = [
+                {**pending[id_][0], "journal_seq": selection.journal_rows[id_]}
+                for id_ in ids
+                if id_ in selection.journal_rows
+            ]
+            answered.append((selection, rows))
+        if self._closing:
+            return True
+        for id_, value in pending.items():
+            if self._order_pending.get(id_) is value:
+                del self._order_pending[id_]
+        for selection, rows in answered:
+            for batch in transcript_index.journal_order_correction_batches(selection, rows):
+                self.publish(
+                    "event",
+                    {
+                        "type": JOURNAL_ORDER_EVENT,
+                        "journal_generation": selection.journal_generation,
+                        "rows": batch,
+                    },
+                )
+        return True
 
     async def _peer_source_read(
         self,

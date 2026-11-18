@@ -4256,7 +4256,7 @@ def journal_order_opener(
 
 
 def journal_order_correction_batches(
-    index: TranscriptIndex, rows: list[dict[str, Any]]
+    index: TranscriptIndex | FrameSelection, rows: list[dict[str, Any]]
 ) -> Iterator[list[dict[str, Any]]]:
     """Pack existing ready metadata into <=128-row dependency-closed events.
 
