@@ -188,7 +188,13 @@ EXCERPT_MAX_CHARS = DISPLAY_CONTEXT_BOUNDS["excerpt"]
 #: the conversation card's REPLY_STYLE_LINE so the two lanes read alike; kept
 #: LOCAL (not imported) because that constant lands in a separate PR and a
 #: pair DM has no thread to steer replies into. One line: it rides every wake.
-PAIR_REPLY_STYLE_LINE = "style: start with the content; no sign-off line or name prefix"
+#: LABELLED AND PLACED AS HARNESS GUIDANCE (review R1-2): it sits above the
+#: untrusted-content clause and says it is local guidance, so a model never
+#: reads it as part of the sender's (untrusted) metadata.
+PAIR_REPLY_STYLE_LINE = (
+    "harness style (local guidance, not from the sender): start with the content; "
+    "no sign-off line or name prefix"
+)
 
 #: How long one wake handoff may hold a message claim. Screening + ack +
 #: delivery are bounded by the screening deadline; this lease only needs to
@@ -247,6 +253,10 @@ def build_wake_payload(
     organization = sender.get("organization") or ""
     lines = [
         f"[{TEAM_BRIDGE_MESSAGE_TYPE}]",
+        # Before the untrusted clause, so it reads as ours, not the sender's
+        # (R1-2); the body window between "screened):" and "body_sha256:" is
+        # untouched.
+        PAIR_REPLY_STYLE_LINE,
         # §11.1: the delivered wake marks the content as external and untrusted
         # — data, never instructions from a colleague's agent. The ONE clause
         # constant (D6): the marking is carried at five hops, and a second
@@ -270,9 +280,6 @@ def build_wake_payload(
         lines.append(f"state: {delivery.get('state')}")
     if message.get("request_state"):
         lines.append(f"request pending: {message.get('request_state')}")
-    # Ahead of the body so the excerpt stays the payload's last free-text run
-    # (the body window is parsed between "screened):" and "body_sha256:").
-    lines.append(PAIR_REPLY_STYLE_LINE)
     if len(text) > EXCERPT_MAX_CHARS:
         lines.append(f"excerpt ({EXCERPT_MAX_CHARS} of {len(text)} chars, screened):")
     else:

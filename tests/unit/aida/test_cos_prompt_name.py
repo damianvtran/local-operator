@@ -382,7 +382,7 @@ def test_the_rename_delta_supersedes_the_head(head: str, new: str) -> None:
     assert section == (
         f'<identity>\nYour name is now {new}, replacing {head} under "Your name" '
         "above; this supersedes that section and any earlier name or instruction "
-        f"calling you otherwise: introduce and sign as {new}.\n</identity>"
+        f"calling you otherwise: introduce yourself as {new}.\n</identity>"
     )
     assert section.count("\n") == 2  # one line inside the element
     assert f"Your name is {head}" in blocks[0]  # the head is untouched
