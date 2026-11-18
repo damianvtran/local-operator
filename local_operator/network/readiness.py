@@ -56,7 +56,9 @@ from typing import (
     Sequence,
 )
 
+from local_operator.i18n.keys import cli_serve_readiness
 from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr
 from local_operator.i18n.text import tr as _github_tr
 from local_operator.network import wire
 
@@ -2880,13 +2882,19 @@ def serve_daemons_fact(root: Path) -> dict[str, Any]:
     }
 
 
-#: Why a recorded daemon is not judged — keyed by ``_daemon_identity``'s answer.
-_IDENTITY_UNKNOWN_SENTENCE: dict[str, str] = {
-    "not_reporting": "is recorded but not answering (its heartbeat stopped)",
-    "not_this_daemon": "is recorded, but another process now holds that pid",
-    "unproven": "is recorded, but its process identity cannot be proven "
-    "(the record predates start-time stamps)",
-}
+# Resolve keyed copy at report time: the process language can change while the
+# relay lives. The legacy `state` wire field remains diagnostic; identity is the
+# only evidence used to judge the process (#3075 R2-n2).
+_serve_copy = tr("cli.serve_readiness")
+
+
+def _identity_unknown_sentence(identity: str) -> str:
+    message = {
+        "not_reporting": cli_serve_readiness.not_reporting,
+        "not_this_daemon": cli_serve_readiness.not_this_daemon,
+        "unproven": cli_serve_readiness.unproven,
+    }.get(identity, cli_serve_readiness.unknown_state)
+    return _serve_copy(message())
 
 
 def _serve_unknown_row(member: Any, *, peer_label: str, detail: str) -> dict[str, Any]:
@@ -3010,8 +3018,10 @@ def serve_daemon_row(
     stale_labels: set[str] = set()
     held: list[str] = []
     other: list[str] = []
-    unknown: list[int] = []
-    unknown_reasons: set[str] = set()
+    unknown_reasons: dict[int, list[str]] = {}
+    unproven_current = 0
+    unproven_gap = False
+    unproven_gap_reloadable = True
     fine: list[str] = []
     movable = True
     observed: list[dict[str, Any]] = []
@@ -3023,11 +3033,28 @@ def serve_daemon_row(
         if identity != "proven":
             # NOT A VERDICT ABOUT WHATEVER HOLDS THE PID (R1-M1): only the
             # recorded daemon's own fresh, born-matching process is judged.
-            unknown.append(pid)
-            unknown_reasons.add(
-                _IDENTITY_UNKNOWN_SENTENCE.get(identity, "is recorded in an unknown state")
-            )
-            observed.append({"pid": pid, "identity": _bounded(identity, 16)})
+            # Keep each reason attached to its PID. A set of reasons beside an
+            # aggregate PID list incorrectly assigns every reason to every daemon.
+            unknown_reasons.setdefault(pid, []).append(_identity_unknown_sentence(identity))
+            evidence: dict[str, Any] = {"pid": pid, "identity": _bounded(identity, 16)}
+            if identity == "unproven" and stamp is not None:
+                # A RECORD/install gap is useful during upgrades, but without a
+                # birth match it is never evidence about the process at this PID.
+                # Remain UNKNOWN; services restart performs its own guarded probe.
+                evidence.update(recorded=label, install=services._record_label(stamp))
+                if services._serves_current_build(record, stamp):  # noqa: SLF001
+                    unproven_current += 1
+                else:
+                    unproven_gap = True
+                    unproven_gap_reloadable = unproven_gap_reloadable and item["reloadable"]
+                    unknown_reasons[pid].append(
+                        _serve_copy(
+                            cli_serve_readiness.recorded_gap(
+                                recorded=label, install=services._record_label(stamp)
+                            )
+                        )
+                    )
+            observed.append(evidence)
             continue
         kind, holder = serve_supervision(item["cgroup"]) if linux else ("n/a", "")
         is_current = stamp is not None and services._serves_current_build(  # noqa: SLF001
@@ -3043,8 +3070,9 @@ def serve_daemon_row(
             }
         )
         if stamp is None:
-            unknown.append(pid)
-            unknown_reasons.add("runs a build the install cannot be compared with")
+            unknown_reasons.setdefault(pid, []).append(
+                _serve_copy(cli_serve_readiness.install_unknown())
+            )
         elif not is_current:
             movable = movable and item["reloadable"]
             stale.append(pid)
@@ -3054,8 +3082,9 @@ def serve_daemon_row(
         elif kind == "other_unit":
             other.append(f"pid {pid} under {holder}")
         elif kind == "unknown" and linux:
-            unknown.append(pid)
-            unknown_reasons.add("runs in a cgroup this check cannot place")
+            unknown_reasons.setdefault(pid, []).append(
+                _serve_copy(cli_serve_readiness.cgroup_unknown())
+            )
         if stamp is not None and is_current and kind in ("unit", "n/a"):
             fine.append(
                 f"the `lop serve` daemon on {peer_label} (pid {pid}) runs the installed "
@@ -3064,11 +3093,15 @@ def serve_daemon_row(
     sentences: list[str] = []
     if stale:
         sentences.append(
-            f"the `lop serve` daemon{'s' if len(stale) > 1 else ''} on {peer_label} "
-            f"({_pid_list(stale)}) run{'' if len(stale) > 1 else 's'} "
-            f"{', '.join(sorted(stale_labels)[:SERVE_DAEMONS_RENDERED])} but the install is "
-            f"{services._record_label(stamp)}: "  # noqa: SLF001
-            "the remote sessions it hosts run that other build"
+            _serve_copy(
+                cli_serve_readiness.stale(
+                    count=len(stale),
+                    device=peer_label,
+                    pids=_pid_list(stale),
+                    builds=", ".join(sorted(stale_labels)[:SERVE_DAEMONS_RENDERED]),
+                    install=services._record_label(stamp),  # noqa: SLF001
+                )
+            )
         )
     if held:
         # ONE SENTENCE FOR EVERY DAEMON A LOGIN HOLDS: the consequence is the same
@@ -3097,21 +3130,42 @@ def serve_daemon_row(
         # NAMED NEUTRALLY, NEVER OK (R1-m5): no `lop serve` unit ships, so another
         # unit holding the daemon (sshd from a host without pam_systemd, crond) is
         # not a supervisor that restarts it.
-        sentences.append(
-            f"the `lop serve` daemon on {peer_label} is held by another service "
-            f"({', '.join(other[:SERVE_DAEMONS_RENDERED])}"
-            + (
-                f" and {len(other) - SERVE_DAEMONS_RENDERED} more"
-                if len(other) > SERVE_DAEMONS_RENDERED
-                else ""
-            )
-            + "), not a lop serve unit"
+        holders = ", ".join(other[:SERVE_DAEMONS_RENDERED]) + (
+            f" and {len(other) - SERVE_DAEMONS_RENDERED} more"
+            if len(other) > SERVE_DAEMONS_RENDERED
+            else ""
         )
-    if unknown:
         sentences.append(
-            f"the `lop serve` daemon on {peer_label} ({_pid_list(unknown)}) "
-            + "; ".join(sorted(unknown_reasons))
-            + ", so whether it is current and supervised is not known"
+            _serve_copy(
+                cli_serve_readiness.other_unit(count=len(other), device=peer_label, holders=holders)
+            )
+        )
+    if unknown_reasons:
+        # Cap the displayed reasons with the PIDs, not independently: the full
+        # count still selects the correct grammatical number for a capped list.
+        # Group only identical complete diagnoses: different recorded builds or
+        # identity failures must remain associated with the right PIDs. Cap PIDs
+        # before grouping so coalescing cannot widen the existing output bound.
+        grouped: dict[tuple[str, ...], list[int]] = {}
+        for pid, why in list(unknown_reasons.items())[:SERVE_DAEMONS_RENDERED]:
+            grouped.setdefault(tuple(why), []).append(pid)
+        reasons = "; ".join(
+            _serve_copy(
+                cli_serve_readiness.pid_reason(
+                    count=len(pids), pids=", ".join(map(str, pids)), reason="; ".join(why)
+                )
+            )
+            for why, pids in grouped.items()
+        )
+        extra = len(unknown_reasons) - SERVE_DAEMONS_RENDERED
+        if extra > 0:
+            reasons += " " + _serve_copy(cli_serve_readiness.and_more(count=extra))
+        sentences.append(
+            _serve_copy(
+                cli_serve_readiness.unknown(
+                    count=len(unknown_reasons), device=peer_label, reasons=reasons
+                )
+            )
         )
     if not sentences:
         return _capability_row(
@@ -3147,8 +3201,24 @@ def serve_daemon_row(
             f"until it ships, re-check {peer_label} after any reboot or logout and start "
             "`lop serve` again if it is gone"
         )
-    if unknown and not (stale or held or other):
-        remedies.append(f"on {peer_label}, run `lop services status` to see each daemon")
+    if not stale and unproven_gap:
+        # Match services.reload_serve_daemons: it deliberately skips a record
+        # already on the installed build. Unknown identity alone is not a
+        # restartable fault, and a reload never guarantees a birth-time sample.
+        # A stale neighbour already supplied this command; do not repeat it.
+        remedy = (
+            cli_serve_readiness.identity_restart(device=peer_label)
+            if unproven_gap_reloadable
+            else cli_serve_readiness.identity_restart_manual(device=peer_label)
+        )
+        remedies.append(_serve_copy(remedy))
+    elif unknown_reasons and not (stale or held or other):
+        if unproven_current:
+            remedies.append(
+                _serve_copy(cli_serve_readiness.identity_no_action(count=unproven_current))
+            )
+        else:
+            remedies.append(f"on {peer_label}, run `lop services status` to see each daemon")
     # The code names the first fix a reader can act on now: the in-place reload
     # runs today, the supervision gap waits on the follow-up, and "not known"
     # comes last.

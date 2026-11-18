@@ -1,0 +1,372 @@
+# Current sd4r catalogue renders — zh-CN
+
+Offline production ICU rendering only, not terminal shaping/service execution.
+
+## cli.serve_readiness.unproven count=1
+
+已有记录，但无法证实进程身份（没有可供比较的启动时间戳）
+
+## cli.serve_readiness.not_reporting count=1
+
+记录存在但未响应（心跳已停止）
+
+## cli.serve_readiness.not_this_daemon count=1
+
+已有记录，但检测到PID复用
+
+## cli.serve_readiness.unknown_state count=1
+
+记录存在，状态未知
+
+## cli.serve_readiness.install_unknown count=1
+
+运行的构建无法与当前安装的构建比较
+
+## cli.serve_readiness.cgroup_unknown count=1
+
+本次检查无法判定其所在cgroup的归属
+
+## cli.serve_readiness.recorded_gap count=1
+
+记录中注明构建为v0.99.0+recorded；已安装的构建为v0.99.2+installed
+
+## cli.serve_readiness.unknown count=0
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=1
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=2
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=3
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=4
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=5
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=11
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=21
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=22
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=25
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=1.5
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=1000000
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown count=1500000
+
+host-sd4r上的`lop serve`守护进程——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.stale count=0
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=1
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=2
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=3
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=4
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=5
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=11
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=21
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=22
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=25
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=1.5
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=1000000
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale count=1500000
+
+host-sd4r上的`lop serve`守护进程（4102, 4103）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.other_unit count=0
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=1
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=2
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=3
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=4
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=5
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=11
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=21
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=22
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=25
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=1.5
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=1000000
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit count=1500000
+
+host-sd4r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.identity_restart count=1
+
+请在host-sd4r上运行`lop services restart`，将记录中的守护进程切换到已安装的构建；重启命令会在采取行动前检查每个守护进程
+
+## cli.serve_readiness.pid_reason count=0
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=1
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=2
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=3
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=4
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=5
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=11
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=21
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=22
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=25
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=1.5
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=1000000
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.pid_reason count=1500000
+
+进程ID4102, 4103——已有记录，但检测到PID复用
+
+## cli.serve_readiness.and_more count=0
+
+以及另外0个
+
+## cli.serve_readiness.and_more count=1
+
+以及另外1个
+
+## cli.serve_readiness.and_more count=2
+
+以及另外2个
+
+## cli.serve_readiness.and_more count=3
+
+以及另外3个
+
+## cli.serve_readiness.and_more count=4
+
+以及另外4个
+
+## cli.serve_readiness.and_more count=5
+
+以及另外5个
+
+## cli.serve_readiness.and_more count=11
+
+以及另外11个
+
+## cli.serve_readiness.and_more count=21
+
+以及另外21个
+
+## cli.serve_readiness.and_more count=22
+
+以及另外22个
+
+## cli.serve_readiness.and_more count=25
+
+以及另外25个
+
+## cli.serve_readiness.and_more count=1.5
+
+以及另外1.5个
+
+## cli.serve_readiness.and_more count=1000000
+
+以及另外1,000,000个
+
+## cli.serve_readiness.and_more count=1500000
+
+以及另外1,500,000个
+
+## cli.serve_readiness.identity_no_action count=0
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=1
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=2
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=3
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=4
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=5
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=11
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=21
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=22
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=25
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=1.5
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=1000000
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_no_action count=1500000
+
+记录中的构建与已安装的构建一致，但进程身份未经证实；此项非必需检查无需采取任何操作
+
+## cli.serve_readiness.identity_restart_manual count=1
+
+请在host-sd4r上手动重启`lop serve`，将记录中的守护进程切换到已安装的构建；它无法在当前进程内自行重新加载
+
+## COMPOSED PID reuse count=1
+
+host-sd4r上的`lop serve`守护进程——进程ID4101——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## COMPOSED PID reuse count=2
+
+host-sd4r上的`lop serve`守护进程——进程ID4102, 4103——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## COMPOSED PID reuse count=3
+
+host-sd4r上的`lop serve`守护进程——进程ID4104, 4105, 4106——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## COMPOSED PID reuse count=21
+
+host-sd4r上的`lop serve`守护进程——进程ID4110, 4111——已有记录，但检测到PID复用，因此无法确定是否与当前安装一致并受监督
+
+## COMPOSED disjoint diagnoses plus overflow
+
+host-sd4r上的`lop serve`守护进程——进程ID4101——已有记录，但无法证实进程身份（没有可供比较的启动时间戳）; 进程ID4102, 4103——已有记录，但检测到PID复用 以及另外22个，因此无法确定是否与当前安装一致并受监督
+

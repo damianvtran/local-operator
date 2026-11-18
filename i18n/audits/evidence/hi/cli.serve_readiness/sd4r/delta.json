@@ -1,0 +1,22 @@
+{
+  "key": "cli.serve_readiness.not_this_daemon",
+  "before": "रिकॉर्ड मौजूद है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है",
+  "after": "रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया",
+  "previous_target_sha256": "40a11e844ff0eb3761b4bcfb50842970cc9469fef38b0f18cc23fec493405f47",
+  "retained_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.stale",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ]
+}

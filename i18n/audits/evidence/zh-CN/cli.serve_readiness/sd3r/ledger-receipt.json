@@ -1,0 +1,57 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+  "status": "passed",
+  "date": "2026-11-16",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d590e061719",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translator_job": "7f2b030d2636",
+    "actual_model_source": "Host session metadata: Model openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "job": "7f2b030d2636",
+    "model": null,
+    "previously_disclosed_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting task identifies same original translator/final job; current-job actual model and fallback not supplied or independently verified. Null preserves that uncertainty."
+  },
+  "note": "Record i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/record.json; 15 keys, 14 byte-identical retained; PID reuse number-neutral; no findings.",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "audit_record": {
+    "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/record.json",
+    "sha256": "7db2d7ce7b565f12dfb64ef228b66e6382d2da75db3bc54308e74b11eeaca7c2"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/report.md",
+      "sha256": "406e788e95b4cdddde257bbc66d7283d4dc87cac019817b1c46a8cce239431bb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "5cd828400e253c3449f16ebe08b888172b627c08ae014eac44a21af174b71030"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3r/verify.py.txt",
+      "sha256": "ff632f97821b49db3802eb087f2a0984f84272fbd3dd6c10e72ec133ee675900"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  }
+}

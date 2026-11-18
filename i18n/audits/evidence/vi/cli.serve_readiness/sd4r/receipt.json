@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd4r",
+  "record_reference": "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/record.json",
+  "ledger_receipt": "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/ledger-receipt.json",
+  "purpose": "Companion hash manifest; separate ledger receipt append-ready, not applied.",
+  "sha256": {
+    "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/report.md": "89f704cc677d901803025cc42b24b11d322b6c12e69a34bf5b9d7b7277824402",
+    "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/rendered.txt": "d080248ce9bc36d14c8766b68735dc6187b96be9301be51dbe149722a312b92a",
+    "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/delta.json": "265881344c633133af879b44b39d6c3c54a0dcaa2076cf860d8860d8c090dc32",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/audit.log": "22d0c52041490b641e8344b1b62cf856a2907752d144204685f80a5396741266",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/input-manifest.json": "e48d1546f2642e53c6562f9847fa034e7b72435e59eb158b1a6214e72140c731",
+    "i18n/audits/evidence/fr/cli.serve_readiness/sd4r/verify.py.txt": "43ad159523eacbcd35ab868b31e475d4f374679e8875d4ca64c603d4d9f6ba2f",
+    "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/record.json": "6a93f0731fc82ff1ae817b6c5d2386f36fb7b94a2c16b7aab2277624f80c54b3",
+    "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/ledger-receipt.json": "fff264fa0e94c5ac141436282280d2e6418705b84ede744e1557375bc0692486",
+    "i18n/audits/evidence/vi/cli.serve_readiness/sd4r/ledger-dry-run.log": "b2e47cd69d7a721ed0d9a44ddd8525de14f5bb0bd74a15da3ba1d857b286597e"
+  }
+}

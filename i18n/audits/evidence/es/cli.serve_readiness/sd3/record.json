@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "Audit daemon Spanish",
+    "session": "e68b64992930",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translation_job": "170903662c6e",
+    "actual_model_source": "Host session-state Model: openai/gpt-6.1-sol; no fallback recorded or observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "task acf0a84cd992",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requester identifies current job 170903662c6e as same original translator; original actual openai/gpt-6.1-sol reported by requester and retained in sd1r; no fresh provider telemetry inspected",
+    "translation_job": "170903662c6e"
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c plus uncommitted remediation",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/cli.serve_readiness.json",
+      "sha256": "2ab401d1a191aaf2a40699ed08cb142e097df0f44a5a20131c82f9f2ec061564"
+    }
+  },
+  "style_inputs": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    }
+  ],
+  "additional_context_inputs": [
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "local_operator/network/readiness.py",
+      "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd3/report.md",
+      "sha256": "c9053d7125c2d229b5493a353b4e6f2727334b73fb071bea696922bd939635da"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd3/audit.log",
+      "sha256": "caf2b33ac10808b8f5e48ad002df3da52b5b00a5b275c36897a09a34b9fd72cf"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd3/validation.py.txt",
+      "sha256": "35916626b1dcd6479350798f2a1480e9959c4c7a4abaa110c8a2ca6bf4fbd5ab"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd3/ledger-receipt.json",
+      "sha256": "b22827019d5604cf2def5e1cb025f9206665bf378975dfc05ff6cb49297430dc"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd3/ledger-dry-run.log",
+      "sha256": "e0052903d55739d4d3282377901115d83c9c1865f55a3ffa7d4cf5830260fbd0"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "previously_fixed_finding_ids": [
+      "ES-SD1-01"
+    ]
+  },
+  "retained_coverage": {
+    "prior_record": {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1r/record.json",
+      "sha256": "7c18c8e48e2651e56f33d5624dbd9c456d56990a757621572f424e4e2cd6f91a"
+    },
+    "prior_report": {
+      "path": "i18n/audits/evidence/es/cli.serve_readiness/sd1r/report.md",
+      "sha256": "47278ba5684715e231098080d0d3f79ada9f9835fa6753b6f63d67da5a9721d8"
+    },
+    "baseline_target_sha256": "7eda53e9b96f9c8cae9ac627b9e84f0a6ebc00a1f7a2a08ab584858c292237ed",
+    "base_commit": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+    "changed_keys": [
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.not_reporting",
+      "cli.serve_readiness.not_this_daemon",
+      "cli.serve_readiness.unknown_state",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.identity_restart"
+    ],
+    "new_keys": [
+      "cli.serve_readiness.pid_reason",
+      "cli.serve_readiness.and_more",
+      "cli.serve_readiness.identity_no_action",
+      "cli.serve_readiness.identity_restart_manual"
+    ],
+    "unchanged_keys": [
+      "cli.serve_readiness.install_unknown",
+      "cli.serve_readiness.cgroup_unknown",
+      "cli.serve_readiness.stale",
+      "cli.serve_readiness.other_unit"
+    ],
+    "unchanged_key_proofs": [
+      {
+        "key": "cli.serve_readiness.install_unknown",
+        "unchanged_value_sha256": "b1686c3838234c8e7d8ee60bf8093a675b7b3c86cf21ff4ffc9c058c1f4951a5",
+        "unchanged_json_line_sha256": "08fbf325ce4d478624e6350b2878dbe78cb29df104d1eb8152032f3b85fd6c43"
+      },
+      {
+        "key": "cli.serve_readiness.cgroup_unknown",
+        "unchanged_value_sha256": "65cfd53679cca072305ecaaf6d58486f6cb51ebc22f8328bf20fdc08e4ab09c0",
+        "unchanged_json_line_sha256": "de7ca41686a7566bd0a97c93c3fd433c3598741aa5ee8b07fa755d5c256b6a8b"
+      },
+      {
+        "key": "cli.serve_readiness.stale",
+        "unchanged_value_sha256": "9630f6bacebc6030003084de3c95309eb98b43508d6eeca30657b5da18164573",
+        "unchanged_json_line_sha256": "e49a1cc33177782a9e39e0234448bbef6d1e6c4afdb9fafe2d787e429f4d583f"
+      },
+      {
+        "key": "cli.serve_readiness.other_unit",
+        "unchanged_value_sha256": "d3c63f4b2d0d4b56ffbac88cf73671a0c87611a8d56cbcd508b8d02666d06d43",
+        "unchanged_json_line_sha256": "53c8f08e4f89a15a2b794a87fd2a9473e89d9ea4451602441b7ab316f95be232"
+      }
+    ],
+    "proof_method": "HEAD full target hash equals sd1r pinned target hash; each retained JSON line exactly equal to HEAD raw line and each decoded value equal"
+  },
+  "coverage": {
+    "changed_new_keys_independently_reviewed": 11,
+    "prior_coverage_retained_keys": 4,
+    "all_current_keys_mechanical_render_opaque": 15,
+    "plural_messages": 6,
+    "second_independent_pass_claimed": false,
+    "source_selection_inspected_not_executed": true,
+    "live_services_or_layout_tested": false,
+    "mt_service_used": false,
+    "deferred_cgroup_N1_reopened": false
+  },
+  "audit_notes_not_execution_log": {
+    "report": "i18n/audits/evidence/es/cli.serve_readiness/sd3/report.md",
+    "actual_execution_logs": [
+      "i18n/audits/evidence/es/cli.serve_readiness/sd3/audit.log",
+      "i18n/audits/evidence/es/cli.serve_readiness/sd3/ledger-dry-run.log"
+    ]
+  },
+  "history_append_applied": false,
+  "translation_edits": false,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

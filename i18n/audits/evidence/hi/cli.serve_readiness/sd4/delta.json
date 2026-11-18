@@ -1,0 +1,70 @@
+{
+  "prior_record": "i18n/audits/evidence/hi/cli.serve_readiness/sd2r/record.json",
+  "prior_target_sha256": "c83b91c4e5297457edb1d1f281af71c80acac1b27f9953733bdcbe004e8bea9b",
+  "prior_catalogue_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "unchanged_keys": [
+    "cli.serve_readiness.cgroup_unknown",
+    "cli.serve_readiness.install_unknown",
+    "cli.serve_readiness.other_unit",
+    "cli.serve_readiness.stale"
+  ],
+  "changed_new_keys": [
+    "cli.serve_readiness.unproven",
+    "cli.serve_readiness.not_reporting",
+    "cli.serve_readiness.not_this_daemon",
+    "cli.serve_readiness.unknown_state",
+    "cli.serve_readiness.recorded_gap",
+    "cli.serve_readiness.unknown",
+    "cli.serve_readiness.identity_restart",
+    "cli.serve_readiness.pid_reason",
+    "cli.serve_readiness.and_more",
+    "cli.serve_readiness.identity_no_action",
+    "cli.serve_readiness.identity_restart_manual"
+  ],
+  "before_after": {
+    "cli.serve_readiness.unproven": {
+      "before": "दर्ज है, लेकिन इसकी प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)",
+      "after": "रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)"
+    },
+    "cli.serve_readiness.not_reporting": {
+      "before": "दर्ज है लेकिन जवाब नहीं दे रहा (इसकी हार्टबीट रुक गई है)",
+      "after": "रिकॉर्ड मौजूद है, लेकिन कोई जवाब नहीं मिल रहा (हार्टबीट रुक गई है)"
+    },
+    "cli.serve_readiness.not_this_daemon": {
+      "before": "दर्ज है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है",
+      "after": "रिकॉर्ड मौजूद है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है"
+    },
+    "cli.serve_readiness.unknown_state": {
+      "before": "अज्ञात स्थिति में दर्ज है",
+      "after": "अज्ञात स्थिति वाला रिकॉर्ड"
+    },
+    "cli.serve_readiness.recorded_gap": {
+      "before": "दर्ज बिल्ड {recorded}, इंस्टॉल किया गया बिल्ड {install} (प्रक्रिया की पहचान अप्रमाणित)",
+      "after": "रिकॉर्ड में बिल्ड {recorded} दर्ज है; इंस्टॉल किया गया बिल्ड {install} है"
+    },
+    "cli.serve_readiness.unknown": {
+      "before": "{count, plural, one {{device} पर `lop serve` डेमन: {reasons}, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं} other {{device} पर `lop serve` डेमन: {reasons}, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं}}",
+      "after": "{count, plural, one {{device} पर `lop serve` डेमन — {reasons}, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं} other {{device} पर `lop serve` डेमन — {reasons}, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं}}"
+    },
+    "cli.serve_readiness.identity_restart": {
+      "before": "{device} पर, रिकॉर्ड देखने के लिए `lop services status` चलाएँ, फिर प्रक्रियाओं की पहचान दर्ज करने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है",
+      "after": "{device} पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है"
+    },
+    "cli.serve_readiness.pid_reason": {
+      "before": null,
+      "after": "{count, plural, one {प्रक्रिया ID {pids} — {reason}} other {प्रक्रियाओं के ID {pids} — {reason}}}"
+    },
+    "cli.serve_readiness.and_more": {
+      "before": null,
+      "after": "{count, plural, one {और # अन्य} other {और # अन्य}}"
+    },
+    "cli.serve_readiness.identity_no_action": {
+      "before": null,
+      "after": "{count, plural, one {जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है} other {जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है}}"
+    },
+    "cli.serve_readiness.identity_restart_manual": {
+      "before": null,
+      "after": "{device} पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop serve` को मैन्युअल रूप से फिर शुरू करें; यह मौजूदा प्रक्रिया में खुद को फिर से लोड नहीं कर सकता"
+    }
+  }
+}

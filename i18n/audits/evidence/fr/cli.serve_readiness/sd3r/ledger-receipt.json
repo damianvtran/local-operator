@@ -1,0 +1,50 @@
+{
+  "locale": "fr",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+  "status": "passed",
+  "audit_date": "2026-11-16",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7f2b030d2636",
+    "model": null,
+    "actual_model_source": "Request names the current translator job but does not supply its actual model. Prior translator model is not assumed to establish this job model.",
+    "fallback": "unknown for translator job; no inference made"
+  },
+  "auditor": {
+    "agent": "Audit daemon French (i18n-auditor)",
+    "session": "19f657b90086",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "7f2b030d2636",
+    "actual_model_source": "Session runtime model declaration: openai/gpt-6.1-sol",
+    "fallback": {
+      "observed": false,
+      "reported": false,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "note": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/record.json; 1 changed PID-reuse key and grouped neighbors passed; 14 keys byte-retained; all 15 mechanical/render checks passed",
+  "record_reference": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/record.json",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "open_finding_ids": [],
+    "findings_report": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md"
+  },
+  "bundle_companions": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/report.md",
+      "sha256": "5c0d682ed79ff900d96767a4506b2a63774e306cd85de31a3b6d1c78b0ff8e45"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "4988670ac9943fbbc8ab4e6d9695ad97a04380ed2c63ddb93be27b1c86ecc428"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.serve_readiness/sd3r/verify.py.txt",
+      "sha256": "a75b6370865843d49e2a88a983694160af7920b9d8a5a101256e4eefc34f3481"
+    }
+  ]
+}

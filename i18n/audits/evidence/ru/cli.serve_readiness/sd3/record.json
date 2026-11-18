@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "independent-ru-auditor",
+    "session": "b8c027b19533",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "170903662c6e",
+    "actual_model_source": "Current session runtime declaration: openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "170903662c6e",
+    "session": "170903662c6e",
+    "model": null,
+    "actual_model_source": "Current translation job identified by manager; actual model for this job not supplied",
+    "prior_translator_session": "acf0a84cd992",
+    "prior_model": "openai/gpt-6.1-sol"
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+  "working_copy": "Uncommitted #4112 remediation; evidence is not claimed to be on main",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.serve_readiness.json",
+      "sha256": "246305666d1703c8052e28e396b3a0d0518afa3f31757abfa120cd13952a52cc"
+    }
+  },
+  "policy_input_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    }
+  ],
+  "source_implementation_input": {
+    "path": "local_operator/network/readiness.py",
+    "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+  },
+  "retained_coverage": {
+    "initial_record": {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1r/record.json",
+      "sha256": "b55a9be2102f6b9f85cca67fb53ac2446ce811ea9f7269f4bec2124d158fc0c1"
+    },
+    "initial_report": {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd1r/report.md",
+      "sha256": "2a501666b3355f841a066407ff89c9c41d4ae16d14e18aa4f4487191834fb2c2"
+    },
+    "new_source_audit": true,
+    "changed_key_count": 7,
+    "new_key_count": 4,
+    "unchanged_key_count": 4,
+    "unchanged_keys": [
+      "cli.serve_readiness.install_unknown",
+      "cli.serve_readiness.cgroup_unknown",
+      "cli.serve_readiness.stale",
+      "cli.serve_readiness.other_unit"
+    ],
+    "unchanged_byte_proof": "Base target SHA-256 equals prior audited target; each retained raw UTF-8 catalogue line exactly equals base line",
+    "deferred_scope": "Existing cgroup N1 not reopened"
+  },
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "RU-SD3-01"
+    ],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 1,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/report.md",
+      "sha256": "4f3f946d5792fcfeda496f87050a0d3ba814d993189d0001b01dba080e8e1094"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/audit.log",
+      "sha256": "e8164e3eb1e9db2851a4436f0714614eb1ad66579befe170603aa68894b21626"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/mechanical.py.txt",
+      "sha256": "07ac2476c0d62f0189b39f0f10b2caae8ebe13b18aaa721a3215b30cc8312a8f"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/ledger-receipt.json",
+      "sha256": "34ebd717015bb3a2cf7cab283a6c9610257c9b81a55fe1173c23e2856ae80360"
+    }
+  ],
+  "current_bytes_match_audited_hashes": true,
+  "audit_notes_not_execution_log": {
+    "semantic_coverage": "11 changed/new keys and 4 retained unchanged keys, current source-selection review",
+    "execution_evidence": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/audit.log",
+    "limits": [
+      "First independent sd3 pass, not second independent auditor sign-off",
+      "Source inspection and pure catalogue rendering only, not live readiness/service execution",
+      "No rendered UI/wrapping/RTL claim",
+      "Current translator job actual model unknown, recorded null rather than inferred",
+      "No translation or source edits, history appends, commits, pytest, services, installs or providers"
+    ]
+  },
+  "ledger_handoff": {
+    "receipt": "i18n/audits/evidence/ru/cli.serve_readiness/sd3/ledger-receipt.json",
+    "dry_run_passed": true,
+    "expected_history_sha_at_dry_run": "6a2983770c38b28431130ba1a9edb8c3fb3894821d3ec040b20dfa3ed3786f1f",
+    "history_appended": false,
+    "note_characters": 193
+  }
+}
