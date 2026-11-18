@@ -2442,13 +2442,8 @@ def _shared_dependencies_link(real: str, entry: str) -> bool:
     return False
 
 
-def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
-    # An index entry marked assume-unchanged or skip-worktree can conceal a
-    # modified file from status. Gitlinks can conceal an independent repo.
-    index = _git_quiet(["ls-files", "-v", "--stage", "-z"], real)
-    if index is None:
-        return "unknown"
-    status = _git_quiet(
+def _strict_cleanup_status(real: str) -> str | None:
+    return _git_quiet(
         [
             "-c",
             "core.ignorestat=false",
@@ -2466,6 +2461,37 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
         ],
         real,
     )
+
+
+def _cleanup_status_path(row: str) -> str | None:
+    # NUL porcelain preserves literal path names (not C quoting).
+    entry = row[3:].rstrip("/")
+    return entry if entry and not os.path.isabs(entry) and ".." not in entry.split("/") else None
+
+
+def plain_cleanup_ignored_preserved(real: str) -> bool | None:
+    """Plain Git refuses ordinary changes but deletes ignored payload too."""
+    status = _strict_cleanup_status(real)
+    if status is None:
+        return None
+    # A tracked edit cannot mask an independent ignored-data hold.
+    for row in status.split("\0"):
+        if row.startswith("!! "):
+            entry = _cleanup_status_path(row)
+            if entry is None:
+                return None
+            if not _shared_dependencies_link(real, entry):
+                return False
+    return True
+
+
+def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
+    # An index entry marked assume-unchanged or skip-worktree can conceal a
+    # modified file from status. Gitlinks can conceal an independent repo.
+    index = _git_quiet(["ls-files", "-v", "--stage", "-z"], real)
+    if index is None:
+        return "unknown"
+    status = _strict_cleanup_status(real)
     if status is None:
         return "unknown"
     deleted = False
@@ -2481,9 +2507,8 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
             continue
         if row[:3] not in (" D ", "D  ", "!! "):
             return "dirty"
-        entry = row[3:].rstrip("/")
-        # NUL porcelain preserves literal path names (not C quoting).
-        if not entry or os.path.isabs(entry) or ".." in entry.split("/"):
+        entry = _cleanup_status_path(row)
+        if entry is None:
             return "unknown"
         physical = os.path.join(real, entry)
         if row[:3] != "!! ":

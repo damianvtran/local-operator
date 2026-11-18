@@ -199,6 +199,58 @@ async def test_plain_own_checkout_without_origin_keeps_legacy_checkpoint(
     assert (wt / "a.txt").read_text() == "uncommitted\n"
 
 
+def test_plain_exact_own_checkout_accepts_shared_link_witness(home: Path, repo: Path) -> None:
+    wt = _branch_tree(home, repo, "plain-shared-link")
+    _git("remote", "remove", "origin", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text("node_modules\n")
+    (repo / "node_modules").mkdir()
+    (wt / "node_modules").symlink_to("../../node_modules")
+    _record(home, wt, creator=ME)
+    command = f"git -C {repo} worktree remove -- {wt}"
+    assert _rank(home, command).risk is Risk.LOW
+
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '8.0'\n")
+    ranked = _rank(home, command)
+    assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["ignored", "ignored-and-edit", "unknown"])
+async def test_plain_exact_own_checkout_holds_unverified_payload(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+) -> None:
+    wt = _branch_tree(home, repo, "plain-preserve")
+    _git("remote", "remove", "origin", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text(".env\n")
+    marker = wt / ".env"
+    if payload != "unknown":
+        marker.write_text("synthetic local data\n")
+    if payload == "ignored-and-edit":
+        (wt / "a.txt").write_text("uncommitted\n")
+    _record(home, wt, creator=ME)
+    if payload == "unknown":
+        original = prov._git_quiet
+        monkeypatch.setattr(
+            prov,
+            "_git_quiet",
+            lambda args, cwd: None if "--ignored=matching" in args else original(args, cwd),
+        )
+    command = f"git -C {repo} worktree remove -- {wt}"
+    ranked = _rank(home, command)
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
+    judge = _Judge("ALLOW: synthetic judge")
+    result = await _check(home, command, judge)
+    assert ranked.risk is Risk.HIGH and ranked.targets[0].cleanup_hold, ranked.reasons
+    assert report.builtin_effect != BUILTIN_PASS, report.render()
+    assert result.blocked and not judge.prompts, result
+    assert wt.is_dir()
+    if payload != "unknown":
+        assert marker.read_text() == "synthetic local data\n"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("creator", [ME, DONE])
 @pytest.mark.parametrize("shared_link", [False, True])

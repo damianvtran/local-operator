@@ -1370,6 +1370,7 @@ def _rank(
         # unknown ranks HIGH with that state named (the one fact the agent can
         # act on); not-linked takes the ordinary ranking below.
         from local_operator.guardrails.provenance import (
+            plain_cleanup_ignored_preserved,
             state_phrase,
             worktree_activity,
             worktree_state,
@@ -1393,12 +1394,9 @@ def _rank(
         # ``--force``, any other delete and every write keep a sibling's tree
         # foreign.
         #
-        # IGNORED FILES follow git's own rule for a non-forced removal by the
-        # family (``git worktree remove`` deletes them without ``--force``;
-        # measured with git 2.55 on a throwaway repo: ignored ``.terraform/``
-        # plus ``.env`` removed, rc 0). A FORCED removal of an ancestor's or
-        # sibling's tree keeps the stricter rule — an ignored ``.env`` the
-        # caller never made is not known to be reproducible.
+        # The legacy family state below treats ignored entries like Git does.
+        # Exact plain commands separately require the same ignored-payload
+        # witness as exact forced cleanup, regardless of the creator.
         own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
         relation = own[2] if own is not None else ""
         # A hidden pid with no evidence is ignored for the PLAIN removal only
@@ -1465,6 +1463,17 @@ def _rank(
                     "a planned literal --force removal",
                     cleanup_hold=True,
                 )
+            if plain_payload is not None:
+                preserved = plain_cleanup_ignored_preserved(path)
+                if preserved is not True:
+                    reason = (
+                        "could not verify ignored files"
+                        if preserved is None
+                        else "preservation check failed; preserve unverified ignored files separately"
+                    )
+                    return RankedTarget(
+                        target, Risk.HIGH, f"linked worktree state: {reason}", cleanup_hold=True
+                    )
             idle = activity.pr_state == "none" and not activity.owners_running
             # OWN + CLEAN does not need the forge (operator escalation
             # 2026-11-11, session 99c51054bdbd): ``git worktree remove --force``
