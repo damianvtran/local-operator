@@ -321,6 +321,20 @@ Every hold ends in one of two ways; none waits forever:
   long-hold alert; the badge is the signal. Set `review_held: false` under
   `values:` > `team_bridge:` to go back to holds with no Deliver/Discard; those
   holds count toward the long-hold alert again.
+- **Waiting for the owner's decision** (`work_scope_hold`): the screener bounced
+  the message and its ONLY category was `new_work_request` — typically a
+  teammate's agent asking you to decide on access, spend or a production change.
+  With `team_bridge.hold_release` on (the default since 2026-11-18) it is held,
+  not rejected: a per-message notice lands in the designated session's inbox
+  and the holds list offers **Deliver** or **Discard**. Prompt injection, social
+  engineering, `out_of_scope_work`, `personal_info_request` and any answer with
+  more than one category are still rejected. Only a preferred, allowlisted
+  screener's answer converts; others reject as before. It has no
+  `lop config edit` key: set `hold_release: false` (an unquoted `false`; a
+  quoted `"false"`, `off` or `0` still reads on, and the receiver logs that once)
+  under `values:` > `team_bridge:` (via `lop config open`) to reject these again.
+  A screener outside the preferred allowlist (a fallback after the preferred
+  models fail) still rejects these requests.
 
 The owner's own posts are never screened by their own agent: a message whose
 server-recorded sender is the owner's account, posting as a person, is
