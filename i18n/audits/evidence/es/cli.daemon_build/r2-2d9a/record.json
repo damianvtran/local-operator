@@ -1,0 +1,68 @@
+{
+  "locale": "es",
+  "namespace": "cli.daemon_build",
+  "audit_id": "r2-2d9a",
+  "round": 2,
+  "audit_date": "2026-11-18",
+  "key_count": 5,
+  "pr": "https://github.com/damianvtran/local-operator/pull/4215",
+  "worktree_head": "e3a97b7400feab469cb786711dab09541b247c53",
+  "scope": "bccb6707..e3a97b74",
+  "supersedes_round": {
+    "audit_id": "r1-6236",
+    "record": "i18n/audits/evidence/es/cli.daemon_build/r1-6236/record.json",
+    "preserved_unchanged": true
+  },
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev task subagent)",
+    "session": "2d9a335da8ba",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": "PR #4215 coder subagent ('local-operator implementer (coder role)', anthropic/claude-opus-5-5); session id not disclosed to auditor",
+    "actual_model_source": "auditor session system prompt 'Model: anthropic/claude-opus-5-5'; no provider fallback observed; same model family as translator, different agent instance"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.daemon_build.json",
+      "sha256": "d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.daemon_build.context.json",
+      "sha256": "debe15d1868bfb9cc48d319b1faaf09ea5edd0d908269bb4bbe1442fd739c8cf"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/cli.daemon_build.json",
+      "sha256": "889c267f95f45c4107dad4be6af99640d2c41726a8e35ef597530d00cdeb37e1"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/cli.daemon_build/r2-2d9a/report.md",
+      "sha256": "a027c3b19fe79c75516689c9c7ef0e0a892f19f9aba4b2261641d1efa536ee31"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.daemon_build/r2-2d9a/audit.log",
+      "sha256": "0d81623dff4f92431708274ce12911cb07c8b85567482b55234db370580c2925"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.daemon_build/r2-2d9a/audit_checks.py.txt",
+      "sha256": "b4c1f0a363dcaf136bd35861ca74918d7248466e4f081c0761f90d223db60042"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log is the actual captured command output (identical bytes in each locale bundle of this audit, home path shown as ~); audit_checks.py.txt is the script that produced its [parity]/[term]/[typo]/[attach] lines",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ES2-1"
+    ],
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    }
+  },
+  "rendered_evidence": "none",
+  "native_human_review": "none"
+}
