@@ -3618,7 +3618,35 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
     ``os.replace`` changes the inode — rescans. One retry covers a concurrent
     ``compact_file`` (which replaces the file, changing the inode under the
     read).
+
+    ONE BUILDER PER SESSION ACROSS PROCESSES. The whole ladder runs under a
+    per-session build lock (``<sid>.build.lock`` beside the cache, the same
+    flock + in-process lock :func:`_publish_lock` uses). ``lop serve`` and the
+    mesh relay are separate processes and both open the same journal when a
+    viewer opens a conversation; ``start_refresh``'s single-flight joins only
+    within one process, so each used to scan the same bytes (transcript-index
+    ADR caller map). Under the lock the second builder re-reads the cache AFTER
+    the first one published, takes the exact-signature hit and returns without
+    scanning. Lock order is build -> publish, never the reverse, so the nested
+    ``write_index`` cannot deadlock against it. A waiter costs a blocked worker
+    thread for at most one build — work it would otherwise have spent
+    scanning the same bytes itself.
     """
+    if not _journal_path(config_dir, session_id).exists():
+        return None  # No journal, nothing to build: never create a lock for it.
+    lock = index_path(config_dir, session_id).with_suffix(".build.lock")
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # An unwritable cache dir cannot hold a lock either; the ladder below
+        # degrades exactly as it did before the lock existed.
+        return _refresh_index_locked(config_dir, session_id)
+    with _publish_lock(lock):
+        return _refresh_index_locked(config_dir, session_id)
+
+
+def _refresh_index_locked(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
+    """:func:`refresh_index`'s ladder; the caller holds the session's build lock."""
     path = _journal_path(config_dir, session_id)
     yield_to = _YIELD_TO.get()
     for attempt in (0, 1):
@@ -3647,8 +3675,14 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
                 and st.st_size > previous.scan.offset
                 and _verify_tail(path, previous.scan.offset, str(previous.sig.get("last_id", "")))
             ):
+                if open_trace.enabled():
+                    # The row that counts SCANS (``index.refresh_start`` counts
+                    # requests, which a hit or a joined build also produce).
+                    open_trace.mark("index.scan", session=session_id, kind="incremental")
                 index = _scan_incremental(path, previous, raw)
             else:
+                if open_trace.enabled():
+                    open_trace.mark("index.scan", session=session_id, kind="full")
                 index = _scan_full(path, raw)
                 # D8's cleanup bullet rides the build pass, and a build is the
                 # only moment that can see the whole cache directory.
@@ -3743,10 +3777,11 @@ def probe_index(config_dir: str | Path, session_id: str) -> IndexProbe:
 
 #: In-flight refreshes and the resident parsed indexes, keyed by
 #: ``(str(config_dir), session_id)``. LOOP-ONLY MUTATION: entries are created,
-#: read and dropped from the event loop thread; the worker only computes and
+#: read and dropped from event loop threads; the worker only computes and
 #: returns (``page_cache``'s cross-thread rule). Each entry carries the loop it
 #: belongs to so a torn-down test loop reads as absent rather than as a future
-#: bound to a dead loop.
+#: bound to a dead loop, and so a caller on ANOTHER live loop joins through
+#: ``_join_across_loops`` instead of touching that loop's task directly.
 _IN_FLIGHT: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, "asyncio.Task[Any]"]] = {}
 _RESIDENT: "OrderedDict[tuple[str, str], TranscriptIndex]" = OrderedDict()
 
@@ -4403,14 +4438,149 @@ def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex |
     return None
 
 
+def _join_across_loops(
+    owner_loop: asyncio.AbstractEventLoop,
+    owner: "asyncio.Task[Any]",
+    loop: asyncio.AbstractEventLoop,
+    session_id: str,
+) -> "asyncio.Task[Any] | None":
+    """A task on ``loop`` that settles with ``owner``'s outcome, or ``None``.
+
+    Neither loop may touch the other's objects directly: asyncio tasks and
+    futures are not thread-safe. So the done-callback is REGISTERED on the
+    owner's loop (``call_soon_threadsafe``) and the result is DELIVERED on the
+    joiner's loop the same way. ``None`` means the owner's loop refused the
+    callback (it closed between the ``is_running`` check and now); the caller
+    then starts its own scan, which is the pre-join behaviour and still correct
+    (same journal, idempotent cache write). The joiner never cancels the
+    owner: cancelling the proxy only abandons this caller's wait.
+    """
+    bridge: asyncio.Future[Any] = loop.create_future()
+
+    def deliver(settled: "asyncio.Task[Any]") -> None:
+        def settle() -> None:
+            if bridge.done():
+                return
+            if settled.cancelled():
+                bridge.cancel()
+            elif settled.exception() is not None:
+                bridge.set_exception(settled.exception())  # type: ignore[arg-type]
+            else:
+                bridge.set_result(settled.result())
+
+        try:
+            loop.call_soon_threadsafe(settle)
+        except RuntimeError:
+            pass  # The joiner's loop closed; nobody is left to answer.
+
+    try:
+        owner_loop.call_soon_threadsafe(owner.add_done_callback, deliver)
+    except RuntimeError:
+        return None
+
+    async def _joined() -> Any:
+        return await bridge
+
+    return loop.create_task(_joined(), name=f"transcript-index-join:{session_id}")
+
+
+def current_without_build(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
+    """A CURRENT index for the session if one is already in memory; never builds.
+
+    For callers whose contract is "never a scan" but which run synchronously —
+    several on an event loop (the TUI's render path, the runtime's
+    ``history_page``). Two sources, both bounded by a few ``stat`` calls:
+
+    1. :func:`fresh_resident` — the index a refresh left resident here.
+    2. The persisted publication, but ONLY when this process has already parsed
+       that exact head (the parse memo, keyed by the head's ino/size/mtime) AND
+       its signature still matches the journal. A cold parse is deliberately
+       NOT done here: on an anchor-sized session decoding the document is
+       hundreds of milliseconds, which is exactly the stall this door exists to
+       keep off the caller. :func:`start_refresh` performs that parse off the
+       loop and leaves the result resident for the next ask.
+
+    ``None`` means "not ready"; pair it with :func:`arm_refresh` to start one.
+    """
+    index = fresh_resident(config_dir, session_id)
+    if index is not None:
+        return index
+    path = index_path(config_dir, session_id)
+    try:
+        st = path.stat()
+        journal_st = _journal_path(config_dir, session_id).stat()
+    except OSError:
+        return None
+    identity = (st.st_ino, st.st_size, st.st_mtime_ns)
+    with _PARSED_LOCK:
+        memo = _PARSED.get(str(path))
+    if memo is None or memo[0] != identity or memo[3].get("version") != TRANSCRIPT_INDEX_VERSION:
+        return None
+    view = memo[1]
+    if not view.journal_generation or not _sig_matches(view.sig, journal_st):
+        return None
+    return _detached(view, identity)
+
+
+def in_flight_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any] | None":
+    """The refresh task running for this session on the CALLING loop, if any.
+
+    For a reader that answered "not ready" and wants to re-ask once the armed
+    refresh lands (``mobile/peer_cycles.py``), without polling. ``None`` off a
+    loop, or when the recorded task belongs to another loop or has finished.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    entry = _IN_FLIGHT.get(_key(config_dir, session_id))
+    if entry is None or entry[0] is not loop or entry[1].done():
+        return None
+    return entry[1]
+
+
+def arm_refresh(config_dir: str | Path, session_id: str) -> bool:
+    """Start (or join) the background refresh WITHOUT awaiting it.
+
+    Returns whether a refresh is now in flight. ``False`` when the calling
+    thread runs no event loop (a ``to_thread`` worker): ``start_refresh`` is
+    loop-resident and there is no loop here to own the task, so the caller
+    just answers "not ready" — the next ask from a loop-side path arms it.
+    The failed build's exception is retrieved here because this caller owns no
+    await on the task (the point is not to wait); an unobserved failure would
+    surface as a second, misleading traceback at GC.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    try:
+        task, _started = start_refresh(config_dir, session_id)
+    except Exception:  # noqa: BLE001 — a refresh is an optimisation, not the answer
+        logger.debug("index refresh arm failed for %s", session_id, exc_info=True)
+        return False
+    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+    return True
+
+
 def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Task[Any], bool]":
     """Start (or join) the background refresh for one session.
 
     Single-flight per session, with the strong reference asyncio tasks need —
     a bare ``create_task`` has only a weak referent and would be collected
-    mid-flight (the pattern serving.py uses for the same reason). Callers in
-    another event loop than a recorded entry get a fresh task; the stale entry
-    is replaced.
+    mid-flight (the pattern serving.py uses for the same reason).
+
+    SINGLE-FLIGHT SPANS THE PROCESS'S LOOPS, not just one loop. ``lop serve``
+    runs the desktop bridge on its main loop and the relay's stored-page reads
+    on the relay's own page loop; both open the same journal when a viewer
+    opens a conversation, and before this join each started its own scan of it
+    (the transcript-index ADR's caller map, ``relay.py`` "duplicated, not
+    joined"). A caller on another loop whose recorded task is still running
+    on a LIVE loop now gets a proxy task on its own loop that settles with the
+    owner's result (see :func:`_join_across_loops`) — one scan, one
+    ``index.refresh_start`` row. Only an entry whose loop has stopped (a closed
+    ``asyncio.run``, a torn-down page loop) is replaced with a fresh task: its
+    task can never finish, so joining it would hang the caller.
 
     Returns ``(task, started)``: ``started`` is True only when THIS call created
     the task, False when it joined one already in flight. The distinction is
@@ -4427,6 +4597,10 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
             return task, False
         if entry_loop is loop:
             _IN_FLIGHT.pop(key, None)
+        elif not task.done() and entry_loop.is_running():
+            proxy = _join_across_loops(entry_loop, task, loop, session_id)
+            if proxy is not None:
+                return proxy, False
 
     hold = _defer_for_paint(config_dir, session_id)
     if hold is not None:

@@ -32,6 +32,14 @@ async def test_optional_display_archive_on_all_three_real_routes(tmp_path, route
     await transcript.append_messages(rows[:-1])
     assert await persist_record(transcript, record)
     await transcript.append_message(rows[-1])
+    # The indexed readers never build (``peer_cycle_display._index_or_arm``); a
+    # cold index answers ``building``. This test pins the ROUTES carrying a
+    # complete proof, so the index is made current first through the same
+    # single-flight refresh a live runtime's journal-order emitter runs.
+    from local_operator.session import transcript_index
+
+    warm, _started = transcript_index.start_refresh(tmp_path, "sess")
+    await warm
     session = build_session(
         transcript.directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path
     )
