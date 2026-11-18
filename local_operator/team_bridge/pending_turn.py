@@ -309,7 +309,11 @@ class PendingTurn:
             return False
         try:
             row = self._store.body_reservation(self._owner, self._conversation_id, self._message_id)
-            facts = self._store.per_call_admission_state(self._owner, self._session_id)
+            facts = self._store.per_call_admission_state(
+                self._owner,
+                self._session_id,
+                reservation=(self._conversation_id or "", self._message_id or ""),
+            )
             return bool(
                 row
                 and self._facts_hold(facts)
@@ -416,7 +420,11 @@ class PendingTurn:
             self._drift_reason = "claim_lost"
             return None
         try:
-            facts = self._store.per_call_admission_state(self._owner, self._session_id)
+            facts = self._store.per_call_admission_state(
+                self._owner,
+                self._session_id,
+                reservation=(self._conversation_id or "", self._message_id or ""),
+            )
         except StoreRefused:
             facts = None
         if not self._facts_hold(facts):

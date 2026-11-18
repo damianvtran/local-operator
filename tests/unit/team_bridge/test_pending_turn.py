@@ -442,3 +442,53 @@ def test_the_aside_builder_never_consults_the_pending_turn() -> None:
     source = inspect.getsource(session_mod.Session._read_only_prompt)
     assert "_pending_body_turn" not in source
     assert "transform_context" not in source
+
+
+# -- a routed reservation: the session that asked reads it ---------------------
+
+
+def _reserve_routed(store: Store, epoch: int, routed: str) -> bool:
+    return store.record_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        conversation_seq=3,
+        mention=False,
+        body_sha256=DIGEST,
+        screening_fingerprint=FINGERPRINT,
+        policy_epoch=epoch,
+        consent_version="bridge_consent_v1",
+        designated_session=SESSION,
+        now=time.time(),
+        routed_session=routed,
+    )
+
+
+def test_the_routed_session_claims_serves_and_completes_the_row(tmp_path) -> None:
+    store, epoch = _store(tmp_path)
+    assert _reserve_routed(store, epoch, "sess_task")
+    designated = _turn(tmp_path)
+    routed = PendingTurn(_owner(), "sess_task", config_dir=tmp_path)
+
+    # The designated session is blind to a row routed elsewhere.
+    assert asyncio.run(designated.open(budget=_budget(), fetch=_fetch)) is False
+    assert _row(store)["state"] == "pending"
+
+    assert asyncio.run(routed.open(budget=_budget(), fetch=_fetch)) is True
+    text = routed.for_call()
+    assert text is not None and BODY_TEXT in text
+    assert (
+        routed.settle(entry_id="e1", error=None, stop_reason="stop", aborted=False) == "completed"
+    )
+    assert _row(store)["state"] == "completed"
+
+
+def test_a_designation_move_makes_the_routed_turn_drift_and_release(tmp_path) -> None:
+    store, epoch = _store(tmp_path)
+    assert _reserve_routed(store, epoch, "sess_task")
+    routed = PendingTurn(_owner(), "sess_task", config_dir=tmp_path)
+    assert asyncio.run(routed.open(budget=_budget(), fetch=_fetch)) is True
+
+    store.update_designated_session(_owner(), "sess_new")
+
+    assert routed.for_call() is None  # the per-call fence no longer holds
