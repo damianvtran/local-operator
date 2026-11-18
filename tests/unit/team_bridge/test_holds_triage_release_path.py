@@ -223,7 +223,7 @@ def test_a_current_preferred_allow_resolves_the_conflict(
     assert _screen(config_dir, owner, Runner(DELIVER)).disposition == "deliver"
     resolved = screening._resolve_write_once_conflict(store, owner, _envelope(owner, _item()))
     assert resolved is not None and resolved.disposition == "deliver"
-    assert resolved.receipt.verdict == "allow"
+    assert resolved.receipt is not None and resolved.receipt.verdict == "allow"
     assert resolved.attachments_hash is None and resolved.files_hash is None
 
 
@@ -240,7 +240,8 @@ def test_the_commit_door_resolves_h5s_shape_epoch_moved_substance_current(
     redraw = Runner(PRYING)
     out = _screen(config_dir, owner, redraw)
     assert redraw.calls == 1  # a real re-draw reached the commit door
-    assert out.disposition == "deliver" and out.receipt.verdict == "allow"
+    assert out.disposition == "deliver"
+    assert out.receipt is not None and out.receipt.verdict == "allow"
 
 
 def test_a_committed_reject_resolves_to_its_bounce(
@@ -250,7 +251,8 @@ def test_a_committed_reject_resolves_to_its_bounce(
     assert _screen(config_dir, owner, Runner(PRYING)).disposition == "bounce"
     _bump_epoch_only(store, owner)
     out = _screen(config_dir, owner, Runner(DELIVER))
-    assert out.disposition == "bounce" and out.receipt.verdict == "reject"
+    assert out.disposition == "bounce"
+    assert out.receipt is not None and out.receipt.verdict == "reject"
     assert out.receipt.categories == ("personal_info_request",)
 
 
@@ -350,7 +352,8 @@ def test_the_reason_is_capped_and_normalised() -> None:
     assert capped_screener_reason("   ") is None
     assert capped_screener_reason(42) is None
     assert capped_screener_reason("a\x00b ") == "ab"
-    assert len(capped_screener_reason("x" * 1000)) == SCREENER_REASON_MAX == 200
+    capped = capped_screener_reason("x" * 1000)
+    assert capped is not None and len(capped) == SCREENER_REASON_MAX == 200
 
 
 def test_a_review_hold_records_its_reason_and_never_logs_it(
