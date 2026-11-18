@@ -4333,6 +4333,7 @@ async def child_attachment_waveform(
 async def bridge_card_body(
     session_id: str,
     request: Request,
+    response: Response,
     entry_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")],
 ):
     """What one inbound Team Bridge card's messages are to THIS viewer.
@@ -4345,12 +4346,15 @@ async def bridge_card_body(
     the caller can already page, so it cannot be used to probe message ids.
     The display store and the hub's admitted-only history read are the only
     sources; the screener's classification fetch (``/messages/{id}/body``) is
-    never used. Caching: ``managed_desktop_boundary`` applies ``no-store`` to
-    every ``/v1/desktop/`` response (measured on the wire for this route), so
-    no per-route header is set — one here would be overridden anyway.
+    never used. Caching: ``private, no-store`` (design §4, QA Q2) — the body is
+    third-party text for one viewer, so no shared cache may hold it and no
+    cache may keep it at all. The managed boundary keeps a route's own
+    policy when it already includes ``no-store``.
     """
     async with errors(request):
-        return reply(await host(request).bridge_card_body(session_id, entry_id))
+        answer = reply(await host(request).bridge_card_body(session_id, entry_id))
+    response.headers["Cache-Control"] = "private, no-store"
+    return answer
 
 
 @router.get(

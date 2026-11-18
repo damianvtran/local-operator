@@ -14,12 +14,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-#: The loader a card calls (lazily, on first expand) for its resolver answer.
-CardBodyLoader = Callable[[], Awaitable[dict[str, Any]]]
+#: The loader a card calls for its resolver answer: ``local_only=True`` on
+#: mount (local files, no network — design round 1 D1), ``False`` on open.
+CardBodyLoader = Callable[..., Awaitable[dict[str, Any]]]
 
 
 def card_body_loader(session: Any, entry_id: str) -> CardBodyLoader | None:
-    """A zero-argument coroutine factory for ``entry_id`` in ``session``, or None."""
+    """A coroutine factory for ``entry_id`` in ``session``, or None."""
 
     if not entry_id:
         return None
@@ -37,11 +38,15 @@ def card_body_loader(session: Any, entry_id: str) -> CardBodyLoader | None:
     config_dir = sessions_root.parent
     session_id = directory.name
 
-    async def load() -> dict[str, Any]:
+    async def load(*, local_only: bool = False) -> dict[str, Any]:
         from local_operator.team_bridge.card_body import resolve_card_body
 
         return await resolve_card_body(
-            config_dir, session_id, entry_id, sessions_root=sessions_root
+            config_dir,
+            session_id,
+            entry_id,
+            sessions_root=sessions_root,
+            local_only=local_only,
         )
 
     return load

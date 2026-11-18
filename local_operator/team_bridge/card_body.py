@@ -29,6 +29,20 @@ bytes; showing it would bypass screening. A test pins that it is never reached.
 ``refused`` is only ever the hub's ``rejected``; this machine never derives a
 moderation outcome (``tool._annotate_body_state`` has the same law).
 
+LOCAL-ONLY MODE (``local_only=True``, design round 1 D1). The TUI resolves every
+card as it MOUNTS so a collapsed header can show the excerpt or the state, and
+a transcript can hold hundreds of cards: that pass must cost no network at all.
+It answers steps 1-3 from local files under a local standing check (live
+owner, same account, consent receipt, the owner's Radient row present) and
+reports every remaining message as ``unavailable``/``not_loaded`` — "open to
+load", never a guess. Opening the card runs the full resolver (step 4).
+
+HUB DELETES (review R2). On a full resolve the hub read also covers messages
+the local store answered, so a message deleted on the hub (an explicit deleted
+marker, or a single-message card whose exact-seq read no longer returns it)
+drops its local row and answers ``unavailable``/``deleted``. A hub that cannot
+be reached never overrides a local row.
+
 ACCOUNT FENCE. A card whose receipt names another account/tenant/endpoint than
 the live owner answers ``other_account`` and reads nothing. Observing sign-out,
 an account mismatch or the bridge turned off purges the display store
@@ -94,7 +108,18 @@ def _card_source(sessions_root: Path, session_id: str, entry_id: str) -> dict[st
     # A pre-receipt card carries no typed locator; the answer is "nothing to
     # resolve", never a parse of its model-facing text.
     projected = projected_display_receipt(details)
-    return projected.get("bridge_receipt_source") if projected else None
+    source = projected.get("bridge_receipt_source") if projected else None
+    if not source:
+        return None
+    from .card_projection import _THREAD_ROOT_LINE
+
+    # A thread reply is served by the replies read, not the top-level history
+    # page, so its absence from that page proves nothing (see _hub_backfill).
+    body = details.get("body")
+    return {
+        **source,
+        "is_thread_reply": bool(isinstance(body, str) and _THREAD_ROOT_LINE.search(body)),
+    }
 
 
 def _hub_state(row: dict[str, Any]) -> str:
@@ -127,11 +152,13 @@ async def resolve_card_body(
     *,
     sessions_root: Path | None = None,
     wire: Any = None,
+    local_only: bool = False,
 ) -> dict[str, Any]:
     """The ``{v:1, items:[...], more:n}`` answer for one card (design §4).
 
     Raises :class:`CardBodyNotFound` for an entry that is not a Team Bridge card
     in that session. ``wire`` is the test seam for the hub client.
+    ``local_only`` reads local files only (see LOCAL-ONLY MODE above).
     """
 
     from .display_bodies import DisplayBodyStore
@@ -168,6 +195,11 @@ async def resolve_card_body(
         # viewer's to see, and probing the hub for it would be a cross-account read.
         return every("unavailable", reason="other_account")
     key = _owner_key(owner)
+
+    if local_only:
+        return answer(
+            await asyncio.to_thread(_local_items, config_dir, owner, key, ids, conversation_id)
+        )
 
     # Standing first: a signed-out or switched viewer must not be served even
     # the local copy (revocation is live). An unreachable hub is not a
@@ -234,17 +266,7 @@ async def resolve_card_body(
         for mid in misses:
             hold = holds.get(mid)
             if hold is not None:
-                held: dict[str, Any] = {
-                    "class": (
-                        "transient"
-                        if hold.get("hold_class") in _TRANSIENT_HOLD_CLASSES
-                        else "awaiting_review"
-                    )
-                }
-                created = hold.get("created_at")
-                if isinstance(created, (int, float)):
-                    held["held_for_s"] = max(0, int(now - created))
-                resolved[mid] = _item(mid, conversation_id, "held", hold=held)
+                resolved[mid] = _item(mid, conversation_id, "held", hold=_hold_view(hold, now))
             elif mid in pending:
                 resolved[mid] = _item(mid, conversation_id, "pending")
         misses = [mid for mid in ids if mid not in resolved]
@@ -254,21 +276,117 @@ async def resolve_card_body(
             resolved[mid] = _item(mid, conversation_id, "unavailable", reason=standing_reason)
         misses = []
 
-    if misses and context is not None:
-        resolved.update(
-            await _hub_backfill(
-                client,
-                context,
-                display,
-                key,
-                conversation_id,
-                misses,
-                newest_seq=int(source["conversation_seq"]),
-                write=not isinstance(context, HistoryReadContext),
-                config_dir=config_dir,
-            )
+    local_hits = [mid for mid in ids if resolved.get(mid, {}).get("source") == "local"]
+    if context is not None and (misses or local_hits):
+        hub = await _hub_backfill(
+            client,
+            context,
+            display,
+            key,
+            conversation_id,
+            misses,
+            verify=local_hits,
+            # R1: the exact single-row read is right only when the card IS one
+            # message; a coalesced card's seq is its NEWEST message, so one
+            # local hit plus an older miss must read the whole page.
+            single=len(all_ids) == 1,
+            absence_is_deletion=len(all_ids) == 1 and not source.get("is_thread_reply"),
+            newest_seq=int(source["conversation_seq"]),
+            write=not isinstance(context, HistoryReadContext),
+            config_dir=config_dir,
         )
+        resolved.update(hub)
     return answer([resolved[mid] for mid in ids])
+
+
+def _local_items(
+    config_dir: Path, owner: Any, key: str, ids: list[str], conversation_id: str
+) -> list[dict[str, Any]]:
+    """Steps 1-3 from local files only, under a LOCAL standing check (D1).
+
+    The standing that the full path proves with ``current_access`` is checked
+    here from what is on disk: the consent receipt for the live owner and the
+    owner's own Radient row. Either missing reads ``signed_out`` — the same
+    answer the full path gives — and nothing local is served. Bridge off with
+    rows still present purges them (the opt-out hooks normally already did).
+    """
+
+    from .display_bodies import (
+        DisplayBodyStore,
+        purge_if_bridge_off,
+        radient_sign_in_state,
+    )
+    from .store import Store, StoreRefused
+
+    def every(reason: str) -> list[dict[str, Any]]:
+        return [_item(mid, conversation_id, "unavailable", reason=reason) for mid in ids]
+
+    store = Store(config_dir)
+    try:
+        consent = store.owner_consent_receipt_readonly(owner)
+    except (StoreRefused, OSError):
+        # Unreadable is not "signed out": the open runs the full proof.
+        return every("not_loaded")
+    signed_in = radient_sign_in_state(config_dir, getattr(owner, "credential_id", None))
+    if signed_in is None:
+        return every("not_loaded")
+    if consent is None or not signed_in:
+        return every("signed_out")
+    purge_if_bridge_off(config_dir)
+    local = DisplayBodyStore(config_dir).bodies(key, ids)
+    out: dict[str, dict[str, Any]] = {}
+    for mid in ids:
+        row = local.get(mid)
+        if row is not None and row["conversation_id"] == conversation_id:
+            out[mid] = _item(mid, conversation_id, "admitted", body=row["body"], source="local")
+    misses = [mid for mid in ids if mid not in out]
+    if misses:
+        try:
+            holds = store.hold_states_readonly(owner, misses)
+        except (StoreRefused, OSError):
+            holds = {}
+        try:
+            receiver = store.receiver_state_readonly(owner, misses)
+        except (StoreRefused, OSError):
+            receiver = None
+        pending = receiver.get("pending_admission", frozenset()) if receiver else frozenset()
+        now = time.time()
+        for mid in misses:
+            hold = holds.get(mid)
+            if hold is not None:
+                out[mid] = _item(mid, conversation_id, "held", hold=_hold_view(hold, now))
+            elif mid in pending:
+                out[mid] = _item(mid, conversation_id, "pending")
+            else:
+                # Not known locally: the hub might serve it, but only an OPEN
+                # may ask (no network on mount).
+                out[mid] = _item(mid, conversation_id, "unavailable", reason="not_loaded")
+    return [out[mid] for mid in ids]
+
+
+def _hold_view(hold: dict[str, Any], now: float) -> dict[str, Any]:
+    """The coarse hold shape both paths serve: class + age, never a code."""
+
+    held: dict[str, Any] = {
+        "class": (
+            "transient" if hold.get("hold_class") in _TRANSIENT_HOLD_CLASSES else "awaiting_review"
+        )
+    }
+    created = hold.get("created_at")
+    if isinstance(created, (int, float)):
+        held["held_for_s"] = max(0, int(now - created))
+    return held
+
+
+def _hub_deleted(row: dict[str, Any]) -> bool:
+    """An explicit hub deletion marker on a history row (forward-compatible)."""
+
+    state = row.get("body_state")
+    return (
+        row.get("deleted") is True
+        or bool(row.get("deleted_at"))
+        or (isinstance(state, dict) and state.get("state") == "deleted")
+    )
 
 
 async def _hub_backfill(
@@ -279,17 +397,31 @@ async def _hub_backfill(
     conversation_id: str,
     misses: list[str],
     *,
+    verify: list[str] = (),  # type: ignore[assignment]
+    single: bool,
+    absence_is_deletion: bool = False,
     newest_seq: int,
     write: bool,
     config_dir: Path,
 ) -> dict[str, dict[str, Any]]:
     """One admitted-only history page ending at the card's newest seq.
 
-    A single card's seq is exact, so ``limit=1`` reads precisely that row. A
-    coalesced card only knows its NEWEST seq and other members' messages may
-    interleave inside the window, so it reads a full page (the hub's 50 cap)
-    and filters to the card's own ids; an id outside the page reads
+    A single-message card's seq is exact, so ``limit=1`` reads precisely that
+    row. A coalesced card only knows its NEWEST seq and other members' messages
+    may interleave inside the window, so it reads a full page (the hub's 50
+    cap) and filters to the card's own ids; an id outside the page reads
     ``unavailable`` rather than guessing.
+
+    ``verify`` are ids the LOCAL store already answered. They are only checked
+    for a hub deletion (R2) and answer only when deleted — then their local row
+    is dropped; any failure or other answer leaves the local body standing.
+
+    ABSENCE AS DELETION is deliberately narrow (``absence_is_deletion``): a
+    single-message, top-level card whose exact read (``before_seq=seq+1,
+    limit=1``) came back with an OLDER row, i.e. the hub walked past the
+    message's position and it was not there. An empty page, a coalesced window
+    or a thread reply (served by the replies read, not this page) proves
+    nothing, and deleting the operator's copy on a guess is the worse error.
     """
 
     from . import pull
@@ -312,7 +444,7 @@ async def _hub_backfill(
             tenant_id=owner.tenant_id,
             endpoint_id=owner.endpoint_id,
             before_seq=newest_seq + 1,
-            limit=1 if len(misses) == 1 else _HUB_PAGE_MAX,
+            limit=1 if single else _HUB_PAGE_MAX,
             access=context.access,
         )
     except Exception as failure:  # noqa: BLE001 — closed reasons only
@@ -329,7 +461,24 @@ async def _hub_backfill(
         for row in (rows if isinstance(rows, list) else [])
         if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
+    skipped_past = absence_is_deletion and any(
+        isinstance(row.get("seq"), int) and row["seq"] < newest_seq for row in by_id.values()
+    )
+    deleted: list[str] = []
+    for mid in [*misses, *verify]:
+        row = by_id.get(mid)
+        if row is not None and row.get("conversation_id", conversation_id) != conversation_id:
+            row = None
+        if (row is None and skipped_past) or (row is not None and _hub_deleted(row)):
+            deleted.append(mid)
+            out[mid] = _item(mid, conversation_id, "unavailable", reason="deleted")
+    if deleted:
+        # The hub no longer serves it: neither may the local copy (design §3
+        # "delete on hub deleted").
+        await asyncio.to_thread(display.delete, owner_key, deleted)
     for mid in misses:
+        if mid in out:
+            continue
         row = by_id.get(mid)
         if row is None or row.get("conversation_id", conversation_id) != conversation_id:
             out[mid] = _item(mid, conversation_id, "unavailable")

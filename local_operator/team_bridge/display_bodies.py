@@ -36,10 +36,20 @@ are dropped; total body bytes over 64 MiB evict oldest-first. The bounds are
 storage hygiene for a cache that the hub can refill, not correctness limits.
 
 REVOCATION. Every row is keyed by the owner namespace (``store._owner_key``),
-and a read answers only for the live owner. Rows for any other namespace are
-purged on enrollment commit (account switch) and whenever the resolver observes
-sign-out or the bridge being turned off (:func:`purge`); the hub backfill can
-restore what the viewer is still authorised to see.
+and a read answers only for the live owner. Purges are EAGER, at the event that
+ends the standing (review R3 / QA Q1), not only when a card is next viewed:
+
+* Radient sign-out — ``AuthStore.org_hub_signed_out``, the hook every logout
+  host and the desktop's account removal share;
+* bridge opt-out — the one-click Turn off (``client._apply_local_opt_out``) and
+  every explicit ``team_bridge.enabled`` write, which all reach
+  ``connector.install.sync_connector_service`` (:func:`purge_if_bridge_off`);
+* consent withdrawn or the bridge off as observed by the excerpt gate
+  (``Session._bridge_history_transform``) at the next model request;
+* another namespace's enrollment commit (account switch, ``keep_owner_key``).
+
+The resolver still purges when it observes the same states (defence in depth).
+The hub backfill can restore what the viewer is still authorised to see.
 """
 
 from __future__ import annotations
@@ -48,6 +58,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -85,6 +96,80 @@ def display_db_path(config_dir: Path) -> Path:
     """``<config_dir>/team_bridge/display_bodies.sqlite3`` — beside, never inside, state."""
 
     return Path(config_dir) / "team_bridge" / "display_bodies.sqlite3"
+
+
+def purge_if_bridge_off(config_dir: Path) -> int:
+    """Purge every row when ``team_bridge.enabled`` reads a DEFINITE off. Never raises.
+
+    Only a readable config that says off counts: a torn or missing read is not
+    an opt-out, and dropping the cache on one would make a transient read error
+    cost the operator every retained body (the hub can refill, but only for
+    messages it still serves).
+    """
+
+    try:
+        from local_operator.config import read_config_values
+
+        from .settings import TeamBridgeSettings
+
+        values = read_config_values(Path(config_dir))
+        if values is None or TeamBridgeSettings.from_values(values).enabled:
+            return 0
+        return DisplayBodyStore(Path(config_dir)).purge()
+    except Exception:  # noqa: BLE001 — every caller already did its real work
+        logger.debug("bridge display: opt-out purge skipped", exc_info=False)
+        return 0
+
+
+#: Serialises reads of the process-shared ``AuthStore`` connection from this
+#: module. The TUI resolves every card as it mounts, each on a worker thread,
+#: and concurrent reads through the one shared connection interleaved: measured
+#: in the round-2 rig as a random card answering "signed out" (a row read back
+#: as ``None`` / a ``TypeError`` from a half-read row) while the operator was
+#: signed in.
+_AUTH_READ_LOCK = threading.Lock()
+
+
+def radient_sign_in_state(config_dir: Path, credential_id: Any) -> bool | None:
+    """Is the owner's own Radient OAuth row on this machine? ``None`` = unreadable.
+
+    Local read only: no network and no token refresh. ``False`` is a definite
+    answer (no row, a foreign or disabled row); ``None`` means the store could
+    not be read, which a caller must not report as "signed out".
+    """
+
+    try:
+        wanted = int(credential_id)
+    except (TypeError, ValueError):
+        return False
+    try:
+        from local_operator.providers.auth_store import shared_auth_store
+
+        root = Path(config_dir)
+        with _AUTH_READ_LOCK:
+            row = shared_auth_store(db_path=root / "auth.db", config_dir=root).get_credential(
+                wanted
+            )
+    except Exception:  # noqa: BLE001 — unreadable is not "signed out"
+        return None
+    return (
+        row is not None
+        and row.provider == "radient"
+        and row.credential_type == "oauth"
+        and not getattr(row, "disabled_cause", None)
+    )
+
+
+def radient_signed_in(config_dir: Path, credential_id: Any) -> bool:
+    """The excerpt gate's sign-in check (QA Q1); unreadable fails closed.
+
+    ``authority_fence`` proves the enrollment, consent and designation, but
+    those rows outlive a ``lop logout radient`` — so without this a signed-out
+    machine kept feeding excerpts to the model. ``False`` only withholds
+    excerpts (the ids-only marker).
+    """
+
+    return radient_sign_in_state(config_dir, credential_id) is True
 
 
 class DisplayBodyStore:
@@ -163,10 +248,22 @@ class DisplayBodyStore:
                     "body, body_sha256, sender_kind, admitted_at, source) "
                     "VALUES (?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(owner_key, message_id) DO UPDATE SET "
-                    # A turn-sourced row is the stronger fact (the agent was
-                    # given it); a later hub backfill must not downgrade it.
-                    "source = CASE WHEN display_bodies.source = 'turn' THEN 'turn' "
+                    # A LIVE turn-sourced row is the stronger fact (the agent
+                    # was given it, and the excerpt gate keys on it); a later
+                    # hub backfill must not downgrade it or move its stamp.
+                    # Any other existing row (hub-sourced, or a turn row past
+                    # its TTL that ``_prune`` has not reached yet) takes the
+                    # new source AND the new stamp: keeping the old stamp made
+                    # a refill of an expired row get pruned again by the
+                    # ``_prune`` below in this very call (review N2), so the
+                    # refill only took on the second view. All right-hand
+                    # sides read the OLD row, so the two CASEs agree.
+                    "source = CASE WHEN display_bodies.source = 'turn' "
+                    "AND display_bodies.admitted_at >= ? THEN 'turn' "
                     "ELSE excluded.source END, "
+                    "admitted_at = CASE WHEN display_bodies.source = 'turn' "
+                    "AND display_bodies.admitted_at >= ? THEN display_bodies.admitted_at "
+                    "ELSE excluded.admitted_at END, "
                     "conversation_id = excluded.conversation_id, body = excluded.body, "
                     "body_sha256 = excluded.body_sha256, sender_kind = excluded.sender_kind",
                     (
@@ -178,6 +275,8 @@ class DisplayBodyStore:
                         kind,
                         stamp,
                         source,
+                        stamp - TTL_SECONDS,
+                        stamp - TTL_SECONDS,
                     ),
                 )
                 self._prune(conn, stamp)

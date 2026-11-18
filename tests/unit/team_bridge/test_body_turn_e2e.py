@@ -1809,8 +1809,12 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
             _message_texts(session._render_history(session._transcript.build_llm_history()))
         )
         assert PENDING_CARD in later, later
-        # Property B: the marker is not a completion oracle — the bytes the
-        # model saw while the body was pending equal those after completion.
+        # Property B, ids-only form: the journal's ids-only marker is not a
+        # completion oracle — the marker bytes the model saw while the body
+        # was pending are unchanged in the settled history. ``later`` is the
+        # history WITHOUT the session's request transform, so this pins the
+        # stored marker only; the replay excerpt (design §5, which does differ
+        # after completion by design) is pinned in test_card_body.py.
         marker = [line for line in before_body if PENDING_CARD in line]
         assert marker and all(line in later for line in marker), (marker, later)
         assert "mention: no" not in later and "sender-name-canary" not in later, later

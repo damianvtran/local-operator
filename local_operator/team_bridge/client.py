@@ -3325,6 +3325,13 @@ class TeamBridgeClient:
             record_local_enabled(config_dir, False)
         except Exception:  # noqa: BLE001 - the hub opt-out already succeeded
             logger.warning("team_bridge: could not persist the local opt-out")
+        # Opt-out ends the standing the retained display bodies were kept
+        # under (bridge-body design §2), so they go now, not at the next card
+        # view (review R3 / QA Q1). After the write, so the purge reads the
+        # same definite OFF every fence will.
+        from .display_bodies import purge_if_bridge_off
+
+        purge_if_bridge_off(config_dir)
         if isinstance(account_id, str) and account_id:
             try:
                 record_default_enrollment(config_dir, account_id)

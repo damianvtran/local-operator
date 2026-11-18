@@ -1038,7 +1038,14 @@ async def managed_desktop_boundary(request: Request, call_next):
             return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
     response = await call_next(request)
     if sensitive or legacy_control:
-        response.headers["Cache-Control"] = "no-store"
+        # A route that already set a STRICTER policy that includes
+        # ``no-store`` (the bridge card body's ``private, no-store``: it
+        # carries third-party message text, design §4) keeps it; anything
+        # else is forced to ``no-store`` as before. Never weakened: the
+        # directive this boundary guarantees is present either way.
+        current = response.headers.get("Cache-Control", "")
+        if "no-store" not in {part.strip().lower() for part in current.split(",")}:
+            response.headers["Cache-Control"] = "no-store"
     return response
 
 

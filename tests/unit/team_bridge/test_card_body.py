@@ -321,7 +321,10 @@ def _resolve(root: Path, wire: FakeWire, entry_id: str = ENTRY_ID) -> dict[str, 
     return asyncio.run(resolve_card_body(root, SESSION, entry_id, wire=wire))
 
 
-def test_a_local_body_is_served_without_any_hub_read(tmp_path: Path) -> None:
+def test_a_local_body_is_served_first_and_the_hub_only_checks_for_a_delete(
+    tmp_path: Path,
+) -> None:
+    """Local first (§4); the full pass also asks the hub whether it was deleted (R2)."""
     _store, turn, _key = _complete_turn(tmp_path)
     assert turn.for_call() is not None
     turn.settle(entry_id="e1", error=None, stop_reason="stop", aborted=False)
@@ -343,7 +346,9 @@ def test_a_local_body_is_served_without_any_hub_read(tmp_path: Path) -> None:
         ],
         "more": 0,
     }
-    assert wire.calls == []
+    # One admitted-only read to learn about a delete; nothing re-recorded.
+    (call,) = wire.calls
+    assert call["limit"] == 1 and call["before_seq"] == 4
 
 
 def test_backfill_uses_the_admitted_history_read_and_caches_the_verified_body(
@@ -362,9 +367,10 @@ def test_backfill_uses_the_admitted_history_read_and_caches_the_verified_body(
     # Cached for display only — never as a turn-sourced (excerpt-eligible) row.
     row = DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID])[MESSAGE_ID]
     assert row["source"] == "hub"
-    # Second view: local, no second hub read.
+    # Second view: served from the local copy (the hub read is the R2 delete
+    # check, which returned the message, so the local body stands).
     assert _resolve(tmp_path, wire)["items"][0]["source"] == "local"
-    assert len(wire.calls) == 1
+    assert len(wire.calls) == 2
 
 
 def test_a_hub_body_that_does_not_match_its_digest_is_never_shown(tmp_path: Path) -> None:
@@ -532,7 +538,7 @@ def test_a_card_without_an_excerpt_names_its_ids_but_carries_no_body() -> None:
     text = model_card_text(message, [message])
     assert text == (
         f"[team_bridge: body not retained in history; message {MESSAGE_ID} in "
-        f"{CONVERSATION_ID}, re-read with channel_thread]"
+        f"{CONVERSATION_ID} (newest seq 3), re-read with channel_thread]"
     )
     assert BODY_TEXT not in text
 
@@ -612,7 +618,10 @@ def test_only_three_excerpts_per_card_and_twenty_cards(tmp_path: Path) -> None:
     shaped = attach_history_excerpts([coalesced], config_dir=tmp_path, owner_key=key)
     text = model_card_text(shaped[0], shaped)
     assert text.count("untrusted excerpt") == 3
-    assert f"messages {ids[3]},{ids[4]} in" in text
+    # The NEWEST three carry excerpts (Q3), so the newest one carries the
+    # card's seq; the older two are named by id.
+    assert f"messages {ids[0]},{ids[1]} in {CONVERSATION_ID}, re-read" in text
+    assert f"message {ids[4]} in {CONVERSATION_ID} (seq 3)" in text
 
     cards = [_card_message(_details([ids[0]])) for _ in range(25)]
     shaped = attach_history_excerpts(cards, config_dir=tmp_path, owner_key=key)
@@ -638,6 +647,7 @@ def test_revoked_standing_removes_excerpts_at_the_next_render(tmp_path: Path, mo
     )
     host = SimpleNamespace(bridge_runtime=SimpleNamespace(config_dir=tmp_path, owner=_owner()))
     message = _card_message()
+    _sign_in_radient(tmp_path)
 
     monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
     live = Session._bridge_history_transform(host, [message])  # type: ignore[arg-type]
@@ -647,6 +657,8 @@ def test_revoked_standing_removes_excerpts_at_the_next_render(tmp_path: Path, mo
     revoked = Session._bridge_history_transform(host, [message])  # type: ignore[arg-type]
     assert revoked[0] is message
     assert BODY_TEXT not in model_card_text(revoked[0], revoked)
+    # R3 / Q1: the consent-revoke path itself purges, not the next card view.
+    assert DisplayBodyStore(tmp_path).bodies(key, [MESSAGE_ID]) == {}
 
 
 def test_the_phone_relay_route_answers_through_the_same_resolver(monkeypatch) -> None:
@@ -689,4 +701,330 @@ def test_the_phone_relay_route_answers_through_the_same_resolver(monkeypatch) ->
     }
     assert client.get(f"/api/sessions/{SESSION}/bridge-cards/missing/body").status_code == 404
     assert client.get("/api/sessions/ffffffffffff/bridge-cards/x/body").status_code == 404
-    assert wire.calls == []
+    # Only the admitted-only history read (the R2 delete check), never the
+    # classification fetch (FakeWire raises on that).
+    assert [call["limit"] for call in wire.calls] == [1]
+
+
+# -- round 1 remediation (PR #4238) ------------------------------------------
+
+
+def _sign_in_radient(root: Path) -> None:
+    """A real Radient OAuth row in ``<root>/auth.db`` with the owner's id (7).
+
+    The row id is pinned with one UPDATE because the store mints ids from 1 and
+    the fixture owner was enrolled against credential 7.
+    """
+    import sqlite3
+
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        row = auth.upsert_credential(
+            "radient",
+            {"refresh": "r1", "access": "a1", "expires": int(time.time() * 1000) + 3_600_000},
+        )
+    finally:
+        auth.close()
+    with sqlite3.connect(root / "auth.db") as conn:
+        conn.execute("UPDATE auth_credentials SET id = 7 WHERE id = ?", (row.id,))
+
+
+def _local_body(root: Path, message_id: str = MESSAGE_ID, *, source: str = "turn") -> None:
+    body = BODY_TEXT if message_id == MESSAGE_ID else f"body {message_id}"
+    assert DisplayBodyStore(root).record(
+        _owner_key(_owner()),
+        message_id=message_id,
+        conversation_id=CONVERSATION_ID,
+        body=body,
+        body_sha256=hashlib.sha256(body.encode()).hexdigest(),
+        sender_kind="human",
+        source=source,
+    )
+
+
+def test_local_only_mode_answers_from_local_files_with_no_network(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """D1: the mount pass reads local files only; unknown ids say "not loaded"."""
+    from local_operator.team_bridge import read_context
+
+    def no_wire(_config: Any) -> Any:
+        raise AssertionError("local_only must not build a wire client")
+
+    monkeypatch.setattr(read_context, "wire_for", no_wire)
+    store = _enroll(tmp_path)
+    _sign_in_radient(tmp_path)
+    ids = [MESSAGE_ID, "bcmsg_abcdef02", "bcmsg_abcdef03", "bcmsg_abcdef04"]
+    _write_card(tmp_path, _details(ids))
+    _local_body(tmp_path)
+    assert _reserve(store, _epoch(store), message_id=ids[2], digest="cd" * 32)
+    monkeypatch.setattr(
+        Store,
+        "hold_states_readonly",
+        lambda self, owner, wanted: {
+            ids[1]: {"hold_class": "screening_unavailable", "created_at": time.time() - 5}
+        },
+    )
+
+    items = asyncio.run(resolve_card_body(tmp_path, SESSION, ENTRY_ID, local_only=True))["items"]
+
+    assert items[0] == {
+        "message_id": MESSAGE_ID,
+        "conversation_id": CONVERSATION_ID,
+        "state": "admitted",
+        "body": BODY_TEXT,
+        "source": "local",
+    }
+    # D3: a screening delay is served as the TRANSIENT class, never a review.
+    assert items[1]["state"] == "held" and items[1]["hold"]["class"] == "transient"
+    assert items[2]["state"] == "pending"
+    assert items[3] == {
+        "message_id": ids[3],
+        "conversation_id": CONVERSATION_ID,
+        "state": "unavailable",
+        "reason": "not_loaded",
+    }
+
+
+def test_local_only_mode_serves_nothing_while_signed_out(tmp_path: Path) -> None:
+    """Q1: the local standing includes the owner's own Radient row."""
+    _enroll(tmp_path)
+    _write_card(tmp_path, _details())
+    _local_body(tmp_path)
+    (item,) = asyncio.run(resolve_card_body(tmp_path, SESSION, ENTRY_ID, local_only=True))["items"]
+    assert item["reason"] == "signed_out" and "body" not in item
+
+
+def test_a_coalesced_card_with_one_local_hit_reads_the_whole_page(tmp_path: Path) -> None:
+    """R1: the exact single-row read is for single-message cards only."""
+    _enroll(tmp_path)
+    older, newest = "bcmsg_abcdef00", MESSAGE_ID
+    _write_card(tmp_path, _details([older, newest]))
+    _local_body(tmp_path, newest)
+    older_body = "body bcmsg_abcdef00"
+    wire = FakeWire(rows=[_hub_row(older, body=older_body, seq=2), _hub_row(newest)])
+
+    items = _resolve(tmp_path, wire)["items"]
+
+    (call,) = wire.calls
+    assert call["limit"] == 50
+    assert [(item["state"], item.get("source")) for item in items] == [
+        ("admitted", "hub"),
+        ("admitted", "local"),
+    ]
+    assert items[0]["body"] == older_body
+
+
+def test_a_hub_deleted_marker_drops_the_local_copy(tmp_path: Path) -> None:
+    """R2: an explicit hub delete answers ``deleted`` and removes the local row."""
+    _enroll(tmp_path)
+    _write_card(tmp_path, _details())
+    _local_body(tmp_path)
+    wire = FakeWire(rows=[_hub_row(body=None, deleted_at="2026-11-18T00:00:00Z")])
+
+    (item,) = _resolve(tmp_path, wire)["items"]
+
+    assert item == {
+        "message_id": MESSAGE_ID,
+        "conversation_id": CONVERSATION_ID,
+        "state": "unavailable",
+        "reason": "deleted",
+    }
+    assert DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID]) == {}
+
+
+def test_an_exact_read_that_skips_past_the_message_means_deleted(tmp_path: Path) -> None:
+    """R2: absence counts only when the exact read walked past the position."""
+    _enroll(tmp_path)
+    _write_card(tmp_path, _details())
+    _local_body(tmp_path)
+    older = _hub_row("bcmsg_abcdef00", body="older", seq=2)
+
+    (item,) = _resolve(tmp_path, FakeWire(rows=[older]))["items"]
+
+    assert item["reason"] == "deleted"
+    assert DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID]) == {}
+
+
+@pytest.mark.parametrize("case", ["empty_page", "thread_reply", "hub_down"])
+def test_absence_that_proves_nothing_keeps_the_local_copy(tmp_path: Path, case: str) -> None:
+    """R2's narrow edge: an empty page, a thread reply or an unreachable hub never deletes."""
+    _enroll(tmp_path)
+    details = _details()
+    rows: Any = []
+    if case == "thread_reply":
+        details["body"] += "thread_root_id: bcmsg_root0001 (reply to)\n"
+        rows = [_hub_row("bcmsg_abcdef00", body="older", seq=2)]
+    if case == "hub_down":
+        rows = BridgeRefusal("bridge_unreachable", "down")
+    _write_card(tmp_path, details)
+    _local_body(tmp_path)
+
+    (item,) = _resolve(tmp_path, FakeWire(rows=rows))["items"]
+
+    assert (item["state"], item.get("source")) == ("admitted", "local")
+    assert MESSAGE_ID in DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID])
+
+
+def test_radient_logout_purges_display_bodies_at_once(tmp_path: Path) -> None:
+    """R3 / Q1: the shared sign-out hook purges; no card view needed."""
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.team_bridge.display_bodies import radient_signed_in
+
+    _sign_in_radient(tmp_path)
+    _local_body(tmp_path)
+    assert radient_signed_in(tmp_path, 7) is True
+
+    auth = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        assert auth.delete_credentials_for_provider("radient") == 1
+    finally:
+        auth.close()
+
+    assert DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID]) == {}
+    assert radient_signed_in(tmp_path, 7) is False
+
+
+def test_the_one_click_opt_out_purges_display_bodies(tmp_path: Path) -> None:
+    """R3 / Q1: Turn off drops retained bodies in the same step."""
+    from local_operator.team_bridge.client import TeamBridgeClient
+
+    _enroll(tmp_path)
+    _local_body(tmp_path)
+    TeamBridgeClient(tmp_path)._apply_local_opt_out("acc_1")
+    assert DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID]) == {}
+
+
+@pytest.mark.parametrize(("enabled", "kept"), [(False, False), (True, True)])
+def test_an_explicit_bridge_setting_write_purges_only_on_off(
+    tmp_path: Path, monkeypatch, enabled: bool, kept: bool
+) -> None:
+    """R3 / Q1: every ``team_bridge.enabled`` write reaches ``sync_connector_service``."""
+    from local_operator.team_bridge.connector import install
+
+    monkeypatch.setattr(install, "_reconcile", lambda *_a, **_k: SimpleNamespace(code="x"))
+    _enroll(tmp_path, enabled=enabled)
+    _local_body(tmp_path)
+    install.sync_connector_service(tmp_path)
+    rows = DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID])
+    assert (MESSAGE_ID in rows) is kept
+
+
+def test_a_torn_config_read_is_not_an_opt_out(tmp_path: Path) -> None:
+    from local_operator.team_bridge.display_bodies import purge_if_bridge_off
+
+    _local_body(tmp_path)
+    (tmp_path / "config.yml").write_text("values: [unterminated\n")
+    assert purge_if_bridge_off(tmp_path) == 0
+    assert MESSAGE_ID in DisplayBodyStore(tmp_path).bodies(_owner_key(_owner()), [MESSAGE_ID])
+
+
+def test_excerpts_stop_while_signed_out_of_radient(tmp_path: Path, monkeypatch) -> None:
+    """Q1: enrollment and consent outlive a logout; the excerpt gate checks sign-in."""
+    from local_operator.session.session import Session
+    from local_operator.team_bridge import authority
+
+    _local_body(tmp_path)
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    host = SimpleNamespace(bridge_runtime=SimpleNamespace(config_dir=tmp_path, owner=_owner()))
+    message = _card_message()
+
+    signed_out = Session._bridge_history_transform(host, [message])  # type: ignore[arg-type]
+    assert signed_out[0] is message
+
+    _sign_in_radient(tmp_path)
+    signed_in = Session._bridge_history_transform(host, [message])  # type: ignore[arg-type]
+    assert "untrusted excerpt" in model_card_text(signed_in[0], signed_in)
+
+
+def test_a_hub_refill_of_an_expired_row_survives_its_own_prune(tmp_path: Path) -> None:
+    """N2: a hub upsert refreshes the stamp (and source) of a stale row."""
+    from local_operator.team_bridge.display_bodies import TTL_SECONDS
+
+    display = DisplayBodyStore(tmp_path)
+    key = _owner_key(_owner())
+    stale = time.time() - TTL_SECONDS - 10
+    common = dict(
+        message_id=MESSAGE_ID,
+        conversation_id=CONVERSATION_ID,
+        body=BODY_TEXT,
+        body_sha256=DIGEST,
+        sender_kind="human",
+    )
+    assert display.record(key, source="turn", now=stale, **common)  # type: ignore[arg-type]
+    # The stale row is not pruned by a write elsewhere until one happens:
+    assert display.record(key, source="hub", **common)  # type: ignore[arg-type]
+    row = display.bodies(key, [MESSAGE_ID])[MESSAGE_ID]
+    assert row["source"] == "hub" and row["admitted_at"] > stale + TTL_SECONDS
+
+
+def test_a_hub_refill_never_downgrades_a_live_turn_row(tmp_path: Path) -> None:
+    display = DisplayBodyStore(tmp_path)
+    key = _owner_key(_owner())
+    _local_body(tmp_path, source="turn")
+    first = display.bodies(key, [MESSAGE_ID])[MESSAGE_ID]["admitted_at"]
+    _local_body(tmp_path, source="hub")
+    row = display.bodies(key, [MESSAGE_ID])[MESSAGE_ID]
+    assert row["source"] == "turn" and row["admitted_at"] == first
+
+
+def test_the_desktop_route_sends_private_no_store(tmp_path: Path) -> None:
+    """Q2: the desktop route keeps ``private, no-store`` through the boundary."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from local_operator.server import app as server_app
+    from local_operator.server.desktop import require_desktop
+    from local_operator.server.routes import desktop_sessions
+
+    answer = {"v": 1, "items": [], "more": 0}
+
+    class Host:
+        async def bridge_card_body(self, session_id: str, entry_id: str) -> dict[str, Any]:
+            return answer
+
+    probe = FastAPI()
+    probe.middleware("http")(server_app.managed_desktop_boundary)
+    probe.include_router(desktop_sessions.router)
+    probe.dependency_overrides[require_desktop] = lambda: None
+    probe.state.desktop_sessions = Host()
+
+    @probe.get("/v1/desktop/probe-public")
+    def public() -> Any:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse({}, headers={"Cache-Control": "public, max-age=60"})
+
+    client = TestClient(probe)
+    response = client.get(f"/v1/desktop/sessions/{SESSION}/bridge-cards/{ENTRY_ID}/body")
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json()["result"] == answer
+    # The boundary still forces no-store over anything weaker.
+    assert client.get("/v1/desktop/probe-public").headers["cache-control"] == "no-store"
+
+
+def test_concurrent_mount_passes_never_misreport_a_signed_in_owner(tmp_path: Path) -> None:
+    """The TUI resolves every card at mount on worker threads at once.
+
+    Reads through the process-shared ``AuthStore`` connection interleaved and a
+    random card answered "signed out" (measured in the round-2 rig). Reads are
+    serialised now, and an unreadable store answers "not loaded", never a
+    sign-out the operator did not do.
+    """
+    _enroll(tmp_path)
+    _sign_in_radient(tmp_path)
+    entries = [f"entry{index:04d}" for index in range(8)]
+    for index, entry in enumerate(entries):
+        _write_card(tmp_path, _details([f"bcmsg_c{index:07d}"]), entry_id=entry)
+
+    async def burst() -> list[str | None]:
+        answers = await asyncio.gather(
+            *[resolve_card_body(tmp_path, SESSION, entry, local_only=True) for entry in entries]
+        )
+        return [answer["items"][0].get("reason") for answer in answers]
+
+    for _ in range(20):
+        assert set(asyncio.run(burst())) == {"not_loaded"}

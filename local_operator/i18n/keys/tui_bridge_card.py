@@ -9,8 +9,16 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def body_deleted() -> Msg:
+    return Msg("tui.bridge_card.body.deleted", {})
+
+
 def body_held() -> Msg:
     return Msg("tui.bridge_card.body.held", {})
+
+
+def body_held_transient() -> Msg:
+    return Msg("tui.bridge_card.body.held_transient", {})
 
 
 def body_loading() -> Msg:
@@ -49,8 +57,8 @@ def body_show_less() -> Msg:
     return Msg("tui.bridge_card.body.show_less", {})
 
 
-def body_show_more(*, shown: str, total: int | float) -> Msg:
-    return Msg("tui.bridge_card.body.show_more", {"shown": shown, "total": total})
+def body_show_more(*, total: int | float) -> Msg:
+    return Msg("tui.bridge_card.body.show_more", {"total": total})
 
 
 def body_signed_out() -> Msg:
@@ -63,3 +71,11 @@ def body_unavailable() -> Msg:
 
 def frame_untrusted() -> Msg:
     return Msg("tui.bridge_card.frame.untrusted", {})
+
+
+def header_held_transient() -> Msg:
+    return Msg("tui.bridge_card.header.held_transient", {})
+
+
+def header_open_to_load() -> Msg:
+    return Msg("tui.bridge_card.header.open_to_load", {})

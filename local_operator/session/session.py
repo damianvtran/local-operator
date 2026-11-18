@@ -21849,9 +21849,36 @@ class Session:
             from local_operator.team_bridge.card_projection import (
                 attach_history_excerpts,
             )
+            from local_operator.team_bridge.display_bodies import (
+                DisplayBodyStore,
+                purge_if_bridge_off,
+                radient_signed_in,
+            )
             from local_operator.team_bridge.store import _owner_key
 
-            if authority_fence(runtime) is not None:
+            refusal = authority_fence(runtime)
+            if refusal is not None:
+                code = refusal.get("code")
+                if code == "feature_off":
+                    # A torn config read also answers ``feature_off``; only a
+                    # definite OFF is an opt-out worth a purge.
+                    purge_if_bridge_off(Path(runtime.config_dir))
+                elif code == "consent_revoked":
+                    # The consent-revoke path as THIS process sees
+                    # it: the retained bodies lost their standing, so they go
+                    # now rather than at the next card view (review R3 / QA
+                    # Q1). ``owner_changed`` is deliberately not here: the new
+                    # owner's rows are not this session's to delete, and an
+                    # account switch already purges at enrollment commit.
+                    DisplayBodyStore(Path(runtime.config_dir)).purge()
+                return messages
+            if not radient_signed_in(
+                runtime.config_dir, getattr(runtime.owner, "credential_id", None)
+            ):
+                # Enrollment and consent outlive ``lop logout radient``; the
+                # sign-in itself is part of the standing (QA Q1). The logout
+                # hook purged the rows already; this withholds excerpts even
+                # if a row survived (fail closed: the ids-only marker).
                 return messages
             return attach_history_excerpts(
                 messages, config_dir=runtime.config_dir, owner_key=_owner_key(runtime.owner)
