@@ -12,6 +12,7 @@ future file that needs them makes the move once for all three.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
@@ -28,7 +29,7 @@ from local_operator.remote_compute import records, resolve_network, tiers
 from local_operator.remote_compute.api import RemoteRuns, RunSubmitMetadata, build_spec
 from local_operator.remote_compute.client import RUNS_PATH, RemoteComputeClient
 from local_operator.remote_compute.defaults import DEFAULT_MAX_HOURS, DEFAULT_SIZE
-from local_operator.remote_compute.repo import RepoRef
+from local_operator.remote_compute.repo import UNPARSEABLE_URL, RepoRef
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -220,6 +221,64 @@ async def test_a_record_that_cannot_be_written_does_not_fail_the_submission(
         submitted = await library.create_run(request_for(), idempotency_key="k")
     assert submitted.record is None
     assert submitted.run["id"] == "run_1"
+
+
+@pytest.mark.asyncio
+async def test_a_repo_url_the_scrubber_cannot_parse_still_submits_and_records(
+    credential: int, request_for: Any, isolated_roots: Path
+) -> None:
+    """A1's repro through the real path, where the run already exists.
+
+    ``create_run`` reaches the scrubber from ``record_submission`` only AFTER the
+    server has answered 201. A scrubber that raised there told the operator the
+    submission failed, with no run id to cancel, for a run the far end had
+    already created; the recorded URL is now the placeholder instead.
+    """
+    origin = _Origin(httpx.Response(201, json=_created(network_id=request_for.network_id)))
+    library, http = _library(origin, credential, isolated_roots)
+    async with http:
+        submitted = await library.create_run(
+            request_for(),
+            idempotency_key="k",
+            recorded_from=RunSubmitMetadata(repo_url="https://[::1/r.git", repo_sha=SHA),
+        )
+    assert submitted.run["id"] == "run_1"
+    assert submitted.record is not None
+    assert submitted.record.repo_url == UNPARSEABLE_URL
+    stored = records.records_path(isolated_roots).read_text(encoding="utf-8")
+    assert "[::1" not in stored
+
+
+@pytest.mark.asyncio
+async def test_any_failure_from_the_record_does_not_fail_the_submission(
+    credential: int,
+    request_for: Any,
+    isolated_roots: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard is wider than ``OSError``, and the message is never logged.
+
+    What the record stores is caller-supplied, so a URL the scrubber refuses is
+    the same failure class as a full disk — and the message of whatever is raised
+    can quote that content, which is the thing the scrub exists to keep out of
+    reach. So the exception's TYPE is logged and nothing else.
+    """
+
+    def boom(*arguments: object, **keywords: object) -> None:
+        raise ValueError("https://[::1/r.git")
+
+    monkeypatch.setattr(records, "record_submission", boom)
+    origin = _Origin(httpx.Response(201, json=_created(network_id=request_for.network_id)))
+    library, http = _library(origin, credential, isolated_roots)
+    with caplog.at_level(logging.WARNING, logger="local_operator.remote_compute.api"):
+        async with http:
+            submitted = await library.create_run(request_for(), idempotency_key="k")
+    assert submitted.record is None
+    assert submitted.run["id"] == "run_1"
+    logged = [entry.getMessage() for entry in caplog.records]
+    assert any("ValueError" in message for message in logged)
+    assert all("[::1" not in message for message in logged)
 
 
 def test_the_defaults_are_the_documented_constants() -> None:

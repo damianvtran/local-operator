@@ -301,3 +301,54 @@ def test_an_origin_with_a_bad_port_and_credentials_is_refused_without_raising(
     assert caught.value.reason == repo_module.REASON_NOT_HTTPS
     assert "hunter2-dummy" not in caught.value.detail
     assert caught.value.detail == "ssh://example.invalid:99999999/team/repo.git"
+
+
+def test_the_scrubber_survives_a_url_urllib_cannot_parse() -> None:
+    """``urlsplit`` itself raises for these, before ``.port`` is ever consulted.
+
+    Two reachable shapes: an unbalanced bracket, one keystroke away from a real
+    IPv6 origin, and a bracket ANYWHERE in the netloc — which is how a password
+    such as a bracketed token presents, because urllib's bracketed-host check then
+    runs on the host that follows. The second one is the credential shape this
+    function exists for, and it escaped as ``ValueError`` into a path that calls
+    the scrubber AFTER the far end has created the run.
+
+    The answer is the placeholder, not a substring of the input: the parse
+    failed because the userinfo boundary is unknowable, so nothing taken from
+    the string can be proven credential-free.
+    """
+    # Fragment-built so the password text is not written whole: it exists
+    # only to carry the bracket that makes urllib refuse the netloc.
+    password = "ab" + "[cd]" + "ef"
+    bracketed_password = "https://user:" + password + "@example.invalid/r.git"
+    for refused in ("https://[::1/r.git", bracketed_password):
+        scrubbed = repo_module.scrub_url(refused)
+        assert scrubbed == repo_module.UNPARSEABLE_URL
+        assert password not in scrubbed
+        assert "@" not in scrubbed
+
+
+def test_an_origin_urllib_cannot_parse_is_refused_without_raising(checkout: Path) -> None:
+    """``_https_origin`` promises ``RepoRef | UnusableRepo`` as well.
+
+    A credential-bearing origin is exactly what it refuses in order to sanitise
+    it, so the parse failure has to answer the typed refusal the same way the
+    out-of-range port above does.
+    """
+    _git("remote", "set-url", "origin", "https://[::1/r.git", cwd=checkout)
+    with pytest.raises(UnusableRepo) as caught:
+        detect_repo(checkout)
+    assert caught.value.reason == repo_module.REASON_NOT_HTTPS
+    assert caught.value.detail == repo_module.UNPARSEABLE_URL
+
+
+def test_the_scrubber_keeps_the_brackets_that_make_ipv6_a_host() -> None:
+    """Dropping the brackets turns a valid origin into one that no longer parses.
+
+    The scrubbed value is what a refusal's detail and the record carry, so it
+    has to stay a URL rather than merely lack userinfo.
+    """
+    assert (
+        repo_module.scrub_url("https://user:pass@[::1]:8443/o/r.git")
+        == "https://[::1]:8443/o/r.git"
+    )

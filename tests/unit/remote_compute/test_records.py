@@ -280,6 +280,21 @@ def test_a_world_readable_record_is_tightened_on_its_next_append(root: Path) -> 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_a_wider_directory_is_tightened_on_the_next_append(root: Path) -> None:
+    """``mkdir(mode=...)`` applies at CREATION only, and the umask masks it.
+
+    A directory an older build made, or one under a hand-made
+    ``LOCAL_OPERATOR_CONFIG_DIR``, would otherwise keep a wider mode while the
+    module promises an owner-only record AND directory. What a wider directory
+    exposes is filenames, and the fix costs one ``chmod`` per append.
+    """
+    directory = records.records_path(root).parent
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o755)
+    _record(root)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
 def test_a_torn_final_line_does_not_swallow_the_next_append(root: Path) -> None:
     """One crash must cost one observation, not two.
 
