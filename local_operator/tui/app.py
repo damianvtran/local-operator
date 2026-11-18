@@ -37560,12 +37560,15 @@ class OperatorApp(App[None]):
                 # receipt says what it lacks.
                 confirm_digest = ""
                 without_working_set = bool(request.without_working_set)
-                if not request.keep and without_working_set:
+                if without_working_set:
                     # NO PREFLIGHT ON THIS PATH, SO ASK THE RELAY DIRECTLY (review
                     # M1, round 3): ``request_move`` refuses a stale relay for
                     # ``--without-working-set`` too, and without this check that
                     # refusal arrived only after the user had been moved off the
                     # conversation. Same sentence, same stop-before-the-leave as R9.
+                    # NOT GATED ON ``--keep`` (review m1, round 4): a kept copy of the
+                    # current conversation still leaves it first, and the CLI still
+                    # sends the flag, so the stale relay refuses that form too.
                     stale = await asyncio.to_thread(stale_relay_message)
                     if stale:
                         drop_checking()
