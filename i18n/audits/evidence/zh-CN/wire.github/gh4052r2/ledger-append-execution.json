@@ -1,0 +1,35 @@
+{
+  "record_reference": "i18n/audits/evidence/zh-CN/wire.github/gh4052r2/record.json",
+  "execution": [
+    {
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/91d1e05d2d82/scratchpad/4052-r2-zh-CN-wire.github-receipt.json",
+        "--expected-history-sha",
+        "440042b74deb25e121559980df47cb9f90a3e86fe2ea64560505578514b74981",
+        "--dry-run"
+      ],
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/zh-CN/wire.github.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/91d1e05d2d82/scratchpad/4052-r2-zh-CN-wire.github-receipt.json",
+        "--expected-history-sha",
+        "440042b74deb25e121559980df47cb9f90a3e86fe2ea64560505578514b74981",
+        "--apply"
+      ],
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/zh-CN/wire.github.json\n",
+      "stderr": ""
+    }
+  ]
+}

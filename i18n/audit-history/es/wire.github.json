@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.github",
+  "history_sha256": "c7a1d5d4f4ef559c011fd34d22fd61999c4f5a5868d7b2cad435fa55d0d6cbe4",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 translator-only receipt; independent audit NOT completed. English source author node99 is a different agent (same actual model Sol). Changed keys: 68. Complete carried namespace must be independently audited with unchanged prior coverage derived, not presumed. Source hash pins full current namespace; translated target sha256 f3ec27fb36efb1e04cd51bf44acca3e2258a11400554d3cda44bb00064298287. Glossary i18n/glossary.md and i18n/style-guides/es.md. Choices: tú, neutral Spanish; repositorio/dispositivo/ajuste; push and GitHub kept; one/many/other days. Settings help preserves never-set automatic selection versus clearing a previously shared hand-picked list stopping lending, and literal --use-default recovery. Safety copy preserves no widening/borrower authority, retrieval-time revocation rather than immediate deletion. Placeholder/CLDR checks recorded separately; no rendered, pseudo or native audit claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 FINAL translator-only handoff; independent audit pending, no pass claimed. Replaces earlier translator target hashes without removing history. Full carried namespace requires independent audit; changed scope is 68 new GitHub keys or one settings help key only. Read i18n/glossary.md and i18n/style-guides/es.md. Shared wave-2 rule keeps push in Latin in ALL locales, including Chinese/Russian/Vietnamese/Hindi/Urdu; prose inflects around it. GitHub, owner/repo, /settings, command literals unchanged. French vous, Spanish tú, Chinese 你, Russian вы, Vietnamese bạn, Urdu آپ, Hindi आप. French narrow no-break punctuation spacing; Urdu glossary device term ڈیوائس; no manual bidi controls. CLDR days: fr/es one-many-other, ru one-few-many-other, zh-CN/vi other, hi/ur one-other; hi/ur hours upgrade number to lossless plural. Preserved no-widening and owner-only authority, next-credential-fetch timing, never-set versus previously shared list cleared, and literal --use-default remedy. Source hash covers full namespace, final target sha256 f3ec27fb36efb1e04cd51bf44acca3e2258a11400554d3cda44bb00064298287. Mechanical execution evidence is separate, not a native semantic audit or rendered/RTL sign-off. Actual model openai/gpt-6.1-sol following quota fallback before translation; independent agent from node99 English author despite same actual model."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev), session 91d1e05d2d82",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "result": "changes_requested",
+        "findings": 1,
+        "actual_model_source": "host fallback from Opus due to quota; second-pass source retained for I2-UR-01"
+      },
+      "status": "changes_requested",
+      "note": "PR4052 r1; 1 unresolved MAJOR. Evidence: i18n/audits/evidence/es/wire.github/gh4052r1/record.json; second pass gh4052s1 preserved; no eligibility restoration."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator remediation, session 9af0b0ea9021, round 1 unified remediation",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none observed in this resumed remediation turn; previous translation/audit Sol fallback provenance remains historical"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 unified round-1 translation remediation against 2afbb818b69074d9f11b0fc1a9a6360967218476. IDs I-COMPOSE. Translator-only receipt, NOT independent audit or eligibility approval. Preserves every historical failed/auditor row and evidence artifact. Source hash covers full namespace; current target sha256 237f67c0d160ff0d11ab8dc192881f6382aa05dce48f19dbfa03942c15f5ad64. Only named values changed, other values remain byte-identical to baseline. Verified both full review comments 6896166510 and 6896056305 against current strings. Glossary: Latin push, Russian device-sharing wording rather than financial creditor, Urdu feminine ڈیوائس; Spanish/Russian share_empty introduces reasons without tense dependence; French failure names list retrieval; Russian settings says previously transferred rather than published list. ICU placeholders, literal commands, next-fetch timing, no borrower authority, no-widening and clear-marker semantics retained. Independent delta checks by BOTH auditors still required; no audit pass/visual or production activation claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator remediation, session 9af0b0ea9021, round 1 unified remediation",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none observed in this resumed remediation turn; previous translation/audit Sol fallback provenance remains historical"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev), session 91d1e05d2d82",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "actual_model_source": "current resumed system model; no fallback this round; historical Sol provenance retained",
+        "second_pass": "dbf144330553, anthropic/claude-opus-5-5, current-byte passed gh4052s2"
+      },
+      "status": "passed",
+      "note": "PR4052 r2 delta PASS; 0 unresolved blocker/major; unchanged scope retained by hashes. Evidence: i18n/audits/evidence/es/wire.github/gh4052r2/record.json; second pass gh4052s2."
+    }
+  ]
+}

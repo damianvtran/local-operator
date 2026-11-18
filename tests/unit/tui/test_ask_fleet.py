@@ -53,6 +53,7 @@ from local_operator.tui.widgets.ask_queue import (
     settled_chip,
 )
 from local_operator.tui.widgets.transcript import NoticeBlock
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 pytestmark = pytest.mark.asyncio
@@ -171,6 +172,24 @@ def _app(session: FakeSession | None = None) -> OperatorApp:
 async def _settle(pilot, turns: int = 3) -> None:
     for _ in range(turns):
         await pilot.pause()
+
+
+async def _booted(app: OperatorApp, pilot) -> None:
+    """Block until the boot worker has ADOPTED the session, then settle.
+
+    WHY NOT ``_settle`` ALONE. Three ``pilot.pause()`` turns yield to the message
+    pump; they do not wait for the boot worker's ``_warm_session_imports``
+    thread hop. A test whose assertion depends on ``app._session`` (the owner
+    contract keys on the ADOPTED session's id, the sidebar marks union the live
+    session's count in, and a fleet door opened on the boot card mounts no
+    ``AskQueueList``) was therefore betting the hop beats three turns. On a
+    GIL-starved CI shard it lost: main run 44077850873, job 134039629936,
+    ``_fleet_answer_starts_here(own) is True`` because ``current`` was ``""``.
+    ``LOP_TEST_SLOW_BOOT_WARM_S=0.4`` reproduces it on any machine. Waiting on
+    the worker (``await_session_boot``) has no turn or clock budget to lose.
+    """
+    await await_session_boot(app)
+    await _settle(pilot)
 
 
 @pytest.fixture
@@ -704,7 +723,7 @@ async def test_the_fleet_tally_sums_the_index_and_the_marks_cover_every_session(
     _seed(isolated_index, "s-settled", [_row("c1", status="declined")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         counts, total = app._read_fleet_asks()
         # The timed-out b2 owes no answer, so it marks nothing (#2481 design D3).
         assert counts == {"s-other": 1}
@@ -890,7 +909,7 @@ async def test_an_ordinary_ask_still_answers_through_the_owner_contract(enabled,
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         app._sync_ask_surface(ask_rows([_row("a1")]))
         await _settle(pilot)
         app._expand_asks()
@@ -1153,7 +1172,7 @@ async def test_a_fleet_row_of_this_session_keeps_the_owner_contract(enabled, iso
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         app._ask_scope = SCOPE_FLEET
         own = ask_rows([_row("a1", session_id=str(session.session_id))])[0]
         other = ask_rows([_row("b1", session_id="s-other")])[0]
@@ -1177,7 +1196,7 @@ async def test_the_settle_handler_routes_by_the_rows_own_session(enabled, isolat
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         routed: list[tuple[str, object]] = []
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(
@@ -1329,7 +1348,7 @@ async def test_the_fleet_door_never_mounts_a_second_list(enabled, isolated_index
     _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         app.action_open_fleet_asks()
         await _settle(pilot, 6)
         first = app.query_one(AskQueueList)
@@ -1590,7 +1609,7 @@ async def test_a_fleet_row_with_no_session_id_fails_loudly_not_sideways(
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         app._ask_scope = SCOPE_FLEET
         orphan = ask_rows([_row("b1")])[0]
         assert orphan.session_id == ""
@@ -1659,7 +1678,7 @@ async def test_a_frontend_snapshot_keeps_the_capped_fleets_backend_tally(enabled
     session = _RecordingSession()
     app = _app(session)
     async with app.run_test(size=(130, 30)) as pilot:
-        await _settle(pilot)
+        await _booted(app, pilot)
         # The adopt-time snapshot's effect: a real Session implements
         # `subscribe_frontend` (`local_operator/session/session.py`), so by the
         # time a user can press anything this is already the live session.

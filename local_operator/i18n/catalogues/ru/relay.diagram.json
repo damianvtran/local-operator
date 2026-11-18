@@ -1,0 +1,10 @@
+{
+  "relay.diagram.close": "Закрыть диаграмму",
+  "relay.diagram.copied": "Скопировано",
+  "relay.diagram.copy": "Копировать код",
+  "relay.diagram.copy_failed": "Не удалось скопировать",
+  "relay.diagram.error.title": "Не удалось построить эту диаграмму",
+  "relay.diagram.full_size": "Полный размер",
+  "relay.diagram.save": "Сохранить SVG",
+  "relay.diagram.view": "Диаграмма"
+}

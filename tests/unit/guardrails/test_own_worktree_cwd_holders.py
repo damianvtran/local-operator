@@ -458,7 +458,7 @@ def test_race_holder_gone_before_attribution_does_not_hold_own_tree(
     _wait_seen(wt, child.pid)
     gone = _exited_pid()
     _inventory_plus(monkeypatch, gone, wt)
-    holders = prov.cwd_holders(os.path.realpath(wt), S, own=True)
+    holders = prov.cwd_holders(os.path.realpath(wt), S)
     assert holders is not None
     assert [(h.pid, h.family) for h in holders] == [(child.pid, True)], holders
     # The field tree is dirty detached scratch by design; the point is "not busy".

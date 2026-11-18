@@ -1271,3 +1271,479 @@ def test_ci_r2_directory_access_error_invalidates_state(
     monkeypatch.setattr(os, "access", access)
     command = f"cd /tmp; cd '{target}'; cd -; rm -rf sessions"
     assert _classify(home, command, cwd=home / ".local-operator").risk >= Risk.HIGH
+
+
+# -- Contained substitutions (node2 QA, #4104 u0; PR #4147) -------------------
+#
+# PR #4147 first tried to carry a contained substitution's proof through a
+# variable so the incident's ``L=<pad>/u0-$(date …).log; exec > "$L"`` ranked
+# LOW. Six review rounds each found another way to steer the carried value
+# (the last, QA Q6, bash's ``$_``), so the carry was removed: a variable
+# assigned from a substitution is opaque and NOT contained, exactly as on
+# main, and those rows rank at least HIGH. The supported way to log under the
+# scratchpad is a literal path (or the substitution inline in the target
+# word). What stays from the PR only ever ranks HIGHER than main.
+#
+# Original note:
+# A log write inside the caller's OWN scratchpad, named with a timestamp held
+# in a variable, was refused as HIGH because the stored value lost the proof
+# that its opaque stretch was a contained ``$(date …)``. The architect's audit
+# (job 08d824b2fd23) also found the containment allowlist too loose: anything
+# without ``/`` or ``.`` in its arguments passed, including bare ``date`` and
+# ``id`` whose spaces word-split an unquoted use into extra unranked paths.
+
+_SP = "$LOCAL_OPERATOR_SCRATCHPAD"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The substitution inline in the target word: contained, own pad.
+        f'exec > "{_SP}/qa-4104/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log" 2>&1',
+        f'rm -rf "{_SP}"/run-$(date +"%Y%m%d")',
+        f'rm -rf "{_SP}"/run-$(uuidgen)',
+        f'rm -rf "{_SP}"/run-$(id -un)',
+    ],
+)
+def test_contained_substitution_inline_in_own_scratchpad_is_low(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # F1: the incident command, verbatim up to its tail.
+        f"L={_SP}/qa-4104-634b/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log; "
+        'exec > "$L" 2>&1; echo started',
+        # F2/F3: a timestamp variable, and a variable path removed.
+        f'TS=$(date -u +%Y%m%dT%H%M%SZ); exec > "{_SP}/q/u0-$TS.log"',
+        f'L={_SP}/q/u0-$(date -u +%Y%m%dT%H%M%SZ).log; rm -f "$L"',
+        # Declaration builtins (former R3 rows).
+        f'export L={_SP}/q/u-$(date +%s).log; exec > "$L"',
+        f'local L={_SP}/q/u-$(date +%s).log; exec > "$L"',
+        f'declare L={_SP}/q/u-$(date +%s).log; rm -f "$L"',
+    ],
+)
+def test_substitution_carried_through_a_variable_ranks_like_main(home: Path, command: str) -> None:
+    # The carry was removed (QA Q6): a variable assigned from a substitution
+    # is opaque, as on main. The supported path is a literal log path.
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'L={_SP}/u0-$(date +%s); L=$L/../../..; rm -rf "$L"',
+        f'T=$(date +%s); rm -rf "{_SP}/$T/../../.."',
+        "rm -rf $HOME/x$(date)",
+        "T=$(date +%s); rm -rf ~/.local-operator/$T",
+    ],
+)
+def test_contained_carry_through_keeps_climbs_and_state_critical(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "date",
+        "id",
+        "date +%e",
+        "date -R",
+        "date +%c",
+        "date +%D",
+        "date +%x",
+        "date +%_H",
+        "hostname -I",
+        "date +%s +%s",
+        "date -d x +%s",
+        "uuidgen -r x",
+    ],
+)
+def test_uncontained_substitution_in_own_scratchpad_is_high(home: Path, body: str) -> None:
+    # Unquoted: these print spaces or ``/``, so the word can split or nest.
+    assert _classify(home, f"rm -rf {_SP}/q$({body})").risk is Risk.HIGH
+
+
+def test_contained_value_outside_own_scratchpad_stays_high(home: Path) -> None:
+    command = 'exec > "$HOME/u0-$(date -u +%Y%m%dT%H%M%SZ).log"'
+    assert _classify(home, command).risk is Risk.HIGH
+    # A delete of an opaque name straight under HOME is CRITICAL (it sits
+    # beside the state root); containment must never lower it.
+    command = 'L=$HOME/u0-$(date -u +%Y%m%dT%H%M%SZ).log; rm -f "$L"'
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'L={_SP}/x-$(date +%s); rm -f "$L" "${{L:-/}}" "$L"/y',
+        f'for d in a b; do L={_SP}/$d-$(date +%s); rm -rf "$L"; done',
+        f'L={_SP}/x-$(date +%s); rm -rf "$L/../../.."',
+        f"T=$(mktemp); L={_SP}/$(date +%s); cp $T $L; rm $L",
+    ],
+)
+def test_carry_through_marker_never_reaches_a_target(home: Path, command: str) -> None:
+    verdict = _classify(home, command)
+    targets = [*verdict.targets, *getattr(verdict, "flagged_targets", [])]
+    assert targets
+    for ranked in targets:
+        # Every string field, raw (``repr`` would escape the marker and hide it).
+        for value in [*vars(ranked).values(), *vars(ranked.target).values()]:
+            if isinstance(value, str):
+                assert "\x03" not in value and "\x02" not in value, (command, value)
+
+
+# -- Round 1 remediation, PR #4147 (review R1-R3, QA Q1) ----------------------
+#
+# The carry-through marker made every contained value trustworthy, including
+# ones a later statement the walker did not model had changed. Each row below
+# ranked LOW on the round-1 head; the probe table in the PR thread shows base
+# (ff41034f) next to the fixed head for every one of them.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R1: ``NAME+=`` appends (base read it as a program name).
+        f'L={_SP}/$(date +%s); L+=/../../..; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); L+=/..; L+=/..; L+=/..; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); M="$L"; M+=/../../..; rm -rf "$M"',
+        f'L={_SP}/$(date +%s); L+=/../../..; find "$L" -delete',
+        f"bash -c 'L={_SP}/$(date +%s); L+=/../../..; rm -rf \"$L\"'",
+        f'export L={_SP}/$(date +%s); L+=/../../..; rm -rf "$L"',
+        # The literal spelling was LOW on base too.
+        f'L={_SP}/x; L+=/..; rm -rf "$L"',
+        f'L={_SP}; L+=/..; rm -rf "$L"',
+        # A loop body runs once per iteration; the walker reads it once.
+        f'L={_SP}/$(date +%s); for i in 1 2 3; do L+=/..; done; rm -rf "$L"',
+        f'L={_SP}/x; for i in 1 2 3; do L+=/..; done; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); for i in 1 2 3; do L=$L/..; done; rm -rf "$L"',
+        # Function-body walking was split out of PR #4147 (round 3): a body is
+        # not walked here, so those rows keep main's ranking (see
+        # ``test_round3_carry_falls_back_to_main_ranking``).
+    ],
+)
+def test_untracked_mutation_of_contained_value_is_critical(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R1: builtins that set or clear a named variable.
+        f'L={_SP}/$(date +%s); unset L; rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); unset -v L; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); printf -v L /; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); printf -v L %s /; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); mapfile L < f; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); readarray L < f; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); getopts a L; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); let L=1; rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); (( L=1 )); rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); : $((L=0)); rm -rf "/$L"',
+        f'L={_SP}/$(date +%s); declare -n R=L; R=/; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); . ./f; rm -rf "$L"',
+        # Its literal reading is ``rm -rf /etc`` (an ordinary path), but a
+        # function-body value is not certain: never LOW outside the pad.
+        f'L={_SP}/$(date +%s); f(){{ local L=/etc; rm -rf "$L"; }}; f',
+        # Q1: a link or move at an opaque name, then a delete or write there.
+        f'L={_SP}/$(date +%s); ln -s "$HOME" "$L"; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); ln -s "$HOME" "$L"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); ln -s "$HOME" "$L"; rm -rf "$L"/*',
+        f'L={_SP}/$(date +%s); ln -sfn "$HOME" "$L"; echo x > "$L"/f',
+        f'L={_SP}/$(date +%s); ln "$HOME" "$L"; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); cp -s "$HOME" "$L"; rm -rf "$L"/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; ln -s "$HOME" -t "$L"; rm -rf "$L"/*',
+        f'L={_SP}/d-$(date +%s); mkdir -p "$L"; ln -s "$HOME" "$L/a"; rm -rf "$L"/a/',
+        f'TS=$(date +%s); ln -s "$HOME" "{_SP}/$TS"; rm -rf "{_SP}/$TS"/',
+        f'ln -s "$HOME" "{_SP}/$(date +%s)"; rm -rf "{_SP}/$(date +%s)"/',
+        f'mv "$HOME/repo" "{_SP}/$(date +%s)"; rm -rf "{_SP}/$(date +%s)"',
+        # R2: LC_TIME names can hold spaces (``es_ES`` %p is ``a. m.``).
+        f"rm -rf {_SP}/x$(date +%p)",
+        f"rm -rf {_SP}/x$(date +%a)",
+        f"rm -rf {_SP}/x$(date +%B)",
+        # Pre-existing: a program the caller may have written proves nothing.
+        f'rm -rf "{_SP}"/x-$(./date +%s)',
+        f'rm -rf "{_SP}"/x-$(/tmp/evil/date +%s)',
+    ],
+)
+def test_unmodelled_change_voids_containment(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Trusted absolute spellings of an allowlisted program.
+        f'rm -rf "{_SP}"/x-$(/bin/date +%s)',
+        f'rm -rf "{_SP}"/x-$(/usr/bin/uuidgen)',
+    ],
+)
+def test_contained_value_still_low_after_remediation(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.LOW
+
+
+# -- Round 3, PR #4147: a fail-closed allowlist for the carry ----------------
+#
+# The carry these rounds gated was removed in round 6 (QA Q6); the rows
+# stay as regressions that must rank at least as high as main.
+#
+# Rounds 1-2 taught the in-order walker setter after setter, and each round's
+# review found another way to reassign, scope or reinterpret the name (R4/R5,
+# QA Q4/Q5). Round 3 narrows instead: ``_containment_carriers`` lets a name
+# keep a contained-substitution proof only under a short allowlist, and every
+# other shape keeps main's (ff41034f) ranking — opaque, judge-reviewed. The
+# rows below are the round-2 escapes; the PR thread's probe table ranks each
+# on main, on the round-2 head and on this head.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R5: setters and constructs the walker does not model.
+        f'L={_SP}/$(date +%s); L=( / ); rm -rf "$L"',
+        f'L={_SP}/$(date +%s); L[0]=/; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); L[0]+=/../../..; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); builtin printf -v L /; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); builtin unset L; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); command read L </dev/null; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); select L in /; do rm -rf "$L"; done',
+        f"L={_SP}/$(date +%s); trap 'L=/' DEBUG; rm -rf \"$L\"",
+        f'L={_SP}/$(date +%s); coproc L {{ echo; }}; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); exec {{L}}>x; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); wait -n -p L; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); for (( L=0; L<1; L++ )); do :; done; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); A[L=0]=1; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); IFS=/; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); PATH=/x:$PATH; rm -rf "$L"',
+        # An unknown setter fails closed: any bare mention voids the carry.
+        f'L={_SP}/$(date +%s); somebuiltin L; rm -rf "$L"',
+        # R4: function bodies, whatever hides their braces.
+        f'f(){{ # }}\nL=/; }}; L={_SP}/$(date +%s); f; rm -rf "$L"',
+        f'g(){{ L=/; }}; f(){{ L={_SP}/x; }}; f; g; rm -rf "$L"',
+        f'date(){{ echo ../../..; }}; L={_SP}/$(date +%s); rm -rf "$L"',
+        f'L={_SP}/u-$(date +%s).log; log(){{ echo "$1" >> "$L"; }}; log hi',
+        # Q4: a nested shell, and every program outside the safe set.
+        f'L={_SP}/$(date +%s); bash -c "ln -s $HOME $L"; rm -rf "$L"/*',
+        f'L={_SP}/$(date +%s); rsync -a ~/ "$L"; rm -rf "$L"/*',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; tar -xf x.tar -C "$L"; rm -rf "$L"/h/',
+        f'L={_SP}/$(date +%s); cp -L /tmp/a "$L"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); python3 -c "import os,sys" "$L"; rm -rf "$L"/',
+        # Any other consumer, operator or second assignment.
+        f'L={_SP}/$(date +%s); M=$L; rm -rf "$M"',
+        f'L={_SP}/x-$(date +%s); L2=$L.bak; rm -f "$L2"',
+        f'L={_SP}/x-$(date +%s); rm -rf "${{L:-/}}"',
+        f'L={_SP}/$(date +%s); rm -rf "${{L%/*}}"',
+        f'L={_SP}/$(date +%s); L+=-x.log; rm -f "$L"',
+        f'L={_SP}/$(date +%s); rm -rf "$L"; L={_SP}/y; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); eval true; rm -rf "$L"',
+    ],
+)
+def test_round3_carry_falls_back_to_main_ranking(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # QA Q5: an outer value of ``$HOME`` or ``/`` is never replaced by a
+        # function body's in-pad value (bodies are not walked).
+        f'L=$HOME; f(){{ local L={_SP}/x; }}; f; rm -rf "$L"',
+        f'L=$HOME; f(){{ L={_SP}/x; }}; rm -rf "$L"',
+        f'L=/; f(){{ local L={_SP}/x; }}; f; rm -rf "$L"',
+        f'L=$HOME; f()(L={_SP}/x); f; rm -rf "$L"',
+        # Another session's scratchpad through a carried value: main ranked
+        # the opaque word CRITICAL, and the carry must not loosen it.
+        'L=$HOME/.local-operator/sessions/other/scratchpad/u0-$(date +%s).log; rm -f "$L"',
+        'TS=$(date +%s); rm -f "$HOME/.local-operator/sessions/other/scratchpad/u0-$TS.log"',
+        # Setter invalidation keeps main's empty reading of an unset name.
+        'let L=1; rm -rf "/$L"',
+        'unset L; rm -rf "/$L"',
+        f'L={_SP}/x; unset L; rm -rf "/$L"',
+    ],
+)
+def test_round3_rows_stay_critical(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'L={_SP}/$(date +%s)/x; mkdir -p "$L"; touch "$L/a"; ls "$L"; cat "$L/a"; '
+        'tee "$L/b"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); test -e "$L"; printf "%s" x > "$L"; rm -f "${{L}}"',
+        f'L={_SP}/$(date +%s).log; echo hi >> "$L"; rm -f "$L"',
+    ],
+)
+def test_round3_former_safe_consumers_rank_like_main(home: Path, command: str) -> None:
+    # Kept LOW while the carry existed; without it these follow main.
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+# -- Round 4, PR #4147: carry only in straight-line, safe-program commands ----
+#
+# The carry these rounds gated was removed in round 6 (QA Q6); the rows
+# stay as regressions that must rank at least as high as main.
+#
+# Round 3's pre-scan counted ONE assignment per name but not whether its
+# segment runs (R6: ``false && L=…``), and only vetted the programs that read
+# ``$L`` (R7: ``hash -p`` rebinding ``date``, ``ln``/``cp -s`` onto a glob or
+# ``$(ls …)`` under the carried prefix). Round 4 makes the carry stricter
+# instead of adding cases: the WHOLE command must be ``;``/newline-joined
+# simple commands built only from ``_CARRY_STRAIGHT_PROGRAMS``, else every
+# carry drops to main's (ff41034f) opaque, judge-ranked reading.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R6: a conditional, looped or grouped assignment may never run.
+        f'false && L={_SP}/$(date +%s); rm -rf "$L"/*',
+        f'[ -d /nope ] && L={_SP}/$(date +%s); rm -rf "$L"/*',
+        f'true || L={_SP}/$(date +%s); rm -rf "$L"/',
+        f'if [ -n "$X" ]; then L={_SP}/$(date +%s); fi; rm -rf "$L"/*',
+        f'while false; do L={_SP}/$(date +%s); done; rm -rf "$L"/*',
+        f'for x in $NOPE; do L={_SP}/$(date +%s); done; rm -rf "$L"/*',
+        f'{{ false && L={_SP}/$(date +%s); }}; rm -rf "$L"/*',
+        # R7: rebinding and link-making that never read ``$L``.
+        f'hash -p /tmp/evil/date date; L={_SP}/$(date +%s); rm -rf "$L"',
+        f'hash -p ./d date; L={_SP}/$(date +%s); rm -rf "$L"/*',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; ln -s / "{_SP}"/[0-9]*/x; rm -rf "$L"/x/',
+        f'L={_SP}/$(date +%s); ln -s / "{_SP}"/1*/x; rm -rf "$L"/x/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; ln -sf / "$(ls -d {_SP}/1*)"/x; rm -rf "$L"/x/',
+        f'L={_SP}/$(date +%s); mkdir "$L"; cp -as / "{_SP}"/*/; rm -rf "$L"/',
+        # A carried log followed by any other program goes to the judge.
+        f'L={_SP}/u0-$(date +%s).log; exec > "$L"; ./run.sh',
+        # Round-3 LOW shapes that are not straight-line now follow main.
+        f'for d in a b; do L={_SP}/$d-$(date +%s); rm -rf "$L"; done',
+        f'L={_SP}/$(date +%s); [ -d "$L" ] && rm -rf "$L"',
+        f'L={_SP}/$(date +%s); cat "$L/a" | tee "$L/b"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); (rm -rf "$L")',
+        f'L={_SP}/$(date +%s); [[ -d "$L" ]]; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); rm -rf "$L" &',
+        # A substitution body is held to the same rule.
+        f'L={_SP}/$(date +%s); echo "$(hash -p /x date)"; rm -rf "$L"',
+        f'L={_SP}/$(date +%s); printf -v M x; rm -rf "$L"',
+        # R8 (round 5): substitutions the part scan never yields — inside an
+        # unquoted heredoc body or a ``${…}`` parameter word — still run in
+        # bash, so any opener the check did not visit drops the carry.
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; cat <<EOF\n$(ln -s ~ {_SP}/[0-9]*)\nEOF\n'
+        'rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; echo "${{X:-$(ln -s ~ {_SP}/[0-9]*)}}"; '
+        'rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); mkdir -p "$L"; echo ${{X:-`ln -s ~ {_SP}/[0-9]*`}}; '
+        'rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X:+$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X=$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X/a/$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
+        f'L={_SP}/$(date +%s); echo ${{X?$(ln -s ~ {_SP}/[0-9]*)}}; rm -rf "$L"/home/',
+    ],
+)
+def test_round4_carry_needs_a_straight_line_safe_command(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The incident shapes: straight-line, safe programs only.
+        f"L={_SP}/qa-4104/u0-launch-$(date -u +%Y%m%dT%H%M%SZ).log; "
+        'exec > "$L" 2>&1; echo started',
+        f'L={_SP}/u0-$(date -u +%Y%m%dT%H%M%SZ).log\nexec > "$L" 2>&1\necho started\ndate',
+        f'export L={_SP}/u0-$(date +%s).log; exec > "$L"; true',
+        f'local L={_SP}/u0-$(date +%s).log; touch "$L"; rm -f "$L"',
+        f'declare L={_SP}/u0-$(date +%s).log; echo x > "$L"',
+    ],
+)
+def test_round4_former_carry_rows_rank_like_main(home: Path, command: str) -> None:
+    # Kept LOW while the carry existed; without it these follow main.
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+# -- Round 6, PR #4147: a character-level allowlist gates the carry ----------
+#
+# The carry these rounds gated was removed in round 6 (QA Q6); the rows
+# stay as regressions that must rank at least as high as main.
+#
+# Rounds 3-5 chased routes through bash's parser and each review found
+# another (R9: backslash-newline hides an opener from lexer and raw count;
+# R10: ``${Z:0:Y}``, ``${Z[Y]}`` and ``test -v`` re-read a carried value as
+# arithmetic, which runs a substitution). ``_carry_charset_ok`` now runs
+# first: anything outside the narrow character set drops every carry, so
+# these rows rank at least HIGH, as on main (ff41034f).
+
+_R6_PRE = f'L={_SP}/$(date +%s); mkdir -p "$L"; '
+_R6_LN = f"ln -s ~ {_SP}/[0-9]*"
+_R6_Y = f"Y=a[\\$\\(ln\\ -s\\ ~\\ {_SP}/[0-9]*\\)]; "
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R9: a backslash-newline splits the opener.
+        _R6_PRE + f'echo $\\\n({_R6_LN}); rm -rf "$L"/home/',
+        _R6_PRE + f'cat <<EOF\n$\\\n({_R6_LN})\nEOF\nrm -rf "$L"/home/',
+        _R6_PRE + f'cat <\\\n({_R6_LN}); rm -rf "$L"/home/',
+        # R10: arithmetic contexts re-read a value as code.
+        _R6_PRE + _R6_Y + 'Z=abc; echo ${Z:0:Y}; rm -rf "$L"/home/',
+        _R6_PRE + _R6_Y + 'Z=abc; echo ${Z[Y]}; rm -rf "$L"/home/',
+        _R6_PRE + _R6_Y + 'test -v "$Y"; rm -rf "$L"/home/',
+        _R6_PRE + _R6_Y + '[ -v "$Y" ]; rm -rf "$L"/home/',
+        _R6_PRE + f'X=$\'a[\\x24({_R6_LN})]\'; [ -v "$X" ]; rm -rf "$L"/home/',
+        _R6_PRE + f'Y="a[$""({_R6_LN})]"; test -v "$Y"; rm -rf "$L"/home/',
+        # Other characters outside the set.
+        _R6_PRE + 'echo $[1+1]; rm -rf "$L"/home/',
+        _R6_PRE + 'cat <<< x; rm -rf "$L"/home/',
+        _R6_PRE + 'rm -rf "$L"/home/ # comment',
+        _R6_PRE + 'touch ~/x; rm -rf "$L"/home/',
+        _R6_PRE + 'rm -rf "$L"/*',
+        _R6_PRE + 'rm -rf "$L"/h?me',
+        # Round 3 kept ``[ -d "$L" ]`` LOW; ``[`` is outside the round-6 set,
+        # so it now follows main (``test -d`` keeps the carry).
+        f'L={_SP}/$(date +%s); [ -d "$L" ]; rm -rf "$L"',
+    ],
+)
+def test_round6_carry_needs_the_character_allowlist(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+# -- Round 6 remediation, PR #4147: R11 (%Z) and Q6 (``$_``) -----------------
+#
+# R11: ``date +%Z`` prints whatever zone abbreviation TZ names, verbatim
+# (``TZ=..0 date +%Z`` prints ``..``), so %Z left the contained-format list.
+# That also tightens main, which ranked the direct form LOW. Q6: ``$_`` (the
+# previous command's last argument) slipped past the carry's character gate;
+# the carry itself is gone, so the row ranks as on main.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'export TZ=..0; L={_SP}/$(date +%Z)/$(date +%Z); rm -rf "$L"',
+        f'TZ=..0; export TZ; L={_SP}/$(date +%Z)/$(date +%Z); rm -rf "$L"',
+        f'export TZ=..0\nL={_SP}/$(date +%Z)/$(date +%Z)\nrm -rf "$L"',
+        # TZ inherited from the environment, not set in the command.
+        f'L={_SP}/$(date +%Z)/$(date +%Z); rm -rf "$L"',
+        f"rm -rf {_SP}/$(date +%Z)/$(date +%Z)",
+        f'rm -rf "{_SP}/$(date +%Z)/$(date +%Z)"',
+        f'rm -rf "{_SP}"/run-$(date -u +%Y%m%d%Z)',
+        # Q6: ``$_`` expands to ``/../../..`` here.
+        f'L={_SP}/$(date +%s); echo /../../..; rm -rf "$L$_"',
+    ],
+)
+def test_round6_tz_controlled_and_last_arg_rows_rank_high(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # %z prints only [+-]hhmm whatever TZ holds; a trailing Z is a literal.
+        f'rm -rf "{_SP}"/run-$(date +%z)',
+        f'rm -rf "{_SP}"/run-$(date -u +%Y%m%dT%H%M%SZ)',
+        f'exec > "{_SP}/u0-$(date -u +%Y%m%dT%H%M%SZ).log"',
+    ],
+)
+def test_round6_offset_and_literal_z_stay_low(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.LOW

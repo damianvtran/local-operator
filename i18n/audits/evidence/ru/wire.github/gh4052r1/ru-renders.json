@@ -1,0 +1,5042 @@
+[
+  {
+    "key": "wire.github.progress",
+    "count": 0,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 2,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 3,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 4,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 5,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 11,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 21,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 22,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 25,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1.5,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1000000,
+    "form": "other",
+    "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 0,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 2,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 3,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 4,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 5,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 11,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 21,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 22,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 25,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1.5,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1000000,
+    "form": "other",
+    "text": "исключения: нет"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 0,
+    "form": "other",
+    "text": "исключения (0): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1,
+    "form": "other",
+    "text": "исключения (1): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 2,
+    "form": "other",
+    "text": "исключения (2): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 3,
+    "form": "other",
+    "text": "исключения (3): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 4,
+    "form": "other",
+    "text": "исключения (4): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 5,
+    "form": "other",
+    "text": "исключения (5): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 11,
+    "form": "other",
+    "text": "исключения (11): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 21,
+    "form": "other",
+    "text": "исключения (21): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 22,
+    "form": "other",
+    "text": "исключения (22): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 25,
+    "form": "other",
+    "text": "исключения (25): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1.5,
+    "form": "other",
+    "text": "исключения (1,5): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1000000,
+    "form": "other",
+    "text": "исключения (1 000 000): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 0,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 2,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 3,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 4,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 5,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 11,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 21,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 22,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 25,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 0,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 2,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 3,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 4,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 5,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 11,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 21,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 22,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 25,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "Репозитории GitHub: нет — REASON; REMEDY"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 0,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 0 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 1 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 2,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 2 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 3,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 3 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 4,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 4 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 5,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 5 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 11,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 11 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 21,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 21 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 22,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 22 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 25,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 25 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1.5,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 1,5 — SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1000000,
+    "form": "other",
+    "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 1 000 000 — SOURCE"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 0,
+    "form": "other",
+    "text": ", за вычетом исключённых: 0"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1,
+    "form": "other",
+    "text": ", за вычетом исключённых: 1"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 2,
+    "form": "other",
+    "text": ", за вычетом исключённых: 2"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 3,
+    "form": "other",
+    "text": ", за вычетом исключённых: 3"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 4,
+    "form": "other",
+    "text": ", за вычетом исключённых: 4"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 5,
+    "form": "other",
+    "text": ", за вычетом исключённых: 5"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 11,
+    "form": "other",
+    "text": ", за вычетом исключённых: 11"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 21,
+    "form": "other",
+    "text": ", за вычетом исключённых: 21"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 22,
+    "form": "other",
+    "text": ", за вычетом исключённых: 22"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 25,
+    "form": "other",
+    "text": ", за вычетом исключённых: 25"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1.5,
+    "form": "other",
+    "text": ", за вычетом исключённых: 1,5"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1000000,
+    "form": "other",
+    "text": ", за вычетом исключённых: 1 000 000"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 0,
+    "form": "other",
+    "text": "  … и ещё 0 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1,
+    "form": "other",
+    "text": "  … и ещё 1 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 2,
+    "form": "other",
+    "text": "  … и ещё 2 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 3,
+    "form": "other",
+    "text": "  … и ещё 3 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 4,
+    "form": "other",
+    "text": "  … и ещё 4 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 5,
+    "form": "other",
+    "text": "  … и ещё 5 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 11,
+    "form": "other",
+    "text": "  … и ещё 11 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 21,
+    "form": "other",
+    "text": "  … и ещё 21 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 22,
+    "form": "other",
+    "text": "  … и ещё 22 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 25,
+    "form": "other",
+    "text": "  … и ещё 25 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1.5,
+    "form": "other",
+    "text": "  … и ещё 1,5 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1000000,
+    "form": "other",
+    "text": "  … и ещё 1 000 000 — весь список: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 0,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (0), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (1), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 2,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (2), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 3,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (3), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 4,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (4), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 5,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (5), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 11,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (11), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 21,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (21), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 22,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (22), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 25,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (25), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1.5,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (1,5), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1000000,
+    "form": "other",
+    "text": "это больше, чем может вместить один общий доступ (1 000 000), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 0,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 2,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 3,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 4,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 5,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 11,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 21,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 22,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 25,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1.5,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1000000,
+    "form": "other",
+    "text": "исключить репозиторий: lop network credential github repos --use-default — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "список, выбранный вручную (настройка репозиториев GitHub)"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "список, выбранный вручную"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website уже был исключён"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website не был исключён"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 0,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 2,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 3,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 4,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 5,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 11,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 21,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 22,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 25,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 0,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 2,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 3,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 4,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 5,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 11,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 21,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 22,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 25,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 0,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (0), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (1), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 2,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (2), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 3,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 4,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (4), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 5,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (5), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 11,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (11), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 21,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (21), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 22,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (22), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 25,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (25), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (1,5), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (1 000 000), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 0,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (0), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (1), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 2,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (2), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 3,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (3), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 4,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (4), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 5,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (5), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 11,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (11), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 21,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (21), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 22,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (22), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 25,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (25), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (1,5), исключены"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (1 000 000), исключены"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 0,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 2,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 3,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 4,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 5,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 11,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 21,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 22,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 25,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 0,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 2,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 3,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 4,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 5,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 11,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 21,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 22,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 25,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "повторите, когда GitHub станет доступен: lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 0,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 2,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 3,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 4,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 5,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 11,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 21,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 22,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 25,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1.5,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1000000,
+    "form": "other",
+    "text": "верните один из репозиториев командой lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 0,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 2,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 3,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 4,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 5,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 11,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 21,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 22,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 25,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1.5,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1000000,
+    "form": "other",
+    "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 0,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 2,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 3,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 4,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 5,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 11,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 21,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 22,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 25,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1.5,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1000000,
+    "form": "other",
+    "text": "REASON — REMEDY"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "в неизвестное время"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 0,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 2,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 3,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 4,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 5,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 11,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 21,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 22,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 25,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1.5,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1000000,
+    "form": "other",
+    "text": "только что"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 0,
+    "form": "other",
+    "text": "0 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1,
+    "form": "other",
+    "text": "1 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 2,
+    "form": "other",
+    "text": "2 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 3,
+    "form": "other",
+    "text": "3 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 4,
+    "form": "other",
+    "text": "4 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 5,
+    "form": "other",
+    "text": "5 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 11,
+    "form": "other",
+    "text": "11 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 21,
+    "form": "other",
+    "text": "21 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 22,
+    "form": "other",
+    "text": "22 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 25,
+    "form": "other",
+    "text": "25 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1.5,
+    "form": "other",
+    "text": "1,5 мин назад"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1000000,
+    "form": "other",
+    "text": "1 000 000 мин назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 0,
+    "form": "other",
+    "text": "0 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1,
+    "form": "other",
+    "text": "1 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 2,
+    "form": "other",
+    "text": "2 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 3,
+    "form": "other",
+    "text": "3 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 4,
+    "form": "other",
+    "text": "4 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 5,
+    "form": "other",
+    "text": "5 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 11,
+    "form": "other",
+    "text": "11 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 21,
+    "form": "other",
+    "text": "21 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 22,
+    "form": "other",
+    "text": "22 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 25,
+    "form": "other",
+    "text": "25 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1.5,
+    "form": "other",
+    "text": "1,5 ч назад"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1000000,
+    "form": "other",
+    "text": "1 000 000 ч назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 0,
+    "form": "other",
+    "text": "0 дней назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1,
+    "form": "other",
+    "text": "1 день назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 2,
+    "form": "other",
+    "text": "2 дня назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 3,
+    "form": "other",
+    "text": "3 дня назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 4,
+    "form": "other",
+    "text": "4 дня назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 5,
+    "form": "other",
+    "text": "5 дней назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 11,
+    "form": "other",
+    "text": "11 дней назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 21,
+    "form": "other",
+    "text": "21 день назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 22,
+    "form": "other",
+    "text": "22 дня назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 25,
+    "form": "other",
+    "text": "25 дней назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1.5,
+    "form": "other",
+    "text": "1,5 дня назад"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1000000,
+    "form": "other",
+    "text": "1 000 000 дней назад"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 0,
+    "form": "other",
+    "text": "в течение 0 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1,
+    "form": "other",
+    "text": "в течение 1 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 2,
+    "form": "other",
+    "text": "в течение 2 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 3,
+    "form": "other",
+    "text": "в течение 3 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 4,
+    "form": "other",
+    "text": "в течение 4 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 5,
+    "form": "other",
+    "text": "в течение 5 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 11,
+    "form": "other",
+    "text": "в течение 11 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 21,
+    "form": "other",
+    "text": "в течение 21 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 22,
+    "form": "other",
+    "text": "в течение 22 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 25,
+    "form": "other",
+    "text": "в течение 25 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1.5,
+    "form": "other",
+    "text": "в течение 1,5 мин"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1000000,
+    "form": "other",
+    "text": "в течение 1 000 000 мин"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub отклонил эту учётную запись"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 0,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 2,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 3,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 4,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 5,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 11,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 21,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 22,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 25,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1.5,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1000000,
+    "form": "other",
+    "text": "не удалось связаться с GitHub"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub вернул ошибку"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub не смог перечислить все репозитории с правом выполнения push"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "не удалось получить список репозиториев GitHub"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 0,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 2,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 3,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 4,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 5,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 11,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 21,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 22,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 25,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1.5,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1000000,
+    "form": "other",
+    "text": "список репозиториев ещё не получен"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 0,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 2,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 3,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 4,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 5,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 11,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 21,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 22,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 25,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "сохранённый список относится к предыдущей учётной записи GitHub"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 0,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 2,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 3,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 4,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 5,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 11,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 21,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 22,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 25,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "учётная запись сохранённого списка GitHub неизвестна"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 0,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 2,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 3,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 4,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 5,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 11,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 21,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 22,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 25,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "нет репозиториев — заимствование будет отклонено, а не расширено"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 0,
+    "form": "other",
+    "text": ", исключено: 0"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1,
+    "form": "other",
+    "text": ", исключено: 1"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 2,
+    "form": "other",
+    "text": ", исключено: 2"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 3,
+    "form": "other",
+    "text": ", исключено: 3"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 4,
+    "form": "other",
+    "text": ", исключено: 4"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 5,
+    "form": "other",
+    "text": ", исключено: 5"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 11,
+    "form": "other",
+    "text": ", исключено: 11"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 21,
+    "form": "other",
+    "text": ", исключено: 21"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 22,
+    "form": "other",
+    "text": ", исключено: 22"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 25,
+    "form": "other",
+    "text": ", исключено: 25"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1.5,
+    "form": "other",
+    "text": ", исключено: 1,5"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1000000,
+    "form": "other",
+    "text": ", исключено: 1 000 000"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 0,
+    "form": "other",
+    "text": "ещё 0"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1,
+    "form": "other",
+    "text": "ещё 1"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 2,
+    "form": "other",
+    "text": "ещё 2"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 3,
+    "form": "other",
+    "text": "ещё 3"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 4,
+    "form": "other",
+    "text": "ещё 4"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 5,
+    "form": "other",
+    "text": "ещё 5"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 11,
+    "form": "other",
+    "text": "ещё 11"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 21,
+    "form": "other",
+    "text": "ещё 21"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 22,
+    "form": "other",
+    "text": "ещё 22"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 25,
+    "form": "other",
+    "text": "ещё 25"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1.5,
+    "form": "other",
+    "text": "ещё 1,5"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1000000,
+    "form": "other",
+    "text": "ещё 1 000 000"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "список, выбранный там вручную"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 0,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 2,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 3,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 4,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 5,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 11,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 21,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 22,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 25,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1.5,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1000000,
+    "form": "other",
+    "text": " — весь список: lop network credential github repos --use-default на lender-qa"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "one",
+    "text": "octo-org/api (0 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (0 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "one",
+    "text": "octo-org/api (1 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (1 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "one",
+    "text": "octo-org/api (2 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (2 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "one",
+    "text": "octo-org/api (3 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (3 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "one",
+    "text": "octo-org/api (4 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (4 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "one",
+    "text": "octo-org/api (5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "one",
+    "text": "octo-org/api (11 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (11 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "one",
+    "text": "octo-org/api (21 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (21 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "one",
+    "text": "octo-org/api (22 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (22 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "one",
+    "text": "octo-org/api (25 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (25 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "one",
+    "text": "octo-org/api (1,5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (1,5 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "one",
+    "text": "octo-org/api (1 000 000 — SOURCE)"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website и octo-org/api (1 000 000 — SOURCE)"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 0,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 2,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 3,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 4,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 5,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 11,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 21,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 22,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 25,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1.5,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1000000,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 0,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 2,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 3,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 4,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 5,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 11,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 21,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 22,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 25,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "На lender-qa нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos --use-default на lender-qa; доступ не предоставлен."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "На lender-qa больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На lender-qa выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos --use-default на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 0,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 2,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 3,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 4,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 5,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 11,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 21,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 22,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 25,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1.5,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1000000,
+    "form": "other",
+    "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 0,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 2,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 3,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 4,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 5,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 11,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 21,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 22,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 25,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1.5,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1000000,
+    "form": "other",
+    "text": "repos не принимает репозиторий"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 0,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 2,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 3,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 4,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 5,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 11,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 21,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 22,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 25,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "--use-default применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 0,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 2,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 3,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 4,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 5,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 11,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 21,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 22,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 25,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1.5,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1000000,
+    "form": "other",
+    "text": "--refresh применим только к repos"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "Репозитории: 0; один общий доступ вмещает не более 0"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "Репозитории: 1; один общий доступ вмещает не более 1"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "Репозитории: 2; один общий доступ вмещает не более 2"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "Репозитории: 3; один общий доступ вмещает не более 3"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "Репозитории: 4; один общий доступ вмещает не более 4"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "Репозитории: 5; один общий доступ вмещает не более 5"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "Репозитории: 11; один общий доступ вмещает не более 11"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "Репозитории: 21; один общий доступ вмещает не более 21"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "Репозитории: 22; один общий доступ вмещает не более 22"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "Репозитории: 25; один общий доступ вмещает не более 25"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "Репозитории: 1,5; один общий доступ вмещает не более 1,5"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "Репозитории: 1 000 000; один общий доступ вмещает не более 1 000 000"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 0,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 2,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 3,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 4,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 5,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 11,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 21,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 22,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 25,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1.5,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1000000,
+    "form": "other",
+    "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 0,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 2,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 3,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 4,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 5,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 11,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 21,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 22,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 25,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1.5,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1000000,
+    "form": "other",
+    "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+  }
+]

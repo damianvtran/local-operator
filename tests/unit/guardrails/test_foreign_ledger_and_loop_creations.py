@@ -49,7 +49,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (state / "sessions" / CHILD / "origin.json").write_text(
         json.dumps({"origin": "subagent", "parent": SID})
     )
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     # Own trees take a fresh ``cwd_holders`` scan instead (PR #3987): stub the
     # inventory too, or an unreadable same-uid ``/proc/<pid>/cwd`` on CI's
     # Linux runner fails it closed and own cleanups read HIGH (train t6).

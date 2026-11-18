@@ -179,6 +179,13 @@ class Harness:
         #: worker's rung-1 input, read through ``attending`` below.
         self.viewing = ""
         self.devices = Devices(live)
+        #: ADR 0009's completion scope for the harness's injected devices.
+        #: ``all`` keeps these tests on the ADR 0008 behaviour they pin (every
+        #: completion a candidate, under the desk hold); the origin-routing
+        #: tests set ``phone``, the shipped default.
+        self.scope: str | None = "all"
+        #: Switches applied over every resolved row (origin-routing tests).
+        self.overrides: dict[str, Any] = {}
         self.worker = self.build()
         if arm:
             # CONSTRUCTING THE HARNESS IS ENABLEMENT. Push is on from here, so
@@ -202,7 +209,29 @@ class Harness:
             presence=self.presence,
             live_devices=self.devices,
             attending=self.attending,
+            preferences=self.preferences,
         )
+
+    def preferences(self) -> dict[str, dict[str, Any]]:
+        """The registry's rows, over the harness scope for injected devices.
+
+        The injected devices hold no registry row, so they resolve to the
+        absent-defaults; a device a test registered for real keeps its stored
+        switches. ``completions_scope`` is then pinned to ``self.scope`` on every
+        row (``None`` keeps what is stored), because these tests pin the
+        preference switches and the desk hold, not origin routing.
+        """
+        resolved = {device: dict(push_devices.PREFERENCE_DEFAULTS) for device in self.devices()}
+        try:
+            resolved.update(push_devices.device_preferences(self.root))
+        except (push_devices.PushRegistryCorrupt, OSError):
+            pass
+        if self.scope is not None:
+            for switches in resolved.values():
+                switches["completions_scope"] = self.scope
+        for switches in resolved.values():
+            switches.update(self.overrides)
+        return resolved
 
     def attending(self, session_id: str) -> bool:
         """``DesktopPresence.attending``'s shape over the harness's inputs."""
@@ -268,6 +297,8 @@ class Harness:
         notify: bool = True,
         token: str | None = None,
         anchor: str | None = None,
+        origin: str = "",
+        needs_user: bool = False,
     ) -> str:
         token = token or str(uuid.uuid4())
         self.store.publish(
@@ -276,6 +307,8 @@ class Harness:
             anchor or f"entry-{token[:8]}",
             kind,
             notify=notify,
+            origin=origin,
+            needs_user=needs_user,
         )
         return token
 
@@ -1897,6 +1930,7 @@ def test_an_injected_listing_count_wins_over_the_store_census(tmp_path: Path) ->
         clock=harness.clock,
         presence=harness.presence,
         live_devices=harness.devices,
+        preferences=harness.preferences,
         unread_count=lambda: 3,
     )
     harness.publish("fresh")
@@ -1926,6 +1960,7 @@ def test_a_degraded_listing_count_drops_the_count_term(tmp_path: Path) -> None:
         clock=harness.clock,
         presence=harness.presence,
         live_devices=harness.devices,
+        preferences=harness.preferences,
         unread_count=lambda: None,
     )
     harness.publish("fresh")

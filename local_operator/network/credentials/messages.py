@@ -25,15 +25,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr as _github_tr
 from local_operator.network.credentials.github import GITHUB_KEY, no_source_arms
 from local_operator.network.credentials.types import (
     CAUSE_GRANT,
     CAUSE_OWNER_LOGIN,
     CAUSE_UNREACHABLE,
+    GITHUB_RENDERED_REASONS,
     BrokerError,
     is_secret_key,
     secret_name_from_key,
 )
+
+_github_text = _github_tr("wire.github")
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.session.credential_binding import CredentialBinding
@@ -210,27 +215,28 @@ def render_broker_error(
             "network guide has the App section). Nothing was lent."
         )
     if error.code == "github_repositories_unset":
-        # The owner sends a device-neutral REASON + REMEDY (``Designation.refusal``),
-        # wrapped here once. RENDERED ONCE (QA round 1, F1): the relay leg and the
-        # runtime client both pass a refusal through this function, so a message
-        # that is already this sentence is returned as it stands.
-        if _GITHUB_UNSET_MARK in error.message:
+        # New relay/runtime hops use a code-bound presentation tag, not English
+        # parsing. Keep the old marker solely for older peers' English replies.
+        if (
+            error.reason == GITHUB_RENDERED_REASONS[error.code]
+            or _GITHUB_UNSET_MARK in error.message
+        ):
             return error.message
         if not error.message:
-            return (
-                f"{owner}{_GITHUB_UNSET_MARK}. Check lop network credential github repos on "
-                f"{owner}; nothing was lent."
+            return _github_text(
+                _github_strings.borrower_unset_default(
+                    owner=owner, command="lop network credential github repos"
+                )
             )
-        return f"{owner}{_GITHUB_UNSET_MARK}: {error.message}. Fix it on {owner}; nothing was lent."
+        return _github_text(_github_strings.borrower_unset(owner=owner, detail=error.message))
     if error.code == "github_repositories_overflow":
-        if _GITHUB_OVERFLOW_MARK in error.message:
+        if (
+            error.reason == GITHUB_RENDERED_REASONS[error.code]
+            or _GITHUB_OVERFLOW_MARK in error.message
+        ):
             return error.message
         detail = f" ({error.message})" if error.message else ""
-        return (
-            f"{owner}{_GITHUB_OVERFLOW_MARK}{detail}, so nothing was lent. On {owner}, pick "
-            "the ones to lend with the GitHub repositories setting (search it in /settings), "
-            "or opt some out with lop network credential github exclude <owner/repo>."
-        )
+        return _github_text(_github_strings.borrower_overflow(owner=owner, detail=detail))
     if error.code == "github_repo_refused":
         detail = f" ({error.message})" if error.message else ""
         return (

@@ -29,5 +29,9 @@
   "mobile.doctor.tunnel.connecting": "Truy cập điện thoại qua Radient vẫn đang kết nối. Hãy chờ vài phút; nếu vẫn không kết nối được, hãy khởi động lại bằng lop tunnel restart.",
   "mobile.doctor.tunnel.turned_off": "Truy cập điện thoại qua Radient đang tắt trên máy tính này. Hãy bật lại bằng lop tunnel start để dùng điện thoại khi ra ngoài.",
   "mobile.doctor.tunnel.not_running": "Truy cập điện thoại qua Radient không chạy trên máy tính này. Hãy khởi động lại bằng lop tunnel restart; nếu vẫn không chạy, hãy gửi báo cáo này cho bộ phận hỗ trợ.",
-  "mobile.doctor.tunnel.list_skipped": "Chưa kiểm tra tunnel trùng lặp vì phiên đăng nhập Radient trên máy tính này không có hoặc cần được làm mới. Hãy mở Local Operator, đăng nhập nếu được yêu cầu, rồi chạy lại bước kiểm tra."
+  "mobile.doctor.tunnel.list_skipped": "Chưa kiểm tra tunnel trùng lặp vì phiên đăng nhập Radient trên máy tính này không có hoặc cần được làm mới. Hãy mở Local Operator, đăng nhập nếu được yêu cầu, rồi chạy lại bước kiểm tra.",
+  "mobile.doctor.watches.ok": "Tài khoản của bạn đang dùng {watches}/{limit} lượt theo dõi tệp và {instances}/{instance_limit} bộ theo dõi được phép trên máy tính này.",
+  "mobile.doctor.watches.near": "Tài khoản của bạn đang dùng {watches}/{limit} lượt theo dõi tệp và {instances}/{instance_limit} bộ theo dõi được phép trên máy tính này, gần chạm giới hạn; phần lớn thuộc về tiến trình {pid}. Hãy khởi động lại tiến trình đó, hoặc nhờ quản trị viên tăng fs.inotify.max_user_watches và fs.inotify.max_user_instances.",
+  "mobile.doctor.watches.at_limit": "Tài khoản của bạn đã dùng hết lượt theo dõi tệp trên máy tính này ({watches}/{limit} lượt theo dõi, {instances}/{instance_limit} bộ theo dõi), nên các chương trình khác theo dõi tệp sẽ báo lỗi “No space left on device”. Phần lớn thuộc về tiến trình {pid}: hãy khởi động lại nó, hoặc nhờ quản trị viên tăng fs.inotify.max_user_watches và fs.inotify.max_user_instances.",
+  "mobile.doctor.watches.unknown": "Không đo được mức dùng lượt theo dõi tệp trên máy tính này. Nếu các chương trình ở đây báo lỗi “No space left on device”, hãy gửi báo cáo này cho bộ phận hỗ trợ."
 }

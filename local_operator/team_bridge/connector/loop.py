@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -1243,6 +1244,11 @@ async def run_forever(
     # The idle state last LOGGED (``no_owner`` or a refusal code), so a state
     # that persists for hours writes one line, not one per re-check.
     idle_code: str | None = None
+    # Consecutive identical persistence refusals (the 2026-11-17 jam): see
+    # ``connector.jam``. Per loop, so a re-arm starts from a clean count.
+    from local_operator.team_bridge.connector.jam import JamTracker
+
+    jam = JamTracker(config_dir)
     while stop is None or not stop.is_set():
         current = owner_source()
         if current is not None and current != owner:
@@ -1293,6 +1299,7 @@ async def run_forever(
             )
             backoff = BACKOFF_BASE_S
             idle_code = None
+            jam.note_success()
             # F1 (live E2E): an answer used to re-poll IMMEDIATELY. Against a
             # real hub that answered at once (resync arms, a caught-up cursor
             # without ``wait``) it never yielded — 124 reads in under 2 s, then
@@ -1332,7 +1339,7 @@ async def run_forever(
                     config_dir=config_dir,
                     owner_source=owner_source,
                     stop=stop,
-                    budget=_failure_delay(failure, OWNER_RECHECK_S),
+                    budget=_failure_delay(failure, OWNER_RECHECK_S, rand=_NO_JITTER),
                 )
                 continue
             # A store refusal outside the closed set names only its class
@@ -1342,6 +1349,7 @@ async def run_forever(
             # repeating it as ``store_code=`` would only restate the line.
             suffix = "" if code in _DIAGNOSTIC_FAILURE_CODES else _store_code_suffix(failure)
             logger.warning("bridge connector failure: stage=iteration code=%s%s", code, suffix)
+            jam.note_failure(failure)
             await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
     return None
@@ -1437,20 +1445,39 @@ async def idle_until_owner_changes(
             return
 
 
-def _failure_delay(failure: BaseException, backoff: float) -> float:
-    """How long to wait after a failed iteration: the local backoff, or the
-    hub's own ``Retry-After`` when it names a longer one (bounded).
+def _NO_JITTER() -> float:
+    """Pin ``_failure_delay`` to its full budget: the identity-refusal idle is a
+    watched wait for an owner change, not a retry storm, and keeps its fixed
+    ``OWNER_RECHECK_S`` re-check."""
 
-    WHY: a 429 (the 120/min poll bucket, the ≤4-waiter census) carries the
-    wait the hub will enforce; re-polling sooner only earns another refusal
-    and keeps the bucket drained. Never SHORTER than the local backoff (the
-    doubling still bounds a flapping hub), never longer than the cap.
+    return 1.0
+
+
+def _failure_delay(
+    failure: BaseException, backoff: float, *, rand: Callable[[], float] = random.random
+) -> float:
+    """How long to wait after a failed iteration: the jittered local backoff,
+    or the hub's own ``Retry-After`` plus jitter when it names one (bounded).
+
+    WHY: a 429 (the 120/min poll bucket, the ≤4-waiter census, the edge's
+    per-IP WAF rule) carries the wait the hub will enforce; re-polling sooner
+    only earns another refusal and keeps the bucket drained. The JITTER is the
+    2026-11-17 incident's lesson: the edge counts per ADDRESS, so every client
+    behind one network (desktop, phone, agents) is blocked and released
+    together — a fixed wait makes them all return in the same second and trip
+    the rule again. Full jitter over the local backoff spreads them.
+
+    Without a hub-named wait: uniform in ``[BACKOFF_BASE_S, backoff]`` — full
+    jitter floored at the base so a failing hub can never be re-polled in a
+    hot loop. With one: never SOONER than the named wait (bounded by
+    ``RETRY_AFTER_MAX_S``), plus up to one local backoff of spread.
     """
 
     retry_after = getattr(failure, "retry_after_seconds", None)
     if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool):
-        return max(backoff, min(float(retry_after), RETRY_AFTER_MAX_S))
-    return backoff
+        return min(max(float(retry_after), 0.0), RETRY_AFTER_MAX_S) + rand() * backoff
+    floor = min(BACKOFF_BASE_S, backoff)
+    return floor + rand() * (backoff - floor)
 
 
 async def _pause(stop: asyncio.Event | None, seconds: float) -> None:

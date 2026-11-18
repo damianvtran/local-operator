@@ -61,6 +61,22 @@ def label_wake() -> Msg:
     return Msg("relay.transcript.label.wake", {})
 
 
+def message_show_less() -> Msg:
+    return Msg("relay.transcript.message.show_less", {})
+
+
+def message_show_less_label() -> Msg:
+    return Msg("relay.transcript.message.show_less_label", {})
+
+
+def message_show_more() -> Msg:
+    return Msg("relay.transcript.message.show_more", {})
+
+
+def message_show_more_label() -> Msg:
+    return Msg("relay.transcript.message.show_more_label", {})
+
+
 def older_failed() -> Msg:
     return Msg("relay.transcript.older.failed", {})
 

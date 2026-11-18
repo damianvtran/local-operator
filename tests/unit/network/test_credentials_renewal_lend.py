@@ -345,6 +345,20 @@ def test_an_unreachable_node_makes_the_owner_wait_by_name_with_no_post(
         assert net_fixtures.wait_for(
             lambda: restarted._link_for(mesh.owner) is not None, timeout_s=20.0
         ), "the node came back but no link settled"
+        # BOTH ENDS, because the claim below runs on the OWNER and asks over the
+        # owner's own link table. The node is the dialler here, and the listener
+        # sends ``welcome`` BEFORE ``register_link`` admits its end
+        # (``RelayServer._run_inbound_handshake``), so the node holds a live link
+        # while the owner's table is still empty. A claim in that window finds no link, dials
+        # the node's PRE-RESTART port (the new one is noted only after admission),
+        # is refused in ~1 ms and records ``no_answer`` -> ``awaiting_handback`` —
+        # an honest answer for a node it cannot reach, and the CI flake this wait
+        # removes (three natural sightings; reproduced 10/10 with a 0.5 s delay
+        # injected before the owner's ``register_link``).
+        node = mesh.b.identity.device_id
+        assert net_fixtures.wait_for(
+            lambda: mesh.a._link_for(node) is not None, timeout_s=20.0
+        ), "the node's end of the link settled, but the owner never admitted its end"
         # The waiting state clears only on an answered claim: force one now.
         broker = __import__(
             "local_operator.network.credentials.owner", fromlist=["broker_for_relay"]

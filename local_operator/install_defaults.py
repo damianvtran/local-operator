@@ -31,6 +31,16 @@ from __future__ import annotations
 #: still reading from.
 DEFAULT_KEEP_GENERATIONS = 2
 
+#: Whether a successful update prunes old generations on its own (the
+#: ``update.auto_prune`` setting; ``update.keep_generations`` reuses
+#: :data:`DEFAULT_KEEP_GENERATIONS` as its default). ON by default since
+#: 2026-11-16: with automatic collection frozen nothing reclaimed disk unless
+#: someone ran ``lop install prune``, and one fleet node had accumulated 113
+#: generations (~8.6 GB) by the time anyone did. The pass is the SAME guarded
+#: :func:`local_operator.update.prune_generations` the command runs, so turning
+#: it on changes when the policy runs, never what it may delete.
+DEFAULT_AUTO_PRUNE_GENERATIONS = True
+
 #: The install layout's one stable directory, HOME-RELATIVE and without the
 #: ``~``. Two readers need it and they must not drift:
 #:

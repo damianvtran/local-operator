@@ -261,6 +261,60 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The receiver's runtime record (which build is running): a config-dir
+    # sidecar published by atomic replace, the same pattern as the counter above.
+    # Every ``_write`` caller passes ``record_path(config_dir)`` =
+    # ``<config_dir>/team_bridge/connector_runtime.json``; its temp sibling is
+    # that fixed name plus ``.{pid}.tmp``. No caller input reaches either path,
+    # so neither can be a session directory or a transcript.
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ runtime record",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::_write",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the record; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/runtime_record.py::clear_own_record",
+        "<path>.unlink",
+        "Removes the fixed team_bridge/connector_runtime.json FILE on exit; never a session path",
+    ),
+    # The receiver's jam report and the stale-restart kick marker (PR #4174):
+    # disposable config-dir sidecars beside the runtime record, same pattern.
+    # ``JamTracker._path`` is ``jam_path(config_dir)`` =
+    # ``<config_dir>/team_bridge/connector-jam.json``; ``_write_marker`` writes
+    # ``marker_path(config_dir)`` = ``<config_dir>/team_bridge/connector-restart.json``.
+    # Each temp sibling is that fixed name plus ``.{pid}.tmp``. Every literal
+    # component is a module constant and no caller input reaches either path,
+    # so none can be a session directory or a transcript.
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._clear",
+        "<path>.unlink",
+        "Removes the fixed team_bridge/connector-jam.json FILE on recovery; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ jam report",
+    ),
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the jam report; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ restart marker",
+    ),
+    (
+        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the restart marker; never sessions/",
+    ),
     # The reply guard's per-install digest key (#3377, review round 1 S-3) is
     # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
     # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
@@ -4701,6 +4755,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Deletes only a marked eval fixture with both owned directories; protected "
         "operator/session roots are refused before removal",
+    ),
+    # Heavy-job lease holder records. The only production directory is
+    # `heavy_lease.lease_dir()` (`<config_dir>/run/heavy-jobs`, passed by
+    # tools/builtin.py and services.py); try_acquire builds the record path as
+    # `directory / f"slot-{slot}.json"` with an integer slot, and _write_record's
+    # temp is that name plus `.<pid>.<id>.tmp`. No session id enters either path.
+    (
+        "local_operator/heavy_lease.py::Lease.release",
+        "<path>.unlink",
+        "Removes only this lease's run/heavy-jobs/slot-<int>.json holder record FILE; "
+        "the path never carries a session id, and unlink rejects directories.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "os.replace",
+        "Publishes the run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp regular file over "
+        "slot-<int>.json; os.replace rejects a directory target.",
+    ),
+    (
+        "local_operator/heavy_lease.py::_write_record",
+        "<path>.unlink",
+        "Removes only this call's failed run/heavy-jobs/slot-<int>.json.<pid>.<id>.tmp "
+        "temp FILE; unlink rejects directories.",
     ),
 )
 

@@ -762,7 +762,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 156 public members and a POSITIVE
+    than stylistic. This protocol carries 157 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -859,7 +859,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     still reads them through ``getattr``, so a rename there degrades silently to
     the slow on-loop path, and what catches it is the census test in
     ``test_viewer_protocol.py``, which reads those ``getattr`` literals and fails
-    on a probe of an undeclared name — not the declaration alone), so
+    on a probe of an undeclared name — not the declaration alone), 157 once
+    the desktop answer route needed ``ask_consent_bearing`` — it reads, through
+    the same ``bridge.remote`` binding as ``ask_respond``, whether the answer
+    just sent carried operator proof, and only the facade sends it), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -1437,8 +1440,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    async def bind_runtime(self) -> None:
+    async def bind_runtime(self, *, deadline: float | None = None) -> None:
         """Bind this viewer before an explicitly requested runtime operation.
+
+        ``deadline`` is the caller's absolute monotonic bound. Omission keeps
+        the short foreground envelope; the pilot supplies its existing budget.
 
         Declared because the desktop ROUTES call it as a HARD access on every
         path that mutates runtime state (``desktop_lifecycle.py`` /mcp,
@@ -1546,6 +1552,15 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Declared here because ``server/routes/desktop_sessions.py`` reaches it
         through a duck-typed ``bridge.remote`` binding, where a rename would be
         a 500 on the phone portal rather than a pyright error.
+        """
+        ...
+
+    def ask_consent_bearing(self) -> bool:
+        """Whether the last ask answer this facade sent carried operator proof.
+
+        Declared because the desktop answer route reads it through the same
+        duck-typed ``bridge.remote`` binding as :meth:`ask_respond`; viewer-only
+        since only the facade sends the answer frame it reports on.
         """
         ...
 

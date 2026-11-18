@@ -1,0 +1,77 @@
+fr wire.github.failure_unknown: échec de la récupération de la liste des dépôts GitHub
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: REASON; REMEDY
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: REASON; REMEDY
+ru wire.github.ttl: в течение 5 мин
+ru wire.github.opt_out_step: исключить репозиторий: lop network credential github exclude <owner/repo> — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин
+ru wire.github.ttl: в течение 5 мин
+ru wire.github.exclude_added: octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин
+ru wire.github.ttl: в течение 5 мин
+ru wire.github.include_added: octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, в течение 5 мин
+ru wire.github.wrapper_denied: octo-org/website отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.
+ru wire.settings.network_credentials_github_repositories.help: Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.
+ur wire.github.wrapper_denied: octo-org/website، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔
+es wire.github.failure_unknown_login: se desconoce la cuenta de la lista de GitHub guardada
+es wire.github.reason_explicit: el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones
+es wire.github.remedy_explicit: añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos --use-default
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones; añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos --use-default
+es wire.github.failure_unknown_login: se desconoce la cuenta de la lista de GitHub guardada
+es wire.github.reason_unavailable_local: no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo
+es wire.github.remedy_unavailable: vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh
+es wire.github.failure_unknown_login: se desconoce la cuenta de la lista de GitHub guardada
+es wire.github.reason_unavailable_remote: no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo
+es wire.github.remedy_unavailable: vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh
+es wire.github.failure_unknown_login: se desconoce la cuenta de la lista de GitHub guardada
+es wire.github.reason_excluded_local: todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (3) están excluidos
+es wire.github.remedy_excluded: vuelve a incluir uno con lop network credential github include octo-org/website
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (3) están excluidos; vuelve a incluir uno con lop network credential github include octo-org/website
+es wire.github.failure_unknown_login: se desconoce la cuenta de la lista de GitHub guardada
+es wire.github.reason_excluded_remote: todos los repositorios a los que su cuenta de GitHub puede hacer push (3) están excluidos
+es wire.github.remedy_excluded: vuelve a incluir uno con lop network credential github include octo-org/website
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que su cuenta de GitHub puede hacer push (3) están excluidos; vuelve a incluir uno con lop network credential github include octo-org/website
+es wire.github.failure_unknown_login: se desconoce la cuenta de la lista de GitHub guardada
+es wire.github.reason_no_repos_local: la cuenta de GitHub de este dispositivo no puede hacer push a ningún repositorio
+es wire.github.remedy_no_repos: concede a esa cuenta de GitHub permiso de push en un repositorio
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: la cuenta de GitHub de este dispositivo no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio
+es wire.github.failure_unknown_login: se desconoce la cuenta de la lista de GitHub guardada
+es wire.github.reason_no_repos_remote: su cuenta de GitHub no puede hacer push a ningún repositorio
+es wire.github.remedy_no_repos: concede a esa cuenta de GitHub permiso de push en un repositorio
+es wire.github.share_empty: Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: su cuenta de GitHub no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio
+ru wire.github.failure_unknown_login: учётная запись сохранённого списка GitHub неизвестна
+ru wire.github.reason_explicit: в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев
+ru wire.github.remedy_explicit: добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев; добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default
+ru wire.github.failure_unknown_login: учётная запись сохранённого списка GitHub неизвестна
+ru wire.github.reason_unavailable_local: не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены
+ru wire.github.remedy_unavailable: повторите, когда GitHub станет доступен: lop network credential github repos --refresh
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh
+ru wire.github.failure_unknown_login: учётная запись сохранённого списка GitHub неизвестна
+ru wire.github.reason_unavailable_remote: не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены
+ru wire.github.remedy_unavailable: повторите, когда GitHub станет доступен: lop network credential github repos --refresh
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh
+ru wire.github.failure_unknown_login: учётная запись сохранённого списка GitHub неизвестна
+ru wire.github.reason_excluded_local: все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены
+ru wire.github.remedy_excluded: верните один из репозиториев командой lop network credential github include octo-org/website
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены; верните один из репозиториев командой lop network credential github include octo-org/website
+ru wire.github.failure_unknown_login: учётная запись сохранённого списка GitHub неизвестна
+ru wire.github.reason_excluded_remote: все репозитории, в которые его учётная запись GitHub может выполнять push (3), исключены
+ru wire.github.remedy_excluded: верните один из репозиториев командой lop network credential github include octo-org/website
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые его учётная запись GitHub может выполнять push (3), исключены; верните один из репозиториев командой lop network credential github include octo-org/website
+ru wire.github.failure_unknown_login: учётная запись сохранённого списка GitHub неизвестна
+ru wire.github.reason_no_repos_local: учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий
+ru wire.github.remedy_no_repos: предоставьте этой учётной записи GitHub право выполнять push в репозиторий
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий
+ru wire.github.failure_unknown_login: учётная запись сохранённого списка GitHub неизвестна
+ru wire.github.reason_no_repos_remote: его учётная запись GitHub не может выполнять push ни в один репозиторий
+ru wire.github.remedy_no_repos: предоставьте этой учётной записи GitHub право выполнять push в репозиторий
+ru wire.github.share_empty: Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: его учётная запись GitHub не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий
+fr wire.github.failure_unknown: échec de la récupération de la liste des dépôts GitHub
+fr wire.github.age_days: il y a 2 jours
+fr wire.github.source_last_good: la liste récupérée il y a 2 jours — impossible de lister les dépôts GitHub à l’instant (échec de la récupération de la liste des dépôts GitHub) ; elle peut donc être périmée
+fr wire.github.reason_unavailable_remote: la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (échec de la récupération de la liste des dépôts GitHub), sans liste antérieure de secours
+fr wire.github.remedy_unavailable: réessayez quand GitHub est joignable : lop network credential github repos --refresh
+fr wire.github.refusal_detail: la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (échec de la récupération de la liste des dépôts GitHub), sans liste antérieure de secours — réessayez quand GitHub est joignable : lop network credential github repos --refresh
+fr wire.github.borrower_unset: owner-device-7 n’a aucun dépôt GitHub dont il puisse prêter l’accès : la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (échec de la récupération de la liste des dépôts GitHub), sans liste antérieure de secours — réessayez quand GitHub est joignable : lop network credential github repos --refresh. Corrigez cela sur owner-device-7 ; aucun accès n’a été prêté.
+ur wire.github.wrapper_denied: synthetic-owner-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/synthetic-repository-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos --refresh جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔
+ru wire.github.wrapper_denied: synthetic-owner-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/synthetic-repository-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos --refresh на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.

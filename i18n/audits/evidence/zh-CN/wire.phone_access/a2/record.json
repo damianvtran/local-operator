@@ -1,0 +1,77 @@
+{
+ "schema": 1,
+ "audit_id": "a2",
+ "audit_kind": "independent_translation_audit",
+ "locale": "zh-CN",
+ "namespace": "wire.phone_access",
+ "round": 2,
+ "audit_date": "2026-11-17",
+ "key_count": 10,
+ "keys_audited": 10,
+ "keys_new_in_scope": 6,
+ "new_keys": [
+  "wire.phone_access.away_after.label",
+  "wire.phone_access.away_after.help",
+  "wire.phone_access.away_after.choice.1m.label",
+  "wire.phone_access.away_after.choice.2m.label",
+  "wire.phone_access.away_after.choice.5m.label",
+  "wire.phone_access.away_after.choice.10m.label"
+ ],
+ "source_audit_revision": "0e4ad0a9171c59d7833d222761cbaa1f6d09bf51",
+ "scope": "origin/main...0e4ad0a9 (merge base c8738d240dcd)",
+ "prior_audits_on_disk": [
+  "a1"
+ ],
+ "pr": "https://github.com/damianvtran/local-operator/pull/4145",
+ "translator": {
+  "agent": "coder subagent of team lopdev that authored commit 9134015c (draft values and English source in the same commit); session id not disclosed in the brief or PR #4145",
+  "model": null,
+  "date": "2026-11-16"
+ },
+ "auditor": {
+  "agent": "i18n-auditor role, independent `task` subagent of team lopdev, Local Operator session 43bcb19f888e; not the translator (the coder that authored 9134015c with the draft values) nor the English-drafting coder; did not edit any catalogue value",
+  "session": "43bcb19f888e",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 43bcb19f888e (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.phone_access.json",
+   "sha256": "1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/wire.phone_access.context.json",
+   "sha256": "95c0c4b8d5f82cef978c751326ba6c214c1c8bf8152717f608eaeee943071c07"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/zh-CN/wire.phone_access.json",
+   "sha256": "f068d44a3df4b85a0d34beff18badbc23b2d1fdd545a9e1d99c909f698e42738"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/zh-CN.md",
+   "sha256": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  }
+ },
+ "artifacts": {
+  "report.md": "fc0a39bcd3e43e3e8620b31d20c20295cad66d67b9192985c415f77c280d5b09",
+  "audit.log": "923e37b71d4ca344fdbfaf4dd261be33a2763b8ac2c3e26ae68aa6f63b73df1d"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse, sha256sum, check.py --catalogues-only, ledger.py history-sha, mech.py). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "ZH-M1",
+   "ZH-N2"
+  ],
+  "finding_severities": {
+   "ZH-M1": "minor",
+   "ZH-N2": "nit"
+  }
+ }
+}

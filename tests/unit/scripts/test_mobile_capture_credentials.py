@@ -30,6 +30,7 @@ PASSWORD_SOURCES = (
     "mobile_delegating_shot.py",
     "mobile_overflow_fixture.py",
     "mobile_overflow_capture.py",
+    "mobile_reading_fixture.py",
     "mobile_reachability_check.py",
     # The open-by-default rig: the capture MINTS the per-run value and hands it to the
     # fixture through the environment, the fixture resolves it with the shared refusing

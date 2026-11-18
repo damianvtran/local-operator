@@ -95,6 +95,12 @@ def layout(home: Path) -> Iterator[Path]:
     Function-scoped on purpose: the suite's autouse ``isolate_environment``
     repoints HOME per test, so a module-scoped state root would be read from
     the wrong HOME and every owner rank would silently lose its ledger rows.
+
+    OWNER is modelled as a LIVE session: with nobody running, #4098's
+    finished-work rule (ask a-798d) rightly ranks an unrelated session's
+    ``rm -rf ~/work`` LOW because its creator has ended, an ownership
+    relaxation this property never meant to forbid. A running creator keeps
+    that route closed, so the comparison isolates the cwd model again.
     """
     from local_operator.session.runtime import registry
 
@@ -106,12 +112,16 @@ def layout(home: Path) -> Iterator[Path]:
         mp.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
         mp.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
         mp.setenv("GIT_TERMINAL_PROMPT", "0")
-        # Synthetic process/forge facts: nobody running, no forge reachable.
-        mp.setattr(prov, "_live_cwd_inside", lambda _: False)
+        # Synthetic process/forge facts: only OWNER running (its cwd outside the
+        # layout, an unused pid, so it holds no tree), no forge reachable.
+        owner_rec = types.SimpleNamespace(
+            session_id=OWNER, pid=2**31 - 1, cwd=str(home.parent / "owner-cwd")
+        )
+        mp.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
         mp.setattr(prov, "_cwd_inventory_cache", None)
         mp.setattr(prov, "_github_repo", lambda _: None)
         mp.setattr(prov, "_gitlab_repo", lambda _: None)
-        mp.setattr(registry, "scan", lambda *a, **k: [])
+        mp.setattr(registry, "scan", lambda *a, **k: [(owner_rec, "live")])
         command = "mkdir -p " + " ".join(LAYOUT)
         pending = prov.plan_creations(command, cwd=str(home), env=_env(home))
         subprocess.run(["bash", "-c", command], cwd=home, check=True)

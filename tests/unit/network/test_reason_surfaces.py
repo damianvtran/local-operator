@@ -55,6 +55,13 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # These f-strings use this device's HeavyClass.reason command label
+    # (long-lived-command and acquired notices) and memory_budget.reason
+    # (why the local cap is off). Neither value comes from a mesh peer.
+    ("local_operator/tools/builtin.py", "_acquire_heavy_lease", "reason"): (
+        3,
+        "local heavy-command labels and memory-cap explanation, not mesh peer codes",
+    ),
     # Backfill parses this device's stored invite receipt to recover the minted
     # id; the coerced detail is regex input, never a rendered peer refusal.
     ("local_operator/network/operator_binding.py", "_invite_ids", "detail"): (
@@ -66,16 +73,6 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/operator_binding.py", "_log_backfill", "reason"): (
         1,
         "backfill outcome cache key used only to deduplicate developer log lines",
-    ),
-    # This is a bound formatter CALL, not a read of a peer's reason field.
-    # Designation.reason() authors the empty-list clause locally (explicit list,
-    # unavailable enumeration, all opted out, or no push access); refusal() adds
-    # its remedy. The output is already words, like approval_copy below, and a
-    # transport-reason gloss would misinterpret that prose. Keep the exact site
-    # and count: another reason read still needs its own audit.
-    ("local_operator/network/credentials/github.py", "Designation.refusal", "reason"): (
-        1,
-        "Designation.reason() is the local human-prose formatter, not a raw mesh reason token",
     ),
     # A failed credential card's "Why it stopped" line (UX review #3002 r1, U1). The value
     # is ``approval_copy.reason_for(code)`` -- this project's own sentence for a refusal code,
@@ -254,6 +251,39 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/update.py", "_publish_team_runtime", "reason"): (
         3,
         "log-only (debug/warning); local procname codes, glossed by _TEAM_SKIP_REASONS",
+    ),
+    # The background-daemon parity reasons (PR #4175, "update: bring background
+    # daemons onto the new build"). Every value is THIS device's own sentence about
+    # its own processes, authored in two places and nowhere else: the recovery
+    # prose in ``services._DAEMON_MODULES`` (``run `lop browser restart```, ...) or
+    # ``services._wakes_left_reason`` / ``update.wake_children_deferral`` (the
+    # live wake-children census), plus the refresh steps' own ``DaemonStatus.reason``
+    # ("move pending, retrying in the background"). No peer writes any of them and
+    # none arrives over a relay; they are declared, not glossed, because the
+    # transport glosses would cut the recovery command at its colon or replace the
+    # command the operator has to run with a generic "it did not answer". Same
+    # class as the prune vocabulary above. ``services.py`` and ``update.py`` are in
+    # this scan only because they name ``local_operator.network`` (services: the
+    # relay import and its module in the daemon inventory; update: the relay roll).
+    #   * ``stale_daemon_lines`` — the ``STALE daemon:`` row ``lop services status``
+    #     and the update report print, ending in the daemon's recovery sentence.
+    #   * ``_reconcile_with_processes`` — that same sentence folded into the
+    #     supervised row's reason when ``ps`` proves the process still runs an old
+    #     generation, so the report's row and the status row say one thing.
+    #   * ``_rolling_receipt`` — the pending daemon's reason inside
+    #     ``central_services_incomplete_reason``, the receipt's own account of why
+    #     the run is not complete.
+    ("local_operator/services.py", "stale_daemon_lines", "reason"): (
+        1,
+        "this device's own daemon recovery sentence (services._DAEMON_MODULES / wakes census)",
+    ),
+    ("local_operator/update.py", "_reconcile_with_processes", "reason"): (
+        1,
+        "the same local recovery sentence, folded into the supervised daemon's row",
+    ),
+    ("local_operator/update.py", "_rolling_receipt", "reason"): (
+        1,
+        "a local DaemonStatus.reason, quoted in central_services_incomplete_reason",
     ),
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.

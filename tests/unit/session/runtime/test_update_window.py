@@ -451,7 +451,12 @@ async def test_a_legacy_spooled_row_replays_exactly_as_today(tmp_path: Path) -> 
     user_rows = _history_user_rows(session)
     assert [row.text for row in user_rows] == [continuation]
     unstamped = user_rows[-1].provider_payload or {}
-    assert not unstamped, "a legacy row must replay unstamped — exactly the old reading"
+    # ADR 0009's surface stamp is not the harness marker: a legacy line (no
+    # surface recorded) replays as ``unknown``, which routes as non-mobile.
+    assert (
+        "harness_injected" not in unstamped
+    ), "a legacy row must replay unstamped — exactly the old reading"
+    assert unstamped.get("lop_input_surface") == "unknown"
 
 
 @pytest.mark.asyncio
@@ -472,7 +477,11 @@ async def test_an_ordinary_spooled_prompt_replays_unstamped(tmp_path: Path) -> N
     user_rows = _history_user_rows(session)
     assert [row.text for row in user_rows] == ["summarise the build staleness fix"]
     unstamped = user_rows[-1].provider_payload or {}
-    assert not unstamped, "an ordinary prompt must never carry the chrome stamp"
+    assert (
+        "harness_injected" not in unstamped
+    ), "an ordinary prompt must never carry the chrome stamp"
+    # ADR 0009: the in-process owner's line keeps its surface across the spool.
+    assert unstamped.get("lop_input_surface") == "tui"
 
 
 @pytest.mark.asyncio

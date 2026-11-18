@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+from typing import Awaitable, TypeVar
 
 import pytest
 
@@ -29,6 +30,8 @@ from local_operator import buildwatch
 from local_operator import update as update_mod
 from local_operator.session.runtime import process
 from local_operator.update import BuildStamp
+
+_R = TypeVar("_R")
 
 BOOT = BuildStamp(version="0.51.0", source_ref="abc1234567890")
 NEW = BuildStamp(version="0.52.0", source_ref="def1234567890")
@@ -430,3 +433,189 @@ def test_the_no_kill_pin_ignores_a_string_that_is_not_a_name() -> None:
     assert _kill_shaped_sites('getattr(obj, "terminate_on_idle")\n') == []
     # ...and a one-argument ``getattr`` must not be an index error inside the pin.
     assert _kill_shaped_sites("getattr(obj)\n") == []
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_disk_read_neither_blocks_the_reaper_loop_nor_refreshes(
+    moved: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reaper's build check reads the disk OFF the loop (2026-11-17: a 145 s
+    on-loop metadata read wedged a ``serve`` loop; the runtime's check is the same
+    read). While it is stuck nothing is judged — no refresh, no decline — and
+    once it answers, the settled move is acted on as before."""
+    import threading
+
+    gate = threading.Event()
+
+    def stuck(*_a: object, **_k: object) -> BuildStamp:
+        gate.wait(10.0)
+        return NEW
+
+    refreshed: list[BuildStamp] = []
+
+    async def recording_refresh(newer, _handle, _runtime, stop, **_kw):  # noqa: ANN001
+        # ``**_kw``: the reaper now hands its own reader in (``read=``).
+        refreshed.append(newer)
+        stop.set()
+        return True
+
+    monkeypatch.setattr(update_mod, "disk_build", stuck)
+    monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(process, "REAP_CHECK_S", 0.01)
+    monkeypatch.setattr(process, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(process, "_should_exit", lambda *_a: False)
+    monkeypatch.setattr(process, "_refresh_for", recording_refresh)
+    handle, runtime, stop = IdleHandle(), IdleRuntime(), asyncio.Event()
+    reaper = asyncio.ensure_future(process._reaper(handle, runtime, stop))
+    try:
+        # The longest wakeup gap, not a tick count (R3-1): see ``_loop_ticks_while``.
+        # An on-loop read would hold the loop for the gate's ~10 s.
+        max_gap, _elapsed, _ = await _loop_ticks_while(asyncio.sleep(0.3))
+        assert max_gap < 2.0, f"the loop went dark for {max_gap:.3f}s while the read was stuck"
+        assert refreshed == [], "an unanswered read is not a build to refresh onto"
+        assert not reaper.done()
+        gate.set()
+        assert await asyncio.wait_for(reaper, 2.0) is True
+    finally:
+        gate.set()
+        stop.set()
+    assert refreshed == [NEW]
+
+
+async def _loop_ticks_while(work: "Awaitable[_R]") -> "tuple[float, float, _R]":
+    """Await ``work`` while a sibling coroutine measures how long the loop went dark.
+
+    Returns ``(max_gap, elapsed, result)``: the largest gap between the sibling's
+    wakeups (including the last one to ``work`` completing) and the wall time of
+    ``work``.
+
+    Why latency and not a tick count (review round 2, R2-1): a count of 5 ms ticks
+    inside a ~50 ms read bound is load-sensitive -- at Mac load ~80 ``sleep(0.005)``
+    overshoots and the count fell to 2 on a correct build. The discriminator does
+    not need a count: the stuck read blocks on ``gate.wait(10.0)`` and the gate is
+    released only after ``work`` returns, so a read run ON the loop freezes every
+    coroutine for ~10 s (one gap of ~10 s), while a read run off it leaves only
+    scheduler jitter. ``max_gap < 2.0`` sits far from both.
+    """
+    loop = asyncio.get_running_loop()
+    last = loop.time()
+    max_gap = 0.0
+
+    async def tick() -> None:
+        nonlocal last, max_gap
+        while True:
+            await asyncio.sleep(0.005)
+            now = loop.time()
+            max_gap = max(max_gap, now - last)
+            last = now
+
+    ticker = asyncio.ensure_future(tick())
+    started = loop.time()
+    try:
+        result = await asyncio.wait_for(work, 5.0)
+    finally:
+        ticker.cancel()
+    done = loop.time()
+    # The final gap counts too: an on-loop read that blocks to the end would
+    # otherwise leave the ticker no wakeup to record it.
+    max_gap = max(max_gap, done - last)
+    return max_gap, done - started, result
+
+
+class _StuckDisk:
+    """``update.disk_build`` that answers ``answered`` times, then blocks on a gate.
+
+    The 2026-11-17 stall (an ``importlib.metadata`` read wedged for 145 s) as a
+    function: the gate stands in for the swapped-out page, and the test releases it
+    in ``finally`` so the abandoned thread ends with the test.
+    """
+
+    def __init__(self, *, answered: int = 0) -> None:
+        import threading
+
+        self.gate = threading.Event()
+        self.calls = 0
+        self._answered = answered
+
+    def __call__(self, *_a: object, **_k: object) -> BuildStamp:
+        self.calls += 1
+        if self.calls > self._answered:
+            self.gate.wait(10.0)
+        return NEW
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_re_check_after_the_stagger_keeps_without_blocking_the_loop(
+    moved: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, M1: ``_refresh_for`` re-reads the disk after its stagger.
+
+    That re-check used to be the sync ``_should_refresh`` on the loop, so the first
+    read moving off the loop only moved the stall one await later. Now it goes
+    through the reader: the loop keeps ticking, and an unanswered re-check KEEPS —
+    no latch, no announcement, no exit (a refresh can always wait a check).
+    """
+    disk = _StuckDisk()
+    monkeypatch.setattr(update_mod, "disk_build", disk)
+    monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+    exits: list[str] = []
+
+    async def recording_exit(
+        _handle: object, _runtime: object, *, reason: str, detail: str = ""
+    ) -> None:
+        exits.append(reason)
+
+    monkeypatch.setattr(process, "_clean_exit", recording_exit)
+    handle, runtime, stop = IdleHandle(), IdleRuntime(), asyncio.Event()
+    try:
+        max_gap, elapsed, retired = await _loop_ticks_while(
+            process._refresh_for(NEW, handle, runtime, stop)
+        )
+    finally:
+        disk.gate.set()
+    assert max_gap < 2.0, f"the loop went dark for {max_gap:.2f}s while the re-check was stuck"
+    assert elapsed < 5.0, f"the stuck re-check held the refresh for {elapsed:.2f}s"
+    assert retired is False, "an unanswered re-check is not a build to leave for"
+    assert disk.calls == 1, "the re-check read the disk once"
+    assert handle.latched == [] and runtime.announced == [] and exits == []
+    assert not stop.is_set()
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_re_check_on_a_latchless_handle_keeps_without_blocking_the_loop(
+    moved: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same M1 site's second half: a handle without ``begin_retire`` re-checks
+    after the announce instead of latching. The first re-check answers (so the
+    announce happens), the second sticks: the runtime keeps, and the loop ran."""
+
+    class LatchlessHandle:
+        def may_refresh(self) -> str:
+            return ""
+
+        def request_stop(self) -> None:
+            raise AssertionError("the build watch must never signal anyone")
+
+    disk = _StuckDisk(answered=1)
+    monkeypatch.setattr(update_mod, "disk_build", disk)
+    monkeypatch.setattr(buildwatch, "BUILD_READ_TIMEOUT_S", 0.05)
+    exits: list[str] = []
+
+    async def recording_exit(
+        _handle: object, _runtime: object, *, reason: str, detail: str = ""
+    ) -> None:
+        exits.append(reason)
+
+    monkeypatch.setattr(process, "_clean_exit", recording_exit)
+    runtime, stop = IdleRuntime(), asyncio.Event()
+    try:
+        max_gap, elapsed, retired = await _loop_ticks_while(
+            process._refresh_for(NEW, LatchlessHandle(), runtime, stop)
+        )
+    finally:
+        disk.gate.set()
+    assert max_gap < 2.0, f"the loop went dark for {max_gap:.2f}s while the re-check was stuck"
+    assert elapsed < 5.0, f"the stuck re-check held the refresh for {elapsed:.2f}s"
+    assert retired is False and exits == [] and not stop.is_set()
+    assert runtime.announced == [("stale-build", NEW.label())], "the first re-check answered"
+    assert disk.calls == 2, "the post-announce re-check is the one that stuck"

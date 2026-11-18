@@ -171,6 +171,19 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "tui/app.py and session/runtime/serving.py; the desktop setup route sends "
         "server-rendered text under a machine outcome code, never a catalogue key"
     ),
+    # Deferred rather than raising the eager total ceiling (PR #4052): the new
+    # GitHub repository-sharing copy pushed hi to 81,230 B, past
+    # EAGER_TOTAL_MAX_BYTES, yet no client resolves one of its keys. Every
+    # producer binds `_github_text = tr("wire.github")` and hands on a FINISHED
+    # sentence: CLI lines and MeshRefusal text (network/cli.py), readiness rows
+    # (network/readiness.py), borrower refusal text (credentials/messages.py),
+    # and the owner's refusal detail / git-helper stderr notice (github.py).
+    "wire.github": (
+        "GitHub repository-sharing copy rendered in-process through "
+        'tr("wire.github") by network/cli.py, network/readiness.py, '
+        "network/credentials/messages.py and network/credentials/github.py; "
+        "the wire and stderr carry finished text, never a catalogue key"
+    ),
 }
 
 

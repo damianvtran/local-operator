@@ -22,6 +22,7 @@ the phone joins all three into one compacted line.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -472,3 +473,59 @@ def bridge_expanded(
 def details_label() -> str:
     """The section heading above :func:`bridge_expanded`'s internals."""
     return _t(_k.expanded_details())
+
+
+#: Display caps match the phone client's own receipt caption (sender 240,
+#: conversation 120), so the fold's text never reads longer than the caption.
+_RECEIPT_SENDER_CHARS = 240
+_RECEIPT_LABEL_CHARS = 120
+
+
+def _display_label(value: object, limit: int) -> str:
+    """A member-written name made safe for one line of human text.
+
+    ``validated_display_receipt`` already refuses C0/C1 controls; this also drops
+    the format characters (bidi overrides and isolates, zero-width marks) and
+    the Unicode line/paragraph separators it admits, which could reorder or
+    split the line. Stricter than the client's own filter by design.
+    """
+    if not isinstance(value, str):
+        return ""
+    kept = "".join(c for c in value if unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp"))
+    return " ".join(kept.split())[:limit]
+
+
+def bridge_delivery_receipt_line(details: Mapping[str, Any] | None) -> str:
+    """The ONE human line for an inbound Team Bridge delivery.
+
+    ``<sender> · <conversation>[ · 📎N]``, built only from the validated display
+    receipt (names and a count, never ids, the model envelope or the card). The
+    live and history folds both call this, so the two cannot disagree. A row
+    with no valid receipt gets the keyed generic sender, not its card text.
+    """
+    # Local import: ``team_bridge`` pulls in a wider graph than this module's callers.
+    from local_operator.team_bridge.display_receipt import projected_display_receipt
+
+    receipt = projected_display_receipt(dict(details or {})).get("bridge_receipt")
+    if not isinstance(receipt, Mapping):
+        return _t(_k.target_person())
+    sender = receipt.get("sender")
+    sender = sender if isinstance(sender, Mapping) else {}
+    conversation = receipt.get("conversation")
+    conversation = conversation if isinstance(conversation, Mapping) else {}
+    parts = [_display_label(sender.get("name"), _RECEIPT_SENDER_CHARS) or _t(_k.target_person())]
+    kind = conversation.get("kind")
+    label = _display_label(conversation.get("label"), _RECEIPT_LABEL_CHARS)
+    if kind == "channel" and label:
+        parts.append(label if label.startswith("#") else f"#{label}")
+    elif label:
+        parts.append(label)
+    elif kind == "dm":
+        parts.append(_t(_k.target_dm()))
+    elif kind in ("channel", "group"):
+        parts.append(_t(_k.target_conversation()))
+    count = receipt.get("attachment_count")
+    if isinstance(count, int) and count > 0:
+        # A symbol and a number: no word to translate.
+        parts.append(f"\N{PAPERCLIP}{count}")
+    return " · ".join(parts)

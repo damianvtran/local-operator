@@ -209,6 +209,146 @@ def _woke_nobody(root: Path) -> dict[str, int]:
         return {}
 
 
+def _running_receiver(root: Path) -> dict[str, Any] | None:
+    """The receiver's own record of the build it is running (``runtime_record``).
+
+    WHY: remote rollout confirmation. The service state above says whether the
+    service manager holds a receiver; only the process itself can say WHICH
+    code it loaded, and a launchd/systemd receiver keeps the build it was
+    exec'd from across every ``lop`` update until it restarts.
+    """
+
+    from local_operator.team_bridge.connector.runtime_record import running_receiver
+
+    try:
+        return running_receiver(root)
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return None
+
+
+def _jam(root: Path) -> dict[str, Any] | None:
+    """The live receiver's persistence jam (``connector.jam``), or ``None``."""
+
+    from local_operator.team_bridge.connector.jam import read_jam
+
+    try:
+        return read_jam(root)
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return None
+
+
+def _supervised_receiver(state: str) -> tuple[bool, int | None]:
+    """``(held, pid)``: whether a receiver PROCESS runs under the service manager.
+
+    WHY (review round 2 M2): ``connector_state`` answers ``loaded`` from three
+    supervisors that mean different things by it. systemd ``active`` and Task
+    Scheduler ``running`` already mean a running process. launchd ``loaded``
+    means only that the label is REGISTERED (``install._registered``), which is
+    also true through the up-to-60 s ``ThrottleInterval`` after any exit and
+    throughout a crash loop — states where no receiver exists and the exited
+    record's ``has exited`` line is the truthful one. So on launchd ``held``
+    needs a live pid behind the label, read through the guarded
+    ``launchd.job_pid`` (refuses a redirected home, never raises); that pid is
+    returned so the verdict can tell a different, unrecorded receiver from the
+    recorded one. Elsewhere the pid is ``None`` (the supervisors there do not
+    hand one over cheaply, and ``held`` already implies a process).
+    """
+
+    from local_operator import supervisors
+    from local_operator.team_bridge.connector import install
+
+    if state != install.STATE_LOADED:
+        return False, None
+    if supervisors.supervisor() != supervisors.LAUNCHCTL:
+        return True, None
+    try:
+        from local_operator import launchd
+        from local_operator.procstate import pid_liveness
+
+        pid = launchd.job_pid(
+            label=install.LABEL, path=install.plist_path(), run=install._launchctl
+        )
+        if pid is not None and pid_liveness(pid) is True:
+            return True, pid
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return False, None
+    return False, None
+
+
+def _restart_verdict(
+    running: dict[str, Any] | None, *, held: bool, held_pid: int | None = None
+) -> tuple[bool | None, str | None]:
+    """``(restart_needed, restart_reason)`` for the whole status, human and JSON alike.
+
+    ``held``/``held_pid`` come from :func:`_supervised_receiver`, never from the
+    bare service state (review round 2 M2: a registered launchd label is not a
+    running receiver).
+
+    ``no_record`` (review M1/C2): a receiver process runs under the service
+    manager, yet no live receiver has recorded itself. Every receiver started
+    by a version older than ``runtime_record`` is exactly that — the teammate's 0.102.4
+    launchd receiver this feature exists for — and so is one that replaced a
+    record's (now exited) pid without writing its own. Only a restart onto the
+    installed code makes it record, so that IS the verdict, not "none".
+    Otherwise the record's own verdict stands (``version_mismatch`` /
+    ``replaced_build``, ``None`` when liveness could not be proven).
+    """
+
+    # A dead record naming the SAME pid launchd holds is a contradiction, not
+    # an unrecorded receiver; keep the record's own ``has exited`` reading.
+    if held and (running is None or (running["alive"] is False and running["pid"] != held_pid)):
+        return True, "no_record"
+    if running is None:
+        return False, None
+    return running["restart_needed"], running["restart_reason"]
+
+
+def _running_lines(
+    running: dict[str, Any] | None, *, held: bool, held_pid: int | None = None
+) -> list[Any]:
+    """The human lines for :func:`_running_receiver`; versions/pids verbatim."""
+
+    restart_needed, reason = _restart_verdict(running, held=held, held_pid=held_pid)
+    if reason == "no_record":
+        return [_k.status_running_unrecorded()]
+    if running is None:
+        return [_k.status_running_none()]
+    version = running["version"] or "—"
+    if running["alive"] is False:
+        return [_k.status_running_exited(pid=str(running["pid"]), version=version)]
+    started_at = running["started_at"]
+    started = (
+        time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(started_at))
+        if started_at is not None
+        else "—"
+    )
+    lines: list[Any] = [
+        _k.status_running(pid=str(running["pid"]), version=version, started=started)
+    ]
+    lines.append(
+        _k.status_running_detail(
+            generation=running["generation"] or "—",
+            versions=", ".join(running["consent_versions"]) or "—",
+        )
+    )
+    # One line per cause (review C1/E1): "a different version" would contradict
+    # the version printed just above when the cause is a replaced build at the
+    # SAME version. Neither line names a command: ``receiver install`` returns
+    # ``current`` without restarting an unchanged, registered launchd job or an
+    # active systemd unit (install.py ``_install_launchd`` / ``_install_systemd``),
+    # and on launchd ``remove`` then ``install`` refuses to re-write the plist
+    # from a source checkout without the stable shim (``_source_checkout_refusal``),
+    # which would leave the receiver stopped. No single command is a verified
+    # restart on every supported host, so the line ends at "restart it".
+    # ``None`` (unproven liveness) prints nothing: no verdict it did not earn.
+    installed = running["installed_version"] or "—"
+    if restart_needed is True and reason == "version_mismatch":
+        lines.append(_k.status_restart_needed(installed=installed))
+    elif restart_needed is True and reason == "replaced_build":
+        lines.append(_k.status_restart_needed_replaced(installed=installed))
+    return lines
+
+
 def _status(root: Path, *, as_json: bool) -> int:
     import os
 
@@ -221,6 +361,10 @@ def _status(root: Path, *, as_json: bool) -> int:
     last = _last_check(root)
     screening = read_screening_status(root)
     woke_nobody = _woke_nobody(root)
+    running = _running_receiver(root)
+    jam = _jam(root)
+    held, held_pid = _supervised_receiver(state)
+    restart_needed, restart_reason = _restart_verdict(running, held=held, held_pid=held_pid)
     log = install.log_path(root)
     journal = install.journal_hint()
     linger: bool | None = None
@@ -250,6 +394,21 @@ def _status(root: Path, *, as_json: bool) -> int:
                     "foreground_command": install.foreground_command(root),
                     # ``None`` when not enrolled or unreadable; see _screening.
                     "screening": screening,
+                    # The build the receiver process itself recorded (pid,
+                    # version, generation, consent set, start) plus
+                    # ``restart_needed``; ``None`` = no receiver recorded.
+                    "running": running,
+                    # The status-wide verdict: ``running``'s own, or
+                    # ``no_record`` when the service manager holds a receiver
+                    # that never recorded itself (see _restart_verdict).
+                    "restart_needed": restart_needed,
+                    "restart_reason": restart_reason,
+                    # A live receiver whose pulls keep failing to persist with
+                    # the SAME closed store code (``connector.jam``): the
+                    # 2026-11-17 jam, a distinct state from "not admitted".
+                    # ``None`` = not jammed. A machine key for the same i18n
+                    # reason as ``woke_nobody``.
+                    "jammed": jam,
                 }
             )
         )
@@ -257,6 +416,8 @@ def _status(root: Path, *, as_json: bool) -> int:
     t = _tr()
     print(t(_k.status_supervisor(name=install.supervisor_name())))
     print(t(_k.status_state(state=state)))
+    for line in _running_lines(running, held=held, held_pid=held_pid):
+        print(t(line))
     print(t(_k.status_enrolment(state=enrolment)))
     print(t(_k.status_config_dir(path=str(root))))
     print(t(_k.status_log(path=str(log))))

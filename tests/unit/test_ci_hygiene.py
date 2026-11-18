@@ -64,7 +64,7 @@ CI_YML = REPO / ".github" / "workflows" / "ci.yml"
 #: `_ci_jobs` for how the pins follow them.
 FULL_SUITE_YML = REPO / ".github" / "workflows" / "full-suite.yml"
 #: Jobs that live in full-suite.yml, not ci.yml. `changes` is in both.
-FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "merge-gate"})
+FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "merge-gate", "precondition"})
 PYPROJECT = REPO / "pyproject.toml"
 MAKEFILE = REPO / "Makefile"
 
@@ -303,9 +303,11 @@ def test_tui_e2e_does_not_need_the_unit_suite_or_pip_audit() -> None:
     )
     # Only the classifier since the move to full-suite.yml: lint/type-check
     # are PR-only jobs, and every commit on `main` already passed them.
-    assert needs == {"changes"}, (
-        f"tui-e2e.needs={sorted(needs)!r}; expected only the classifier "
-        "(full-suite.yml has no lint/type-check jobs to depend on)"
+    # Plus the #4074 COST gate (`precondition`, fast CI known green): a cost
+    # prerequisite is not a unit-suite dependency. `test`/`pip-audit` stay banned.
+    assert needs == {"changes", *_scope().COST_GATES}, (
+        f"tui-e2e.needs={sorted(needs)!r}; expected the classifier plus the cost "
+        "gate (full-suite.yml has no lint/type-check jobs to depend on)"
     )
 
 
@@ -1774,7 +1776,9 @@ def test_every_ci_job_is_either_flag_gated_or_explicitly_ungated() -> None:
         "UNGATED_JOBS names jobs that are not in ci.yml: "
         f"{sorted(set(scope.UNGATED_JOBS) - jobs)}"
     )
-    unclassified = jobs - set(scope.JOB_FLAGS) - set(scope.UNGATED_JOBS)
+    assert set(scope.COST_GATES) <= jobs, "COST_GATES names jobs that do not exist"
+    assert not set(scope.COST_GATES) & (set(scope.JOB_FLAGS) | set(scope.UNGATED_JOBS))
+    unclassified = jobs - set(scope.JOB_FLAGS) - set(scope.UNGATED_JOBS) - set(scope.COST_GATES)
     assert not unclassified, (
         f"{sorted(unclassified)} are in ci.yml but in neither JOB_FLAGS nor "
         "UNGATED_JOBS: they run on every diff with nothing saying why"
@@ -1798,6 +1802,13 @@ def test_every_ci_job_is_either_flag_gated_or_explicitly_ungated() -> None:
 
     for job, reason in scope.UNGATED_JOBS.items():
         assert reason.strip(), f"{job} is declared ungated with no reason"
+
+
+def _strip_cost_gate_clauses(scope: Any, expression: str) -> str:
+    """Remove each declared cost gate's exact `ok == 'true'` clause from an `if:`."""
+    for gate in scope.COST_GATES:
+        expression = expression.replace(f"needs.{gate}.outputs.ok == 'true'", "")
+    return expression
 
 
 def test_a_gated_job_escapes_the_implicit_success_without_hiding_a_failure() -> None:
@@ -1847,7 +1858,10 @@ def test_scope_gates_fail_open_and_never_compare_against_true() -> None:
     """
     scope = _scope()
     for job in _ci_jobs():
-        expression = _if(job)
+        # The ONE sanctioned `== 'true'`: a declared cost gate's own `ok` output,
+        # which is fail-CLOSED on purpose. Anything else (a scope flag, an
+        # undeclared output) is still rejected.
+        expression = _strip_cost_gate_clauses(scope, _if(job))
         assert "== 'true'" not in expression and '== "true"' not in expression, (
             f"{job} compares a scope output against 'true' (if: {expression!r}); "
             "an output that was never written is EMPTY, so this skips the job "
@@ -1939,7 +1953,7 @@ def test_every_dependency_clause_is_justified_by_the_flag_implication() -> None:
         return all(flags[flag] for flag in job_flags)
 
     for job, job_flags in scope.JOB_FLAGS.items():
-        for dependency in sorted(_needs(job) - {"changes"}):
+        for dependency in sorted(_needs(job) - {"changes"} - set(scope.COST_GATES)):
             assert dependency in scope.JOB_FLAGS, (
                 f"{job} needs `{dependency}`, which is not a gated job; if it is "
                 "genuinely ungated say so in UNGATED_JOBS"
@@ -3535,6 +3549,51 @@ def test_pull_requests_do_not_run_the_unit_suites() -> None:
 # ritual present: each is a way the gate could be made to *look* green.
 
 
+#: `always()` plus the ONE data-driven skip: `superseded` is only ever true on a
+#: push to main that a newer tested tip replaced (scripts/fast_gate_check.py).
+MERGE_GATE_IF = "always() && needs.precondition.outputs.superseded != 'true'"
+
+
+def test_every_heavy_full_suite_job_is_gated_on_the_precondition() -> None:
+    """GH #4074: `!cancelled()` overrides `needs` success, so the gate must be explicit.
+
+    A heavy job that forgot `needs.precondition.outputs.ok == 'true'` would run
+    ~380 runner-minutes after a red precondition. The aggregate must also need
+    the precondition so a red one turns the required check red.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for job_id in ("test", "tui-e2e"):
+        assert "precondition" in jobs[job_id]["needs"], job_id
+        assert "needs.precondition.outputs.ok == 'true'" in jobs[job_id]["if"], job_id
+        # `ok` alone could survive a late post-step failure of the precondition.
+        assert "needs.precondition.result == 'success'" in jobs[job_id]["if"], job_id
+        assert "needs.changes.outputs" in jobs[job_id]["if"], job_id
+    # coverage-report rides `needs: test`: a skipped test skips it by default.
+    assert jobs["coverage-report"]["needs"] == "test"
+    assert "precondition" in jobs["merge-gate"]["needs"]
+    assert jobs["precondition"]["permissions"] == {"contents": "read", "actions": "read"}
+    # The helper must come from a trusted tree, never from the PR checkout.
+    assert "actions/checkout" not in str(jobs["precondition"])
+    # The trusted tree is the live main tip `changes` resolved, never the stale
+    # event base SHA (which can predate the helper). `changes` must not depend
+    # on `precondition` (a cycle) and must not be gated by it.
+    assert jobs["precondition"]["needs"] == ["changes"]
+    assert "precondition" not in jobs["changes"].get("needs", [])
+    assert "needs.changes.outputs.gate_base" in str(jobs["precondition"])
+    assert "pull_request.base.sha" not in str(jobs["precondition"])
+    # Every heavy job names both gates, and the aggregate sees both.
+    for job_id in ("test", "tui-e2e"):
+        assert "changes" in jobs[job_id]["needs"], job_id
+    assert {"changes", "precondition"} <= set(jobs["merge-gate"]["needs"])
+
+
+def test_nightly_schedule_has_its_own_concurrency_group() -> None:
+    """A push must never replace a pending nightly (full coverage backstop)."""
+    group = yaml.safe_load(FULL_SUITE_YML.read_text())["concurrency"]["group"]
+    assert "github.event_name == 'schedule' && 'full-suite-nightly'" in group
+    assert group.index("full-suite-nightly") < group.index("full-suite-main")
+
+
 def test_merge_gate_aggregates_every_full_suite_job() -> None:
     """One stable required name, `always()`, unconditional, over every suite job.
 
@@ -3548,7 +3607,7 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
         f"the required check name drifted to {gate['name']!r}: branch protection "
         "names this exact string, and a rename stops gating silently"
     )
-    assert gate["if"] == "always()", (
+    assert gate["if"] == MERGE_GATE_IF, (
         "the aggregate must report on EVERY run of this workflow, whatever event "
         "started it — a condition that can be false publishes `skipped`, which "
         f"satisfies a required check (if: {gate['if']!r})"
@@ -3623,8 +3682,8 @@ def test_no_full_suite_job_is_conditional_on_the_triggering_event() -> None:
             "(`needs.changes.outputs.*`), never by which event ran"
         )
     assert (
-        jobs["merge-gate"]["if"] == "always()"
-    ), "the aggregate is the required check: it must be unconditional"
+        jobs["merge-gate"]["if"] == MERGE_GATE_IF
+    ), "the aggregate is the required check: only the push-superseded data may skip it"
 
 
 def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
@@ -4469,3 +4528,62 @@ def test_ci_gate_aggregates_every_pr_job() -> None:
     assert gate["if"] == "always()"
     assert set(gate["needs"]) == set(jobs) - {"ci-gate"}
     _assert_gate_allowlists_results(gate["steps"][-1]["run"])
+
+
+def test_cost_gate_contract_rejects_unknown_dependencies_and_scope_true_compares() -> None:
+    """Negative controls for the COST_GATES policy (GH #4074).
+
+    The exemption is exact: only a declared gate's own `ok == 'true'` clause is
+    stripped, so a scope flag compared to 'true' and an undeclared dependency
+    are still caught by the guards that now know about cost gates.
+    """
+    scope = _scope()
+    assert set(scope.COST_GATES) == {"precondition"}
+    gate_clause = "needs.precondition.outputs.ok == 'true'"
+    assert "== 'true'" not in _strip_cost_gate_clauses(scope, f"!cancelled() && {gate_clause}")
+    # A scope flag compared to 'true' survives stripping and would be flagged.
+    assert "== 'true'" in _strip_cost_gate_clauses(
+        scope, f"!cancelled() && {gate_clause} && needs.changes.outputs.unit == 'true'"
+    )
+    # An undeclared gate-shaped output is not exempt.
+    assert "== 'true'" in _strip_cost_gate_clauses(scope, "needs.other.outputs.ok == 'true'")
+    # Every heavy job names every declared gate in needs, result and output.
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for job_id in ("test", "tui-e2e"):
+        for gate in scope.COST_GATES:
+            assert gate in jobs[job_id]["needs"]
+            assert f"needs.{gate}.result == 'success'" in jobs[job_id]["if"]
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None or shutil.which("bash") is None,
+    reason="the real gate script needs bash and jq",
+)
+@pytest.mark.parametrize("precondition", ["skipped", "failure", "cancelled", "", None, "future"])
+def test_merge_gate_is_red_unless_the_precondition_succeeded(precondition: str | None) -> None:
+    """A skipped/dead cost gate with every heavy job skipped must NOT read green."""
+    needs = {
+        "precondition": {"result": precondition, "outputs": {}},
+        "changes": {"result": "success", "outputs": {}},
+        "test": {"result": "skipped", "outputs": {}},
+        "coverage-report": {"result": "skipped", "outputs": {}},
+        "tui-e2e": {"result": "skipped", "outputs": {}},
+    }
+    proc = subprocess.run(
+        ["bash", "-c", _gate_step_runs()["merge-gate"]],
+        env={"PATH": os.environ.get("PATH", ""), "NEEDS": json.dumps(needs)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert "precondition=" in proc.stdout
+    needs["precondition"]["result"] = "success"
+    ok = subprocess.run(
+        ["bash", "-c", _gate_step_runs()["merge-gate"]],
+        env={"PATH": os.environ.get("PATH", ""), "NEEDS": json.dumps(needs)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert ok.returncode == 0, (ok.stdout, ok.stderr)

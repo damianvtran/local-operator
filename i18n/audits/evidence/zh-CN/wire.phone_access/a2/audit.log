@@ -1,0 +1,25 @@
+$ git rev-parse HEAD
+0e4ad0a9171c59d7833d222761cbaa1f6d09bf51
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/wire.phone_access.json local_operator/i18n/catalogues/en/wire.phone_access.context.json local_operator/i18n/catalogues/zh-CN/wire.phone_access.json i18n/glossary.md i18n/style-guides/zh-CN.md
+1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a  local_operator/i18n/catalogues/en/wire.phone_access.json
+95c0c4b8d5f82cef978c751326ba6c214c1c8bf8152717f608eaeee943071c07  local_operator/i18n/catalogues/en/wire.phone_access.context.json
+f068d44a3df4b85a0d34beff18badbc23b2d1fdd545a9e1d99c909f698e42738  local_operator/i18n/catalogues/zh-CN/wire.phone_access.json
+5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7  i18n/glossary.md
+615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6  i18n/style-guides/zh-CN.md
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace wire.phone_access
+f58a161ff24609e31c131b1b9727445887e14ebda5dc92ff4e9651782019b1ce
+exit=0
+$ python3 $SCRATCH/i18n-away/mech.py . zh-CN  # mechanical parity/placeholder/format-char/digit check over the 6 new keys
+keys en=10 zh-CN=10 parity=OK
+wire.phone_access.away_after.label: placeholders=OK len=14 len_ratio=0.29 format_chars=[] latin_runs=[] digits=- digit_space_cjk=False
+wire.phone_access.away_after.help: placeholders=OK len=65 len_ratio=0.32 format_chars=[] latin_runs=[] digits=- digit_space_cjk=False
+wire.phone_access.away_after.choice.1m.label: placeholders=OK len=4 len_ratio=0.50 format_chars=[] latin_runs=[] digits=1 digit_space_cjk=True
+wire.phone_access.away_after.choice.2m.label: placeholders=OK len=4 len_ratio=0.44 format_chars=[] latin_runs=[] digits=2 digit_space_cjk=True
+wire.phone_access.away_after.choice.5m.label: placeholders=OK len=4 len_ratio=0.44 format_chars=[] latin_runs=[] digits=5 digit_space_cjk=True
+wire.phone_access.away_after.choice.10m.label: placeholders=OK len=5 len_ratio=0.50 format_chars=[] latin_runs=[] digits=01 digit_space_cjk=True
+exit=0

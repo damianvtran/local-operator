@@ -1,0 +1,10 @@
+{
+  "relay.diagram.close": "आरेख बंद करें",
+  "relay.diagram.copied": "कॉपी हो गया",
+  "relay.diagram.copy": "कोड कॉपी करें",
+  "relay.diagram.copy_failed": "कॉपी नहीं हो सका",
+  "relay.diagram.error.title": "यह आरेख बनाया नहीं जा सका",
+  "relay.diagram.full_size": "पूरा आकार",
+  "relay.diagram.save": "SVG सहेजें",
+  "relay.diagram.view": "आरेख"
+}

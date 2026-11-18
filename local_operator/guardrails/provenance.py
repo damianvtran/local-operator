@@ -59,13 +59,15 @@ import logging
 import math
 import os
 import re
+import shutil
 import signal
 import sqlite3
 import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1760,7 +1762,7 @@ def _inside(cwd: str | None, real: str) -> bool:
     return cwd is not None and (cwd == real or cwd.startswith(real + os.sep))
 
 
-def _live_cwd_inside(real: str) -> bool | None:
+def _live_cwd_inside(real: str, *, hidden_blocks: bool = False) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
     Reads :func:`_cwd_entries` (bounded, cached per process). ``None`` —
@@ -1772,9 +1774,23 @@ def _live_cwd_inside(real: str) -> bool | None:
     kernel restarted, a ``git`` that finished — must not keep the tree "busy".
     A cached miss is still reused (the TTL's documented price).
 
-    A hidden pid (cwd unreadable) might be inside, so it also answers ``None``.
-    Every caller treats ``None`` like ``True`` (``busy`` / never delete): PR
-    #3980 rounds 1-3 found no sound way to prove such a process outside a tree.
+    A hidden pid (cwd unreadable, EACCES) counts only on POSITIVE evidence:
+    its readable fds/maps are already merged into the entries by
+    :func:`_cwd_entries`, so one naming a path inside answers ``True`` above.
+    Without such evidence it no longer answers ``None`` (field report
+    2026-11-17, node-2 session d5188ee174d4, guard 0.106.6): ``(sd-pam)`` —
+    same uid, non-dumpable, up for days — made EVERY tree on the host read
+    ``busy=unknown``, so clean, merged worktrees removed with a plain ``git
+    worktree remove`` (the guide's finished-work rule, whoever created them)
+    were refused. #4024 already applied this rule to own trees; the residual
+    risk is the one documented on :func:`_unreadable_cwd_evidence`. The
+    pid's name is never consulted: a same-uid process picks its own comm.
+
+    ``hidden_blocks`` keeps the pre-#4024 refusal for a caller that DELETES
+    with no judge in the loop (``interrupted_worktree_add``'s settle): there
+    a hidden pid still answers ``None``. Every caller treats ``None`` like
+    ``True`` (``busy`` / never delete); an unreadable ``/proc`` or a failed
+    scan is ``None`` for every caller.
     """
     cached = _cwd_inventory_cache
     from_cache = cached is not None and time.monotonic() - cached[0] < _CWD_INVENTORY_TTL_S
@@ -1787,7 +1803,7 @@ def _live_cwd_inside(real: str) -> bool | None:
             return None
     if any(_inside(cwd, real) for _pid, cwd in entries):
         return True
-    if any(cwd is None for _pid, cwd in entries):
+    if hidden_blocks and any(cwd is None for _pid, cwd in entries):
         return None
     return False
 
@@ -1908,7 +1924,9 @@ def _session_pids(session_id: str) -> tuple[dict[int, str], dict[int, str]]:
     return family, others
 
 
-def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHolder, ...] | None:
+def cwd_holders(
+    real: str, session_id: str, *, hidden_blocks: bool = False
+) -> tuple[CwdHolder, ...] | None:
     """Every live process with its cwd inside ``real``, attributed; ``None`` if unknown.
 
     WHY (operator directive 2026-11-14, field case ``attr3880-ci`` on
@@ -1919,21 +1937,31 @@ def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHo
     ancestry reaches no family pid — another session's, or an orphan
     reparented to init — is foreign. ``None`` (inventory or process table
     unreadable) means ownership is unknown: the caller keeps the tree busy.
-    ``own`` is passed only after ledger ownership is proved: an unrelated
-    hidden pid then does not block cleanup, but any readable fd/maps evidence
-    inside the tree is still attributed and a foreign holder remains busy.
+    A cwd-unreadable pid is a holder only when its readable fd/maps evidence
+    lies inside the tree (merged into the entries by :func:`_cwd_entries`);
+    otherwise it is left to :func:`cwd_scan_note` for every tree, own or
+    not (field report 2026-11-17, see :func:`_live_cwd_inside`). Until then
+    only ledger-proven own trees had that rule, so ``(sd-pam)`` alone voided
+    the scan for the finished-work path and its phrase read ``busy=unknown``.
+
+    ``hidden_blocks`` restores the pre-relaxation rule (review M1, PR #4161)
+    for a caller whose LOW answer is an ``rm -rf`` (or a forced removal) with
+    no judge in the loop, e.g. :func:`finished_rig`: such a delete has none of
+    ``git worktree remove``'s own refusal of untracked content, so a hidden
+    pid with no evidence answers ``None`` (unknown, with the pids recorded in
+    the inventory error), and next to a definite holder it is listed as one
+    that "may hold the tree". Only the plain ``git worktree remove`` route
+    may leave it ``False``.
     """
     global _cwd_inventory_error
     entries = _cwd_entries(fresh=True)
     if entries is None:
         return None
-    hidden = [pid for pid, cwd in entries if cwd is None]
+    hidden = [pid for pid, cwd in entries if cwd is None] if hidden_blocks else []
     inside = [(pid, cwd) for pid, cwd in entries if _inside(cwd, real)]
-    # Preserve #3980's hidden-pid refusal for unowned trees/settle, but apply
-    # #4024's positive fd/maps evidence rule to ledger-proven own trees only.
     # Definite holders must be attributed before unrelated hidden pids are
     # reported (#3987 m1); otherwise the reason conceals the actual blocker.
-    if hidden and not own and not inside:
+    if hidden and not inside:
         _cwd_inventory_error = "cwd of pid {} unreadable (Permission denied)".format(
             ", ".join(map(str, hidden[:5])) + (", ..." if len(hidden) > 5 else "")
         )
@@ -1977,7 +2005,7 @@ def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHo
             seen += 1
         command = table.get(pid, (0, ""))[1][:_HOLDER_COMMAND_MAX]
         holders.append(CwdHolder(pid, command, owner, is_family))
-    if hidden and not own:
+    if hidden:
         definite_pids = {holder.pid for holder in holders}
         holders.extend(
             CwdHolder(pid, "?", "cwd unreadable; may hold the tree", False)
@@ -2040,7 +2068,7 @@ def _spawner_owner(session_id: str, spawner: str) -> tuple[str, bool]:
     return f"session {spawner}, another session in this harness process", False
 
 
-def busy_phrase(path: str, session_id: str = "") -> str:
+def busy_phrase(path: str, session_id: str = "", *, hidden_blocks: bool = False) -> str:
     """The judge-facing account of WHY a tree reads busy: holders, or why unknown.
 
     Never a bare "busy" (operator directive 2026-11-14): the field refusal
@@ -2048,7 +2076,9 @@ def busy_phrase(path: str, session_id: str = "") -> str:
     from another session's work.
     """
     real = os.path.realpath(path)
-    holders = cwd_holders(real, session_id)
+    # The same rule as the ``worktree_state`` call that read ``busy``, or a
+    # hidden pid that made it busy would be dropped from its own explanation.
+    holders = cwd_holders(real, session_id, hidden_blocks=hidden_blocks)
     if holders is None:
         reason = _cwd_inventory_error or "process table unreadable"
         return (
@@ -2060,9 +2090,11 @@ def busy_phrase(path: str, session_id: str = "") -> str:
     return "busy: cwd held by " + ", ".join(h.describe() for h in holders)
 
 
-def state_phrase(path: str, state: str, session_id: str = "") -> str:
+def state_phrase(
+    path: str, state: str, session_id: str = "", *, hidden_blocks: bool = False
+) -> str:
     """``state``, with the holders spelled out when it is ``busy``."""
-    return busy_phrase(path, session_id) if state == "busy" else state
+    return busy_phrase(path, session_id, hidden_blocks=hidden_blocks) if state == "busy" else state
 
 
 def _only_regenerable(directory: str) -> bool:
@@ -2105,7 +2137,12 @@ def _only_regenerable(directory: str) -> bool:
 
 
 def worktree_state(
-    path: str, *, own: bool = False, session_id: str = "", facts: dict[str, bool] | None = None
+    path: str,
+    *,
+    own: bool = False,
+    session_id: str = "",
+    facts: dict[str, bool] | None = None,
+    hidden_blocks: bool = False,
 ) -> str:
     """The removal-relevant state of a worktree path.
 
@@ -2125,7 +2162,11 @@ def worktree_state(
     cwd is inside it, or the inventory could not be read — with ``own`` and
     ``session_id``, holders from the deleting session's own family do not
     count; :func:`busy_phrase` names the holders), ``not-linked`` or
-    ``unknown``.
+    ``unknown``. ``hidden_blocks`` (review M1, PR #4161): a NOT-own tree also
+    reads ``busy`` past a cwd-unreadable pid with no evidence, for callers
+    whose LOW answer is an ``rm -rf`` or ``--force`` with no judge
+    (:func:`finished_foreign_worktree`, a reached tree); only the plain ``git
+    worktree remove`` route leaves it off. An own tree keeps #4024's rule.
 
     Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
     and sits in ``<common>/worktrees/<name>``, and that registration's
@@ -2210,10 +2251,10 @@ def worktree_state(
         # ``attr3880-ci``: the creator's eval kernel, bash child or subagent)
         # do not make it busy; any foreign holder, or an inventory or process
         # table that cannot be read (``None``), keeps it busy — fail closed.
-        holders = cwd_holders(real, session_id, own=True)
+        holders = cwd_holders(real, session_id)
         live = None if holders is None else any(not h.family for h in holders)
     else:
-        live = _live_cwd_inside(real)
+        live = _live_cwd_inside(real, hidden_blocks=hidden_blocks)
     if live is not False:
         return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
@@ -2713,6 +2754,103 @@ def _hidden_work(path: str) -> list[str]:
 #: "PR state unknown", which never ranks LOW. The ``glab mr list`` lookup shares
 #: it: measured 2026-11-09, n=3 against minervaai/go-protos, 1.12–1.32 s.
 _GH_TIMEOUT_S = 8.0
+#: The forge auth the deleting session's bash child would carry, as a zero-arg
+#: provider of ``{name: value}`` (set per guard call by ``check_tool_call``).
+#:
+#: WHY (field report 2026-11-17, lop-remote-node-2 session d5188ee174d4, guard
+#: 0.106.6): every ``gh pr list`` the guard ran read "PR state unknown (gh
+#: lookup on damianvtran/local-operator failed or timed out)" while the same
+#: query in the agent's own shell answered at once (#3963 MERGED). node-2 has
+#: no ``gh`` login of its own: it BORROWS the operator's github credential over
+#: the mesh, and ``execute_bash`` injects that (``GH_TOKEN``/``GITHUB_TOKEN``
+#: via ``network.credentials.github.lent_github_env``) plus the session
+#: credential store's ``credential_env()`` into the child only. The guard's
+#: ``gh`` ran on the harness's bare ``os.environ``, unauthenticated, exited
+#: non-zero, and every clean merged worktree lost its LOW path.
+#:
+#: Constraints: the provider is LAZY (the borrow can cost one bounded broker
+#: round trip, so only a forge lookup pays it, never every classified call);
+#: its values reach the ``gh``/``glab`` child env only — never facts, logs or
+#: the judge; a provider that raises or yields nothing leaves the bare
+#: environment, so a real failure still reads "unknown" (fail closed).
+FORGE_AUTH: ContextVar[Callable[[], Mapping[str, str]] | None] = ContextVar(
+    "guardrail_forge_auth", default=None
+)
+
+
+def bind_forge_auth(fn: Callable[[], Any]) -> Callable[[], Any]:
+    """``fn`` carrying this thread's :data:`FORGE_AUTH` into a worker thread.
+
+    ``ThreadPoolExecutor`` does not copy context variables, and the reach
+    lookups (``classify._bounded_lookups``) run ``worktree_activity`` on a
+    pool. Only this one variable is carried: copying the whole context would
+    also share ``classify``'s per-call glob memo across threads.
+    """
+    provider = FORGE_AUTH.get()
+    if provider is None:
+        return fn
+
+    def bound() -> Any:
+        token = FORGE_AUTH.set(provider)
+        try:
+            return fn()
+        finally:
+            FORGE_AUTH.reset(token)
+
+    return bound
+
+
+#: The only session-injected names a forge child gets, per forge (review m1,
+#: PR #4161). Tokens only: a stored ``GH_HOST``/``GH_CONFIG_DIR``/
+#: ``GITLAB_HOST`` would re-point the guard's lookup at another host or
+#: config, and ``GH_ENTERPRISE_TOKEN`` is for hosts the pinned ``--repo``
+#: never names. The host itself is pinned in argv (:func:`_gh_repo_arg`,
+#: :func:`_glab_repo_arg`), so a token goes only to the host it was minted for.
+_FORGE_TOKEN_NAMES = {
+    "gh": ("GH_TOKEN", "GITHUB_TOKEN"),
+    "glab": ("GITLAB_TOKEN", "GLAB_TOKEN"),
+}
+
+
+def _gh_repo_arg(repo: str) -> str:
+    """``repo`` as ``github.com/<owner>/<name>``: ``gh`` then ignores ``GH_HOST``.
+
+    :func:`_github_repo` only ever reads github.com remotes, so the host is
+    known; pinning it keeps an operator's enterprise ``GH_HOST`` from routing
+    the guard's lookup (review m1, PR #4161). An already-qualified value passes.
+    """
+    return repo if repo.count("/") >= 2 else f"github.com/{repo}"
+
+
+def _glab_repo_arg(repo: str) -> str:
+    """``repo`` as a full ``https://<host>/<path>`` URL, so ``GITLAB_HOST`` cannot move it.
+
+    :func:`_gitlab_repo` returns a bare path for gitlab.com and a URL for a
+    self-hosted host; the bare one is pinned to gitlab.com here (review m1).
+    """
+    return repo if "://" in repo else f"https://gitlab.com/{repo}"
+
+
+def _forge_cli_env(cli: str = "gh", **overrides: str) -> dict[str, str]:
+    """The environment for one ``gh``/``glab`` child: ours, plus the session's forge token.
+
+    Only :data:`_FORGE_TOKEN_NAMES` for ``cli`` are taken from the provider,
+    whatever else it returns.
+    """
+    env = dict(os.environ, **overrides)
+    provider = FORGE_AUTH.get()
+    if provider is None:
+        return env
+    try:
+        auth = provider()
+    except Exception:  # noqa: BLE001 — no auth is the old behaviour: "unknown", never a pass
+        logger.debug("guard forge auth unavailable")
+        return env
+    allowed = _FORGE_TOKEN_NAMES.get(cli, ())
+    env.update({str(k): str(v) for k, v in (auth or {}).items() if str(k) in allowed})
+    return env
+
+
 _GITHUB_URL_RE = re.compile(
     r"^(?:https?://(?:[^@/]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
@@ -2735,6 +2873,15 @@ class ForgeChange(NamedTuple):
     state: str
     #: ``YYYY-MM-DD`` of the merge/close (or last update while open); may be "".
     date: str
+    #: The change's head commit as the forge records it (GitHub ``headRefOid``,
+    #: GitLab ``sha``); "" when not read. Only :func:`finished_foreign_worktree`
+    #: reads it, to accept a squash merge whose MERGED head is this tree's HEAD.
+    head: str = ""
+    #: The branch the change targets (GitHub ``baseRefName``, GitLab
+    #: ``target_branch``); "" when not read. A merged change counts as landed
+    #: only when this is origin's default branch (review m2, PR #4161): a
+    #: stacked PR merged into another feature branch never reached it.
+    base: str = ""
 
 
 #: Rows the one history lookup asks for. A branch with more changes than this
@@ -2787,6 +2934,11 @@ class WorktreeActivity:
     #: Why git could NOT prove the branch landed, when the forge was not read
     #: either (shown after the unknown state, never ranked).
     git_unproven: str = ""
+    #: ``(head commit, base branch)`` of this branch's MERGED changes on the
+    #: page read. Never ranked on its own: only
+    #: :func:`finished_foreign_worktree` uses it, and only as the merge proof
+    #: for a tree whose HEAD equals a head merged into origin's default branch.
+    merged_heads: tuple[tuple[str, str], ...] = ()
 
     def facts(self) -> str:
         branch = self.branch or "(detached HEAD)"
@@ -2861,7 +3013,7 @@ def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
     The open-only fallback behind :func:`_gh_prs` (tests replace it).
     ``GH_PROMPT_DISABLED`` keeps gh from ever prompting inside a guard check.
     """
-    env = dict(os.environ, GH_PROMPT_DISABLED="1")
+    env = _forge_cli_env("gh", GH_PROMPT_DISABLED="1")
     try:
         proc = subprocess.run(
             [
@@ -2869,7 +3021,7 @@ def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
                 "pr",
                 "list",
                 "--repo",
-                repo,
+                _gh_repo_arg(repo),
                 "--head",
                 branch,
                 "--state",
@@ -2902,10 +3054,20 @@ def _glab_open_mrs(repo: str, branch: str) -> list[int] | None:
     unknown flag would exit non-zero and read as "unknown" on every call.
     ``GLAB_NO_PROMPT`` keeps glab from prompting inside a guard check.
     """
-    env = dict(os.environ, GLAB_NO_PROMPT="1")
+    env = _forge_cli_env("glab", GLAB_NO_PROMPT="1")
     try:
         proc = subprocess.run(
-            ["glab", "mr", "list", "--repo", repo, "--source-branch", branch, "-F", "json"],
+            [
+                "glab",
+                "mr",
+                "list",
+                "--repo",
+                _glab_repo_arg(repo),
+                "--source-branch",
+                branch,
+                "-F",
+                "json",
+            ],
             capture_output=True,
             text=True,
             timeout=_GH_TIMEOUT_S,
@@ -2938,19 +3100,19 @@ def _gh_prs(repo: str, branch: str) -> list[ForgeChange] | None:
     bound, measured 2026-11-11 at 0.47–0.55 s (n=3, ``--head release-next
     --state all --limit 10`` on damianvtran/local-operator). Tests replace it.
     """
-    env = dict(os.environ, GH_PROMPT_DISABLED="1")
+    env = _forge_cli_env("gh", GH_PROMPT_DISABLED="1")
     argv = [
         "gh",
         "pr",
         "list",
         "--repo",
-        repo,
+        _gh_repo_arg(repo),
         "--head",
         branch,
         "--state",
         "all",
         "--json",
-        "number,state,mergedAt,closedAt,updatedAt",
+        "number,state,mergedAt,closedAt,updatedAt,headRefOid,baseRefName",
         "--limit",
         str(_FORGE_HISTORY_LIMIT),
     ]
@@ -2972,7 +3134,15 @@ def _gh_prs(repo: str, branch: str) -> list[ForgeChange] | None:
                 if state == "merged"
                 else _day(r.get("closedAt")) if state == "closed" else _day(r.get("updatedAt"))
             )
-            out.append(ForgeChange(int(r["number"]), state, date))
+            out.append(
+                ForgeChange(
+                    int(r["number"]),
+                    state,
+                    date,
+                    str(r.get("headRefOid") or ""),
+                    str(r.get("baseRefName") or ""),
+                )
+            )
         return out
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -2985,13 +3155,13 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
     (checked from ``--help``), so GitLab gets the same history as GitHub.
     GitLab's open state is ``opened``; it is normalised to ``open`` here.
     """
-    env = dict(os.environ, GLAB_NO_PROMPT="1")
+    env = _forge_cli_env("glab", GLAB_NO_PROMPT="1")
     argv = [
         "glab",
         "mr",
         "list",
         "--repo",
-        repo,
+        _glab_repo_arg(repo),
         "--source-branch",
         branch,
         "--all",
@@ -3019,7 +3189,15 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
                 if state == "merged"
                 else _day(r.get("closed_at")) if state == "closed" else _day(r.get("updated_at"))
             )
-            out.append(ForgeChange(int(r["iid"]), state, date))
+            out.append(
+                ForgeChange(
+                    int(r["iid"]),
+                    state,
+                    date,
+                    str(r.get("sha") or ""),
+                    str(r.get("target_branch") or ""),
+                )
+            )
         return out
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -3141,7 +3319,16 @@ def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
             owners_running=owners,
             newest=newest,
         )
-    return WorktreeActivity(branch, "none", pr_label=label, owners_running=owners, newest=newest)
+    return WorktreeActivity(
+        branch,
+        "none",
+        pr_label=label,
+        owners_running=owners,
+        newest=newest,
+        merged_heads=tuple(
+            (c.head, c.base) for c in changes if c.state == "merged" and c.head and c.base
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -3167,10 +3354,27 @@ class FinishedForeign:
 
     def warning(self, root: str) -> str:
         """The short steering note a LOW from this route carries (``GuardOutcome.warnings``)."""
+        # Facts follow the proof actually used (#3992 author's constraint 3):
+        # a squash merge reads "content already on origin", an unread forge
+        # never claims "no open PR".
+        merged = (
+            "HEAD's content already in origin's default branch (merged by content)"
+            if "merged-by-content" in self.reasons
+            else (
+                "HEAD is the head of a MERGED PR/MR (squash merge)"
+                if "merged-by-pr" in self.reasons
+                else "merged into origin's default branch"
+            )
+        )
+        pr = (
+            "PR state unread (forge unavailable)"
+            if "forge-unread" in self.reasons
+            else "no open PR"
+        )
         return (
             f"Guardrail {_DANGEROUS_DELETE}: finished worktree {root} removed without review — "
-            "registered linked tree, HEAD on its branch and merged into origin's default "
-            "branch, no open PR, no running owner, clean with no ignored files. "
+            f"registered linked tree, HEAD on its branch and {merged}, "
+            f"{pr}, no running owner, clean with no ignored files. "
             # Q4 on PR #3992: the ref lives in the primary checkout, which an
             # enclosing delete in the same call may remove too, so the note
             # states the condition instead of promising the ref survives.
@@ -3213,8 +3417,10 @@ def finished_foreign_worktree(
        (``ls-remote --symref``: never a hardcoded ``main``, never a fetch),
        and the local ``refs/remotes/origin/<default>`` equals it, since the
        ancestry walk needs that object locally. A squash/rebase merge has no
-       ancestry and stays with the judge \u2014 a merged-PR badge proves nothing
-       about later commits;
+       ancestry: it passes when HEAD's content is already in that tip
+       (:func:`content_merged`), or when the forge lists a MERGED PR/MR whose
+       head commit IS HEAD (``merged-by-pr``). A merged badge on any other
+       head proves nothing about later commits and stays with the judge;
     4. no open PR/MR (``worktree_activity`` says ``none``; ``unknown`` fails);
     5. no running owner, VERIFIED: ``_running_owners(strict=True)`` raises on
        an unreadable ledger/registry or a tree with no ledger creator row
@@ -3235,7 +3441,10 @@ def finished_foreign_worktree(
 
     real = os.path.realpath(path)
     facts: dict[str, bool] = {}
-    state = worktree_state(real, facts=facts)
+    # Strict on hidden pids (review M1, PR #4161): a ``safe`` answer here
+    # ranks ``--force`` and ``rm -rf`` LOW, and neither refuses untracked
+    # content the way a plain ``git worktree remove`` does.
+    state = worktree_state(real, facts=facts, hidden_blocks=True)
     if state in ("not-linked", "dirty", "locked", "stale-initializing", "busy"):
         return no(f"state-{state}", state)
     if state != "clean":
@@ -3291,21 +3500,51 @@ def finished_foreign_worktree(
     proc = _git_proc(["merge-base", "--is-ancestor", head, advertised], real)
     if proc is None or proc.returncode not in (0, 1):
         return unknown("ancestry-unknown", state)
+    merged_fact = "merged-on-origin"
     if proc.returncode == 1:
-        return no("not-merged", state)
+        # Squash/rebase merge (node-2 census 2026-11-15: approval-provenance,
+        # github-default-repos #3842, copy-wipe-dispatch-identity #3948,
+        # mobility-link-drop #3855 — all squash-merged, so no ancestry). HEAD's
+        # CONTENT must already be in the advertised tip, which the local ref
+        # was just shown to equal; a local commit after the squash fails it.
+        if content_merged(real, head, advertised):
+            merged_fact = "merged-by-content"
+        else:
+            # The forge's word, for the squash merge content cannot prove
+            # (field report 2026-11-17, node-2: main later edited a path the
+            # branch changed — routine in a busy repo — so the tree-equality
+            # proof fails though PR #3963 MERGED). Accepted ONLY when a
+            # MERGED change's recorded head IS this tree's HEAD: nothing was
+            # committed after what landed. A merged badge on an older head
+            # proves nothing about later commits, so that stays not-merged.
+            # The change must also have merged INTO ``default`` (review m2, PR
+            # #4161): a stacked PR merged into a feature branch has the same
+            # head but its content never reached origin's default branch.
+            # The open-PR, owner, clean and race checks below all still run.
+            if activity is None:
+                activity = worktree_activity(real, session_id)
+            if activity.git_merged or (head, default) not in activity.merged_heads:
+                return no("not-merged", state)
+            merged_fact = "merged-by-pr"
     if activity is None:
         activity = worktree_activity(real, session_id)
     if activity.pr_state == "open":
         return no("open-pr", state)
     if activity.pr_state != "none" or activity.branch != ref[len("refs/heads/") :]:
         return unknown("pr-unknown", state)
+    pr_fact = "no-open-pr"
     if activity.git_merged:
-        # Convergence with PR #4024: its ``_git_fallback`` reports ``none``
-        # from git ancestry when the forge lookup FAILED. That is sound for the
-        # caller's own trees, but here the forge reading is one of the foreign
-        # facts that must be positively read (unreadable foreign facts fail
-        # closed), so a ``none`` that git inferred is not "no open PR".
-        return unknown("pr-unknown", state)
+        # The forge lookup FAILED and ``_git_fallback`` inferred ``none`` from
+        # git. That is still NOT "no open PR" (#3992: an unread forge stays
+        # unknown), so the fact is named for what was proven instead: HEAD's
+        # content is already on origin's ADVERTISED default tip (checked
+        # above, ancestry or tree-equality), so nothing on this tree is
+        # unlanded — a PR still open on these commits would propose nothing
+        # main lacks. WHY accept it (operator, ask a-798d, 2026-11-15:
+        # "these requests should not require human approval"): on node-2 gh
+        # fails or times out, and every finished foreign tree went to the
+        # judge. A KNOWN open PR still refuses above (CRITICAL in ``_rank``).
+        pr_fact = "forge-unread"
     # Race re-check (review R4 on PR #3992): the forge lookup above can take
     # up to the ``gh`` timeout, so the clean / no-ignored / not-busy facts read
     # at the start are re-read with the same helper just before answering. A
@@ -3316,11 +3555,188 @@ def finished_foreign_worktree(
     global _cwd_inventory_cache
     _cwd_inventory_cache = None
     again: dict[str, bool] = {}
-    if worktree_state(real, facts=again) != "clean" or again.get("ignored", True):
+    if worktree_state(real, facts=again, hidden_blocks=True) != "clean" or again.get(
+        "ignored", True
+    ):
         return unknown("state-moved", state)
     if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
         return unknown("head-moved", state)
-    return FinishedForeign("safe", _FINISHED_FACTS, state, activity)
+    facts_out = tuple(
+        merged_fact if f == "merged-on-origin" else pr_fact if f == "no-open-pr" else f
+        for f in _FINISHED_FACTS
+    )
+    return FinishedForeign("safe", facts_out, state, activity)
+
+
+def _running_session_ids() -> set[str]:
+    """Session ids the registry reads as ``live`` or ``wedged``; RAISES when unreadable.
+
+    ``strict`` scan, no reaping (a guard check never moves another session's
+    record): an incomplete registry is "unknown", never "everyone ended".
+    """
+    from local_operator.session.runtime import registry
+
+    running: set[str] = set()
+    for rec, state in registry.scan(None, reap=False, strict=True):
+        sid = str(getattr(rec, "session_id", "") or "")
+        if not sid:
+            raise OSError("session record without an id")
+        if state in ("live", "wedged"):
+            running.add(sid)
+    return running
+
+
+def _creators_inside(real: str) -> set[str] | None:
+    """Creators of every ledger row strictly INSIDE ``real``; ``None`` if unreadable.
+
+    Range scan on the indexed ``path`` column (``real + "/"`` up to
+    ``real + "0"``, the next byte after ``/``), so no LIKE escaping.
+    """
+    try:
+        conn = _connect(ledger_path(), create=False)
+        if conn is None:
+            return None
+        try:
+            return {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT DISTINCT creator FROM created WHERE path > ? AND path < ?",
+                    (real + os.sep, real + chr(ord(os.sep) + 1)),
+                )
+            }
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def _entry_dev(entry: os.DirEntry[str]) -> int:
+    """The device an entry lives on (a seam: tests stand in a mount point)."""
+    return entry.stat(follow_symlinks=False).st_dev
+
+
+def _nested_repository(real: str, *, worktrees: bool = False) -> str | None:
+    """Why ``real`` may hold a repository of its own (not a linked worktree), or ``None``.
+
+    A ``.git`` DIRECTORY anywhere in the bounded walk is a clone or ``git
+    init`` whose commits may exist nowhere else; a ``.git`` FILE is a linked
+    worktree's pointer, which :func:`classify._reached_worktrees` already held
+    to its own bar. ``None`` only when the walk saw EVERYTHING: an exhausted
+    walk cannot rule one out, so it counts.
+
+    No depth cap here (review M2, PR #4098): the shared ``_WALK_DEPTH`` (4)
+    stopped this walk early and answered "no repository" with directories
+    left unscanned, while scratch-HOME rigs nest clones at
+    ``home/src/github.com/<org>/<repo>``. A depth cap that reported "too
+    deep" instead would send most real rigs (``home/.local-operator/
+    sessions/<id>/…``) back to the judge, so the walk is bounded by
+    ``_WALK_ENTRIES`` alone — exhausting it still counts — and stays finite
+    without one: symlinks are never followed, and (review m2) a directory on
+    another device than the rig is refused, never entered (a mounted volume
+    is not the rig's to delete, and BSD ``rm -rf`` without ``-x`` would
+    descend into it).
+
+    ``worktrees=True`` also counts a ``.git`` FILE (a linked worktree inside):
+    for callers with no ``_reached_worktrees`` pass of their own, such as the
+    typed whole-set settlement (``check._typed_set_recoverable``, review B2).
+    """
+    try:
+        root_dev = os.stat(real).st_dev
+    except OSError:
+        return f"unreadable directory {real}"
+    seen = 0
+    stack: list[str] = [real]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            return f"unreadable directory {current}"
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return "too many entries to rule out a nested repository"
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+                dev = _entry_dev(entry) if is_dir else root_dev
+            except OSError:
+                return f"unreadable entry {entry.path}"
+            if entry.name == ".git" and is_dir:
+                return f"nested repository at {current}"
+            if worktrees and entry.name == ".git":
+                return f"linked worktree at {current}"
+            if not is_dir:
+                continue
+            if dev != root_dev:
+                return f"mount point at {entry.path}"
+            stack.append(entry.path)
+    return None
+
+
+def finished_rig(path: str, session_id: str) -> tuple[str | None, str]:
+    """``(fact, "")`` for a ``$HOME`` rig another, ended session left; else ``(None, why)``.
+
+    WHY (node-2 census, 2026-11-15, v0.105.3; operator, ask a-798d: "these
+    requests should not require human approval and shouldn't be blocked by
+    guardrails in the future"): 17 ``~/qa-*`` rigs were refused with "No
+    operator ask answer names <path>" although the sessions that built them
+    had ended. A top-level ``$HOME`` directory is HIGH because it may be the
+    operator's own data; a directory the creation ledger records as made by
+    an agent session that has ENDED is that session's leftover, not data.
+
+    Every fact is positively established, else ``None`` (the judge decides):
+    - a ledger row records exactly this directory (same inode generation),
+      by a session other than the caller (the caller's own rig already has
+      the ledger LOW). NO row \u2014 a pre-ledger or hand-made directory \u2014 never
+      qualifies: only the judge can tell a rig from the operator's data;
+    - every creator of that row AND of every row inside it is NOT running per
+      a strict registry read (unreadable registry/ledger: unknown);
+    - no live process outside the caller's family has its cwd inside
+      (:func:`cwd_holders`; an unreadable inventory is busy);
+    - it is not a repository itself and holds no ``.git`` directory
+      (:func:`_nested_repository`) \u2014 a clone's unpushed commits may exist
+      nowhere else. Linked worktrees inside are ranked by the caller first
+      (``_reached_worktrees``), each held to the finished-worktree bar.
+    Location (direct child of ``$HOME``, never the state root, secrets or
+    install layout) is the caller's check: those are CRITICAL before this.
+    """
+    real = os.path.realpath(path)
+    if not os.path.isdir(real) or os.path.islink(path):
+        return None, "not a directory"
+    creators = set(recorded_creators(real))
+    if not creators:
+        return None, "no creation ledger row for this directory"
+    if session_id and session_id in creators:
+        return None, "created by this session"
+    inside = _creators_inside(real)
+    if inside is None:
+        return None, "creation ledger unreadable"
+    try:
+        running = _running_session_ids()
+    except Exception:  # noqa: BLE001 \u2014 an unreadable registry is unknown, not ended
+        return None, "session registry unreadable"
+    live = sorted((creators | (inside - {session_id})) & running)
+    if live:
+        return None, "creating session still running: " + ", ".join(live)
+    if os.path.lexists(os.path.join(real, ".git")) or is_primary_checkout(real):
+        return None, "a git repository root"
+    nested = _nested_repository(real)
+    if nested:
+        return None, nested
+    # ``rm -rf`` of a rig ranks LOW with no judge, and it deletes whatever a
+    # hidden process is doing in there: a hidden pid stays blocking (review
+    # M1, PR #4161; the relaxed rule is for plain ``git worktree remove``).
+    holders = cwd_holders(real, session_id, hidden_blocks=True)
+    if holders is None:
+        return None, "live-process scan unavailable"
+    foreign_holders = [h.describe() for h in holders if not h.family]
+    if foreign_holders:
+        return None, "in use by " + ", ".join(foreign_holders)
+    return (
+        "finished work: rig recorded by ended session "
+        + ", ".join(sorted(creators))
+        + "; no running creator, no live holder, no nested repository"
+    ), ""
 
 
 def _git_fallback(real: str, branch: str, unknown: WorktreeActivity) -> WorktreeActivity:
@@ -3356,6 +3772,19 @@ _LS_REMOTE_TIMEOUT_S = 8.0
 _FETCH_TIMEOUT_S = 20.0
 
 
+def _askpass_false() -> str:
+    """An absolute ``false`` for ``GIT_ASKPASS``, resolved where it actually lives.
+
+    WHY (QA round 2, PR #4098): ``/bin/false`` does not exist on macOS (it is
+    ``/usr/bin/false``), so git failed to spawn the askpass at all. That still
+    failed closed, but by accident. Looked up only in the system directories,
+    never ``$PATH``, so nothing on the caller's path can stand in for it; the
+    last resort is an empty string, which git treats as "no askpass" (and
+    ``GIT_TERMINAL_PROMPT=0`` plus no tty still refuses any prompt).
+    """
+    return shutil.which("false", path="/usr/bin:/bin") or ""
+
+
 def _git_net(args: Sequence[str], cwd: str, *, timeout: float) -> str | None:
     """A git call that may reach the network: no prompt, no tty, group-reaped.
 
@@ -3363,14 +3792,19 @@ def _git_net(args: Sequence[str], cwd: str, *, timeout: float) -> str | None:
     ssh can prompt for a password or passphrase inside a guard check, and a
     timeout kills the WHOLE group (``git-remote-https``/``ssh`` children
     included), not just the git parent. Read-only on the working tree: callers
-    pass only ``ls-remote`` and a ``fetch`` that writes remote-tracking refs
-    and ``FETCH_HEAD`` in the common dir.
+    pass only ``ls-remote`` and a ``fetch`` that writes objects only (no
+    remote-tracking ref, no ``FETCH_HEAD``: :func:`git_merged`).
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    # Review m4 (PR #4098): no credential helper, no prompt, no askpass, so
+    # an https origin never reaches the keychain (the system gitconfig sets
+    # ``credential.helper=osxkeychain`` here) — the same posture as the
+    # ``finished_foreign_worktree`` ls-remote. Unauthenticated reads only.
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_ASKPASS=_askpass_false())
+    env.pop("SSH_ASKPASS", None)
     try:
         proc = subprocess.Popen(
-            ["git", "-C", cwd, *args],
+            ["git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-C", cwd, *args],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -3438,6 +3872,10 @@ def git_merged(path: str, branch: str) -> tuple[bool, str]:
         timeout=_LS_REMOTE_TIMEOUT_S,
     )
     source = "read from origin"
+    # The local copy of origin's default branch as it stood BEFORE any fetch
+    # below: the squash proof only counts against a ref that already equals
+    # what origin advertises (#3992 author's constraint, 2026-11-15).
+    pre_fetch_local: str | None = None
     if listing is not None:
         for line in listing.splitlines():
             left, _, name = line.partition("\t")
@@ -3447,9 +3885,26 @@ def git_merged(path: str, branch: str) -> tuple[bool, str]:
                 default_tip = left.strip()
             elif name == f"refs/heads/{branch}":
                 remote_tip = left.strip()
+        if default:
+            pre_fetch_local = _local_ref(real, f"refs/remotes/origin/{default}")
         if default and default_tip and not _has_commit(real, default_tip):
+            # Objects only (QA Q1, PR #4098): ``--refmap=`` stops the
+            # opportunistic update of ``refs/remotes/origin/<default>`` and
+            # ``--no-write-fetch-head`` leaves FETCH_HEAD, so no ref moves.
+            # The ancestry proof below reads the advertised SHA itself; the
+            # squash proof needs the local ref to have equalled it BEFORE this
+            # call, and since this fetch never moves that ref, a second call
+            # gives the same answer as the first (preview == check).
             _git_net(
-                ["fetch", "--no-tags", "--quiet", "origin", f"refs/heads/{default}"],
+                [
+                    "fetch",
+                    "--no-tags",
+                    "--quiet",
+                    "--refmap=",
+                    "--no-write-fetch-head",
+                    "origin",
+                    f"refs/heads/{default}",
+                ],
                 real,
                 timeout=_FETCH_TIMEOUT_S,
             )
@@ -3468,15 +3923,100 @@ def git_merged(path: str, branch: str) -> tuple[bool, str]:
             return False, "no default branch ref for origin"
     if not _has_commit(real, default_tip):
         return False, f"origin/{default} tip {default_tip[:9]} not fetched"
+    # Squash/rebase proof (:func:`content_merged`) is held to a stricter bar
+    # than ancestry: only against the tip origin ADVERTISED just now, and only
+    # when the local ``refs/remotes/origin/<default>`` already equalled it
+    # before any fetch. An unreachable origin (already-fetched refs) or a
+    # stale/mismatched local ref leaves a squash-merged branch unproven, never
+    # merged: a tree-equality against an old snapshot of main says nothing
+    # about whether the content is on origin NOW.
+    squash_ok = listing is not None and pre_fetch_local == default_tip
+    squashed = False
     if not _is_ancestor(real, tip, default_tip):
-        return False, f"branch tip {tip[:9]} is not in origin/{default} ({source})"
+        if not (squash_ok and content_merged(real, tip, default_tip)):
+            return False, f"branch tip {tip[:9]} is not in origin/{default} ({source})"
+        squashed = True
     if remote_tip and remote_tip != tip:
-        if not _has_commit(real, remote_tip) or not _is_ancestor(real, remote_tip, default_tip):
+        if not _has_commit(real, remote_tip) or not (
+            _is_ancestor(real, remote_tip, default_tip)
+            or (squash_ok and content_merged(real, remote_tip, default_tip))
+        ):
             return False, (
                 f"origin/{branch} at {remote_tip[:9]} has commits not proven in "
                 f"origin/{default} ({source})"
             )
+    if squashed:
+        return True, (
+            f"merged by content: branch tip {tip[:9]}'s content is already in "
+            f"origin/{default} (squash/rebase merge; merging it changes nothing; {source})"
+        )
     return True, f"branch tip {tip[:9]} is in origin/{default} ({source})"
+
+
+def content_merged(real: str, tip: str, default_tip: str) -> bool:
+    """Is every change on ``tip`` already in ``default_tip``'s tree? (squash/rebase merges)
+
+    WHY (node-2 field census, 2026-11-15, v0.105.3): the operator squash-merges
+    PRs, so a merged branch's tip is NEVER an ancestor of ``origin/main``.
+    approval-provenance was refused from its own session with "tip 78c35f517
+    not in origin/main", and 5 more worktrees read "git did not prove it
+    merged" when the ``gh`` lookup timed out on the node — every one of them
+    finished work.
+
+    Proof, by object ids only (review m1, PR #4098): every path the branch
+    changed since its merge-base with ``<default>``
+    (``diff-tree <merge-base> <tip>``) must be IDENTICAL — same blob and mode,
+    or absent on both — in ``<default>`` and ``<tip>`` (``diff-tree <tip>
+    <default>`` lists none of them). The first version ran ``git merge-tree
+    --write-tree``, which executes any repo-configured merge driver
+    (``merge.<name>.driver`` mapped by an attribute): it ran a planted
+    command, and a common ``merge=ours``-style driver made an unmerged
+    CHANGELOG edit read "merged by content". ``diff-tree`` plumbing with
+    ``--name-only`` runs no driver, textconv or external diff.
+
+    Callers pass the tree's CURRENT HEAD as ``tip``: a local commit made
+    after the squashed one changes a path main does not have, so it is
+    unproven (#3992 author's constraint 2). A later revert on main, or main
+    editing a branch-changed path again afterwards, leaves that path
+    different: not proven (stricter than a merge would be, on purpose — it
+    goes to the judge or the forge lookup). Any error is also "not proven":
+    this only ever ADDS a proof, so failing closed leaves the old ranking.
+    Local objects only, never a fetch: ``default_tip`` must already be local
+    (:func:`git_merged` checks ``_has_commit`` first).
+    """
+    base = _git_quiet(["merge-base", default_tip, tip], real)
+    if base is None or not base.strip():
+        return False
+    changed = _git_quiet(
+        [
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--name-only",
+            base.strip(),
+            tip,
+        ],
+        real,
+    )
+    differs = _git_quiet(
+        ["diff-tree", "-r", "-z", "--no-renames", "--no-ext-diff", "--name-only", tip, default_tip],
+        real,
+    )
+    if changed is None or differs is None:
+        return False
+    return not ({p for p in changed.split("\0") if p} & {p for p in differs.split("\0") if p})
+
+
+def _git_quiet(args: Sequence[str], real: str) -> str | None:
+    """:func:`_git` with repo-configured programs switched off (review m1, PR #4098).
+
+    ``core.fsmonitor`` and hooks are the configured executables a read-only
+    probe could otherwise start; the object-store reads that use this need
+    neither.
+    """
+    return _git(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], real)
 
 
 def _ignored_unregenerable(real: str) -> bool:
@@ -3720,6 +4260,21 @@ class OperatorWords:
     #: The picked labels plus any typed answer: a path these name is the
     #: operator's pick even when an unpicked option names it too.
     picked: str = ""
+    #: The part of ``approved`` that only a TYPED answer to a multi-target
+    #: question approved (:func:`_typed_set_question`), one question per
+    #: line. ``DeleteCase.evidence_basis`` settles a path reached ONLY
+    #: through these on the answer alone when nothing unrecoverable can be
+    #: lost (review B2 defence in depth, PR #4098); otherwise the judge reads
+    #: the operator's words.
+    typed_set: str = ""
+
+    @property
+    def firm(self) -> str:
+        """``approved`` minus the typed whole-set questions: picks and exact-path answers."""
+        if not self.typed_set:
+            return self.approved
+        typed = set(self.typed_set.split("\n"))
+        return "\n".join(line for line in self.approved.split("\n") if line not in typed)
 
 
 @dataclass
@@ -3817,6 +4372,7 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
     answers = record.get("answers") or {}
     parts: list[str] = []
     approved: list[str] = []
+    typed_set: list[str] = []
     picked: list[str] = []
     unpicked: list[str] = []
     for q in questions:
@@ -3832,7 +4388,9 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
         # The consent rendering, which the refusal side also reads for every
         # question this answer kept (``unanswered_asks``, review R2-M3).
         parts.append(f"{_ask_question_text(q)} -> operator answered: {', '.join(chosen)}")
-        approved.extend(_approved_text(q, opts, labels, chosen))
+        got = _approved_text(q, opts, labels, chosen)
+        approved.extend(got)
+        typed_set.extend(_typed_set_question(q, labels, chosen, got))
         picked.extend(chosen)
         unpicked.extend(lbl for lbl in labels if lbl not in chosen)
     if not parts:
@@ -3845,6 +4403,7 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
         approved="\n".join(approved),
         unpicked="\n".join(unpicked),
         picked="\n".join(picked),
+        typed_set="\n".join(typed_set),
     )
 
 
@@ -3961,6 +4520,213 @@ def ask_answer_covers(
     return False
 
 
+#: Trailing words a typed whole-set first clause may carry that only restate
+#: the approval: "Remove all as recommended", "Remove all I give approval".
+_WHOLE_SET_TAIL_RE = re.compile(
+    r"(?i)(?:\s+(?:as\s+(?:recommended|suggested|proposed|planned)"
+    r"|i\s+give\s+(?:my\s+)?approval|i\s+approve|approved|please|now))*"
+)
+#: The ONLY first clauses :func:`_typed_whole_set` accepts: a removal verb over
+#: the whole set ("Remove all", "Delete them", "Remove all 34"). A bare "yes"/
+#: "ok" is NOT one: "ok, just es" and "Yes. Also check the logs" put the
+#: qualification after it (test_classification_accuracy), and a bare yes is
+#: settled only by ``_BARE_AFFIRM_RE`` over the WHOLE answer.
+_TYPED_WHOLE_SET_RE = re.compile(
+    r"(?i)\W*(?:delete|remove|clean\s?up|wipe|discard)\s+"
+    r"(?:all(?:\s+(?:\d+|of\s+them|them|of\s+these|of\s+those))?|them(?:\s+all)?"
+    r"|everything|both|these|those|it)"
+)
+#: Narrowing words anywhere in the answer that ``_CARVE_OUT_RE`` does not
+#: already list ("ok, just es", "yes, minus fr", "zh-cn stays").
+_NARROWING_RE = re.compile(
+    r"(?i)\b(?:just|minus|stays?|remains?|apart\s+from|other\s+than|save\s+for|besides"
+    r"|aside\s+from|without)\b"
+)
+#: How the whole-set head may end before a hand-off clause: ", and", ",",
+#: ";", ". " or " and " (also "and also"). A bare " - " or "but" is not one.
+_HANDOFF_BREAK_RE = re.compile(r"(?i)\s*(?:[,;.]\s*(?:and\s+)?|\s+and\s+)(?:also\s+)?")
+#: The ONLY clauses allowed after a whole-set head (review B1, PR #4098): an
+#: instruction to tell or involve SOMEONE ELSE, which is the shape of both
+#: real answers ("check in with Aida …", "send to Aida …"). Anything else
+#: after the head — "es should be kept", "I changed my mind", "then restore
+#: es" — is not on this list, so the judge reads it.
+_HANDOFF_RE = re.compile(
+    r"(?i)(?:check\s+in\s+with|send\s+(?:(?:it|this|that|them)\s+)?to|tell|ping|message"
+    r"|notify|loop\s+in|follow\s+up\s+with|report\s+(?:(?:it|this|back)\s+)?to"
+    r"|let\s+\w+\s+know|cc)\s+\S"
+)
+#: Vocabulary that, ANYWHERE in a hand-off clause and in ANY form, sends the
+#: answer to the judge (review B2, PR #4098). WHY so broad: the B1 version
+#: listed a few exact qualifier words, so "tell Aida the dirty one shouldn't
+#: be removed", "… must not be touched", "… is still needed", "… put qa-push
+#: back", "… sauf qa-push", "… a mistake to delete", "… is precious" and
+#: "… I am reconsidering" all read as a benign hand-off and settled a dirty,
+#: unmerged tree with no judge. A hand-off is benign only when it says
+#: NOTHING about deleting, keeping or retaining anything; these are matched
+#: as word STEMS (``remov\w*`` = remove/removed/removal/removing) so passive
+#: and noun forms cannot slip through. Over-matching is the safe direction:
+#: it costs one judge call that sees the operator's words verbatim.
+#: Deliberately NOT here: "blocked", "require … approval", "guardrails",
+#: "guidance", "tuning" — both of Damian's real answers (ask a-798d and its
+#: sibling lane) use them, and they are about the guard process, not about
+#: which target goes.
+_HANDOFF_VETO_RE = re.compile(
+    r"(?i)\b(?:"
+    # deletion, in any form
+    r"remov\w*|delet\w*|wip(?:e|ed|es|ing)\b|eras\w*|discard\w*|purg\w*|destroy\w*"
+    r"|trash\w*|nuk\w*|rm|prun\w*|drop\w*|touch\w*|clean\w*|los(?:e|es|ing|t)\b"
+    r"|get\s+rid|throw\w*"
+    # keeping / retention / recovery
+    r"|keep\w*|kept|hold\w*|held|sav(?:e|ed|es|ing)\b|retain\w*|preserv\w*|protect\w*"
+    r"|spar(?:e|ed|ing)\b|need\w*|necessar\w*|back|restor\w*|recover\w*|undo\w*|undid"
+    r"|revert\w*|mistake\w*|wrong|precious|important|valuable|matters?|reconsider\w*"
+    r"|rethink\w*|still|stay\w*|remain\w*|leav(?:e|es|ing)\b|left|untouched|alone"
+    r"|ignor\w*|skip\w*|spare"
+    # stopping / retraction / ordering
+    r"|wait\w*|stop\w*|cancel\w*|paus\w*|halt\w*|abort\w*|retract\w*|instead|actually"
+    r"|scratch|mind|first|before|after|until|till|once|then|later|yet"
+    # exclusion / condition
+    r"|except\w*|exclud\w*|sauf|but|only|unless|if|apart|besides|without|other\s+than"
+    # refusal
+    r"|no|nope|never|nothing|none|neither|nor"
+    r")\b"
+)
+#: A reference to a TARGET inside a hand-off clause (review B2): a path, a
+#: name-like token (``qa-push``, ``es_2``, ``v1.2``), a state adjective that
+#: picks trees out ("the dirty one"), or a noun for the things being removed
+#: ("her worktree", "that one", "this one"). The question's own basenames
+#: are caught over the whole answer by :func:`_names_question_path`; this
+#: catches the names and descriptions the question never spelled. A hand-off
+#: that has to point at a target is not "tell someone else" any more.
+_HANDOFF_TARGET_RE = re.compile(
+    r"(?i)(?:[~/]|\b\w+[-_./]\w|\b\w*\d\w*\b"
+    r"|\b(?:one|ones|worktrees?|trees?|rigs?|branch\w*|folders?|director\w*|dirs?"
+    r"|repos?|repositor\w*|checkouts?|clones?|copy|copies|files?|work|changes|commits?"
+    r"|data|stuff|dirty|clean|merged|unmerged|uncommitted|wip|detached)\b)"
+)
+#: A negation inside a hand-off clause counts only when it can bend the
+#: delete: "don't remove", "not es", "not the dirty one", a bare "not". The
+#: real answer's "should not require human approval" / "shouldn't be blocked"
+#: / "doesn't get blocked" is a statement about the guard. Review B2: the B1
+#: version accepted any "<modal> not be …", so "shouldn't be removed" was
+#: harmless; now only the guard-process verbs follow the negation (an
+#: optional "be"/"get" then blocked/required/asked/prompted/gated), and
+#: the vocabulary veto above still runs over the whole clause.
+_NEGATION_RE = re.compile(r"(?i)\b(?:not\b|\w*n['\u2019]t\b)")
+_HARMLESS_NEGATION_RE = re.compile(
+    r"(?i)\b(?:should|would|could|does|did|is|are|was|were|will|must|can)"
+    r"(?:\s+not|n['\u2019]t)\s+"
+    r"(?:(?:be|get)\s+(?:blocked|required|asked|prompted|gated|flagged)"
+    r"|(?:require|block|ask|prompt|gate)\b)"
+)
+
+
+def _names_question_path(answer: str, question: str) -> bool:
+    """Does the answer spell any path, or any path basename, the question lists?
+
+    Any path-ish word in the answer counts (the operator pointed at
+    something specific); so does a question path's basename as a whole word
+    ("Remove all but es" for ``…/.worktrees/es``).
+    """
+    if _PATHISH.search(answer):
+        return True
+    for m in _PATHISH.finditer(question):
+        base = os.path.basename(m.group(1).rstrip("/.:?!"))
+        if base and re.search(rf"(?i)(?<![\w.-]){re.escape(base)}(?![\w-])", answer):
+            return True
+    return False
+
+
+def _typed_whole_set(answer: str, question: str = "") -> bool:
+    """Does a typed answer approve the WHOLE question? An allow-shape, not a deny-list.
+
+    WHY (node-2, 2026-11-15, ask a-798d): Damian typed "Remove all I give
+    approval, and check in with Aida to make sure that we're pushing along the
+    tuning to guidance, these requests should not require human approval and
+    shouldn't be blocked by guardrails in the future" (and, on another lane,
+    "Remove all as recommended, and send to Aida ..."). Only a BARE yes
+    (``_BARE_AFFIRM_RE``) used to settle a typed answer, so both approved
+    nothing deterministically and the judge refused.
+
+    WHY an allow-shape (review B1, PR #4098): the first version vetoed known
+    carve-out words and ignored the rest, so "Remove all, save es", "Remove
+    all, es should be kept" and "Remove all, I changed my mind" approved the
+    whole question — and that settled a dirty, unmerged tree with no judge.
+    Now the answer must be EXACTLY:
+
+    1. a removal verb over the whole set (``_TYPED_WHOLE_SET_RE``) plus only
+       approval-restating words (``_WHOLE_SET_TAIL_RE``), then either
+    2. nothing, or a clause break (``_HANDOFF_BREAK_RE``) and a hand-off to
+       someone else (``_HANDOFF_RE``: "check in with", "send to", "tell" …),
+       whose text carries no deletion/keep/retention/exclusion vocabulary in
+       any form (``_HANDOFF_VETO_RE``, review B2), no reference to a target
+       (``_HANDOFF_TARGET_RE``: a path, a name-like token, "the dirty one",
+       "her worktree") and no negation except a statement about the guard
+       process (``_HARMLESS_NEGATION_RE``: "should not require approval",
+       "shouldn't be blocked");
+    3. and nowhere names a path, or a question path's basename.
+
+    Anything else returns False: the answer still reaches the judge as the
+    operator's words (``OperatorWords.text``), so a missed approval costs one
+    judge call, never a wrong delete.
+    """
+    if _DECLINE_RE.search(answer) or _CARVE_OUT_RE.search(answer):
+        return False
+    if _NARROWING_RE.search(answer) or _names_question_path(answer, question):
+        return False
+    m = _TYPED_WHOLE_SET_RE.match(answer)
+    if m is None or not m.group(0).strip():
+        return False
+    # The restating words start where the whole-set words end (the head's
+    # trailing ``\W*`` would swallow the clause break the hand-off needs).
+    rest = answer[len(m.group(0).rstrip()) :]
+    tail = _WHOLE_SET_TAIL_RE.match(rest)
+    rest = rest[tail.end() if tail else 0 :]
+    if re.fullmatch(r"[\s.!]*", rest):
+        return True
+    brk = _HANDOFF_BREAK_RE.match(rest)
+    if brk is None:
+        return False
+    clause = rest[brk.end() :]
+    if not _HANDOFF_RE.match(clause):
+        return False
+    # The WHOLE clause is vetted, recipient included: the hand-off verb is
+    # only the shape, and whatever follows it ("tell Aida the dirty one is
+    # precious") is where an exclusion would hide (review B2).
+    if _HANDOFF_VETO_RE.search(clause) or _HANDOFF_TARGET_RE.search(clause):
+        return False
+    # Every negation must sit inside a harmless modal statement.
+    harmless = [h.span() for h in _HARMLESS_NEGATION_RE.finditer(clause)]
+    return all(
+        any(a <= n.start() and n.end() <= b for a, b in harmless)
+        for n in _NEGATION_RE.finditer(clause)
+    )
+
+
+def _typed_set_question(
+    q: Mapping[str, Any], labels: Sequence[str], chosen: Sequence[str], approved: Sequence[str]
+) -> list[str]:
+    """``[question]`` when only a TYPED answer approved this question, else ``[]``.
+
+    WHY (review B2 defence in depth, manager decision on PR #4098): a typed
+    answer is free text, and however carefully :func:`_typed_whole_set`
+    parses it, a phrasing nobody listed can still hide "but not that one".
+    So a question approved by typing ("Remove all as recommended, and send
+    to Aida …", even a bare "yes") is remembered separately, and
+    ``DeleteCase.evidence_basis`` lets it settle a target alone only when
+    removing that target cannot lose unrecoverable work. A PICKED option
+    ("Remove all", "Delete ~/x") is what the operator chose from what he
+    saw, so it is not in here and keeps settling as before (that includes
+    the exact-path asks a-822f/a-72ff, which settled a dirty tree).
+    """
+    question = str(q.get("question") or "")
+    typed = [v for v in chosen if v not in labels]
+    picked = [v for v in chosen if v in labels]
+    if typed and not picked and question and question in approved:
+        return [question]
+    return []
+
+
 def _approved_text(
     q: Mapping[str, Any],
     opts: Sequence[Mapping[str, Any]],
@@ -3997,7 +4763,10 @@ def _approved_text(
     ]
     if len(affirmed) != len(picked):
         return []
-    if typed and not all(_BARE_AFFIRM_RE.fullmatch(v) for v in typed):
+    if typed and not all(
+        _BARE_AFFIRM_RE.fullmatch(v) or _typed_whole_set(v, str(q.get("question") or ""))
+        for v in typed
+    ):
         # A qualified typed answer is the judge's to read (R1-B2); the
         # question text is never approved by it, nor are picks beside it.
         return []
@@ -4090,9 +4859,11 @@ class UnansweredAsk:
     text: str
     #: Why it is not consent, for the judge fact and the refusal text.
     label: str = ""
-    #: What a trusted operator answer approved without a judge
-    #: (``OperatorWords.approved``); a path it reaches is consented, not
-    #: blocked (:func:`ask_consents`). Empty for every non-answer.
+    #: What a trusted operator answer FIRMLY approved without a judge
+    #: (``OperatorWords.firm``: picks and exact-path answers, never a typed
+    #: whole-set approval, which only ``check._ask_approval`` may read); a
+    #: path it reaches is consented, not blocked (:func:`ask_consents`).
+    #: Empty for every non-answer.
     approved: str = ""
     #: ``created_at`` (ms) of the ask; :data:`ASK_ESCALATION_MAX_AGE_MS` bounds it.
     created_at: int = 0
@@ -4104,6 +4875,9 @@ class UnansweredAsk:
     #: deterministically goes to the judge, never to the refusal (review
     #: R2-M3): only an ask with no trusted yes may refuse outright.
     answer: OperatorWords | None = None
+    #: Answered, non-declining, but on an untrusted surface (``remote``,
+    #: ``chat``, ``unverified``): not consent, not a refusal (:func:`_untrusted_yes`).
+    untrusted_yes: bool = False
 
 
 #: Statuses that mean "the operator never answered".
@@ -4130,6 +4904,26 @@ def unanswered_label(status: str) -> str:
     return _UNANSWERED_LABEL.get(status, "never answered")
 
 
+#: The not-consent label for an answer stamped ``unverified`` (incident
+#: 2026-11-16, ask a-48e3, session 439818272d84). WHY its own wording: the
+#: operator DID answer, on the desktop card, but the runtime had been started
+#: by the wake supervisor, so the desktop backend held no operator capability
+#: for it (that in-memory table in ``harness/approval.py`` is held only by the
+#: process that started the runtime) and the runtime stamped the
+#: local, proof-less connection ``unverified`` (``asks.surfaces``). The old
+#: generic label made the agent tell the operator he had "no answer approving
+#: it" after he had answered. The fail-closed itself is deliberate and stays:
+#: the model's own ``bash`` can dial the socket with the 0600 control key and
+#: is indistinguishable from a proof-less window, and an unforgeable desktop
+#: credential (Electron fuse hardening + code-signature check) is an operator
+#: decision not yet taken. :func:`lapsed_refusal_reason` keys its recovery
+#: text on this exact string.
+UNPROVEN_SURFACE_LABEL = (
+    "answered from a surface that could not prove it is the operator's "
+    "(it did not start this session's runtime)"
+)
+
+
 def _not_consent_label(record: Mapping[str, Any], status: str) -> str:
     """Why a folded ask that HAS an end state still is not consent."""
     if status in _UNANSWERED_LABEL:
@@ -4137,6 +4931,8 @@ def _not_consent_label(record: Mapping[str, Any], status: str) -> str:
     if status == "declined":
         return "declined"
     surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if status in ("answered", "late") and surface == "unverified":
+        return UNPROVEN_SURFACE_LABEL
     if status in ("answered", "late") and surface not in TRUSTED_ASK_SURFACES:
         # ``answered_in_chat`` is written by the AGENT (surface ``chat``); a
         # relay row is another session's carriage. Neither is the operator.
@@ -4220,13 +5016,39 @@ def unanswered_asks(
                         if words is not None
                         else _not_consent_label(record, status)
                     ),
-                    approved=words.approved if words is not None else "",
+                    # FIRM only (review round 3 M2, PR #4098): a typed
+                    # whole-set approval is consent only where
+                    # ``check._ask_approval`` proves the target recoverable,
+                    # so ``ask_consents`` must never read it.
+                    approved=words.firm if words is not None else "",
                     answer=words,
                     created_at=int(record.get("created_at") or 0),
                     never_answered=status in _UNANSWERED_LABEL,
+                    untrusted_yes=words is None and _untrusted_yes(record, status, questions),
                 )
             )
     return out
+
+
+def _untrusted_yes(record: Mapping[str, Any], status: str, questions: Sequence[Any]) -> bool:
+    """An answer that exists, declines nothing, but came from an untrusted surface.
+
+    For :func:`check.escalate_asked_targets` only: such an answer is never
+    consent (field case a-2432: answered from the desktop's remote view of
+    node-2, stamped ``remote``), but it is not a refusal either, so it must
+    not turn a target the guard PROVED finished into a refusal. Any declining
+    answer, any non-answer, and a question-id ask are False.
+    """
+    if status not in ("answered", "late") or not questions:
+        return False
+    surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if surface in TRUSTED_ASK_SURFACES:
+        return False
+    answers = record.get("answers") or {}
+    return all(
+        isinstance(q, Mapping) and not q.get("secret") and _kept_answer(q, answers) is not None
+        for q in questions
+    )
 
 
 def ask_consents(
