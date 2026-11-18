@@ -10943,6 +10943,122 @@ async def test_an_ordinary_ask_beside_a_signed_one_keeps_the_plain_door(answers_
     assert remote.calls == [("a-other", {"q0": ["yes"]}, False, False)]
 
 
+class _UnsignedCapableRemote(_DecideRemote):
+    """A facade that reports whether ``bridge_decide`` would go out UNSIGNED.
+
+    ``signature_free=False`` is the terminal-started designated session: this
+    backend did not start the runtime, so the real attach client would sign the
+    decision with the operator key (Touch ID). PR #4208 security round 1, S-1.
+    """
+
+    def __init__(self, *, signature_free: bool, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.signature_free = signature_free
+        self.probed = 0
+
+    async def bridge_decide_signature_free(self) -> bool:
+        self.probed += 1
+        return self.signature_free
+
+
+def _card_recorder(monkeypatch: pytest.MonkeyPatch, outcome: str | None = "decided"):
+    from local_operator.server.routes import desktop_team_bridge
+
+    calls: list[dict[str, Any]] = []
+
+    async def record(config_dir: Any, **kwargs: Any) -> str | None:
+        calls.append(kwargs)
+        return outcome
+
+    monkeypatch.setattr(desktop_team_bridge, "decide_request_from_card", record)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_team_bridge_card_that_would_be_signed_takes_the_no_prompt_path(
+    answers_api, monkeypatch
+) -> None:
+    """a-856f / S-1: no signed runtime door, so no Touch ID, for a Team Bridge card."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_" + "cd" * 16)
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["detail"] == "decided"
+    assert calls == [{"ask_id": "a-site", "message_id": "bmsg_" + "cd" * 16, "word": "approve"}]
+    assert remote.decisions == []  # the signing door was never reached
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_no_prompt_card_refusal_is_a_409_sentence(answers_api, monkeypatch) -> None:
+    from local_operator.server.routes import desktop_team_bridge
+
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ef")
+    _install_ask_remote(app, remote)
+
+    async def refuse(config_dir: Any, **kwargs: Any) -> str | None:
+        raise ValueError("this request was already decided")
+
+    monkeypatch.setattr(desktop_team_bridge, "decide_request_from_card", refuse)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Deny"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "this request was already decided"
+    assert remote.decisions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "signature_free, outcome", [(True, "decided"), (False, None)], ids=["capable", "not-ours"]
+)
+async def test_the_runtime_door_stays_when_no_prompt_is_needed_or_the_ask_is_not_ours(
+    answers_api, monkeypatch, signature_free, outcome
+) -> None:
+    """A capability-bearing backend keeps the runtime door (no prompt, and the
+    answer reaches the agent's turn); a card whose ask is not this machine's
+    Team Bridge ask (``None``) falls back to it too."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=signature_free, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch, outcome)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == [("a-site", "bmsg_ab", "approve")]
+    assert len(calls) == (0 if signature_free else 1)
+
+
+@pytest.mark.asyncio
+async def test_a_site_card_keeps_the_signed_door_even_when_it_would_be_signed(
+    answers_api, monkeypatch
+) -> None:
+    """S-1's boundary: a ``site:v1:`` browser approval is real authority (the
+    node's extension re-verifies the signature), so it is never rerouted."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="")
+    card = _site_card(shown_origin="https://docs.example", bound_origin="https://docs.example")
+    remote.frontend_state.asks[0].questions = [card]
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == [("a-site", card["question_id"], "approve")]
+    assert calls == [] and remote.probed == 0
+
+
 def _site_card(*, shown_origin: str, bound_origin: str) -> dict[str, Any]:
     """A node's site card as its frame publishes it: ``site_ask_question``'s
     own output, bound to ``bound_origin``. Only the forged variant's sentence

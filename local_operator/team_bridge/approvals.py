@@ -37,11 +37,24 @@ boundary: ``agent_shell.DAEMON_BEARER_ENVS`` keeps it out of an agent shell's
 ENVIRONMENT, but the desktop persists it in a 0600 file any ordinary same-uid
 shell can read (security round 1, S-1 — measured). A same-uid process holding
 it can therefore decide a request the operator has a local ask for — exactly
-what it could already do with ``auth.db``. The residual is unchanged in kind;
-closing it for real needs the HUB to verify an operator signature on every
-human decision (a protocol follow-up). Presence signing stays for
-authority-RAISING operator actions (``operator.sign`` — e.g. loosening a gate),
-which are not ordinary approvals.
+what it could already do with ``auth.db``. The residual is unchanged in kind.
+
+THE LIKELY HOLDER IS AN AGENT SHELL, not malware (PR #4208 security round 1,
+S-3). A third-party Team Bridge sender wants its own request approved and is
+motivated to plant instructions in the screened body; an agent acting on that
+message from an UNCONFINED shell can read the desktop token and call
+``…/requests/decide``, as it could already read ``auth.db`` and POST the hub's
+decide. The two files need the SAME confinement: a confined shell is denied
+both (``tools/confinement.py`` lists the desktop-token paths and
+``<config>/auth.db*``), an unconfined one reads both. Hardening one without the
+other closes nothing; a future change to either deny list must move both.
+
+Closing it for real needs the HUB to verify an operator signature on every
+human decision (a protocol follow-up). The desktop CARD answer for a Team
+Bridge request follows the same no-prompt rule (S-1 of the same review:
+``desktop_team_bridge.decide_request_from_card``). Presence signing stays for
+``site:v1:`` browser approvals and for authority-RAISING operator actions
+(``operator.sign`` — e.g. loosening a gate), which are not ordinary approvals.
 
 The mechanism:
 
@@ -246,7 +259,7 @@ def request_rows(
     BODY is never read — it is untrusted third-party text, and the screened
     excerpt a human decides on already rides the ask card — and no screening
     rationale exists on this path to leak. Items for another tenant, items with
-    NO tenant (the projection is a fence, so absence fails closed — review S-4)
+    NO tenant (the projection is a fence, so absence fails closed — review S-4),
     items with NO local ask (screening rejected the request, or has not
     screened it yet — gap 2) and items whose local ask is already answered are
     dropped.
@@ -528,46 +541,6 @@ def conflicting_selection(
         for item in selection
         if item.message_id in unsent and unsent[item.message_id] != item.word
     ]
-
-
-#: Bound on ``client_ref`` (hex), echoed on the published authorize frame.
-CLIENT_REF_MAX = 32
-
-
-def prompt_items(config_dir: Path, selection: Sequence[Selection]) -> list[dict[str, Any]]:
-    """What a batch decision is FOR, resolved by the daemon from the LOCAL asks.
-
-    The payload of the ``team_bridge_authorize`` feed frame (S-6), which the
-    ``/authorize`` compatibility shim still publishes (as ``signed``, with no
-    prompt behind it — decision a-856f) so the shipped desktop keeps naming
-    what each confirmation was for. Each item is
-    ``{message_id, word, sender, excerpt}``. ``sender`` and ``excerpt`` come
-    from the ask card's own line (``<sender>: <screened excerpt>``, composed at
-    issuance by ``asks_bridge.bridge_request_question``), split at its first
-    ``": "`` — the caller supplies neither, so a caller cannot make a frame
-    look like it is for something else. An item with no local ask carries
-    ``None`` for both. Never the hub body, a screening rationale or a body hash.
-    The line is bounded at issuance, and a selection is at most 50 items.
-    """
-
-    asks = bridge_asks_by_message(config_dir)
-    items: list[dict[str, Any]] = []
-    for item in selection:
-        ask = asks.get(item.message_id)
-        sender: str | None = None
-        excerpt: str | None = None
-        if ask is not None and ask.text:
-            head, sep, tail = ask.text.partition(": ")
-            sender, excerpt = (head, tail) if sep else (None, ask.text)
-        items.append(
-            {
-                "message_id": item.message_id,
-                "word": item.word,
-                "sender": sender,
-                "excerpt": excerpt,
-            }
-        )
-    return items
 
 
 async def _settle_and_cancel(config_dir: Path, ask: BridgeAsk) -> bool:

@@ -10,7 +10,7 @@ import logging
 import pathlib
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import aclosing, asynccontextmanager
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, NamedTuple, cast
 
@@ -5019,6 +5019,49 @@ def _verified_decision_target(bridge: Any, body: Answer) -> tuple[str, str, str]
     return None
 
 
+async def _decide_card_without_prompt(
+    request: Request, bridge: Any, target: tuple[str, str, str]
+) -> str | None:
+    """Decide a Team Bridge request card with no OS prompt, or ``None`` to keep the runtime door.
+
+    WHY (decision a-856f; PR #4208 security round 1, S-1). The runtime door's
+    ``bridge_decide`` is signed by the attach client with the operator key — a
+    Touch ID sheet, and a refusal on hosts without a presence key — whenever
+    this backend did not start the session's runtime (a terminal-started
+    designated session). For a Team Bridge request that prompt guards nothing:
+    the bearer-only Approvals decide already reaches the same ask. So, only in
+    that case, the card is decided by
+    ``desktop_team_bridge.decide_request_from_card`` (same bearer, same intent
+    ledger and hub audit as the list).
+
+    ``None`` — the runtime door stays — for: a ``site:v1:`` card (a node's
+    browser extension re-verifies that signature; it is real authority there),
+    a peer's conversation (its ask lives on the other device), a holder with no
+    probe (the in-process serving handle, which never signs), a facade that
+    reports the decision would go unsigned anyway (that path also injects the
+    answer into the agent's turn, which the bearer path does not), and a card
+    whose ask is not one of this machine's Team Bridge asks.
+    """
+    from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+    ask_id, question_id, word = target
+    if question_id.startswith(SITE_QUESTION_PREFIX):
+        return None
+    if getattr(bridge, "remote_row", None) is not None:
+        return None
+    probe = getattr(bridge.remote, "bridge_decide_signature_free", None)
+    if not callable(probe) or await cast(Callable[[], Awaitable[bool]], probe)():
+        return None
+    # Imported here: desktop_team_bridge imports this module (``reply``).
+    from local_operator.server.routes.desktop_team_bridge import (
+        decide_request_from_card,
+    )
+
+    return await decide_request_from_card(
+        store_root(request), ask_id=ask_id, message_id=question_id, word=word
+    )
+
+
 async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:
     """Put a queued ask away from the desktop — the NO-BOOT door (SA-D5, §14).
 
@@ -5160,6 +5203,15 @@ async def answer(session_id: str, body: Answer, request: Request):
                     # a ``{"ok", "error"}`` verdict, a serving handle raises
                     # ``ValueError`` (caught below with the plain door's). Both
                     # reach the user as the same 409 sentence.
+                    #
+                    # EXCEPT a Team Bridge request this backend would have to
+                    # SIGN for (decision a-856f; PR #4208 security round 1,
+                    # S-1): ordinary approve/deny never raises Touch ID, so it
+                    # is decided through the bearer-authorised single-item path
+                    # instead (``_decide_card_without_prompt``).
+                    decided = await _decide_card_without_prompt(request, bridge, target)
+                    if decided is not None:
+                        return reply({"detail": decided})
                     verdict = await bridge.remote.bridge_decide(*target)
                     if isinstance(verdict, Mapping) and not verdict.get("ok", True):
                         raise ValueError(str(verdict.get("error") or "the decision was refused"))

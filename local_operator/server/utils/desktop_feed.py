@@ -2337,10 +2337,13 @@ class DesktopFeed:
         desktop renders it and labels a ``client_ref`` it did not generate as
         "not started by you".
 
-        Since decision a-856f that route is a NON-PROMPTING compatibility shim
-        (ordinary approvals never raise Touch ID), so it publishes one frame in
-        the ``signed`` state per call; ``prompting`` / ``dismissed`` /
-        ``refused`` are no longer emitted. LIVE-ONLY, like ``settings_intent``:
+        NO CALLER PUBLISHES IT SINCE decision a-856f. That route is now a
+        non-prompting compatibility shim, and a lone ``signed`` frame renders
+        nothing in the shipped desktop (its model only closes a notice that a
+        ``prompting`` frame opened), so publishing one would claim a detection
+        signal that does not exist (PR #4208 security round 1, S-2). The method
+        and frame type stay so an older desktop's subscription keeps its shape;
+        a decide-side frame would be a new, rendered contract. LIVE-ONLY, like ``settings_intent``:
         a missed frame has nothing to replay into. The payload never carries a
         message body, a screening rationale or a body hash.
         """

@@ -1017,7 +1017,7 @@ def test_a_card_answer_between_record_and_post_is_not_sent(world, monkeypatch) -
     assert _ask_status(world.root, COS, ask_a) == "answered"
 
 
-# --- S-6: the shim still publishes what each confirmation was for ------------
+# --- S-2: the shim publishes no feed frame ------------------------------------
 
 
 def _post_authorize(world, items, **extra):
@@ -1026,45 +1026,81 @@ def _post_authorize(world, items, **extra):
     )
 
 
-def test_each_authorize_publishes_one_signed_frame_on_the_desktop_feed(world) -> None:
-    """``team_bridge_authorize`` keeps its shape: one ``signed`` frame, no prompt."""
+def test_the_authorize_shim_publishes_no_feed_frame(world) -> None:
+    """PR #4208 security round 1, S-2: a lone ``signed`` frame renders nothing in
+    the shipped desktop, so the shim no longer claims a detection signal."""
 
     frames: list[dict[str, Any]] = []
     world.http.app.state.desktop_feed = SimpleNamespace(
         publish_team_bridge_authorize=lambda payload: frames.append(payload)
     )
     _raise_ask(world.root, "bmsg_a")
-    ok = _post_authorize(
-        world, _items(("bmsg_a", "approve"), ("bmsg_zz", "deny")), client_ref="c0ffee"
-    )
+    ok = _post_authorize(world, _items(("bmsg_a", "approve")), client_ref="c0ffee")
     assert ok.status_code == 200, ok.text
-    assert [f["state"] for f in frames] == ["signed"]
-    (first,) = frames
-    assert set(first) == {"authorize_id", "client_ref", "state", "items"}
-    assert first["client_ref"] == "c0ffee"
-    assert first["items"] == [
-        {
-            "message_id": "bmsg_a",
-            "word": "approve",
-            "sender": "priya@acme.example",
-            "excerpt": "approve the spend?",
-        },
-        {"message_id": "bmsg_zz", "word": "deny", "sender": None, "excerpt": None},
-    ]
-    flat = json.dumps(frames)
-    for leaked in ("PRIVATE BODY", "PRIVATE RATIONALE", "body_hash", "rationale"):
-        assert leaked not in flat
-
-    _post_authorize(world, _items(("bmsg_a", "approve")))
-    assert [f["state"] for f in frames] == ["signed", "signed"]
-    assert frames[1]["client_ref"] is None
-    assert frames[1]["authorize_id"] != first["authorize_id"]
-
+    assert frames == []
+    # ``client_ref`` is still grammar-checked, so a shipped client's body keeps
+    # its contract and a malformed one is still refused.
     for bad in ("C0FFEE", "x" * 4, "a" * 33, "", 7):
         refused = _post_authorize(world, _items(("bmsg_a", "approve")), client_ref=bad)
         assert refused.status_code == 422, (bad, refused.text)
-    assert len(frames) == 2  # a malformed body publishes nothing
     assert world.signer_calls == []
+
+
+# --- S-1: a desktop CARD answer to a Team Bridge request never prompts --------
+
+
+def _card(world, *, ask_id: str, message_id: str, word: str):
+    import asyncio
+
+    return asyncio.run(
+        routes.decide_request_from_card(world.root, ask_id=ask_id, message_id=message_id, word=word)
+    )
+
+
+def test_a_card_decision_settles_the_ask_with_no_signer_call(world) -> None:
+    """The bearer path the answer route takes for a terminal-started session."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    assert _card(world, ask_id=ask_a, message_id="bmsg_a", word="deny") == "decided"
+    (call,) = _hub_calls(world.hub, "/v1/messaging/requests/decide")
+    assert call["body"]["decisions"] == [
+        {
+            "message_id": "bmsg_a",
+            "decision": "denied",
+            "ask_ref": {"ask_id": ask_a, "question_id": "bmsg_a"},
+            "decided_via": "bearer-only",
+        }
+    ]
+    assert world.hub.ledger[0]["request_id"] == "bmsg_a"
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"
+    assert _intent_states(world.root) == {"bmsg_a": "sent"}
+    assert world.signer_calls == []
+
+
+def test_a_card_for_another_ask_keeps_the_runtime_door(world) -> None:
+    """A card whose ask is not this machine's Team Bridge ask for that request
+    (another ask id, or no ask) is not decided here: ``None``, zero hub calls."""
+
+    _raise_ask(world.root, "bmsg_a")
+    assert _card(world, ask_id="a-elsewhere", message_id="bmsg_a", word="approve") is None
+    assert _card(world, ask_id="a-none", message_id="bmsg_c", word="approve") is None
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+
+
+def test_a_card_refusal_is_a_card_sentence_and_nothing_is_decided_twice(world) -> None:
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.pending = ["bmsg_b"]  # decided elsewhere: the hub answers already-decided
+    with pytest.raises(ValueError, match="already decided"):
+        _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve")
+    assert _ask_status(world.root, COS, ask_a) == "withdrawn"  # terminal: settled
+    assert world.signer_calls == []
+
+
+def test_a_card_in_a_non_designated_session_is_refused(world) -> None:
+    ask_o = _raise_ask(world.root, "bmsg_a", session_id="s-other")
+    with pytest.raises(ValueError, match="no longer your Team Bridge session"):
+        _card(world, ask_id=ask_o, message_id="bmsg_a", word="approve")
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
 
 
 def test_a_request_decided_elsewhere_is_settled_by_the_list(world) -> None:

@@ -84,6 +84,7 @@ import asyncio
 import io
 import logging
 import re
+import secrets
 import unicodedata
 import urllib.parse
 from collections.abc import Callable, Iterator, Mapping
@@ -4846,10 +4847,11 @@ class OperatorProofIn(_Strict):
 class ApprovalsAuthorizeIn(ApprovalsSelectionIn):
     """The ``…/decide/authorize`` body: the selection plus an optional ``client_ref``.
 
-    ``client_ref`` is the caller's own correlation value, echoed on the
-    ``team_bridge_authorize`` feed frame so the desktop can tell a
-    confirmation it started from one it did not (S-6). Lowercase hex, at most 32 characters:
-    bounded, and incapable of carrying copy that could pass for daemon text.
+    ``client_ref`` was the caller's correlation value for the retired prompt's
+    feed frame (S-6). It is still accepted, and grammar-checked, so the shipped
+    desktop's body is not refused; nothing reads it any more (S-2, a-856f).
+    Lowercase hex, at most 32 characters: bounded, and incapable of carrying
+    copy that could pass for daemon text.
     """
 
     client_ref: str | None = Field(default=None, pattern=r"^[0-9a-f]{1,32}$")
@@ -5039,13 +5041,18 @@ async def authorize_decision(
     Refusals: a malformed selection (422), the account fence, ``bridge_off``,
     and ``earlier_decision_unconfirmed`` (409, ``details.items``) — the same
     whole-batch refusal ``…/decide`` would give, surfaced at the step the old
-    client expects it. On success one ``team_bridge_authorize`` frame is
-    published in the ``signed`` state (no ``prompting`` frame: nothing is
-    shown to wait on), with the optional ``client_ref`` echoed, so the desktop
-    still names what the confirmation was for.
-    """
+    client expects it.
 
-    import secrets
+    NO FEED FRAME (PR #4208 security round 1, S-2). This route used to publish
+    ``team_bridge_authorize`` frames so the desktop could show what a Touch ID
+    prompt was for and flag one it did not start. With no prompt, the shipped
+    desktop renders nothing for a lone ``signed`` frame (its model only closes
+    a notice a ``prompting`` frame opened), and ``…/decide`` can be called
+    without this step anyway, so a frame here would claim a detection signal
+    that does not exist. A decision made outside the desktop is visible after
+    the fact in the hub decision ledger (``…/decisions``) and as a settled ask.
+    ``client_ref`` is still accepted (grammar-checked) for the shipped client.
+    """
 
     from local_operator.team_bridge import approvals
 
@@ -5055,16 +5062,6 @@ async def authorize_decision(
     conflicts = approvals.conflicting_selection(config_dir, context.owner, selection)
     if conflicts:
         _raise_decide("earlier_decision_unconfirmed", {"items": conflicts})
-    feed = getattr(request.app.state, "desktop_feed", None)
-    if feed is not None:  # no feed means no subscriber (the desktop creates it)
-        feed.publish_team_bridge_authorize(
-            {
-                "authorize_id": secrets.token_hex(8),
-                "client_ref": body.client_ref,
-                "state": "signed",
-                "items": approvals.prompt_items(config_dir, selection),
-            }
-        )
     return reply(
         {
             # Shaped to pass ``OperatorProofIn`` when echoed: 64-hex challenge,
@@ -5102,8 +5099,6 @@ async def decide_requests(
     exactly the selected pairs.
     """
 
-    import secrets
-
     from local_operator.team_bridge import approvals
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
 
@@ -5135,6 +5130,109 @@ async def decide_requests(
     except BridgeRefusal as exc:
         _raise_bridge(exc)
     return reply(outcome)
+
+
+#: The sentence a desktop CARD answer gets for each per-item refusal of the
+#: single-item decide (``decide_request_from_card``). Card copy, not batch copy:
+#: one request, answered on its own card. Codes not listed read as
+#: ``_CARD_REFUSAL_DEFAULT``; every one of them means nothing was decided.
+_CARD_REFUSALS: dict[str, str] = {
+    "no_open_ask": "this request is no longer waiting for a decision",
+    "answered_on_card": "this request was already answered on its card",
+    "owner_changed": (
+        "Team Bridge was set up again since this request arrived, so it can no longer be "
+        "decided here"
+    ),
+    "not_designated": (
+        "this request belongs to a session that is no longer your Team Bridge session"
+    ),
+    "feature_off": "Team Bridge is off on this machine; turn it on to decide this request",
+    "consent_revoked": "Team Bridge is off on this machine; turn it on to decide this request",
+    "earlier_decision_unconfirmed": _DECIDE_REFUSALS["earlier_decision_unconfirmed"][1],
+    "request_already_decided": "this request was already decided",
+    "request_withdrawn": "the sender withdrew this request",
+    "request_revoked": "the sender withdrew this request",
+    "request_expired": "this request has expired",
+}
+_CARD_REFUSAL_DEFAULT = "the decision could not be sent; nothing was decided — try again"
+
+
+async def decide_request_from_card(
+    config_dir: Path, *, ask_id: str, message_id: str, word: str
+) -> str | None:
+    """Decide ONE Team Bridge request answered on its desktop card, with no prompt.
+
+    WHY (decision a-856f; PR #4208 security round 1, S-1). The card's normal
+    door is the session runtime's ``bridge_decide``, which the attach client
+    signs with the operator key (an OS Touch ID sheet) whenever the desktop
+    backend did not start that session's runtime — a terminal-started
+    designated session, for one. That is exactly the prompt a-856f rules out,
+    and it protected nothing: the bearer-only ``…/requests/decide`` already
+    decides the same ask. So the desktop answer route calls this instead when
+    the facade reports the decision would be signed
+    (``AttachedSession.bridge_decide_signature_free``). ``site:v1:`` cards never
+    come here: a node's browser extension re-verifies their signature.
+
+    Same authority and audit as the Approvals list: the caller is behind the
+    desktop bearer, the item is ONE explicit ``(message_id, word)`` the person
+    tapped, it must resolve to THIS card's ask (``ask_id`` — a re-raised ask is
+    a different decision), and ``approvals.decide_selection`` re-checks the
+    local ask, owner binding and designated session, records the intent before
+    the hub call and settles the ask afterwards. The account is the committed
+    owner's: the ask was issued under that binding and the decide re-checks it.
+
+    Returns ``None`` when no ask on this machine matches (the caller keeps the
+    runtime door, whose own refusal then stands). Returns ``"decided"`` on
+    success. Raises ``ValueError`` carrying the card sentence on any refusal.
+    """
+
+    from local_operator.team_bridge import approvals
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        ReadRefused,
+        resolve_read_context,
+        wire_for,
+    )
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    ask = approvals.bridge_asks_by_message(config_dir).get(message_id)
+    if ask is None or ask.ask_id != ask_id:
+        return None
+    try:
+        owner = Store(config_dir).active_owner_readonly()
+    except StoreRefused:
+        owner = None
+    if owner is None:
+        raise ValueError(_CARD_REFUSALS["owner_changed"])
+    wire = wire_for(config_dir)
+    try:
+        context = await resolve_read_context(
+            config_dir, expected_account_id=str(owner.account_id), wire=wire
+        )
+        if getattr(context, "read_only", False):
+            raise ValueError(_CARD_REFUSALS["feature_off"])
+        selection = [approvals.Selection(message_id, word)]
+        if approvals.conflicting_selection(config_dir, context.owner, selection):
+            raise ValueError(_CARD_REFUSALS["earlier_decision_unconfirmed"])
+        outcome = await approvals.decide_selection(
+            wire,
+            selection,
+            config_dir=config_dir,
+            owner=context.owner,
+            access=context.access,
+            expected_account_id=str(owner.account_id),
+            batch_ref=f"{approvals.BATCH_INTENT_PREFIX}{secrets.token_hex(8)}",
+        )
+    except BridgeSignInRequired:
+        raise ValueError("sign in to Team Bridge again to decide this request") from None
+    except (BridgeRefusal, ReadRefused):
+        raise ValueError(_CARD_REFUSAL_DEFAULT) from None
+    (result,) = outcome["results"]
+    if result.get("status") or (result.get("sent") and not result.get("error")):
+        # A sent item the hub's answer omitted may well be committed (review
+        # R1-2 of PR #4099); the ledger reconciles it on the next list read.
+        return "decided"
+    raise ValueError(_CARD_REFUSALS.get(str(result.get("error") or ""), _CARD_REFUSAL_DEFAULT))
 
 
 @router.get("/v1/desktop/team-bridge/decisions", response_model=CRUDResponse[Any])

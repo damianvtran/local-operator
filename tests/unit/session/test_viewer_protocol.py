@@ -1319,9 +1319,14 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # reads whether the answer just sent carried operator proof. Facade-only —
     # only ``AttachedSession`` sends that frame. Declared in
     # ``ViewerSessionProtocol`` in the same commit; the floors stay put.
-    assert len(viewer_only) == 81, (
+    # 81 → 82 is ``bridge_decide_signature_free`` (PR #4208, decision a-856f):
+    # the desktop answer route asks whether a Team Bridge card's decision would
+    # be signed (Touch ID) and, if so, decides it through the bearer path.
+    # Facade-only — an in-process owner never signs. Declared in
+    # ``ViewerSessionProtocol`` in the same commit; the floors stay put.
+    assert len(viewer_only) == 82, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 81, and the aggregate floor is set at 40 against that number. A "
+        "says 82, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
