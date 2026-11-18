@@ -179,6 +179,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The host-filed org-hub pull consent ask (PR #3693): its own namespace
         # so no audited catalogue's hash moves; its locales ride the same PR.
         "wire.hub_pull",
+        # GitHub repository sharing diagnostics (PR #4052): the `repos` list,
+        # opt-out lines, readiness rows and the wrapper's denied-repo notice.
+        # Its own namespace so no audited catalogue's hash moves; its seven
+        # locales ride the same PR with their own ledger rows.
+        "wire.github",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

@@ -63,6 +63,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import copy
 import enum
 import hashlib
 import json
@@ -74,7 +75,7 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence, TypedDict
 
 import httpx
 
@@ -1651,6 +1652,9 @@ EDGE_BLOCKED_SENTENCE = (  # i18n: ignore model-facing refusal sentence, like th
     "user what you tried to send and let them decide."
 )
 
+#: The throttle code, from the hub's own buckets AND the edge's per-IP WAF rule.
+RATE_LIMITED_CODE = "rate_limited"
+
 #: An edge header value is untrusted text that lands in a log and a tool
 #: result: one bounded token of a conservative alphabet, or nothing. Whatever
 #: the edge (or an intermediary) puts there still reaches the model, up to 64
@@ -1754,6 +1758,20 @@ def _edge_blocked(response: httpx.Response) -> BridgeRefusal:
     )
 
 
+#: The wait the edge states in its 429 sentence ("…; retry in 300 seconds.").
+#: Bounded to six digits so response-sized junk is never a number.
+_STATED_RETRY_AFTER = re.compile(r"\bretry in (\d{1,6}) seconds?\b", re.IGNORECASE)
+
+
+def _stated_retry_after(message: Any) -> int | None:
+    """The ``retry in N seconds`` wait a throttle sentence names, else ``None``."""
+
+    if not isinstance(message, str):
+        return None
+    match = _STATED_RETRY_AFTER.search(message)
+    return int(match.group(1)) if match else None
+
+
 def _refusal(response: httpx.Response) -> BridgeRefusal:
     """Map one non-2xx answer onto :class:`BridgeRefusal` (§6.5).
 
@@ -1776,6 +1794,22 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
     code = body.get("code") if body else None
     message = body.get("error") if body else None
     details = body.get("details") if body else None
+    # The EDGE's shape (incident 2026-11-17): the AWS WAF in front of the hub
+    # answers its per-IP rate rule with ``{"error": {"type", "code",
+    # "message"}}`` — the error is an OBJECT, not the hub's flat
+    # ``code``/``error`` pair — and WAF cannot emit a Retry-After header. Read
+    # flat, that 429 became ``bridge_error`` / "Radient refused the request
+    # (HTTP 429)." with no wait, so agents and the desktop could not tell a
+    # throttle from a fault and retried at once, which kept the block alive.
+    # The nested object is only consulted when the flat fields are absent, so
+    # a hub answer keeps its exact reading.
+    if isinstance(message, dict):
+        nested = message
+        if code is None:
+            code = nested.get("code")
+        message = nested.get("message")
+        if details is None:
+            details = nested.get("details")
     # Codes reach CLI diagnostics and logs. Treat the hub as untrusted here:
     # neither line breaks nor response-sized junk are machine identifiers (QA Q2).
     if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) is None:
@@ -1796,6 +1830,12 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
                 retry_after = int(header.strip())
             except ValueError:
                 retry_after = None
+    if retry_after is None and status in (429, 503):
+        # Last resort, for the edge answer above that can carry no header: its
+        # sentence states the wait ("retry in 300 seconds"). Only a throttle or
+        # an unavailable answer is read this way, and only the edge's exact
+        # phrase — a number elsewhere in prose is never a wait.
+        retry_after = _stated_retry_after(message)
     return BridgeRefusal(
         code,
         message,
@@ -1887,6 +1927,48 @@ def _local_settings_snapshot(config_dir: Path | None) -> TeamBridgeSettings | No
         return TeamBridgeSettings.from_values(watcher.values)
     except Exception:  # noqa: BLE001 - bookkeeping must not fail the operation
         return None
+
+
+def _directory_binds_avatar(
+    directory: Any, sender_account_id: str, endpoint: tuple[str, str]
+) -> bool:
+    """Whether one directory answer publishes ``endpoint`` for this sender (see
+    :meth:`TeamBridgeClient._endpoint_belongs_to`)."""
+
+    members = directory.get("members") if isinstance(directory, dict) else None
+    if not isinstance(members, list):
+        return False
+    expected_url = f"/v1/messaging/endpoints/{endpoint[0]}/avatar?v={endpoint[1]}"
+    for member in members:
+        if not isinstance(member, dict) or member.get("account_id") != sender_account_id:
+            continue
+        agent = member.get("agent")
+        if not isinstance(agent, dict) or agent.get("endpoint_id") != endpoint[0]:
+            continue
+        avatar = agent.get("avatar")
+        if isinstance(avatar, dict) and isinstance(avatar.get("hash"), str):
+            if avatar["hash"] == endpoint[1]:
+                return True
+            continue
+        if isinstance(agent.get("avatar_url"), str) and agent["avatar_url"] == expected_url:
+            return True
+    return False
+
+
+#: How long :meth:`TeamBridgeClient.directory_cached` keeps one directory
+#: answer. 120 s, inside the 60–300 s band: long enough that a burst of named
+#: sends (an agent posting a status round, a fan-out to several teammates) costs
+#: one read instead of one per message, and short enough that a change no miss
+#: can detect — a member REMOVED, an agent renamed while its old name is still
+#: matched — is corrected within two minutes. Anything a miss CAN detect (a new
+#: teammate, a new endpoint, a bridge turned on) is refreshed immediately by the
+#: caller's one forced re-read, so the TTL is not what bounds a join.
+DIRECTORY_CACHE_TTL_S = 120.0
+#: Bound on distinct (hub, account, tenant) entries held at once.
+DIRECTORY_CACHE_MAX_ENTRIES = 64
+#: Process-wide on purpose: the tool and the desktop routes build a fresh
+#: client per call, so a per-instance cache would never be hit. Memory only.
+_DIRECTORY_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 
 
 class TeamBridgeClient:
@@ -2582,6 +2664,91 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def directory_cached(
+        self,
+        tenant_id: str,
+        *,
+        expected_account_id: str | None = None,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """:meth:`directory`, answered from a short per-account cache.
+
+        WHY (incident 2026-11-17). Every NAMED send and DM resolution read
+        the directory uncached, so an agent posting a burst of messages spent a
+        directory read per message from the same address the edge rate-limits
+        per IP. The directory changes on human time (someone joins, renames an
+        agent, enables the bridge), so a short cache removes those reads without
+        a visible cost.
+
+        THE KEY is ``(hub base, signed-in account, tenant)``: the pinned access
+        is resolved FIRST and its account is part of the key, so an answer read
+        as one account is never served to another, and one organization's
+        members never answer for another's. A caller fencing on
+        ``expected_account_id`` that does not match the pinned account bypasses
+        the cache, so :meth:`_send`'s own guard still refuses it.
+
+        FRESHNESS is the caller's lever, not the TTL's: a resolution that MISSES
+        on a cached answer (an unknown name, an endpoint id, a bridge that reads
+        as off) calls again with ``refresh=True`` exactly once, which re-reads
+        and re-primes the entry — so a newly joined teammate is found on the
+        first try, and only a miss pays for a read.
+
+        Callers get a deep copy; the cached payload is never handed out to be
+        mutated. A caller that decides whether to re-read needs to know where
+        the copy came from: use :meth:`directory_cached_read`.
+        """
+
+        payload, _fetched = await self.directory_cached_read(
+            tenant_id, expected_account_id=expected_account_id, refresh=refresh
+        )
+        return payload
+
+    async def directory_cached_read(
+        self,
+        tenant_id: str,
+        *,
+        expected_account_id: str | None = None,
+        refresh: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        """:meth:`directory_cached`, plus whether THIS call read the wire.
+
+        WHY. The forced re-read on a resolution miss exists only because a
+        cached copy may predate a teammate joining. A copy fetched by this very
+        call is already as fresh as a re-read would be, so re-reading it spends
+        a second directory request (against the per-IP edge limit the cache was
+        added to relieve) for an identical answer. Callers re-read on a miss
+        only when ``fetched`` is False — a cold cache then costs exactly one
+        read, a warm one at most one forced refresh.
+
+        ``fetched`` is True for every path that reached :meth:`directory`: a
+        cache miss or expiry, ``refresh=True``, and the uncached bypass (no
+        pinned account, or an ``expected_account_id`` fence that does not match).
+        """
+
+        access = await self.current_access()
+        account = str(getattr(access, "account_id", "") or "")
+        if not account or (expected_account_id is not None and expected_account_id != account):
+            payload = await self.directory(
+                tenant_id, access=access, expected_account_id=expected_account_id
+            )
+            return payload, True
+        key = (self.base_url, account, str(tenant_id))
+        now = time.monotonic()
+        hit = _DIRECTORY_CACHE.get(key)
+        if not refresh and hit is not None and hit[0] > now:
+            return copy.deepcopy(hit[1]), False
+        payload = await self.directory(
+            tenant_id, access=access, expected_account_id=expected_account_id
+        )
+        if isinstance(payload, dict):
+            if len(_DIRECTORY_CACHE) >= DIRECTORY_CACHE_MAX_ENTRIES:
+                # Account/tenant pairs on one machine are a handful; the bound
+                # only stops an unexpected key churn from growing the process.
+                _DIRECTORY_CACHE.clear()
+            _DIRECTORY_CACHE[key] = (time.monotonic() + DIRECTORY_CACHE_TTL_S, payload)
+            return copy.deepcopy(payload), True
+        return payload, True
+
     async def tenant_state(
         self, tenant_id: str, *, access: OAuthAccess | None = None
     ) -> dict[str, Any]:
@@ -2760,6 +2927,7 @@ class TeamBridgeClient:
         agent_name: str | None = None,
         endpoint: Any = _UNKNOWN_ENDPOINT,
         expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """The consent write, with §5.2's client-side preconditions enforced.
 
@@ -2881,7 +3049,13 @@ class TeamBridgeClient:
             else None
         )
         try:
-            result = await self._send("PUT", "/messaging/settings", body=body, access=access)
+            result = await self._send(
+                "PUT",
+                "/messaging/settings",
+                body=body,
+                access=access,
+                pre_http_guard=pre_http_guard,
+            )
         except BridgeRefusal as refusal:
             if "agent_name" in body and _refuses_field(refusal, "agent_name"):
                 # Code and rule are a closed server set (§6.5); the name itself
@@ -5504,25 +5678,12 @@ class TeamBridgeClient:
         about whether this is the picture.
         """
 
+        # Deliberately NOT ``directory_cached``: this is a fence, and a cached
+        # answer can only be wrong in the open direction — a picture unbound
+        # since the read would still paint until the entry expires. The fence
+        # reads the hub's current answer every time.
         directory = await self.directory(tenant_id, expected_account_id=expected_account_id)
-        members = directory.get("members") if isinstance(directory, dict) else None
-        if not isinstance(members, list):
-            return False
-        expected_url = f"/v1/messaging/endpoints/{endpoint[0]}/avatar?v={endpoint[1]}"
-        for member in members:
-            if not isinstance(member, dict) or member.get("account_id") != sender_account_id:
-                continue
-            agent = member.get("agent")
-            if not isinstance(agent, dict) or agent.get("endpoint_id") != endpoint[0]:
-                continue
-            avatar = agent.get("avatar")
-            if isinstance(avatar, dict) and isinstance(avatar.get("hash"), str):
-                if avatar["hash"] == endpoint[1]:
-                    return True
-                continue
-            if isinstance(agent.get("avatar_url"), str) and agent["avatar_url"] == expected_url:
-                return True
-        return False
+        return _directory_binds_avatar(directory, sender_account_id, endpoint)
 
     async def fetch_attachment(
         self,
@@ -6124,6 +6285,9 @@ STATUS_CACHE_TTL_S = 300.0
 STATUS_ERROR_TTL_S = 30.0
 
 STATE_SIGNED_OUT = "signed_out"
+#: Still ``unavailable`` on a throttle: the error's ``code`` is what tells a
+#: surface "slow down, retrying" (``RATE_LIMITED_CODE``) from a real outage, and
+#: keeping the state lets every existing reader of ``state`` stay correct.
 STATE_UNAVAILABLE = "unavailable"
 STATE_UPDATE_REQUIRED = "update_required"
 STATE_READY = "ready"
@@ -6397,6 +6561,15 @@ def default_on_in_force(check: StatusCheck) -> bool:
     return record is not None and record.version == served and record.text == consent.get("text")
 
 
+class _IdentityPublishDisabled(Exception):
+    """The connector lost local permission to dispatch a name reconciliation."""
+
+
+class _IdentityPublishKwargs(TypedDict, total=False):
+    # Ordinary status reads and name reconciliations do not carry the publish guard.
+    pre_http_guard: Callable[[], None]
+
+
 class StatusDiscipline:
     """The ONE reader of ``GET /v1/messaging/status`` on this machine.
 
@@ -6448,6 +6621,11 @@ class StatusDiscipline:
         #: a rename must not suppress that name for the life of the process; a
         #: failed attempt is retried at the next fresh read (≥ the cache TTL).
         self._agent_name_sent: dict[str, str] = {}
+        #: Whether the LAST :meth:`_sync_agent_name` left a wanted name unpublished
+        #: (its PUT failed). Read only by :meth:`publish_identity`, whose caller
+        #: retries on it. The connector serializes one publisher for one account;
+        #: this flag is not an outcome ledger for concurrent publisher callers.
+        self._agent_name_deferred = False
         #: ``(account_id, tenant_id)`` pairs this process already ASKED the hub to
         #: enrol, whatever the answer. The debounce for :meth:`_default_enroll`:
         #: a 404/405 (older hub), a 409, a transport failure or a no-op must not
@@ -6517,7 +6695,18 @@ class StatusDiscipline:
         return out
 
     def _ttl(self, state: _AccountState) -> float:
-        return STATUS_ERROR_TTL_S if state.check.error is not None else STATUS_CACHE_TTL_S
+        error = state.check.error
+        if error is None:
+            return STATUS_CACHE_TTL_S
+        # A throttle names its own wait (the edge's per-IP block says 300 s).
+        # Re-reading sooner only earns another 429 and — because the edge
+        # counts per address — keeps every other client on the network
+        # blocked too, so the failed answer is held for the wait the hub named,
+        # bounded by the success TTL so a hostile header cannot pin it.
+        retry_after = error.retry_after_seconds
+        if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool):
+            return max(STATUS_ERROR_TTL_S, min(float(retry_after), STATUS_CACHE_TTL_S))
+        return STATUS_ERROR_TTL_S
 
     def _cached(self, state: _AccountState, boundary: Boundary) -> StatusCheck:
         return replace(
@@ -6565,9 +6754,11 @@ class StatusDiscipline:
     async def reconcile_identity_mutation(self) -> StatusCheck:
         """Reconcile a persisted, effective UI identity edit without waiting 300s.
 
-        Only the explicit desktop PATCH/reset orchestration calls this, after
-        comparing canonical identity before/after persistence. It is NOT a
-        general force-refresh flag on the status read API. Revisions are sampled
+        Two callers: the explicit desktop PATCH/reset orchestration, after
+        comparing canonical identity before/after persistence, and
+        :meth:`publish_identity` (the connector's rename publisher, fired by a
+        config-watcher change to ``aida.name`` / ``team_bridge.session``). It
+        is NOT a general force-refresh flag on the status read API. Revisions are sampled
         before a read's first await, so concurrent queued edits share the latest
         read while an edit arriving during an older read cannot be lost. The
         existing per-account lock, transport/auth fences and publisher guards
@@ -6581,6 +6772,49 @@ class StatusDiscipline:
         self._identity_revision += 1
         revision = self._identity_revision
         return self._observe(await self._check(Boundary.SURFACE_OPEN, identity_revision=revision))
+
+    async def publish_identity(self, retry: bool = False) -> bool:
+        """Push a local chief-of-staff rename to the hub now; ``True`` once settled.
+
+        WHY. Before this, a rename reached the hub only at the next FRESH
+        status read (>= :data:`STATUS_CACHE_TTL_S` apart, and only when a
+        surface opened), unless it was made through the desktop settings page.
+        A rename made any other way (``/aida rename``, a session rename synced
+        into ``aida.name``, the agent renaming herself) left the directory and
+        every message label under the old name for minutes, or until someone
+        opened the bridge page (report 2026-11-17: "Aida" -> "Aubree" ->
+        "Aubee"; a #general post after the second rename still said "Aida").
+
+        ``True`` means there is nothing left to push from here: the hub holds
+        the wanted name, no endpoint of this machine's is publishable, or
+        Team Bridge is explicitly off locally or signed out.
+        ``False`` means the status read or the name PUT has not settled. A
+        retry preserves the revision for that edit and respects cached status
+        refusals; the same active-owner and account guards still fence the PUT.
+        """
+
+        try:
+            self._require_identity_publish_enabled()
+            if not retry:
+                self._identity_revision += 1
+            self._agent_name_deferred = False
+            check = self._observe(
+                await self._check(
+                    Boundary.SURFACE_OPEN,
+                    identity_revision=self._identity_revision,
+                    publish_retry=retry,
+                )
+            )
+        except _IdentityPublishDisabled:
+            return True  # The enable key itself wakes the publisher if turned back on.
+        if check.state == STATE_SIGNED_OUT:
+            return True
+        return check.error is None and not self._agent_name_deferred
+
+    def _require_identity_publish_enabled(self) -> None:
+        local = _local_settings_snapshot(self._config_dir)
+        if local is None or (local.enabled_is_set and not local.enabled):
+            raise _IdentityPublishDisabled
 
     def _observe(self, check: StatusCheck) -> StatusCheck:
         """Record visibility identically for ordinary and explicit mutation reads."""
@@ -6602,11 +6836,16 @@ class StatusDiscipline:
             )
         return check
 
-    async def _check(self, boundary: Boundary | str, *, identity_revision: int = 0) -> StatusCheck:
+    async def _check(
+        self,
+        boundary: Boundary | str,
+        *,
+        identity_revision: int = 0,
+        publish_retry: bool | None = None,
+    ) -> StatusCheck:
         """The cached-or-fresh read behind :meth:`check`."""
 
         boundary = Boundary.parse(boundary)
-        now = time.monotonic()
         wall = time.time()
         try:
             access = await self._client.current_access()
@@ -6635,17 +6874,27 @@ class StatusDiscipline:
                 texts={},
             )
         key = access.account_id or f"credential:{access.credential_id}"
+
+        def reusable(state: _AccountState) -> bool:
+            if time.monotonic() - state.last_attempt >= self._ttl(state):
+                return False
+            if publish_retry is not None:
+                # Neither a rename nor a retry is permission to break a refusal
+                # hold. After a failed PUT, however, read fresh eligibility before
+                # retrying the write, without minting a new identity revision.
+                if state.check.error is not None:
+                    return True
+                if publish_retry:
+                    return False
+            return state.identity_revision >= identity_revision
+
         state = self._states.get(key)
-        if (
-            state is not None
-            and state.identity_revision >= identity_revision
-            and now - state.last_attempt < self._ttl(state)
-        ):
+        if state is not None and reusable(state):
             cached = self._cached(state, boundary)
             # A pending local commit must not wait out the status cache (QA Q2):
             # the cached answer already proves state C for the marker's endpoint,
             # and the retry paces itself. Local gates only, unless one is pending.
-            if not self._read_only:
+            if not self._read_only and publish_retry is None:
                 await self._retry_pending_commit(cached, access=access)
             return cached
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -6657,13 +6906,10 @@ class StatusDiscipline:
         async with lock:
             # Re-check under the lock: a sibling that arrived first already read.
             state = self._states.get(key)
-            if (
-                state is not None
-                and state.identity_revision >= identity_revision
-                and time.monotonic() - state.last_attempt < self._ttl(state)
-            ):
+            if state is not None and reusable(state):
                 return self._cached(state, boundary)
-            check = await self._read(key, boundary, access, deferred=deferred)
+            guard = self._require_identity_publish_enabled if publish_retry is not None else None
+            check = await self._read(key, boundary, access, deferred=deferred, publish_guard=guard)
         for pending_check, pending_access in deferred:
             await self._sync_agent_avatar(pending_check, pending_access)
         return check
@@ -6675,6 +6921,7 @@ class StatusDiscipline:
         access: OAuthAccess,
         *,
         deferred: list[tuple[StatusCheck, OAuthAccess]] | None = None,
+        publish_guard: Callable[[], None] | None = None,
     ) -> StatusCheck:
         revision = self._identity_revision
         prior = self._states.get(key)
@@ -6683,7 +6930,10 @@ class StatusDiscipline:
             # The SAME pinned access the cache key was derived from rides
             # through the transport: the read cannot run as a different
             # account than the one this answer is filed under (finding 2).
-            payload = await self._client.status(access=access)
+            extra: _IdentityPublishKwargs = (
+                {"pre_http_guard": publish_guard} if publish_guard is not None else {}
+            )
+            payload = await self._client.status(access=access, **extra)
         except BridgeSignInRequired:
             return StatusCheck(
                 state=STATE_SIGNED_OUT,
@@ -6697,9 +6947,40 @@ class StatusDiscipline:
                 texts={},
             )
         except BridgeRefusal as refusal:
-            last_good = (
-                prior.check.payload if prior is not None and prior.check.error is None else None
+            # A READY check served through a throttle (below) still holds the
+            # last good payload, so it counts as last good too.
+            prior_good = prior is not None and (
+                prior.check.error is None or prior.check.state == STATE_READY
             )
+            if (
+                refusal.code == RATE_LIMITED_CODE
+                and prior is not None
+                and prior_good
+                and prior.check.state == STATE_READY
+            ):
+                # A throttle is not a verdict about the account (incident
+                # 2026-11-17: the edge's per-IP rule blocked a whole network for
+                # 300 s and every surface showed "Team Bridge is unavailable").
+                # Keep answering with the last READY check — same account key,
+                # so never another account's — and attach the refusal, so a
+                # surface keeps its conversations and says "retrying" from
+                # ``error.code`` instead of tearing the page down. ``_ttl``
+                # holds this answer for the wait the throttle named.
+                check = replace(
+                    prior.check,
+                    boundary=boundary.value,
+                    from_cache=True,
+                    checked_at=time.time(),
+                    error=refusal,
+                )
+                self._states[key] = _AccountState(
+                    last_attempt=time.monotonic(),
+                    check=check,
+                    texts=texts,
+                    identity_revision=revision,
+                )
+                return check
+            last_good = prior.check.payload if prior is not None and prior_good else None
             check = StatusCheck(
                 state=STATE_UNAVAILABLE,
                 boundary=boundary.value,
@@ -6719,10 +7000,16 @@ class StatusDiscipline:
             )
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
-        # BEFORE default-on, on the answer as read: the boundary whose POST just
-        # failed to commit reads B here, so the commit-only retry starts at the
-        # NEXT boundary (plan R3), never inside the request that created it.
-        if not self._read_only:
+        if publish_guard is not None:
+            # A background rename only projects the name. If OFF landed while
+            # the GET was already in flight, settle without starting a write.
+            publish_guard()
+            if not self._read_only:
+                await self._sync_agent_name(check, access, publish_guard=publish_guard)
+        elif not self._read_only:
+            # BEFORE default-on, on the answer as read: the boundary whose POST
+            # just failed to commit reads B here, so the commit-only retry starts
+            # at the NEXT boundary (plan R3), not inside the request that created it.
             await self._retry_pending_commit(check, access=access)
             check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
             check = self._sync_local_designation(check)
@@ -7193,7 +7480,13 @@ class StatusDiscipline:
             return None
         return tenant_id, endpoint_id, endpoint
 
-    async def _sync_agent_name(self, check: StatusCheck, access: OAuthAccess) -> None:
+    async def _sync_agent_name(
+        self,
+        check: StatusCheck,
+        access: OAuthAccess,
+        *,
+        publish_guard: Callable[[], None] | None = None,
+    ) -> None:
         """Re-send the chief of staff's name after a rename, at a status boundary.
 
         WHY HERE. A rename lands in ``aida.name`` from many writers (``/aida
@@ -7226,6 +7519,7 @@ class StatusDiscipline:
         Best-effort: any failure leaves the status answer untouched.
         """
 
+        self._agent_name_deferred = False
         owned = self._owned_endpoint(check, access, field="agent_name")
         if owned is None:
             return
@@ -7245,17 +7539,24 @@ class StatusDiscipline:
         if self._agent_name_sent.get(endpoint_id) == wanted:
             return
         try:
+            extra: _IdentityPublishKwargs = (
+                {"pre_http_guard": publish_guard} if publish_guard is not None else {}
+            )
             await self._client.put_settings(
                 state="active",
                 tenant_id=tenant_id,
                 agent_name=wanted,
                 endpoint=endpoint,
                 expected_account_id=access.account_id,
+                **extra,
             )
+        except _IdentityPublishDisabled:
+            raise
         except Exception as exc:  # noqa: BLE001 - a display name never fails a status read
             # Do not log exception prose/tracebacks: transport errors can carry
             # private URLs, credentials or the name. Keep failures diagnosable.
             logger.warning("team_bridge: name synchronization deferred (%s)", type(exc).__name__)
+            self._agent_name_deferred = True
             return
         self._agent_name_sent[endpoint_id] = wanted
 

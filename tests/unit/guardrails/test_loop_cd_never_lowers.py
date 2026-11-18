@@ -117,7 +117,7 @@ def layout(home: Path) -> Iterator[Path]:
         owner_rec = types.SimpleNamespace(
             session_id=OWNER, pid=2**31 - 1, cwd=str(home.parent / "owner-cwd")
         )
-        mp.setattr(prov, "_live_cwd_inside", lambda _: False)
+        mp.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
         mp.setattr(prov, "_cwd_inventory_cache", None)
         mp.setattr(prov, "_github_repo", lambda _: None)
         mp.setattr(prov, "_gitlab_repo", lambda _: None)

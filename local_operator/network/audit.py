@@ -571,6 +571,11 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "credential_id",
             "anchored",
             "policy",
+            # Owner-local display metadata (a label may intentionally be email),
+            # not another identity or candidate list. Reason is a closed scalar
+            # basis:ordinal within the winning eligible tier, never global best.
+            "account_label",
+            "ranked_reason",
         }
     ),
     # -- the refresh delegation (mesh-refresh-delegation.md §3.7f) ------------

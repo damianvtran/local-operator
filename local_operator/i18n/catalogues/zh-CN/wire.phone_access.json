@@ -2,5 +2,11 @@
   "wire.phone_access.title": "手机访问",
   "wire.phone_access.description": "这台电脑如何为手机应用保持其Radient隧道正常工作。更改将在下次登录时生效。",
   "wire.phone_access.auto_setup.label": "登录后重新连接手机访问",
-  "wire.phone_access.auto_setup.help": "在已开通手机访问的电脑上登录Radient时，会在后台重新连接或修复其隧道。此操作绝不会激活计费或消耗点数；如有任何价格或点数不足，都会改为向你展示。"
+  "wire.phone_access.auto_setup.help": "在已开通手机访问的电脑上登录Radient时，会在后台重新连接或修复其隧道。此操作绝不会激活计费或消耗点数；如有任何价格或点数不足，都会改为向你展示。",
+  "wire.phone_access.away_after.label": "离开电脑多久后改为发送到手机",
+  "wire.phone_access.away_after.help": "这台电脑在多长时间内没有键盘或鼠标操作后，原本会在这里提示你的已完成任务改为发送到你的手机。锁定屏幕会立即视为离开。需要桌面应用。",
+  "wire.phone_access.away_after.choice.1m.label": "1分钟",
+  "wire.phone_access.away_after.choice.2m.label": "2分钟",
+  "wire.phone_access.away_after.choice.5m.label": "5分钟",
+  "wire.phone_access.away_after.choice.10m.label": "10分钟"
 }

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -675,3 +676,125 @@ def test_exec_off_the_main_thread_ignores_the_reload_signal_and_restores_it(
     assert errors == []
     assert during == [1]  # SIG_IGN at the moment of the exec
     assert os_disposition() == sentinel  # the failed (stubbed) exec put it back
+
+
+# --- inherited inotify fds across the in-place exec -------------------------------------
+#
+# A serve that re-exec'd across releases was measured holding 21 inotify fds and 176,515
+# watches its image did not own (node2, 2026-11-18): instances opened without
+# ``IN_CLOEXEC`` survive ``execve``. ``_exec`` now marks them close-on-exec first.
+
+_linux_only = pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="inotify and /proc/self/fd are Linux-only"
+)
+
+
+def _plain_inotify_fd() -> int:
+    """An inotify fd opened the way watchdog does: ``inotify_init()``, no ``IN_CLOEXEC``."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init()
+    if fd < 0:
+        pytest.skip(f"inotify_init failed: errno {ctypes.get_errno()}")
+    return int(fd)
+
+
+def _cloexec(fd: int) -> bool:
+    import fcntl
+
+    return bool(fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC)
+
+
+@_linux_only
+def test_close_inotify_on_exec_marks_inotify_and_leaves_other_fds_alone() -> None:
+    """The plain inotify fd gains FD_CLOEXEC; an inheritable pipe and socket do not.
+
+    The pipe and socket stand in for the listener and bearer pipe the exec deliberately
+    passes: they must come out of the hook exactly as they went in.
+    """
+    import socket
+
+    ino = _plain_inotify_fd()
+    read_end, write_end = os.pipe()
+    sock = socket.socket()
+    try:
+        os.set_inheritable(read_end, True)
+        os.set_inheritable(sock.fileno(), True)
+        assert not _cloexec(ino)
+
+        marked = serve_reload.close_inotify_on_exec()
+
+        assert ino in marked
+        assert _cloexec(ino)
+        assert not _cloexec(read_end)
+        assert not _cloexec(sock.fileno())
+        assert _cloexec(write_end)  # PEP 446 default, untouched either way
+        assert read_end not in marked and sock.fileno() not in marked
+    finally:
+        os.close(ino)
+        os.close(read_end)
+        os.close(write_end)
+        sock.close()
+
+
+def test_close_inotify_on_exec_is_a_no_op_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "listdir", lambda path: pytest.fail("walked /proc off Linux"))
+    assert serve_reload.close_inotify_on_exec() == []
+
+
+def test_exec_marks_inotify_close_on_exec_before_execve(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook runs on the real exec path, ahead of ``execve``."""
+    order: list[str] = []
+    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: None)
+    monkeypatch.setattr(
+        serve_reload, "close_inotify_on_exec", lambda: order.append("cloexec") or []
+    )
+    monkeypatch.setattr(os, "execve", lambda path, argv, env: order.append("execve"))
+    serve_reload._exec(_watch(_app(fd=19)).plan())
+    assert order == ["cloexec", "execve"]
+
+
+_EXEC_PROBE = """
+import ctypes, os, sys
+if len(sys.argv) > 1 and sys.argv[1] == "after":
+    fds = os.listdir("/proc/self/fd")
+    count = 0
+    for name in fds:
+        try:
+            count += os.readlink("/proc/self/fd/" + name) == "anon_inode:inotify"
+        except OSError:
+            pass
+    print(count)
+    sys.exit(0)
+libc = ctypes.CDLL(None, use_errno=True)
+for _ in range(3):
+    assert libc.inotify_init() >= 0
+if sys.argv[1] == "hook":
+    from local_operator.server import reload
+    assert len(reload.close_inotify_on_exec()) == 3
+os.execv(sys.executable, [sys.executable, "-c", sys.argv[-1], "after"])
+"""
+
+
+@_linux_only
+@pytest.mark.parametrize(("mode", "survivors"), [("plain", "3"), ("hook", "0")])
+def test_inotify_fds_cross_a_real_exec_only_without_the_hook(mode: str, survivors: str) -> None:
+    """Real ``execv`` in a throwaway child: 3 plain inotify fds survive, unless hooked."""
+    import subprocess
+    from pathlib import Path as _Path
+
+    repo = str(_Path(serve_reload.__file__).resolve().parents[2])
+    env = {**os.environ, "PYTHONPATH": repo}
+    result = subprocess.run(
+        [sys.executable, "-c", _EXEC_PROBE, mode, _EXEC_PROBE],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=True,
+    )
+    assert result.stdout.strip() == survivors, result.stderr

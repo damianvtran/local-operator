@@ -1,0 +1,137 @@
+UTC: 2026-11-16T05:24:41.578201+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:24:41.633759+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python -c 'import json,hashlib,re,unicodedata
+from pathlib import Path
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+root=Path.cwd(); ns='"'"'cli.serve_readiness'"'"'; base=root/'"'"'local_operator/i18n/catalogues'"'"'; key=ns+'"'"'.not_this_daemon'"'"'
+prev=json.loads((root/'"'"'i18n/audits/evidence/hi/cli.serve_readiness/sd3/record.json'"'"').read_text())
+sha=lambda b:hashlib.sha256(b).hexdigest()
+for x in prev['"'"'reference_hashes'"'"']:
+ if x['"'"'path'"'"'] in ('"'"'i18n/glossary.md'"'"','"'"'i18n/style-guides/hi.md'"'"'): assert sha((root/x['"'"'path'"'"']).read_bytes())==x['"'"'sha256'"'"']
+old_hi='"'"'रिकॉर्ड मौजूद है, लेकिन अब उस PID का उपयोग कोई दूसरी प्रक्रिया कर रही है'"'"'; new_hi='"'"'रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया'"'"'
+old_en='"'"'recorded, but another process now holds that PID'"'"'; new_en='"'"'recorded, but PID reuse was detected'"'"'
+for label,new,old in [('"'"'hi'"'"',new_hi,old_hi),('"'"'en'"'"',new_en,old_en)]:
+ b=(root/prev['"'"'input_hashes'"'"'][label]['"'"'path'"'"']).read_bytes(); assert b.count(new.encode())==1
+ assert sha(b.replace(new.encode(),old.encode()))==prev['"'"'input_hashes'"'"'][label]['"'"'sha256'"'"'],label
+ print('"'"'PASS reverse-one-value reconstruction to sd3 whole-file SHA256:'"'"',label,'"'"'; other 14 entries and all formatting byte-identical'"'"')
+def pairs(items):
+ d={}
+ for k,v in items:
+  assert k not in d,k
+  d[k]=v
+ return d
+def load(path):return json.loads(path.read_text(),object_pairs_hook=pairs)
+en=load(base/'"'"'en'"'"'/f'"'"'{ns}.json'"'"'); hi=load(base/'"'"'hi'"'"'/f'"'"'{ns}.json'"'"'); ctxpath=base/'"'"'en'"'"'/f'"'"'{ns}.context.json'"'"';ctx=load(ctxpath)
+# The former generic note equals the unchanged unproven note; reconstruct exact old sidecar bytes.
+newnote=ctx[key]['"'"'note'"'"'];oldnote=ctx[ns+'"'"'.unproven'"'"']['"'"'note'"'"']
+assert sha(ctxpath.read_bytes().replace(newnote.encode(),oldnote.encode()))==prev['"'"'input_hashes'"'"']['"'"'context'"'"']['"'"'sha256'"'"']
+print('"'"'PASS reverse-one-note reconstruction to sd3 context SHA256; no other context changes.'"'"')
+assert hi.keys()==en.keys()==ctx.keys() and len(hi)==15
+cats=set(load(root/'"'"'local_operator/i18n/data/plural_rules.json'"'"')['"'"'locales'"'"']['"'"'hi'"'"']['"'"'categories'"'"'])
+def structure(nodes):return [(n.name,n.kind,n.skeleton,[(s,structure(body)) for s,body in n.parts]) for n in nodes if isinstance(n,rt._Arg)]
+params={'"'"'device'"'"':'"'"'node-a'"'"','"'"'pids'"'"':'"'"'21, 22'"'"','"'"'builds'"'"':'"'"'v0.90.0'"'"','"'"'install'"'"':'"'"'v0.91.0'"'"','"'"'recorded'"'"':'"'"'v0.89.0'"'"','"'"'holders'"'"':'"'"'example.service'"'"','"'"'reason'"'"':new_hi,'"'"'reasons'"'"':new_hi}
+for k,text in hi.items():
+ assert structure(rt.parse_message(text))==structure(rt.parse_message(en[k])),k
+ assert rt.message_arguments(text)==rt.message_arguments(en[k]),k
+ assert re.findall(r'"'"'`[^`]*`'"'"',text)==re.findall(r'"'"'`[^`]*`'"'"',en[k]),k
+ assert re.findall(r'"'"'</?[A-Za-z][^>]*>'"'"',text)==re.findall(r'"'"'</?[A-Za-z][^>]*>'"'"',en[k]),k
+ assert not re.search('"'"'[०-९\u200c\u200d]'"'"',text),k
+ assert not any(unicodedata.bidirectional(c) in ('"'"'RLE'"'"','"'"'RLO'"'"','"'"'LRE'"'"','"'"'LRO'"'"','"'"'PDF'"'"','"'"'RLI'"'"','"'"'LRI'"'"','"'"'FSI'"'"','"'"'PDI'"'"') for c in text),k
+ for selectors in rt.plural_selectors(text):assert set(selectors)==cats,k
+ for count in ((0,1,2,5,21) if rt.plural_selectors(text) else (1,)):
+  out=rt.render_message(text,dict(params,count=count),'"'"'hi'"'"');print('"'"'RENDER'"'"',k,'"'"'count'"'"',count,'"'"'cells'"'"',cell_len(out),out)
+ p={name:'"'"'[probe:'"'"'+name+'"'"'] {x, plural, one {X} other {Y}} --flag /a:b [red] 123'"'"' for name,kind in rt.message_arguments(text) if kind=='"'"'simple'"'"'}
+ for count in ((1,2) if rt.plural_selectors(text) else (1,)):
+  out=rt.render_message(text,dict(p,count=count),'"'"'hi'"'"')
+  for value in p.values():assert out.count(value)==1,(k,value)
+print('"'"'PASS all 15 mechanical/render/opaque checks; Hindi one/other complete; no max width hints:'"'"',all('"'"'maxCells'"'"' not in v and '"'"'maxChars'"'"' not in v for v in ctx.values()))
+T=lambda s,**p:rt.render_message(hi[ns+'"'"'.'"'"'+s],p,'"'"'hi'"'"')
+for count,pids in [(1,'"'"'21'"'"'),(2,'"'"'21, 22'"'"')]:
+ group=T('"'"'pid_reason'"'"',count=count,pids=pids,reason=T('"'"'not_this_daemon'"'"'))
+ out=T('"'"'unknown'"'"',count=count,device='"'"'node-a'"'"',reasons=group)
+ assert out.count(new_hi)==1 and '"'"':'"'"' not in out
+ assert '"'"'उस PID'"'"' not in out
+ print('"'"'GROUPED_NUMBER_NEUTRAL'"'"',out)
+print('"'"'CHANGED_TEXT chars'"'"',len(new_hi),'"'"'cells'"'"',cell_len(new_hi))
+print('"'"'Source/service selection not executed; text-only render. Prior all-key semantic audit retained except fresh changed key and grouped neighbors.'"'"')
+for label,rel in prev['"'"'input_hashes'"'"'].items():print('"'"'INPUT_SHA256'"'"',label,sha((root/rel['"'"'path'"'"']).read_bytes()))
+'
+PASS reverse-one-value reconstruction to sd3 whole-file SHA256: hi ; other 14 entries and all formatting byte-identical
+PASS reverse-one-value reconstruction to sd3 whole-file SHA256: en ; other 14 entries and all formatting byte-identical
+PASS reverse-one-note reconstruction to sd3 context SHA256; no other context changes.
+RENDER cli.serve_readiness.unproven count 1 cells 88 रिकॉर्ड मौजूद है, लेकिन प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)
+RENDER cli.serve_readiness.not_reporting count 1 cells 47 रिकॉर्ड मौजूद है, लेकिन कोई जवाब नहीं मिल रहा (हार्टबीट रुक गई है)
+RENDER cli.serve_readiness.not_this_daemon count 1 cells 36 रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया
+RENDER cli.serve_readiness.unknown_state count 1 cells 16 अज्ञात स्थिति वाला रिकॉर्ड
+RENDER cli.serve_readiness.install_unknown count 1 cells 51 ऐसे बिल्ड पर चलता है जिसकी तुलना इंस्टॉल किए गए बिल्ड से नहीं की जा सकती
+RENDER cli.serve_readiness.cgroup_unknown count 1 cells 49 ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है
+RENDER cli.serve_readiness.recorded_gap count 1 cells 50 रिकॉर्ड में बिल्ड v0.89.0 दर्ज है; इंस्टॉल किया गया बिल्ड v0.91.0 है
+RENDER cli.serve_readiness.unknown count 0 cells 129 node-a पर `lop serve` डेमन — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+RENDER cli.serve_readiness.unknown count 1 cells 129 node-a पर `lop serve` डेमन — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+RENDER cli.serve_readiness.unknown count 2 cells 128 node-a पर `lop serve` डेमन — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+RENDER cli.serve_readiness.unknown count 5 cells 128 node-a पर `lop serve` डेमन — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+RENDER cli.serve_readiness.unknown count 21 cells 128 node-a पर `lop serve` डेमन — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+RENDER cli.serve_readiness.stale count 0 cells 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+RENDER cli.serve_readiness.stale count 1 cells 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलता है, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इस पर चलने वाले रिमोट सत्र उस दूसरे बिल्ड पर चलते हैं
+RENDER cli.serve_readiness.stale count 2 cells 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+RENDER cli.serve_readiness.stale count 5 cells 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+RENDER cli.serve_readiness.stale count 21 cells 123 node-a पर `lop serve` डेमन (21, 22) v0.90.0 पर चलते हैं, लेकिन इंस्टॉल किया गया बिल्ड v0.91.0 है: इन पर चलने वाले रिमोट सत्र उन दूसरे बिल्डों पर चलते हैं
+RENDER cli.serve_readiness.other_unit count 0 cells 81 node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count 1 cells 81 node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count 2 cells 79 node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count 5 cells 79 node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.other_unit count 21 cells 79 node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+RENDER cli.serve_readiness.identity_restart count 1 cells 115 node-a पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है
+RENDER cli.serve_readiness.pid_reason count 0 cells 54 प्रक्रिया ID 21, 22 — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया
+RENDER cli.serve_readiness.pid_reason count 1 cells 54 प्रक्रिया ID 21, 22 — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया
+RENDER cli.serve_readiness.pid_reason count 2 cells 57 प्रक्रियाओं के ID 21, 22 — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया
+RENDER cli.serve_readiness.pid_reason count 5 cells 57 प्रक्रियाओं के ID 21, 22 — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया
+RENDER cli.serve_readiness.pid_reason count 21 cells 57 प्रक्रियाओं के ID 21, 22 — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया
+RENDER cli.serve_readiness.and_more count 0 cells 8 और 0 अन्य
+RENDER cli.serve_readiness.and_more count 1 cells 8 और 1 अन्य
+RENDER cli.serve_readiness.and_more count 2 cells 8 और 2 अन्य
+RENDER cli.serve_readiness.and_more count 5 cells 8 और 5 अन्य
+RENDER cli.serve_readiness.and_more count 21 cells 9 और 21 अन्य
+RENDER cli.serve_readiness.identity_no_action count 0 cells 107 जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count 1 cells 107 जिस रिकॉर्ड में प्रक्रिया की पहचान अप्रमाणित है, उसका बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाता है; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count 2 cells 107 जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count 5 cells 107 जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_no_action count 21 cells 107 जिन रिकॉर्डों में प्रक्रिया की पहचान अप्रमाणित है, उनके बिल्ड इंस्टॉल किए गए बिल्ड से मेल खाते हैं; इस गैर-अनिवार्य जाँच के लिए किसी कार्रवाई की ज़रूरत नहीं है
+RENDER cli.serve_readiness.identity_restart_manual count 1 cells 119 node-a पर, दर्ज डेमन को इंस्टॉल किए गए बिल्ड पर लाने के लिए `lop serve` को मैन्युअल रूप से फिर शुरू करें; यह मौजूदा प्रक्रिया में खुद को फिर से लोड नहीं कर सकता
+PASS all 15 mechanical/render/opaque checks; Hindi one/other complete; no max width hints: True
+GROUPED_NUMBER_NEUTRAL node-a पर `lop serve` डेमन — प्रक्रिया ID 21 — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+GROUPED_NUMBER_NEUTRAL node-a पर `lop serve` डेमन — प्रक्रियाओं के ID 21, 22 — रिकॉर्ड मौजूद है, लेकिन PID का दोबारा उपयोग पाया गया, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+CHANGED_TEXT chars 52 cells 36
+Source/service selection not executed; text-only render. Prior all-key semantic audit retained except fresh changed key and grouped neighbors.
+INPUT_SHA256 en cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a
+INPUT_SHA256 context e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629
+INPUT_SHA256 hi d3c438265c79bf2eca6e6f0c1c2f433bd10748bbbe4dc7ff5819a14887394e21
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:26:06.007822+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace cli.serve_readiness
+7cc26e916691cc8087a01175e0b12c9ba27e16e9195b6150bb853b7a8690851c
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T05:26:06.332505+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/hi/cli.serve_readiness/sd3r/ledger-receipt.json --expected-history-sha 7cc26e916691cc8087a01175e0b12c9ba27e16e9195b6150bb853b7a8690851c --dry-run
+i18n/audit-history/hi/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE: 0
+

@@ -10943,6 +10943,164 @@ async def test_an_ordinary_ask_beside_a_signed_one_keeps_the_plain_door(answers_
     assert remote.calls == [("a-other", {"q0": ["yes"]}, False, False)]
 
 
+class _UnsignedCapableRemote(_DecideRemote):
+    """A facade that reports whether ``bridge_decide`` would go out UNSIGNED.
+
+    ``signature_free=False`` is the terminal-started designated session: this
+    backend did not start the runtime, so the real attach client would sign the
+    decision with the operator key (Touch ID). PR #4208 security round 1, S-1.
+    """
+
+    def __init__(self, *, signature_free: bool, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.signature_free = signature_free
+        self.probed = 0
+
+    async def bridge_decide_signature_free(self) -> bool:
+        self.probed += 1
+        return self.signature_free
+
+
+def _card_recorder(monkeypatch: pytest.MonkeyPatch, outcome: str | None = "decided"):
+    from local_operator.server.routes import desktop_team_bridge
+
+    calls: list[dict[str, Any]] = []
+
+    async def record(config_dir: Any, **kwargs: Any) -> str | None:
+        calls.append(kwargs)
+        return outcome
+
+    monkeypatch.setattr(desktop_team_bridge, "decide_request_from_card", record)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_team_bridge_card_that_would_be_signed_takes_the_no_prompt_path(
+    answers_api, monkeypatch
+) -> None:
+    """a-856f / S-1: no signed runtime door, so no Touch ID, for a Team Bridge card."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_" + "cd" * 16)
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["detail"] == "decided"
+    assert calls == [{"ask_id": "a-site", "message_id": "bmsg_" + "cd" * 16, "word": "approve"}]
+    assert remote.decisions == []  # the signing door was never reached
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_no_prompt_card_refusal_is_a_409_sentence(answers_api, monkeypatch) -> None:
+    from local_operator.server.routes import desktop_team_bridge
+
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ef")
+    _install_ask_remote(app, remote)
+
+    async def refuse(config_dir: Any, **kwargs: Any) -> str | None:
+        raise ValueError("this request was already decided")
+
+    monkeypatch.setattr(desktop_team_bridge, "decide_request_from_card", refuse)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Deny"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "this request was already decided"
+    assert remote.decisions == []
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_door_stays_when_no_prompt_is_needed(answers_api, monkeypatch) -> None:
+    """A capability-bearing backend keeps the runtime door: no prompt there,
+    and the answer reaches the agent's turn."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=True, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == [("a-site", "bmsg_ab", "approve")]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_team_bridge_card_that_would_be_signed_is_refused_not_signed(
+    answers_api, monkeypatch
+) -> None:
+    """R2-1 (a-856f): no matching local ask on a would-sign backend is the
+    "no longer waiting" refusal, never a fall-through to the signing door."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch, None)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "this request is no longer waiting for a decision"
+    assert len(calls) == 1
+    assert remote.decisions == []  # the signing door was never reached
+
+
+@pytest.mark.asyncio
+async def test_a_card_answer_that_is_not_approve_or_deny_is_refused_before_anything_is_saved(
+    answers_api, tmp_path, monkeypatch
+) -> None:
+    """S-4 at the route: ``Maybe`` reaches the REAL ``decide_request_from_card``
+    (lower-cased by ``bridge_decision_target``) and is refused with the runtime
+    door's sentence before any store read or intent write."""
+    from local_operator.team_bridge import approvals
+
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    looked_up: list[Any] = []
+    monkeypatch.setattr(
+        approvals, "bridge_asks_by_message", lambda root: looked_up.append(root) or {}
+    )
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Maybe"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == (
+        "that is not an answer this request accepts — choose Approve or Deny."
+    )
+    assert looked_up == []  # refused before the first store read
+    assert remote.decisions == [] and remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_site_card_keeps_the_signed_door_even_when_it_would_be_signed(
+    answers_api, monkeypatch
+) -> None:
+    """S-1's boundary: a ``site:v1:`` browser approval is real authority (the
+    node's extension re-verifies the signature), so it is never rerouted."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="")
+    card = _site_card(shown_origin="https://docs.example", bound_origin="https://docs.example")
+    remote.frontend_state.asks[0].questions = [card]
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == [("a-site", card["question_id"], "approve")]
+    assert calls == [] and remote.probed == 0
+
+
 def _site_card(*, shown_origin: str, bound_origin: str) -> dict[str, Any]:
     """A node's site card as its frame publishes it: ``site_ask_question``'s
     own output, bound to ``bound_origin``. Only the forged variant's sentence
@@ -10993,3 +11151,41 @@ async def test_the_desktop_route_signs_only_a_card_it_can_rebuild(answers_api, s
         assert "did not sign" in result.json()["detail"]
         assert remote.decisions == []
     assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
+    tmp_path, monkeypatch
+) -> None:
+    """A local session's attention frame and snapshot omit ``origin``/``needs_user``.
+
+    Review round 3, R3-2: the bridge publishes raw ``AttentionStore.state`` for a
+    local session and installs it on the snapshot with ``model_copy``, which
+    skips the model validator. The bridge's own copy keeps the full state, since
+    its notification edge reads the store's facts.
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    raw = {"unseen": True, "completion_token": "t2", "origin": "o" * 4000, "needs_user": True}
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.attention = {"unseen": False, "completion_token": "t1"}
+
+    async def read() -> dict[str, Any]:
+        return dict(raw)
+
+    monkeypatch.setattr(bridge, "_read_attention", read)
+    await bridge.refresh_attention()
+
+    frames = [frame["payload"] for frame, _ in bridge.replay if frame.get("type") == "attention"]
+    assert frames, "the bridge published no attention frame"
+    assert not {"origin", "needs_user"} & set(frames[-1])
+    assert frames[-1]["completion_token"] == "t2"
+    assert bridge.attention["origin"] == "o" * 4000
+
+    bridge.remote = cast(
+        Any, SimpleNamespace(frontend_state=FrontendSessionState(session_id="s1", epoch="e1"))
+    )
+    capture = bridge._capture_wire_state()
+    assert not {"origin", "needs_user"} & set(capture.attention)
+    snapshot = module._wire_state_of(capture)["snapshot"]
+    assert not {"origin", "needs_user"} & set(snapshot["attention"])

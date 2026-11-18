@@ -17,6 +17,30 @@ def auto_setup_label() -> Msg:
     return Msg("wire.phone_access.auto_setup.label", {})
 
 
+def away_after_choice_10m_label() -> Msg:
+    return Msg("wire.phone_access.away_after.choice.10m.label", {})
+
+
+def away_after_choice_1m_label() -> Msg:
+    return Msg("wire.phone_access.away_after.choice.1m.label", {})
+
+
+def away_after_choice_2m_label() -> Msg:
+    return Msg("wire.phone_access.away_after.choice.2m.label", {})
+
+
+def away_after_choice_5m_label() -> Msg:
+    return Msg("wire.phone_access.away_after.choice.5m.label", {})
+
+
+def away_after_help() -> Msg:
+    return Msg("wire.phone_access.away_after.help", {})
+
+
+def away_after_label() -> Msg:
+    return Msg("wire.phone_access.away_after.label", {})
+
+
 def description() -> Msg:
     return Msg("wire.phone_access.description", {})
 

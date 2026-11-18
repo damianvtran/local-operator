@@ -1,0 +1,56 @@
+$ git rev-parse HEAD
+d30d1fb1ee99567900586e510c99162b13c9856d
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/wire.phone_access.json local_operator/i18n/catalogues/en/wire.phone_access.context.json local_operator/i18n/catalogues/zh-CN/wire.phone_access.json i18n/glossary.md i18n/style-guides/zh-CN.md
+1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a  local_operator/i18n/catalogues/en/wire.phone_access.json
+95c0c4b8d5f82cef978c751326ba6c214c1c8bf8152717f608eaeee943071c07  local_operator/i18n/catalogues/en/wire.phone_access.context.json
+91e8bf24126ab3f36601f25cbfa526d7626f810a27aa17bc955511fdcfd45b9d  local_operator/i18n/catalogues/zh-CN/wire.phone_access.json
+5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7  i18n/glossary.md
+615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6  i18n/style-guides/zh-CN.md
+exit=0
+$ git diff 294e5923 HEAD -- local_operator/i18n/catalogues/zh-CN/wire.phone_access.json  # a2 target -> current target
+diff --git a/local_operator/i18n/catalogues/zh-CN/wire.phone_access.json b/local_operator/i18n/catalogues/zh-CN/wire.phone_access.json
+index 389257d9de6a..5a0a9513067a 100644
+--- a/local_operator/i18n/catalogues/zh-CN/wire.phone_access.json
++++ b/local_operator/i18n/catalogues/zh-CN/wire.phone_access.json
+@@ -5,8 +5,8 @@
+   "wire.phone_access.auto_setup.help": "在已开通手机访问的电脑上登录Radient时，会在后台重新连接或修复其隧道。此操作绝不会激活计费或消耗点数；如有任何价格或点数不足，都会改为向你展示。",
+   "wire.phone_access.away_after.label": "离开电脑多久后改为发送到手机",
+   "wire.phone_access.away_after.help": "这台电脑在多长时间内没有键盘或鼠标操作后，原本会在这里提示你的已完成任务改为发送到你的手机。锁定屏幕会立即视为离开。需要桌面应用。",
+-  "wire.phone_access.away_after.choice.1m.label": "1 分钟",
+-  "wire.phone_access.away_after.choice.2m.label": "2 分钟",
+-  "wire.phone_access.away_after.choice.5m.label": "5 分钟",
+-  "wire.phone_access.away_after.choice.10m.label": "10 分钟"
++  "wire.phone_access.away_after.choice.1m.label": "1分钟",
++  "wire.phone_access.away_after.choice.2m.label": "2分钟",
++  "wire.phone_access.away_after.choice.5m.label": "5分钟",
++  "wire.phone_access.away_after.choice.10m.label": "10分钟"
+ }
+exit=0
+$ git diff --stat 294e5923 HEAD -- local_operator/i18n/catalogues/en/wire.phone_access.json local_operator/i18n/catalogues/en/wire.phone_access.context.json i18n/glossary.md i18n/style-guides/zh-CN.md  # empty = en source, context, glossary, style guide unchanged since a2
+exit=0
+$ grep -n 'session_cleanup_temporary_idle_minutes.choice' local_operator/i18n/catalogues/zh-CN/wire.settings.json  # corpus precedent
+871:  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15分钟",
+872:  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30分钟",
+873:  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2小时",
+874:  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24小时",
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace wire.phone_access
+93866ce4e7a4d102b01cee31fbb4ee51afac3e158dd0d9537f39b09b5c365100
+exit=0
+$ python3 $SCRATCH/i18n-a3/mech.py . zh-CN  # mechanical parity/placeholder/format-char/digit-spacing check over all 10 keys
+keys en=10 zh-CN=10 parity=OK
+wire.phone_access.title: placeholders=OK len=4 len_ratio=0.33 format_chars=[] latin_runs=[] digits=- digit_space_cjk=False
+wire.phone_access.description: placeholders=OK len=40 len_ratio=0.38 format_chars=[] latin_runs=['Radient'] digits=- digit_space_cjk=False
+wire.phone_access.auto_setup.label: placeholders=OK len=11 len_ratio=0.28 format_chars=[] latin_runs=[] digits=- digit_space_cjk=False
+wire.phone_access.auto_setup.help: placeholders=OK len=75 len_ratio=0.34 format_chars=[] latin_runs=['Radient'] digits=- digit_space_cjk=False
+wire.phone_access.away_after.label: placeholders=OK len=14 len_ratio=0.29 format_chars=[] latin_runs=[] digits=- digit_space_cjk=False
+wire.phone_access.away_after.help: placeholders=OK len=65 len_ratio=0.32 format_chars=[] latin_runs=[] digits=- digit_space_cjk=False
+wire.phone_access.away_after.choice.1m.label: placeholders=OK len=3 len_ratio=0.38 format_chars=[] latin_runs=[] digits=1 digit_space_cjk=False
+wire.phone_access.away_after.choice.2m.label: placeholders=OK len=3 len_ratio=0.33 format_chars=[] latin_runs=[] digits=2 digit_space_cjk=False
+wire.phone_access.away_after.choice.5m.label: placeholders=OK len=3 len_ratio=0.33 format_chars=[] latin_runs=[] digits=5 digit_space_cjk=False
+wire.phone_access.away_after.choice.10m.label: placeholders=OK len=4 len_ratio=0.40 format_chars=[] latin_runs=[] digits=10 digit_space_cjk=False
+exit=0

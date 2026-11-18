@@ -334,6 +334,14 @@ def test_the_account_is_the_attribution_and_the_class_only_rides_it() -> None:
     # Present-but-null is the server saying nothing, not a malformed message
     # (round 1 N1).
     assert _allocation_sender({"sender_account_id": None, "sender_kind": None})["account_id"] == ""
+    # An ``integration`` (Team Integrations app) post keeps the account and has
+    # NO member class: it screens as an unclassed sender, which the owner and
+    # tier rules never honour, instead of holding as malformed.
+    assert _allocation_sender({"sender_account_id": "iap_1", "sender_kind": "integration"}) == {
+        "account_id": "iap_1",
+        "kind": "",
+        "display_label": "",
+    }
     with pytest.raises(ValueError):
         _allocation_sender({"sender_account_id": "acc_ada", "sender_kind": "admin"})
     # The connector's cap is the envelope's, so a long account holds on the

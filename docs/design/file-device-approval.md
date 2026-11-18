@@ -79,8 +79,9 @@ The journal publishes a pending fence durably **before** the current projection,
 then a completed witness only after exact projection readback. A retained denial
 generation dominates restored older current bytes. Indeterminate completion
 attempts compensate with a higher-revision pending fence; uncertainty never
-means "guaranteed no mutation." Missing, malformed, redirected, mismatched or
-selectively rewound witness state fails closed. Exact signed retries reconcile
+means "guaranteed no mutation." Missing, malformed, redirected or mismatched
+witness state fails closed. Selective **current-projection** restore denies
+with intact authoritative negative witnesses. Exact signed retries reconcile
 the same generation, rather than minting a replacement request or epoch.
 
 This mirrors the existing finite journal's revision/capacity discipline, **not**
@@ -97,13 +98,18 @@ and defaults remain unchanged. Unsupported directory/no-follow durability
 refuses rather than silently weakening persistence. Record-then-domain lock
 order and CAS prevent two workers from applying one expected generation twice.
 
-**Trusted-owner filesystem boundary:** coordinated rollback of *all* private
-current, journal, sentinel and context state is not detected. These ordinary
+**Trusted-owner filesystem boundary:** authoritative negative journal/sentinel
+integrity is trusted. Coherently rewinding **all surviving knowledge of a later
+transition** is unsupported; it does **not** require rewriting every physical
+file. For example, after a revoke-g2 pending fence is published but its projection
+write fails, current g1 can remain untouched. Restoring only the old journal can
+remove the sole surviving knowledge of that attempted g2 transition. Ordinary
 owner-private files are not a protected monotonic service, hardware counter or
-privileged anti-rollback store. The guarantees cover peer/API replay and
-selective current/witness restoration, not an owner rewriting every authority
-input coherently. No new root service, seal, key rotation or restart-reapproval
-policy has been introduced.
+privileged anti-rollback store. The guarantee is peer/API replay resistance and
+selective current restore denial with intact witnesses, not hostile-owner/OS
+freshness. No peer/API/import writer that lowers the journal was identified by
+the P1 review. No new root service, seal, key rotation or restart-reapproval
+policy is added by P2; its metadata does not strengthen this boundary.
 
 ## Relay and desktop process separation
 

@@ -1,0 +1,14 @@
+{
+  "comment_url": "https://github.com/damianvtran/local-operator/pull/4052#issuecomment-6896056305",
+  "body_readback_matches": true,
+  "record_path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-record.json",
+  "record_sha256": "c4be466b99c8320b91b6c131478871dc4c6a93e3824e2ce1f0caea2201db04fd",
+  "input_and_artifact_hashes_verified": true,
+  "input_hash_mismatches": [],
+  "status": "changes_requested",
+  "finding_ids": [
+    "I2-UR-01",
+    "I2-RU-01"
+  ],
+  "unresolved_blocker_major_count": 1
+}

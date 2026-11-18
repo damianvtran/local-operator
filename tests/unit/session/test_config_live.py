@@ -1139,6 +1139,13 @@ HOST_OWNED_LIVE_SECTIONS = {
     "speech",
     "static",
     "mesh_updates",
+    # ``updates`` is host-owned in the ``mesh_updates`` shape: its two keys decide
+    # what an UPDATE does to older install generations, not what a session does.
+    # ``update.auto_prune_policy`` re-reads config.yml at every promotion tail, so
+    # an edit applies to the next update with no restart. The live half is proven
+    # in ``tests/unit/test_capacity_recovery.py`` (the off switch and keep margin
+    # rewritten between updates in one process take effect on the next one).
+    "updates",
     # ``console`` is host-owned in the ``desktop``/``runtime`` shape: the limits are
     # admission policy for the DESKTOP CONSOLE HOST, not for a Python ``Session`` —
     # nothing in ``Session`` reads the ``console`` block, so a probe in this file

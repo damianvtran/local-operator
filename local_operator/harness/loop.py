@@ -30,7 +30,14 @@ import re
 import time
 import uuid
 from collections import Counter, deque
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar, cast
@@ -3963,6 +3970,7 @@ class AgentLoop:
                             tool_results,
                             new_messages,
                             redact=config.redact_tool_result,
+                            file_provenance=config.file_provenance,
                         )
                     elif (
                         config.recover_wordless_stop
@@ -5533,6 +5541,8 @@ class AgentLoop:
                 assistant.tool_calls = retained.tool_calls
                 assistant.content = retained.content
                 assistant.provider_payload = retained.provider_payload
+        if config.file_provenance is not None:
+            await config.file_provenance("assistant", assistant, None)
         yield MessageEndEvent(message=assistant)
         yield _ModelTurnResult(
             message=executing,
@@ -6666,6 +6676,8 @@ class AgentLoop:
                     ):
                         context.quiet_request_failed = True
                     result.duration_s = time.monotonic() - started
+                    if config.file_provenance is not None:
+                        await config.file_provenance("nested", nested, {"outer_call_id": call.id})
                     queue.put_nowait(
                         ToolExecutionEndEvent(
                             tool_call_id=nested.id,
@@ -6705,7 +6717,42 @@ class AgentLoop:
                     }
                 )
             pending_creations = _plan_guard_creations(tool.name, item.args, execution_context)
-            result = await tool.execute(call.id, item.args, signal, on_update, execution_context)
+            from local_operator.session.file_provenance import EXECUTION_SOURCE
+
+            native_source = {
+                "tool": tool.name,
+                "call_id": call.id,
+                "arguments": item.args,
+                "cwd": execution_context.cwd,
+                # Cleared when this executor returns: see ``EXECUTION_SOURCE``.
+                "executing": True,
+            }
+            if config.file_provenance is not None:
+                await config.file_provenance("executing", call, native_source)
+            execution_token = (
+                EXECUTION_SOURCE.set(native_source) if config.file_provenance is not None else None
+            )
+            try:
+                result = await tool.execute(
+                    call.id, item.args, signal, on_update, execution_context
+                )
+            finally:
+                native_source["executing"] = False
+                if execution_token is not None:
+                    EXECUTION_SOURCE.reset(execution_token)
+            if config.file_provenance is not None:
+                # The actual executor returned; synthetic/refused branches do
+                # not reach this boundary. Freeze before hooks/copies/queues.
+                await config.file_provenance(
+                    "executed",
+                    call,
+                    {
+                        "arguments": item.args,
+                        "tool": tool.name,
+                        "cwd": execution_context.cwd,
+                        "result": result,
+                    },
+                )
             # R1-1 (PR #3702): settle a write/edit diff on the ORIGINAL result,
             # right here, before anything copies it. The guard annotation, the
             # one-turn public copy and a PostToolUse hook note all
@@ -7731,10 +7778,17 @@ class AgentLoop:
             settings = guard_check.read_settings(authorised=frozenset(authorised))
             env: Mapping[str, str] = {}
             scratchpad: str | None = None
+            forge_auth = None
             if tool.name == "bash":
-                from local_operator.tools.builtin import bash_guard_environment
+                from local_operator.tools.builtin import (
+                    bash_guard_environment,
+                    bash_guard_forge_auth,
+                )
 
                 env, scratchpad = bash_guard_environment(tool_context)
+                # The guard's own PR-state lookups must authenticate as this
+                # session's shell does (field report 2026-11-17, node-2).
+                forge_auth = bash_guard_forge_auth(tool_context)
             session_id = (tool_context.session_id if tool_context is not None else "") or ""
             operator = None
             if tool.name == "bash":
@@ -7759,6 +7813,7 @@ class AgentLoop:
                 intent=item.intent or "",
                 operator=operator,
                 messages=context.messages if tool.name == "bash" else None,
+                forge_auth=forge_auth,
             )
             return await guard_check.check_tool_call(
                 tool.name,
@@ -7807,6 +7862,7 @@ class AgentLoop:
         results: list[ToolResult],
         new_messages: list[AgentMessage],
         redact: Callable[[str], str] | None = None,
+        file_provenance: Callable[[str, Any, Any], Awaitable[None]] | None = None,
     ) -> None:
         for result in results:
             # Idempotent backstop for a path that skipped the runner's step:
@@ -7861,6 +7917,10 @@ class AgentLoop:
             message = Message.tool_result(
                 result.model_copy(update={"content": content, "details": details})
             )
+            if file_provenance is not None:
+                # Message.tool_result minted its real durable event ID only now.
+                # Bind the already frozen completion; never restat on delivery.
+                await file_provenance("result", message, result)
             context.messages.append(message)
             new_messages.append(message)
 

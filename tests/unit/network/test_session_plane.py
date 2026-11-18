@@ -207,6 +207,120 @@ def _serve(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, _Served]:
     return served
 
 
+#: Upper bound on waiting for a full collection to run. A failure signal (the
+#: collector never ran at all), never the window: the wait ends on the gc
+#: callback, normally within one call.
+_FULL_COLLECTION_BOUND_S = 30.0
+
+
+def _collect_fully() -> None:
+    """Return only once a FULL cyclic collection has started AND finished after the call.
+
+    WHY NOT A BARE ``gc.collect()``. CPython's collector is not re-entrant: while
+    ANY thread is mid-collection, a ``gc.collect()`` on another thread returns 0
+    at once and collects nothing (``_PyGC_Collect`` loses the ``collecting``
+    flag race). In a CI shard that is routine: the relay, sqlite and executor
+    threads every test leaves behind run finalizers (the ``unclosed database``
+    ResourceWarnings in the shard logs) from inside THEIR collections, and a
+    finalizer that touches I/O or a lock drops the GIL with the collection still
+    in progress. A test thread whose ``gc.collect()`` lands in that window
+    destroys nothing, so a garbage task's ``Task was destroyed but it is
+    pending!`` line is simply never written — measured as the py3.13 shard 3
+    "the log capture cannot see asyncio's complaint" flake (#4155, #4120), and
+    reproduced 10/10 by holding another thread's collection open.
+
+    The callback pair is the event to wait on: collections are serialised, so a
+    ``start`` seen after registration followed by a generation-2 ``stop`` is one
+    whole full collection that began after every object unreachable at the call
+    was already garbage — whichever thread happened to run it. Its finalizers,
+    asyncio's destructor log included, have run by the time ``stop`` fires.
+    """
+    lock = threading.Lock()
+    started = False
+    done = threading.Event()
+
+    def observe(phase: str, info: dict[str, int]) -> None:
+        nonlocal started
+        with lock:
+            if phase == "start":
+                started = True
+            elif started and info.get("generation") == 2:
+                done.set()
+
+    gc.callbacks.append(observe)
+    try:
+        deadline = time.monotonic() + _FULL_COLLECTION_BOUND_S
+        while not done.is_set():
+            # Returns at once, collecting nothing, when another thread holds the
+            # collector; the short wait then lets that collection finish before
+            # this thread asks again.
+            gc.collect()
+            if done.wait(timeout=0.05):
+                break
+            assert (
+                time.monotonic() < deadline
+            ), "no full collection could run on any thread within the bound"
+    finally:
+        gc.callbacks.remove(observe)
+
+
+def test_collect_fully_waits_out_a_collection_held_by_another_thread(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for the vacuity-guard flake: a busy collector must not hide the complaint.
+
+    Another thread's collection is held open deterministically (its finalizer
+    parks on an event), which is the CI shard's state when the flake fired. The
+    bare ``gc.collect()`` is asserted to MISS the complaint first — the negative
+    control that proves the hazard is real on this interpreter, so the helper's
+    pass below is not vacuous — then ``_collect_fully`` must surface it once the
+    other collection is released.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _ParkedFinalizer:
+        def __del__(self) -> None:
+            entered.set()
+            release.wait(timeout=_FULL_COLLECTION_BOUND_S)
+
+    def hold_a_collection_open() -> None:
+        cycle = _ParkedFinalizer()
+        cycle.self_ref = cycle  # type: ignore[attr-defined]
+        del cycle
+        gc.collect()
+
+    holder = threading.Thread(target=hold_a_collection_open, name="held-collection")
+    releaser = threading.Timer(0.1, release.set)
+
+    def complained() -> bool:
+        return any("Task was destroyed" in r.getMessage() for r in caplog.records)
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        try:
+            holder.start()
+            assert entered.wait(timeout=_FULL_COLLECTION_BOUND_S), "the holder never collected"
+            control = asyncio.new_event_loop()
+            stray = control.create_task(asyncio.Event().wait())
+            control.run_until_complete(asyncio.sleep(0))
+            control.close()
+            del stray
+            assert gc.collect() == 0 and not complained(), (
+                "precondition: a bare collect during another thread's collection was "
+                "expected to collect nothing; the hazard this pins is not present"
+            )
+            # Released from another thread while the helper is already waiting,
+            # so the helper has to outlast the held collection, not race it.
+            releaser.start()
+            _collect_fully()
+            assert complained(), "_collect_fully returned before the garbage task was destroyed"
+        finally:
+            release.set()
+            holder.join(timeout=_FULL_COLLECTION_BOUND_S)
+            if releaser.ident is not None:
+                releaser.join(timeout=_FULL_COLLECTION_BOUND_S)
+
+
 def _seed(root: Path, session_id: str) -> None:
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
@@ -2534,8 +2648,10 @@ def test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending(
             reader.join(timeout=30)
         # THE COMPLAINT ITSELF, at the only moment a test can assert on it: the
         # destructor emits it whenever the collector next runs, so the collector is
-        # driven here rather than left to the interpreter.
-        gc.collect()
+        # driven here rather than left to the interpreter — and driven to a FULL
+        # collection that really ran, since a bare ``gc.collect()`` is a no-op
+        # while another thread is collecting (see ``_collect_fully``).
+        _collect_fully()
         destroyed = [
             r.getMessage() for r in caplog.records if "Task was destroyed" in r.getMessage()
         ]
@@ -2556,7 +2672,7 @@ def test_a_read_parked_at_stop_ends_cancelled_and_is_not_destroyed_pending(
             control.run_until_complete(asyncio.sleep(0))
             control.close()
             del stray
-            gc.collect()
+            _collect_fully()
             return any("Task was destroyed" in r.getMessage() for r in caplog.records)
 
         assert not destroyed, f"a read parked at stop was destroyed pending: {destroyed}"

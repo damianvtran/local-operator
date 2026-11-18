@@ -275,8 +275,16 @@ def test_a_review_hold_replays_without_a_redraw(rig) -> None:  # noqa: F811 — 
 
 def test_review_held_off_restores_the_old_hold(rig) -> None:  # noqa: F811 — imported fixture
     config_dir, store, owner = rig
+    # Both release paths explicitly off is the pre-B4b build. ``hold_release``
+    # must be written ``false`` since slice S3a made an absent key read ON.
     (config_dir / "config.yml").write_text(
-        json.dumps({"values": {"team_bridge": {"enabled": True, "review_held": False}}}),
+        json.dumps(
+            {
+                "values": {
+                    "team_bridge": {"enabled": True, "review_held": False, "hold_release": False}
+                }
+            }
+        ),
         encoding="utf-8",
     )
     assert _screen(config_dir, owner, Runner(DOUBT)).hold_code == "model_hold"

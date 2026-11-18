@@ -983,6 +983,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.mesh_updates_description()),
     ),
+    # What THIS device's update does with its older install generations
+    # (``update.auto_prune`` / ``update.keep_generations``). Its own section, not
+    # ``mesh_updates``: that one is about rolling OTHER members. LIVE is honest:
+    # ``update.auto_prune_policy`` re-reads config.yml at every promotion tail
+    # (PyPI, snapshot and mesh), and no ``Session`` holds either key.
+    Section(
+        "updates",
+        _t(_ws.updates_title()),
+        Scope.LIVE,
+        _t(_ws.updates_description()),
+    ),
     # PREVIEW, and its own section, LIVE — all three are decisions, not defaults.
     #
     # LIVE is honest: the switch is read from ``config.yml`` on every capability
@@ -5568,6 +5579,41 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=3650.0,
         help=(_t(_ws.network_audit_max_age_days_help())),
     ),
+    # THE POST-UPDATE PRUNE (operator decision 2026-11-16, after a fleet node
+    # reached 113 generations / ~8.6 GB with automatic collection frozen). Both
+    # are read by ``update.auto_prune_policy`` and drive
+    # ``update.reclaim_after_promotion``, which is ``lop install prune``'s own
+    # guarded ``prune_generations``: the current build, the updater's running
+    # tree and every record-named root are never removed, whatever these say.
+    # Defaults are LITERALS mirroring ``install_defaults``
+    # (DEFAULT_AUTO_PRUNE_GENERATIONS / DEFAULT_KEEP_GENERATIONS);
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins the pair.
+    Setting(
+        key="update.auto_prune",
+        path=("update", "auto_prune"),
+        section="updates",
+        label=_t(_ws.update_auto_prune_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_ws.update_auto_prune_choice_true_description()),
+            _t(_ws.update_auto_prune_choice_false_description()),
+        ),
+        help=_t(_ws.update_auto_prune_help()),
+    ),
+    # 0 is legal (keep only what is current or in use); the ceiling is a sanity
+    # bound, not a policy — each generation is a whole venv (~80-140 MB).
+    Setting(
+        key="update.keep_generations",
+        path=("update", "keep_generations"),
+        section="updates",
+        label=_t(_ws.update_keep_generations_label()),
+        kind=Kind.INT,
+        default=2,
+        help=_t(_ws.update_keep_generations_help()),
+        minimum=0,
+        maximum=100,
+    ),
     # THE SWITCH (S3b; mesh-update-propagation.md §5): auto-roll is reachable
     # only when this reads ``auto``. A per-run ``lop update --no-roll``
     # overrides it; the manual verbs (``lop network update``) work under
@@ -5696,7 +5742,9 @@ SETTINGS: tuple[Setting, ...] = (
         placeholder=_t(_ws.network_credentials_github_repositories_placeholder()),
         empty_unsets=True,
         validate_value=_validate_github_repositories,
-        synonyms=("auth", "access", "permissions", "scopes"),
+        # No "access": the help copy now says "lend GitHub access", so the word
+        # already matches this row and a synonym repeating it is dead weight.
+        synonyms=("auth", "permissions", "scopes"),
     ),
     # -- hub ---------------------------------------------------------------
     # Defaults are LITERALS here for the same reason the aida ones are: this module
@@ -6538,6 +6586,35 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_pa.auto_setup_help()),
         kind=Kind.BOOL,
         default=True,
+    ),
+    Setting(
+        # ADR 0008 desk presence: how long this computer may go without input
+        # before a completion it would banner here goes to the phone instead.
+        # A COMPUTER setting (it describes the desk), edited from desktop
+        # Settings through `PATCH /v1/settings/{key}` and from the phone through
+        # the relay's `GET/PATCH /api/settings/phone-away-after`. The desktop
+        # app reads it and sends it as the presence beat's `away_after_s`; the
+        # core's own reader (`presence.configured_away_after_s`) is for the
+        # TUI-only probe (slice 4), where no beat carries it. In the
+        # `phone_access` section because it decides what reaches the phone.
+        # An ENUM of the four presets every client offers (the same shape as
+        # `session.cleanup.temporary.idle_minutes`); the literal default mirrors
+        # `presence.DEFAULT_AWAY_AFTER_S`, held equal by
+        # `test_every_default_matches_its_consumer`.
+        key="notifications.phone_away_after_s",
+        path=("notifications", "phone_away_after_s"),
+        section="phone_access",
+        label=_t(_pa.away_after_label()),
+        help=_t(_pa.away_after_help()),
+        kind=Kind.ENUM,
+        default=120,
+        choices=(
+            Choice(60, _t(_pa.away_after_choice_1m_label())),
+            Choice(120, _t(_pa.away_after_choice_2m_label())),
+            Choice(300, _t(_pa.away_after_choice_5m_label())),
+            Choice(600, _t(_pa.away_after_choice_10m_label())),
+        ),
+        synonyms=("idle", "push", "mobile", "presence"),
     ),
 )
 

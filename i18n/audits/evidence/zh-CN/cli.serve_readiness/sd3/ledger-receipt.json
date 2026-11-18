@@ -1,0 +1,57 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10",
+  "status": "passed",
+  "date": "2026-11-16",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "job": "170903662c6e",
+    "model": null,
+    "previously_disclosed_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting task identifies same original translator/new job. Actual model/fallback of this new job not supplied; jobs peek cannot resolve it in auditor scope. Null is unknown, not a claim of fallback."
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d590e061719",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translator_job": "170903662c6e",
+    "actual_model_source": "Host session metadata: Model openai/gpt-6.1-sol; no fallback observed",
+    "fallback": null
+  },
+  "note": "Record i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3/record.json; 15 keys (11 reviewed, 4 byte-identical retained); no findings; first pass at new source.",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "audit_record": {
+    "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3/record.json",
+    "sha256": "9b79f2769bc6a2d469064a158f544c39cc30ec9faf2495f0b3d7664a4ef288a0"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3/report.md",
+      "sha256": "780b0c001281116e50d79241a2aeb70a8657a7a865982acc59db3577fc1064b9"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3/audit.log",
+      "sha256": "a764ff44d5c42c59b4951d43526d3b460bb8907169694cd7e2dbb4882059382a"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3/verify.py.txt",
+      "sha256": "8cbb464195fba12954c15f77ad2ec1e1ad820a207206784c9b2ce5c6e295338c"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  }
+}

@@ -55,6 +55,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
+from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr as _github_tr
+
+_github_text = _github_tr("wire.github")
 
 #: The default invite lifetime. A string flag parsed by :func:`_duration`, because
 #: ``--expires 10m`` is what a person types and ``600`` is what they would have to
@@ -3792,7 +3796,7 @@ def _github_designation_now(*, refresh: bool, progress: bool = False) -> tuple[A
         timer = threading.Timer(
             _LISTING_PROGRESS_AFTER_S,
             lambda: print(
-                "listing the repositories your GitHub login can push to…",
+                _github_text(_github_strings.progress()),
                 file=sys.stderr,
                 flush=True,
             ),
@@ -3824,75 +3828,79 @@ def _designation_payload(designated: Any) -> dict[str, Any]:
 
 
 def _github_ttl_words() -> str:
-    """How soon an opt-out reaches borrowers: the grant window, in minutes (N4).
-
-    A borrower keeps one GitHub grant at most ``grant_ttl_s``; the next one it
-    fetches carries the narrowed list, so that window is the honest upper bound.
-    """
+    """Format the existing grant-window bound, not a new timeout or authority."""
     from local_operator.network.credentials import grant_ttl_s
 
-    minutes = max(1, int((grant_ttl_s(_config_dir()) + 59) // 60))
-    return f"within {minutes} min"
+    return _github_text(
+        _github_strings.ttl(count=max(1, int((grant_ttl_s(_config_dir()) + 59) // 60)))
+    )
 
 
 def _designation_source(designated: Any) -> str:
-    """Where the list came from, in the user's words (U3): no keys, no all-caps."""
+    """Localized list provenance; account matching stays in github.designation."""
     from local_operator.network.credentials import github as github_mod
 
     ago = github_mod.listed_ago(designated.age_s() if designated.fetched_at else None)
     if designated.origin == github_mod.ORIGIN_EXPLICIT:
-        return "the list you chose by hand (the GitHub repositories setting)"
+        return _github_text(_github_strings.source_explicit())
     if designated.origin == github_mod.ORIGIN_LAST_GOOD:
-        why = f" ({designated.error})" if designated.error else ""
-        return (
-            f"the list fetched {ago} — GitHub repositories couldn't be listed "
-            f"just now{why}, so it may be out of date"
+        failure = (
+            f" ({github_mod.listing_failure_text(designated.error)})" if designated.error else ""
         )
-    return f"every repository this device's GitHub login can push to, listed {ago}"
+        return _github_text(_github_strings.source_last_good(ago=ago, failure=failure))
+    return _github_text(_github_strings.source_enumerated(ago=ago))
 
 
 def _opted_out_lines(designated: Any) -> list[str]:
-    """The opted-out NAMES and the way back (UX round 1, U1), or that there are none."""
+    """Name every opt-out, preserving the exact technical undo command."""
     names = list(designated.excluded)
     if not names:
-        return ["opted out: none"]
+        return [_github_text(_github_strings.opt_out_none())]
     return [
-        f"opted out ({len(names)}): {', '.join(names)} — bring one back: "
-        "lop network credential github include <owner/repo>"
+        _github_text(
+            _github_strings.opt_out_names(
+                count=len(names),
+                names=", ".join(names),
+                command="lop network credential github include <owner/repo>",
+            )
+        )
     ]
 
 
 def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[str]:
-    """The human lines: the repositories, where they came from, what is opted out.
-
-    ``receipt`` sizes the list for the share's confirmation (a short head and a
-    pointer); ``credential github repos`` prints every name (U2).
-    """
+    """Localized owner output; receipts stay short and repos still lists all."""
     from local_operator.network.credentials import github as github_mod
 
     names = list(designated.repositories)
-    whose = "this device's"
     if not names:
-        reason = designated.reason(whose)
-        if receipt:
-            # The share WAS recorded; only its borrows are refused (U4.3).
-            head = (
-                "GitHub repositories: none yet — the share is in place, but every borrow "
-                f"is refused while {reason}; {designated.remedy()}"
-            )
-        else:
-            head = f"GitHub repositories: none — {reason}; {designated.remedy()}"
-        return [head, *_opted_out_lines(designated)]
-    opted = f", minus {designated.excluded_count} opted out" if designated.excluded_count else ""
+        key = _github_strings.share_empty if receipt else _github_strings.repos_empty
+        return [
+            _github_text(
+                key(reason=designated.reason("this device's"), remedy=designated.remedy())
+            ),
+            *_opted_out_lines(designated),
+        ]
+    opted = (
+        _github_text(_github_strings.opted_suffix(count=designated.excluded_count))
+        if designated.excluded_count
+        else ""
+    )
     lines = [
-        f"GitHub repositories lent for: {len(names)} — {_designation_source(designated)}{opted}"
+        _github_text(
+            _github_strings.repos_head(
+                count=len(names), source=_designation_source(designated), opted=opted
+            )
+        )
     ]
     shown = names[:_RECEIPT_SHOWN] if receipt else names
     lines.extend(f"  {name}" for name in shown)
     if len(names) > len(shown):
         lines.append(
-            f"  … and {len(names) - len(shown)} more — see them all: "
-            "lop network credential github repos"
+            _github_text(
+                _github_strings.more(
+                    count=len(names) - len(shown), command="lop network credential github repos"
+                )
+            )
         )
     carry = (
         github_mod.APP_MINT_MAX_REPOSITORIES
@@ -3900,16 +3908,15 @@ def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[s
         else github_mod.MAX_DESIGNATED_REPOSITORIES
     )
     if len(names) > carry:
-        lines.append(
-            f"this is more than the {carry} one share can carry, so every borrow is refused "
-            "until you pick the ones to lend with the GitHub repositories setting (search it "
-            "in /settings) or opt some out"
-        )
+        lines.append(_github_text(_github_strings.capacity(count=carry)))
     lines.extend(_opted_out_lines(designated))
     lines.append(
-        "opt a repository out: lop network credential github exclude <owner/repo> — devices "
-        f"you share with lose push to it the next time they fetch the credential, "
-        f"{_github_ttl_words()}"
+        _github_text(
+            _github_strings.opt_out_step(
+                command="lop network credential github exclude <owner/repo>",
+                ttl=_github_ttl_words(),
+            )
+        )
     )
     return lines
 
@@ -3935,7 +3942,7 @@ def _cmd_credential_github(args: argparse.Namespace) -> int:
     root = _config_dir()
     if action == "repos":
         if args.repository:
-            raise MeshRefusal("bad_request", "'repos' takes no repository")
+            raise MeshRefusal("bad_request", _github_text(_github_strings.usage_repos_args()))
         use_default = bool(getattr(args, "use_default", False))
         if use_default:
             try:
@@ -3943,33 +3950,38 @@ def _cmd_credential_github(args: argparse.Namespace) -> int:
             except OSError as exc:
                 raise MeshRefusal(
                     "github_default_reset_failed",
-                    "could not complete the return to the automatic GitHub repository list "
-                    f"({exc.__class__.__name__}); check this device's data folder is writable, "
-                    "then retry lop network credential github repos --use-default",
+                    _github_text(
+                        _github_strings.reset_failed(
+                            error=exc.__class__.__name__,
+                            command="lop network credential github repos --use-default",
+                        )
+                    ),
                 ) from exc
-        designated, source = _github_designation_now(refresh=bool(args.refresh) or use_default)
+        designated, source = _github_designation_now(
+            refresh=bool(args.refresh) or use_default, progress=not bool(args.json)
+        )
         payload = {"action": "repos", **_designation_payload(designated)}
         return _emit(args, payload, _designation_lines(designated, source, receipt=False))
     if getattr(args, "use_default", False):
-        raise MeshRefusal("bad_request", "--use-default applies to 'repos' only")
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_default()))
     if args.refresh:
-        raise MeshRefusal("bad_request", "--refresh applies to 'repos' only")
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_refresh()))
     entry = github_mod.normalise_repository(args.repository)
     if not entry:
-        raise MeshRefusal(
-            "bad_request", f"{action} needs one repository as owner/repo, e.g. octo-org/website"
-        )
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_repo(action=action)))
     designated, _source = _github_designation_now(refresh=False)
     known = bool(designated.listed) or designated.origin != github_mod.ORIGIN_UNAVAILABLE
     in_list: bool | None = (
         entry.lower() in {name.lower() for name in designated.listed} if known else None
     )
     which = (
-        "the list you chose by hand"
+        _github_text(_github_strings.which_explicit())
         if designated.origin == github_mod.ORIGIN_EXPLICIT
-        else "the list this device's GitHub login can push to"
+        else _github_text(_github_strings.which_enumerated())
     )
-    unchecked = f" ({designated.error})" if designated.error else ""
+    unchecked = (
+        f" ({github_mod.listing_failure_text(designated.error)})" if designated.error else ""
+    )
     current = list(github_mod.excluded_repositories(root))
     lowered = [name.lower() for name in current]
     if action == "exclude":
@@ -3982,39 +3994,25 @@ def _cmd_credential_github(args: argparse.Namespace) -> int:
         github_mod.write_excluded(root, updated)
     ttl = _github_ttl_words()
     if action == "exclude" and not changed:
-        line = f"{entry} was already opted out"
+        line = _github_text(_github_strings.exclude_already(repo=entry))
     elif action == "exclude" and in_list is False:
-        line = (
-            f"{entry} isn't in {which} — check the spelling; it's opted out anyway, in case "
-            "it's added later"
-        )
+        line = _github_text(_github_strings.exclude_typo(repo=entry, which=which))
     elif action == "exclude" and in_list is None:
-        line = (
-            f"{entry} is opted out; its spelling couldn't be checked because {which} "
-            f"couldn't be fetched{unchecked}"
+        line = _github_text(
+            _github_strings.exclude_unchecked(repo=entry, which=which, failure=unchecked)
         )
     elif action == "exclude":
-        line = (
-            f"{entry} is opted out — devices you share with lose push to it the next time "
-            f"they fetch the credential, {ttl}"
-        )
+        line = _github_text(_github_strings.exclude_added(repo=entry, ttl=ttl))
     elif not changed:
-        line = f"{entry} was not opted out"
+        line = _github_text(_github_strings.include_unchanged(repo=entry))
     elif in_list is False:
-        line = (
-            f"{entry} is no longer opted out, but it isn't in {which}, so it still isn't "
-            "lent — check the spelling"
-        )
+        line = _github_text(_github_strings.include_typo(repo=entry, which=which))
     elif in_list is None:
-        line = (
-            f"{entry} is no longer opted out; whether it's in {which} couldn't be checked"
-            f"{unchecked}"
+        line = _github_text(
+            _github_strings.include_unchecked(repo=entry, which=which, failure=unchecked)
         )
     else:
-        line = (
-            f"{entry} is back in — devices you share with can push to it again the next time "
-            f"they fetch the credential, {ttl}"
-        )
+        line = _github_text(_github_strings.include_added(repo=entry, ttl=ttl))
     payload = {
         "action": action,
         "repository": entry,
@@ -7768,9 +7766,21 @@ def _translate_act_target(target: str, peer: str) -> str:
 
 
 def _pilot_dial_refusal(
-    session_id: str, peer: str, message: str, config_dir: Path
+    session_id: str,
+    peer: str,
+    message: str | BaseException,
+    config_dir: Path,
+    *,
+    verb: str = "send",
+    device: str = "",
 ) -> tuple[str, str]:
-    """The refusal for a viewer whose dial produced NO SESSION.
+    """Preserve an answered refusal or connection observation before the dial rung.
+
+    Typed peer errors are answers, not evidence that the device is unreachable.
+    An admitted stream going quiet likewise cannot truthfully say no session was
+    reached. Neither fact needs another catalogue read, dial, retry or timeout.
+
+    The remaining generic dial branch retains its existing rule:
 
     ONE RULE FOR BOTH RUNGS — the open and the bind — and it is a correction this
     PR made against itself twice. The first version asked the peer's catalogue
@@ -7789,8 +7799,30 @@ def _pilot_dial_refusal(
     component in both), and the transport's own sentence rides along verbatim, so a
     refused frame still reads as a refusal rather than as a link problem.
     """
+    from local_operator.ansi import sanitize_prompt_line
+    from local_operator.mobile.attach_client import RemoteStreamUnresponsiveError
     from local_operator.network import store
+    from local_operator.network.projection import RemoteStreamRefused
+    from local_operator.redaction_shapes import scrub_shapes
 
+    undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    label = device or peer
+    # The local relay labels a missing owner answer explicitly; that typed
+    # observation still belongs to the doctor/transport rung, not refusal copy.
+    if isinstance(message, RemoteStreamRefused) and message.code != "peer_unreachable":
+        detail = sanitize_prompt_line(scrub_shapes(str(message)), limit=300)
+        if message.code == "session_unreachable":
+            sentence = f"{session_id} on {label} could not be reached: {detail}; {undone}. "
+        else:
+            sentence = f"{session_id} on {label} was refused by {label}: {detail}; {undone}. "
+        return message.code, sentence + "Re-run the command to retry."
+    if isinstance(message, RemoteStreamUnresponsiveError):
+        return (
+            "peer_unreachable",
+            f"{session_id} on {label} stopped answering after connecting; {undone}. "
+            f"Run `lop network doctor --peer {peer}` to distinguish a lost connection "
+            "from a stopped runtime.",
+        )
     if store.find_own_relay(config_dir) is None:
         return "relay_unavailable", _relay_unavailable_message()
     return (
@@ -7803,22 +7835,15 @@ def _pilot_dial_refusal(
 
 
 def _pilot_runtime_busy(exc: BaseException) -> bool:
-    """True when the runtime was REACHED and is alive, but did not answer in time.
+    """Whether this failure belongs to the runtime-answer lane, not the doctor.
 
-    ONE CLASSIFICATION, THE LADDER'S: the desktop control ladder decides "busy" by
-    ``RuntimeUnresponsiveError`` or the duck-checked ``owner_alive`` mark
-    (``server/routes/desktop_sessions.py::_owner_busy``), and every busy
-    ``ConnectionError`` main defines carries that mark: ``OwnerAckTimeout``, the
-    late welcome (``OwnerWelcomeTimeout``) and the reconnect refusal
-    (``OwnerReconnectingError``). Reading the MARK rather than listing classes is
-    what keeps this verb from drifting when a new busy shape lands; a list here
-    missed the late welcome, which the pilot's own bind raises, and called a busy
-    session a device that "produced no session". The one addition is
-    ``RuntimeBindFailedError`` (the runtime announced it could not prepare this
-    connection), which is deliberately left unmarked so the desktop ladder keeps
-    its existing answer for it. All of these are ``ConnectionError``s, and
-    ``OwnerAckTimeout`` is ALSO a ``TimeoutError``, so this must be asked before
-    either sibling rung.
+    The pilot retains the desktop's ``RuntimeUnresponsiveError`` / ``owner_alive``
+    rule, plus its existing ``RuntimeBindFailedError`` case. The latter is an
+    explicit refusal, NOT evidence of load: its own reason is printed instead of
+    the timed busy sentence. It remains unmarked so the desktop bind-failure
+    ladder is unchanged. ``OwnerAckTimeout`` is also a ``TimeoutError``; ask this
+    predicate before either generic sibling rung. A remote sync timeout without
+    a post-welcome answer stays an ordinary transport error at its source.
     """
     from local_operator.session.attached import (
         RuntimeBindFailedError,
@@ -7830,19 +7855,33 @@ def _pilot_runtime_busy(exc: BaseException) -> bool:
     return bool(getattr(exc, "owner_alive", False))
 
 
-def _pilot_busy_sentence(verb: str, session_id: str, device: str, waited_s: float) -> str:
-    """The refusal for a runtime that is alive and too busy to answer this act.
+def _pilot_busy_sentence(
+    verb: str, session_id: str, device: str, waited_s: float, *, refusal: str | None = None
+) -> str:
+    """The runtime-answer lane: its explicit refusal, or the timed busy answer.
 
-    Says the three things the person acts on: the session is still running over
+    The timed branch says the three things the person acts on: it is running over
     there, this act did NOT happen, and the remedy is to retry. It does not send
     them to ``network doctor``: the link worked, the stream opened, and the
     runtime spoke — a link diagnosis would send them after a fault that is not
     there.
     """
     undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    if refusal is not None:
+        from local_operator.mobile.attach_client import bind_failed_cause
+
+        # Keep the canonical safe cause, not another surface's reconnect remedy.
+        # An immediate refusal is not an invented one-second load measurement.
+        cause = bind_failed_cause(refusal)
+        detail = f": {cause}" if cause else ""
+        return (
+            f"{session_id} is running on {device}, but its runtime could not prepare "
+            f"the connection{detail}; {undone}. Re-run the command to retry."
+        )
     return (
         f"{session_id} is running on {device}, but its runtime was too busy to answer "
-        f"within {max(1, int(waited_s))}s, so {undone}; retry when its current work settles"
+        f"within {max(1, int(waited_s))}s, so {undone}. "
+        "Re-run the command to retry when its current work settles."
     )
 
 
@@ -8238,7 +8277,7 @@ async def _pilot_act(
         # as a traceback, which is the one thing this family never does with a
         # refusal; see ``_pilot_dial_refusal`` for how the component is decided.
         code, sentence = await asyncio.to_thread(
-            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            _pilot_dial_refusal, session_id, peer, exc, config_dir, verb=verb, device=device
         )
         raise MeshRefusal(code, sentence) from exc
     if viewer is None:
@@ -8266,9 +8305,17 @@ async def _pilot_act(
             # sibling rung would otherwise claim it — which is how a busy session
             # on a healthy link read as a device that "produced no session".
             if _pilot_runtime_busy(exc):
+                from local_operator.session.attached import RuntimeBindFailedError
+
                 raise MeshRefusal(
                     "session_unreachable",
-                    _pilot_busy_sentence(verb, session_id, device, time.monotonic() - bind_started),
+                    _pilot_busy_sentence(
+                        verb,
+                        session_id,
+                        device,
+                        time.monotonic() - bind_started,
+                        refusal=str(exc) if isinstance(exc, RuntimeBindFailedError) else None,
+                    ),
                 ) from exc
             if isinstance(exc, TimeoutError):
                 raise MeshRefusal(
@@ -8287,7 +8334,7 @@ async def _pilot_act(
             # settled on the GUIDE side: its ``session_unreachable`` row says a
             # bind that ran out of its BUDGET, which is the timeout rung above).
             code, sentence = await asyncio.to_thread(
-                _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+                _pilot_dial_refusal, session_id, peer, exc, config_dir, verb=verb, device=device
             )
             raise MeshRefusal(code, sentence) from exc
         if verb == "peek":
@@ -8421,7 +8468,7 @@ async def _pilot_mailbox_direct(
 
     async def _refuse_dial(exc: BaseException) -> MeshRefusal:
         code, sentence = await asyncio.to_thread(
-            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            _pilot_dial_refusal, session_id, peer, exc, config_dir
         )
         return MeshRefusal(code, sentence)
 

@@ -52,7 +52,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (state / "config.yml").write_text("version: 1\n")
     # Synthetic trees are never live process cwd; dedicated worktree-removal
     # controls cover live/unknown inventory without depending on fleet latency.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     # An OWN tree's busy answer bypasses ``_live_cwd_inside`` for a fresh
     # ``cwd_holders`` scan (PR #3987), so "never a live cwd" must hold at the
     # inventory too. Without this the real scan ran: on GitHub's Linux runner

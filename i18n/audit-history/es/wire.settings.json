@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "34f889142e53a630e22d00ef03dce4abf7f198a6bcabee0db0a9479d84733920",
+  "history_sha256": "82e7b52d5a1dc17ebcd688478993ecacbf659e0083dc64f2daefbbf719a11cd3",
   "entries": [
     {
       "locale": "es",
@@ -648,6 +648,551 @@
       },
       "status": "passed",
       "note": "feat/heavy-job-lease 2026-11-16 translation-auditor d0fd6c8b5699 (anthropic/claude-opus-5-5, no fallback) at branch head 52ce8b7ef146: re-audit after the en K1 correction. Source en 5237bd670369→beb522ed3593 changes exactly 3 keys (heavy_jobs.description, bash_heavy_jobs_enabled.help, bash_heavy_jobs_enabled.choice.true.description; 3 changed lines, key order identical); this locale's target changes exactly the same 3 keys. The other 872 keys, including the unchanged heavy-job title/label/choice.false, are value- and order-identical to the bytes 304fd013b104 that carried the passed 5237bd670369 receipt (auditor 5e96a4997450, commit 86a617971); they were not re-scored. Changed keys audited against the en copy and context notes (slot count depends on memory; copy must not promise exactly one). No ICU placeholders/plural arms/markup in source or target (parity 0=0); NFC; no bidi/control or no-break chars. Main has not touched i18n since merge base f0689a27c2af. Prior deferred note applied: description now ends 'agotar la memoria de la máquina'. 'Limita cuántas … se ejecutan a la vez … (una sola con 16 GB de memoria o menos)' agrees in gender with compilaciones/pruebas; choice 'los trabajos pesados se turnan'. Glossary trabajo, máquina (10 uses). 0 findings. Target bytes sha256 f179113a0302594ff7e881724e4796aca90773f0be884a88e1ad6e7fafc22b52. Single independent audit only; no second audit performed in this receipt."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 translator-only receipt; independent audit NOT completed. English source author node99 is a different agent (same actual model Sol). Changed keys: 1. Complete carried namespace must be independently audited with unchanged prior coverage derived, not presumed. Source hash pins full current namespace; translated target sha256 b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91. Glossary i18n/glossary.md and i18n/style-guides/es.md. Choices: tú, neutral Spanish; repositorio/dispositivo/ajuste; push and GitHub kept; one/many/other days. Settings help preserves never-set automatic selection versus clearing a previously shared hand-picked list stopping lending, and literal --use-default recovery. Safety copy preserves no widening/borrower authority, retrieval-time revocation rather than immediate deletion. Placeholder/CLDR checks recorded separately; no rendered, pseudo or native audit claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 FINAL translator-only handoff; independent audit pending, no pass claimed. Replaces earlier translator target hashes without removing history. Full carried namespace requires independent audit; changed scope is 68 new GitHub keys or one settings help key only. Read i18n/glossary.md and i18n/style-guides/es.md. Shared wave-2 rule keeps push in Latin in ALL locales, including Chinese/Russian/Vietnamese/Hindi/Urdu; prose inflects around it. GitHub, owner/repo, /settings, command literals unchanged. French vous, Spanish tú, Chinese 你, Russian вы, Vietnamese bạn, Urdu آپ, Hindi आप. French narrow no-break punctuation spacing; Urdu glossary device term ڈیوائس; no manual bidi controls. CLDR days: fr/es one-many-other, ru one-few-many-other, zh-CN/vi other, hi/ur one-other; hi/ur hours upgrade number to lossless plural. Preserved no-widening and owner-only authority, next-credential-fetch timing, never-set versus previously shared list cleared, and literal --use-default remedy. Source hash covers full namespace, final target sha256 b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91. Mechanical execution evidence is separate, not a native semantic audit or rendered/RTL sign-off. Actual model openai/gpt-6.1-sol following quota fallback before translation; independent agent from node99 English author despite same actual model."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev), session 91d1e05d2d82",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "actual_model_source": "current resumed system model; no fallback this round; historical Sol provenance retained",
+        "second_pass": "dbf144330553, anthropic/claude-opus-5-5, current-byte passed gh4052s2"
+      },
+      "status": "passed",
+      "note": "PR4052 r2 delta PASS; 0 unresolved blocker/major; unchanged scope retained by hashes. Evidence: i18n/audits/evidence/es/wire.settings/gh4052r2/record.json; second pass gh4052s2."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "2261c91b3577c347cca8b098b402cdf11c8cdec38571fc4b36106133813fd0bc",
+      "target_sha256": "51758ab915fbe26f5d7490c8f6268875a4b367a3805f3790a91ca49f7185275f",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "composition_translators": [
+        {
+          "side": "feature (PR #4052)",
+          "provenance": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ]
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12"
+          },
+          "composition_translators": [
+            {
+              "side": "feature",
+              "provenance": {
+                "agent": "coder (PR #3872 core implementer, lopdev)",
+                "session": "f4c08c15c058",
+                "model": "anthropic/claude-opus-5-5",
+                "date": "2026-11-12"
+              },
+              "additional_reported": null
+            },
+            {
+              "side": "main",
+              "provenance": {
+                "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified; es label fix e2ea7efff2f6 by i18n-translator job 17c3e25545b7 (same model, no fallback, relayed)",
+                "model": "anthropic/claude-opus-5-5",
+                "fallback": "none (as relayed by the manager)",
+                "date": "2026-11-13"
+              },
+              "additional_reported": {
+                "job": "17c3e25545b7",
+                "model": null,
+                "source": "upstream audited report identifies translator job; actual model not independently supplied here"
+              }
+            }
+          ],
+          "keys": [
+            "wire.settings.desktop_remote_files_cache_bytes.help",
+            "wire.settings.desktop_remote_files_cache_bytes.label"
+          ]
+        }
+      ],
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, role task) — merged-source binding audit for PR #4052; not a translator or first/second auditor of either parent change",
+        "session": "1276f8eeb1e5",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "68299720a784ecf117f1807c74c1fe7c24364ff4",
+        "parent_revisions": [
+          "270d4c087d78864805b9bfedceb07224850b5253",
+          "cb85fcb96216c14f43c5c35e2472609c59dd4ccd"
+        ],
+        "common_base": "aa051d55925b483175388edcbae9dff315ca49f1",
+        "evidence": "i18n/audits/evidence/es/wire.settings/merged-bind-1276f8eeb1e5-2261c91b/record.json",
+        "evidence_sha256": "c6dc26600ea8a4132e0615903e4d4afa5d9ed8283f01c578166f43bc9fd0bbaa",
+        "parent_receipts": [
+          {
+            "side": "feature (PR #4052)",
+            "source_sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+            "target_sha256": "b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91",
+            "receipt_canonical_sha256": "39cf1421a129f012a1129d7122f549c53936c6fe0617c84267a0363eb4f7eae2",
+            "keys": [
+              "wire.settings.network_credentials_github_repositories.help"
+            ],
+            "auditor_session": "91d1e05d2d82",
+            "second_audit_session": "dbf144330553",
+            "evidence": "i18n/audits/evidence/es/wire.settings/gh4052r2/record.json",
+            "evidence_sha256": "f6e11fe06b3a046a42ed4924884b48909fb36431cb91b20fcd33c5e27fe2c136"
+          },
+          {
+            "side": "main",
+            "source_sha256": "99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64",
+            "target_sha256": "f3958b6d17300da2808d084e745c61ffc8a25b6a06d6c0330f83083eae77758f",
+            "receipt_canonical_sha256": "b33d8e18c510a6db22597a249c1278b2d02debef96999bfa1c48eb35cd1a1478",
+            "keys": [
+              "wire.settings.desktop_remote_files_cache_bytes.help",
+              "wire.settings.desktop_remote_files_cache_bytes.label"
+            ],
+            "auditor_session": "187b766ab67d",
+            "evidence": "i18n/audits/evidence/es/wire.settings/merged-compat2-187b766ab67d-da012724/record.json",
+            "evidence_sha256": "9c16be258e5644b1a0796fdd4a55baa27bae603ba9eb778d4301dc0457b24098"
+          }
+        ]
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (second independent pass; not the translator and not the first auditor)",
+        "session": "dbf144330553",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.network_credentials_github_repositories.help at en source fa6a7d8e6a81, target bytes b0a7ccd76e1c; PR #4052 parent 270d4c087d78",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "evidence": "i18n/audits/evidence/es/wire.settings/gh4052s2/record.json",
+        "evidence_sha256": "c32d12dd4f9ab64fd2dbdb35f79aa80aaaa86d4268d65f0438810eb1da75f18e",
+        "retained_from": "PR #4052 parent receipt (source fa6a7d8e); covers only wire.settings.network_credentials_github_repositories.help, carried unchanged into this source — not a second audit of this binding",
+        "first_audit_session": "91d1e05d2d82"
+      },
+      "retained_upstream_findings": [],
+      "note": "#4052 merged-bind i18n-auditor 1276f8eeb1e5 (claude-opus-5-5, no fallback): en 2261c91b=main 99abc7c2+PR key network_credentials_github_repositories.help (fa6a7d8e); exact; 0 blocker/major. i18n/audits/evidence/es/wire.settings/merged-bind-1276f8eeb1e5-2261c91b/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "04768d21849206c2617d17f000e8f513a0cd47cb4217d6a06d627da932e764d7",
+      "target_sha256": "a3dc525bf4b0e330e4e575402105915055ff1679a5f5a145ad5d1c56f59c79d4",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "composition_translators": [
+        {
+          "side": "feature (PR #4052)",
+          "provenance": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ]
+        },
+        {
+          "side": "main (#3990)",
+          "provenance": {
+            "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none (as relayed by the manager)",
+            "date": "2026-11-15"
+          },
+          "keys": [
+            "wire.settings.display_notification_session_name.help"
+          ]
+        }
+      ],
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, role task) — merged-source binding audit (bind2) for PR #4052; not a translator or first/second auditor of either parent key",
+        "session": "1276f8eeb1e5",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "d9872af215651bbc84bb6a9e41066cacef072177",
+        "parent_revisions": [
+          "9cc1f2b4ad8323f1d42aa3f7b413a7b489cf7918",
+          "f0689a27c2af546e71be2a2783e6c6e86bc5004d"
+        ],
+        "common_base": "cb85fcb96216c14f43c5c35e2472609c59dd4ccd",
+        "evidence": "i18n/audits/evidence/es/wire.settings/merged-bind2-1276f8eeb1e5-04768d21/record.json",
+        "evidence_sha256": "612d0203c6690843f0807b2d90b983524a7a0fca9c77f2791845eb227142a5b0",
+        "parent_receipts": [
+          {
+            "side": "feature (PR #4052)",
+            "source_sha256": "2261c91b3577c347cca8b098b402cdf11c8cdec38571fc4b36106133813fd0bc",
+            "target_sha256": "51758ab915fbe26f5d7490c8f6268875a4b367a3805f3790a91ca49f7185275f",
+            "receipt_canonical_sha256": "473df603adf823e17fbd9b135e850f777188fdd67c060ec5af7e51f70c45275a",
+            "keys": [
+              "wire.settings.network_credentials_github_repositories.help"
+            ],
+            "auditor_session": "91d1e05d2d82",
+            "second_audit_session": "dbf144330553",
+            "bind_session": "1276f8eeb1e5",
+            "evidence": "i18n/audits/evidence/es/wire.settings/merged-bind-1276f8eeb1e5-2261c91b/record.json",
+            "evidence_sha256": "c6dc26600ea8a4132e0615903e4d4afa5d9ed8283f01c578166f43bc9fd0bbaa"
+          },
+          {
+            "side": "main (#3990)",
+            "source_sha256": "f5c40bc8a0762c3ffa8fea5ca6ab7c377f9fba8644fefed9153d760823a05da7",
+            "target_sha256": "f058e22129eed8f95113cad47d97a87b230bdbc7949b4b4fb6f415fbaa02a731",
+            "receipt_canonical_sha256": "0738697c6c3a367312a310b05fd3f10bf9e3cb9548e928cea609c6a590536cef",
+            "keys": [
+              "wire.settings.display_notification_session_name.help"
+            ],
+            "auditor_session": "d62d8ba8b744",
+            "second_audit_session": "937c6ecbae86",
+            "bind_session": "5b334e35ef01",
+            "evidence": "i18n/audits/evidence/es/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json",
+            "evidence_sha256": "b3f8588071c76a034cd81693752342589801a9df0f53e5c481c317584848dded"
+          }
+        ]
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (second independent pass; not the translator and not the first auditor)",
+        "session": "dbf144330553",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.network_credentials_github_repositories.help at en source fa6a7d8e6a81, target bytes b0a7ccd76e1c; PR #4052 parent 270d4c087d78",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "evidence": "i18n/audits/evidence/es/wire.settings/gh4052s2/record.json",
+        "evidence_sha256": "c32d12dd4f9ab64fd2dbdb35f79aa80aaaa86d4268d65f0438810eb1da75f18e",
+        "retained_from": "PR #4052 receipts (fa6a7d8e, re-bound at 2261c91b); covers only wire.settings.network_credentials_github_repositories.help, carried unchanged into this source — not a second audit of this binding. #3990 key second audit: session 937c6ecbae86 (see composition_audit.parent_receipts)",
+        "first_audit_session": "91d1e05d2d82"
+      },
+      "retained_upstream_findings": [],
+      "note": "#4052 bind2 i18n-auditor 1276f8eeb1e5 (claude-opus-5-5, no fallback): en 04768d21=base 99abc7c2+PR key network_credentials_github_repositories.help+#3990 key; exact; 0 blocker/major. i18n/audits/evidence/es/wire.settings/merged-bind2-1276f8eeb1e5-04768d21/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "f8a64b715bcd9d03c4960bbafbc8f058c0e9839e69fa2b5090bbae779187fc87",
+      "target_sha256": "01fb17c35c3eb19bd7ccfa651727b22feb602ad2164aeefd29161bf1f0750cb0",
+      "translator": {
+        "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+      },
+      "composition_translators": [
+        {
+          "side": "feature (PR #4052)",
+          "provenance": {
+            "agent": "lopdev translator allocation, session 9af0b0ea9021 (independent of English author node99)",
+            "model": "openai/gpt-6.1-sol",
+            "date": "2026-11-15",
+            "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations served by openai/gpt-6.1-sol"
+          },
+          "keys": [
+            "wire.settings.network_credentials_github_repositories.help"
+          ]
+        },
+        {
+          "side": "main (#4104)",
+          "provenance": {
+            "agent": "translator under the lopdev manager (commit 52ce8b7ef146) — relayed by the manager, not independently verified",
+            "model": null,
+            "fallback": "not reported",
+            "date": "2026-11-16"
+          },
+          "keys": [
+            "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+            "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+            "wire.settings.bash_heavy_jobs_enabled.help",
+            "wire.settings.bash_heavy_jobs_enabled.label",
+            "wire.settings.heavy_jobs.description",
+            "wire.settings.heavy_jobs.title"
+          ]
+        }
+      ],
+      "auditor": {
+        "agent": "reviewer (lopdev team) acting as independent i18n auditor for the PR #4052 main-fold merged bind; not a translator or prior auditor of any key in this namespace",
+        "session": "f0bc4e490816",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "984fe22af585131b22d5c1571c790a7ce3c2c17a",
+        "parent_revisions": [
+          "0bd1487f6a3596770242c01f4bc01fc200de75a8",
+          "3f31afb9a2480a6ae1e57d1ef811598570a92744"
+        ],
+        "common_base": "da8f3f040806fb9010cf45df73afa43e4cc807de",
+        "evidence": "i18n/audits/evidence/es/wire.settings/merged-bind3-f0bc4e490816-f8a64b71/record.json",
+        "evidence_sha256": "010a754364acb60a96d52d904018ebd7a602616a4978d0767d867ef8efd4bc7f",
+        "parent_receipts": [
+          {
+            "side": "feature (PR #4052)",
+            "source_sha256": "04768d21849206c2617d17f000e8f513a0cd47cb4217d6a06d627da932e764d7",
+            "target_sha256": "a3dc525bf4b0e330e4e575402105915055ff1679a5f5a145ad5d1c56f59c79d4",
+            "receipt_canonical_sha256": "f0876462cd87d1773b2bfef2584b517ce247553c87ece3759d9b7d8a2a6cbba1",
+            "keys": [
+              "wire.settings.network_credentials_github_repositories.help"
+            ],
+            "auditor_session": "1276f8eeb1e5",
+            "evidence": "i18n/audits/evidence/es/wire.settings/merged-bind2-1276f8eeb1e5-04768d21/record.json",
+            "evidence_sha256": "612d0203c6690843f0807b2d90b983524a7a0fca9c77f2791845eb227142a5b0"
+          },
+          {
+            "side": "main (#4104)",
+            "source_sha256": "beb522ed359310863117d8869f3c494f4733b0346644d81780b8c3a9bcfa0b95",
+            "target_sha256": "f179113a0302594ff7e881724e4796aca90773f0be884a88e1ad6e7fafc22b52",
+            "receipt_canonical_sha256": "412d6f87f4dacca9b535c566ad2de327b3417c0295c0adc72419e5dbaca84a0d",
+            "keys": [
+              "wire.settings.bash_heavy_jobs_enabled.choice.false.description",
+              "wire.settings.bash_heavy_jobs_enabled.choice.true.description",
+              "wire.settings.bash_heavy_jobs_enabled.help",
+              "wire.settings.bash_heavy_jobs_enabled.label",
+              "wire.settings.heavy_jobs.description",
+              "wire.settings.heavy_jobs.title"
+            ],
+            "auditor_session": "d0fd6c8b5699",
+            "evidence": null,
+            "evidence_sha256": null
+          }
+        ]
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (second independent pass; not the translator and not the first auditor)",
+        "session": "dbf144330553",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.network_credentials_github_repositories.help at en source fa6a7d8e6a81, target bytes b0a7ccd76e1c; PR #4052 parent 270d4c087d78",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "evidence": "i18n/audits/evidence/es/wire.settings/gh4052s2/record.json",
+        "evidence_sha256": "c32d12dd4f9ab64fd2dbdb35f79aa80aaaa86d4268d65f0438810eb1da75f18e",
+        "retained_from": "PR #4052 receipts; covers only wire.settings.network_credentials_github_repositories.help, carried unchanged — not a second audit of this binding. Main #4104 keys had no second audit.",
+        "first_audit_session": "91d1e05d2d82"
+      },
+      "retained_upstream_findings": [],
+      "note": "#4052 main-fold bind3 independent auditor f0bc4e490816 (anthropic/claude-opus-5-5, no fallback): en f8a64b71=base f5c40bc8+PR key network_credentials_github_repositories.help+#4104 6 heavy-job keys; exact composition; 7 keys semantically re-read; 0 blocker/major. i18n/audits/evidence/es/wire.settings/merged-bind3-f0bc4e490816-f8a64b71/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+      "target_sha256": "b0acd06d72c591ff60cf2bd3020ad029380603bc291de4965c0777e7f0663225",
+      "translator": {
+        "agent": "i18n-translator (job 2e94fb7583f3); resumed/remediation job chain 2e94fb7583f3->bde68516ccdb->02be60704ad7->3379e128b390",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev), task as-au-es",
+        "session": "6d23d6953609",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-16",
+        "result": "clean-with-findings",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "finding_ids": [
+          "es-A1"
+        ],
+        "locale_verdict": "CLEAN-WITH-FINDINGS"
+      },
+      "status": "passed",
+      "note": "PR #4135 (fix/auto-prune-generations) update_auto_prune/update_keep_generations copy, final audit at cc66c51cb3ad + uncommitted translator edits (bytes = target_sha256). Independent i18n-auditor session 6d23d6953609 (anthropic/claude-opus-5-5, fallback: none observed) of i18n-translator job 2e94fb7583f3 (anthropic/claude-sonnet-5-5; job chain 2e94fb7583f3->bde68516ccdb->02be60704ad7->3379e128b390; translator replaced the earlier UNAUDITED implementer drafts). Audited keys: the 8 keys wire.settings.updates.title/description, update_auto_prune.label/help/choice.true.description/choice.false.description, update_keep_generations.label/help. Pair findings: 0 blocker, 0 major, 1 minor, 0 nit ['es-A1']; verdict CLEAN-WITH-FINDINGS. Earlier draft rounds of this audit (where the record has a round1 block) found MAJOR(s) that were remediated by the translator before these bytes; they were never ledger rows. Record: i18n/audits/evidence/es/wire.settings/ap1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/ap1/record.json",
+      "round": "ap1",
+      "keys_audited": 8
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6",
+      "target_sha256": "cd1ea9e66f6e35a3fe166425d56880a1dcfad71ceb9609b81bbe9ae437a497af",
+      "translator": {
+        "agent": "i18n-translator (jobs for this key's rework: 54647c7a3ac3 -> 581ae376a00e -> 8d547a25bca6; original first-pass chain in the ap1 receipt: (job 2e94fb7583f3); resumed/remediation job chain 2e94fb7583f3->bde68516ccdb->02be60704ad7->3379e128b390)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev), task as-au-es",
+        "session": "6d23d6953609",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-16",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 (fix/auto-prune-generations) FINAL round ap2: the ONE reworded key wire.settings.update_keep_generations.help (English now leads with the always-kept guarantee: 'Always kept: current, previous and running installs, and any a session or service registered. Also keeps this many newest unused installs.'; decided by the PR's code review after a real TUI render). This row supersedes the ap1 row's value for update_keep_generations.help only; the other 7 keys are unchanged from ap1 and the ap1 row stays in history (append-only). Independent i18n-auditor session 6d23d6953609 (anthropic/claude-opus-5-5, fallback: none observed), same session as ap1, now at round 5 of its record; audited bytes = target_sha256 on top of a67cdd7c7350 + uncommitted final working tree. i18n-translator (anthropic/claude-sonnet-5-5) job chain for this key: 54647c7a3ac3 -> 581ae376a00e -> 8d547a25bca6. Pair findings: 0 blocker, 0 major, 0 minor, 0 nit []; verdict CLEAN. Record: i18n/audits/evidence/es/wire.settings/ap2/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/ap2/record.json",
+      "round": "ap2",
+      "keys_audited": 1
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "8202b3fda884e4e0c4b492d1cfabab21cb3b0e14db6aae25fa04c53309bd680f",
+      "target_sha256": "f394a67feba0500e0d83023938451c9355fbd6d57781fd0aea4137eb4eb42957",
+      "translator": {
+        "agent": "i18n-translator (team lopdev), session b0fe2564b811, job fe2cc984b94c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev), independent of translator b0fe2564b811 and the implementer",
+        "session": "1164c8450503",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-17",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 merge with main, round m4135: independent i18n-auditor session 1164c8450503 (anthropic/claude-opus-5-5, fallback: none observed), audited bytes target_sha256 in the uncommitted merge tree of .worktrees/auto-prune-pr. Translator: i18n-translator session b0fe2564b811 (anthropic/claude-opus-5-5), job fe2cc984b94c, 2026-11-17. Merge of PR #4135 (HEAD 1853bde32, wire.settings cd1ea9e66f6e, last receipt passed vs en d1f1d715f520) with main (MERGE_HEAD eb872993c, wire.settings f179113a0302, last receipt passed vs en beb522ed3593); merge-base 23398503e. Mechanical, whole namespace (883 keys): key set equals en and the union of both parents minus deletions; every non-patched value is byte-identical to the side that changed it (no both-sides conflicts, no reverts); placeholder parity, backtick code-span parity, NFC and no bidi/control chars all pass; the source has no ICU plural/select, so there are no plural categories to check. Key order differs from en only in the session_cleanup_temporary_idle_minutes choices, which is pre-existing at the merge base and not a translation issue. Semantic: all 14 merge keys (update_auto_prune.*, update_keep_generations.{label,help}, updates.{title,description}, bash_heavy_jobs_enabled.*, heavy_jobs.{title,description}) checked against en and the en context sidecar for meaning, prune/keep safety, glossary and fit. Safety holds: every rendering deletes only unused/old installs, and keep_generations.help leads with the complete always-kept clause (current, previous, running, registered) within the 146-cell budget. The other 869 keys were not re-scored: they are value-identical to bytes that already carry passed receipts on a parent. No translator change to this locale in the merge; confirmed. Pair findings: 0 blocker, 0 major, 0 minor, 0 nit []; verdict CLEAN. Minor/nit findings are deferred and non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/m4135/record.json",
+      "round": "m4135",
+      "keys_audited": 883
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "c62db407a0b2e1944e63504b6332a3da5dcc494b6877f2ecefed3f518851b96a",
+      "target_sha256": "1b6f0095e6fe435e4684a8b0a70e50ad7c95b769c30e35e9ccab90ec263ebf40",
+      "translator": {
+        "agent": "i18n-translator, session b0fe2564b811",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev, reviewer role, round m4135b), session 634bfc6a6ee7; independent of translator b0fe2564b811 and implementer feac6b2db7a4; did not read the m4135 records or any other session scratchpad",
+        "session": "634bfc6a6ee7",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-17",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "locale_verdict": "CLEAN"
+      },
+      "status": "passed",
+      "note": "PR #4135 merge 2 (MERGE_HEAD a0e458d43 into HEAD a4152e090), round m4135b: independent i18n-auditor session 634bfc6a6ee7 (anthropic/claude-opus-5-5, fallback none observed) audited target_sha256 against en c62db407a0b2 in the uncommitted merge tree of .worktrees/auto-prune-pr. Mechanical, 883 keys: key set equals en; placeholder and backtick parity, NFC, no bidi/control chars; literals lop install prune, lop update and lop network credential github repos --use-default verbatim; labels <=29 cells. Three-way vs merge-base eb872993c: 8 PR keys carry HEAD text, network_credentials_github_repositories.help carries main text, no both-sides changes, rest byte-identical. All 9 keys faithful. Prune copy deletes only unused old installs; keep help lists current, previous, running and session/service-registered first (guarantee clause 93 cells, whole 145 <=146). GitHub help keeps the two states distinct (never set = pushable minus opt-outs; clearing a shared hand-picked list stops lending) and never implies clearing widens access. Findings: 0 blocker, 0 major, 0 minor, 0 nit []; minor/nit deferred, non-gating. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/es/wire.settings/m4135b/record.json",
+      "round": "m4135b",
+      "keys_audited": 883
     }
   ]
 }

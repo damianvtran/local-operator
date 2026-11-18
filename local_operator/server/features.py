@@ -764,6 +764,21 @@ def static_feature_flags() -> dict[str, Any]:
         # condition gets re-checked rather than rediscovered.
         "desktop_feed": 1,
         "desktop_presence": 1,
+        # ADR 0008 desk presence (slice 1): `POST /v1/desktop/presence`
+        # accepts the optional `idle_s`, `locked`, `idle_trusted` and
+        # `away_after_s` fields, and the phone push worker holds/releases on
+        # "a person is at this computer" rather than on window focus.
+        #
+        # A KEY, NOT "ADDITIVE OPTIONAL", and that is forced: `PresenceBeat`
+        # is `extra="forbid"`, so a beat carrying a field an older core does
+        # not declare is a 422. The app swallows that error, the lease then
+        # lapses after 45 s, the banner gate stops suppressing the on-screen
+        # conversation and the phone gets everything. So an app adds the
+        # fields ONLY to a backend advertising this key (read on every feed
+        # connect, local or remote), and sends today's beat byte-for-byte to
+        # one without it. The `notifications.phone_away_after_s` setting and
+        # its relay route ship under the same release.
+        "desk_presence": 1,
         # Stopping a session's CURRENT WORK without ending the session:
         # POST /v1/desktop/sessions/{id}/interrupt.
         #

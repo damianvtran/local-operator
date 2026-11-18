@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "i18n-auditor / Audit daemon Urdu",
+    "session": "c736f176af6f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translation_job": "7f2b030d2636",
+    "actual_model_source": "Current session runtime declaration openai/gpt-6.1-sol; no fallback reported.",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "job": "7f2b030d2636",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager states same original translator; original delegation disclosed actual openai/gpt-6.1-sol. No new job fallback trace was supplied; none is assumed."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/cli.serve_readiness.json",
+      "sha256": "081af5a89bfc287acf2533ee71e93a495dacba9099a00f35aa61f7c074504a03"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3r/report.md",
+      "sha256": "c463bd17f6caf637b877261de41eadfc6032272bfa671238677f09ade76fb755",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3r/delta.py.txt",
+      "sha256": "e16e0e22bb3e7f5ff6beb58253ee446c0cf35ecfe5180fd311c354cbc0f814ef",
+      "kind": "actual_command_stdin_reproduction"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "6427ab0ff5ad90971dd8ed14b30c2d61757ee89398d717547eb6c5a7d2ae9d9a",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3r/ledger-receipt.json",
+      "sha256": "3bb6001739d26104674714f94a419c7582b7719d1c6248a9b792952127cbb6dd",
+      "kind": "ledger_append_receipt_dry_run_validated"
+    }
+  ],
+  "source_audit_revision": {
+    "head": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+    "working_tree_inputs": "Uncommitted final number-neutral PID-reuse remediation"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "cross_locale_trigger_disposition": {
+    "finding_id": "RU-SD3-01",
+    "status": "fixed_in_ur_target",
+    "russian_signoff_claimed": false
+  },
+  "retained_coverage": {
+    "record_path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/record.json",
+    "sha256": "9d446f56934b394482bf9d8b986e13404e2c7c67e61e176fa180b16211e4d74d",
+    "current_total_keys": 15,
+    "unchanged_target_keys": 14,
+    "changed_key": "cli.serve_readiness.not_this_daemon",
+    "byte_proof": "audit.log: exact prior en/context/ur file hashes recovered by undoing only changed value/note, proving all other values and formatting unchanged",
+    "supporting_style_glossary_docs_hashes_checked_unchanged": true
+  },
+  "checks": {
+    "catalogue_validator_exit": 0,
+    "parser_exit": 0,
+    "all_15_current_keys_checked": true,
+    "six_plural_messages": [
+      "one",
+      "other"
+    ],
+    "counts_rendered": [
+      0,
+      1,
+      2,
+      12
+    ],
+    "opaque_params_checked": true,
+    "pid_reuse_group_counts": [
+      1,
+      2,
+      12
+    ],
+    "rendered_visual_rtl_evidence": false,
+    "second_separate_auditor_not_claimed": true
+  },
+  "ledger_operation": {
+    "append_applied": false,
+    "dry_run_exit_code": 0,
+    "expected_history_sha": "af25ed22e1b0de23ac4c09e26e4dabb0084928ef0d666bf848c4e7f30a87d3d6",
+    "all_existing_namespace_history_files_unchanged": true,
+    "parent_to_append": true
+  },
+  "current_bytes_match_audited_hashes": true,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention_state": "New repo-only bundle; parent owns staging and commit; not claimed on main"
+}

@@ -137,6 +137,7 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.session.transcript import (
     Transcript,
+    custom_type_proven_absent,
     is_bookkeeping_entry,
     is_bookkeeping_message,
     transcript_is_bookkeeping_only,
@@ -633,8 +634,41 @@ def _question_prose(question: Any) -> str:
 REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
 
 
-def _owner_sender(owner_typed: bool) -> dict[str, Any]:
-    return {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+def _file_admission_for(
+    locality: str | None, capabilities: Iterable[str] | None, operation: str
+) -> Any:
+    """The native file-provenance admission for an in-process admission path.
+
+    ``valid_admission(None)`` is False (R1, PR #4108): a caller that names no
+    admission never mints a ``user`` proof. Paths that admit a turn without the
+    control server's dispatch (headless exec, an action receipt the runtime
+    completes for an old viewer) build theirs here from the SAME connection facts
+    ``RuntimeServer._dispatch`` would weigh, so a relayed/unknown locality, or a
+    remote caller lacking ``operation``, is refused exactly as on the wire.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.file_provenance import user_admission
+
+    return user_admission(
+        SimpleNamespace(locality=locality, capabilities=frozenset(capabilities or ())),
+        operation,
+    )
+
+
+#: The sender stamp naming the SURFACE a spooled owner line was typed on (ADR
+#: 0009), read back by ``session.spooled_input_surface`` so a prompt spooled
+#: across a runtime swap keeps its notification routing. An in-process caller
+#: (``input_surface=None``) is the owner's own TUI, which ``Session.prompt``
+#: would stamp ``tui`` live, so its line says so too; only a line from a build
+#: before the key lacks it, and that reads ``unknown``.
+INPUT_SURFACE_SENDER_KEY = "input_surface"
+
+
+def _owner_sender(owner_typed: bool, input_surface: str | None = None) -> dict[str, Any]:
+    sender: dict[str, Any] = {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+    sender[INPUT_SURFACE_SENDER_KEY] = input_surface if input_surface is not None else "tui"
+    return sender
 
 
 @dataclass
@@ -683,6 +717,11 @@ class _PromptCommand:
     documents: list["DocumentContent"] | None = None
     #: False for a prompt from a remote connection (see ``prompt``).
     owner_typed: bool = True
+    # Frozen before queue/spool; never serialized into inbox/receipt JSON.
+    _file_capture: Any = None
+    #: ADR 0009: the connection's surface, decided by the control server, or
+    #: ``None`` for an in-process caller (``Session.prompt`` then stamps ``tui``).
+    input_surface: str | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -4245,6 +4284,7 @@ class ServingSessionHandle(SessionHandle):
             self._fold.fold_history(self._session.history())
         except Exception:  # noqa: BLE001 — history is a convenience, not a gate
             logger.debug("owned session history fold failed", exc_info=True)
+        self._seed_supplements()
         # Seed the live flag ONCE at attach (a phone subscribing mid-turn never
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
@@ -4273,6 +4313,40 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return unsubscribe
 
+    def _seed_supplements(self) -> None:
+        """Seed the projection's supplement map from the journal, once at attach.
+
+        ``fold_history`` reads messages only and a supplement (a pin or a card) is a
+        journal ``custom`` row, so an owner that did not run the turn — a resumed,
+        idle-exited or restarted session — would serve a projection with
+        ``supplements == {}`` and every earlier Highlight would vanish from the
+        relay, which serves this projection live. The newest row per anchor is
+        taken by the cold open's own rule (``newest_per_anchor``); the fold keeps
+        only anchors of the current tail and lets an equal-version live beat win.
+        Best effort like the history fold beside it: a journal that cannot be read
+        costs the seed, never the attach.
+        """
+        try:
+            transcript = self._session.transcript
+            # The byte scan first: a journal that never wrote a supplement (most of
+            # them) must not pay a walk of every entry at attach.
+            if custom_type_proven_absent(transcript.directory, SUPPLEMENT_CUSTOM_TYPE):
+                return
+            rows: list[dict[str, Any]] = []
+            for entry in transcript.entries():
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                details = payload.get("details")
+                if payload.get("custom_type") == SUPPLEMENT_CUSTOM_TYPE and isinstance(
+                    details, dict
+                ):
+                    rows.append(details)
+            if rows:
+                self._fold.fold_supplement_rows(newest_per_anchor(rows).values())
+        except Exception:  # noqa: BLE001 — the seed is a convenience, not a gate
+            logger.debug("owned session supplement seed failed", exc_info=True)
+
     @_on_session_loop
     async def prompt(
         self,
@@ -4288,8 +4362,14 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         wait_for_turn: bool = True,
         owner_typed: bool = True,
+        _file_admission: Any = None,
+        input_surface: str | None = None,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``input_surface`` is the ADR 0009 origin the control server derived from
+        the authenticated connection (``mobile``/``remote``/``desktop``/``tui``/
+        ``unknown``); ``None`` leaves ``Session.prompt``'s in-process default.
 
         ``owner_typed=False`` is set by the control server for a prompt from a
         REMOTE connection (``RuntimeServer._dispatch``): it rides to
@@ -4447,6 +4527,11 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW: an idle handover that QUEUES instead of refusing.
         #
         # This arm is the 2026-09-19 incident's repair. The idle rung leaves in
@@ -4474,23 +4559,26 @@ class ServingSessionHandle(SessionHandle):
                 # window's own phrase would claim "the one it loaded is gone
                 # from disk", which is false for a superseded tree (the
                 # D10/MAJOR-2 class).
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise self._retiring_refusal()
             try:
                 receipt = await self._spool_for_successor(
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
                 )
-            finally:
-                # Rejected on both outcomes, for the reason the refusal below
-                # rejects: this command is not in the transcript, so the
-                # identity must not be spent. A retry that re-spools is
-                # deduplicated by whoever drains it against the durable index.
+            except BaseException:
+                # No durable spool owns the message on failure/cancellation: release
+                # the frozen ticket too, just as an ordinary admission refusal does.
+                self._refuse_admitted(command_id)
+                raise
+            else:
+                # The successor's drain needs the frozen ticket, but not this
+                # process's reservation: its durable index deduplicates retries.
                 self._command_reservations.reject(command_id)
             return receipt
         if self._retiring_cause:
@@ -4532,22 +4620,22 @@ class ServingSessionHandle(SessionHandle):
                         text,
                         mode="mailbox",
                         wake=True,
-                        sender=_owner_sender(owner_typed),
+                        sender=_owner_sender(owner_typed, input_surface),
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
                     )
-                finally:
-                    # Rejected on BOTH outcomes, and for the same reason the
-                    # refusal below rejects: this command is not in the
-                    # transcript, so the identity must not be spent. A retry
-                    # that re-spools is deduplicated by the successor instead
-                    # (``process._drain_inbox_into`` consults the durable index
-                    # with this same id), which is the only place the answer is
-                    # authoritative — this process is leaving.
+                except BaseException:
+                    # A failed/cancelled spool has no successor-owned message to
+                    # consume the ticket. Keep neither it nor the reservation.
+                    self._refuse_admitted(command_id)
+                    raise
+                else:
+                    # Preserve only the ticket for the successor's drain. Its
+                    # durable index, not this leaving process, deduplicates retries.
                     self._command_reservations.reject(command_id)
                 return receipt
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise self._retiring_refusal()
         if not wait_for_turn and (
             getattr(self._session, "is_streaming", False) or self._prompt_queue
@@ -4579,10 +4667,10 @@ class ServingSessionHandle(SessionHandle):
             # join the turn running now, they do not queue behind other input.
             from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
 
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise TurnInFlight(TURN_IN_FLIGHT)
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise RuntimeError(
                 f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
             )
@@ -4602,6 +4690,8 @@ class ServingSessionHandle(SessionHandle):
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
             owner_typed=owner_typed,
+            _file_capture=file_capture,
+            input_surface=input_surface,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -5002,7 +5092,12 @@ class ServingSessionHandle(SessionHandle):
         self._last_prompt_failure = ""
         try:
             await self.prompt(
-                text, command_id=str(uuid.uuid4()), wait_complete=True, owner_typed=owner_typed
+                text,
+                command_id=str(uuid.uuid4()),
+                wait_complete=True,
+                owner_typed=owner_typed,
+                # Headless exec runs in the owner's own process: a local admission.
+                _file_admission=_file_admission_for("local", (), "prompt"),
             )
             return True
         except RuntimeError:
@@ -5529,8 +5624,12 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "_file_capture" in parameters:
+                        fields["_file_capture"] = command._file_capture
                     if "owner_typed" in parameters and not command.owner_typed:
                         fields["owner_typed"] = False
+                    if "input_surface" in parameters and command.input_surface is not None:
+                        fields["input_surface"] = command.input_surface
                     if "input_mode" in parameters:
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
@@ -5623,8 +5722,11 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        _file_admission: Any = None,
+        input_surface: str | None = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
+        # ``input_surface``: see ``prompt`` — the ADR 0009 origin of this steer.
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
@@ -5688,6 +5790,8 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    _file_admission=_file_admission,
+                    input_surface=input_surface,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -5766,6 +5870,8 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        _file_admission: Any = None,
+        input_surface: str | None = None,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -5781,6 +5887,11 @@ class ServingSessionHandle(SessionHandle):
         """
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted", False
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
         # by construction (the window only opens when ``may_refresh`` reports
@@ -5795,14 +5906,14 @@ class ServingSessionHandle(SessionHandle):
         # carriage instead (see that block).
         if self._updating:
             if carries_attachments:
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise self._retiring_refusal()
             try:
                 receipt = await self._spool_for_successor(
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5846,7 +5957,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5856,7 +5967,7 @@ class ServingSessionHandle(SessionHandle):
                 # Nowhere durable to put the message, so it is refused rather than
                 # queued — and the producer identity stays retryable, which is what
                 # lets the same id be admitted once the spool can be written.
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
@@ -5894,6 +6005,10 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        if "_file_capture" in parameters:
+            fields["_file_capture"] = file_capture
+        if "input_surface" in parameters and input_surface is not None:
+            fields["input_surface"] = input_surface
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
@@ -5921,6 +6036,26 @@ class ServingSessionHandle(SessionHandle):
         )
         self._notify()
         return "steering queued", not carries_attachments
+
+    def _admits_into_live_turn(self) -> bool:
+        """Whether a peer message can still ride the turn that is running NOW.
+
+        True only while the session is streaming a turn AND this runtime has not
+        stopped admitting: no committed exit (``begin_retire`` commits only from
+        the idle decision, so a streaming turn normally implies none — checked
+        anyway because the order is not this method's to assume) and no
+        disposal (which cancels the turn, so a message handed to it would die
+        with it). Everything else — idle, retiring at idle, disposing — keeps
+        the spool/refusal the windows were built for.
+
+        A SNAPSHOT, and that is safe in one direction only: a turn that ends
+        right after this reads True leaves the delivery parked for a boundary
+        it never reaches. ``Session._flush_parked_deliveries`` owns that tail —
+        on a leaving runtime it spools what was parked instead of dropping it.
+        """
+        if getattr(self, "_disposing", False) or getattr(self, "_exit_committed", False):
+            return False
+        return bool(getattr(self._session, "is_streaming", False))
 
     @_on_session_loop
     async def receive_peer_message(
@@ -5985,7 +6120,25 @@ class ServingSessionHandle(SessionHandle):
         # peer's wake is spooled instead of refused (see ``types.UPDATING``). The
         # window is checked as its own term because it is open BEFORE the cause
         # is latched — the announce and the latch come after it.
-        if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
+        #
+        # A LIVE TURN STILL ADMITS, and that check comes first. Both of the
+        # deferring windows above may be open while a turn is mid-flight: the
+        # build-replaced drain latches on a BUSY runtime by construction, and a
+        # checkpointed move opens the update window without sampling idleness.
+        # Spooling there held every local ``send`` (``now=True`` steers too)
+        # for a successor that only boots once the turn ends — measured on
+        # node2, 2026-11-17 10:31–11:15Z: a 0.106.5 runtime busy ~40 min after
+        # ``lop update`` answered every local send "held for the next runtime —
+        # it runs it" and delivered nothing (3 peer rows + 6 own wakes) until
+        # it rolled at idle, while mesh-relayed sends arrived. Delivering into
+        # the turn that is already running starts no NEW work, which is all
+        # invariant (i) forbids; once that turn is gone the spool is right
+        # again. See ``_admits_into_live_turn``.
+        if (
+            (self._retiring_cause or self._updating)
+            and (wake or mode != "mailbox")
+            and not self._admits_into_live_turn()
+        ):
             if self._updating or (self._draining and not self._exit_committed):
                 receipt = await self._spool_for_successor(
                     text,
@@ -7234,6 +7387,22 @@ class ServingSessionHandle(SessionHandle):
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None] | None:
+        """ADR 0009 R10: record which surface answered, before the answer lands.
+
+        Synchronous and called by the control server just ahead of the answer
+        op, so the note is in place when the answer's row reaches the run. Two
+        plain attribute writes on the session (``Session.note_answer_surface``),
+        which is why it needs no loop hop. Returns the session's undo (run by
+        the server when the answer is refused), or ``None`` from a session
+        without the capability.
+        """
+        note = getattr(self._session, "note_answer_surface", None)
+        if callable(note):
+            undo = note(ask_id, surface)
+            return cast(Callable[[], None], undo) if callable(undo) else None
+        return None
+
     @_on_session_loop
     async def ask_answer(
         self,
@@ -8321,6 +8490,17 @@ class ServingSessionHandle(SessionHandle):
                 or not state.get("notify", True)
             ):
                 return _ANNOUNCE_SETTLED
+            # ADR 0009 §2 footnote 1: a MOBILE-origin completion or error is the
+            # phone's to announce while the phone would be told
+            # (``notifications.routing.phone_would_emit``, the predicate the push worker
+            # asks). SETTLED and no claim, like the quiet arm above: the unseen
+            # mark stays for the sidebar and inbox. When the phone would not
+            # emit, the ladder runs as before so the item is never silent on
+            # every surface.
+            from local_operator.notifications.routing import desktop_defers_to_phone
+
+            if desktop_defers_to_phone(state, root):
+                return _ANNOUNCE_SETTLED
             if desktop_delivery_present(root, kind):
                 # Rung 2. DEFERRED rather than settled (R7): this answer is a
                 # CACHED lease with a 2 s TTL, and the app behind it may be
@@ -9022,7 +9202,9 @@ class ServingSessionHandle(SessionHandle):
                 code=("applied" if ok else (str(data_code) if data_code else "failed")),
                 message=str(result.text or ""),
             )
-        result = await self._complete_unconsumed_action(result, images, consumers)
+        result = await self._complete_unconsumed_action(
+            result, images, consumers, locality=locality, capabilities=capabilities
+        )
         return result.model_dump(mode="json")
 
     async def _complete_unconsumed_action(
@@ -9030,6 +9212,9 @@ class ServingSessionHandle(SessionHandle):
         result: Any,
         images: list[dict[str, str]] | None,
         consumers: Iterable[str] | None,
+        *,
+        locality: str | None = None,
+        capabilities: frozenset[str] | None = None,
     ) -> Any:
         """Run an attach receipt's request here when the client will not.
 
@@ -9095,9 +9280,18 @@ class ServingSessionHandle(SessionHandle):
             # note the echo) and it returns on its first step. ``prompt``
             # emphatically CAN park — see below.
             if self._session.is_streaming:
-                await self.steer(request, images=images, command_id=str(uuid.uuid4()))
+                await self.steer(
+                    request,
+                    images=images,
+                    command_id=str(uuid.uuid4()),
+                    _file_admission=_file_admission_for(locality, capabilities, "steer"),
+                )
             else:
-                await self._admit_without_waiting_for_the_turn(request, images)
+                await self._admit_without_waiting_for_the_turn(
+                    request,
+                    images,
+                    _file_admission=_file_admission_for(locality, capabilities, "prompt"),
+                )
         except Exception as exc:  # noqa: BLE001 — the attach happened; say what did not
             # The attach ALREADY landed and stays; only the turn failed to
             # start (session closing, queue full, a rejected prompt). Reporting
@@ -9113,8 +9307,26 @@ class ServingSessionHandle(SessionHandle):
             )
         return result
 
+    def _refuse_admitted(self, command_id: str) -> None:
+        """Release a refused command's reservation AND its frozen file ticket.
+
+        ``admitted_ticket`` freezes the ticket into ``OwnerProvenance.admissions``
+        before the update-window/queue checks; a refusal raised after it would
+        otherwise keep that ticket for the runtime's life (R3, PR #4108). Only
+        RAISING refusals call this: a spooled command keeps its ticket, because
+        the spool's drain takes it back by command id (``CONTINUATION``).
+        """
+        self._command_reservations.reject(command_id)
+        take = getattr(self._session, "_take_file_continuation", None)
+        if callable(take):
+            take(command_id)
+
     async def _admit_without_waiting_for_the_turn(
-        self, request: str, images: list[dict[str, str]] | None
+        self,
+        request: str,
+        images: list[dict[str, str]] | None,
+        *,
+        _file_admission: Any = None,
     ) -> None:
         """Admit ``request`` as a turn, reporting only the IMMEDIATE refusals.
 
@@ -9163,7 +9375,12 @@ class ServingSessionHandle(SessionHandle):
         # attachments.
         blocks = await _image_blocks_async(images)
         task = asyncio.ensure_future(
-            self.prompt(request, images=blocks, command_id=str(uuid.uuid4()))
+            self.prompt(
+                request,
+                images=blocks,
+                command_id=str(uuid.uuid4()),
+                _file_admission=_file_admission,
+            )
         )
         # One turn is enough today — nothing before ``prompt``'s first suspension
         # point yields — but a couple of extra turns costs nothing and keeps this

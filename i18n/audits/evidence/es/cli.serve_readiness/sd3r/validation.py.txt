@@ -1,0 +1,96 @@
+
+from pathlib import Path
+import json,re,hashlib,unicodedata,subprocess
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+ns='cli.serve_readiness'; base=Path('local_operator/i18n/catalogues')
+def strict(path):
+ def pairs(items):
+  obj={}
+  for k,v in items:
+   assert k not in obj,('duplicate JSON key',k)
+   obj[k]=v
+  return obj
+ return json.loads(Path(path).read_text(),object_pairs_hook=pairs)
+en=strict(base/'en'/f'{ns}.json'); es=strict(base/'es'/f'{ns}.json'); ctx=strict(base/'en'/f'{ns}.context.json')
+assert len(en)==15 and set(en)==set(es)==set(ctx)
+print('STRICT JSON/context/target parity PASS: 15/15 keys, no duplicates/additions/omissions.')
+prior=json.loads(Path('i18n/audits/evidence/es/cli.serve_readiness/sd1r/record.json').read_text())
+before_raw=subprocess.run(['git','show',f'HEAD:{base}/es/{ns}.json'],capture_output=True,check=True).stdout
+assert hashlib.sha256(before_raw).hexdigest()==prior['input_hashes']['es']['sha256']
+before=json.loads(before_raw); changed=[k for k in before if before[k]!=es[k]]; added=[k for k in es if k not in before]; retained=[k for k in before if before[k]==es[k]]
+assert len(changed)==7 and len(added)==4 and len(retained)==4
+print('DELTA PASS: 7 changed / 4 added / 4 retained. HEAD original target hash matches sd1r.')
+for k in retained:
+ a=next(x for x in before_raw.splitlines() if x.lstrip().startswith(json.dumps(k).encode()+b':'))
+ b=next(x for x in (base/'es'/f'{ns}.json').read_bytes().splitlines() if x.lstrip().startswith(json.dumps(k).encode()+b':'))
+ assert a==b
+ print('BYTE-IDENTICAL RETAINED',k,hashlib.sha256(a).hexdigest())
+def branches(s):
+ nodes=rt.parse_message(s)
+ if len(nodes)==1 and getattr(nodes[0],'kind',None)=='plural': return dict(nodes[0].parts)
+ return {'plain':nodes}
+def shape(nodes): return [(x.name,x.kind,x.skeleton) for x in nodes if hasattr(x,'kind')]
+def text(nodes): return ''.join(x.value for x in nodes if hasattr(x,'value'))
+params={'device':'node-1','pids':'101, 102','holders':'other.service','builds':'build-old','install':'build-new','recorded':'build-old','reasons':'identificador de proceso 101 — hay registro, pero no hay respuesta','reason':'hay registro, pero no hay respuesta'}
+for k in en:
+ assert rt.message_arguments(en[k])==rt.message_arguments(es[k]),k
+ eb=branches(en[k]); sb=branches(es[k])
+ if 'plain' not in eb: assert set(eb)=={'one','other'} and set(sb)=={'one','many','other'},k
+ for selector,nodes in sb.items():
+  source=eb.get(selector,eb.get('other'))
+  assert shape(nodes)==shape(source),(k,selector)
+  a=text(source); b=text(nodes)
+  assert re.findall(r'`[^`]*`',a)==re.findall(r'`[^`]*`',b),(k,'backtick literals')
+  assert re.findall(r'</?[A-Za-z][^>]*>',a)==re.findall(r'</?[A-Za-z][^>]*>',b),(k,'rich/HTML tags')
+  assert re.findall(r'--[a-zA-Z][a-zA-Z0-9_-]*',a)==re.findall(r'--[a-zA-Z][a-zA-Z0-9_-]*',b),(k,'flags')
+ assert unicodedata.normalize('NFC',es[k])==es[k],k
+ assert not any(unicodedata.category(c)=='Cf' for c in es[k]),k
+ hints={n:v for n,v in ctx[k].items() if n in ('maxCells','maxChars')}
+ print('KEY PASS',k,'args='+str(rt.message_arguments(es[k])),'selectors='+str(rt.plural_selectors(es[k])),'width_hints='+str(hints))
+ for count in ((0,1,2,1000000,1500000) if 'plain' not in sb else (1,)):
+  rendered=rt.render_message(es[k],dict(params,count=count),'es')
+  print(' RENDER count='+str(count)+' cells='+str(cell_len(rendered))+' chars='+str(len(rendered))+': '+rendered)
+ opaque={n:('OPAQUE_'+n+'{/not_an_arg}[/bold]`token`--flag/opaque:a') for n,kind in rt.message_arguments(es[k]) if kind!='plural'}
+ for count in ((1,2,1000000) if 'plain' not in sb else (1,)):
+  result=rt.render_message(es[k],dict(opaque,count=count),'es')
+  for value in opaque.values(): assert value in result,(k,'opaque value altered')
+ print(' OPAQUE values byte-preserved PASS')
+# Compose the grouped diagnosis the same way as readiness.py, with only pure ICU rendering.
+def tr(suffix,**kw): return rt.render_message(es[ns+'.'+suffix],kw,'es')
+unproven=tr('unproven'); gap=tr('recorded_gap',recorded='build-old',install='build-new')
+assert 'identidad' not in gap and 'proceso' not in gap
+for count,pids in ((1,'101'),(2,'101, 102')):
+ for reason in (unproven+'; '+gap,tr('not_reporting'),tr('not_this_daemon'),tr('unknown_state')):
+  grouped=tr('pid_reason',count=count,pids=pids,reason=reason)
+  output=tr('unknown',count=count,device='node-1',reasons=grouped)
+  assert ': ' not in output and '::' not in output
+  assert output.count(reason)==1
+  print('GROUPED count='+str(count)+': '+output)
+print('OVERFLOW:',tr('and_more',count=3))
+print('NO ACTION:',tr('identity_no_action',count=1))
+print('RELOAD:',tr('identity_restart',device='node-1'))
+print('MANUAL:',tr('identity_restart_manual',device='node-1'))
+print('PASS: 15-key mechanical/render/opaque checks; no declared width caps. Pure copy rendering only, no live service/layout/behavior proof.')
+
+print('FINAL FOCUSED PID REUSE CHECK')
+assert es[ns+'.not_this_daemon']=='hay registro, pero se detectó reutilización de PID'
+for count,pids in ((1,'101'),(2,'101, 102'),(1000000,'101, 102')):
+ reason=tr('not_this_daemon')
+ grouped=tr('pid_reason',count=count,pids=pids,reason=reason)
+ output=tr('unknown',count=count,device='node-1',reasons=grouped)
+ assert 'ese PID' not in output and output.count(reason)==1
+ assert '::' not in output and ': ' not in output
+ print('CURRENT PID REUSE count='+str(count)+': '+output)
+previous=json.loads(Path('i18n/audits/evidence/es/cli.serve_readiness/sd3/record.json').read_text())
+for name,item in previous['input_hashes'].items():
+ p=Path(item['path']); raw=p.read_bytes(); data=json.loads(raw); key=ns+'.not_this_daemon'
+ if name=='context':
+  old=data[ns+'.unproven']['note']; new=data[key]['note']
+ else:
+  old={'en':'recorded, but another process now holds that PID','es':'hay registro, pero ahora otro proceso tiene ese PID'}[name]; new=data[key]
+ assert raw.count(new.encode())==1
+ rebuilt=raw.replace(new.encode(),old.encode(),1)
+ assert hashlib.sha256(rebuilt).hexdigest()==item['sha256']
+ print('SD3 RETENTION PROOF PASS',name,'only not_this_daemon value/note changed; all other file bytes unchanged',item['sha256'])
+print('FINAL PASS: all 15 current keys mechanical/render/opaque; 1 changed key + grouped neighbors independently read; other 14 target values/formatting byte-retained from sd3.')

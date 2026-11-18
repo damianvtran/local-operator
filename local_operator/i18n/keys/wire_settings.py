@@ -3225,6 +3225,38 @@ def tui_theme_label() -> Msg:
     return Msg("wire.settings.tui_theme.label", {})
 
 
+def update_auto_prune_choice_false_description() -> Msg:
+    return Msg("wire.settings.update_auto_prune.choice.false.description", {})
+
+
+def update_auto_prune_choice_true_description() -> Msg:
+    return Msg("wire.settings.update_auto_prune.choice.true.description", {})
+
+
+def update_auto_prune_help() -> Msg:
+    return Msg("wire.settings.update_auto_prune.help", {})
+
+
+def update_auto_prune_label() -> Msg:
+    return Msg("wire.settings.update_auto_prune.label", {})
+
+
+def update_keep_generations_help() -> Msg:
+    return Msg("wire.settings.update_keep_generations.help", {})
+
+
+def update_keep_generations_label() -> Msg:
+    return Msg("wire.settings.update_keep_generations.label", {})
+
+
+def updates_description() -> Msg:
+    return Msg("wire.settings.updates.description", {})
+
+
+def updates_title() -> Msg:
+    return Msg("wire.settings.updates.title", {})
+
+
 def wakes_description() -> Msg:
     return Msg("wire.settings.wakes.description", {})
 

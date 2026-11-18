@@ -1,0 +1,367 @@
+# sd4 current catalogue renders — ru
+UTC 2026-11-16T05:18:32.631978+00:00; raw logical-order text, not terminal screenshots.
+
+## cli.serve_readiness.unproven | count=1 | CLDR=n/a
+
+есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска)
+
+## cli.serve_readiness.not_reporting | count=1 | CLDR=n/a
+
+есть запись, но ответа нет (сигналы активности больше не поступают)
+
+## cli.serve_readiness.not_this_daemon | count=1 | CLDR=n/a
+
+есть запись, но этот PID теперь принадлежит другому процессу
+
+## cli.serve_readiness.unknown_state | count=1 | CLDR=n/a
+
+запись с неизвестным состоянием
+
+## cli.serve_readiness.install_unknown | count=1 | CLDR=n/a
+
+использует сборку, которую нельзя сравнить с установленной
+
+## cli.serve_readiness.cgroup_unknown | count=1 | CLDR=n/a
+
+работает в cgroup, которую эта проверка не может распознать
+
+## cli.serve_readiness.recorded_gap | count=1 | CLDR=n/a
+
+в записи указана сборка v0.99.0+recorded; установлена сборка v0.99.2+installed
+
+## cli.serve_readiness.unknown | count=0 | CLDR=many
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1 | CLDR=one
+
+демон `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+
+## cli.serve_readiness.unknown | count=2 | CLDR=few
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=3 | CLDR=few
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=4 | CLDR=few
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=5 | CLDR=many
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=11 | CLDR=many
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=21 | CLDR=one
+
+демон `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением
+
+## cli.serve_readiness.unknown | count=22 | CLDR=few
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=25 | CLDR=many
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1.5 | CLDR=other
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1000000 | CLDR=many
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.unknown | count=1500000 | CLDR=many
+
+демоны `lop serve` на host-sd4 — DIAGS-opaque-ß, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+
+## cli.serve_readiness.stale | count=0 | CLDR=many
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1 | CLDR=one
+
+демон `lop serve` на host-sd4 (4101, 4102) использует v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на нём удалённые сессии используют ту другую сборку
+
+## cli.serve_readiness.stale | count=2 | CLDR=few
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=3 | CLDR=few
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=4 | CLDR=few
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=5 | CLDR=many
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=11 | CLDR=many
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=21 | CLDR=one
+
+демон `lop serve` на host-sd4 (4101, 4102) использует v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на нём удалённые сессии используют ту другую сборку
+
+## cli.serve_readiness.stale | count=22 | CLDR=few
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=25 | CLDR=many
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1.5 | CLDR=other
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1000000 | CLDR=many
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.stale | count=1500000 | CLDR=many
+
+демоны `lop serve` на host-sd4 (4101, 4102) используют v0.99.1+running, но установленная сборка — v0.99.2+installed: размещённые на них удалённые сессии используют те другие сборки
+
+## cli.serve_readiness.other_unit | count=0 | CLDR=many
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1 | CLDR=one
+
+демон `lop serve` на host-sd4 находится под управлением другой службы (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=2 | CLDR=few
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=3 | CLDR=few
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=4 | CLDR=few
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=5 | CLDR=many
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=11 | CLDR=many
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=21 | CLDR=one
+
+демон `lop serve` на host-sd4 находится под управлением другой службы (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=22 | CLDR=few
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=25 | CLDR=many
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1.5 | CLDR=other
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1000000 | CLDR=many
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.other_unit | count=1500000 | CLDR=many
+
+демоны `lop serve` на host-sd4 находятся под управлением других служб (worker.service), а не юнита lop serve
+
+## cli.serve_readiness.identity_restart | count=1 | CLDR=n/a
+
+на host-sd4 выполните `lop services restart`, чтобы перевести демон из записи на установленную сборку; перед действием команда проверяет каждый демон
+
+## cli.serve_readiness.pid_reason | count=0 | CLDR=many
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1 | CLDR=one
+
+идентификатор процесса 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=2 | CLDR=few
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=3 | CLDR=few
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=4 | CLDR=few
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=5 | CLDR=many
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=11 | CLDR=many
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=21 | CLDR=one
+
+идентификатор процесса 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=22 | CLDR=few
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=25 | CLDR=many
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1.5 | CLDR=other
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1000000 | CLDR=many
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.pid_reason | count=1500000 | CLDR=many
+
+идентификаторы процессов 4101, 4102 — DIAG-opaque-α
+
+## cli.serve_readiness.and_more | count=0 | CLDR=many
+
+и ещё 0
+
+## cli.serve_readiness.and_more | count=1 | CLDR=one
+
+и ещё 1
+
+## cli.serve_readiness.and_more | count=2 | CLDR=few
+
+и ещё 2
+
+## cli.serve_readiness.and_more | count=3 | CLDR=few
+
+и ещё 3
+
+## cli.serve_readiness.and_more | count=4 | CLDR=few
+
+и ещё 4
+
+## cli.serve_readiness.and_more | count=5 | CLDR=many
+
+и ещё 5
+
+## cli.serve_readiness.and_more | count=11 | CLDR=many
+
+и ещё 11
+
+## cli.serve_readiness.and_more | count=21 | CLDR=one
+
+и ещё 21
+
+## cli.serve_readiness.and_more | count=22 | CLDR=few
+
+и ещё 22
+
+## cli.serve_readiness.and_more | count=25 | CLDR=many
+
+и ещё 25
+
+## cli.serve_readiness.and_more | count=1.5 | CLDR=other
+
+и ещё 1,5
+
+## cli.serve_readiness.and_more | count=1000000 | CLDR=many
+
+и ещё 1 000 000
+
+## cli.serve_readiness.and_more | count=1500000 | CLDR=many
+
+и ещё 1 500 000
+
+## cli.serve_readiness.identity_no_action | count=0 | CLDR=many
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=1 | CLDR=one
+
+запись с неподтверждённой идентичностью процесса соответствует установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=2 | CLDR=few
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=3 | CLDR=few
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=4 | CLDR=few
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=5 | CLDR=many
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=11 | CLDR=many
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=21 | CLDR=one
+
+запись с неподтверждённой идентичностью процесса соответствует установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=22 | CLDR=few
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=25 | CLDR=many
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=1.5 | CLDR=other
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=1000000 | CLDR=many
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_no_action | count=1500000 | CLDR=many
+
+записи с неподтверждённой идентичностью процессов соответствуют установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## cli.serve_readiness.identity_restart_manual | count=1 | CLDR=n/a
+
+на host-sd4 перезапустите `lop serve` вручную, чтобы перевести демон из записи на установленную сборку; он не может перезагрузить себя в текущем процессе
+
+## COMPOSED current unproven record / non-required no-action
+
+демон `lop serve` на host-sd4 — идентификатор процесса 4101 — есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска), поэтому неизвестно, соответствует ли он установленной сборке и находится ли под управлением; запись с неподтверждённой идентичностью процесса соответствует установленной сборке; для этой необязательной проверки никаких действий не требуется
+
+## COMPOSED grouped recorded gap / reloadable remedy
+
+демоны `lop serve` на host-sd4 — идентификаторы процессов 4101, 4102 — есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска); в записи указана сборка v0.99.0+recorded; установлена сборка v0.99.2+installed, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением; на host-sd4 выполните `lop services restart`, чтобы перевести демон из записи на установленную сборку; перед действием команда проверяет каждый демон
+
+## COMPOSED grouped recorded gap / manual remedy
+
+демоны `lop serve` на host-sd4 — идентификаторы процессов 4101, 4102 — есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска); в записи указана сборка v0.99.0+recorded; установлена сборка v0.99.2+installed, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением; на host-sd4 перезапустите `lop serve` вручную, чтобы перевести демон из записи на установленную сборку; он не может перезагрузить себя в текущем процессе
+
+## COMPOSED mixed PID groups and keyed overflow
+
+демоны `lop serve` на host-sd4 — идентификатор процесса 4101 — есть запись, но идентичность процесса нельзя подтвердить (не удалось сравнить отметку времени запуска); идентификаторы процессов 4102, 4103 — есть запись, но этот PID теперь принадлежит другому процессу и ещё 22, поэтому неизвестно, соответствуют ли они установленной сборке и находятся ли под управлением
+

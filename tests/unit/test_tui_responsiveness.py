@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import os
 import sys
 import threading
 import time
@@ -913,8 +914,12 @@ def test_second_title_backfill_pass_is_stat_only(tmp_path: Path) -> None:
     1,268 sessions could never grow a sidecar and were fully re-read every
     time. The sentinel turns the second pass into one ``stat`` per directory.
     """
+    import builtins
+    import io
+
     from local_operator.resume import (
         TITLE_SCAN_SENTINEL_NAME,
+        TRANSCRIPT_NAME,
         backfill_session_titles,
         session_name,
         stored_session_title,
@@ -923,18 +928,52 @@ def test_second_title_backfill_pass_is_stat_only(tmp_path: Path) -> None:
     for index in range(25):
         _titleless_session(tmp_path, f"sess{index:04d}")
 
-    assert backfill_session_titles(tmp_path) == 0  # nothing to journal
+    # WHY A READ COUNT AND NOT A CLOCK: this used to assert the second pass
+    # took < 20 ms of wall time. The regression it guards (re-reading every
+    # transcript) cost ~0.5 ms per transcript here, ~12 ms for 25, so the bound
+    # sat within 2x of the healthy figure and a loaded CI runner crossed it on a
+    # green tree (21.7 ms, run 43866131472, test(3.12,0)). The property the
+    # sentinel exists for is "no transcript is opened again", which is a count,
+    # not a duration — it cannot flake under load and it fails deterministically
+    # the moment the sentinel check is dropped, at any machine speed.
+    #
+    # The spy sits at ``io.open``/``builtins.open`` rather than on
+    # ``_scan_all_titles`` so a re-introduced read by ANY route (the scan,
+    # ``Path.read_text``, ``compression.iter_lines``/``read_head``) is counted:
+    # ``Path.open`` resolves ``io.open`` at call time, and a bare ``open()``
+    # resolves ``builtins.open``. Only transcript files are counted; the
+    # sentinel/sidecar ``exists()`` probes are stats and never open anything.
+    transcript_opens: list[str] = []
+    real_open = io.open
+
+    def counting_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(file, (str, os.PathLike)) and Path(file).name.startswith(TRANSCRIPT_NAME):
+            transcript_opens.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(io, "open", counting_open)
+        patch.setattr(builtins, "open", counting_open)
+        assert backfill_session_titles(tmp_path) == 0  # nothing to journal
+        first_pass_opens = len(transcript_opens)
+        transcript_opens.clear()
+        # The second pass is the one that used to redo all the work.
+        assert backfill_session_titles(tmp_path) == 0
+
+    # Live-instrument guard: the first pass must be SEEN reading every one of
+    # the 25, or a zero on the second pass would only prove the spy is attached
+    # to nothing. ``>=`` not ``==``: how many opens a full scan takes per
+    # transcript is the scanner's business; the guard only needs it non-blind.
+    assert first_pass_opens >= 25, (
+        f"the read spy counted {first_pass_opens} transcript opens on the first "
+        "(full) pass, expected >= 25 — the instrument is not on the backfill's read path"
+    )
     sentinels = list((tmp_path / "sessions").glob(f"*/{TITLE_SCAN_SENTINEL_NAME}"))
     assert len(sentinels) == 25, "a no-title directory must record its scan"
-
-    # The second pass is the one that used to redo all the work.
-    started = time.perf_counter()
-    assert backfill_session_titles(tmp_path) == 0
-    elapsed_ms = (time.perf_counter() - started) * 1000.0
-    # 25 dirs x ~0.01ms stat each; the pre-fix pass re-READ every transcript
-    # (~0.5ms each here). The bound is generous against CI jitter but an
-    # order of magnitude below a single full read of this fixture.
-    assert elapsed_ms < 20.0, f"second pass took {elapsed_ms:.1f} ms — sentinel ignored?"
+    assert transcript_opens == [], (
+        f"the second backfill pass opened {len(transcript_opens)} transcript(s) — "
+        f"sentinel ignored? first: {transcript_opens[:3]}"
+    )
 
     # The picker surfaces are untouched: the sentinel is not a title.
     directory = tmp_path / "sessions" / "sess0000"

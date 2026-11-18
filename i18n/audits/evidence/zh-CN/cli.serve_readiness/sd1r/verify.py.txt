@@ -1,0 +1,32 @@
+"""Remediation-only assertions plus reused read-only full mechanical verification.
+
+The previous audit provides native semantic coverage for unchanged keys; executing
+its verifier again is mechanical validation, not a new independent audit pass.
+"""
+import hashlib
+import json
+import runpy
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+from local_operator.i18n import runtime
+
+prior = Path('i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1')
+record = json.loads((prior/'record.json').read_text())
+for item in record['artifacts'] + record['policy_input_hashes'] + [record['input_hashes']['en'], record['input_hashes']['context']]:
+    assert hashlib.sha256(Path(item['path']).read_bytes()).hexdigest() == item['sha256'], item['path']
+path = Path(record['input_hashes']['zh-CN']['path'])
+raw = path.read_bytes()
+new = '本次检查无法判定其所在cgroup的归属'
+old = '运行于此检查无法定位的cgroup中'
+assert raw.count(new.encode()) == 1
+assert hashlib.sha256(raw.replace(new.encode(), old.encode())).hexdigest() == record['input_hashes']['zh-CN']['sha256']
+print('DELTA PASS: exact ZH-SD1-01 suggested replacement only; all other target bytes and English/context/policy files unchanged; prior artifact hashes intact')
+runpy.run_path(str(prior/'verify.py.txt'), run_name='__main__')
+target = json.loads(raw)
+reason = target['cli.serve_readiness.cgroup_unknown']
+assert reason == new
+for count in (1, 2, 21):
+    composed = runtime.render_message(target['cli.serve_readiness.unknown'], {'count':count, 'device':'node-a', 'reasons':'pid 123 '+reason}, 'zh-CN')
+    print('COMPOSED', count, composed)
+print('REMEDIATION PASS: ZH-SD1-01 fixed; cgroup ownership classification remains unknown without asserting absent cgroup or proven supervision. Native delta/neighbor reasoning is in report.md, not proved by these assertions.')

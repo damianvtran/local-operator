@@ -1,0 +1,25 @@
+$ git rev-parse HEAD
+0e4ad0a9171c59d7833d222761cbaa1f6d09bf51
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/wire.phone_access.json local_operator/i18n/catalogues/en/wire.phone_access.context.json local_operator/i18n/catalogues/fr/wire.phone_access.json i18n/glossary.md i18n/style-guides/fr.md
+1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a  local_operator/i18n/catalogues/en/wire.phone_access.json
+95c0c4b8d5f82cef978c751326ba6c214c1c8bf8152717f608eaeee943071c07  local_operator/i18n/catalogues/en/wire.phone_access.context.json
+5d888913f9740782549ee71694d84d1d51f6d3a16dbc7ad4c216233017abd93c  local_operator/i18n/catalogues/fr/wire.phone_access.json
+5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7  i18n/glossary.md
+5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7  i18n/style-guides/fr.md
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale fr --namespace wire.phone_access
+2d707dd5569f6fae92927721389f648fdf3111e834a2c94dd4771deecb342a07
+exit=0
+$ python3 $SCRATCH/i18n-away/mech.py . fr  # mechanical parity/placeholder/format-char/digit check over the 6 new keys
+keys en=10 fr=10 parity=OK
+wire.phone_access.away_after.label: placeholders=OK len=64 len_ratio=1.33 format_chars=[] latin_runs=[] digits=-
+wire.phone_access.away_after.help: placeholders=OK len=246 len_ratio=1.21 format_chars=[] latin_runs=[] digits=-
+wire.phone_access.away_after.choice.1m.label: placeholders=OK len=8 len_ratio=1.00 format_chars=[] latin_runs=[] digits=1
+wire.phone_access.away_after.choice.2m.label: placeholders=OK len=9 len_ratio=1.00 format_chars=[] latin_runs=[] digits=2
+wire.phone_access.away_after.choice.5m.label: placeholders=OK len=9 len_ratio=1.00 format_chars=[] latin_runs=[] digits=5
+wire.phone_access.away_after.choice.10m.label: placeholders=OK len=10 len_ratio=1.00 format_chars=[] latin_runs=[] digits=01
+exit=0

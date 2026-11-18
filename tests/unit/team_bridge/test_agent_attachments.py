@@ -140,6 +140,14 @@ class FakeHub:
             raise self.status_failure
         return self.status_payload
 
+    async def directory_cached_read(
+        self, tenant_id: str, *, expected_account_id: str | None = None, refresh: bool = False
+    ) -> tuple[Any, bool]:
+        # The tool reads the directory through the client's cache; this fake has
+        # no cache, so every read reaches ``directory``, is recorded there, and
+        # reports itself as fetched (so a miss is believed without a re-read).
+        return await self.directory(tenant_id, expected_account_id=expected_account_id), True
+
     async def directory(self, tenant_id: str, *, expected_account_id: str | None = None) -> Any:
         self.calls.append({"method": "directory"})
         return {

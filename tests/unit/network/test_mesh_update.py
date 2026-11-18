@@ -775,27 +775,41 @@ def test_a_non_uv_tool_member_without_the_layout_is_refused(
     assert reply["code"] == "editable_install", reply
 
 
-def test_the_generation_install_keeps_automatic_collection_frozen(
-    monkeypatch: pytest.MonkeyPatch,
+def test_the_generation_install_runs_the_shared_post_promotion_reclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mesh promotion has the same no-collection contract as other update tails."""
+    """Mesh promotion prunes through the same tail as ``lop update`` (2026-11-16).
+
+    A mesh member is the machine nobody runs ``lop install prune`` on by hand; the
+    install hands its promoted build to ``reclaim_after_promotion`` (the guarded
+    policy), and this module never calls ``prune_generations`` itself.
+    """
     from local_operator import update as update_mod
 
     log: list[Any] = []
+    promoted = tmp_path / "promoted"
     monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: True)
+
+    def _install(source=None, version=None, runner=None):
+        log.append(("install", version))
+        return promoted
+
+    monkeypatch.setattr(update_mod, "install_into_generation", _install)
     monkeypatch.setattr(
         update_mod,
-        "install_into_generation",
-        lambda source=None, version=None, runner=None: log.append(("install", version)),
+        "reclaim_after_promotion",
+        lambda generation, **kwargs: log.append(("reclaim", generation, kwargs["previous"])),
     )
-    monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: log.append("census"))
+    # R2: the pre-flip ``current`` is read BEFORE the install and handed on.
+    previous = tmp_path / "previous"
     monkeypatch.setattr(
         update_mod,
-        "prune_generations",
-        lambda **kwargs: log.append("prune"),
+        "previous_generation_for_reclaim",
+        lambda: log.append("previous") or previous,
     )
+    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: log.append("prune"))
     assert meshupdate.install_build("0.99.0") == meshupdate.METHOD_GENERATION
-    assert log == [("install", "0.99.0")]
+    assert log == ["previous", ("install", "0.99.0"), ("reclaim", promoted, previous)]
 
 
 def test_a_failed_classic_install_is_labelled_with_the_shape_that_ran(

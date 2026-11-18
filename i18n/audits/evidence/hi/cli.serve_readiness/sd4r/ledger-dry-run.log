@@ -1,0 +1,5 @@
+$ python3 -B scripts/i18n/ledger.py history-sha --locale hi --namespace cli.serve_readiness
+7cc26e916691cc8087a01175e0b12c9ba27e16e9195b6150bb853b7a8690851c
+$ python3 -B scripts/i18n/ledger.py append --receipt i18n/audits/evidence/hi/cli.serve_readiness/sd4r/ledger-receipt.json --expected-history-sha 7cc26e916691cc8087a01175e0b12c9ba27e16e9195b6150bb853b7a8690851c --dry-run
+i18n/audit-history/hi/cli.serve_readiness.json
+EXIT_CODE=0

@@ -489,6 +489,38 @@ pairing whose window closed with nobody answering exits `3` as
 `pairing_unanswered`, having joined nothing. Park a fresh ceremony rather than
 reusing the invite — the scope of every exit code is in "Reference".
 
+## Reading an artifact from a peer session
+
+A review/evidence citation must carry the source **peer + exact session id +
+`scratchpad://<relative-path>` or `attachment:<id>`**. Obtain that tuple from the
+source session's reply; a peer's absolute filesystem path is not portable, and
+reading its bare scratchpad reference locally would address your own session.
+Pull the authorized artifact through the existing CLI, then read the local copy:
+
+```bash
+lop network files pull <peer> <sid> scratchpad://review/report.md --json
+lop network files pull <peer> <sid> attachment:<id> --json
+```
+
+These are templates: substitute the actual peer, session and reported reference;
+an attachment id is 32 lowercase hex characters and must be referenced by that
+session. Omit `--out` for a verified copy in this device's attachment store. On a
+successful receipt (`verified: true`), read its top-level JSON `path` with
+`read(path="<returned path>")`; `landed.store` names the store copy too. Preserve
+the original peer, session and source reference in citations: the returned local
+path is this device's inspection location, not the artifact's origin.
+
+`--out` requests an optional additional copy. A resolved destination inside
+Local Operator's config/data directory—including your own session scratchpad
+under that directory—is refused as `out_invalid`, even with `--force`. Use the
+store-only form above; do not direct `--out` into session data.
+
+**No new authority or bypass.** This recipe does not grant access to arbitrary
+remote paths or other sessions' attachments. `BLOCKED by guardrail` remains
+final for the same effect on the same targets: report it. Never pull, copy or
+import the blocked material through another path, tool or peer to reroute the
+refusal.
+
 ## Who the session on the peer runs as
 
 A create on a peer can name the agent PROFILE it runs as or the TEAM it manages,
@@ -682,14 +714,22 @@ acting on one (QA round 5, Q-R5-1):
 - `session_unreachable` — the peer accepted the act and then its runtime stopped
   answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
   (that runtime may be starting, or wedged), the act as a whole running out of
-  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer (it
-  accepted the connection and did not produce its state in time, or said it could
-  not prepare it). The busy sentence says the act was not delivered and to retry;
-  it is not a link problem, so it does not point at `network doctor`. The peer's own sentence is carried verbatim, and nothing on
-  this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
-  `relay_unavailable` with no local relay) even when the rung that noticed was the
-  bind: the two codes answer "which side of the open died", not "which sentence did
-  I get", because a stopped device and a stopped runtime look identical from here.
+  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer. The
+  sentence states that the act was not delivered before asking you to re-run the
+  command. An explicit connection refusal keeps the runtime's own reason, not an
+  invented timed load diagnosis. If the other device answers that it could not
+  reach or start this session's runtime, that is also `session_unreachable`:
+  the reason is shown and the next step is to re-run the command, not diagnose a
+  device that already answered.
+
+  A connection that goes quiet after it is accepted is different. The session's
+  initial state may have been lost in transit, or nothing may have answered after
+  it. Neither proves the runtime is busy. This is `peer_unreachable`; the sentence
+  says the act was not delivered and points to `lop network doctor --peer <peer>`
+  to distinguish a lost connection from a stopped runtime. It does not claim no
+  session was reached. A dial that produced NO stream at all remains
+  `peer_unreachable` (or `relay_unavailable` with no local relay), even when the
+  rung that noticed was the bind.
 - `session_ambiguous` — the named device ANSWERED and holds SEVERAL conversations
   the target matches (a conversation name is not unique by design): the sentence
   lists the candidate rows with the id each is retypeable as, and NOTHING was sent.
@@ -1491,10 +1531,12 @@ lop network identity rotate --json    # for a suspected key compromise
 - Do not add a member by editing a member list. Membership changes through
   `invite`/`join`, `member rm`, and the epoch rotation they carry.
 - Do not force a full re-sync, and do not invent a `--force` on a verb that does
-  not take one: the only verb in this family with a `--force` is `network sessions
-  --stop`, and it means the owner's own `lop stop --force` — stop a target the
-  plain stop skipped (one already leaving, or mid-turn with a socket that will not
-  answer), accepting that the turn goes with it.
+  not take one. For session lifecycle operations, `network sessions --stop
+  --force` means the owner's own `lop stop --force` — stop a target the plain
+  stop skipped (one already leaving, or mid-turn with a socket that will not
+  answer), accepting that the turn goes with it. Separately, `network files pull
+  --force` permits replacing an existing `--out` file; it does not bypass the
+  config/data-directory restriction. Store-only pulls need neither flag.
 
 ## Reference
 
@@ -1581,6 +1623,29 @@ copies the audit log somewhere retention will not prune it — take that copy
 before an incident review, not after. `identity rotate` replaces the device key
 and announces the new device id to peers (the old id is stale from then on): it
 is for a suspected key compromise, and the previous id is gone for good.
+
+**Why an account was lent.** The owner's existing `credential.grant` audit record
+adds `account_label` and `ranked_reason`; inspect them with `lop network log --json`
+(or the normal text/export views). The label is owner-local display metadata,
+possibly an email, or null if unknown. It is not a new account identifier and is
+never attached to the peer's grant. Existing `credential_id`, `policy`, `scope`,
+`sub`, and latency fields are unchanged.
+
+`ranked_reason` is a bounded machine scalar `basis:ordinal`, not prose or a
+candidate list. The ordinal is the **actual served row's position in the final
+eligible ordering within its winning credential tier**, not a global best across
+OAuth, login keys, environment and fallback tiers. Bases are `reset_rank`,
+`headroom_rank`, `fair_hash`, `round_robin`, `affinity`, `request_pick`, and
+`demotion_preference` (an observed change in the final stable partition).
+`affinity_fallback` / `request_fallback` mean an earlier preferred row was not
+served: the sibling is not falsely called the anchor/request pick. For example,
+`reset_rank:2` is the second row in that ordering, not a claim it was the earliest
+reset overall. Eligibility filtering precedes ranking, so a sole remaining row
+is rank 1 even if excluded siblings exist. A path that does not rank says
+`unranked`, with no fabricated ordinal. This is a snapshot of the existing pick,
+not a second selector invocation, usage fetch or new routing policy; coalesced
+requests keep their own outcome's explanation. It uses normal audit retention
+and batching, not a separate journal or new power-loss durability promise.
 
 **What is not implemented in this build**, so nothing above should be promised as
 existing:

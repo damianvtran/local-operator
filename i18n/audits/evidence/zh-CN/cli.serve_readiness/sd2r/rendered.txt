@@ -1,0 +1,191 @@
+# sd2r rendered catalogue text — zh-CN
+Offline production ICU runtime with explicit locale; not service execution or a screenshot.
+
+## cli.serve_readiness.unproven | count=1 | CLDR=n/a
+
+已有记录，但无法证实其进程身份（没有可供比较的启动时间戳）
+
+## cli.serve_readiness.not_reporting | count=1 | CLDR=n/a
+
+已有记录但未响应（心跳已停止）
+
+## cli.serve_readiness.not_this_daemon | count=1 | CLDR=n/a
+
+已有记录，但该PID现已被其他进程占用
+
+## cli.serve_readiness.unknown_state | count=1 | CLDR=n/a
+
+记录中的状态未知
+
+## cli.serve_readiness.install_unknown | count=1 | CLDR=n/a
+
+运行的构建无法与当前安装的构建比较
+
+## cli.serve_readiness.cgroup_unknown | count=1 | CLDR=n/a
+
+本次检查无法判定其所在cgroup的归属
+
+## cli.serve_readiness.recorded_gap | count=1 | CLDR=n/a
+
+记录中的构建为v0.99.0+recorded，已安装的构建为v0.99.2+installed（进程身份未经证实）
+
+## cli.serve_readiness.unknown | count=0 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=1 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=2 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=3 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=4 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=5 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=11 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=21 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=22 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=25 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=1.5 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=1000000 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.unknown | count=1500000 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程：pid 4101: 已有记录但未响应（心跳已停止）; pid 4102: 本次检查无法判定其所在cgroup的归属，因此无法确定是否与当前安装一致并受监督
+
+## cli.serve_readiness.stale | count=0 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=1 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=2 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=3 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=4 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=5 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=11 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=21 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=22 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=25 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=1.5 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=1000000 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.stale | count=1500000 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程（4101, 4102）运行的是v0.99.1+running，但已安装的构建为v0.99.2+installed：其托管的远程会话也运行上述构建，而非已安装的构建
+
+## cli.serve_readiness.other_unit | count=0 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=1 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=2 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=3 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=4 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=5 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=11 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=21 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=22 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=25 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=1.5 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=1000000 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.other_unit | count=1500000 | CLDR=other
+
+host-sd2r上的`lop serve`守护进程由其他服务（worker.service）管理，而非lop serve单元
+
+## cli.serve_readiness.identity_restart | count=1 | CLDR=n/a
+
+请在host-sd2r上运行`lop services status`检查记录，再运行`lop services restart`记录进程身份；重启操作会在采取行动前检查每个守护进程
+

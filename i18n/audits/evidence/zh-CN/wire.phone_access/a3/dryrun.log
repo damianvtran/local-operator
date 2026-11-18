@@ -1,0 +1,3 @@
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $SCRATCH/i18n-a3/zh-CN.wire.phone_access.json --expected-history-sha 93866ce4e7a4d102b01cee31fbb4ee51afac3e158dd0d9537f39b09b5c365100 --dry-run
+i18n/audit-history/zh-CN/wire.phone_access.json
+exit=0

@@ -1,0 +1,133 @@
+{
+ "round": "m4135b",
+ "locale": "ru",
+ "namespace": "wire.settings",
+ "pr": "damianvtran/local-operator#4135",
+ "auditor": {
+  "agent": "i18n-auditor (team lopdev, reviewer role, round m4135b), session 634bfc6a6ee7; independent of translator b0fe2564b811 and implementer feac6b2db7a4; did not read the m4135 records or any other session scratchpad",
+  "session": "634bfc6a6ee7",
+  "model": "anthropic/claude-opus-5-5",
+  "actual_model_source": "system prompt 'Model:' line of this session",
+  "fallback": "none observed",
+  "native_speaker": false,
+  "date": "2026-11-17"
+ },
+ "translator": {
+  "agent": "i18n-translator",
+  "session": "b0fe2564b811",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-17"
+ },
+ "audited_tree": "uncommitted merge of MERGE_HEAD a0e458d43 into HEAD a4152e090 in .worktrees/auto-prune-pr; audited bytes = input_hashes_sha256",
+ "input_hashes_sha256": {
+  "local_operator/i18n/catalogues/en/wire.settings.json": "c62db407a0b2e1944e63504b6332a3da5dcc494b6877f2ecefed3f518851b96a",
+  "local_operator/i18n/catalogues/ru/wire.settings.json": "3590bab71ef50c4854ab85533e51048ec6bca1c9c7a7c464f887aa0434f701c3",
+  "local_operator/i18n/catalogues/en/wire.settings.context.json": "de060f8b7f0b39a72bb449d4b4d3847bf43da32348e9926e329001bdf91166a7"
+ },
+ "scope": "whole namespace (883 keys): mechanical on all keys; semantic on the 8 PR #4135 keys plus main #4052 key network_credentials_github_repositories.help; 874 unchanged keys proven byte-identical to both parents by three-way comparison (not re-scored)",
+ "mechanical": {
+  "key_sets_equal_en": true,
+  "key_count": 883,
+  "placeholder_parity_all_keys": true,
+  "backtick_code_span_parity_all_keys": true,
+  "nfc_all_keys": true,
+  "bidi_or_control_chars": false,
+  "literals_verbatim": {
+   "lop install prune": true,
+   "lop update": true,
+   "lop network credential github repos --use-default": true
+  },
+  "label_cells": {
+   "wire.settings.update_auto_prune.label": 24,
+   "wire.settings.update_keep_generations.label": 28
+  },
+  "label_limit": 29,
+  "provenance": "three-way vs merge-base eb872993c: every key equals the side that changed it (HEAD a4152e090 for the PR keys, MERGE_HEAD a0e458d43 for network_credentials_github_repositories.help); no both-sides changes; all other keys byte-identical to both parents",
+  "cell_measure": "rich.cells.cell_len"
+ },
+ "per_key": [
+  {
+   "key": "wire.settings.update_auto_prune.label",
+   "owner": "PR #4135",
+   "en": "Prune old installs",
+   "text": "Удалять старые установки",
+   "cells": 24,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.help",
+   "owner": "PR #4135",
+   "en": "After each update, delete unused old installs, like `lop install prune`.",
+   "text": "После каждого обновления удалять неиспользуемые старые установки, как `lop install prune`.",
+   "cells": 90,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.true.description",
+   "owner": "PR #4135",
+   "en": "keep current, running and the newest few",
+   "text": "хранить текущую, запущенные и новейшие",
+   "cells": 38,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.false.description",
+   "owner": "PR #4135",
+   "en": "keep every install; prune by hand",
+   "text": "хранить все установки; удалять вручную",
+   "cells": 38,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.label",
+   "owner": "PR #4135",
+   "en": "Unused installs kept",
+   "text": "Хранить неиспольз. установок",
+   "cells": 28,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.help",
+   "owner": "PR #4135",
+   "en": "Always kept: current, previous and running installs, and any a session or service registered. Also keeps this many newest unused installs.",
+   "text": "Всегда хранятся текущая, предыдущая и запущенные установки, а также зарегистрированные сессией или службой. Плюс столько новейших неиспользуемых.",
+   "cells": 145,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.updates.title",
+   "owner": "PR #4135",
+   "en": "Updates",
+   "text": "Обновления",
+   "cells": 10,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.updates.description",
+   "owner": "PR #4135",
+   "en": "What an update does with the older installs it leaves behind. Takes effect at the next `lop update`.",
+   "text": "Что происходит со старыми установками после обновления. Вступает в силу при следующем `lop update`.",
+   "cells": 99,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.network_credentials_github_repositories.help",
+   "owner": "main #4052",
+   "en": "owner/repo entries to lend GitHub access for. When never set, use every repository the login can push to, minus opt-outs. Clearing a previously shared hand-picked list stops lending; return to automatic selection with lop network credential github repos --use-default.",
+   "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+   "cells": 390,
+   "verdict": "PASS"
+  }
+ ],
+ "semantic_summary": "All 9 keys faithful. Label \"Хранить неиспольз. установок\" (28 cells) reads as a count label (genitive after the number) — acceptable. Keep help guarantee first (107 cells; whole 145). GitHub help: two states distinct; clearing stops access sharing.",
+ "findings": [],
+ "severity_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "unresolved_blocker_major": 0,
+ "result": "clean",
+ "not_claimed": "native-speaker review and rendered-frame certification"
+}

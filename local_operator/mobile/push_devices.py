@@ -478,7 +478,49 @@ def link_message(
 #: only daemon refuses the key). The one deliberate exception to "keeps the
 #: behaviour it had" is ``previews`` itself: an older row resolves it to true,
 #: so banners become descriptive on upgrade, which is the operator's decision.
-PREFERENCE_KEYS = ("enabled", "completions", "errors", "previews")
+#:
+#: ADR 0009 (mobile repo ``docs/adr/0009-notification-routing-by-origin.md``
+#: §3 core edit 5, §4) adds two ENUM keys, so the model is no longer boolean-only:
+#:
+#: - ``completions_scope`` — ``phone`` (default): a completion pushes only when
+#:   the run's origin is ``mobile`` (the operator: "if started on mobile it
+#:   should notify on mobile"); ``all``: every completion is a candidate, under
+#:   ADR 0008's desk hold. "Off" stays ``completions: false``.
+#: - ``attention`` — ``away`` (default): a run that ended on an ask it opened
+#:   (``needs_user``) of non-mobile origin is held while the desk is active and
+#:   released when it goes away; ``always``: pushed at once; ``never``: not
+#:   pushed. Independent of ``completions``: turning "Agent finished" off must
+#:   never mute a question.
+#:
+#: Both absent-default to the operator's policy rather than to "on" (ADR 0009
+#: §4: "the defaults are the operator's policy, not opt-in"), and the app sends
+#: them only to a daemon advertising the ``push_routing`` capability.
+PREFERENCE_KEYS = (
+    "enabled",
+    "completions",
+    "errors",
+    "previews",
+    "completions_scope",
+    "attention",
+)
+
+#: Per enum key: its allowed values, first is the absent-default.
+ENUM_PREFERENCES: dict[str, tuple[str, ...]] = {
+    "completions_scope": ("phone", "all"),
+    "attention": ("away", "always", "never"),
+}
+
+#: Every key's absent-default: ``True`` for the boolean switches (a row written
+#: before preferences keeps the behaviour it had), the policy default for enums.
+PREFERENCE_DEFAULTS: dict[str, Any] = {
+    key: (ENUM_PREFERENCES[key][0] if key in ENUM_PREFERENCES else True) for key in PREFERENCE_KEYS
+}
+
+
+def _valid_preference(key: str, value: object) -> bool:
+    if key in ENUM_PREFERENCES:
+        return isinstance(value, str) and value in ENUM_PREFERENCES[key]
+    return isinstance(value, bool)
 
 
 class PushDeviceRefusal(Exception):
@@ -1069,7 +1111,7 @@ def _checked_sound_cache(stems: object) -> list[str]:
     return cached
 
 
-def resolved_preferences(record: Mapping[str, Any]) -> dict[str, bool]:
+def resolved_preferences(record: Mapping[str, Any]) -> dict[str, Any]:
     """One row's push switches, with absence resolved to ``True``.
 
     A row written before preferences existed carries no ``preferences`` key,
@@ -1079,10 +1121,19 @@ def resolved_preferences(record: Mapping[str, Any]) -> dict[str, bool]:
     """
     stored = record.get("preferences")
     stored = stored if isinstance(stored, Mapping) else {}
-    return {key: bool(stored.get(key, True)) for key in PREFERENCE_KEYS}
+    resolved: dict[str, Any] = {}
+    for key in PREFERENCE_KEYS:
+        value = stored.get(key, PREFERENCE_DEFAULTS[key])
+        if key in ENUM_PREFERENCES:
+            # An unknown stored value resolves to the key's DEFAULT, never to
+            # "on": a value this build cannot read must not widen what pushes.
+            resolved[key] = value if _valid_preference(key, value) else PREFERENCE_DEFAULTS[key]
+        else:
+            resolved[key] = bool(value)
+    return resolved
 
 
-def device_preferences(config_dir: Path) -> dict[str, dict[str, bool]]:
+def device_preferences(config_dir: Path) -> dict[str, dict[str, Any]]:
     """READ-ONLY ``{device_id: resolved preferences}`` for the emit gate.
 
     A sibling of :func:`credential_facts` rather than more fields on it: those
@@ -1093,7 +1144,7 @@ def device_preferences(config_dir: Path) -> dict[str, dict[str, bool]]:
     """
     with _LOCK:
         records = _load(config_dir)
-    preferences: dict[str, dict[str, bool]] = {}
+    preferences: dict[str, dict[str, Any]] = {}
     for record in records:
         preferences.setdefault(record["device_id"], resolved_preferences(record))
     return preferences
@@ -1665,14 +1716,19 @@ def _checked_operator_link(
     return device_id
 
 
-def _checked_preferences(value: object) -> dict[str, bool]:
+def _checked_preferences(value: object) -> dict[str, Any]:
     """The register body's ``preferences``: an object of known bool switches.
 
     Strict like the body around it: a non-object, an unknown key (echoed
     BOUNDED, the same rule as the body's own unknown-field refusal) or a
-    non-bool value refuses the whole register. A key the app left out is
-    stored resolved to ``True``, so the row always holds every switch
-    and a reader never re-derives the default.
+    non-bool value refuses the whole register. A BOOLEAN key the app left out
+    is stored resolved to ``True``, so the row always holds every switch.
+
+    An ENUM key (ADR 0009) is stored only when the app SENT it (review round 1,
+    m3): absent already resolves to its default (:func:`resolved_preferences`),
+    and writing the default would put a key a pre-1b build does not know into
+    every row, which that build's ``_validated_record`` refuses wholesale on a
+    rollback, taking every registry route down with it.
     """
     if not isinstance(value, dict):
         raise PushDeviceRefusal("preferences must be an object when provided")
@@ -1681,9 +1737,19 @@ def _checked_preferences(value: object) -> dict[str, bool]:
         names = ", ".join(unknown)[:MAX_FIELD_CHARS]
         raise PushDeviceRefusal(f"unknown preferences field(s): {names}")
     for key, flag in value.items():
-        if not isinstance(flag, bool):
-            raise PushDeviceRefusal(f"preferences.{key} must be true or false")
-    return {key: value.get(key, True) for key in PREFERENCE_KEYS}
+        if _valid_preference(key, flag):
+            continue
+        if key in ENUM_PREFERENCES:
+            # ADR 0009: per key, so an enum outside its set is refused (422)
+            # rather than stored as something the worker would have to guess at.
+            allowed = ", ".join(ENUM_PREFERENCES[key])
+            raise PushDeviceRefusal(f"preferences.{key} must be one of: {allowed}")
+        raise PushDeviceRefusal(f"preferences.{key} must be true or false")
+    return {
+        key: value.get(key, PREFERENCE_DEFAULTS[key])
+        for key in PREFERENCE_KEYS
+        if key not in ENUM_PREFERENCES or key in value
+    }
 
 
 def _install_id(value: object) -> str:
@@ -1924,10 +1990,17 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
         )
     if "preferences" in entry:
         stored = entry["preferences"]
+        # An enum key holding a STRING this build does not know is readable,
+        # not corrupt (review round 1, m3): a later build may have added the
+        # value before a rollback, and ``resolved_preferences`` resolves it to
+        # the key's default. Refusing it would refuse every registry route.
         if (
             not isinstance(stored, dict)
             or set(stored) - set(PREFERENCE_KEYS)
-            or not all(isinstance(flag, bool) for flag in stored.values())
+            or not all(
+                isinstance(flag, str) if key in ENUM_PREFERENCES else _valid_preference(key, flag)
+                for key, flag in stored.items()
+            )
         ):
             raise PushRegistryCorrupt(
                 f"push device registry record {index} has invalid preferences;"

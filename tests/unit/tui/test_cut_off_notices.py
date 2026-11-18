@@ -96,11 +96,11 @@ async def _start_and_end_turn(
     from local_operator.tui.events import TurnEnded, TurnStarted
     from local_operator.tui.widgets.editor import Editor
 
-    for _ in range(200):
-        if app._session is not None:
-            break
-        await pilot.pause()
-        await asyncio.sleep(0.01)
+    # Wait on the boot worker, not a fixed count of turns: the old 200-turn loop
+    # fell through with no session on a slow boot, and every poll after it
+    # returned without reading (`LOP_TEST_SLOW_BOOT_WARM_S=12` reproduces
+    # `assert [] == [...]`). Same fix as #4171; this file's other loops too.
+    await await_session_boot(app)
     editor = app.query_one(Editor)
     editor.focus()
     editor.text = "run the long job"
@@ -112,6 +112,47 @@ async def _start_and_end_turn(
     app.post_message(TurnEnded(aborted, error, cut_off_cause=cut_off_cause))
     await pilot.pause()
     await pilot.pause()
+
+
+def _own_the_completion_poll(app: OperatorApp, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Pause this App's periodic completion poller so the test's explicit poll owns the read.
+
+    WHY. ``_poll_completion_attention`` is single-flight: while one invocation
+    holds ``_attention_poll_pending`` (its ``refresh_attention`` thread hop is
+    in flight), every other call returns at once. The App also runs it from two
+    ``set_interval(1.0, ...)`` mount sites. A test that publishes and then
+    awaits the explicit poll is betting no tick is mid-read at that instant; on
+    a GIL-starved CI shard a tick that read the store BEFORE the publish is
+    still in its thread hop, the explicit call returns without reading, and the
+    assertion sees ``[]`` (merge-gate runs 43991831905 / #4139 and 44146587975 /
+    #4175). Holding a tick's read across the publish reproduces it every time.
+
+    The product is not affected: it has no explicit caller, and the next 1 s
+    tick reads the published outcome and paints it. Only the test's
+    "explicit call paints NOW" premise was unguarded.
+
+    HOW. Wraps ``set_interval`` on THIS instance (not the class) and pauses only
+    timers whose callback is this App's ``_poll_completion_attention`` at
+    creation, before any can fire; unrelated periodic callbacks stay real, and
+    the App context stays the timers' only owner at shutdown. Install it before
+    ``run_test`` and assert the returned list is non-empty after boot, so a
+    moved mount site cannot turn the pause into a silent no-op.
+    """
+    captured: list[Any] = []
+    real_set_interval = app.set_interval
+
+    def own_completion_interval(interval: float, callback: Any, *args: Any, **kwargs: Any) -> Any:
+        timer = real_set_interval(interval, callback, *args, **kwargs)
+        if (
+            getattr(callback, "__self__", None) is app
+            and getattr(callback, "__func__", None) is OperatorApp._poll_completion_attention
+        ):
+            timer.pause()
+            captured.append(timer)
+        return timer
+
+    monkeypatch.setattr(app, "set_interval", own_completion_interval)
+    return captured
 
 
 @pytest.mark.asyncio
@@ -148,9 +189,11 @@ async def test_a_provider_error_is_also_stated_once(tmp_path, monkeypatch) -> No
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     async with app.run_test(size=(100, 30)) as pilot:
         endpoint = "api refused the request: 502 Bad Gateway"
         await _start_and_end_turn(app, pilot, aborted=False, error=endpoint)
+        assert completion_timers, "the periodic consumer was not captured"
         assert _notice_texts(app) == [endpoint]
 
         session.publish("error", reason=endpoint)
@@ -181,6 +224,7 @@ async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_i
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     from local_operator.harness.notice_copy import retired_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
@@ -188,6 +232,7 @@ async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_i
         await _start_and_end_turn(
             app, pilot, aborted=False, error=sentence, cut_off_cause="runtime-retired"
         )
+        assert completion_timers, "the periodic consumer was not captured"
         assert _notice_texts(app) == [sentence]
         # D2: warning ink from the FIRST frame, never the ~1 s of danger the
         # restate used to correct.
@@ -227,10 +272,12 @@ async def test_a_closed_outcome_restates_an_aborted_live_row_into_the_info_tier(
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     from local_operator.harness.notice_copy import closed_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
         await _start_and_end_turn(app, pilot, aborted=True, error=None)
+        assert completion_timers, "the periodic consumer was not captured"
         # The live row the handoff paints, held for adoption.
         assert _notice_texts(app) == ["interrupted"]
 
@@ -287,12 +334,56 @@ async def test_the_poller_names_the_cause_for_a_cut_off_it_never_painted(
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(200):
-            if app._session is not None:
-                break
-            await pilot.pause()
+        await await_session_boot(app)
+        assert completion_timers, "the periodic consumer was not captured"
+        session.publish("error", cause="runtime-retired", reason=REASON)
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        assert _notice_texts(app) == [f"Stopped with an error — {REASON}"]
+
+
+@pytest.mark.asyncio
+async def test_no_periodic_tick_can_own_the_read_an_explicit_poll_test_makes(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression for the CI flake on the test above (#4139, #4175 merge gates).
+
+    Models the loaded runner deterministically: every store read lands and then
+    holds its thread hop for 0.5 s, so a periodic tick that starts before the
+    publish is still mid-read when the explicit poll runs — which then returns
+    on ``_attention_poll_pending`` and paints nothing (``assert [] == [...]``).
+    Without ``_own_the_completion_poll`` this test fails that way every time
+    (the tick fires within the 1.5 s window below); with it no tick ever reads
+    and the explicit poll paints. 1.5 s spans more than one 1.0 s interval.
+    """
+    import threading
+    import time
+
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    read_started = threading.Event()
+    real_state = session.store.state
+
+    def slow_state(identity: str) -> dict[str, Any]:
+        state = real_state(identity)
+        read_started.set()
+        time.sleep(0.5)
+        return state
+
+    monkeypatch.setattr(session.store, "state", slow_state)
+    app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        assert completion_timers, "the periodic consumer was not captured"
+        deadline = time.monotonic() + 1.5
+        while not read_started.is_set() and time.monotonic() < deadline:
             await asyncio.sleep(0.01)
+        assert not read_started.is_set(), "a periodic tick read the store mid-test"
+        assert not getattr(app, "_attention_poll_pending", False)
         session.publish("error", cause="runtime-retired", reason=REASON)
         await app._poll_completion_attention()
         await pilot.pause()
@@ -306,9 +397,7 @@ async def test_an_interrupted_outcome_keeps_its_own_spelling(tmp_path, monkeypat
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
-    completion_timers: list[Any] = []
     ancillary_adoptions: list[OutcomeSession] = []
-    real_set_interval = app.set_interval
 
     def no_mobile_producers(adopted: Any) -> None:
         # Spelling depends on real adoption/store/poller/render, not the
@@ -318,21 +407,7 @@ async def test_an_interrupted_outcome_keeps_its_own_spelling(tmp_path, monkeypat
         ancillary_adoptions.append(adopted)
 
     monkeypatch.setattr(app, "_mobile_adopted", no_mobile_producers)
-
-    def own_completion_interval(interval: float, callback: Any, *args: Any, **kwargs: Any) -> Any:
-        timer = real_set_interval(interval, callback, *args, **kwargs)
-        if (
-            getattr(callback, "__self__", None) is app
-            and getattr(callback, "__func__", None) is OperatorApp._poll_completion_attention
-        ):
-            # The private poll returns while another invocation owns its read.
-            # Pause only this App's periodic callers BEFORE either mount site
-            # can acquire it; this wording test owns one real post-publish poll.
-            timer.pause()
-            completion_timers.append(timer)
-        return timer
-
-    monkeypatch.setattr(app, "set_interval", own_completion_interval)
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     async with app.run_test(size=(100, 30)):
         await await_session_boot(app)
         assert app._session is session
@@ -375,12 +450,10 @@ async def test_the_poller_paints_a_cut_off_in_the_danger_tier(tmp_path, monkeypa
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(200):
-            if app._session is not None:
-                break
-            await pilot.pause()
-            await asyncio.sleep(0.01)
+        await await_session_boot(app)
+        assert completion_timers, "the periodic consumer was not captured"
         session.publish("error", cause="runtime-retired", reason=REASON)
         await app._poll_completion_attention()
         await pilot.pause()
@@ -401,12 +474,10 @@ async def test_the_pollers_interrupted_control_stays_quiet(tmp_path, monkeypatch
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(200):
-            if app._session is not None:
-                break
-            await pilot.pause()
-            await asyncio.sleep(0.01)
+        await await_session_boot(app)
+        assert completion_timers, "the periodic consumer was not captured"
         session.publish("interrupted", cause="user-stop", reason="the session was stopped")
         await app._poll_completion_attention()
         await pilot.pause()
@@ -428,11 +499,7 @@ async def test_the_tui_stop_route_records_the_deliberate_verdict(tmp_path, monke
     session = DeliberateStopSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(200):
-            if app._session is not None:
-                break
-            await pilot.pause()
-            await asyncio.sleep(0.01)
+        await await_session_boot(app)
         assert app._session is session
         await app._stop_local_session()
         await pilot.pause()
@@ -464,11 +531,7 @@ async def test_a_cut_off_turns_live_cards_are_retired_as_cut_off(tmp_path, monke
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(200):
-            if app._session is not None:
-                break
-            await pilot.pause()
-            await asyncio.sleep(0.01)
+        await await_session_boot(app)
         editor = app.query_one(Editor)
         editor.focus()
         editor.text = "run the long job"
@@ -520,8 +583,10 @@ async def test_a_settled_run_paints_no_error_card_and_the_poller_stays_quiet(
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     async with app.run_test(size=(100, 30)) as pilot:
         await _start_and_end_turn(app, pilot, aborted=True, error=None)
+        assert completion_timers, "the periodic consumer was not captured"
         notices = _notice_texts(app)
         assert not any("Stopped with an error" in text for text in notices), notices
         assert all(
@@ -566,10 +631,12 @@ async def test_the_poller_paints_a_closed_run_neutrally_and_never_in_danger(
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     from local_operator.harness.notice_copy import closed_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
         await _start_and_end_turn(app, pilot, aborted=False, error=None)
+        assert completion_timers, "the periodic consumer was not captured"
         session.publish("closed", cause="disposed")
         await app._poll_completion_attention()
         await pilot.pause()
@@ -631,10 +698,12 @@ async def test_the_poller_paints_a_retired_run_in_warning_and_never_in_danger(
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
+    completion_timers = _own_the_completion_poll(app, monkeypatch)
     from local_operator.harness.notice_copy import retired_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
         await _start_and_end_turn(app, pilot, aborted=False, error=None)
+        assert completion_timers, "the periodic consumer was not captured"
         session.publish("retired", cause="runtime-retired")
         await app._poll_completion_attention()
         await pilot.pause()

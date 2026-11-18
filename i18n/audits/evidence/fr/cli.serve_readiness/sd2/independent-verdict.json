@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-11-16T04:45:47.859670+00:00",
+  "auditor": {
+    "agent": "Local Operator — second independent i18n auditor (sd2)",
+    "session": "85af124f4a9f",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host-supplied session context: Model: openai/gpt-6.1-sol; session self-identity confirmed with sessions(info).",
+    "fallback": "none observed or reported by host; no fallback model claimed",
+    "independence": "Fresh second-pass session, not translator acf0a84cd992; no translation authorship or edits. Source/context/glossary/styles/targets audited before consulting first reports; no first reports consulted at all.",
+    "round": 2,
+    "native_speaker_claim": false
+  },
+  "verdicts": {
+    "fr": "passed",
+    "es": "passed",
+    "ru": "passed",
+    "vi": "passed",
+    "hi": "passed",
+    "ur": "passed",
+    "zh-CN": "passed"
+  },
+  "findings": [],
+  "input_hashes": {
+    "local_operator/i18n/catalogues/en/cli.serve_readiness.json": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+    "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json": "e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "local_operator/network/readiness.py": "263973ba412aa3194a85accec36ce9861d79ec3ac25dcf48ac716f871e0ce29e",
+    "local_operator/i18n/catalogues/fr/cli.serve_readiness.json": "fa709445a56aaae44736e248854e28b4c87721a3d079be8710d7b1a92958ed44",
+    "local_operator/i18n/catalogues/es/cli.serve_readiness.json": "11fe4d85d826ad5206ebbc4c2a379a9daa0ee529f831466ea9e363953cee6fcd",
+    "local_operator/i18n/catalogues/ru/cli.serve_readiness.json": "892e251984ddf40978a06ef7cb5e558455ed788b2a15f959c5a84f9ebf8a2968",
+    "local_operator/i18n/catalogues/vi/cli.serve_readiness.json": "76639bf0411f16c4c5a38c3f5ed852df89736e6cfb6c73658b6a7dcc1b261d1d",
+    "local_operator/i18n/catalogues/hi/cli.serve_readiness.json": "44980d359b70259062ec915d495235869e62996247beaa7e851e05b8a65ab439",
+    "local_operator/i18n/catalogues/ur/cli.serve_readiness.json": "07c4be789363310c6f1863fd643974ca7741f18c99b7fd6c9404872ed84d9674",
+    "local_operator/i18n/catalogues/zh-CN/cli.serve_readiness.json": "c02337dab4639daae2784f9b089be5f95cda30406d504dfa558d19a94b569828",
+    "i18n/style-guides/fr.md": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+    "i18n/style-guides/es.md": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6",
+    "i18n/style-guides/ru.md": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "i18n/style-guides/vi.md": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51",
+    "i18n/style-guides/hi.md": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
+    "i18n/style-guides/ur.md": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4",
+    "i18n/style-guides/zh-CN.md": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  },
+  "first_reports_consulted": false
+}

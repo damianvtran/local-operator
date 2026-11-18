@@ -1,0 +1,203 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "i18n-auditor / Audit daemon Urdu",
+    "session": "c736f176af6f",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "acf0a84cd992",
+    "independent_from_translation_job": "170903662c6e",
+    "actual_model_source": "Session runtime declaration openai/gpt-6.1-sol; no fallback reported.",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "job": "170903662c6e",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager identifies remediation job as same original translator; original delegation disclosed actual openai/gpt-6.1-sol. No separate provider fallback was disclosed for this job."
+  },
+  "source_audit_revision": {
+    "head": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+    "working_tree_inputs": "Uncommitted #4112 source/target remediation; exact input hashes below"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/cli.serve_readiness.json",
+      "sha256": "ea205b92cd2fdfa297a56464cd3ac44116fe37c6facce6b440a33fa02ad72e53"
+    }
+  },
+  "supporting_input_hashes": [
+    {
+      "path": "local_operator/network/readiness.py",
+      "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/ur.md",
+      "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/report.md",
+      "sha256": "0042b27bc41dd7e5827b2c17bd9dad70603b1f9d1e8524abbbcd1c7529991014",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/mechanical.py.txt",
+      "sha256": "4ef0b87a2f6d65e0141e5b7cab64cabf736f182d649b1a024e78034f55d88e89",
+      "kind": "actual_command_stdin_reproduction"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/audit.log",
+      "sha256": "a9b98be2f9b9e5e30bf357dd3502e94d2f710a365a7f39b5e3d565c74290dfc4",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/ledger-receipt.json",
+      "sha256": "ed231cf539b593ecc369f6387c16dc4b204c96fc48cf7b8ff8202a9efe282110",
+      "kind": "ledger_append_receipt_dry_run_validated"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "coverage": {
+    "audit_kind": "First independent audit of changed source hash; not a recreation",
+    "updated_keys": [
+      "cli.serve_readiness.unproven",
+      "cli.serve_readiness.not_reporting",
+      "cli.serve_readiness.not_this_daemon",
+      "cli.serve_readiness.unknown_state",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.identity_restart"
+    ],
+    "new_keys": [
+      "cli.serve_readiness.pid_reason",
+      "cli.serve_readiness.and_more",
+      "cli.serve_readiness.identity_no_action",
+      "cli.serve_readiness.identity_restart_manual"
+    ],
+    "retained_keys": [
+      "cli.serve_readiness.install_unknown",
+      "cli.serve_readiness.cgroup_unknown",
+      "cli.serve_readiness.stale",
+      "cli.serve_readiness.other_unit"
+    ],
+    "retained_coverage_record": {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd1r/record.json",
+      "sha256": "73917c845659e22a8a84b7f5d43cf15b7da3e606c7d70e4ef83899e55947ebac"
+    },
+    "unchanged_value_proof": [
+      {
+        "locale": "en",
+        "key": "cli.serve_readiness.install_unknown",
+        "value_sha256": "ecbf137d2c98bfe4f87b5244ebda7ba2d77f178d7866d583626a79984d7f45b8",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      },
+      {
+        "locale": "en",
+        "key": "cli.serve_readiness.cgroup_unknown",
+        "value_sha256": "5f7bb362e191854c2fae045ccf22e8081ab60db087f2a65aa6f5f592de43368c",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      },
+      {
+        "locale": "en",
+        "key": "cli.serve_readiness.stale",
+        "value_sha256": "775803dd5c649de3de8ea616ce7514ff49306801fb2b286dff4626979ebc9143",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      },
+      {
+        "locale": "en",
+        "key": "cli.serve_readiness.other_unit",
+        "value_sha256": "03c7c68e179d3372d151d206bb9e630a608e63f24b53d93c95ffe8a74186c567",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      },
+      {
+        "locale": "ur",
+        "key": "cli.serve_readiness.install_unknown",
+        "value_sha256": "0a9be5c5443af73b99614c038563ebbd5e28b36ed54e0f2eb0c5cae6f1f0a608",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      },
+      {
+        "locale": "ur",
+        "key": "cli.serve_readiness.cgroup_unknown",
+        "value_sha256": "dc5a5c024972260645c6b2a0440f197e4ef48f55edddc2f73fdebc5874a15516",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      },
+      {
+        "locale": "ur",
+        "key": "cli.serve_readiness.stale",
+        "value_sha256": "4dd323a19d78324b727fecdd133112f71e035a19e244c8c5bda343707544a102",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      },
+      {
+        "locale": "ur",
+        "key": "cli.serve_readiness.other_unit",
+        "value_sha256": "1ff130bacc639999c3ea7fbf647e793f4452e2fb24c9f7a679ffa6c43870f853",
+        "base_ref": "1fc11dab96954dcc4c31abcc695c696baf2ead8c",
+        "value_bytes_unchanged": true
+      }
+    ],
+    "all_15_current_keys_mechanically_checked": true,
+    "plural_messages": 6,
+    "required_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "counts_rendered": [
+      0,
+      1,
+      2,
+      12
+    ],
+    "opaque_simple_parameters_checked": true,
+    "grouped_diagnoses_composed": true,
+    "readiness_selection_read_not_executed": true,
+    "deferred_cgroup_N1_not_reopened": true,
+    "rendered_visual_rtl_evidence": false,
+    "separate_second_auditor_not_claimed": true
+  },
+  "ledger_operation": {
+    "append_applied": false,
+    "dry_run_exit_code": 0,
+    "expected_history_sha": "c133486dfb91920d3a92b025400eb1a4eb8d10029bde3f2e96b1eee99562d151",
+    "history_file_sha256_before_and_after": "121c2d3fae01ca6bb3cf60e8f39524f41608e318049741629f7977c47eb65f50",
+    "parent_to_append": true
+  },
+  "current_bytes_match_audited_hashes": true,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention_state": "New canonical repo-only bundle; parent owns staging/commit; no claim on main"
+}

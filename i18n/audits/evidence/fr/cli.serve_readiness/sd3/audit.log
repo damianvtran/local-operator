@@ -1,0 +1,86 @@
+# Actual execution log
+Record reference: i18n/audits/evidence/fr/cli.serve_readiness/sd3/record.json
+Auditor: Audit daemon French; session 19f657b90086; actual model openai/gpt-6.1-sol; no fallback reported
+UTC: 2026-11-16T05:17:16.883169+00:00
+CWD: /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+exit_code: 0
+stdout:
+check.py: catalogue checks: 0 problem(s)
+
+stderr:
+
+
+$ .venv/bin/python -c <exact code retained in i18n/audits/evidence/fr/cli.serve_readiness/sd3/verify.py.txt>
+exit_code: 0
+stdout:
+PASS cli.serve_readiness.unproven args= () categories= ()
+RENDER 1 cells=123 enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé)
+PASS cli.serve_readiness.not_reporting args= () categories= ()
+RENDER 1 cells=67 enregistrement présent, mais aucune réponse (plus de signal de vie)
+PASS cli.serve_readiness.not_this_daemon args= () categories= ()
+RENDER 1 cells=72 enregistrement présent, mais PID désormais détenu par un autre processus
+PASS cli.serve_readiness.unknown_state args= () categories= ()
+RENDER 1 cells=43 enregistrement présent avec un état inconnu
+PASS cli.serve_readiness.install_unknown args= () categories= ()
+RENDER 1 cells=62 utilise un build qui ne peut pas être comparé à l’installation
+PASS cli.serve_readiness.cgroup_unknown args= () categories= ()
+RENDER 1 cells=66 s’exécute dans un cgroup que cette vérification ne peut pas situer
+PASS cli.serve_readiness.recorded_gap args= (('recorded', 'simple'), ('install', 'simple')) categories= ()
+RENDER 1 cells=91 l’enregistrement indique le build v0.105.3+abc:def ; le build v0.105.4+fed:cba est installé
+PASS cli.serve_readiness.unknown args= (('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) categories= (('one', 'many', 'other'),)
+RENDER 0 cells=146 le daemon `lop serve` sur node-a:22 — REASONS_OPAQUE:XYZ ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+RENDER 1 cells=146 le daemon `lop serve` sur node-a:22 — REASONS_OPAQUE:XYZ ; il est donc impossible de savoir s’il correspond à l’installation et s’il est supervisé
+RENDER 2 cells=155 les daemons `lop serve` sur node-a:22 — REASONS_OPAQUE:XYZ ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+RENDER 1000000 cells=155 les daemons `lop serve` sur node-a:22 — REASONS_OPAQUE:XYZ ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+RENDER 1500000 cells=155 les daemons `lop serve` sur node-a:22 — REASONS_OPAQUE:XYZ ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+PASS cli.serve_readiness.stale args= (('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) categories= (('one', 'many', 'other'),)
+RENDER 0 cells=180 le daemon `lop serve` sur node-a:22 (1001, 1002) utilise v0.105.3+abc:def, mais l’installation est v0.105.4+fed:cba : les sessions distantes qu’il héberge utilisent cet autre build
+RENDER 1 cells=180 le daemon `lop serve` sur node-a:22 (1001, 1002) utilise v0.105.3+abc:def, mais l’installation est v0.105.4+fed:cba : les sessions distantes qu’il héberge utilisent cet autre build
+RENDER 2 cells=189 les daemons `lop serve` sur node-a:22 (1001, 1002) utilisent v0.105.3+abc:def, mais l’installation est v0.105.4+fed:cba : les sessions distantes qu’ils hébergent utilisent ces autres builds
+RENDER 1000000 cells=189 les daemons `lop serve` sur node-a:22 (1001, 1002) utilisent v0.105.3+abc:def, mais l’installation est v0.105.4+fed:cba : les sessions distantes qu’ils hébergent utilisent ces autres builds
+RENDER 1500000 cells=189 les daemons `lop serve` sur node-a:22 (1001, 1002) utilisent v0.105.3+abc:def, mais l’installation est v0.105.4+fed:cba : les sessions distantes qu’ils hébergent utilisent ces autres builds
+PASS cli.serve_readiness.other_unit args= (('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) categories= (('one', 'many', 'other'),)
+RENDER 0 cells=114 le daemon `lop serve` sur node-a:22 est rattaché à un autre service (custom.service), et non à une unité lop serve
+RENDER 1 cells=114 le daemon `lop serve` sur node-a:22 est rattaché à un autre service (custom.service), et non à une unité lop serve
+RENDER 2 cells=119 les daemons `lop serve` sur node-a:22 sont rattachés à d’autres services (custom.service), et non à une unité lop serve
+RENDER 1000000 cells=119 les daemons `lop serve` sur node-a:22 sont rattachés à d’autres services (custom.service), et non à une unité lop serve
+RENDER 1500000 cells=119 les daemons `lop serve` sur node-a:22 sont rattachés à d’autres services (custom.service), et non à une unité lop serve
+PASS cli.serve_readiness.identity_restart args= (('device', 'simple'),) categories= ()
+RENDER 1 cells=159 sur node-a:22, lancez `lop services restart` pour faire passer le daemon enregistré au build installé ; le redémarrage vérifie chaque daemon avant toute action
+PASS cli.serve_readiness.pid_reason args= (('count', 'plural'), ('pids', 'simple'), ('reason', 'simple')) categories= (('one', 'many', 'other'),)
+RENDER 0 cells=53 identifiant de processus 1001, 1002 — DIAG_OPAQUE:XYZ
+RENDER 1 cells=53 identifiant de processus 1001, 1002 — DIAG_OPAQUE:XYZ
+RENDER 2 cells=54 identifiants de processus 1001, 1002 — DIAG_OPAQUE:XYZ
+RENDER 1000000 cells=54 identifiants de processus 1001, 1002 — DIAG_OPAQUE:XYZ
+RENDER 1500000 cells=54 identifiants de processus 1001, 1002 — DIAG_OPAQUE:XYZ
+PASS cli.serve_readiness.and_more args= (('count', 'plural'),) categories= (('one', 'many', 'other'),)
+RENDER 0 cells=12 et 0 de plus
+RENDER 1 cells=12 et 1 de plus
+RENDER 2 cells=12 et 2 de plus
+RENDER 1000000 cells=20 et 1 000 000 de plus
+RENDER 1500000 cells=20 et 1 500 000 de plus
+PASS cli.serve_readiness.identity_no_action args= (('count', 'plural'),) categories= (('one', 'many', 'other'),)
+RENDER 0 cells=167 l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+RENDER 1 cells=167 l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+RENDER 2 cells=174 les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+RENDER 1000000 cells=174 les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+RENDER 1500000 cells=174 les enregistrements, dont l’identité des processus n’est pas prouvée, correspondent au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+PASS cli.serve_readiness.identity_restart_manual args= (('device', 'simple'),) categories= ()
+RENDER 1 cells=167 sur node-a:22, redémarrez `lop serve` manuellement pour faire passer le daemon enregistré au build installé ; il ne peut pas se recharger lui-même en cours d’exécution
+RETAINED EXACT JSON LINE cli.serve_readiness.install_unknown 290b735aab218177fbc515505855510d2069083bd727e2b1ea53d3297942ca2f
+RETAINED EXACT JSON LINE cli.serve_readiness.cgroup_unknown 0fc60e48961d6e2b7121fb8a813038f40029b09ebd3cb9b5cebabaed3b72af2d
+RETAINED EXACT JSON LINE cli.serve_readiness.stale 35ea5e046d5459d13a3e32d9271b8cdd782701722dda4a939bca23259b3ebc59
+RETAINED EXACT JSON LINE cli.serve_readiness.other_unit 5eb14b219d8e692d3a67d2167dfa27fde4bbbde13b7b1082a56b449ba6f12df9
+GROUPED COMPOSITION overflow=1 les daemons `lop serve` sur node-a:22 — identifiants de processus 1001, 1002 — enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé); l’enregistrement indique le build v0.105.3+abc:def ; le build v0.105.4+fed:cba est installé et 1 de plus ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+GROUPED COMPOSITION overflow=2 les daemons `lop serve` sur node-a:22 — identifiants de processus 1001, 1002 — enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé); l’enregistrement indique le build v0.105.3+abc:def ; le build v0.105.4+fed:cba est installé et 2 de plus ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+GROUPED COMPOSITION overflow=1000000 les daemons `lop serve` sur node-a:22 — identifiants de processus 1001, 1002 — enregistrement présent, mais identité du processus impossible à prouver (aucun horodatage de démarrage n’a pu être comparé); l’enregistrement indique le build v0.105.3+abc:def ; le build v0.105.4+fed:cba est installé et 1 000 000 de plus ; il est donc impossible de savoir s’ils correspondent à l’installation et s’ils sont supervisés
+ACTION COPY identity_no_action l’enregistrement, dont l’identité du processus n’est pas prouvée, correspond au build installé ; aucune action n’est nécessaire pour cette vérification non obligatoire
+ACTION COPY identity_restart sur node-a:22, lancez `lop services restart` pour faire passer le daemon enregistré au build installé ; le redémarrage vérifie chaque daemon avant toute action
+ACTION COPY identity_restart_manual sur node-a:22, redémarrez `lop serve` manuellement pour faire passer le daemon enregistré au build installé ; il ne peut pas se recharger lui-même en cours d’exécution
+SUMMARY 15/15 mechanical/opaque checks; 6/6 French plurals one/many/other; 7 changed + 4 new + 4 exact unchanged JSON lines; grouped reason and overflow composition checked
+LIMIT no services, pytest, translation APIs, installs, screenshots or runtime remedy-branch execution; source selection reviewed statically
+
+stderr:
+

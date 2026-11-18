@@ -1,0 +1,136 @@
+"""Independent scoped catalogue audit evidence, not a native-app/UI certification."""
+import sys, os, json, hashlib, subprocess, unicodedata, re, io
+from pathlib import Path
+ROOT=Path('/Users/damian/local-operator/.worktrees/github-designation-ux-4052')
+sys.path.insert(0,str(ROOT)); os.chdir(ROOT)
+from local_operator.i18n import runtime, messages
+from local_operator.i18n.format import plural_categories, plural_category
+from local_operator.i18n.display import isolated_status_text, TechnicalSpan
+from rich.console import Console
+from rich.text import Text
+OUT=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])/'audit4052'; OUT.mkdir(exist_ok=True)
+LOCALES=['en','fr','es','zh-CN','ru','vi','ur','hi']; NS=['wire.github','wire.settings']; HELP='wire.settings.network_credentials_github_repositories.help'
+BASE='aa051d55925b483175388edcbae9dff315ca49f1'; HEAD='0b754ce89567ae158fe91db3ec0ed0b4a621f312'
+assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==HEAD
+sha=lambda b:hashlib.sha256(b).hexdigest()
+load=lambda p:json.loads(p.read_text())
+cat=lambda l,ns:ROOT/'local_operator/i18n/catalogues'/l/(ns+'.json')
+en={ns:load(cat('en',ns)) for ns in NS}
+counts=[0,1,2,3,4,5,11,21,22,25,1.5,1000000]
+fixed={'repo':'octo-org/website','names':'octo-org/website, octo-org/api','command':'lop network credential github repos --use-default','owner':'lender-qa','action':'exclude','error':'PermissionError','limit':128,'form':'other','last':'octo-org/api','head':'octo-org/website','reason':'REASON','remedy':'REMEDY','source':'SOURCE','ago':'AGO','opted':'','failure':'','pointer':'','ttl':'TTL','which':'WHICH','detail':'DETAIL'}
+summary={}; findings=[]
+for l in LOCALES:
+ d={ns:load(cat(l,ns)) for ns in NS};rendered=[]; report={'locale':l,'inputs':{},'scoped_key_count':69,'settings_total_keys':len(d['wire.settings']),'retention':{},'receipt_matches':{},'checks':[]}
+ for ns in NS:
+  p=cat(l,ns); report['inputs'][ns]={'en':sha(cat('en',ns).read_bytes()),'target':sha(p.read_bytes()),'context':sha(cat('en',ns).with_name(ns+'.context.json').read_bytes())}
+  # Duplicate-member detection is independent of the repository parser.
+  def pairs(xs):
+   z={}
+   for k,v in xs:
+    assert k not in z,(l,ns,'duplicate key',k)
+    z[k]=v
+   return z
+  json.loads(p.read_text(),object_pairs_hook=pairs)
+  assert set(d[ns])==set(en[ns]),(l,ns,'key mismatch')
+  if ns=='wire.settings':
+   old=json.loads(subprocess.check_output(['git','show',f'{BASE}:{p.relative_to(ROOT)}']))
+   delta=[k for k in old.keys()|d[ns].keys() if old.get(k)!=d[ns].get(k)];assert delta==[HELP],delta
+   report['retention'][ns]={'changed_keys':delta,'unchanged_target_values':len(old)-1,'base_target_sha256':sha(subprocess.check_output(['git','show',f'{BASE}:{p.relative_to(ROOT)}']))}
+   if l!='en':
+    hp=f'i18n/audit-history/{l}/{ns}.json';prev=json.loads(subprocess.check_output(['git','show',f'{BASE}:{hp}']))['entries'][-1]
+    assert prev['status']=='passed';report['retention'][ns]['baseline_receipt']=prev
+  if l!='en':
+   rows=load(ROOT/'i18n/audit-history'/l/(ns+'.json'))['entries']; r=rows[-1]
+   assert r['source_sha256']==report['inputs'][ns]['en']
+   assert report['inputs'][ns]['target'] in r['note']
+   assert r['translator']['model']=='openai/gpt-6.1-sol'
+   report['receipt_matches'][ns]={'source':True,'target_note':True,'translator':r['translator'],'status':r['status']}
+  keys=list(en[ns]) if ns=='wire.github' else [HELP]
+  for k in keys:
+   v=d[ns][k];args=runtime.message_arguments(v);src_args=dict(runtime.message_arguments(en[ns][k]));target_args=dict(args)
+   assert set(src_args)==set(target_args),(l,k,'placeholder names')
+   for name,kind in target_args.items():
+    assert src_args[name]==kind or (src_args[name]=='number' and kind=='plural'),(l,k,name,src_args[name],kind)
+   for plural in runtime.plural_arguments(v):
+    cats={b.selector for b in plural.branches};assert set(plural_categories(l))<=cats,(l,k,cats,plural_categories(l))
+    assert all(not b.empty and b.renders_value for b in plural.branches),(l,k,'lossy plural')
+   assert not any(ord(c) in {0x061c,0x200e,0x200f} or unicodedata.bidirectional(c) in {'LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI'} for c in v),(l,k,'manual bidi')
+   if l=='vi':assert unicodedata.normalize('NFC',v)==v,(l,k,'NFC')
+   # Protected literal groups actually authored in the source, not prose.
+   literals=['lop network credential github exclude <owner/repo>','lop network credential github repos --use-default','/settings','owner/repo','octo-org/website','--use-default','--refresh']
+   for literal in literals:
+    if literal in en[ns][k]:assert literal in v,(l,k,'literal lost',literal)
+   forms=['one','other'] if k.endswith('.readiness_list') else ['other']
+   for n in counts:
+    for form in forms:
+     params={name:(n if kind in {'number','plural'} else fixed.get(name,name.upper())) for name,kind in args};params.update({name:form for name,kind in args if name=='form'})
+     text=runtime.render_message(v,params,l);assert isinstance(text,str) and text
+     rendered.append({'key':k,'count':n,'form':form,'text':text})
+ report['render_count']=len(rendered);report['plural_categories_observed']={str(n):plural_category(l,n) for n in counts}
+ # Compose reason/remedy/time fragments with the same raw ICU runtime used by tr().
+ def R(key,**kw):return runtime.render_message(d['wire.github']['wire.github.'+key],kw,l)
+ ago=R('age_days',count=2); ttl=R('ttl',count=5);failure=' ('+R('failure_offline')+')'
+ examples={
+  'empty_explicit':R('share_empty',reason=R('reason_explicit'),remedy=R('remedy_explicit',command=fixed['command'])),
+  'empty_unavailable':R('share_empty',reason=R('reason_unavailable_local',failure=failure),remedy=R('remedy_unavailable',command='lop network credential github repos --refresh')),
+  'excluded':R('exclude_added',repo=fixed['repo'],ttl=ttl),
+  'included':R('include_added',repo=fixed['repo'],ttl=ttl),
+  'last_good':R('source_last_good',ago=ago,failure=failure),
+  'ready':R('readiness_list',form='other',head=fixed['repo'],last='octo-org/api',count=2,source=R('readiness_enumerated',ago=ago,opted=''),pointer=R('readiness_pointer',command='lop network credential github repos',owner=fixed['owner'])),
+  'wrapper_denied':R('wrapper_denied',repo=fixed['repo'],command='lop network credential github repos'),
+  'settings_help':d['wire.settings'][HELP]}
+ report['composed_examples']=examples
+ # Real production lookup remains eligibility-gated; pending locales currently fall back to en.
+ fallback=messages.render_record('wire.github.age_days',{'count':21},locale=l)
+ report['production_lookup']={'text':fallback.text,'source_locale':fallback.source_locale}
+ assert fallback.source_locale=='en',(l,'unexpected activation',fallback)
+
+ report['checks']=['duplicate-free JSON','exact key parity','placeholder name/kind parity including lossless number-to-plural','complete CLDR categories','all branch counts rendered','technical literals retained','no manual bidi controls','settings unaffected values byte-retained','current-byte translator receipt matched']
+ (OUT/f'{l}-renders.json').write_text(json.dumps(rendered,ensure_ascii=False,indent=2)+'\n')
+ # Render plain CLI text with Rich at 100 columns, not a browser/native-app test host.
+ c=Console(record=True,width=100,file=io.StringIO(),force_terminal=False,color_system=None)
+ for name,text in examples.items():
+  c.print(Text(f'{l} / {name}',style='bold'));c.print(Text(text));c.print()
+ (OUT/f'{l}.svg').write_text(c.export_svg(title=f'PR4052 independent audit — {l} / raw CLI copy'))
+ report['max_line_cells_before_wrap']=max(Text(x).cell_len for x in examples.values())
+ summary[l]=report
+# Counterfactual mechanical guards: intentionally malformed ICU and lost argument must fail.
+try: runtime.parse_message('{count, plural, one {# day} other {# days}')
+except runtime.MessageSyntaxError: syntax_negative=True
+else: syntax_negative=False
+assert syntax_negative
+assert dict(runtime.message_arguments('value {repo}'))!=dict(runtime.message_arguments('value'))
+# Scoped pseudo long-string check: interpolate expanded literals, then wrap without truncation.
+pseudo=[]
+def expanded_nodes(nodes):
+ from dataclasses import replace
+ out=[]
+ protected=re.compile(r'(lop network credential github exclude <owner/repo>|lop network credential github repos --use-default|GitHub|/settings|owner/repo|octo-org/website|--use-default|--refresh|repos|push)')
+ for node in nodes:
+  if isinstance(node,runtime._Text):
+   pieces=protected.split(node.value)
+   value=''.join(piece if i%2 else ''.join(c+('~' if c.isalpha() else '') for c in piece) for i,piece in enumerate(pieces))
+   out.append(replace(node,value=value))
+  elif isinstance(node,runtime._Arg):out.append(replace(node,parts=tuple((s,expanded_nodes(body)) for s,body in node.parts)))
+  else:out.append(node)
+ return tuple(out)
+for k,v in en['wire.github'].items():
+ args=runtime.message_arguments(v);params={n:(2 if kind in {'number','plural'} else fixed.get(n,n.upper())) for n,kind in args}
+ raw=runtime.render_message(v,params,'en');expanded='⟦'+runtime._render(expanded_nodes(runtime.parse_message(v)),params,'en',None)+'⟧'
+ for name,kind in args:
+  if kind=='simple' and params[name]:assert str(params[name]) in expanded,(k,name,'pseudo mutated placeholder')
+ c=Console(width=80,file=io.StringIO(),record=True);c.print(Text(expanded)); txt=c.export_text(clear=False)
+ # Rich export includes wrapping LFs; make whitespace-normalized comparison to show no discarded words.
+ assert re.sub(r'\s+','',txt)==re.sub(r'\s+','',expanded),(k,'pseudo clipped')
+ pseudo.append({'key':k,'raw_cells':Text(raw).cell_len,'pseudo_cells':Text(expanded).cell_len,'width':80,'no_clipping':True})
+(OUT/'pseudo.json').write_text(json.dumps(pseudo,ensure_ascii=False,indent=2)+'\n')
+# Explicit production paint-adapter probe, not evidence that plain CLI calls this adapter.
+ur=summary['ur']['composed_examples']['wrapper_denied'];command='lop network credential github repos';spans=[]
+for token in ['octo-org/website',command]:
+ start=ur.index(token);spans.append(TechnicalSpan(start,start+len(token),token))
+projected=isolated_status_text(messages.RenderedMessage(ur,'ur'),sorted(spans,key=lambda x:x.start))
+assert projected.count('\u2066')==2 and projected.count('\u2067')==1 and projected.count('\u2069')==3
+assert ''.join(c for c in projected if c not in '\u2066\u2067\u2069')==ur
+(OUT/'rtl-probe.json').write_text(json.dumps({'raw':ur,'projected':projected,'isolate_counts':{'LRI':2,'RLI':1,'PDI':3},'native_terminal_shaping_verified':False,'plain_cli_adapter_use_claimed':False},ensure_ascii=False,indent=2)+'\n')
+(OUT/'summary.json').write_text(json.dumps({'head':HEAD,'base':BASE,'locales':summary,'render_count':sum(x['render_count'] for x in summary.values()),'pseudo_count':len(pseudo),'syntax_negative_control':syntax_negative},ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'locales':len(summary),'renders':sum(x['render_count'] for x in summary.values()),'scoped_target_values':7*69,'pseudo_messages':len(pseudo),'production_lookup':'en fallback for all pending target locales','rtl_probe':'balanced adapter isolates; no native terminal shaping proof','output':str(OUT)},indent=2))

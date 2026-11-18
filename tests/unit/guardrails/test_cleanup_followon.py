@@ -52,7 +52,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for sid in (ME, DONE):
         (state / "sessions" / sid / "scratchpad").mkdir(parents=True)
     (state / "config.yml").write_text("version: 1\n")
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     monkeypatch.setattr(prov, "_github_repo", lambda _: "example/repo")
     monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
@@ -397,7 +397,7 @@ def test_real_strict_owner_scan_without_a_ledger_row_is_unknown(
     monkeypatch.undo()  # drop every stub, then restore only the isolation
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(home / ".local-operator"))
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     assert prov.finished_foreign_worktree(str(wt), ME).reasons == ("owner-unknown",)
 
 
@@ -821,7 +821,9 @@ def test_r4_state_change_during_the_forge_lookup_is_caught(
         return []
 
     monkeypatch.setattr(prov, "_gh_prs", forge)
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: moved["now"] and change == "busy")
+    monkeypatch.setattr(
+        prov, "_live_cwd_inside", lambda _, **_kw: moved["now"] and change == "busy"
+    )
     got = prov.finished_foreign_worktree(str(wt), ME)
     assert not got.safe and got.reasons == ("state-moved",), got
 
@@ -924,7 +926,7 @@ def test_convergence_foreign_cwd_never_uses_own_process_exemptions(
 ) -> None:
     """The upstream own-family exemption is not evidence a foreign tree is idle."""
     wt = _finished_tree(home, repo, "done")
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: live)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: live)
 
     def own_only(*args: Any, **kwargs: Any) -> Any:
         pytest.fail("foreign finished-tree proof called the own-session cwd exemption")

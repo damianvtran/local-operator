@@ -161,6 +161,40 @@ def test_eof_without_a_newline_still_delivers_the_token(monkeypatch: pytest.Monk
     assert desktop.desktop_posture().token == TOKEN
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the bounded wait and RLIMIT_NOFILE are POSIX-only")
+def test_a_descriptor_numbered_above_fd_setsize_is_still_adopted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the wait used select(), which raises ValueError for any fd >= 1024.
+
+    A long CI process (and a serve under a parent holding many descriptors) inherits a
+    bearer descriptor numbered above FD_SETSIZE; the plane then stayed CLOSED. Dup the pipe
+    to a number past 1024 and require the token to be adopted.
+    """
+    import resource
+
+    high = 1100
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard <= high:
+        pytest.skip(f"RLIMIT_NOFILE hard limit {hard} cannot hold descriptor {high}")
+    if soft != resource.RLIM_INFINITY and soft <= high:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (high + 1, hard))
+    read_end = _pipe_with(TOKEN.encode() + b"\n")
+    try:
+        fd = os.dup2(read_end, high)
+    finally:
+        os.close(read_end)
+    try:
+        monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(fd))
+        desktop.adopt_spawn_bearer()
+        assert desktop.desktop_posture().token == TOKEN
+        with pytest.raises(OSError):
+            os.fstat(fd)  # consumed and closed, as for a low-numbered descriptor
+    finally:
+        if soft != resource.RLIM_INFINITY and soft <= high:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
 @pytest.mark.parametrize("value", ["not-a-number", "987654"])
 def test_a_bad_descriptor_leaves_the_plane_closed(
     monkeypatch: pytest.MonkeyPatch, value: str

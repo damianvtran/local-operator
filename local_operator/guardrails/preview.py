@@ -339,60 +339,70 @@ def preview_tool_call(
     effect = ""
     builtin_text = ""
     builtin_facts: tuple[str, ...] = ()
-    if tool_name == "bash":
-        command = args.get("command")
-        if isinstance(command, str) and command.strip():
-            verdict = classify_bash(
-                command,
-                cwd=context.cwd,
-                env=context.env,
-                scratchpad=context.scratchpad,
-                session_id=context.session_id,
-            )
-            # Same ranking the checkpoint applies (unanswered asks lift LOW).
-            verdict = escalate_asked_targets(verdict, context)
-            effect = builtin_branch(verdict, critical_override=live.critical_override)
-            if effect == BUILTIN_REFUSE_CRITICAL:
-                builtin_text = _critical_text(verdict)
-            elif effect == BUILTIN_REFUSE_CREDENTIAL:
-                builtin_text = credential_refusal_text(command)
-            elif effect == BUILTIN_JUDGE:
-                case = build_delete_case(verdict, context)
-                builtin_facts = (*case.facts, *case.evidence.describe())
-                if case.excluded:
-                    builtin_facts += (f"excluded as untrusted: {case.excluded}",)
-                proven = case.evidence_basis()
-                if proven:
-                    # The checkpoint allows this without the judge
-                    # (``DeleteCase.evidence_basis``); report that branch.
-                    effect = BUILTIN_PASS
-                    builtin_facts += (f"allowed without the judge: {proven}",)
-                elif case.lapsed_only:
-                    # The checkpoint refuses a path only a non-consenting ask
-                    # points at before any judge runs (QA R1-Q1): say so,
-                    # rather than naming a judge that never runs.
-                    effect = BUILTIN_REFUSE_LAPSED
-                    builtin_text = review_text(
-                        DANGEROUS_DELETE_RULE,
-                        lapsed_refusal_reason(case),
-                        _targets_text(verdict),
-                        worktree=worktree_flagged(verdict),
-                    )
-                else:
-                    builtin_text = review_text(
-                        DANGEROUS_DELETE_RULE,
-                        "<judge reason>",
-                        _targets_text(verdict),
-                        worktree=worktree_flagged(verdict),
-                    )
+    # The same forge auth the checkpoint gives its PR-state lookups (QA Q1,
+    # PR #4161): without it a preview on a gh-borrowing node read "PR state
+    # unknown" where ``check_tool_call`` read the merged PR, and refusal text
+    # sends agents here to re-evaluate. Set and reset exactly as there.
+    from local_operator.guardrails import provenance as prov
 
-    elif tool_name in FILE_DESTINATION_TOOLS:
-        # The checkpoint refuses a write/edit of the guard's own evidence
-        # before any rule; report that same branch and text.
-        verdict = evidence_write_verdict(tool_name, args, context)
-        if verdict is not None:
-            effect = BUILTIN_REFUSE_CRITICAL
-            builtin_text = _critical_text(verdict)
+    forge_token = prov.FORGE_AUTH.set(context.forge_auth)
+    try:
+        if tool_name == "bash":
+            command = args.get("command")
+            if isinstance(command, str) and command.strip():
+                verdict = classify_bash(
+                    command,
+                    cwd=context.cwd,
+                    env=context.env,
+                    scratchpad=context.scratchpad,
+                    session_id=context.session_id,
+                )
+                # Same ranking the checkpoint applies (unanswered asks lift LOW).
+                verdict = escalate_asked_targets(verdict, context)
+                effect = builtin_branch(verdict, critical_override=live.critical_override)
+                if effect == BUILTIN_REFUSE_CRITICAL:
+                    builtin_text = _critical_text(verdict)
+                elif effect == BUILTIN_REFUSE_CREDENTIAL:
+                    builtin_text = credential_refusal_text(command)
+                elif effect == BUILTIN_JUDGE:
+                    case = build_delete_case(verdict, context)
+                    builtin_facts = (*case.facts, *case.evidence.describe())
+                    if case.excluded:
+                        builtin_facts += (f"excluded as untrusted: {case.excluded}",)
+                    proven = case.evidence_basis()
+                    if proven:
+                        # The checkpoint allows this without the judge
+                        # (``DeleteCase.evidence_basis``); report that branch.
+                        effect = BUILTIN_PASS
+                        builtin_facts += (f"allowed without the judge: {proven}",)
+                    elif case.lapsed_only:
+                        # The checkpoint refuses a path only a non-consenting ask
+                        # points at before any judge runs (QA R1-Q1): say so,
+                        # rather than naming a judge that never runs.
+                        effect = BUILTIN_REFUSE_LAPSED
+                        builtin_text = review_text(
+                            DANGEROUS_DELETE_RULE,
+                            lapsed_refusal_reason(case),
+                            _targets_text(verdict),
+                            worktree=worktree_flagged(verdict),
+                        )
+                    else:
+                        builtin_text = review_text(
+                            DANGEROUS_DELETE_RULE,
+                            "<judge reason>",
+                            _targets_text(verdict),
+                            worktree=worktree_flagged(verdict),
+                        )
+
+        elif tool_name in FILE_DESTINATION_TOOLS:
+            # The checkpoint refuses a write/edit of the guard's own evidence
+            # before any rule; report that same branch and text.
+            verdict = evidence_write_verdict(tool_name, args, context)
+            if verdict is not None:
+                effect = BUILTIN_REFUSE_CRITICAL
+                builtin_text = _critical_text(verdict)
+    finally:
+        prov.FORGE_AUTH.reset(forge_token)
 
     # Item C: a credential variable's path value resolves like a literal, so
     # the preview hides it exactly as the checkpoint's carriers do.

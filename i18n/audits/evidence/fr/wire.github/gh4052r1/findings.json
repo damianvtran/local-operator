@@ -1,0 +1,121 @@
+[
+  {
+    "id": "I-RU-PUSH",
+    "severity": "MAJOR",
+    "locale": "ru",
+    "namespace": "wire.github",
+    "keys": [
+      "wire.github.opt_out_step",
+      "wire.github.exclude_added",
+      "wire.github.include_added"
+    ],
+    "problem": "The all-locales glossary keeps git push in Latin. These three messages replace it with отправлять … изменения, unlike neighboring GitHub copy and the translator receipt claim.",
+    "suggestions": {
+      "wire.github.opt_out_step": "исключить репозиторий: {command} — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, {ttl}",
+      "wire.github.exclude_added": "{repo} исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, {ttl}",
+      "wire.github.include_added": "{repo} возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, {ttl}"
+    },
+    "current_text": {
+      "wire.github.opt_out_step": "исключить репозиторий: {command} — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "wire.github.exclude_added": "{repo} исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "wire.github.include_added": "{repo} возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, {ttl}"
+    }
+  },
+  {
+    "id": "I-RU-WRAPPER",
+    "severity": "MAJOR",
+    "locale": "ru",
+    "namespace": "wire.github",
+    "keys": [
+      "wire.github.wrapper_denied"
+    ],
+    "problem": "Устройство-кредитор is a financial-creditor calque in a safety diagnostic; выполнение … недоступна is grammatically wrong. Same key as second-pass I2-RU-01, independently rated MINOR there; deduplicate fixes, not provenance.",
+    "suggestions": {
+      "wire.github.wrapper_denied": "{repo} отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте {command} на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ."
+    },
+    "current_text": {
+      "wire.github.wrapper_denied": "{repo} отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте {command} на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ."
+    }
+  },
+  {
+    "id": "I-COMPOSE",
+    "severity": "MAJOR",
+    "locale": "es",
+    "namespace": "wire.github",
+    "keys": [
+      "wire.github.share_empty"
+    ],
+    "problem": "A whole reason sentence is inserted after mientras: with reason_unavailable_local this becomes se rechaza … mientras no se pudo obtener … y no hay … . Present refusal is governed by an incompatible completed-past temporal clause. Use a reason-introducing wrapper that can accept every existing reason; no English/code change needed.",
+    "suggestions": {
+      "wire.github.share_empty": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se sigue rechazando todo préstamo por este motivo: {reason}; {remedy}"
+    },
+    "current_text": {
+      "wire.github.share_empty": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras {reason}; {remedy}"
+    }
+  },
+  {
+    "id": "I-COMPOSE",
+    "severity": "MAJOR",
+    "locale": "ru",
+    "namespace": "wire.github",
+    "keys": [
+      "wire.github.share_empty"
+    ],
+    "problem": "Composed explicit reason yields отклоняются, пока … не осталось репозиториев; unavailable reason yields пока не удалось получить … . The completed-past clauses are not an idiomatic ongoing refusal condition, and the explicit reading can suggest until none remain. Introduce the reason as a reason; existing English/fragment keys do not need changes.",
+    "suggestions": {
+      "wire.github.share_empty": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: {reason}; {remedy}"
+    },
+    "current_text": {
+      "wire.github.share_empty": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока {reason}; {remedy}"
+    }
+  },
+  {
+    "id": "I-FR-01",
+    "severity": "MINOR",
+    "locale": "fr",
+    "namespace": "wire.github",
+    "keys": [
+      "wire.github.failure_unknown"
+    ],
+    "problem": "Échec de la liste names a failed list rather than failed retrieval; surrounding failure copy uses an operation. Meaning remains recoverable.",
+    "suggestions": {
+      "wire.github.failure_unknown": "échec de la récupération de la liste des dépôts GitHub"
+    },
+    "current_text": {
+      "wire.github.failure_unknown": "échec de la liste des dépôts GitHub"
+    }
+  },
+  {
+    "id": "I-RU-02",
+    "severity": "MINOR",
+    "locale": "ru",
+    "namespace": "wire.settings",
+    "keys": [
+      "wire.settings.network_credentials_github_repositories.help"
+    ],
+    "problem": "Ранее опубликованного can suggest a published list rather than one previously shared for lending. Keep the exact never-set/cleared shared-list distinction; the current rest of the sentence does preserve stop-lending and explicit reset.",
+    "suggestions": {
+      "wire.settings.network_credentials_github_repositories.help": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка выбранного вручную списка, ранее использовавшегося для общего доступа, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+    },
+    "current_text": {
+      "wire.settings.network_credentials_github_repositories.help": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+    }
+  },
+  {
+    "id": "I2-UR-01",
+    "severity": "MAJOR",
+    "locale": "ur",
+    "namespace": "wire.github",
+    "keys": [
+      "wire.github.wrapper_denied"
+    ],
+    "problem": "Second independent pass dbf144330553: final آلہ switches from glossary ڈیوائس in the same diagnostic. Preserved second-pass report is the source, not a self-issued second pass.",
+    "suggestions": {
+      "wire.github.wrapper_denied": "{repo}، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر {command} جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔"
+    },
+    "source_record": "i18n/audits/evidence/ur/wire.github/gh4052s1/record.json",
+    "current_text": {
+      "wire.github.wrapper_denied": "{repo}، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر {command} جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔"
+    }
+  }
+]

@@ -62,6 +62,13 @@ then set established to `max(established, read + creation)`. It includes side
 calls and is still a counterfactual, not a measured cold result or proven cache
 ownership. Timestamp order matches `reviews/cold.py`. Historical cold and this
 alternative are shown with observed values, with equal visual prominence.
+In prose the kit leads with observed cost, which includes the measured cache
+reuse within each task and, for repeated runs, the reuse that holds only while
+a rerun lands inside the cache TTL (R2: median gap 1.1 min). It treats both
+cold estimates as a pessimistic sensitivity check for a one-off task on a cold
+cache, not an upper bound. Under that
+repricing the full-arm order changes against OpenCode (R2), and that reversal
+is reported alongside the observed result, not instead of it.
 
 ## Exact Codex historical sensitivity (R1/R5)
 
@@ -102,9 +109,11 @@ The Radient classifier was absent by v1 configuration. Its explicit separate
 zero component is not a usage measurement; v1 total = observed model cost.
 No inference about a later signed-in classifier's expense is supported.
 
-No point-estimate performance ranking is warranted: n=1 per cell, asymmetric
-private loadout, order-dependent warmth, post-hoc task selection, infeasible
-checkers, ambiguous tasks, model settings and an infrastructure failure. The
+No point-estimate performance ranking is warranted: n=1 per cell, per-harness
+differences in instruction text, skill counts and model settings within the
+full configuration (listed in the README under "Configuration differences"),
+order-dependent warmth, post-hoc task selection, infeasible checkers,
+ambiguous tasks and an infrastructure failure. The
 new plots are descriptive and make no inferential claims. Optional historical
 statistics resample **tasks**, not repeats; their CIs exclude run-to-run
 variance. No pass-rate difference or quality parity is established.

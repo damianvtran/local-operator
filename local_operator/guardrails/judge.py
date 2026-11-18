@@ -146,6 +146,9 @@ class JudgeBrief:
     #: Trusted operator rows, newest first: ``(label, text)`` where label is
     #: ``operator, direct`` or ``operator, answer to ask …`` (see
     #: ``provenance.operator_brief``). When set it replaces ``user_request``.
+    #: ``user_request`` alone is rendered as an UNVERIFIED user-role row,
+    #: never as the operator's words: in a subagent it is the delegating
+    #: agent's brief. Callers put trusted words here (``check.operator_of``).
     operator_words: tuple[tuple[str, str], ...] = ()
     #: Kinds and counts of untrusted rows left out (never their text).
     excluded: str = ""
@@ -203,12 +206,22 @@ def render_brief(brief: JudgeBrief) -> str:
             row_id = f' id="o{index}"' if label == "operator, direct" else ""
             lines.append(f'<operator source="{safe_label}"{row_id}>\n{body}\n</operator>')
     else:
+        # Legacy no-brief path. The latest user-role row is NOT proof of the
+        # operator: in a subagent it is the delegating agent's brief and may
+        # relay a peer or a remote answer (field incident, child
+        # feac6b2db7a4). It is shown as data, outside any <operator> block,
+        # so the judge never reads it as the operator's own words.
+        lines.append("Operator's words: (none found)")
         user = _clip(brief.user_request, _MAX_USER_CHARS) if brief.user_request else ""
         if user:
-            user = user.replace("</operator>", "<\\/operator>")
-            lines.append(f'<operator source="operator, direct">\n{user}\n</operator>')
-        else:
-            lines.append("Operator's words: (none found)")
+            # Neither close the fence nor open a look-alike <operator> block.
+            user = user.replace("</unverified>", "<\\/unverified>").replace(
+                "<operator", "<\\operator"
+            )
+            lines.append(
+                '<unverified source="unverified latest user-role message, not proven '
+                f"to be the operator's\">\n{user}\n</unverified>"
+            )
     if brief.excluded:
         lines.append(f"Excluded as untrusted (not shown): {brief.excluded}")
     if brief.evidence:

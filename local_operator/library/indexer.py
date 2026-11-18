@@ -45,6 +45,7 @@ from typing import Any, Final
 from local_operator import resume
 from local_operator.library import identity
 from local_operator.library import index as library_index
+from local_operator.library import session_watch
 from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import (
     SCHEMA_VERSION,
@@ -451,6 +452,8 @@ class LibraryIndexer:
         self._lock = threading.RLock()
         #: Set when the observer could not start; drives the slow reconcile.
         self.observer_failed = False
+        #: One fallback warning per indexer, not one per failed session add.
+        self._watch_warned = False
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -621,6 +624,15 @@ class LibraryIndexer:
             self.observer_failed = True
             logger.info("library: no sessions directory at %s; using slow reconcile", root)
             return
+        if session_watch.supported():
+            # LINUX NEVER WATCHES THE TREE RECURSIVELY. Recursive inotify is one
+            # watch per directory, and scratchpads made that 126,757 watches in
+            # one serve — the whole per-user budget (session_watch's docstring
+            # has the measurement). The shallow watch covers every file this
+            # index reads, from one close-on-exec fd.
+            self._start_session_watch(root)
+            return
+        observer: Any = None
         try:
             from watchdog.observers import Observer
 
@@ -628,6 +640,8 @@ class LibraryIndexer:
             # this module does not import watchdog at module scope. A host
             # without the package still runs the app — it falls back to the
             # slow reconcile instead of failing to import the Library.
+            # Recursive is right HERE (macOS FSEvents, Windows
+            # ReadDirectoryChangesW): both watch a tree as one kernel object.
             handler: Any = _JournalHandler(root, self._mark_dirty)
             observer = Observer()
             observer.schedule(handler, str(root), recursive=True)
@@ -636,8 +650,66 @@ class LibraryIndexer:
             self.observer_failed = False
         except Exception:  # noqa: BLE001 - fall back to the timer, never to a crash
             self.observer_failed = True
+            if observer is not None:
+                # A half-started observer still owns its OS handle; dropping the
+                # reference without stop() leaked it for the process's life.
+                try:
+                    observer.stop()
+                except Exception:  # noqa: BLE001 - best effort on a failed start
+                    pass
             logger.warning(
                 "library: journal watch unavailable; using slow reconcile", exc_info=True
+            )
+
+    def _start_session_watch(self, root: Path) -> None:
+        # Construction is inside the try: it loads libc through ctypes, and a
+        # host where that fails (no inotify symbols, a stripped container libc)
+        # must fall back to the reconcile like the watchdog branch does. This
+        # runs on the worker thread with no handler above it, so anything that
+        # escaped here would end the worker, not just the watch.
+        try:
+            watch = session_watch.SessionDirWatch(
+                root,
+                self._mark_dirty,
+                # Lost events: a reconcile re-reads every journal's signature.
+                on_overflow=self.wake,
+                on_failure=self._session_watch_failed,
+            )
+            watch.start()
+        except Exception as error:  # noqa: BLE001 - fall back to the timer, never to a crash
+            # ``start`` already closed its fd, so nothing it took is held.
+            self._session_watch_failed(error)
+            return
+        self._observer = watch
+        self.observer_failed = False
+
+    def _session_watch_failed(self, error: Exception) -> None:
+        """Fall back to the timed reconcile, saying so ONCE per indexer.
+
+        Budget exhaustion is the case this exists for: the old recursive watch
+        hit ENOSPC silently and kept squatting on what it had taken. Here the
+        watch has already released every descriptor, and one warning names the
+        limit and the remedy; repeating it per session would only flood the log
+        of a host that is already short on watches.
+        """
+        self.observer_failed = True
+        if self._watch_warned:
+            return
+        self._watch_warned = True
+        if getattr(error, "errno", None) in session_watch.BUDGET_ERRNOS:
+            logger.warning(
+                "library: inotify limit reached (%s); journal watch off, using the timed "
+                "reconcile. Raise fs.inotify.max_user_watches / max_user_instances, or "
+                "find the holder with `lop mobile doctor`.",
+                error,
+            )
+        else:
+            # A non-OSError is a bug or a broken libc, not a budget: keep its
+            # traceback (an OSError's message already says everything).
+            logger.warning(
+                "library: journal watch stopped (%s); using the timed reconcile",
+                error,
+                exc_info=None if isinstance(error, OSError) else error,
             )
 
     def _mark_dirty(self, session_id: str) -> None:

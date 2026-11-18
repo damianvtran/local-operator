@@ -1,0 +1,63 @@
+
+### fr
+borrower_no_matching_account: owner-device-7 n’a aucun dépôt GitHub dont il puisse prêter l’accès : la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (le compte associé à la liste GitHub enregistrée est inconnu), sans liste antérieure de secours — réessayez quand GitHub est joignable : lop network credential github repos --refresh. Corrigez cela sur owner-device-7 ; aucun accès n’a été prêté.
+denied_repo: octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête.
+stale_readiness: octo-org/website et octo-org/api (3 — la liste récupérée il y a 2 jours, 2 exclusions — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification (le compte associé à la liste GitHub enregistrée est inconnu)) — liste complète : lop network credential github repos sur owner-device-7
+all_opted_out: Dépôts GitHub : aucun — tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (3) sont exclus ; réincluez un dépôt avec lop network credential github include octo-org/website
+opt_out_timing: octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, sous 5 min
+clear_vs_never_set: Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default.
+auth_request_failure: GitHub a refusé ce compte
+
+### es
+borrower_no_matching_account: owner-device-7 no tiene repositorios de GitHub cuyo acceso pueda prestar: no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo — vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh. Corrígelo en owner-device-7; no se prestó ningún acceso.
+denied_repo: octo-org/website no está en la lista de repositorios proporcionada por el dispositivo que presta el acceso (puede estar excluido o no admitir push allí). Comprueba lop network credential github repos en ese dispositivo. Solo ese dispositivo puede cambiar qué acceso presta.
+stale_readiness: octo-org/website y octo-org/api (3 — la lista obtenida hace 2 días, 2 excluidos — ese dispositivo no pudo listar los repositorios de GitHub en su última comprobación (se desconoce la cuenta de la lista de GitHub guardada)) — lista completa: lop network credential github repos en owner-device-7
+all_opted_out: Repositorios de GitHub: ninguno — todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (3) están excluidos; vuelve a incluir uno con lop network credential github include octo-org/website
+opt_out_timing: octo-org/website está excluido — los dispositivos destinatarios pierden el permiso de push la próxima vez que obtengan la credencial, en un máximo de 5 min
+clear_vs_never_set: Entradas owner/repo cuyo acceso a GitHub se puede prestar. Si nunca se ha configurado, se usan todos los repositorios a los que la cuenta puede hacer push, menos los excluidos. Vaciar una lista elegida a mano y compartida anteriormente detiene los préstamos; vuelve a la selección automática con lop network credential github repos --use-default.
+auth_request_failure: GitHub rechazó esa cuenta
+
+### zh-CN
+borrower_no_matching_account: owner-device-7没有可出借访问权限的GitHub仓库：未能获取其GitHub账号可push的仓库列表 (保存的GitHub列表对应的账号未知)，且没有可回退使用的旧列表——GitHub可访问后重试：lop network credential github repos --refresh。请在owner-device-7上处理；未出借任何权限。
+denied_repo: octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos。只有该设备才能更改其出借范围。
+stale_readiness: octo-org/website和octo-org/api（3——2天前获取的列表，已排除2个——该设备上次检查时未能列出GitHub仓库 (保存的GitHub列表对应的账号未知)）——完整列表：lop network credential github repos（在owner-device-7上运行）
+all_opted_out: GitHub仓库：无——此设备GitHub账号可push的所有仓库（3个）均已被排除；用lop network credential github include octo-org/website重新纳入一个仓库
+opt_out_timing: octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，5分钟内
+clear_vs_never_set: 可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。
+auth_request_failure: GitHub拒绝了该账号
+
+### ru
+borrower_no_matching_account: На owner-device-7 нет репозиториев GitHub, доступ к которым можно предоставить взаймы: не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены — повторите, когда GitHub станет доступен: lop network credential github repos --refresh. Исправьте это на owner-device-7; доступ не предоставлен.
+denied_repo: octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ.
+stale_readiness: octo-org/website и octo-org/api (3 — список, полученный 2 дня назад, исключено: 2 — при последней проверке устройство не смогло перечислить репозитории GitHub (учётная запись сохранённого списка GitHub неизвестна)) — весь список: lop network credential github repos на owner-device-7
+all_opted_out: Репозитории GitHub: нет — все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены; верните один из репозиториев командой lop network credential github include octo-org/website
+opt_out_timing: octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, в течение 5 мин
+clear_vs_never_set: Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.
+auth_request_failure: GitHub отклонил эту учётную запись
+
+### vi
+borrower_no_matching_account: owner-device-7 không có kho GitHub nào để cho mượn quyền truy cập: không lấy được danh sách kho mà tài khoản GitHub của thiết bị đó có thể push (không rõ tài khoản của danh sách GitHub đã lưu), và không có danh sách cũ để dùng thay — thử lại khi kết nối được GitHub: lop network credential github repos --refresh. Sửa trên owner-device-7; chưa cho mượn quyền nào.
+denied_repo: octo-org/website không nằm trong danh sách kho do thiết bị cho mượn cung cấp (có thể bị loại trừ hoặc không thể push từ đó). Kiểm tra lop network credential github repos trên thiết bị cho mượn. Chỉ thiết bị đó mới thay đổi được những gì nó cho mượn.
+stale_readiness: octo-org/website và octo-org/api (3 — danh sách lấy 2 ngày trước, 2 kho đã loại trừ — thiết bị đó không thể liệt kê kho GitHub ở lần kiểm tra gần nhất (không rõ tài khoản của danh sách GitHub đã lưu)) — danh sách đầy đủ: chạy lop network credential github repos trên owner-device-7
+all_opted_out: Kho GitHub: không có — tất cả kho mà tài khoản GitHub trên thiết bị này có thể push (3) đều bị loại trừ; đưa một kho trở lại bằng lop network credential github include octo-org/website
+opt_out_timing: octo-org/website đã được loại trừ — các thiết bị được chia sẻ sẽ mất quyền push kho đó khi lấy thông tin xác thực lần tới, trong vòng 5 phút
+clear_vs_never_set: Các mục owner/repo để cho mượn quyền truy cập GitHub. Nếu chưa từng đặt, dùng tất cả kho mà tài khoản có thể push, trừ các kho bị loại trừ. Xóa trắng danh sách chọn thủ công từng được chia sẻ sẽ dừng cho mượn; trở lại lựa chọn tự động bằng lop network credential github repos --use-default.
+auth_request_failure: GitHub đã từ chối tài khoản đó
+
+### ur
+borrower_no_matching_account: owner-device-7 کے پاس کوئی GitHub ریپوزیٹری نہیں جس کی رسائی وہ مستعار دے سکے: اس کے GitHub اکاؤنٹ کی push کے قابل ریپوزیٹریوں کی فہرست حاصل نہیں ہو سکی (محفوظ GitHub فہرست کا اکاؤنٹ نامعلوم ہے)، اور متبادل کے لیے کوئی پچھلی فہرست نہیں ہے — GitHub سے رابطہ ممکن ہونے پر دوبارہ کوشش کریں: lop network credential github repos --refresh۔ اسے owner-device-7 پر درست کریں؛ کوئی رسائی مستعار نہیں دی گئی۔
+denied_repo: octo-org/website، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔
+stale_readiness: octo-org/website اور octo-org/api (3 — 2 دن پہلے حاصل کردہ فہرست، 2 خارج کردہ — آخری جانچ میں وہ ڈیوائس GitHub ریپوزیٹریوں کی فہرست نہیں لے سکا (محفوظ GitHub فہرست کا اکاؤنٹ نامعلوم ہے)) — مکمل فہرست: lop network credential github repos (owner-device-7 پر چلائیں)
+all_opted_out: GitHub ریپوزیٹریاں: کوئی نہیں — اس ڈیوائس کے GitHub اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں (3) خارج ہیں؛ lop network credential github include octo-org/website سے ایک کو واپس شامل کریں
+opt_out_timing: octo-org/website خارج ہے — جن ڈیوائسز سے اشتراک ہے وہ اگلی بار سند حاصل کرتے وقت اس میں push کا حق کھو دیں گے، 5 منٹ کے اندر
+clear_vs_never_set: GitHub رسائی مستعار دینے کے لیے owner/repo اندراجات۔ اگر کبھی مقرر نہیں کیا گیا تو اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں استعمال ہوں گی، خارج کردہ کو چھوڑ کر۔ پہلے مشترک کی گئی ہاتھ سے منتخب فہرست کو خالی کرنے سے مستعار دینا بند ہو جاتا ہے؛ lop network credential github repos --use-default سے خودکار انتخاب پر واپس آئیں۔
+auth_request_failure: GitHub نے اس اکاؤنٹ کو مسترد کیا
+
+### hi
+borrower_no_matching_account: owner-device-7 के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली (सहेजी गई GitHub सूची का खाता अज्ञात है), और विकल्प के लिए कोई पिछली सूची नहीं है — GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --refresh। इसे owner-device-7 पर ठीक करें; कोई पहुँच उधार नहीं दी गई।
+denied_repo: octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।
+stale_readiness: octo-org/website और octo-org/api (3 — 2 दिन पहले प्राप्त सूची, 2 बाहर रखी गईं — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका (सहेजी गई GitHub सूची का खाता अज्ञात है)) — पूरी सूची: lop network credential github repos (owner-device-7 पर चलाएँ)
+all_opted_out: GitHub रिपॉज़िटरी: कोई नहीं — इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (3), वे बाहर रखी गई हैं; lop network credential github include octo-org/website से किसी एक को वापस शामिल करें
+opt_out_timing: octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, 5 मिनट के भीतर
+clear_vs_never_set: GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।
+auth_request_failure: GitHub ने उस खाते को अस्वीकार किया

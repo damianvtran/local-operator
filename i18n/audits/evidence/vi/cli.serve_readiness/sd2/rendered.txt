@@ -1,0 +1,193 @@
+# Rendered catalogue text — vi / cli.serve_readiness / sd2
+
+Production runtime.render_message with explicit locale; raw text, no shipped-eligibility override.
+These are offline catalogue renders, not screenshots or full readiness integration.
+
+## cli.serve_readiness.unproven | count=1 | CLDR=n/a
+
+đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)
+
+## cli.serve_readiness.not_reporting | count=1 | CLDR=n/a
+
+đã được ghi nhận nhưng không phản hồi (heartbeat đã ngừng)
+
+## cli.serve_readiness.not_this_daemon | count=1 | CLDR=n/a
+
+đã được ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác
+
+## cli.serve_readiness.unknown_state | count=1 | CLDR=n/a
+
+được ghi nhận ở trạng thái không xác định
+
+## cli.serve_readiness.install_unknown | count=1 | CLDR=n/a
+
+chạy bản dựng không thể đối chiếu với bản cài đặt
+
+## cli.serve_readiness.cgroup_unknown | count=1 | CLDR=n/a
+
+chạy trong cgroup mà lần kiểm tra này không thể xác định vị trí
+
+## cli.serve_readiness.recorded_gap | count=1 | CLDR=n/a
+
+bản dựng được ghi nhận v0.99.0+recorded, bản cài đặt v0.99.2+installed (chưa xác minh danh tính tiến trình)
+
+## cli.serve_readiness.unknown | count=0 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=1 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=2 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=3 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=4 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=5 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=11 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=21 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=22 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=25 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=1.5 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=1000000 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown | count=1500000 | CLDR=other
+
+daemon `lop serve` trên host-sd2: pid 4101: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.stale | count=0 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=1 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=2 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=3 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=4 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=5 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=11 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=21 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=22 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=25 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=1.5 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=1000000 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale | count=1500000 | CLDR=other
+
+daemon `lop serve` trên host-sd2 (4101, 4102) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.other_unit | count=0 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=1 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=2 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=3 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=4 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=5 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=11 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=21 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=22 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=25 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=1.5 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=1000000 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit | count=1500000 | CLDR=other
+
+daemon `lop serve` trên host-sd2 thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.identity_restart | count=1 | CLDR=n/a
+
+trên host-sd2, chạy `lop services status` để kiểm tra các bản ghi, rồi chạy `lop services restart` để ghi nhận danh tính tiến trình; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện
+
