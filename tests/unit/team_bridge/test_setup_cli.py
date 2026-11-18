@@ -297,10 +297,22 @@ def test_the_guide_is_the_only_place_that_could_promise_a_terminal_consent() -> 
 # instead of pointing at an app that should never enrol the node.
 
 
-def _network(root: Path, *, self_id: str, created_by: str, trust: str = "active") -> None:
+def _network(
+    root: Path,
+    *,
+    self_id: str,
+    created_by: str,
+    trust: str = "active",
+    previous_ids: tuple[str, ...] = (),
+) -> None:
     from local_operator.network import store as net_store
-    from local_operator.network.types import NetworkRecord
+    from local_operator.network.types import MemberRecord, NetworkRecord
 
+    # ``previous_ids`` models `lop network rotate`: the self member keeps its old
+    # ids there while ``created_by`` still names the pre-rotation id.
+    members = (
+        [MemberRecord(device_id=self_id, previous_ids=list(previous_ids))] if previous_ids else []
+    )
     net_store.save(
         NetworkRecord(
             network_id=f"net-{created_by}",
@@ -308,6 +320,7 @@ def _network(root: Path, *, self_id: str, created_by: str, trust: str = "active"
             created_by=created_by,
             self_device_id=self_id,
             trust=trust,  # type: ignore[arg-type]
+            members=members,
         ),
         root,
     )
@@ -323,7 +336,9 @@ def authority(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
 
     def _resolve(root):  # noqa: ANN001
         state["probed"] = True
-        return mirror_authority.Authority(key_id="anchor-1" if state["signs"] else "", signs=state["signs"])
+        return mirror_authority.Authority(
+            key_id="anchor-1" if state["signs"] else "", signs=state["signs"]
+        )
 
     monkeypatch.setattr(mirror_authority, "_resolve", _resolve)
     mirror_authority.reset_cache()
@@ -332,7 +347,10 @@ def authority(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
 
 
 def test_a_joined_mesh_node_is_routed_to_the_chief_of_staff_not_the_app(
-    tmp_path: Path, placed: list[str], authority: dict[str, bool], capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    placed: list[str],
+    authority: dict[str, bool],
+    capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _network(tmp_path, self_id="dev-node", created_by="dev-head")
@@ -345,7 +363,7 @@ def test_a_joined_mesh_node_is_routed_to_the_chief_of_staff_not_the_app(
     lines = setup_cli.render_lines(result)
     assert len(lines) == 1
     text = lines[0]
-    assert "chief-of-staff session" in text and "`send`" in text and "no peer" in text
+    assert "chief-of-staff session" in text and "`send`" in text and "no `peer` field" in text
     # The app path is NOT offered on a node: neither primary-device line appears.
     assert "Local Operator app" not in text
     assert "run this command again" not in text
@@ -362,13 +380,21 @@ def test_a_joined_mesh_node_is_routed_to_the_chief_of_staff_not_the_app(
         [("dev-head", "dev-head")],  # created its own network: the operator's device
         [("dev-head", "dev-other"), ("dev-head", "dev-head")],  # joined one, created one
         [("dev-node", "dev-head", "untrusted")],  # only an untrusted network
+        # The creator rotated its identity: created_by keeps the old id (M1).
+        [("dev-head2", "dev-head", "active", ("dev-head",))],
     ],
 )
 def test_a_primary_device_keeps_the_app_guidance(
     tmp_path: Path, placed: list[str], authority: dict[str, bool], networks: list[tuple[str, ...]]
 ) -> None:
     for row in networks:
-        _network(tmp_path, self_id=row[0], created_by=row[1], trust=row[2] if len(row) > 2 else "active")
+        _network(
+            tmp_path,
+            self_id=row[0],
+            created_by=row[1],
+            trust=row[2] if len(row) > 2 else "active",
+            previous_ids=row[3] if len(row) > 3 else (),
+        )
 
     result = setup_cli.setup(tmp_path)
 

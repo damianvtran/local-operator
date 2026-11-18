@@ -145,13 +145,18 @@ def setup(root: Path) -> dict[str, Any]:
 def is_joined_mesh_node(root: Path) -> bool:
     """Whether this device is a mesh member that JOINED, not the operator's primary.
 
-    The facts, both already on disk and both read-only here:
+    The facts, both already on disk (this function writes nothing of its own;
+    ``list_networks`` may still move a corrupt record aside, as for every reader):
 
     * membership: every active network record was created by ANOTHER device
       (``created_by`` is this device's id for a network it created, and the
-      inviter's id for one it joined, ``network.cli``). A device with no network,
-      or one that created any of its networks, is treated as primary — the
-      operator creates the network on their own machine and pairs nodes into it;
+      inviter's id for one it joined, ``network.cli``). ``created_by`` is never
+      rewritten by ``lop network rotate``, which moves the old id into the self
+      member's ``previous_ids``; so "this device" means its current id or any
+      previous one, or a rotated creator would read as a joined node. A device
+      with no network, or one that created any of its networks, is treated as
+      primary — the operator creates the network on their own machine and pairs
+      nodes into it;
     * authority: a device that SIGNS for the installed operator anchor is the
       operator's own device (:mod:`local_operator.network.mirror_authority`), even
       if it happens to have joined someone else's network. That probe runs only
@@ -168,13 +173,27 @@ def is_joined_mesh_node(root: Path) -> bool:
         active = [record for record in list_networks(root) if record.trust == "active"]
         if not active:
             return False
-        if any(not record.created_by or record.created_by == record.self_device_id for record in active):
+        if any(not record.created_by or _created_here(record) for record in active):
             return False
         from local_operator.network.mirror_authority import local_authority
 
         return not local_authority(root).signs
     except Exception:  # noqa: BLE001 — unreadable network state means "primary" here
         return False
+
+
+def _created_here(record: Any) -> bool:
+    """Whether ``record.created_by`` names this device under any id it has held.
+
+    Explicit rather than ``record.member(created_by) is record.self_member()``:
+    that idiom is also true when neither resolves (both ``None``), which would
+    call a device with no self row the creator.
+    """
+
+    if record.created_by == record.self_device_id:
+        return True
+    me = record.self_member()
+    return me is not None and record.created_by in me.previous_ids
 
 
 def _enabled(root: Path) -> bool:
