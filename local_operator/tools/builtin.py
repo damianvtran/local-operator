@@ -54,6 +54,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat as stat_mode
 import sys
 import tempfile
 import textwrap
@@ -624,19 +625,30 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     privilege) the launcher is copied, which is the same build's binary either
     way, and an existing copy is left alone (there is no generation layout there
     to drift from).
+
+    NEVER A DIRECTORY: ``root`` is the session's scratchpad, which lives under
+    ``sessions/<id>/`` — the tree the session-deletion guard
+    (``tests/unit/session/test_no_session_deletion.py``) protects. The only
+    entries this function unlinks or replaces are the two fixed names
+    ``bin/<launcher-name>`` and ``bin/.<launcher-name>.<pid>.tmp``, and each is
+    ``lstat``-ed first: anything that is a real directory (not a symlink to one)
+    makes the shim give up, so a user's or another tool's directory at either
+    name is left byte-for-byte alone and the call falls back to no injection.
     """
     bin_dir = root / "bin"
     target = bin_dir / launcher.name
+    staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
     desired = _stable_launcher(launcher)
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
+        if _is_real_directory(target) or _is_real_directory(staged):
+            return None
         if target.is_symlink():
             # ``exists()`` follows the link: a pruned generation reads as gone.
             if os.readlink(target) == str(desired) and target.exists():
                 return bin_dir
         elif target.is_file():
             return bin_dir
-        staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
         with contextlib.suppress(FileNotFoundError):
             staged.unlink()
         try:
@@ -649,6 +661,18 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     except OSError:
         logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
         return None
+
+
+def _is_real_directory(path: Path) -> bool:
+    """Whether ``path`` itself (not a symlink's target) is a directory.
+
+    ``lstat`` so a symlink to a directory reads as a link — removing or
+    replacing the link never touches the directory it names.
+    """
+    try:
+        return stat_mode.S_ISDIR(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def _stable_launcher(launcher: Path) -> Path:

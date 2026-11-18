@@ -714,6 +714,37 @@ def test_lop_resolves_to_this_build_when_the_path_has_none(tmp_path, monkeypatch
     assert builtin.own_launcher_path_injection(shim_root, parent_path=str(elsewhere)) == {}
 
 
+@pytest.mark.parametrize("which", ["target", "staged"])
+def test_a_directory_at_the_shim_names_is_never_touched(tmp_path, monkeypatch, which) -> None:
+    """A real directory at ``bin/lop`` or the staged temp name is left alone.
+
+    The shim root is the session scratchpad, inside ``sessions/<id>/``: the
+    session-deletion guard allow-lists the shim's unlink/replace only because
+    neither can reach a directory. With one in the way, injection is skipped and
+    the directory and its contents survive untouched.
+    """
+    import sys
+
+    scripts = tmp_path / "venv" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "lop").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(scripts / "python"))
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    shim_root = tmp_path / "scratch"
+    name = "lop" if which == "target" else f".lop.{os.getpid()}.tmp"
+    blocker = shim_root / "bin" / name
+    blocker.mkdir(parents=True)
+    (blocker / "keep.txt").write_text("user data", encoding="utf-8")
+
+    assert builtin.own_launcher_path_injection(shim_root, parent_path=str(empty)) == {}
+    assert blocker.is_dir() and not blocker.is_symlink()
+    assert (blocker / "keep.txt").read_text(encoding="utf-8") == "user data"
+    assert sorted(os.listdir(shim_root / "bin")) == [name]
+
+
 def test_the_launcher_shim_never_shadows_the_users_python(tmp_path, monkeypatch) -> None:
     """R-1's user-visible harm, asserted directly on PATH resolution.
 
