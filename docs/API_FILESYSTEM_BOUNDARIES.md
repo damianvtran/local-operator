@@ -65,6 +65,14 @@ workspace explicitly set to the filesystem root grants that scope. The edit
 check is not a security boundary against a caller already authorized to
 reconfigure agents or use the unrestricted local harness.
 
+On a standalone daemon (not started or claimed by the desktop app), a
+browser-originated write (`POST`/`PUT`/`PATCH`/`DELETE`) is accepted only from
+the daemon's own origin or an origin listed in `LOCAL_OPERATOR_DESKTOP_ORIGINS`,
+and foreign pages get no CORS grant; native clients (curl, scripts, the CLI)
+are unchanged. Known limitation: this does not authenticate other OS accounts
+on the same host, which reach loopback as native clients -- run a standalone
+daemon only on a single-user host, or use the desktop-managed posture.
+
 **Loopback is not a boundary between local accounts.** On a shared host, any
 local account that can reach `127.0.0.1:<port>` can call this API; the static
 file route serves unclamped on loopback-accepted connections, so -- subject to

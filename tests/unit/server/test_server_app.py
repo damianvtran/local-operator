@@ -16,12 +16,14 @@ async def test_cors_headers(test_app_client):
     response the server is not permitted to send. Not an engine-cutover
     change — the app's middleware configuration is untouched.
     """
-    # Make a request with an Origin header to simulate a cross-origin request
-    response = await test_app_client.get("/v1/agents", headers={"Origin": "http://localhost:3000"})
+    # Origin "null" is the packaged renderer's real origin (it runs at file://)
+    # and the one foreign origin a standalone daemon still grants; any other
+    # foreign origin gets no grant there (test_standalone_browser_writes.py).
+    response = await test_app_client.get("/v1/agents", headers={"Origin": "null"})
 
     # Verify that the CORS headers are present in the response
     assert response.status_code == 200
-    assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+    assert response.headers.get("access-control-allow-origin") == "null"
     assert response.headers.get("access-control-allow-credentials") == "true"
     assert "Origin" in response.headers.get("vary", "")
 

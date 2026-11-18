@@ -63,6 +63,13 @@ monitoring in place. (The `Interoperability` and `Performance Focus` modes are
 *not* equivalent: they reduce or disable monitoring of the excluded paths, and on
 macOS agents 4.6+ `Interoperability` is not supported.)
 
+## Known limitations
+
+- A standalone `lop serve` daemon on loopback does not authenticate other
+  local OS accounts. Run it only on single-user hosts, or use the
+  desktop-managed posture. Browser pages are already limited to the daemon's
+  own origin or origins listed in `LOCAL_OPERATOR_DESKTOP_ORIGINS`.
+
 ## Reporting a Vulnerability
 
 If you identify a security-related vulnerability or security incident in Local Operator, we invite you to [report the vulnerability privately](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability) and create a GitHub Security Advisory on our repository. Your advisory helps us quickly address potential risks and informs the community about the issue. When creating the advisory, please include:

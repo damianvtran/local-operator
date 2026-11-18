@@ -38,7 +38,12 @@ from local_operator.server import loop_watchdog as serve_loop_watchdog
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
-from local_operator.server.desktop import desktop_posture, require_desktop
+from local_operator.server.desktop import (
+    desktop_posture,
+    request_own_origins,
+    require_desktop,
+    standalone_write_admitted,
+)
 from local_operator.server.routes import (
     agents,
     auth,
@@ -1042,6 +1047,56 @@ async def managed_desktop_boundary(request: Request, call_next):
     return response
 
 
+#: Methods that change state. Keyed on the METHOD, not a route list, so a route
+#: added later is covered the day it lands; GET/HEAD/OPTIONS stay untouched
+#: (static file serving, ``/health``, CORS preflights).
+_STANDALONE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: Refuses browser callers itself (``routes/desktop_claim.py``), and is the one
+#: route a standalone daemon must keep answering for the app to attach.
+_STANDALONE_WRITE_EXEMPT = frozenset({"/v1/desktop/claim"})
+
+
+@app.middleware("http")
+async def standalone_browser_write_gate(request: Request, call_next):
+    """Refuse browser-originated writes from foreign origins on a STANDALONE daemon.
+
+    A managed daemon (desktop bearer or accepted claim) is already behind
+    :func:`managed_desktop_boundary` and ``require_desktop``, so this applies
+    only when ``desktop_posture()`` is NOT enabled -- the posture where any web
+    page could otherwise rewrite configuration through a simple cross-origin
+    request that CORS never gets to refuse. The admission rule and its threat
+    model live in :func:`~local_operator.server.desktop.standalone_write_admitted`;
+    native clients (curl, scripts, the CLI) send neither ``Origin`` nor
+    ``Sec-Fetch-Site`` and pass unchanged.
+
+    PLACEMENT. Registered right after :func:`managed_desktop_boundary`, i.e.
+    INSIDE ``CORSMiddleware`` and :func:`desktop_origin_cors`, so a refusal is
+    answered before the router (no handler runs, no file is touched) and its
+    CORS headers still pass through the same echo suppression as every other
+    reply. No websocket route exists on the serve app, so the HTTP gate is the
+    whole surface.
+    """
+    if (
+        request.method in _STANDALONE_WRITE_METHODS
+        and request.url.path not in _STANDALONE_WRITE_EXEMPT
+        and not desktop_posture().enabled
+        and not standalone_write_admitted(request, desktop_posture().origins)
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={
+                # i18n: ignore transport refusal; clients classify by status
+                "detail": (
+                    "Cross-origin browser requests cannot change this server. "
+                    "Use the same origin, a native client, or list the origin in "
+                    "LOCAL_OPERATOR_DESKTOP_ORIGINS."
+                )
+            },
+        )
+    return await call_next(request)
+
+
 @app.exception_handler(RequestValidationError)
 async def desktop_validation_error(request: Request, error: RequestValidationError):
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
@@ -1260,6 +1315,11 @@ async def desktop_origin_cors(request: Request, call_next):
     legacy boundary), and it is untouched here. Closing the echo for an
     allowlist-less daemon needs the app to stop reading ``/health`` from the
     renderer, which the UI PR does by probing health/version from main.
+
+    A STANDALONE daemon (no bearer, no claim) with nothing admitted is the
+    exception: it strips the grant for every Origin except ``"null"`` (that same
+    renderer's pre-attach ``/health`` read) and its own origin, so a foreign
+    page can neither read its replies nor clear a preflight for a write.
     """
     response = await call_next(request)
     # The allowlist in force: the environment's, UNIONED with the origins the
@@ -1270,10 +1330,23 @@ async def desktop_origin_cors(request: Request, call_next):
     # An app that declared a renderer origin in its claim body gets exactly
     # that, and a plane with nothing admitted keeps the echo its renderer reads
     # ``/health`` with.
-    allowed = desktop_posture().origins
-    if not allowed:
-        return response
+    posture = desktop_posture()
+    allowed = posture.origins
     origin = request.headers.get("origin")
+    if not allowed:
+        if posture.enabled or origin is None or origin == "null":
+            return response
+        # STANDALONE with nothing admitted: no foreign page may READ this
+        # daemon either (the write half is ``standalone_browser_write_gate``).
+        # Two echoes survive: ``"null"``, which the packaged renderer
+        # (``file://``) reads ``/health`` with before it has claimed anything,
+        # and the daemon's own origin, which needs no grant but is harmless.
+        # The managed allowlist-less posture keeps its historical echo above.
+        if origin.strip().lower() in request_own_origins(request):
+            return response
+        del response.headers["access-control-allow-origin"]
+        del response.headers["access-control-allow-credentials"]
+        return response
     if origin is not None and origin not in allowed:
         # Removed rather than set to a placeholder: absent means "no CORS grant",
         # which is what a browser must conclude. Credentials must go with it, or
