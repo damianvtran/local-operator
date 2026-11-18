@@ -63,5 +63,14 @@
   "cli.sessions_move_workset.desktop_refused": "The working files on {source} need your decision before this conversation moves to {device}, so nothing was moved.",
   "cli.sessions_move_workset.unknown_card": "The working files on {source} could not be read (repository: {repo}), so nothing was moved. Fix that repository, or choose “{button}” below to leave every working file there.",
   "cli.sessions_move_workset.unsupported_card": "{device} runs an older lop that cannot list this conversation's working files. Update lop there, or choose “{button}” below to leave them on that device.",
-  "cli.sessions_move_workset.probe_asked": "{device} was asked whether it can reach these remotes; it was sent only their addresses and build-file names, no paths or branches."
+  "cli.sessions_move_workset.probe_asked": "{device} was asked whether it can reach these remotes; it was sent only their addresses and build-file names, no paths or branches.",
+  "cli.sessions_move_workset.receipt_transferred": "Working files arrived from {source}: {count, plural, one {# worktree} other {# worktrees}} restored here.",
+  "cli.sessions_move_workset.receipt_restored_row": "Restored {path} at {dest}.",
+  "cli.sessions_move_workset.receipt_pending": "{count, plural, one {# worktree is} other {# worktrees are}} not restored yet; this device retries when its relay restarts, and {source} still has the files.",
+  "cli.sessions_move_workset.receipt_left_row": "{path} stayed on {source}: {reason}.",
+  "cli.sessions_move_workset.receipt_recipe": "To recreate its dependencies, run in {cwd}: {run}",
+  "cli.sessions_move_workset.receipt_rewrite": "Used a remote address this device can reach: {detail}",
+  "cli.sessions_move_workset.reason.primary_absent": "the destination has no copy of this repository and could not clone it",
+  "cli.sessions_move_workset.reason.restore_failed": "the files arrived but could not be restored yet",
+  "cli.sessions_move_workset.reason.snapshot_failed": "its state could not be captured on the source (an empty branch or a bare repository)"
 }

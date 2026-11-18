@@ -42,6 +42,22 @@ _REASONS = {
     "not_transferred": _ws.reason_not_transferred,
     "unsafe_path": _ws.reason_unsafe_path,
     "insufficient_space": _ws.reason_insufficient_space,
+    # The transfer half's restore/snapshot outcomes (PR B).
+    "primary_absent": _ws.reason_primary_absent,
+    "restore_failed": _ws.reason_restore_failed,
+    "snapshot_failed": _ws.reason_snapshot_failed,
+}
+
+#: Engine reason codes that share one sentence: the user-facing distinction is "the
+#: source could not capture it", "the destination has no repository", or "it arrived
+#: but is not restored yet"; the precise code stays in the block for a support read.
+_REASON_ALIASES = {
+    "unborn_head": "snapshot_failed",
+    "bare_repository": "snapshot_failed",
+    "artifact_missing": "restore_failed",
+    "artifact_corrupt": "restore_failed",
+    "invalid_digest": "restore_failed",
+    "bundle_unverifiable": "restore_failed",
 }
 
 #: How many withheld / left-behind rows a summary prints before it stops listing. The
@@ -93,7 +109,7 @@ def _size(count: int) -> str:
 
 
 def reason_text(code: str) -> str:
-    builder = _REASONS.get(code)
+    builder = _REASONS.get(code) or _REASONS.get(_REASON_ALIASES.get(code, ""))
     return _t(builder()) if builder is not None else code
 
 
@@ -314,12 +330,14 @@ def prompt_text(block: Mapping[str, Any], *, session: str, device: str = "") -> 
 
 def receipt_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
     """What the receipt says about the working set after the move. ``source`` is the
-    device the files stayed on (the move's ``from_device`` name).
+    device the files came from or stayed on (the move's ``from_device`` name).
 
     THE LIST, NOT ONLY THE COUNT (QA round 1, Q-2): with ``--yes`` or a passed digest
     no prompt was shown, so the receipt is the only place a text-mode user learns
     WHICH worktrees, withheld files and dependency trees stayed. The headline is
     followed by the same row lines the confirmation summary prints."""
+    if block.get("transferred") is True:
+        return _transferred_lines(block, source=source_label(block, source))
     if block.get("transferred") is not False:
         return []
     consent = str(block.get("consent") or "")
@@ -372,3 +390,44 @@ def _stayed_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
                 "  " + _t(_ws.leaves_behind(path=str(item.get("path") or ""), command=command))
             )
     return out
+
+
+def _transferred_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
+    """The receipt of a move that CARRIED its working set (PR B): what was restored and
+    where, what is still waiting, what stayed on the source and why, and the dependency
+    recipes to run (listed, never run — design §9). One line per fact, so a user who
+    reads only the receipt knows exactly which work is on which device."""
+    rows = [r for r in block.get("worktrees") or [] if isinstance(r, dict)]
+    restored = [r for r in rows if r.get("state") == "restored"]
+    pending = [r for r in rows if r.get("state") == "pending_restore"]
+    left = [r for r in rows if r.get("state") == "left_behind"]
+    lines = [_t(_ws.receipt_transferred(source=source, count=len(restored)))]
+    for row in restored[:_LIST_LIMIT]:
+        lines.append(
+            _t(
+                _ws.receipt_restored_row(
+                    path=str(row.get("path") or ""),
+                    dest=str(row.get("dest_path") or row.get("path") or ""),
+                )
+            )
+        )
+        for recipe in (row.get("recipes") or [])[:_LIST_LIMIT]:
+            if isinstance(recipe, dict) and recipe.get("run"):
+                lines.append(
+                    _t(_ws.receipt_recipe(cwd=str(recipe.get("cwd") or ""), run=str(recipe["run"])))
+                )
+    if pending:
+        lines.append(_t(_ws.receipt_pending(count=len(pending), source=source)))
+    for row in left[:_LIST_LIMIT]:
+        lines.append(
+            _t(
+                _ws.receipt_left_row(
+                    path=str(row.get("path") or ""),
+                    source=source,
+                    reason=reason_text(str(row.get("reason") or "")),
+                )
+            )
+        )
+    for note in (block.get("notes") or [])[:_LIST_LIMIT]:
+        lines.append(_t(_ws.receipt_rewrite(detail=str(note))))
+    return lines

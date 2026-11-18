@@ -146,9 +146,7 @@ def test_a_confirmed_move_carries_the_working_set(
     # The owner audited the serve; its served artifacts are gone after ``done``.
     serves = [e for e in _audit_events(server_a.root) if e.get("event") == "session.workset.serve"]
     assert serves, "no session.workset.serve audit row"
-    assert all(
-        e["detail"]["to_device"] == server_b.identity.device_id for e in serves
-    ), serves
+    assert all(e["detail"]["to_device"] == server_b.identity.device_id for e in serves), serves
     assert not workset_move.outgoing_dir(server_a.root, SESSION).exists()
     assert read_handoff_journal(server_a.root) == {}
 
@@ -270,4 +268,3 @@ def test_an_older_destination_keeps_the_files_on_the_source(
     assert moved["working_set"]["transferred"] is False
     assert [r["reason"] for r in moved["working_set"]["worktrees"]] == ["not_transferred"]
     assert not (bhome / "proj" / ".worktrees" / "feat").exists()
-

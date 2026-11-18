@@ -63,5 +63,14 @@
   "cli.sessions_move_workset.desktop_refused": "Рабочие файлы на {source} требуют вашего решения, прежде чем этот разговор будет перенесён на {device}, поэтому ничего не перенесено.",
   "cli.sessions_move_workset.unknown_card": "Не удалось прочитать рабочие файлы на {source} (репозиторий: {repo}), поэтому ничего не перенесено. Исправьте этот репозиторий или выберите ниже «{button}», чтобы оставить там все рабочие файлы.",
   "cli.sessions_move_workset.unsupported_card": "На {device} установлена старая версия lop, которая не может перечислить рабочие файлы этого разговора. Обновите там lop или выберите ниже «{button}», чтобы оставить их на том устройстве.",
-  "cli.sessions_move_workset.probe_asked": "У {device} спросили, есть ли у него доступ к этим удалённым репозиториям; туда отправлены только их адреса и имена файлов сборки, без путей и веток."
+  "cli.sessions_move_workset.probe_asked": "У {device} спросили, есть ли у него доступ к этим удалённым репозиториям; туда отправлены только их адреса и имена файлов сборки, без путей и веток.",
+  "cli.sessions_move_workset.receipt_transferred": "Рабочие файлы получены с {source}: здесь восстановлено {count, plural, one {# worktree} few {# worktree} many {# worktree} other {# worktree}}.",
+  "cli.sessions_move_workset.receipt_restored_row": "{path} восстановлен в {dest}.",
+  "cli.sessions_move_workset.receipt_pending": "{count, plural, one {# worktree ещё не восстановлен} few {# worktree ещё не восстановлены} many {# worktree ещё не восстановлены} other {# worktree ещё не восстановлены}}; это устройство повторит попытку при перезапуске своего relay, а файлы по-прежнему есть на {source}.",
+  "cli.sessions_move_workset.receipt_left_row": "{path} остался на {source}: {reason}.",
+  "cli.sessions_move_workset.receipt_recipe": "Чтобы заново создать его зависимости, выполните в {cwd}: {run}",
+  "cli.sessions_move_workset.receipt_rewrite": "Использован удалённый адрес, доступный этому устройству: {detail}",
+  "cli.sessions_move_workset.reason.primary_absent": "на устройстве назначения нет копии этого репозитория, и его не удалось клонировать",
+  "cli.sessions_move_workset.reason.restore_failed": "файлы получены, но пока не могут быть восстановлены",
+  "cli.sessions_move_workset.reason.snapshot_failed": "его состояние не удалось зафиксировать на источнике (пустая ветка или bare-репозиторий)"
 }

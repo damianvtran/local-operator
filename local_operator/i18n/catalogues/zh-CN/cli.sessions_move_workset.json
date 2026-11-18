@@ -63,5 +63,14 @@
   "cli.sessions_move_workset.desktop_refused": "{source}上的工作文件需要你先作出决定，才能将此对话移到{device}，因此没有移动任何内容。",
   "cli.sessions_move_workset.unknown_card": "无法读取{source}上的工作文件（仓库：{repo}），因此没有移动任何内容。请修复该仓库，或选择下方的“{button}”，把所有工作文件留在原处。",
   "cli.sessions_move_workset.unsupported_card": "{device}上的lop版本过旧，无法列出此对话的工作文件。请在该设备上更新lop，或选择下方的“{button}”，将它们留在该设备上。",
-  "cli.sessions_move_workset.probe_asked": "已询问{device}能否访问这些远程仓库；只发送了它们的地址和构建文件名，不含路径或分支。"
+  "cli.sessions_move_workset.probe_asked": "已询问{device}能否访问这些远程仓库；只发送了它们的地址和构建文件名，不含路径或分支。",
+  "cli.sessions_move_workset.receipt_transferred": "工作文件已从 {source} 传来：{count, plural, other {#个worktree}}已在此恢复。",
+  "cli.sessions_move_workset.receipt_restored_row": "已将 {path} 恢复到 {dest}。",
+  "cli.sessions_move_workset.receipt_pending": "{count, plural, other {#个worktree尚未恢复}}；本设备会在其 relay 重启时重试，{source} 上仍保留这些文件。",
+  "cli.sessions_move_workset.receipt_left_row": "{path} 留在了 {source} 上：{reason}。",
+  "cli.sessions_move_workset.receipt_recipe": "要重新创建其依赖，请在 {cwd} 中运行：{run}",
+  "cli.sessions_move_workset.receipt_rewrite": "已使用本设备可访问的远程地址：{detail}",
+  "cli.sessions_move_workset.reason.primary_absent": "目标设备上没有此仓库的副本，也无法克隆它",
+  "cli.sessions_move_workset.reason.restore_failed": "文件已到达，但暂时无法恢复",
+  "cli.sessions_move_workset.reason.snapshot_failed": "无法在源设备上记录其状态（空分支或 bare 仓库）"
 }

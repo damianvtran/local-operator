@@ -71,9 +71,7 @@ def test_secret_content_under_an_innocent_name_is_withheld(tmp_path: Path) -> No
     _commit(rig.worktree, {"src/settings.py": f"KEY_ID = '{AWS_KEY_ID}'\n"})
     check = _check(rig)
     hit = [f for f in check.findings if f.path == "src/settings.py"]
-    assert (
-        hit and hit[0].why == "history_secret_content" and hit[0].rule == "aws-access-key-id"
-    )
+    assert hit and hit[0].why == "history_secret_content" and hit[0].rule == "aws-access-key-id"
     # Class name only, never the value.
     assert AWS_KEY_ID not in json.dumps([f.to_dict() for f in check.findings])
 
@@ -105,9 +103,7 @@ def test_untracked_secret_rides_the_worktree_tree_unless_excluded(tmp_path: Path
 def test_secret_in_a_commit_message_is_withheld(tmp_path: Path) -> None:
     rig = make_rig(tmp_path, dirty=False)
     _commit(rig.worktree, {"ok.txt": "fine\n"}, message=f"use {AWS_KEY_ID}")
-    assert any(
-        f.why == "history_secret_content" and f.path == "" for f in _check(rig).findings
-    )
+    assert any(f.why == "history_secret_content" and f.path == "" for f in _check(rig).findings)
 
 
 def test_unscannable_blobs_are_withheld_not_skipped(tmp_path: Path) -> None:

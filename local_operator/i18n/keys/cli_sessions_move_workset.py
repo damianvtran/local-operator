@@ -201,6 +201,18 @@ def reason_over_cap() -> Msg:
     return Msg("cli.sessions_move_workset.reason.over_cap", {})
 
 
+def reason_primary_absent() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.primary_absent", {})
+
+
+def reason_restore_failed() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.restore_failed", {})
+
+
+def reason_snapshot_failed() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.snapshot_failed", {})
+
+
 def reason_submodule() -> Msg:
     return Msg("cli.sessions_move_workset.reason.submodule", {})
 
@@ -221,6 +233,13 @@ def receipt_keep(*, device: str, source: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_keep", {"device": device, "source": source})
 
 
+def receipt_left_row(*, path: str, source: str, reason: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.receipt_left_row",
+        {"path": path, "source": source, "reason": reason},
+    )
+
+
 def receipt_not_transferred(*, count: int | float, device: str) -> Msg:
     return Msg(
         "cli.sessions_move_workset.receipt_not_transferred",
@@ -228,8 +247,28 @@ def receipt_not_transferred(*, count: int | float, device: str) -> Msg:
     )
 
 
+def receipt_pending(*, count: int | float, source: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_pending", {"count": count, "source": source})
+
+
+def receipt_recipe(*, cwd: str, run: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_recipe", {"cwd": cwd, "run": run})
+
+
+def receipt_restored_row(*, path: str, dest: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_restored_row", {"path": path, "dest": dest})
+
+
 def receipt_resumed(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_resumed", {"device": device})
+
+
+def receipt_rewrite(*, detail: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_rewrite", {"detail": detail})
+
+
+def receipt_transferred(*, source: str, count: int | float) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_transferred", {"source": source, "count": count})
 
 
 def receipt_without(*, device: str) -> Msg:

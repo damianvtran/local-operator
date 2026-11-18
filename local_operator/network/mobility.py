@@ -5213,8 +5213,7 @@ def _source_prepare(
     from local_operator.network import workset as _workset_mod
 
     workset_transfer = (
-        _peer_workset_version(frame.get("working_set"))
-        >= _workset_mod.WORKSET_TRANSFER_MIN_VERSION
+        _peer_workset_version(frame.get("working_set")) >= _workset_mod.WORKSET_TRANSFER_MIN_VERSION
     )
     workset_arrival: dict[str, Any] | None = None
     if not keep:

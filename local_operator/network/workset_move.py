@@ -229,7 +229,9 @@ def _rev(cwd: Path, ref: str) -> str:
 
     if not ref:
         return ""
-    proc = engine._git(cwd, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)  # noqa: SLF001
+    proc = engine._git(
+        cwd, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False
+    )  # noqa: SLF001
     sha = proc.stdout.strip()
     return sha if _SHA.match(sha) else ""
 
@@ -270,7 +272,8 @@ def source_prepare(
     ``left_behind`` with the engine's reason; it never fails the move (the source
     keeps it untouched either way).
     """
-    from local_operator.network import workset, workset_transfer as engine
+    from local_operator.network import workset
+    from local_operator.network import workset_transfer as engine
 
     home = home_of(server)
     out = _private_dir(outgoing_dir(server.root, session_id))
@@ -290,7 +293,13 @@ def source_prepare(
             left.append({"path": facts.path, "reason": exc.reason})
             continue
         upstream_merge = _config(worktree, f"branch.{snap.branch}.merge") if snap.branch else ""
-        tips = [t for t in dict.fromkeys([snap.head, _rev(worktree, facts.upstream), _rev(worktree, facts.base)]) if t]
+        tips = [
+            t
+            for t in dict.fromkeys(
+                [snap.head, _rev(worktree, facts.upstream), _rev(worktree, facts.base)]
+            )
+            if t
+        ]
         row = {
             "n": n,
             "path": facts.path,
@@ -376,7 +385,10 @@ def _authorised_journal(
     bound (same epoch, same destination, same binding digest). Any mismatch is a
     refusal with zero bytes served.
     """
-    from local_operator.session.placement import HANDOFF_PHASE_PREPARED, handoff_in_flight
+    from local_operator.session.placement import (
+        HANDOFF_PHASE_PREPARED,
+        handoff_in_flight,
+    )
 
     try:
         entry = handoff_in_flight(Path(server.root), session_id)
@@ -388,12 +400,16 @@ def _authorised_journal(
         or str(entry.get("mode") or "") != "move"
         or str(entry.get("phase") or "") != HANDOFF_PHASE_PREPARED
     ):
-        return None, _refused("not_owner", "no move of this conversation is being prepared here", session_id)
+        return None, _refused(
+            "not_owner", "no move of this conversation is being prepared here", session_id
+        )
     if str(entry.get("to_device") or "") != str(link.device_id):
         return None, _refused("not_authorised", "this move is not going to that device", session_id)
     epoch = str(frame.get("lease_epoch") or "")
     if not epoch or epoch != str(entry.get("lease_epoch") or ""):
-        return None, _refused("refused", "that request names a different move (lease epoch)", session_id)
+        return None, _refused(
+            "refused", "that request names a different move (lease epoch)", session_id
+        )
     bound = entry.get("working_set") if isinstance(entry.get("working_set"), Mapping) else {}
     journal = _read_json(outgoing_dir(server.root, session_id) / "journal.json")
     if (
@@ -403,7 +419,9 @@ def _authorised_journal(
         or not bound
         or str(journal.get("binding") or "") != str(bound.get("binding") or "")
     ):
-        return None, _refused("refused", "this move carries no working set for that device", session_id)
+        return None, _refused(
+            "refused", "this move carries no working set for that device", session_id
+        )
     return journal, None
 
 
@@ -424,7 +442,8 @@ def serve_plan(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) ->
     journal, refusal = _authorised_journal(server, link, frame, session_id)
     if refusal is not None or journal is None:
         return refusal or _refused("refused", "no working set", session_id)
-    raw_have = frame.get("have") if isinstance(frame.get("have"), Mapping) else {}
+    have_value = frame.get("have")
+    raw_have: Mapping[str, Any] = have_value if isinstance(have_value, Mapping) else {}
     out = outgoing_dir(server.root, session_id)
     artifacts: dict[str, dict[str, Any]] = {}
     reply_artifacts: list[dict[str, Any]] = []
@@ -432,7 +451,8 @@ def serve_plan(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) ->
     # The destination DECLINES a worktree whose repository it neither has nor could
     # clone (reason from W1): bundling it would ship the whole history for a restore
     # that cannot happen, so it stays here, reported with the destination's reason.
-    raw_decline = frame.get("decline") if isinstance(frame.get("decline"), Mapping) else {}
+    decline_value = frame.get("decline")
+    raw_decline: Mapping[str, Any] = decline_value if isinstance(decline_value, Mapping) else {}
     for row in journal.get("worktrees") or []:
         n = str(row.get("n"))
         if n in raw_decline:
@@ -459,15 +479,19 @@ def serve_plan(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) ->
                 {
                     "n": int(row.get("n") or 0),
                     "path": row.get("path"),
-                    "reason": "history_unscannable"
-                    if all(f.why == "history_unscannable" for f in withheld.check.findings)
-                    else "history_secret",
+                    "reason": (
+                        "history_unscannable"
+                        if all(f.why == "history_unscannable" for f in withheld.check.findings)
+                        else "history_secret"
+                    ),
                     "excluded": [f.to_dict() for f in withheld.check.findings][:50],
                 }
             )
             continue
         except engine.MoveWorksetError as exc:
-            left.append({"n": int(row.get("n") or 0), "path": row.get("path"), "reason": exc.reason})
+            left.append(
+                {"n": int(row.get("n") or 0), "path": row.get("path"), "reason": exc.reason}
+            )
             continue
         artifacts[n] = {"digest": artifact.digest, "bytes": artifact.bytes}
         reply_artifacts.append(
@@ -657,7 +681,9 @@ def serve_fetch(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) -
                         "no working file was sent",
                         session_id,
                     )
-            span, total, eof = sync_mod.read_open_span(handle, offset=offset, limit=limit, size=size)
+            span, total, eof = sync_mod.read_open_span(
+                handle, offset=offset, limit=limit, size=size
+            )
     except OSError:
         return _refused("unknown_item", "that artifact could not be read", session_id)
     with _SERVE_LOCK:
@@ -679,7 +705,9 @@ def serve_fetch(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) -
 # ------------------------------------------------------------- owner: commit/done
 
 
-def ready_digest_matches(root: Path | str, session_id: str, entry: Mapping[str, Any], reported: str) -> bool:
+def ready_digest_matches(
+    root: Path | str, session_id: str, entry: Mapping[str, Any], reported: str
+) -> bool:
     """Commit check (design §4 step 12): the destination's ``workset_digest`` equals the
     owner's, recomputed from ITS journal. A move without a bound working set must not
     report one (an empty reported value is the only match)."""
@@ -759,7 +787,11 @@ def _ask(transport: Any, frame: dict[str, Any]) -> dict[str, Any]:
     try:
         return transport.ask(frame)
     except Moved as refusal:
-        code = refusal.code if refusal.code in ("working_set_over_cap",) else "working_set_transfer_failed"
+        code = (
+            refusal.code
+            if refusal.code in ("working_set_over_cap",)
+            else "working_set_transfer_failed"
+        )
         raise WorksetTransferRefused(code, refusal.message) from refusal
 
 
@@ -809,23 +841,29 @@ def _fetch_artifact(
         handle.truncate(offset)
         handle.seek(offset)
         while True:
-            answer = _ask(
-                transport, {**base, "offset": offset, "limit": sync_mod.SYNC_CHUNK_BYTES}
-            )
+            answer = _ask(transport, {**base, "offset": offset, "limit": sync_mod.SYNC_CHUNK_BYTES})
             if str(answer.get("digest") or "") != digest or int(answer.get("offset", -1)) != offset:
-                raise WorksetTransferRefused("working_set_transfer_failed", "the owner answered a different span")
+                raise WorksetTransferRefused(
+                    "working_set_transfer_failed", "the owner answered a different span"
+                )
             data = base64.b64decode(str(answer.get("data") or ""), validate=True)
             if hashlib.sha256(data).hexdigest() != str(answer.get("chunk_sha256") or ""):
-                raise WorksetTransferRefused("working_set_transfer_failed", "a chunk failed its digest")
+                raise WorksetTransferRefused(
+                    "working_set_transfer_failed", "a chunk failed its digest"
+                )
             size = int(answer.get("size") or 0)
             if size != expected_bytes or offset + len(data) > size:
-                raise WorksetTransferRefused("working_set_transfer_failed", "the artifact size changed")
+                raise WorksetTransferRefused(
+                    "working_set_transfer_failed", "the artifact size changed"
+                )
             handle.write(data)
             offset += len(data)
             if answer.get("eof") or offset >= size:
                 break
             if not data:
-                raise WorksetTransferRefused("working_set_transfer_failed", "the owner sent an empty chunk")
+                raise WorksetTransferRefused(
+                    "working_set_transfer_failed", "the owner sent an empty chunk"
+                )
         handle.flush()
         os.fsync(handle.fileno())
     if _sha256(part) != hexdigest:
@@ -879,7 +917,8 @@ def destination_transfer(
     ``staging/<sid>.workset/pending.json`` with one restore plan per artifact, for the
     restore that runs after ``done``.
     """
-    from local_operator.network import workset, workset_transfer as engine
+    from local_operator.network import workset
+    from local_operator.network import workset_transfer as engine
 
     home = home_of(server)
     into = _private_dir(incoming_staging(server.root, session_id))
@@ -891,7 +930,9 @@ def destination_transfer(
     for row in rows:
         n = str(row.get("n"))
         remote_url = str(row.get("remote_url") or "")
-        rewrite = row.get("https_rewrite") if isinstance(row.get("https_rewrite"), Mapping) else None
+        rewrite = (
+            row.get("https_rewrite") if isinstance(row.get("https_rewrite"), Mapping) else None
+        )
         # A2's probe may offer an https form of an ssh remote this device cannot use;
         # the clone and the restore then use it, repo-locally, and the note says so.
         use_url = str(rewrite.get("to")) if rewrite and rewrite.get("to") else remote_url
@@ -919,11 +960,11 @@ def destination_transfer(
             tips = [str(t) for t in row.get("tips") or [] if _SHA.match(str(t))]
             have[n] = engine.compute_have(res.path, tips, remote=res.remote)
         else:
-            decline[n] = (
-                (res.reason if res is not None else "") or "destination_cannot_clone"
-            )
+            decline[n] = (res.reason if res is not None else "") or "destination_cannot_clone"
     planned = _plan(transport, session_id, lease_epoch, have, decline)
-    artifacts = {str(a.get("n")): a for a in planned.get("artifacts") or [] if isinstance(a, Mapping)}
+    artifacts = {
+        str(a.get("n")): a for a in planned.get("artifacts") or [] if isinstance(a, Mapping)
+    }
     left = [dict(r) for r in planned.get("left_behind") or [] if isinstance(r, Mapping)]
     total = sum(int(a.get("bytes") or 0) for a in artifacts.values())
     cap = workset.cap_bytes(Path(server.root))
@@ -949,7 +990,9 @@ def destination_transfer(
             continue
         digest = str(art.get("digest") or "")
         if not _DIGEST.match(digest):
-            raise WorksetTransferRefused("working_set_transfer_failed", "the owner named a malformed artifact")
+            raise WorksetTransferRefused(
+                "working_set_transfer_failed", "the owner named a malformed artifact"
+            )
         info = primaries.get(n) or {}
         res = info.get("res")
         fetched = _fetch_artifact(
@@ -967,10 +1010,14 @@ def destination_transfer(
                 replanned = _plan(transport, session_id, lease_epoch, {**have, n: []}, decline)
                 again = {str(a.get("n")): a for a in replanned.get("artifacts") or []}.get(n)
                 if not again:
-                    raise WorksetTransferRefused("working_set_transfer_failed", "the re-plan carried nothing")
+                    raise WorksetTransferRefused(
+                        "working_set_transfer_failed", "the re-plan carried nothing"
+                    )
                 digest = str(again.get("digest") or "")
                 if not _DIGEST.match(digest):
-                    raise WorksetTransferRefused("working_set_transfer_failed", "the owner named a malformed artifact")
+                    raise WorksetTransferRefused(
+                        "working_set_transfer_failed", "the owner named a malformed artifact"
+                    )
                 fetched = _fetch_artifact(
                     transport,
                     session_id=session_id,
@@ -986,7 +1033,10 @@ def destination_transfer(
                     )
                 # Every other worktree's artifact is unchanged by a re-plan (the
                 # staged directory is the cache), so their digests still hold.
-                artifacts = {**artifacts, **{str(a.get("n")): a for a in replanned.get("artifacts") or []}}
+                artifacts = {
+                    **artifacts,
+                    **{str(a.get("n")): a for a in replanned.get("artifacts") or []},
+                }
         mapping.append((str(row.get("path")), [digest]))
         plans.append(
             {
@@ -1085,14 +1135,20 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
         if report.state == "restored" and report.dest_path:
             try:
                 dest = engine.contained_path(home, report.dest_path)
-                primary = engine.contained_path(home, plan.primary) if plan.primary.startswith("~/") else dest
+                primary = (
+                    engine.contained_path(home, plan.primary)
+                    if plan.primary.startswith("~/")
+                    else dest
+                )
                 row["recipes"] = [r.to_dict() for r in engine.recipes_for(dest, primary, home=home)]
             except Exception:  # noqa: BLE001 — a recipe is advice
                 row["recipes"] = []
         restored[key] = row
         pending["restored"] = restored
         _write_json(directory / "pending.json", pending)
-    rows = [restored[str(p.get("n"))] for p in pending.get("plans") or [] if str(p.get("n")) in restored]
+    rows = [
+        restored[str(p.get("n"))] for p in pending.get("plans") or [] if str(p.get("n")) in restored
+    ]
     _retarget_cwd(server, session_id, str(pending.get("cwd") or ""), rows, home)
     waiting = [r for r in rows if r.get("state") == "pending_restore"]
     state = "pending_restore" if waiting else "restored"
@@ -1129,7 +1185,8 @@ def _retarget_cwd(
     path is rewritten to the same tail under that row's ``dest_path``, contained under
     this device's home. Best effort: a marker it cannot write keeps the promote's value.
     """
-    from local_operator.network import carry, workset_transfer as engine
+    from local_operator.network import carry
+    from local_operator.network import workset_transfer as engine
 
     if not cwd_rel.startswith("~/"):
         return
@@ -1152,7 +1209,9 @@ def _retarget_cwd(
         return
 
 
-def arrival_receipt(block: Mapping[str, Any] | None, restored: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def arrival_receipt(
+    block: Mapping[str, Any] | None, restored: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
     """The receipt's ``working_set`` block once the transfer ran (destination side).
 
     Starts from the owner's arrival block (the confirmed scope) and replaces each
@@ -1210,7 +1269,8 @@ def resume_pending(server: Any) -> list[str]:
         restored = pending.get("restored") or {}
         plans = pending.get("plans") or []
         if all(
-            str(p.get("n")) in restored and restored[str(p.get("n"))].get("state") != "pending_restore"
+            str(p.get("n")) in restored
+            and restored[str(p.get("n"))].get("state") != "pending_restore"
             for p in plans
         ):
             continue

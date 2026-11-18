@@ -308,5 +308,50 @@
     "role": "desktop dialog refusal text when the working-set gate stops a move (the dialog renders the file list itself)",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "{source} = device that keeps the files, {device} = destination; both verbatim. Must NOT mention any command-line flag."
+  },
+  "cli.sessions_move_workset.receipt_transferred": {
+    "role": "CLI line after a move that carried the working files",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {source} is the device they came from (verbatim)."
+  },
+  "cli.sessions_move_workset.receipt_restored_row": {
+    "role": "CLI receipt row: one worktree restored on this device",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is the source path, {dest} the path here; both ~/-paths, keep verbatim."
+  },
+  "cli.sessions_move_workset.receipt_pending": {
+    "role": "CLI receipt line: worktrees whose files arrived but are not restored yet",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {source} verbatim. 'relay' is the product's background service name."
+  },
+  "cli.sessions_move_workset.receipt_left_row": {
+    "role": "CLI receipt row: one worktree that did not travel, with the reason",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{reason} is one of the reason.* phrases (lower-case clause); {path}/{source} verbatim."
+  },
+  "cli.sessions_move_workset.receipt_recipe": {
+    "role": "CLI receipt row: the command that recreates a worktree's dependencies (printed, never run)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{cwd} is a path and {run} a shell command; keep both verbatim."
+  },
+  "cli.sessions_move_workset.receipt_rewrite": {
+    "role": "CLI receipt row: the destination used an https form of an ssh remote",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{detail} is 'repo: old -> new' verbatim."
+  },
+  "cli.sessions_move_workset.reason.primary_absent": {
+    "role": "reason clause: why a worktree stayed behind",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.reason.restore_failed": {
+    "role": "reason clause: files arrived but the restore has not completed",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.reason.snapshot_failed": {
+    "role": "reason clause: the source could not snapshot a worktree",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; 'bare' is git's term."
   }
 }

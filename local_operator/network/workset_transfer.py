@@ -572,9 +572,7 @@ def history_check(
         objects=len(listed),
         blobs=len(blobs),
         scanned_digest=digest,
-        findings=tuple(
-            sorted(findings.values(), key=lambda f: (f.path, f.why, f.rule, f.object))
-        ),
+        findings=tuple(sorted(findings.values(), key=lambda f: (f.path, f.why, f.rule, f.object))),
     )
 
 

@@ -881,5 +881,9 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 horas",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 horas",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "Eliminar los chats temporales tras",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Cuánto tiempo puede estar inactivo un chat temporal antes de eliminarse. El tiempo en pantalla, una tarea en curso o una pregunta abierta no cuentan como inactividad."
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Cuánto tiempo puede estar inactivo un chat temporal antes de eliminarse. El tiempo en pantalla, una tarea en curso o una pregunta abierta no cuentan como inactividad.",
+  "wire.settings.mesh_moves.title": "Movimientos de sesión",
+  "wire.settings.mesh_moves.description": "Lo que una conversación movida a otro dispositivo lleva consigo. Se lee en cada movimiento, así que un cambio se aplica al siguiente.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Límite de archivos de trabajo por movimiento (bytes)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "La cantidad máxima de datos de archivos de trabajo (commits empaquetados más archivos preparados, sin preparar y sin seguimiento) que un movimiento envía a otro dispositivo o acepta de él. Si se supera, el movimiento se rechaza y nada cambia. Valor predeterminado: 256 MiB."
 }

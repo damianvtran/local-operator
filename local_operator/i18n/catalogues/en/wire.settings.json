@@ -881,5 +881,9 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 hours",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 minutes",
   "wire.settings.session_cleanup_temporary_idle_minutes.help": "How long a temporary chat may sit idle before it is deleted. Time on screen, a running task or an open question does not count as idle.",
-  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Delete temporary chats after"
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Delete temporary chats after",
+  "wire.settings.mesh_moves.title": "Session moves",
+  "wire.settings.mesh_moves.description": "What a conversation moved to another device brings with it. Read at every move, so a change applies to the next one.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Working-files cap per move (bytes)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "The most working-file data (bundled commits plus staged, unstaged and untracked files) one move sends to, or accepts from, another device. Over it, the move is refused and nothing changes. Default 256 MiB."
 }

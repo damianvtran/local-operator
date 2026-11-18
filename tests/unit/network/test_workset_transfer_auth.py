@@ -94,9 +94,8 @@ def staged(rig: Rig, tmp_path: Path) -> tuple[_Server, str]:
             "working_set": bound,
         },
     )
-    planned = workset_move.serve_plan(
-        server, _Link(DEST), {"session_id": SID, "lease_epoch": EPOCH, "have": {}}  # type: ignore[arg-type]
-    )
+    frame = {"session_id": SID, "lease_epoch": EPOCH, "have": {}}
+    planned = workset_move.serve_plan(server, _Link(DEST), frame)  # type: ignore[arg-type]
     assert planned["result"] == "planned", planned
     (artifact,) = planned["artifacts"]
     return server, str(artifact["digest"])
@@ -119,9 +118,7 @@ def _serve_rows(root: Path) -> list[dict[str, Any]]:
 
 
 @pytest.fixture()
-def spans(
-    staged: tuple[_Server, str], monkeypatch: pytest.MonkeyPatch
-) -> list[tuple[int, int]]:
+def spans(staged: tuple[_Server, str], monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
     """Every span the owner reads, with the number of serve rows on disk AT THAT MOMENT."""
     seen: list[tuple[int, int]] = []
     real = sync_mod.read_open_span

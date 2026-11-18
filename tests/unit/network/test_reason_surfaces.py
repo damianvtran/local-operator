@@ -55,6 +55,13 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # The working-set receipt block (PR B): ``str()`` normalises a restore/left-behind
+    # REASON CODE as it is copied from the restore report into the block's row. It
+    # stays a machine code there; the human sentence is ``workset_text.reason_text``.
+    ("local_operator/network/workset_move.py", "arrival_receipt", "reason"): (
+        2,
+        "a reason CODE copied into the receipt block, rendered later by workset_text",
+    ),
     # These f-strings use this device's HeavyClass.reason command label
     # (long-lived-command and acquired notices) and memory_budget.reason
     # (why the local cap is off). Neither value comes from a mesh peer.

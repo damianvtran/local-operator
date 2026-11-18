@@ -881,5 +881,9 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 часа",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 часа",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "Удалять временные чаты через",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Сколько временный чат может простаивать, прежде чем будет удалён. Время на экране, выполняющаяся задача или открытый вопрос простоем не считаются."
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Сколько временный чат может простаивать, прежде чем будет удалён. Время на экране, выполняющаяся задача или открытый вопрос простоем не считаются.",
+  "wire.settings.mesh_moves.title": "Перенос сеансов",
+  "wire.settings.mesh_moves.description": "Что разговор, перенесённый на другое устройство, берёт с собой. Читается при каждом переносе, поэтому изменение действует со следующего.",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "Лимит рабочих файлов на перенос (байт)",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "Максимальный объём рабочих файлов (упакованные коммиты плюс проиндексированные, непроиндексированные и неотслеживаемые файлы), который один перенос отправляет на другое устройство или принимает с него. При превышении перенос отклоняется и ничего не меняется. По умолчанию 256 МиБ."
 }

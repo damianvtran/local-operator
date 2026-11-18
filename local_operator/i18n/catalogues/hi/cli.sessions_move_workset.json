@@ -63,5 +63,14 @@
   "cli.sessions_move_workset.desktop_refused": "{source} पर मौजूद वर्किंग फ़ाइलों के बारे में पहले आपका फ़ैसला ज़रूरी है, तभी यह बातचीत {device} पर जा सकती है, इसलिए कुछ नहीं ले जाया गया।",
   "cli.sessions_move_workset.unknown_card": "{source} पर वर्किंग फ़ाइलें पढ़ी नहीं जा सकीं (रिपॉज़िटरी: {repo}), इसलिए कुछ नहीं ले जाया गया। उस रिपॉज़िटरी को ठीक करें, या सभी वर्किंग फ़ाइलें वहीं छोड़ने के लिए नीचे “{button}” चुनें।",
   "cli.sessions_move_workset.unsupported_card": "{device} पर lop का पुराना संस्करण है, जो इस बातचीत की वर्किंग फ़ाइलों की सूची नहीं बना सकता। वहाँ lop अपडेट करें, या उन्हें उसी डिवाइस पर छोड़ने के लिए नीचे “{button}” चुनें।",
-  "cli.sessions_move_workset.probe_asked": "{device} से पूछा गया कि क्या वह इन रिमोट रिपॉज़िटरी तक पहुँच सकता है; उसे सिर्फ़ उनके पते और बिल्ड फ़ाइलों के नाम भेजे गए, कोई पाथ या ब्रांच नहीं।"
+  "cli.sessions_move_workset.probe_asked": "{device} से पूछा गया कि क्या वह इन रिमोट रिपॉज़िटरी तक पहुँच सकता है; उसे सिर्फ़ उनके पते और बिल्ड फ़ाइलों के नाम भेजे गए, कोई पाथ या ब्रांच नहीं।",
+  "cli.sessions_move_workset.receipt_transferred": "वर्किंग फ़ाइलें {source} से आ गईं: {count, plural, one {# worktree} other {# worktrees}} यहाँ रीस्टोर हुए।",
+  "cli.sessions_move_workset.receipt_restored_row": "{path} को {dest} पर रीस्टोर किया गया।",
+  "cli.sessions_move_workset.receipt_pending": "{count, plural, one {# worktree अभी रीस्टोर नहीं हुआ है} other {# worktrees अभी रीस्टोर नहीं हुए हैं}}; यह डिवाइस अपना relay दोबारा शुरू होने पर फिर कोशिश करता है, और फ़ाइलें अब भी {source} पर हैं।",
+  "cli.sessions_move_workset.receipt_left_row": "{path} {source} पर ही रहा: {reason}।",
+  "cli.sessions_move_workset.receipt_recipe": "इसकी dependencies दोबारा बनाने के लिए {cwd} में चलाएँ: {run}",
+  "cli.sessions_move_workset.receipt_rewrite": "ऐसा रिमोट पता इस्तेमाल किया गया जिस तक यह डिवाइस पहुँच सकता है: {detail}",
+  "cli.sessions_move_workset.reason.primary_absent": "गंतव्य पर इस repository की कोई कॉपी नहीं है और वह इसे clone नहीं कर सका",
+  "cli.sessions_move_workset.reason.restore_failed": "फ़ाइलें आ गईं, पर अभी रीस्टोर नहीं हो सकीं",
+  "cli.sessions_move_workset.reason.snapshot_failed": "स्रोत पर इसकी स्थिति कैप्चर नहीं हो सकी (खाली branch या bare repository)"
 }

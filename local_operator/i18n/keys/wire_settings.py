@@ -1453,6 +1453,22 @@ def memory_guard_title() -> Msg:
     return Msg("wire.settings.memory_guard.title", {})
 
 
+def mesh_move_working_set_max_bytes_help() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_max_bytes.help", {})
+
+
+def mesh_move_working_set_max_bytes_label() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_max_bytes.label", {})
+
+
+def mesh_moves_description() -> Msg:
+    return Msg("wire.settings.mesh_moves.description", {})
+
+
+def mesh_moves_title() -> Msg:
+    return Msg("wire.settings.mesh_moves.title", {})
+
+
 def mesh_updates_description() -> Msg:
     return Msg("wire.settings.mesh_updates.description", {})
 

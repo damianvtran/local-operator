@@ -983,6 +983,16 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.mesh_updates_description()),
     ),
+    # How a session MOVE carries its working set (design move-working-set.md §8.4).
+    # LIVE is honest: ``workset.cap_bytes`` re-reads config.yml at every move, on the
+    # owner (the manifest's cap, refusing ``working_set_over_cap`` before anything is
+    # retired) and on the destination (its own cap on what it accepts).
+    Section(
+        "mesh_moves",
+        _t(_ws.mesh_moves_title()),
+        Scope.LIVE,
+        _t(_ws.mesh_moves_description()),
+    ),
     # What THIS device's update does with its older install generations
     # (``update.auto_prune`` / ``update.keep_generations``). Its own section, not
     # ``mesh_updates``: that one is about rolling OTHER members. LIVE is honest:
@@ -5642,6 +5652,20 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.network_rollout_on_update_choice_off_description()),
             ),
         ),
+    ),
+    # The per-move working-set cap: 256 MiB, ~6x the measured max delta (43.1 MB over
+    # n=60 worktrees, median 0; design §8.4). The default mirrors
+    # ``workset.DEFAULT_CAP_BYTES``, which ``_consumer_defaults()`` pins.
+    Setting(
+        key="mesh.move.working_set_max_bytes",
+        path=("mesh", "move", "working_set_max_bytes"),
+        section="mesh_moves",
+        label=_t(_ws.mesh_move_working_set_max_bytes_label()),
+        kind=Kind.INT,
+        default=268_435_456,
+        minimum=1_048_576,
+        maximum=17_179_869_184,
+        help=_t(_ws.mesh_move_working_set_max_bytes_help()),
     ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot

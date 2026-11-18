@@ -881,5 +881,9 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2小时",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24小时",
   "wire.settings.session_cleanup_temporary_idle_minutes.label": "临时对话的删除时间",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "临时对话闲置多久后被删除。显示在屏幕上、有任务在运行或有未回答的问题时，不计为闲置。"
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "临时对话闲置多久后被删除。显示在屏幕上、有任务在运行或有未回答的问题时，不计为闲置。",
+  "wire.settings.mesh_moves.title": "会话迁移",
+  "wire.settings.mesh_moves.description": "迁移到另一台设备的对话会随身带走哪些内容。每次迁移时读取，因此更改会在下一次迁移生效。",
+  "wire.settings.mesh_move_working_set_max_bytes.label": "每次迁移的工作文件上限（字节）",
+  "wire.settings.mesh_move_working_set_max_bytes.help": "一次迁移向另一台设备发送或从其接收的工作文件数据上限（打包的提交，加上已暂存、未暂存和未跟踪的文件）。超过上限时迁移会被拒绝，且不做任何更改。默认 256 MiB。"
 }

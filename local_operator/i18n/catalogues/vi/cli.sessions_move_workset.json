@@ -63,5 +63,14 @@
   "cli.sessions_move_workset.desktop_refused": "Cần bạn quyết định về các tệp làm việc trên {source} trước khi chuyển cuộc trò chuyện này sang {device}, nên chưa chuyển gì.",
   "cli.sessions_move_workset.unknown_card": "Không đọc được các tệp làm việc trên {source} (kho: {repo}) nên chưa chuyển gì. Hãy sửa kho đó, hoặc chọn “{button}” bên dưới để giữ mọi tệp làm việc lại ở đó.",
   "cli.sessions_move_workset.unsupported_card": "{device} đang chạy bản lop cũ, không liệt kê được tệp làm việc của cuộc trò chuyện này. Hãy cập nhật lop ở đó, hoặc chọn “{button}” bên dưới để giữ chúng lại trên thiết bị đó.",
-  "cli.sessions_move_workset.probe_asked": "Đã hỏi {device} có truy cập được các kho từ xa này hay không; chỉ gửi địa chỉ của chúng và tên các tệp build, không gửi đường dẫn hay nhánh."
+  "cli.sessions_move_workset.probe_asked": "Đã hỏi {device} có truy cập được các kho từ xa này hay không; chỉ gửi địa chỉ của chúng và tên các tệp build, không gửi đường dẫn hay nhánh.",
+  "cli.sessions_move_workset.receipt_transferred": "Các tệp làm việc đã đến từ {source}: {count, plural, other {# worktree}} đã được khôi phục tại đây.",
+  "cli.sessions_move_workset.receipt_restored_row": "Đã khôi phục {path} tại {dest}.",
+  "cli.sessions_move_workset.receipt_pending": "{count, plural, other {# worktree chưa được khôi phục}}; thiết bị này sẽ thử lại khi relay của nó khởi động lại, và {source} vẫn còn các tệp.",
+  "cli.sessions_move_workset.receipt_left_row": "{path} vẫn ở trên {source}: {reason}.",
+  "cli.sessions_move_workset.receipt_recipe": "Để tạo lại các phụ thuộc của nó, hãy chạy trong {cwd}: {run}",
+  "cli.sessions_move_workset.receipt_rewrite": "Đã dùng một địa chỉ remote mà thiết bị này truy cập được: {detail}",
+  "cli.sessions_move_workset.reason.primary_absent": "thiết bị đích không có bản sao của repository này và không thể clone nó",
+  "cli.sessions_move_workset.reason.restore_failed": "các tệp đã đến nhưng chưa thể khôi phục",
+  "cli.sessions_move_workset.reason.snapshot_failed": "không thể ghi lại trạng thái của nó trên nguồn (nhánh trống hoặc repository bare)"
 }

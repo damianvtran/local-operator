@@ -63,5 +63,14 @@
   "cli.sessions_move_workset.desktop_refused": "{source} پر موجود ورکنگ فائلوں کے بارے میں پہلے آپ کا فیصلہ ضروری ہے، تبھی یہ گفتگو {device} پر منتقل ہو سکتی ہے، اس لیے کچھ منتقل نہیں ہوا۔",
   "cli.sessions_move_workset.unknown_card": "{source} پر ورکنگ فائلیں پڑھی نہیں جا سکیں (ریپوزیٹری: {repo})، اس لیے کچھ منتقل نہیں ہوا۔ اس ریپوزیٹری کو ٹھیک کریں، یا تمام ورکنگ فائلیں وہیں چھوڑنے کے لیے نیچے “{button}” منتخب کریں۔",
   "cli.sessions_move_workset.unsupported_card": "{device} پر lop کا پرانا ورژن ہے جو اس گفتگو کی ورکنگ فائلوں کی فہرست نہیں بنا سکتا۔ وہاں lop اپ ڈیٹ کریں، یا انہیں اسی ڈیوائس پر چھوڑنے کے لیے نیچے “{button}” منتخب کریں۔",
-  "cli.sessions_move_workset.probe_asked": "{device} سے پوچھا گیا کہ کیا وہ ان ریموٹ ریپوزیٹریز تک پہنچ سکتا ہے؛ اسے صرف ان کے ایڈریس اور بلڈ فائلوں کے نام بھیجے گئے، کوئی پاتھ یا برانچ نہیں۔"
+  "cli.sessions_move_workset.probe_asked": "{device} سے پوچھا گیا کہ کیا وہ ان ریموٹ ریپوزیٹریز تک پہنچ سکتا ہے؛ اسے صرف ان کے ایڈریس اور بلڈ فائلوں کے نام بھیجے گئے، کوئی پاتھ یا برانچ نہیں۔",
+  "cli.sessions_move_workset.receipt_transferred": "ورکنگ فائلیں {source} سے آ گئیں: {count, plural, one {# worktree} other {# worktrees}} یہاں بحال ہوئے۔",
+  "cli.sessions_move_workset.receipt_restored_row": "{path} کو {dest} پر بحال کیا گیا۔",
+  "cli.sessions_move_workset.receipt_pending": "{count, plural, one {# worktree ابھی بحال نہیں ہوا} other {# worktrees ابھی بحال نہیں ہوئے}}؛ یہ ڈیوائس اپنا relay دوبارہ شروع ہونے پر پھر کوشش کرتی ہے، اور فائلیں اب بھی {source} پر ہیں۔",
+  "cli.sessions_move_workset.receipt_left_row": "{path} {source} پر ہی رہا: {reason}۔",
+  "cli.sessions_move_workset.receipt_recipe": "اس کی dependencies دوبارہ بنانے کے لیے {cwd} میں چلائیں: {run}",
+  "cli.sessions_move_workset.receipt_rewrite": "ایسا ریموٹ پتا استعمال کیا گیا جس تک یہ ڈیوائس پہنچ سکتی ہے: {detail}",
+  "cli.sessions_move_workset.reason.primary_absent": "منزل پر اس repository کی کوئی کاپی نہیں ہے اور وہ اسے clone نہیں کر سکی",
+  "cli.sessions_move_workset.reason.restore_failed": "فائلیں آ گئیں، لیکن ابھی بحال نہیں ہو سکیں",
+  "cli.sessions_move_workset.reason.snapshot_failed": "ماخذ پر اس کی حالت محفوظ نہیں ہو سکی (خالی branch یا bare repository)"
 }
