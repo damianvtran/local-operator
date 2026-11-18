@@ -1,0 +1,64 @@
+{
+  "locale": "ru",
+  "namespace": "cli.daemon_build",
+  "audit_id": "r1-6236",
+  "round": 1,
+  "audit_date": "2026-11-18",
+  "key_count": 5,
+  "pr": "https://github.com/damianvtran/local-operator/pull/4215",
+  "worktree_head": "2cc53faf08f6e5a7295b5e3b6a512f3b5a6ecbb3",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev task subagent)",
+    "session": "623609b4ac65",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": "PR #4215 coder subagent ('local-operator implementer (coder role)', anthropic/claude-opus-5-5); session id not disclosed to auditor",
+    "actual_model_source": "auditor session system prompt 'Model: anthropic/claude-opus-5-5'; no provider fallback observed; same model family as translator, different agent instance"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.daemon_build.json",
+      "sha256": "d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.daemon_build.context.json",
+      "sha256": "a35175034f8cee80d9e80aef3deaf4d27809bf48e0ccea0b5d30246aed436c14"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.daemon_build.json",
+      "sha256": "383542a05637ccec8fb7acf03eed99ed9bbefe09d78b66a766c345b240319dc6"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.daemon_build/r1-6236/report.md",
+      "sha256": "6555edfc2d7e13c420658f843ff27cf331133a89e4107819c16d0d3b2b0de91d"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.daemon_build/r1-6236/audit.log",
+      "sha256": "3a1b18e85721e660957b008f54e6d2708b74764a037aea74d349b463efd0cc08"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.daemon_build/r1-6236/audit_checks.py.txt",
+      "sha256": "9fe25e772249eb0047db43d8c9d028cc23e7fe5680dfbc7dfc62732ea6a18aff"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log is the actual captured command output (identical bytes in each locale bundle of this audit); audit_checks.py.txt is the script that produced its [parity]/[term]/[typo]/[ur] lines",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "RU-1",
+      "RU-2",
+      "S-1"
+    ],
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 1
+    }
+  },
+  "rendered_evidence": "none",
+  "native_human_review": "none"
+}

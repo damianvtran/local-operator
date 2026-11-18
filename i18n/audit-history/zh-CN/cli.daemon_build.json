@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.daemon_build",
+  "history_sha256": "e1a900ec4cda0c2878f33cf4d13d437a5569f765969786b06682568c6190184a",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.daemon_build",
+      "source_sha256": "d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93",
+      "context_sha256": "a35175034f8cee80d9e80aef3deaf4d27809bf48e0ccea0b5d30246aed436c14",
+      "translator": {
+        "agent": "local-operator implementer (coder role), PR #4215 coder subagent",
+        "session": null,
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "623609b4ac65",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "changes_requested",
+        "findings": 2,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "R1 r1-6236, 5/5 keys, parity ok; 1 MAJOR (ZH-1), 1 MINOR: build≠version/bare-line fixes needed. Record: i18n/audits/evidence/zh-CN/cli.daemon_build/r1-6236/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.daemon_build/r1-6236/record.json",
+          "sha256": "f261fc707df762e362ea524c1c3cfd6ee3ddcafac003aaf90ba775c06baaec45"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.daemon_build/r1-6236/report.md",
+          "sha256": "f9f5f9792ad889ebfffd81e4304f5ea9c5cfcf26682f2a6202442bf0677a1ab9"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.daemon_build/r1-6236/audit.log",
+          "sha256": "3a1b18e85721e660957b008f54e6d2708b74764a037aea74d349b463efd0cc08"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.daemon_build/r1-6236/audit_checks.py.txt",
+          "sha256": "9fe25e772249eb0047db43d8c9d028cc23e7fe5680dfbc7dfc62732ea6a18aff"
+        }
+      ]
+    }
+  ]
+}
