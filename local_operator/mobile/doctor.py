@@ -405,6 +405,68 @@ def inotify_usage(proc: Path = Path("/proc")) -> dict[str, Any] | None:
     }
 
 
+def _process_name(proc: Path, pid: int) -> str | None:
+    """What ``ps`` would call ``pid``: its ``comm``, so a bare number is not all
+    the user gets (design D3). ``None`` once it has exited."""
+    try:
+        name = (proc / str(pid) / "comm").read_text(errors="replace").strip()
+    except OSError:
+        return None
+    return name or None
+
+
+#: The systemd units whose restart is NOT a remedy: the user's own service
+#: manager (restarting it ends every user service at once) and the slices and
+#: scopes a login shell or terminal lives in, which have no restart to name.
+_NOT_RESTARTABLE_UNIT_PREFIXES = ("user@", "user-runtime-dir@", "systemd-")
+
+
+def restart_command(proc: Path, pid: int) -> str | None:
+    """The exact command that restarts ``pid``, when one can be known (design D3).
+
+    WHY ONLY THESE. A command is named only when restarting through it really
+    releases the process's inotify instances: Local Operator's own daemons
+    (``lop serve`` reloads in place, and its inotify fd is close-on-exec, so the
+    re-exec drops every watch — #4193), and a process that is the main body of a
+    systemd service, which ``systemctl restart`` replaces outright. Anything
+    else (a terminal's editor, a desktop app) has no restart command a doctor
+    can know, and guessing one would send a non-expert to the wrong program;
+    the summary then names the program and asks for it to be restarted.
+    """
+    try:
+        argv = (proc / str(pid) / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        argv = []
+    # setproctitle renames these to "Local Operator", so the module in the
+    # argv (not comm) is what tells the phone service from the serve daemon.
+    if b"local_operator.mobile.service" in argv:
+        return "lop mobile restart"
+    if b"local_operator.cli" in argv and b"serve" in argv:
+        return "lop services restart"
+    try:
+        cgroup = (proc / str(pid) / "cgroup").read_text()
+    except OSError:
+        return None
+    for line in cgroup.splitlines():
+        # cgroup v2 is the single "0::<path>" line; v1 hierarchies carry the
+        # same unit path under name=systemd.
+        _, _, path = line.partition("::") if line.startswith("0::") else ("", "", "")
+        if not path and ":name=systemd:" in line:
+            path = line.split(":name=systemd:", 1)[1]
+        parts = [part for part in path.split("/") if part]
+        if not parts or not parts[-1].endswith(".service"):
+            continue
+        unit = parts[-1]
+        if unit.startswith(_NOT_RESTARTABLE_UNIT_PREFIXES):
+            return None
+        # Under user@<uid>.service it is the user's own manager's unit; anywhere
+        # else it is a system unit, which only an administrator may restart.
+        if any(part.startswith("user@") for part in parts[:-1]):
+            return f"systemctl --user restart {unit}"
+        return f"sudo systemctl restart {unit}"
+    return None
+
+
 def check_watches(proc: Path = Path("/proc")) -> dict[str, Any]:
     usage = inotify_usage(proc)
     if usage is None:
@@ -420,17 +482,56 @@ def check_watches(proc: Path = Path("/proc")) -> dict[str, Any]:
         "instance_limit": str(instance_limit),
     }
     if ratio >= WATCHES_WARN_RATIO:
-        at_limit = usage["watches"] >= limit or usage["instances"] >= instance_limit
-        # Name the holder of whichever budget is the bottleneck. With either
-        # count > 0 its top holder is set, so "?" only survives a zero limit
-        # (no key without the process clause exists; adding one needs copy).
-        top = usage["top_instance_pid"] if instance_ratio > watch_ratio else usage["top_pid"]
-        pid = str(top or "?")
-        summary = (
-            _md.watches_at_limit(pid=pid, **args) if at_limit else _md.watches_near(pid=pid, **args)
-        )
+        # WHICH BUDGET (design D1, review M3). The two limits fail differently:
+        # a full max_user_watches makes inotify_add_watch fail with ENOSPC ("No
+        # space left on device"), a full max_user_instances makes inotify_init
+        # fail with EMFILE ("Too many open files"). The row quotes the error the
+        # user will actually have seen and names the one sysctl that raises it.
+        # A tie goes to watches, the budget node2's incident spent.
+        by_instances = instance_ratio > watch_ratio
+        if by_instances:
+            at_limit = usage["instances"] >= instance_limit
+            top = usage["top_instance_pid"]
+        else:
+            at_limit = usage["watches"] >= limit
+            top = usage["top_pid"]
+        # With either count > 0 its top holder is set, so "?" only survives a
+        # zero limit.
+        name = _process_name(proc, top) if top is not None else None
+        command = restart_command(proc, top) if top is not None else None
+        # The problem line counts only the budget that is short; the other one
+        # stays in the check's data (and in the ok line).
+        named = {
+            "pid": str(top or "?"),
+            "name": name or "?",
+            "how": "command" if command else "other",
+            "command": command or "",
+        }
+        if by_instances:
+            counts = {"instances": args["instances"], "instance_limit": args["instance_limit"]}
+            summary = (
+                _md.watches_instances_at_limit(**counts, **named)
+                if at_limit
+                else _md.watches_instances_near(**counts, **named)
+            )
+        else:
+            counts = {"watches": args["watches"], "limit": args["limit"]}
+            summary = (
+                _md.watches_at_limit(**counts, **named)
+                if at_limit
+                else _md.watches_near(**counts, **named)
+            )
         status = FAIL if at_limit else WARN
-        return _check("watches", status, _t(summary), ratio=round(ratio, 3), **usage)
+        return _check(
+            "watches",
+            status,
+            _t(summary),
+            ratio=round(ratio, 3),
+            bottleneck="instances" if by_instances else "watches",
+            top_name=name,
+            restart_command=command,
+            **usage,
+        )
     return _check("watches", PASS, _t(_md.watches_ok(**args)), ratio=round(ratio, 3), **usage)
 
 

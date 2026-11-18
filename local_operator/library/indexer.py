@@ -677,7 +677,8 @@ class LibraryIndexer:
             )
             watch.start()
         except Exception as error:  # noqa: BLE001 - fall back to the timer, never to a crash
-            # ``start`` already closed its fd, so nothing it took is held.
+            # ``start`` closes its inotify fd and wake pipe on every failure
+            # path, late ones included, so nothing it took is held.
             self._session_watch_failed(error)
             return
         self._observer = watch
@@ -696,12 +697,13 @@ class LibraryIndexer:
         if self._watch_warned:
             return
         self._watch_warned = True
-        if getattr(error, "errno", None) in session_watch.BUDGET_ERRNOS:
+        code = getattr(error, "errno", None)
+        if code in session_watch.BUDGET_ERRNOS:
             logger.warning(
                 "library: inotify limit reached (%s); journal watch off, using the timed "
-                "reconcile. Raise fs.inotify.max_user_watches / max_user_instances, or "
-                "find the holder with `lop mobile doctor`.",
+                "reconcile. Raise %s, or find the holder with `lop mobile doctor`.",
                 error,
+                session_watch.budget_limit(code),
             )
         else:
             # A non-OSError is a bug or a broken libc, not a budget: keep its

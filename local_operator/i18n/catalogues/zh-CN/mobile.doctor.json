@@ -30,8 +30,10 @@
   "mobile.doctor.tunnel.turned_off": "此电脑上通过Radient的手机访问已关闭。要在外出时使用手机，请运行 lop tunnel start 重新开启。",
   "mobile.doctor.tunnel.not_running": "此电脑上通过Radient的手机访问未运行。请运行 lop tunnel restart 重启它；如果仍然没有运行，请将这份报告发给支持团队。",
   "mobile.doctor.tunnel.list_skipped": "未检查重复隧道，因为此电脑上的Radient登录不存在或需要刷新。请打开Local Operator，按提示登录，然后重新运行检查。",
-  "mobile.doctor.watches.ok": "你的账户在此电脑上使用了{watches}个文件监视（上限{limit}个）和{instances}个监视器（上限{instance_limit}个）。",
-  "mobile.doctor.watches.near": "你的账户在此电脑上使用了{watches}个文件监视（上限{limit}个）和{instances}个监视器（上限{instance_limit}个），已接近上限，其中大部分属于进程{pid}。请重启该进程，或请管理员调高 fs.inotify.max_user_watches 和 fs.inotify.max_user_instances。",
-  "mobile.doctor.watches.at_limit": "你的账户已用完此电脑上的文件监视（{watches}个监视，上限{limit}个；{instances}个监视器，上限{instance_limit}个），因此其他监视文件的程序会报错“No space left on device”。其中大部分属于进程{pid}：请重启它，或请管理员调高 fs.inotify.max_user_watches 和 fs.inotify.max_user_instances。",
-  "mobile.doctor.watches.unknown": "无法统计此电脑上文件监视的使用情况。如果此电脑上的程序报错“No space left on device”，请将这份报告发给支持团队。"
+  "mobile.doctor.watches.ok": "你的账户在此电脑上使用了{watches}个文件监视（上限{limit}个）和{instances}个监视句柄（上限{instance_limit}个）。",
+  "mobile.doctor.watches.near": "你的账户在此电脑上使用了{watches}个文件监视（上限{limit}个），已接近上限，其中大部分属于{name}（进程{pid}）。{how, select, command{请运行{command}重启它} other{请重启该程序}}，或请管理员调高 fs.inotify.max_user_watches。",
+  "mobile.doctor.watches.at_limit": "你的账户已用完此电脑上的文件监视（{watches}个，上限{limit}个），因此监视文件的程序会报错“No space left on device”。其中大部分属于{name}（进程{pid}）：{how, select, command{请运行{command}重启它} other{请重启该程序}}，或请管理员调高 fs.inotify.max_user_watches。",
+  "mobile.doctor.watches.instances_near": "你的账户在此电脑上使用了{instances}个监视句柄（上限{instance_limit}个），已接近上限，其中{name}（进程{pid}）占用最多。{how, select, command{请运行{command}重启它} other{请重启该程序}}，或请管理员调高 fs.inotify.max_user_instances。",
+  "mobile.doctor.watches.instances_at_limit": "你的账户已用完此电脑上的监视句柄（{instances}个，上限{instance_limit}个），因此监视文件的程序会报错“Too many open files”。其中{name}（进程{pid}）占用最多：{how, select, command{请运行{command}重启它} other{请重启该程序}}，或请管理员调高 fs.inotify.max_user_instances。",
+  "mobile.doctor.watches.unknown": "无法统计此电脑上文件监视的使用情况。如果此电脑上的程序报错“No space left on device”或“Too many open files”，请将这份报告发给支持团队。"
 }
