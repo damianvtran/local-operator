@@ -35,9 +35,11 @@ building the client, so the command never creates one (#4251 QA Q2).
 HUMAN-ONLY JOIN, FAIL-CLOSED. The owner audit serves bodies the agent's
 screening HELD or REJECTED — the exact text screening keeps out of a model's
 context (``client.py``'s owner-audit section, ``test_owner_audit_isolation.py``).
-So the join needs a POSITIVE sign of a person (:func:`_human_at_terminal`): the
+So the join needs a POSITIVE sign of a person (:func:`_withheld_reason`): the
 agent-descent marker absent (:func:`local_operator.agent_shell.in_agent_shell`,
-set by the ``bash`` tool and the ``eval`` worker) AND stdin a terminal. Anything
+set by the ``bash`` tool and the ``eval`` worker), no app console pane
+(``LOCAL_OPERATOR_CONSOLE_SURFACE`` absent — the ``console`` tool's pty), AND
+stdin a terminal. Anything
 else — an agent tool, a cron job, ``env -i`` with no terminal — gets the
 metadata (ids, codes, ages, flags — what the hold-alert already discloses) and
 ``sender: withheld``, never a held body or a sender-chosen label. The first
@@ -45,18 +47,12 @@ cut gated on the marker alone, which failed OPEN on the ``eval`` worker that
 never carried it (#4251 security review S-1). Stdin, not stdout, so a person's
 ``lop team-bridge holds --json | jq`` still works.
 
-THE LIMITS, STATED. (1) Not a same-uid boundary: a process that scrubs its
-environment and allocates a pty can still reach the hub with the local
-credential, exactly as it could by importing the client. (2) The ``console``
-tool drives a REAL pty whose environment is its host's, so it passes the
-terminal test and may lack the marker; a model driving ``lop team-bridge holds``
-through ``console`` gets the join. It is a deliberate interactive-terminal tool
-whose screen the operator can see, and marking its pty would also change every
-``in_agent_shell()`` refusal inside it, so it is recorded here rather than
-patched in this change. The excerpt is further
-opt-in (``--excerpt``), capped at :data:`EXCERPT_MAX` characters, and scrubbed
-by the harness's one credential-shape table BEFORE it is cut, so a token split
-by the cut cannot escape the shape match.
+THE LIMIT, STATED. Not a same-uid boundary: a command that deliberately scrubs
+its environment (``env -u LOCAL_OPERATOR_AGENT_SHELL -u
+LOCAL_OPERATOR_CONSOLE_SURFACE``) and allocates a pty (``script``) still gets the
+join, exactly as same-user code could by importing the client. That is the
+accepted limit; every ordinary agent tool path — ``bash``, ``eval``, ``console``
+— is withheld. A person uses their own terminal app, not the app's console pane.
 
 Terminal copy here is developer-facing CLI output naming codes and states —
 plain English like ``team_bridge/cli.py``, pending the CLI copy-extraction
@@ -136,10 +132,22 @@ def _withheld_reason() -> str | None:
     Fail-closed by construction: the join runs only on the positive answer.
     """
 
+    import os
+
     from local_operator.agent_shell import in_agent_shell
+    from local_operator.terminals import CONSOLE_SURFACE_ENV
 
     if in_agent_shell():
         return "agent_shell"
+    # The app's console pane: a real pty, so it passes the terminal test, and
+    # its environment is the app's, so it lacks the bash marker. Every pane is
+    # readable by the agent (`console read`), whoever opened it, so held text
+    # printed there reaches a model. PRESENCE, not value: a creator's `env`
+    # override can assign the key (even "") but cannot delete it; only an
+    # `env -u` in the command can, the same deliberate scrub as for the marker
+    # (#4251 security review S-3).
+    if CONSOLE_SURFACE_ENV in os.environ:
+        return "console"
     if not _stdin_is_terminal():
         return "no_terminal"
     return None

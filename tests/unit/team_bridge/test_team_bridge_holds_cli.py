@@ -90,6 +90,8 @@ def held(rig, monkeypatch):  # noqa: F811 — imported fixture
 
 def _as_person(monkeypatch, client: Any) -> None:
     monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    # A run inside the app's console pane must not turn these into withheld.
+    monkeypatch.delenv("LOCAL_OPERATOR_CONSOLE_SURFACE", raising=False)
     # The pty half of the gate is proven for real in
     # ``test_the_gate_needs_a_terminal_and_no_marker``; here it is the seam.
     monkeypatch.setattr(holds_cli, "_stdin_is_terminal", lambda: True)
@@ -200,6 +202,23 @@ def test_the_gate_needs_a_terminal_and_no_marker() -> None:
     # the worker carried the marker, a cron job) -> withheld.
     assert _probe(bare, tty=False) == "no_terminal"
     # A person: a real pty on stdin and no marker -> the lookup runs.
+    assert _probe(bare, tty=True) == "None"
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "openpty"), reason="needs a pty")
+def test_the_app_console_pane_is_withheld_even_on_a_pty() -> None:
+    """S-3: the `console` tool's pty passes the terminal test and lacks the bash
+    marker, so the pane's own key withholds — by PRESENCE (an `env` override can
+    blank it but not delete it)."""
+
+    import os
+
+    from local_operator.terminals import CONSOLE_SURFACE_ENV
+
+    bare = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")}
+    bare["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+    assert _probe({**bare, CONSOLE_SURFACE_ENV: "con:1:abc"}, tty=True) == "console"
+    assert _probe({**bare, CONSOLE_SURFACE_ENV: ""}, tty=True) == "console"
     assert _probe(bare, tty=True) == "None"
 
 

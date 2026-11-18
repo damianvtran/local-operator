@@ -312,8 +312,9 @@ through your signed-in account; if that fails, the rows still print with
   printed.
 - It never delivers or discards a message and writes nothing to the bridge
   store: do those in the app.
-- **Run by an agent** (from any agent tool), or anywhere without a terminal on
-  stdin, it prints `from: withheld` and no excerpt. A held message did not pass
+- **Run by an agent** (from any agent tool), in the app's console pane, or
+  anywhere without a terminal on stdin, it prints `from: withheld` and no
+  excerpt. A held message did not pass
   screening, so its text and its sender-chosen labels stay out of model context.
   Ask the user to run it in their own terminal when they want to know who sent
   what.
