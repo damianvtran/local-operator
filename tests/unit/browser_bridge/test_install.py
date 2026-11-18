@@ -1307,7 +1307,12 @@ class _LaunchctlRig:
             install, "health", lambda *a, **k: {"ok": True} if self.answering else None
         )
         monkeypatch.setattr(install, "_launchctl", self._launchctl)
-        monkeypatch.setattr(install.launchd, "job_running", lambda **kwargs: self.running)
+        # The pid launchd publishes (`None` = not running); a kickstart respawns
+        # the job under a new one, which is what confirms a build restart.
+        self.pid = 4242
+        monkeypatch.setattr(
+            install.launchd, "job_pid", lambda **kwargs: self.pid if self.running else None
+        )
         monkeypatch.setattr(install.launchd, "kickstart", self._kickstart)
 
     def _launchctl(self, *cmd: str) -> subprocess.CompletedProcess[str]:
@@ -1317,6 +1322,7 @@ class _LaunchctlRig:
     def _kickstart(self, **kwargs: object) -> bool:
         self.calls.append(["kickstart", "-k", str(kwargs.get("label"))])
         self.answering = True  # the restart brought it back
+        self.pid += 1
         return True
 
     def write_current_plist(self, port: int) -> None:
@@ -1356,6 +1362,7 @@ def test_install_skips_a_plist_that_already_says_what_it_would_write(
     rig = _LaunchctlRig(monkeypatch, tmp_path)
     rig.write_current_plist(4099)
     before = rig.plist.stat().st_mtime_ns
+    _running_build(monkeypatch, stale=None, verdict=False)
 
     result = install.install(4099)
 
@@ -1368,6 +1375,58 @@ def test_install_skips_a_plist_that_already_says_what_it_would_write(
     assert not any(
         "loaded the LaunchAgent" in step for step in steps
     ), "an install that skipped the load must not report one"
+
+
+def _running_build(
+    monkeypatch: pytest.MonkeyPatch, *, stale: Path | None, verdict: bool | None
+) -> None:
+    """Pin the running pid's build: the repair's reader and the tri-state together."""
+    from local_operator import update
+
+    monkeypatch.setattr(update, "stale_generation_of_process", lambda pid: stale)
+    monkeypatch.setattr(update, "generation_staleness_of_process", lambda pid: verdict)
+
+
+def test_a_current_plist_over_a_stale_build_restarts_the_bridge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The mobile/tunnel field finding (2026-11-18), on the bridge's twin branch.
+
+    A byte-identical plist (it names the shim) over a bridge still running the
+    OLD build used to read "already current". A PROVEN stale build is kicked
+    and confirmed by a new pid.
+    """
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    _running_build(monkeypatch, stale=Path("/gen/20261113T090000Z-oldbuild"), verdict=True)
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    assert [call[:2] for call in rig.calls] == [["kickstart", "-k"]], rig.calls
+    assert rig.pid == 4243
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("20261113T090000Z-oldbuild" in step for step in steps), steps
+    assert not any("already current and running" in step for step in steps), steps
+
+
+def test_an_unconfirmed_bridge_build_is_named_not_bounced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unreadable build: no restart on a guess, and no "already current" either."""
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    _running_build(monkeypatch, stale=None, verdict=None)
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    assert rig.calls == [], rig.calls
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("lop browser restart" in step for step in steps), steps
+    assert not any("already current and running" in step for step in steps), steps
 
 
 def test_install_still_writes_and_reloads_a_changed_plist(
@@ -1423,3 +1482,66 @@ def test_the_verbs_refuse_a_redirected_home(
     assert result["ok"] is False, result
     assert calls == [], f"a redirected home reached launchd: {calls}"
     assert "not the LaunchAgent the real home owns" in str(result["error"])
+
+
+# --------------------------------------------------------------------------
+# Running build on Linux (review R1-1/R1-2, 2026-11-18): `enable --now` does
+# not restart a running unit, so the install asks the running build.
+# --------------------------------------------------------------------------
+
+
+def _linux_build_rig(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, check: object
+) -> list[dict[str, object]]:
+    from local_operator import update
+
+    monkeypatch.setattr(install, "systemd_path", lambda: tmp_path / "unit.service")
+    monkeypatch.setattr(install, "log_path", lambda: tmp_path / "bridge.log")
+    monkeypatch.setattr(install, "health", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(install, "enable_linger", lambda: True)
+    monkeypatch.setattr(
+        install.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+    asked: list[dict[str, object]] = []
+
+    def build_line(**kwargs: object) -> object:
+        asked.append(kwargs)
+        return check
+
+    monkeypatch.setattr(update, "systemd_install_build_line", build_line)
+    return asked
+
+
+def test_linux_unknown_build_is_named_not_bounced(
+    linux: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator import launchd
+
+    check = launchd.InstallBuildCheck(kind="unconfirmed", recovery="lop browser restart")
+    asked = _linux_build_rig(monkeypatch, tmp_path, check)
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    assert asked[0]["restart_when_unproven"] is False
+    assert asked[0]["recovery"] == "lop browser restart"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert check.step() in steps
+    assert "lop browser restart" in check.step()
+
+
+def test_linux_failed_build_restart_fails_the_install(
+    linux: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator import launchd
+
+    check = launchd.InstallBuildCheck(kind="failed", recovery="lop browser restart")
+    _linux_build_rig(monkeypatch, tmp_path, check)
+
+    result = install.install(4099)
+
+    assert result["ok"] is False
+    assert result["error"] == check.step()
