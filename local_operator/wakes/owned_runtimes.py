@@ -50,6 +50,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +127,7 @@ def owned_pids(
     owner: str = "",
     any_owner: bool = False,
     run: Callable[[Sequence[str], float], str] | None = None,
+    unreadable: list[int] | None = None,
 ) -> list[tuple[int, str, str]]:
     """(pid, session-id, environment-text) candidates, for inventory and tests.
 
@@ -140,6 +142,15 @@ def owned_pids(
     only defers a restart while under-counting would end a conversation.
     ``run`` is the census's command runner (``reclaim``'s seam), passed through
     so :func:`count_owned` can tell an unreadable process table from an empty one.
+
+    ``unreadable``, when given, collects every listed runtime pid that is STILL
+    ALIVE but whose per-pid probe could not be read: no ``ps -p`` row (a
+    timeout under load, where the runner answers ``""``), or no environment at
+    all (``/proc/<pid>/environ`` or ``ps -E`` read nothing). Such a pid is still
+    skipped here, because this function lists only what it could identify; the
+    census caller decides that "could not identify" is not "not wake-owned"
+    (review R2-1 on #4175). The extra liveness and environment reads happen
+    only when a caller asks for this list, so inventory callers pay nothing new.
     """
     from local_operator.session.runtime import reclaim
 
@@ -150,9 +161,19 @@ def owned_pids(
     for observed_row in reclaim.runtime_processes(**seam):
         row = reclaim.process_row(observed_row.pid, **seam)
         if row is None:
+            if unreadable is not None and _still_alive(observed_row.pid):
+                unreadable.append(observed_row.pid)
             continue
         env = row.command
         observed_owner = owner_of(env)
+        if not observed_owner and unreadable is not None:
+            # No marker means "not wake-started" OR "its environment could not
+            # be read": ``process_row`` folds an unreadable environ into the
+            # same ``command`` text. Only a direct re-read tells them apart, and
+            # a real runtime always starts with a non-empty environment.
+            if not reclaim.pid_environment(row.pid, **seam).strip() and _still_alive(row.pid):
+                unreadable.append(row.pid)
+            continue
         if not observed_owner or (owner and observed_owner != owner):
             continue
         if config_dir is not None and reclaim.config_root_of(env) != str(config_dir):
@@ -161,6 +182,31 @@ def owned_pids(
         if session_id:
             found.append((row.pid, session_id, env))
     return found
+
+
+def _still_alive(pid: int) -> bool:
+    """Could a stop of THIS user's supervisor still reach ``pid``? Doubt answers yes.
+
+    ``kill(pid, 0)`` sends nothing; it only asks the kernel whether a signal
+    would be delivered. Success is a live pid of ours. ``ESRCH`` proves it
+    exited. ``EPERM`` is another user's process: the process table lists every
+    user, a supervisor's ``sweep`` cannot signal that pid either, and its
+    environment is unreadable to us by design, so counting it as unknown would
+    block every wakes restart on a shared host for no conversation at risk. Any
+    other answer is doubt, and doubt only defers a restart, while calling a live
+    runtime gone could end a conversation.
+    """
+    if sys.platform == "win32":  # ``os.kill(pid, 0)`` terminates there; no ps census anyway
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def count_owned(config_dir: Path | None = None) -> int | None:
@@ -177,6 +223,13 @@ def count_owned(config_dir: Path | None = None) -> int | None:
     "no runtimes" — the one answer that licenses a restart — so an empty table
     is treated as unreadable: a successful ``ps -eo`` always lists at least
     ``ps`` itself and its parent. Never raises.
+
+    ``None`` too when a listed runtime is still ALIVE but its own row or
+    environment could not be read (review R2-1 on #4175, 2026-11-18). The table
+    alone cannot say whether that runtime carries the marker. Skipping it
+    answered ``0`` while a marked runtime might be running, and a later
+    ``sweep`` with a successful probe would then SIGTERM it. A pid that exited
+    between the table and the probe is gone and does not count.
     """
     from local_operator.session.runtime import reclaim
 
@@ -188,12 +241,16 @@ def count_owned(config_dir: Path | None = None) -> int | None:
             read_table.append(bool(output.strip()))
         return output
 
+    unreadable: list[int] = []
     try:
-        found = owned_pids(config_dir, any_owner=True, run=run)
+        found = owned_pids(config_dir, any_owner=True, run=run, unreadable=unreadable)
     except Exception:  # noqa: BLE001 — a census is a gate's input; unknown is not zero
         logger.debug("wake-owned runtime census failed", exc_info=True)
         return None
     if not read_table or not all(read_table):
+        return None
+    if unreadable:
+        logger.debug("wake-owned runtime census: alive but unreadable pids %s", unreadable)
         return None
     return len(found)
 
