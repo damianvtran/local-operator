@@ -928,16 +928,42 @@ async def test_a_reselect_after_navigating_away_gets_a_full_budget(monkeypatch):
         monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_CEILING_S", 0.05)
         monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", 7)
 
+        # NAVIGATE AWAY ON AN EVENT, NOT ON A WALL-CLOCK GUESS. This used to
+        # sleep 3 x 0.06 s and hope the chain was then inside a backoff. Under
+        # CPU load (two CI witnesses on `test (3.13, 2)`, reproduced locally at
+        # 2-3/10 with spinner processes) the switch instead landed while an
+        # ATTEMPT was in flight; that attempt then fails with the source no
+        # longer current and takes the product's other, correct, exit — it
+        # latches "source left the screen" and zeroes the counter — so the
+        # precondition read `carried == 0` and the test failed before it ever
+        # reached the property it pins. The spy below marks the one moment the
+        # residue is defined for: the retry loop has spent `RESIDUE` attempts
+        # and is about to sleep its backoff. The test is woken from `set()`
+        # before the loop's own sleep can complete (the wake-up is queued ahead
+        # of the timer), so the switch below happens strictly mid-backoff, no
+        # matter how starved the host is.
+        residue = 3
+        mid_backoff = asyncio.Event()
+        shipped_backoff = app_module.sidebar_connect_backoff_s
+
+        def backoff_spy(attempt: int) -> float:
+            if attempt >= residue:
+                mid_backoff.set()
+            return shipped_backoff(attempt)
+
+        monkeypatch.setattr(app_module, "sidebar_connect_backoff_s", backoff_spy)
+
         app._start_sidebar_connection(source)
         # Part-way through, NOT to exhaustion: an exhausted budget resets itself
         # on surrender, and the residue this pins is the one a chain leaves when
         # it is stopped early.
-        for _ in range(3):
-            await asyncio.sleep(0.06)
+        await asyncio.wait_for(mid_backoff.wait(), timeout=30)
         assert source.connect_attempts > 0, "the precondition never spent any budget"
         assert source.connect_attempts < app_module.SIDEBAR_CONNECT_ATTEMPTS
 
-        # The user navigates away mid-backoff; the chain stops itself.
+        # The user navigates away mid-backoff; the chain stops itself. No await
+        # between the wake-up above and this assignment: that is what keeps it
+        # inside the backoff.
         app._interaction = SessionInteraction(FakeSession())
         task = source.connection_task
         if task is not None:
