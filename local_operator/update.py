@@ -81,9 +81,7 @@ from local_operator.helpers import retention_label
 # a stdlib-only module; every existing consumer of the name here is unaffected.
 # The ``as`` spelling is what marks this as a deliberate re-export rather than
 # an unused import.
-from local_operator.install_defaults import (
-    DEFAULT_AUTO_PRUNE_GENERATIONS,
-)
+from local_operator.install_defaults import DEFAULT_AUTO_PRUNE_GENERATIONS
 from local_operator.install_defaults import (
     DEFAULT_KEEP_GENERATIONS as DEFAULT_KEEP_GENERATIONS,
 )
