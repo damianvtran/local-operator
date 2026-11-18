@@ -67,7 +67,7 @@ from local_operator.config import ConfigManager
 from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.text import tr
 from local_operator.network.types import MeshRefusal
-from local_operator.remote_compute import is_enabled, records, resolve_network
+from local_operator.remote_compute import is_enabled, records, resolve_network, results
 from local_operator.remote_compute.api import (
     RemoteRuns,
     RunSubmitMetadata,
@@ -75,6 +75,7 @@ from local_operator.remote_compute.api import (
     repository_for,
 )
 from local_operator.remote_compute.client import (
+    LOGS_PAGE_DEFAULT,
     RemoteComputeClient,
     check_idempotency_key,
     is_terminal,
@@ -85,6 +86,7 @@ from local_operator.remote_compute.defaults import run_defaults
 from local_operator.remote_compute.errors import (
     ATTESTATION_CODE_PREFIX,
     REFUSAL_CODES,
+    BundleApplyFailed,
     CapacityUnavailable,
     Conflict,
     IdempotencyConflict,
@@ -95,12 +97,15 @@ from local_operator.remote_compute.errors import (
     NetworkMismatch,
     PreviewNotEnabled,
     RemoteComputeError,
+    ResultsUnavailable,
     RunBusy,
     RunIdentityMismatch,
     RunLimitReached,
     RunNotFound,
+    SizeMismatch,
     Unreachable,
     UnreadableEnvelope,
+    UnsafeArchive,
     UnusableRepo,
 )
 from local_operator.remote_compute.messages import refusal_message
@@ -185,6 +190,7 @@ CODE_CAPACITY_UNAVAILABLE = "capacity_unavailable"
 CODE_RUN_NOT_FOUND = "not_found"
 #: Also the contract's spelling, for a key this client refuses before sending.
 CODE_INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
+CODE_RESULTS_SIZE_MISMATCH = "results_size_mismatch"
 CODE_FAILED = "remote_compute_failed"
 
 #: The status each refusal answers when the library carries no HTTP status of its
@@ -207,6 +213,16 @@ _STATUS_BY_CLASS: tuple[tuple[type[BaseException], int], ...] = (
     (UnreadableEnvelope, 502),
     (NetworkMismatch, 502),
     (RunIdentityMismatch, 502),
+    # THE RESULTS FAMILY, and the statuses are the DISTINCTION rather than a
+    # convention. A run that published nothing, or a destination that is already
+    # there, is a conflict with the state of the run or of this machine (409); an
+    # archive this build will not write and a download that is not the size the
+    # server advertised are the far end having sent something unusable (502); and a
+    # clone that cannot take the bundle is again this machine's state (409).
+    (ResultsUnavailable, 409),
+    (BundleApplyFailed, 409),
+    (UnsafeArchive, 502),
+    (SizeMismatch, 502),
 )
 
 #: The code each library-internal refusal answers, in the same order. Read only
@@ -222,6 +238,7 @@ _CODE_BY_CLASS: tuple[tuple[type[BaseException], str], ...] = (
     (InvalidIdempotencyKey, CODE_INVALID_IDEMPOTENCY_KEY),
     (CapacityUnavailable, CODE_CAPACITY_UNAVAILABLE),
     (RunNotFound, CODE_RUN_NOT_FOUND),
+    (SizeMismatch, CODE_RESULTS_SIZE_MISMATCH),
 )
 
 #: The status a MESH refusal answers, by the refusal's own code.
@@ -317,7 +334,17 @@ def _class_code(failure: RemoteComputeError) -> str:
     ``not_found``, so a renderer that branches on ``error.code`` alone can tell
     "this run is gone" from a generic library failure without also reading the
     status (QA round 1, Q1).
+
+    THE REASON IS THE CODE for the results families, exactly as it is for
+    :class:`UnusableRepo` (which has its own arm in :func:`refusal_from`): each
+    reason has its own remedy — a missing artifact, an archive this device will not
+    write, a clone whose base commit is absent — and a renderer branches on the
+    code. Named classes rather than ``getattr(failure, "reason", None)`` for
+    everything, because two other families carry a ``reason`` that is NOT a wire
+    code and this table's answer for them must not move.
     """
+    if isinstance(failure, (BundleApplyFailed, ResultsUnavailable, UnsafeArchive)):
+        return failure.reason
     for error_type, code in _CODE_BY_CLASS:
         if isinstance(failure, error_type):
             return code
@@ -412,6 +439,35 @@ class RunSubmission(BaseModel):
     max_hours: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
     network_id: str | None = None
     idempotency_key: str | None = None
+
+
+class ResultsFetch(BaseModel):
+    """The fetch body: where to extract, or nothing for the run's default directory.
+
+    ``dest_dir`` IS OPTIONAL AND ABSOLUTE. Optional because the default is a
+    directory this app owns (``<config>/remote-compute/results/<run id>``), and
+    absolute because a relative path would resolve against the daemon's working
+    directory rather than the operator's — the refusal names that rather than
+    landing the files somewhere nobody looks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    dest_dir: str | None = None
+
+
+class ResultsApply(BaseModel):
+    """The apply body: the clone the run's bundle is fetched into.
+
+    REQUIRED, because there is no directory this app may guess: the bundle belongs
+    beside the commits it builds on, and only the operator knows which clone that
+    is. The clone must already hold the run's base commit
+    (``git bundle verify`` enforces it).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    directory: str = Field(min_length=1)
 
 
 @contextlib.asynccontextmanager
@@ -629,6 +685,76 @@ async def get_run(
     return {"run": {**without_secrets(run), "source": "server"}}
 
 
+@router.get("/v1/desktop/remote-compute/runs/{identifier}/logs")
+@_refusing
+async def run_logs(
+    identifier: str,
+    request: Request,
+    next_token: str | None = None,
+    limit: int = LOGS_PAGE_DEFAULT,
+    manager: ConfigManager = Depends(get_config_manager),
+    auth: DesktopAuth = Depends(get_desktop_auth),
+) -> Any:
+    """One page of a run's logs, in the server's own page shape.
+
+    ONE PAGE, NOT A TAIL. The streaming loop is the library's ``follow_logs``, and
+    a route that held a request open for the life of a run would be a connection a
+    GUI has to keep alive, restart and time out on its own. So the renderer polls
+    this with the ``next_token`` it was given, and the two stop rules — an
+    unchanged token on two empty pages means no new lines, a terminal run with an
+    empty page is the end — stay in the library where they are tested once.
+
+    THE CONSENT SWITCH GATES THIS READ. With ``remote_compute.enabled`` off nothing
+    about the operator's work leaves the device, and a log read is work leaving the
+    device: the answer is the same 403 ``not_configured`` a create gets, and no
+    upstream call is made. The flag is read per request, so a live toggle reaches a
+    running daemon.
+    """
+    root = _config_dir(request, manager)
+    _require_enabled(root)
+    credential_id = _require_pin(await _pin(auth))
+    async with _runs(root, credential_id) as runs:
+        page = await runs.client.run_logs(identifier, next_token=next_token, limit=limit)
+    return {
+        "events": list(page.events),
+        "next_token": page.next_token,
+        "run_status": page.run_status,
+    }
+
+
+@router.get("/v1/desktop/remote-compute/runs/{identifier}/results")
+@_refusing
+async def run_results(
+    identifier: str,
+    request: Request,
+    manager: ConfigManager = Depends(get_config_manager),
+    auth: DesktopAuth = Depends(get_desktop_auth),
+) -> Any:
+    """The run's artifacts WITHOUT their download URLs, and its git summary.
+
+    THE URLS DO NOT LEAVE THIS PROCESS except into the download itself. Each one is
+    a bearer that authorises one GET for a few minutes, so a body carrying them
+    would put the run's results in the client's cache and in every log the client
+    keeps; :func:`fetch_results` is the one place a URL is used, and it never
+    returns one. ``Artifact.to_json`` is that filter, so this route cannot forget
+    it — the same shape ``without_secrets`` gives a run body.
+
+    A run that has not published anything answers an empty list, not a refusal: "no
+    artifacts yet" is a normal answer while a run is still going, and the panel
+    paints it.
+    """
+    root = _config_dir(request, manager)
+    _require_enabled(root)
+    credential_id = _require_pin(await _pin(auth))
+    async with _runs(root, credential_id) as runs:
+        listing = await runs.client.run_artifacts(identifier)
+    return {
+        "run_status": listing.run_status,
+        "artifacts": [artifact.to_json() for artifact in listing.artifacts],
+        "git": listing.git,
+    }
+
+
 # -- the writes --------------------------------------------------------------
 
 
@@ -674,7 +800,7 @@ async def create_run(
     """
     root = _config_dir(request, manager)
     if not is_enabled(root):
-        raise ClientRefusal(403, "not_configured", _t(_wr.disabled()))
+        raise _disabled()
     if body.tier != TIER_CLOUD_RUN:
         raise ClientRefusal(400, "tier_not_available", TIER_NOT_AVAILABLE_MESSAGE)
     credential_id = _require_pin(await _pin(auth))
@@ -780,6 +906,74 @@ async def delete_run(
     return {"run": without_secrets(run) or None}
 
 
+@router.post("/v1/desktop/remote-compute/runs/{identifier}/results/fetch")
+@_refusing
+async def fetch_results(
+    identifier: str,
+    request: Request,
+    # NO BODY IS A VALID REQUEST — "extract it where the app puts results" — and a
+    # required model would answer 422 before the consent gate or the sign-in check
+    # could speak. The body only ever carries a destination.
+    body: ResultsFetch | None = None,
+    manager: ConfigManager = Depends(get_config_manager),
+    auth: DesktopAuth = Depends(get_desktop_auth),
+) -> Any:
+    """Download and extract the run's results, and offer its session for ``--resume``.
+
+    THE ORDER IS THE SAFETY, and it is the library's: the archive is downloaded to a
+    private temp file, checked against the size the listing advertised, and only
+    then extracted into a directory that must NOT already exist. So a refused or
+    truncated download leaves no half-populated results directory for a panel to
+    offer as the run's work.
+
+    THE SESSION IS RESTORED IN A THREAD. Copying a session directory is file I/O
+    that can take a moment on a large transcript, and this loop serves every other
+    request in the daemon: the same reason ``_networks`` and the repository read run
+    off the loop. ``None`` means the archive carried no session directory (a run
+    that produced artifacts but no conversation), which is a legitimate answer.
+    """
+    root = _config_dir(request, manager)
+    _require_enabled(root)
+    credential_id = _require_pin(await _pin(auth))
+    chosen = body.dest_dir if body is not None else None
+    destination = Path(chosen) if chosen else results.results_directory(identifier, config_dir=root)
+    async with _runs(root, credential_id) as runs:
+        fetched = await runs.fetch_results(identifier, destination)
+        restored = await asyncio.to_thread(runs.restore_session, fetched.directory)
+    return {
+        "directory": str(fetched.directory),
+        "file_count": fetched.file_count,
+        "archive_bytes": fetched.archive_bytes,
+        "session_id": restored.session_id if restored is not None else None,
+        "session_restored": bool(restored is not None and restored.created),
+    }
+
+
+@router.post("/v1/desktop/remote-compute/runs/{identifier}/results/apply")
+@_refusing
+async def apply_bundle(
+    identifier: str,
+    body: ResultsApply,
+    request: Request,
+    manager: ConfigManager = Depends(get_config_manager),
+    auth: DesktopAuth = Depends(get_desktop_auth),
+) -> Any:
+    """Fetch the run's repository bundle into a clone, as a ref this app owns.
+
+    ``refs/remotes/radient/lop/<run id>`` AND NOT A BRANCH: nothing here checks
+    anything out, so the run's commits are visible to ``git log`` while the
+    operator's HEAD, index and branches are exactly what they were. The clone must
+    already hold the run's base commit — ``git bundle verify`` enforces that, and
+    its refusal is the honest answer to "this clone has never seen that code".
+    """
+    root = _config_dir(request, manager)
+    _require_enabled(root)
+    credential_id = _require_pin(await _pin(auth))
+    async with _runs(root, credential_id) as runs:
+        applied = await runs.apply_bundle(identifier, body.directory)
+    return {"ref": applied.ref, "commit": applied.commit}
+
+
 # -- the pieces the routes read ----------------------------------------------
 #
 # EVERY UPSTREAM CALL IS PINNED TO ONE CREDENTIAL, resolved from THIS daemon's
@@ -788,6 +982,30 @@ async def delete_run(
 # for a CLI invocation, wrong for a daemon started against a relocated root, and
 # wrong in a test whose store is a temporary database. So the pin is resolved here,
 # once, and handed to every client this module builds.
+
+
+def _require_enabled(root: Path) -> None:
+    """Refuse a read that would reach Radient while the consent switch is off.
+
+    THE SAME REFUSAL A CREATE GETS (``403 not_configured``), because it is the same
+    question: with ``remote_compute.enabled`` off, nothing about the operator's work
+    leaves the device, and a one-page log read or an artifact listing is that work
+    leaving. Raised rather than answered with ``enabled: false`` because these
+    routes have no local answer to fall back to — a log page and an artifact list
+    only exist upstream, and an empty body would paint as "this run has no logs".
+    """
+    if not is_enabled(root):
+        raise _disabled()
+
+
+def _disabled() -> ClientRefusal:
+    """The refusal every route here answers while the consent switch is off.
+
+    ONE CONSTRUCTION, because the sentence is the library's ``disabled`` copy and
+    the code is ``not_configured``: a renderer that branches on the code must see
+    the same one from a create and from a log read.
+    """
+    return ClientRefusal(403, "not_configured", _t(_wr.disabled()))
 
 
 async def _account(auth: DesktopAuth) -> dict[str, str]:

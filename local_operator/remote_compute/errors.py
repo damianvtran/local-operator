@@ -286,6 +286,92 @@ class Unreachable(RemoteComputeError):
     """
 
 
+class ResultsUnavailable(RemoteComputeError):
+    """A run's results could not be fetched here, and WHY, as a machine code.
+
+    The reason is a code rather than a sentence for the same reason
+    :class:`UnusableRepo`'s is: each reason has its own remedy, its own copy and
+    its own wire code, and this module has no locale. The reasons this build
+    produces are ``no_results`` and ``no_bundle`` (the run published no such
+    artifact), ``download_refused`` (the presigned GET answered a status other
+    than 200 — an expired signature is the ordinary cause), ``destination_exists``
+    (nothing is extracted over a directory that is already there),
+    ``relative_destination`` (a destination must be absolute, because the daemon's
+    working directory is not the operator's), ``unreadable_archive`` (the bytes
+    are not a gzipped tar) and ``invalid_run_id`` (an id this build will not turn
+    into a path component or a git ref).
+
+    ``detail`` names the artifact, path or status the refusal is about, and it is
+    never a presigned URL: see :mod:`local_operator.remote_compute.results`.
+    """
+
+    def __init__(self, reason: str, *, detail: str = "") -> None:
+        super().__init__(f"this run's results could not be fetched: {reason} {detail}".strip())
+        self.reason = reason
+        self.detail = detail
+
+
+class UnsafeArchive(RemoteComputeError):
+    """A results archive carrying an entry this device will not write, and WHY.
+
+    A REASON CODE, because the answer is a refusal rather than a repair: an
+    archive that names an absolute path, escapes the destination, or carries a
+    link or a device file is not a results archive this build can extract, and
+    the operator's remedy is to report it, not to retype anything. The reasons
+    are ``absolute_path``, ``outside_destination``, ``link`` (a symbolic or hard
+    link of any kind, in or out of the destination) and ``special_file``
+    (anything that is neither a regular file nor a directory).
+    """
+
+    def __init__(self, reason: str, *, detail: str = "") -> None:
+        super().__init__(
+            f"the results archive carries an entry this device will not extract: "
+            f"{reason} {detail}".strip()
+        )
+        self.reason = reason
+        self.detail = detail
+
+
+class SizeMismatch(RemoteComputeError):
+    """A download whose byte count is not the ``size_bytes`` the server advertised.
+
+    BOTH COUNTS ARE FIELDS, not only prose: the surface that reports this names
+    them, and parsing numbers back out of an English sentence would make the copy
+    a wire format (the same rule :class:`RunIdentityMismatch` follows for its two
+    ids). A truncated or padded body is refused rather than extracted: the size
+    the artifact listing carries is the one check this device can make on bytes
+    it did not produce.
+    """
+
+    def __init__(self, *, artifact: str, expected: int, actual: int) -> None:
+        super().__init__(
+            f"the {artifact} download is {actual} bytes, not the {expected} the server advertised"
+        )
+        self.artifact = artifact
+        self.expected = expected
+        self.actual = actual
+
+
+class BundleApplyFailed(RemoteComputeError):
+    """A run's repository bundle could not be applied to a local repository, and WHY.
+
+    A REASON CODE, and the reasons separate the two ends: ``invalid_run_id`` (an
+    id that is not one this build will write into a ref name), ``not_a_directory``
+    (the target is not a directory), ``bundle_invalid`` (``git bundle verify``
+    refused it — most often because the run's base commit is not in this clone)
+    and ``fetch_refused`` (git would not create the ref). ``detail`` names the ref
+    or the path, and never carries git's own stderr: a fixed sentence is what
+    this module's redaction rule allows, and a refusal is reported by its reason.
+    """
+
+    def __init__(self, reason: str, *, detail: str = "") -> None:
+        super().__init__(
+            f"the run's repository bundle could not be applied: {reason} {detail}".strip()
+        )
+        self.reason = reason
+        self.detail = detail
+
+
 #: The refusal codes the server's contract names, as this build knows them.
 #:
 #: A CLOSED SET, and that is load-bearing twice. It is what
@@ -620,6 +706,7 @@ __all__ = [
     "ERROR_BY_STATUS",
     "LOGIN_REQUIRED",
     "REFUSAL_CODES",
+    "BundleApplyFailed",
     "CapacityUnavailable",
     "Conflict",
     "IdempotencyConflict",
@@ -631,12 +718,15 @@ __all__ = [
     "PreviewNotEnabled",
     "RETRY_AFTER_MAX_S",
     "RemoteComputeError",
+    "ResultsUnavailable",
     "RunBusy",
     "RunIdentityMismatch",
     "RunLimitReached",
     "RunNotFound",
+    "SizeMismatch",
     "Unreachable",
     "UnreadableEnvelope",
+    "UnsafeArchive",
     "UnusableRepo",
     "refusal_code",
     "refusal_for",

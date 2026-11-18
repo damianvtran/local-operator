@@ -39,10 +39,12 @@ and refusal mapping all execute) and the git repository, which is real.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import logging
 import os
 import subprocess
+import tarfile
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -60,7 +62,7 @@ from local_operator.config import ConfigManager
 from local_operator.network import store as network_store
 from local_operator.network import types as network_types
 from local_operator.providers.auth_store import AuthStore
-from local_operator.remote_compute import records
+from local_operator.remote_compute import records, results
 from local_operator.remote_compute.errors import RunNotFound
 from local_operator.server.routes import desktop_radient, desktop_remote_compute
 
@@ -81,6 +83,14 @@ RUN_ID = "9f2c1a04-1111-4111-8111-abcdef000001"
 OTHER_RUN_ID = "9f2c1a04-2222-4222-8222-abcdef000002"
 
 NET_ID = "n_" + "1" * 24
+
+#: The session id a fake results archive carries: 12 lowercase hex, the shape lop
+#: writes a session directory with.
+SESSION_ID = "e1e2e3e4e5e6"
+
+#: The signature a fake presigned artifact URL carries. Greppable, so the cells
+#: that assert "no URL leaves this process" cannot pass by accident.
+SIGNATURE = "PRESIGNED-MUST-NOT-LEAK"
 
 
 @dataclass
@@ -1470,6 +1480,10 @@ async def test_every_route_is_behind_the_desktop_gate(api: Api) -> None:
         ("post", "/v1/desktop/remote-compute/runs"),
         ("post", f"/v1/desktop/remote-compute/runs/{RUN_ID}/cancel"),
         ("delete", f"/v1/desktop/remote-compute/runs/{RUN_ID}"),
+        ("get", f"/v1/desktop/remote-compute/runs/{RUN_ID}/logs"),
+        ("get", f"/v1/desktop/remote-compute/runs/{RUN_ID}/results"),
+        ("post", f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch"),
+        ("post", f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/apply"),
     ]
     async with AsyncClient(
         transport=ASGITransport(app=api.app), base_url="http://localhost"
@@ -1478,3 +1492,334 @@ async def test_every_route_is_behind_the_desktop_gate(api: Api) -> None:
             call: Callable[..., Any] = getattr(anonymous, method)
             answer = await call(path)
             assert answer.status_code in {401, 403, 503}, f"{method} {path}: {answer.text}"
+
+
+# ---------------------------------------------------------------------------
+# The run's logs and results: one page, no URLs, and the two writes
+# ---------------------------------------------------------------------------
+
+
+def _log_page(
+    *, messages: tuple[str, ...] = (), token: str | None = None, status: str = "running"
+) -> dict[str, Any]:
+    """A log page as the server answers it, inside the usual envelope."""
+    events = [{"timestamp": "2026-11-17T00:00:00Z", "message": text} for text in messages]
+    return {"msg": "Logs", "result": {"events": events, "next_token": token, "run_status": status}}
+
+
+def _bundle_for_run(root: Path) -> tuple[Path, bytes]:
+    """A clone holding the run's base commit, and a bundle of the run's own work.
+
+    THE CLONE IS MADE FIRST, deliberately: it must be a repository that has the
+    base commit and has never seen the run's branch — which is exactly what an
+    operator's working clone looks like when they apply a bundle.
+    """
+    source = root / "bundle-source"
+    source.mkdir()
+    _git(source, "init", "--quiet", "--initial-branch=main")
+    (source / "README.md").write_text("hello\n")
+    _git(source, "add", "README.md")
+    _git(source, "commit", "--quiet", "-m", "base")
+    clone = root / "bundle-clone"
+    _git(root, "clone", "--quiet", str(source), str(clone))
+    _git(source, "branch", f"lop/{RUN_ID}", "main")
+    _git(source, "checkout", "--quiet", f"lop/{RUN_ID}")
+    (source / "work.txt").write_text("the run's work\n")
+    _git(source, "add", "work.txt")
+    _git(source, "commit", "--quiet", "-m", "the run's commit")
+    _git(source, "checkout", "--quiet", "main")
+    bundle = root / "repo.bundle"
+    _git(source, "bundle", "create", str(bundle), f"main..lop/{RUN_ID}")
+    return clone, bundle.read_bytes()
+
+
+def _repository_state(clone: Path) -> dict[str, str]:
+    """Everything the operator's clone must still look like after an apply."""
+    return {
+        "head": _git(clone, "rev-parse", "HEAD"),
+        "branch": _git(clone, "symbolic-ref", "HEAD"),
+        "branches": _git(clone, "for-each-ref", "refs/heads"),
+        "status": _git(clone, "status", "--porcelain"),
+        "index": _git(clone, "ls-files", "--stage"),
+    }
+
+
+def _session_archive(session_id: str = SESSION_ID) -> bytes:
+    """A results archive holding one session directory, gzipped."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+        for name, payload in (
+            (f"sessions/{session_id}/transcript.jsonl", b'{"role":"user"}\n'),
+            (f"sessions/{session_id}/meta.json", b"{}\n"),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            bundle.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+def _serve(payload: bytes, *, status: int = 200) -> tuple[httpx.MockTransport, list[Any]]:
+    """A presigned-download transport that answers ``payload`` and records requests."""
+    seen: list[Any] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(status, content=payload)
+
+    return httpx.MockTransport(handle), seen
+
+
+def _install_download(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport) -> None:
+    """Point the presigned-download seam at ``transport`` for one cell."""
+
+    def build() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, follow_redirects=False)
+
+    monkeypatch.setattr(results, "artifact_client", build)
+
+
+def _artifacts(*rows: dict[str, Any], git: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "msg": "Artifacts",
+        "result": {"run_status": "stopped", "artifacts": list(rows), "git": git},
+    }
+
+
+def _artifact_row(name: str, size: int) -> dict[str, Any]:
+    """One artifact, with a presigned URL on the loopback host the check allows."""
+    return {
+        "name": name,
+        "size_bytes": size,
+        "url": f"http://127.0.0.1:9/{name}?X-Amz-Signature={SIGNATURE}",
+        "expires_at": "2026-11-17T00:05:00Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_log_page_is_passed_through_with_its_token(api: Api) -> None:
+    api.configure()
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/logs",
+        payload=_log_page(messages=("cloning",), token="tok-2"),
+    )
+
+    body = (
+        await api.client.get(
+            f"/v1/desktop/remote-compute/runs/{RUN_ID}/logs",
+            params={"next_token": "tok-1", "limit": 50},
+        )
+    ).json()
+
+    assert body["run_status"] == "running"
+    assert body["next_token"] == "tok-2"
+    assert [event["message"] for event in body["events"]] == ["cloning"]
+    assert api.radient.calls[-1].url.params["next_token"] == "tok-1"
+    assert api.radient.calls[-1].url.params["limit"] == "50"
+    # The account's bearer travels to Radient, as it must.
+    assert api.radient.calls[-1].headers["authorization"].endswith(RADIENT_ACCESS)
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_where_logs_are_not_readable_answers_its_own_code(api: Api) -> None:
+    """``not_configured`` is a definite answer: the panel says logs are not offered."""
+    api.configure()
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/logs",
+        status=503,
+        payload={"error": {"code": "not_configured"}},
+    )
+
+    answer = await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}/logs")
+
+    assert answer.status_code == 503, answer.text
+    assert answer.json()["error"]["code"] == "not_configured"
+
+
+@pytest.mark.asyncio
+async def test_the_results_listing_carries_no_download_urls(api: Api) -> None:
+    """A presigned URL is a bearer: the panel gets names and sizes, never the URL."""
+    api.configure()
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(
+            _artifact_row("results.tar.gz", 1234),
+            git={"branch": "lop/run", "commit": "c0ffee", "bundle_present": True},
+        ),
+    )
+
+    answer = await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results")
+
+    assert answer.status_code == 200, answer.text
+    assert SIGNATURE not in answer.text
+    assert "127.0.0.1" not in answer.text
+    body = answer.json()
+    assert body["run_status"] == "stopped"
+    assert body["artifacts"] == [
+        {"name": "results.tar.gz", "size_bytes": 1234, "expires_at": "2026-11-17T00:05:00Z"}
+    ]
+    assert body["git"] == {"branch": "lop/run", "commit": "c0ffee", "bundle_present": True}
+
+
+@pytest.mark.asyncio
+async def test_the_flag_off_refuses_logs_and_results_before_any_request(api: Api) -> None:
+    """The switch is a consent gate: no log read and no listing leaves the device."""
+    api.configure(enabled=False)
+
+    for path in ("logs", "results"):
+        answer = await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}/{path}")
+        assert answer.status_code == 403, answer.text
+        assert answer.json()["error"]["code"] == "not_configured"
+
+    fetch = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch")
+    assert fetch.status_code == 403, fetch.text
+    assert api.radient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_extracts_the_results_and_offers_the_session(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api.configure()
+    payload = _session_archive()
+    transport, downloads = _serve(payload)
+    _install_download(monkeypatch, transport)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("results.tar.gz", len(payload))),
+    )
+
+    answer = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch")
+
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["file_count"] == 2
+    assert body["archive_bytes"] == len(payload)
+    assert body["session_id"] == SESSION_ID
+    assert body["session_restored"] is True
+    # The default directory is the app's own, under the config root of THIS daemon.
+    assert body["directory"] == str(api.root / "remote-compute" / "results" / RUN_ID)
+    assert (api.root / "sessions" / SESSION_ID / "transcript.jsonl").is_file()
+    # The download went out WITHOUT the account's bearer, on its own client.
+    assert "authorization" not in {name.lower() for name in downloads[0].headers}
+    assert RADIENT_ACCESS not in answer.text
+    assert SIGNATURE not in answer.text
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_with_an_unsafe_archive_is_a_502_naming_the_reason(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An archive that would escape the destination is refused, with its code."""
+    api.configure()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+        payload = b"escaped\n"
+        info = tarfile.TarInfo("../escaped.txt")
+        info.size = len(payload)
+        bundle.addfile(info, io.BytesIO(payload))
+    transport, _downloads = _serve(buffer.getvalue())
+    _install_download(monkeypatch, transport)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("results.tar.gz", len(buffer.getvalue()))),
+    )
+
+    answer = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch")
+
+    assert answer.status_code == 502, answer.text
+    assert answer.json()["error"]["code"] == "outside_destination"
+    assert not (api.root / "escaped.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_whose_body_is_the_wrong_size_is_a_502(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api.configure()
+    payload = _session_archive()
+    transport, _downloads = _serve(payload[:-5])
+    _install_download(monkeypatch, transport)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("results.tar.gz", len(payload))),
+    )
+
+    answer = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch")
+
+    assert answer.status_code == 502, answer.text
+    assert answer.json()["error"]["code"] == "results_size_mismatch"
+    assert not (api.root / "remote-compute" / "results" / RUN_ID).exists()
+
+
+@pytest.mark.asyncio
+async def test_the_fetch_body_refuses_an_unknown_field(api: Api) -> None:
+    api.configure()
+
+    answer = await api.client.post(
+        f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch", json={"dest": "/tmp/x"}
+    )
+
+    assert answer.status_code == 422, answer.text
+
+
+@pytest.mark.asyncio
+async def test_an_apply_creates_the_ref_and_leaves_the_checkout_alone(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api.configure()
+    clone, bundle = _bundle_for_run(api.root)
+    before = _repository_state(clone)
+    transport, _downloads = _serve(bundle)
+    _install_download(monkeypatch, transport)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("repo.bundle", len(bundle))),
+    )
+
+    answer = await api.client.post(
+        f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/apply",
+        json={"directory": str(clone)},
+    )
+
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["ref"] == f"refs/remotes/radient/lop/{RUN_ID}"
+    assert _git(clone, "rev-parse", body["ref"]).strip() == body["commit"]
+    assert _repository_state(clone) == before
+
+
+@pytest.mark.asyncio
+async def test_an_apply_to_a_clone_without_the_base_commit_is_a_409(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api.configure()
+    _source, bundle = _bundle_for_run(api.root)
+    unrelated = api.root / "unrelated"
+    unrelated.mkdir()
+    _git(unrelated, "init", "--quiet", "--initial-branch=main")
+    (unrelated / "x.txt").write_text("x\n")
+    _git(unrelated, "add", "x.txt")
+    _git(unrelated, "commit", "--quiet", "-m", "unrelated")
+    transport, _downloads = _serve(bundle)
+    _install_download(monkeypatch, transport)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("repo.bundle", len(bundle))),
+    )
+
+    answer = await api.client.post(
+        f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/apply",
+        json={"directory": str(unrelated)},
+    )
+
+    assert answer.status_code == 409, answer.text
+    assert answer.json()["error"]["code"] == "bundle_invalid"
+    assert not (unrelated / ".git" / "refs" / "remotes" / "radient").exists()

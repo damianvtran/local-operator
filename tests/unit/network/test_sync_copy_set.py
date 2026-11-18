@@ -380,6 +380,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "refusal CODES share, matched against a ``code`` field of a JSON answer -- a "
         "vocabulary, not a path. Nothing is written under it, here or anywhere.",
     ),
+    "local_operator/remote_compute/results.py": (
+        2,
+        "``REASON_ABSOLUTE_PATH`` ('absolute_path') and ``REASON_SPECIAL_FILE`` "
+        "('special_file') are REFUSAL REASON CODES: the ``reason`` an "
+        "``errors.UnsafeArchive`` carries and the ``error.code`` a surface branches on "
+        "when a results archive holds an entry this device will not extract. No code "
+        "path opens either spelling as a path. They read as path-shaped only because "
+        "the heuristic matches a name ending in ``_PATH``/``_FILE`` whose value is one "
+        "segment, which a code is.",
+    ),
     "local_operator/guardrails/provenance.py": (
         3,
         "LEDGER_DIRNAME ('guardrails'), LEDGER_FILENAME ('created.sqlite') and "
