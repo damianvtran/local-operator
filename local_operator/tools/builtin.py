@@ -27559,7 +27559,7 @@ async def _bridge_access(
     node_origin = url
     # The app's flags from the last PENDING slice, so the timeout text can keep
     # the one-errand sentence the pending text gave (review R4).
-    pending_flags: dict[str, bool] = {}
+    opens_on_approval = opened_tab = False
     try:
         _parts = _urlsplit(url)
         if _parts.scheme in ("http", "https") and _parts.hostname:
@@ -27593,7 +27593,8 @@ async def _bridge_access(
                     notify=notify,
                     delegated=delegated,
                     total_s=total_s,
-                    **pending_flags,
+                    opens_on_approval=opens_on_approval,
+                    opened_tab=opened_tab,
                 ),
                 details={"origin": url, "state": "pending"},
             )
@@ -27609,10 +27610,8 @@ async def _bridge_access(
         state_value = str(result.get("state", ""))
         node_origin = str(result.get("origin") or node_origin)
         if state_value == "pending":
-            pending_flags = {
-                "opens_on_approval": result.get("opens_on_approval") is True,
-                "opened_tab": result.get("opened_tab") is True,
-            }
+            opens_on_approval = result.get("opens_on_approval") is True
+            opened_tab = result.get("opened_tab") is True
         if state_value != "pending" and await_on_node:
             origin = str(result.get("origin", url))
             # The extension's sweep reports an EXPIRED entry as "cancelled"

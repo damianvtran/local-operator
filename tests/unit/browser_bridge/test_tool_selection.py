@@ -693,7 +693,8 @@ def test_await_timeout_keeps_the_one_errand_sentence() -> None:
             host=builtin.HOST_UI_PREFIX,
             attached=True,
             total_s=120,
-            **flags,
+            opens_on_approval=flags["opens_on_approval"],
+            opened_tab=flags.get("opened_tab", False),
         )
         flat = " ".join(text.split())
         assert sentence in flat, flags
