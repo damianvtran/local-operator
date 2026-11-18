@@ -49,8 +49,8 @@ from local_operator.network.types import PairDecision
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_cli import NETWORK, _parser, _save_network
 from tests.unit.network.test_pair_offer import (
-    _RecordingHandshake,
     _join_with_recorder,
+    _RecordingHandshake,
     _seed,
 )
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
@@ -788,3 +788,89 @@ def test_the_versioned_op_refuses_a_missing_or_default_policy(
 def test_net_invite_policy_is_a_local_op_only() -> None:
     assert "net_invite_policy" in types.LOCAL_OPS
     assert "net_invite_policy" not in types.OP_CAPABILITY
+
+
+# ---------------------------------------------------------------------------
+# A REGISTERED relay that does not answer (review round 2, R2-1 / security S2):
+# the restrictive mint refuses instead of falling back to a local mint, because
+# the process behind that record may be an older build that would later admit
+# the locally-minted row WITH credential offers. No record at all keeps the local
+# mint (the operator-authorized offline path); a default mint is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _silent_relay(monkeypatch: pytest.MonkeyPatch, *, registered: bool) -> list[str]:
+    """``find_own_relay`` reports a record (or none) and the relay never answers."""
+    ops: list[str] = []
+
+    def _request(_record: Any, op: str, *, timeout: float = 5.0, **_fields: Any) -> Any:
+        ops.append(op)
+        return None
+
+    # A record shaped enough for the local mint's endpoint probe (``listen``), so a
+    # fallback mint would run to completion and be caught by the row/token checks.
+    record = SimpleNamespace(listen={}) if registered else None
+    monkeypatch.setattr(store, "find_own_relay", lambda *a, **k: record)
+    monkeypatch.setattr(relay, "control_request", _request)
+    return ops
+
+
+def test_an_unanswering_registered_relay_refuses_and_mints_nothing(
+    minting_root: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, adopted = minting_root
+    ops = _silent_relay(monkeypatch, registered=True)
+    before_rows = list(store.load(NETWORK, root).invites)
+    before_tokens = _outbox_tokens(root)
+
+    # rc 2 like the sibling "relay predates the flag" policy refusal, directly and
+    # through the CLI's own dispatcher; no invite id or token path in either stream.
+    assert net_cli._cmd_invite(_invite_args(no_offers=True)) == 2  # noqa: SLF001
+    first = capsys.readouterr()
+    args = _invite_args(no_offers=True)
+    args.network_command = "invite"
+    assert net_cli.main(args) == 2
+    second = capsys.readouterr()
+    for out in (first, second):
+        assert out.out == ""
+        assert "did not answer" in out.err and "no invite was minted locally" in out.err
+        assert "invite_id" not in out.err and ".invite" not in out.err
+
+    assert ops == ["net_invite_policy", "net_invite_policy"]
+    assert store.load(NETWORK, root).invites == before_rows
+    assert _outbox_tokens(root) == before_tokens
+    assert adopted == []
+
+
+def test_no_relay_record_still_mints_the_policy_locally(
+    minting_root: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, adopted = minting_root
+    ops = _silent_relay(monkeypatch, registered=False)
+    assert net_cli._cmd_invite(_invite_args(no_offers=True)) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert ops == []  # no record: nothing was asked, so silence cannot mean anything
+    row = store.load(NETWORK, root).invite(payload["invite_id"])
+    assert row is not None and row.credential_offers == types.CREDENTIAL_OFFERS_NONE
+    token = Path(payload["path"]).read_text(encoding="utf-8").strip()
+    assert _payload_of(token)[invite_mod.OFFER_POLICY_KEY] == types.CREDENTIAL_OFFERS_NONE
+    assert adopted == []
+
+
+def test_a_default_invite_still_mints_locally_when_the_relay_is_silent(
+    minting_root: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, adopted = minting_root
+    ops = _silent_relay(monkeypatch, registered=True)
+    assert net_cli._cmd_invite(_invite_args(no_offers=False)) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert ops == ["net_invite"]
+    row = store.load(NETWORK, root).invite(payload["invite_id"])
+    assert row is not None and row.credential_offers == ""
+    assert adopted == [str(root)]

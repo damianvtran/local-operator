@@ -16380,9 +16380,7 @@ def _grant_pair_shares(
         # above all, never add the broker capability. Nothing was offered, so
         # nothing is ``reduced`` either.
         if decision.shares:
-            _audit_pair_grant(
-                audit, record, joiner_id, "", holders=0, skipped="invite_policy_none"
-            )
+            _audit_pair_grant(audit, record, joiner_id, "", holders=0, skipped="invite_policy_none")
         return [], []
     from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers as offers_mod

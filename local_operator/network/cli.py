@@ -5148,9 +5148,36 @@ def _cmd_invite(args: argparse.Namespace) -> int:
                 hosts=hosts,
                 device_id=args.device,
                 credential_offers=CREDENTIAL_OFFERS_NONE,
-                allow_no_answer=True,
+                # ``allow_no_relay``, NOT ``allow_no_answer`` (review round 2, R2-1 /
+                # security S2): the local mint below is safe ONLY when no relay record
+                # exists. A registered relay that does not answer may be an older
+                # process that later serves admission for a row it cannot read the
+                # policy of, and would then offer credentials; the joiner's own refusal
+                # comes after its receipt, so it is no privacy proof. So silence from a
+                # registered relay refuses and mints nothing here.
+                #
+                # OFFLINE ASSUMPTION (operator-accepted): with no record, the local
+                # mint relies on whatever relay later serves this network being this
+                # build or newer, which reads ``credential_offers`` off the row.
+                # Starting an OLDER owner relay on a newer invite record is unsupported
+                # — source cannot retrofit code that is already installed.
+                allow_no_relay=True,
+                no_answer_message=(
+                    "refusing: the running relay did not answer, and no invite was minted "
+                    "locally and no token is returned here: a relay that predates "
+                    "--no-credential-offers would admit a locally minted invite WITH "
+                    "credential offers. Check it with `lop network status`, restart it "
+                    "(`lop network serve`/launchd unit) on this build and mint again. "
+                    "(A current relay that answers late still applies the policy to "
+                    "anything it mints.)"
+                ),
             )
         except MeshRefusal as refusal:
+            if refusal.code == "relay_control_failed":
+                # Exit 2 like the sibling unsupported-relay refusal: both are the
+                # policy declining to mint, not a transport fault of the command.
+                print(str(refusal), file=sys.stderr)
+                return 2
             if refusal.code not in _UNSERVED_OP_CODES:
                 raise
             print(
