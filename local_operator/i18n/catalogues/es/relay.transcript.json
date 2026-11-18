@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "Pregunta",
   "relay.transcript.label.messages": "Mensajes",
   "relay.transcript.composer.queued": "{count, plural, one {# en cola} many {# en cola} other {# en cola}}",
-  "relay.transcript.session.unread_refused": "No se pudo leer lo que está sin leer; no se borró nada. Inténtalo de nuevo."
+  "relay.transcript.session.unread_refused": "No se pudo leer lo que está sin leer; no se borró nada. Inténtalo de nuevo.",
+  "relay.transcript.message.show_more": "Ver más",
+  "relay.transcript.message.show_less": "Ver menos",
+  "relay.transcript.message.show_more_label": "Ver más de tu mensaje",
+  "relay.transcript.message.show_less_label": "Ver menos de tu mensaje"
 }

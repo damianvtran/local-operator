@@ -1,10 +1,87 @@
-# Harness-cost analysis kit — EXPLORATORY v1
+# Harness-cost analysis kit — exploratory v1
 
-**This is a reproducibility and methods artifact, not a promotional benchmark or
-an estimate of current harness performance.** The historical v1 study is
-materially confounded. The author develops Local Operator (conflict of interest).
-Read [CORRECTIONS.md](CORRECTIONS.md) and the
-[independent rigor review](reviews/REVIEW-RIGOR-R1.md) before using any number.
+This kit reproduces, at zero model spend, a historical comparison of what agent
+harnesses cost on the same OSWorld desktop tasks. It ships the frozen metering
+data, the one analysis command, [CORRECTIONS.md](CORRECTIONS.md) and an
+[independent rigor review](reviews/REVIEW-RIGOR-R1.md). It is a single-run,
+exploratory study: one run per task and harness, no repeats. It is not an
+estimate of current harness performance.
+
+## Results under full configuration
+
+The headline ("full") arm ran each harness in a production-scale configuration
+rather than a bare one: the same 24 OSWorld tasks (Codex: only its first 4 long
+tasks), the same main model (Claude Sonnet 5.5) through the same metering
+proxy, priced on the same frozen rate card. Each harness was configured with an
+MCP tool catalog of roughly 480 tools and with skills, and every harness except
+OpenCode with instruction files. How much of that catalog reached the model
+depended on how each harness exposes tools: eagerly in its tool list, through
+tool search, or not in its tool list at all (see the Tools item under
+[Configuration differences](#configuration-differences)).
+This is a deliberate method choice: it approximates cost as a harness is used
+with a real setup. A bare configuration, with no skills, MCP servers or real
+system prompt, is easier to match but less representative of real use. A full
+configuration is not a byte-identical one, though: each harness loads
+instructions, skills and tools in its own way, and the specific differences are
+listed under [Configuration differences](#configuration-differences).
+
+The generated table, figures and `PROVENANCE.json` keep their frozen v1 label,
+"materially confounded"; the configuration differences and caveats below are
+the specific statement of what that label refers to.
+
+Observed cost per task, full arm, from
+[the generated table](generated/cost-per-task-table.md):
+
+| Harness | Passed / n | Observed USD/task |
+|---|---:|---:|
+| Local Operator | 16 / 24 | 0.043 |
+| omp | 17 / 24 | 0.068 |
+| OpenCode | 17 / 24 | 0.079 |
+| Claude Code | 14 / 24 | 0.092 |
+
+Local Operator had the lowest observed cost per task on the full 24-task set
+($0.043 against $0.068–$0.092). Pass counts were close (14–17 of 24) and, with
+one run per cell, do not rank quality. Codex ran only 4 long tasks in this arm,
+at $5.75 per task, inflated by a repeated-compaction problem; it is reported as
+a separate population (see caveats).
+
+**Why observed cost leads.** Observed cost includes the prompt-cache reads the
+harnesses actually made. Within a task, reuse is measured here: after the first
+main call, Local Operator's later main calls read a median 97.6% of their
+prompt from cache (omp and Claude Code are similar, so this is not specific to
+Local Operator; it is not universal either: Codex's later main calls in this
+arm read a median 0%). Reuse across repeated runs holds only while a rerun
+lands inside the provider's cache window. In this run Local Operator's first
+main call read a median 95% of its prompt from cache because the same harness
+had run a task with the same prefix a median 1.1 minutes earlier (review R2).
+22 of 24 Local Operator runs started within the 5-minute TTL; the other two,
+after gaps of about 9 and 32 minutes, read 0% from cache on their first main
+call (recomputed from `v1-snapshot/requests.jsonl`; review R2's "23 of 24" is
+the Claude Code figure). A rerun outside that window starts cold, and observed
+warmth here depends on run order and timing, as the caveats below note.
+
+As a separate measurement, not a result of this kit,
+[docs/BENCHMARKS.md](../../docs/BENCHMARKS.md) measures Local Operator alone:
+two task-cost runs on a different model (deepseek-v4-flash) and coding tasks
+reached 88.1% and 89.9% warm cache rates (90.6% and 91.3% on the longest
+task), and a live 30-turn trajectory reached a 94.2% cache rate that cost
+$0.0164 against $0.0517 uncached, a 68% saving.
+
+**Cold columns: a pessimistic sensitivity check.** The two cold estimates
+reprice cache reads that a run inherited from earlier runs, approximating a
+one-off task on a cold cache ([CORRECTIONS.md](CORRECTIONS.md) defines each).
+They are counterfactual estimates, not measured cold runs, and not an upper
+bound on what a cold run could cost. Under that pricing the full-arm order
+changes: OpenCode ($0.091) comes in below Local Operator ($0.110). Local
+Operator's mean stays below Claude Code's ($0.123–$0.126), but per task the
+two are about even (paired cold ratio, Claude Code / Local Operator, 1.03,
+95% CI 0.76–1.21; review R2); omp is highest ($0.159).
+
+**The clean arm.** A second arm ran 16 short tasks with five harnesses without
+the loadout (the preregistration's "clean/no-loadout arm"), concurrently. There
+Local Operator was not the cheapest observed: omp $0.020, OpenCode $0.024,
+Local Operator $0.024, Codex $0.058, Claude Code $0.059. Its cold estimate
+($0.079) was the second highest.
 
 ## Zero-spend regeneration
 
@@ -78,7 +155,7 @@ The historical compatibility fields `figure_data.codex.long4`, `.cpp` and
 `long4_measured` field is the observed cost. Neither the old ratio nor the
 adjusted cost is used in the new figures.
 
-## Frozen population and caveats
+## Frozen population, configuration and caveats
 
 There are 24 selected OSWorld tasks (16 short, 8 long), 180 rep-0 run records,
 6 smoke run records, 1,575 metering records, and 1,533 priced responses. Clean
@@ -89,16 +166,18 @@ selection universe has **368** tasks (multi_apps: **101**), correcting the
 historical review's 369/102 count; this kit does not establish an eligible v2
 sample or promise 60 feasible tasks.
 
-- One repeat per cell: no run-to-run uncertainty estimate, no pass-rate ranking.
+Each cell has one run, so there is no run-to-run uncertainty estimate and no
+pass-rate ranking. The remaining caveats:
+
 - Cache warmth depends on order/timing and a disk pause; observed is not a
   controlled steady-state treatment. Counterfactual cold is not measured cold.
   The full-arm arithmetic ordering reverses versus OpenCode under cold pricing.
 - Codex's fallback model metadata triggered repeated compaction, with different
   thinking behavior and proxy cache injection; n=4 and a post-hoc sensitivity
   cannot support a current-performance ratio or schema-only causal explanation.
-- Unequal private instructions/skills/plugins, effort, output budget and side
-  calls; task selection, checker feasibility, instruction ambiguity and crashes
-  confound both quality and cost. Historical pass counts are not quality parity.
+- Task selection, checker feasibility, instruction ambiguity and one
+  terminated run (Claude Code, exit 143, cause not established; review R4)
+  affect both quality and cost. Historical pass counts are not quality parity.
 - OpenRouter `usage.cost` confirms a rate-card calculation from the **same usage
   block**, not an independent invoice or independent token measurement.
 - v1 did **not** enable the Radient classifier. Its explicitly absent component
@@ -108,6 +187,44 @@ sample or promise 60 feasible tasks.
 - Logged scores are reproducible as data; full checker/artifact re-execution is
   **not** possible from this public kit. Private result artifacts and office
   fixtures are intentionally excluded. See `reviews/README.md`.
+
+### Configuration differences
+
+The full arm shared the task set, main model, metering proxy and rate card, and
+configured every harness with a tool catalog of production scale. It did not
+give every harness byte-identical instructions, skills, tool exposure or
+settings. Each difference below can shift cost between harnesses, so the
+observed gap is not attributable to harness design alone. Measured differences
+(review R6, from request metadata and bodies; tool payload sizes recomputed
+from `v1-snapshot/requests.jsonl`):
+
+- **Instructions.** A shared 3,480-byte instruction file reached Claude Code,
+  Codex and omp in full. OpenCode received none. Local Operator received its
+  own 19,814-byte system prompt, which carried 4 of the 13 shared lines.
+- **Skills.** Skill files per root: Local Operator 30, `.claude` 27, `.codex` 33,
+  `.agents` 28, OpenCode 15, omp 15.
+- **Tools.** Reported catalog sizes are 480–482 tools; the kit does not show
+  that every harness was given the identical set. What reached the model
+  differed. Median tool-schema bytes per main call, no-loadout clean arm → full
+  arm: Codex 15,442 → 942,651 (494–496 tools on the wire, including plugin
+  tools, on 119 of its 234 full-arm main calls; the other 115 alternating calls
+  carried a single 140-byte tool); Claude Code 76,349 → 43,385 (22 → 12
+  tools, with `ENABLE_TOOL_SEARCH=true`); Local Operator 50,763, omp 17,174
+  and OpenCode 13,079 unchanged between arms (28, 11 and 12 tools). For those
+  three, the catalog did not appear in the tool list on the wire; the shipped
+  data cannot show whether it was loaded lazily or not exposed.
+- **Thinking and output budget.** Adaptive thinking with high effort for Claude
+  Code, Local Operator and omp; adaptive without an effort setting for OpenCode;
+  no thinking for Codex. `max_tokens` was 32,000 for Claude Code and 128,000
+  for the others.
+- **Side calls.** Each harness made its default title/selection calls, which
+  differ in model and number (omp 408 Haiku calls, OpenCode 24 Haiku, Claude
+  Code 24 Sonnet, Local Operator 48 Sonnet).
+- **Proxy cache injection.** The proxy added `cache_control` to Codex's calls
+  and to Claude Code's title calls (24 in the full-arm r0 runs and 2 in smoke
+  runs; 42 across all runs).
+- **Scheduling.** The clean arm ran its five harnesses concurrently; the full
+  arm ran them one after another, so wall times are not comparable across arms.
 
 Any future v2 preregistration/selection is a **draft/pending evidence** process,
 not validated by reproducing these v1 numbers. A new public loadout is included
@@ -185,3 +302,13 @@ negative controls, actual reconciliations and rendered-frame checks. Numerical
 parity is the acceptance criterion; **pixel-identical plots across platforms or
 fonts are not promised**. This folder inherits the repository MIT license;
 third-party schema notices and full upstream license texts are included.
+
+## Disclosure
+
+The author of this study develops Local Operator, one of the harnesses compared.
+The frozen data, the analysis command and an independent rigor review are
+published here so that every cost figure can be regenerated from the frozen
+metering data without trusting the author. Configuration measurements
+(instruction and system-prompt bytes, skill counts, thinking and output
+settings) and task scores rest on the review's access to request bodies and
+result artifacts that this kit does not ship.

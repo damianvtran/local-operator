@@ -306,3 +306,16 @@ async def test_callers_cannot_mutate_the_cached_answer():
     got = await client.directory_cached("tnt_1")
     got["members"].clear()
     assert (await client.directory_cached("tnt_1"))["members"]
+
+
+@pytest.mark.asyncio
+async def test_the_read_reports_whether_this_call_fetched_the_copy():
+    """Callers re-read on a miss only for a CACHED copy, so the origin is exact:
+    cold and refresh fetch, a warm hit does not, the bypass always fetches."""
+
+    seen: list[httpx.Request] = []
+    client = _make_client(_directory_handler(seen))
+    assert (await client.directory_cached_read("tnt_1"))[1] is True
+    assert (await client.directory_cached_read("tnt_1"))[1] is False
+    assert (await client.directory_cached_read("tnt_1", refresh=True))[1] is True
+    assert len(seen) == 2

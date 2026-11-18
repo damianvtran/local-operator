@@ -7766,9 +7766,21 @@ def _translate_act_target(target: str, peer: str) -> str:
 
 
 def _pilot_dial_refusal(
-    session_id: str, peer: str, message: str, config_dir: Path
+    session_id: str,
+    peer: str,
+    message: str | BaseException,
+    config_dir: Path,
+    *,
+    verb: str = "send",
+    device: str = "",
 ) -> tuple[str, str]:
-    """The refusal for a viewer whose dial produced NO SESSION.
+    """Preserve an answered refusal or connection observation before the dial rung.
+
+    Typed peer errors are answers, not evidence that the device is unreachable.
+    An admitted stream going quiet likewise cannot truthfully say no session was
+    reached. Neither fact needs another catalogue read, dial, retry or timeout.
+
+    The remaining generic dial branch retains its existing rule:
 
     ONE RULE FOR BOTH RUNGS — the open and the bind — and it is a correction this
     PR made against itself twice. The first version asked the peer's catalogue
@@ -7787,8 +7799,30 @@ def _pilot_dial_refusal(
     component in both), and the transport's own sentence rides along verbatim, so a
     refused frame still reads as a refusal rather than as a link problem.
     """
+    from local_operator.ansi import sanitize_prompt_line
+    from local_operator.mobile.attach_client import RemoteStreamUnresponsiveError
     from local_operator.network import store
+    from local_operator.network.projection import RemoteStreamRefused
+    from local_operator.redaction_shapes import scrub_shapes
 
+    undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    label = device or peer
+    # The local relay labels a missing owner answer explicitly; that typed
+    # observation still belongs to the doctor/transport rung, not refusal copy.
+    if isinstance(message, RemoteStreamRefused) and message.code != "peer_unreachable":
+        detail = sanitize_prompt_line(scrub_shapes(str(message)), limit=300)
+        if message.code == "session_unreachable":
+            sentence = f"{session_id} on {label} could not be reached: {detail}; {undone}. "
+        else:
+            sentence = f"{session_id} on {label} was refused by {label}: {detail}; {undone}. "
+        return message.code, sentence + "Re-run the command to retry."
+    if isinstance(message, RemoteStreamUnresponsiveError):
+        return (
+            "peer_unreachable",
+            f"{session_id} on {label} stopped answering after connecting; {undone}. "
+            f"Run `lop network doctor --peer {peer}` to distinguish a lost connection "
+            "from a stopped runtime.",
+        )
     if store.find_own_relay(config_dir) is None:
         return "relay_unavailable", _relay_unavailable_message()
     return (
@@ -7801,22 +7835,15 @@ def _pilot_dial_refusal(
 
 
 def _pilot_runtime_busy(exc: BaseException) -> bool:
-    """True when the runtime was REACHED and is alive, but did not answer in time.
+    """Whether this failure belongs to the runtime-answer lane, not the doctor.
 
-    ONE CLASSIFICATION, THE LADDER'S: the desktop control ladder decides "busy" by
-    ``RuntimeUnresponsiveError`` or the duck-checked ``owner_alive`` mark
-    (``server/routes/desktop_sessions.py::_owner_busy``), and every busy
-    ``ConnectionError`` main defines carries that mark: ``OwnerAckTimeout``, the
-    late welcome (``OwnerWelcomeTimeout``) and the reconnect refusal
-    (``OwnerReconnectingError``). Reading the MARK rather than listing classes is
-    what keeps this verb from drifting when a new busy shape lands; a list here
-    missed the late welcome, which the pilot's own bind raises, and called a busy
-    session a device that "produced no session". The one addition is
-    ``RuntimeBindFailedError`` (the runtime announced it could not prepare this
-    connection), which is deliberately left unmarked so the desktop ladder keeps
-    its existing answer for it. All of these are ``ConnectionError``s, and
-    ``OwnerAckTimeout`` is ALSO a ``TimeoutError``, so this must be asked before
-    either sibling rung.
+    The pilot retains the desktop's ``RuntimeUnresponsiveError`` / ``owner_alive``
+    rule, plus its existing ``RuntimeBindFailedError`` case. The latter is an
+    explicit refusal, NOT evidence of load: its own reason is printed instead of
+    the timed busy sentence. It remains unmarked so the desktop bind-failure
+    ladder is unchanged. ``OwnerAckTimeout`` is also a ``TimeoutError``; ask this
+    predicate before either generic sibling rung. A remote sync timeout without
+    a post-welcome answer stays an ordinary transport error at its source.
     """
     from local_operator.session.attached import (
         RuntimeBindFailedError,
@@ -7828,19 +7855,33 @@ def _pilot_runtime_busy(exc: BaseException) -> bool:
     return bool(getattr(exc, "owner_alive", False))
 
 
-def _pilot_busy_sentence(verb: str, session_id: str, device: str, waited_s: float) -> str:
-    """The refusal for a runtime that is alive and too busy to answer this act.
+def _pilot_busy_sentence(
+    verb: str, session_id: str, device: str, waited_s: float, *, refusal: str | None = None
+) -> str:
+    """The runtime-answer lane: its explicit refusal, or the timed busy answer.
 
-    Says the three things the person acts on: the session is still running over
+    The timed branch says the three things the person acts on: it is running over
     there, this act did NOT happen, and the remedy is to retry. It does not send
     them to ``network doctor``: the link worked, the stream opened, and the
     runtime spoke — a link diagnosis would send them after a fault that is not
     there.
     """
     undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    if refusal is not None:
+        from local_operator.mobile.attach_client import bind_failed_cause
+
+        # Keep the canonical safe cause, not another surface's reconnect remedy.
+        # An immediate refusal is not an invented one-second load measurement.
+        cause = bind_failed_cause(refusal)
+        detail = f": {cause}" if cause else ""
+        return (
+            f"{session_id} is running on {device}, but its runtime could not prepare "
+            f"the connection{detail}; {undone}. Re-run the command to retry."
+        )
     return (
         f"{session_id} is running on {device}, but its runtime was too busy to answer "
-        f"within {max(1, int(waited_s))}s, so {undone}; retry when its current work settles"
+        f"within {max(1, int(waited_s))}s, so {undone}. "
+        "Re-run the command to retry when its current work settles."
     )
 
 
@@ -8236,7 +8277,7 @@ async def _pilot_act(
         # as a traceback, which is the one thing this family never does with a
         # refusal; see ``_pilot_dial_refusal`` for how the component is decided.
         code, sentence = await asyncio.to_thread(
-            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            _pilot_dial_refusal, session_id, peer, exc, config_dir, verb=verb, device=device
         )
         raise MeshRefusal(code, sentence) from exc
     if viewer is None:
@@ -8264,9 +8305,17 @@ async def _pilot_act(
             # sibling rung would otherwise claim it — which is how a busy session
             # on a healthy link read as a device that "produced no session".
             if _pilot_runtime_busy(exc):
+                from local_operator.session.attached import RuntimeBindFailedError
+
                 raise MeshRefusal(
                     "session_unreachable",
-                    _pilot_busy_sentence(verb, session_id, device, time.monotonic() - bind_started),
+                    _pilot_busy_sentence(
+                        verb,
+                        session_id,
+                        device,
+                        time.monotonic() - bind_started,
+                        refusal=str(exc) if isinstance(exc, RuntimeBindFailedError) else None,
+                    ),
                 ) from exc
             if isinstance(exc, TimeoutError):
                 raise MeshRefusal(
@@ -8285,7 +8334,7 @@ async def _pilot_act(
             # settled on the GUIDE side: its ``session_unreachable`` row says a
             # bind that ran out of its BUDGET, which is the timeout rung above).
             code, sentence = await asyncio.to_thread(
-                _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+                _pilot_dial_refusal, session_id, peer, exc, config_dir, verb=verb, device=device
             )
             raise MeshRefusal(code, sentence) from exc
         if verb == "peek":
@@ -8419,7 +8468,7 @@ async def _pilot_mailbox_direct(
 
     async def _refuse_dial(exc: BaseException) -> MeshRefusal:
         code, sentence = await asyncio.to_thread(
-            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            _pilot_dial_refusal, session_id, peer, exc, config_dir
         )
         return MeshRefusal(code, sentence)
 
