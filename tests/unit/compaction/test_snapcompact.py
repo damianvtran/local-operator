@@ -167,13 +167,37 @@ def test_a_long_tool_result_keeps_its_end():
     body = out.split("[Tool result: bash]\n")[1]
     assert body.startswith("exit code: 1\ncollected item 0: ok")
     assert body.endswith(verdict)
-    marker = f"\n[... {len(text) - TOOL_RESULT_MAX_CHARS} more characters truncated]\n"
+    head_chars = TOOL_RESULT_MAX_CHARS - TOOL_RESULT_TAIL_CHARS
+    kept_end = body[head_chars:].split(" more characters truncated]\n")[1]
+    # At most the old budget, and the marker counts exactly what is missing.
+    assert TOOL_RESULT_TAIL_CHARS - 100 < len(kept_end) <= TOOL_RESULT_TAIL_CHARS
+    marker = f"\n[... {len(text) - head_chars - len(kept_end)} more characters truncated]\n"
     assert body.count(marker) == 1
-    assert len(body) == TOOL_RESULT_MAX_CHARS + len(marker)
+    assert body == text[:head_chars] + marker + kept_end and text.endswith(kept_end)
     # Short results are untouched, and the head/tail never overlap or reorder.
     assert body.index("collected item 0:") < body.index(marker) < body.index(verdict)
     short = serialize_for_snapcompact([messages[0], _tool_message("c1", "exit code: 0\nfine")])
     assert short.endswith("[Tool result: bash]\nexit code: 0\nfine")
+    # The kept end opens on a whole line: the carry miner reads one line as
+    # one item, and a mid-word fragment is noise there (review round 1, F4).
+    assert kept_end.split("\n")[0] in lines + [verdict]
+
+
+def test_a_long_tool_result_with_no_line_break_near_the_cut_keeps_the_full_end():
+    """Snapping to a line start never costs more than a short prefix."""
+    blob = "exit code: 0\n" + "q" * 9_000
+    out = serialize_for_snapcompact(
+        [
+            Message(
+                role="assistant",
+                content=[TextContent(text="dumping")],
+                tool_calls=[ToolCall(id="c1", name="bash", arguments={"cmd": "xxd"})],
+            ),
+            _tool_message("c1", blob),
+        ]
+    )
+    kept_end = out.split("more characters truncated]\n")[1]
+    assert kept_end == "q" * TOOL_RESULT_TAIL_CHARS
 
 
 def test_serialize_tool_args_truncated():
@@ -963,6 +987,7 @@ def test_archive_json_dump_keeps_its_persisted_shape():
         "page_digests",
         "carry",
         "created_at",
+        "live_tail_chars",
     }
     assert payload["middle_kinds"] == archive.middle_kinds
     assert payload["page_digests"] == archive.page_digests
@@ -972,10 +997,16 @@ def test_archive_json_dump_keeps_its_persisted_shape():
 
     # A payload written before the replay-policy keys existed: both default
     # to the all-image replay (no kinds -> no policy path).
-    older = {k: v for k, v in payload.items() if k not in ("middle_kinds", "page_digests")}
+    older = {
+        k: v
+        for k, v in payload.items()
+        if k not in ("middle_kinds", "page_digests", "live_tail_chars")
+    }
     revived = Archive.model_validate(older)
     assert revived.middle_kinds == ""
     assert revived.page_digests == []
+    # ...and before the live-tail record: nothing is still protected.
+    assert revived.live_tail_chars == 0
 
 
 def test_malformed_persisted_frame_is_a_validation_error():
@@ -1149,7 +1180,10 @@ def test_head_edge_is_one_page_while_the_tail_keeps_the_shape_default():
     messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(8)]
     archive = compact_to_archive(messages, "anthropic", "claude-opus-4-8")
     assert not archive.truncated_chars, "fixture must not drop pages (head would gain a marker)"
-    assert len(archive.text_head) == HEAD_EDGE_FRAMES * shape.capacity
+    # Literal, not the constant on both sides: with ``HEAD_EDGE_FRAMES`` put
+    # back to 3 this suite used to pass unchanged (review round 1, F5).
+    assert HEAD_EDGE_FRAMES == 1 < HQ_EDGE_FRAMES
+    assert len(archive.text_head) == shape.capacity
     assert len(archive.text_tail) == HQ_EDGE_FRAMES * shape.capacity
     assert _head_chars_for(shape, None) == HEAD_EDGE_FRAMES * shape.capacity
 
@@ -1211,12 +1245,20 @@ def test_protected_tail_rides_the_tail_edge_verbatim():
 
 
 def test_protected_tail_below_the_default_changes_nothing():
-    """A short task is already inside the default tail: byte-identical archive."""
+    """A short task is already inside the default tail: the same replayed archive.
+
+    Only the record of what was protected differs, which is what lets the
+    next pass of the same task keep protecting it.
+    """
     provider, model_id = "anthropic", "claude-opus-4-8"
-    messages = _task_messages(400, "old") + _task_messages(3, "live")
+    live = _task_messages(3, "live")
+    messages = _task_messages(400, "old") + live
     base = compact_to_archive(messages, provider, model_id)
     same = compact_to_archive(messages, provider, model_id, protected_tail_messages=6)
-    assert same.model_dump(exclude={"created_at"}) == base.model_dump(exclude={"created_at"})
+    replayed = {"created_at", "live_tail_chars"}
+    assert same.model_dump(exclude=replayed) == base.model_dump(exclude=replayed)
+    assert base.live_tail_chars == 0
+    assert same.live_tail_chars == len(serialize_for_snapcompact(live))
 
 
 def test_protected_tail_covering_everything_keeps_all_text_and_renders_no_frames():
@@ -1231,11 +1273,13 @@ def test_protected_tail_covering_everything_keeps_all_text_and_renders_no_frames
 
 
 def test_a_chained_pass_folds_the_previous_protected_tail_into_the_middle():
-    """The wide tail is a property of ONE pass, not a ratchet.
+    """Without the continuation argument the wide tail lasts ONE pass.
 
-    The next pass re-slices its own edges from ``previous_text + new``; the
-    earlier task text becomes ordinary middle history (paged, budgeted, mined
-    into the carry when dropped) and the tail returns to what that pass asks.
+    A pass that does not say the earlier span is still live (a new task, or
+    any caller that is not continuing one) re-slices its own edges from
+    ``previous_text + new``; the earlier task text becomes ordinary middle
+    history (paged, budgeted, mined into the carry when dropped) and the tail
+    returns to what that pass asks.
     """
     provider, model_id = "anthropic", "claude-opus-4-8"
     shape = resolve_shape(provider, model_id)
@@ -1251,6 +1295,141 @@ def test_a_chained_pass_folds_the_previous_protected_tail_into_the_middle():
     assert len(second.text_tail) == HQ_EDGE_FRAMES * shape.capacity
     assert "next step 199" in second.text_tail
     assert "live step 0\n" not in second.text_tail
+
+
+def test_a_continuing_task_keeps_its_earlier_protected_tail():
+    """A task still running at the NEXT pass keeps what the last pass protected.
+
+    A dense pass archives the live task's opening request with it, so on the
+    next pass ``task_boundary_floor`` has nothing to measure from. Without
+    this the previous protected tail became ordinary middle history after one
+    pass: paged, imaged and dropped oldest-first, which is the recency-shaped
+    loss the tail exists to prevent (agent review round 1, F1). The session
+    hands back ``Archive.live_tail_chars`` as ``protected_tail_previous_chars``
+    while no new operator turn has arrived, and the two spans ride the new
+    tail together.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    task = _task_messages(300, "live")
+    first = compact_to_archive(
+        _task_messages(400, "old") + task, provider, model_id, protected_tail_messages=len(task)
+    )
+    span = serialize_for_snapcompact(task)
+    assert first.live_tail_chars == len(span)
+    assert first.text.endswith(span), "the next pass re-reads the span off Archive.text"
+
+    more = _task_messages(200, "next")
+    second = compact_to_archive(
+        more,
+        provider,
+        model_id,
+        previous_text=first.text,
+        protected_tail_messages=len(more),
+        protected_tail_previous_chars=first.live_tail_chars,
+    )
+    assert second.text_tail == f"{span}\n\n{serialize_for_snapcompact(more)}"
+    assert second.live_tail_chars == len(second.text_tail)
+    assert second.text.endswith(second.text_tail)
+
+
+def test_a_new_task_releases_the_earlier_protected_tail():
+    """The earlier tail is only still live when the new span CONTINUES it.
+
+    ``protected_tail_previous_chars`` with a protected span that does not
+    reach back to the start of this pass's messages is not contiguous with
+    the previous tail (older, finished history sits between them), so it is
+    ignored and the previous task folds into the middle.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    task = _task_messages(300, "live")
+    first = compact_to_archive(
+        _task_messages(400, "old") + task, provider, model_id, protected_tail_messages=len(task)
+    )
+    newer = _task_messages(300, "next")
+    second = compact_to_archive(
+        _task_messages(10, "between") + newer,
+        provider,
+        model_id,
+        previous_text=first.text,
+        protected_tail_messages=len(newer),
+        protected_tail_previous_chars=first.live_tail_chars,
+    )
+    assert second.text_tail == serialize_for_snapcompact(newer)
+    assert second.live_tail_chars == len(second.text_tail)
+    # No protected span at all: nothing is recorded as live.
+    plain = compact_to_archive(newer, provider, model_id, previous_text=first.text)
+    assert plain.live_tail_chars == 0
+
+
+def test_the_protected_tail_is_bounded_and_keeps_the_newest_steps():
+    """A task that never ends must not grow the tail without limit.
+
+    ``protected_tail_max_tokens`` bounds the tail on the archive's own ruler.
+    Over it, the OLDEST protected text leaves the tail (into the middle, where
+    it is paged and budgeted like any other history) and the cut lands on a
+    role header, so the tail never opens mid-message.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    task = _task_messages(600, "live")
+    # Above the default tail edge for this reader (3 pages, ~30k tokens of this
+    # filler), so the bound and not the edge default is what sizes the tail.
+    cap = 45_000
+    unbounded = compact_to_archive(task, provider, model_id, protected_tail_messages=len(task))
+    assert estimate_tokens(Message.assistant(unbounded.text_tail or unbounded.text_head)) > cap
+
+    bounded = compact_to_archive(
+        task,
+        provider,
+        model_id,
+        protected_tail_messages=len(task),
+        protected_tail_max_tokens=cap,
+    )
+    tail_tokens = estimate_tokens(Message.assistant(bounded.text_tail))
+    assert 0.8 * cap <= tail_tokens <= cap
+    assert bounded.text_tail.startswith("[Assistant]\n")
+    assert bounded.text_tail.endswith(serialize_for_snapcompact(task[-2:]))
+    # What left the tail is still archived, just no longer protected.
+    assert "live step 0\n" in bounded.text and "live step 0\n" not in bounded.text_tail
+    # A task that outgrew the bound is carried on THIS pass and not recorded
+    # as continuable: the horizon the raw floor has, and what stops a ratchet.
+    assert bounded.live_tail_chars == 0
+
+    # The same bound holds for a continued span, and the same record.
+    fitting = compact_to_archive(
+        task[:120], provider, model_id, protected_tail_messages=120, protected_tail_max_tokens=cap
+    )
+    assert fitting.live_tail_chars == len(serialize_for_snapcompact(task[:120]))
+    more = _task_messages(600, "next")
+    chained = compact_to_archive(
+        more,
+        provider,
+        model_id,
+        previous_text=fitting.text,
+        protected_tail_messages=len(more),
+        protected_tail_previous_chars=fitting.live_tail_chars,
+        protected_tail_max_tokens=cap,
+    )
+    assert 0.8 * cap <= estimate_tokens(Message.assistant(chained.text_tail)) <= cap
+    assert chained.text_tail.endswith(serialize_for_snapcompact(more[-2:]))
+    assert chained.live_tail_chars == 0
+
+
+def test_a_closed_protected_tail_is_carried_but_not_recorded_as_continuable():
+    """The floor was already clamped: this pass protects, the next does not."""
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    task = _task_messages(300, "live")
+    older = _task_messages(400, "old")
+    open_ = compact_to_archive(older + task, provider, model_id, protected_tail_messages=len(task))
+    closed = compact_to_archive(
+        older + task,
+        provider,
+        model_id,
+        protected_tail_messages=len(task),
+        protected_tail_closed=True,
+    )
+    assert closed.text_tail == open_.text_tail == serialize_for_snapcompact(task)
+    assert open_.live_tail_chars == len(open_.text_tail)
+    assert closed.live_tail_chars == 0
 
 
 def test_protected_tail_starts_on_the_spans_first_header_after_a_ragged_prefix():

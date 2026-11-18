@@ -652,6 +652,12 @@ def _truncate(text: str, max_chars: int) -> str:
     return f"{text[:max_chars]}\n[... {len(text) - max_chars} more characters truncated]"
 
 
+#: How far into the kept end of a truncated tool result :func:`_truncate_middle`
+#: looks for a line break to start on. A fifth of the kept end at the shipped
+#: 500: enough to clear an ordinary line, small enough to cost little.
+_TAIL_LINE_SNAP_CHARS = 100
+
+
 def _truncate_middle(text: str, max_chars: int, tail_chars: int) -> str:
     """Keep the head AND the end of ``text`` within ``max_chars``; cut the middle.
 
@@ -663,20 +669,28 @@ def _truncate_middle(text: str, max_chars: int, tail_chars: int) -> str:
     it; replaying 25 real compaction points, 24% of the long results in a
     dense-carried task still had their last line, against 99% raw.
 
-    The budget is unchanged (``max_chars`` characters of the result plus the
-    one marker line it always had), so no archive grows by this: only which
-    characters are kept changes. The marker keeps its wording and its exact
-    count, and now sits where the cut is, so a reader can see that what
-    follows it is the END of the output rather than a continuation.
+    The budget is unchanged (at most ``max_chars`` characters of the result
+    plus the one marker line it always had), so no archive grows by this: only
+    which characters are kept changes. The marker keeps its wording, counts
+    exactly what was elided, and now sits where the cut is, so a reader can
+    see that what follows it is the END of the output, not a continuation.
     """
     if len(text) <= max_chars:
         return text
     tail_chars = max(0, min(tail_chars, max_chars))
     head = text[: max_chars - tail_chars]
-    marker = f"[... {len(text) - max_chars} more characters truncated]"
-    if not tail_chars:
+    end = text[len(text) - tail_chars :] if tail_chars else ""
+    # Open the kept end on a whole line when one starts soon enough: the carry
+    # miner reads a line as an item, and a mid-word fragment is noise there
+    # (agent review round 1, F4). Bounded so a result with no line break near
+    # the cut (a hex dump, one long JSON line) keeps its full end.
+    newline = end.find("\n", 0, _TAIL_LINE_SNAP_CHARS)
+    if newline != -1 and newline + 1 < len(end):
+        end = end[newline + 1 :]
+    marker = f"[... {len(text) - len(head) - len(end)} more characters truncated]"
+    if not end:
         return f"{head}\n{marker}"
-    return f"{head}\n{marker}\n{text[len(text) - tail_chars :]}"
+    return f"{head}\n{marker}\n{end}"
 
 
 def _content_text(message: Message) -> str:
@@ -841,6 +855,19 @@ class Archive(BaseModel):
     #: or short means the archive replays all-image, which is also what every
     #: pre-policy archive does.
     page_digests: list[str] = Field(default_factory=list)
+    #: How many TRAILING characters of ``text`` are a live task that the NEXT
+    #: pass should go on protecting (``compact_to_archive``'s
+    #: ``protected_tail_messages``); ``0`` when there is none, or when the task
+    #: has outgrown its protection on this pass. WHY IT IS STORED: a dense
+    #: pass archives the task's opening request along with the task, so the
+    #: next pass has no operator turn to measure the task from. This is the
+    #: only record that the newest archived text is still the running task,
+    #: and the session hands it back as ``protected_tail_previous_chars``
+    #: until a new operator turn arrives. Additive like ``middle_kinds``: an
+    #: archive written before it existed reads as ``0`` (nothing to continue,
+    #: the pre-existing behaviour), and a build that does not know the field
+    #: ignores it.
+    live_tail_chars: int = 0
     #: The never-page-truncated, TIER-RANKED carry digest (see
     #: :mod:`local_operator.compaction.mine`). This is the field that stops the
     #: cliff: each pass mines the pages it is about to DROP into this digest and
@@ -1023,6 +1050,35 @@ def _page_digest(page: str) -> str:
     return hashlib.sha256(page.encode("utf-8")).hexdigest()[:16]
 
 
+def _bounded_tail_chars(archive_text: str, protected_chars: int, max_tokens: int | None) -> int:
+    """``protected_chars`` reduced so the tail it names fits ``max_tokens``.
+
+    The tail is the SUFFIX of ``archive_text``, so bounding it means giving up
+    its oldest text. One tokenization of the candidate, then a proportional
+    cut: characters per token is close to uniform across a serialized
+    transcript, and the 0.95 margin absorbs the rest (the caller's bound is a
+    budget, not an invoice). The cut then moves FORWARD to the next role
+    header so the tail never opens inside a message; forward only, so the
+    result can only be smaller than the bound asked for. With no header left
+    in the remainder the proportional cut stands: a single enormous block is
+    still better held in part than not at all.
+    """
+    if protected_chars <= 0 or max_tokens is None:
+        return max(0, protected_chars)
+    if max_tokens <= 0:
+        return 0
+    candidate = archive_text[len(archive_text) - protected_chars :]
+    tokens = estimate_tokens(Message.assistant(candidate))
+    if tokens <= max_tokens:
+        return protected_chars
+    keep = int(protected_chars * (max_tokens / tokens) * 0.95)
+    start = len(archive_text) - keep
+    header = archive_text.find("\n\n[", start)
+    if header != -1:
+        start = header + 2
+    return len(archive_text) - start
+
+
 def compact_to_archive(
     messages: Sequence[Message],
     provider: str,
@@ -1034,6 +1090,9 @@ def compact_to_archive(
     previous_carry: str | None = None,
     threshold_tokens: int | None = None,
     protected_tail_messages: int = 0,
+    protected_tail_previous_chars: int = 0,
+    protected_tail_max_tokens: int | None = None,
+    protected_tail_closed: bool = False,
 ) -> Archive:
     """Run one snapcompact pass over discarded ``messages``.
 
@@ -1063,11 +1122,31 @@ def compact_to_archive(
     replayed as plain text instead of being paged. They must not ride the
     middle: pages are capped at ``max_frames`` and dropped oldest-first, and
     replaying real compaction points showed what that costs a live task (49%
-    of its steps left when it rides the middle, 100% on the tail edge). It
-    is a property of this one pass, not a ratchet: the next pass re-slices
-    its edges from ``previous_text + new``, so this pass's wide tail becomes
-    ordinary middle history there. ``0``
+    of its steps left when it rides the middle, 100% on the tail edge). ``0``
     (every other caller) leaves the tail at its shape default.
+
+    ``protected_tail_previous_chars`` extends that across passes of ONE task:
+    the trailing that many characters of ``previous_text`` are what the last
+    pass protected (its ``Archive.live_tail_chars``) and the task is still
+    running, so they stay on the tail with the new span. It is honoured only
+    when the new protected span is ALL of ``messages`` -- otherwise finished
+    history sits between the two and the earlier span is no longer the live
+    task, so it folds into the middle like any other old text. Without it a
+    wide tail lasted exactly one pass (agent review round 1, F1).
+
+    ``protected_tail_max_tokens`` bounds the protected tail on the archive's
+    own ruler; over it, the OLDEST protected text leaves the tail at a role
+    header and joins the middle. ``None`` leaves the span unbounded.
+
+    What gets RECORDED as still live (``Archive.live_tail_chars``) is what
+    keeps this from being a ratchet, and it mirrors the horizon the raw floor
+    has always had: the floor protects a task while the task fits its cap,
+    keeps the newest cap's worth on the pass where the task outgrows it, and
+    is plain recency from then on (the request it measured from is gone). So
+    a tail the bound had to trim is recorded as ``0``, and so is one the
+    caller marks ``protected_tail_closed`` (the floor was already clamped
+    when it chose this span). Either way THIS pass still protects the span;
+    the next pass of the same task simply does not continue it.
 
     ``threshold_tokens`` is the resolved compaction trigger (``T_eff``). When
     given, the archive budget and the verbatim-edge cap are sized against it
@@ -1113,6 +1192,25 @@ def compact_to_archive(
     protected_chars = 0
     if protected_tail_messages > 0:
         protected_chars = len(serialize_for_snapcompact(messages[-protected_tail_messages:]))
+    # The earlier protected tail is still live only if the new span runs back
+    # to it without a gap: every message of this pass is protected, and the
+    # two texts are adjacent in ``archive_text`` (joined by the two-character
+    # separator above, or the earlier text alone when this pass adds none).
+    if (
+        protected_tail_previous_chars > 0
+        and previous_text
+        and protected_tail_messages >= len(messages)
+        and protected_chars == len(serialized)
+    ):
+        earlier = min(protected_tail_previous_chars, len(previous_text))
+        protected_chars = earlier + (2 + protected_chars if serialized else 0)
+    asked_chars = min(protected_chars, len(archive_text))
+    protected_chars = _bounded_tail_chars(archive_text, asked_chars, protected_tail_max_tokens)
+    # See the docstring: a task that no longer fits its protection is carried
+    # on this pass and not continued by the next.
+    live_tail_chars = (
+        0 if protected_tail_closed or protected_chars < asked_chars else protected_chars
+    )
     tail_chars = max(_edge_chars_for(shape, context_window, threshold_tokens), protected_chars)
     if len(archive_text) <= head_chars + tail_chars:
         return Archive(
@@ -1121,6 +1219,7 @@ def compact_to_archive(
             text_head=archive_text,
             text_tail="",
             shape_id=shape.id,
+            live_tail_chars=live_tail_chars,
         )
 
     text_head = archive_text[:head_chars]
@@ -1277,6 +1376,7 @@ def compact_to_archive(
         middle_kinds=middle_kinds,
         page_digests=page_digests,
         carry=carry,
+        live_tail_chars=live_tail_chars,
     )
 
 

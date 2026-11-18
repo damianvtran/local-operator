@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
@@ -1448,6 +1448,19 @@ class _PeerArrival:
         self._event.set()
 
 
+class _DenseTailArgs(TypedDict, total=False):
+    """The dense-tail keywords of :meth:`Session._produce_summary`.
+
+    ``total=False`` because each is passed only when set (see
+    :meth:`Session._dense_tail_kwargs`): a duck-typed ``_produce_summary``
+    that predates them keeps its signature.
+    """
+
+    dense_tail: int
+    dense_previous_chars: int
+    dense_closed: bool
+
+
 @dataclass(frozen=True, slots=True)
 class _CompactionPlan:
     """One compaction pass, decided but not yet committed.
@@ -1496,6 +1509,18 @@ class _CompactionPlan:
     #: Carried as an INDEX, not a count, because the byte-aware step may move
     #: ``cut`` later after the plan decided this, and the span must follow it.
     dense_tail_from: int | None = None
+    #: Trailing characters of the PREVIOUS archive's text that are the same
+    #: live task, still running (``Archive.live_tail_chars``). Non-zero only
+    #: when this pass continues a task whose opening request an earlier dense
+    #: pass archived, so ``task_boundary_floor`` had nothing to measure from;
+    #: ``dense_tail_from`` is then ``0`` (the whole summarized span continues
+    #: it). See :meth:`Session._dense_tail_cut`.
+    dense_tail_previous_chars: int = 0
+    #: The task floor was CLAMPED at its cap when it chose this pass's span:
+    #: the task is already wider than its protection. The span is carried on
+    #: this pass and not recorded as continuable, which is the horizon the raw
+    #: floor has (its anchor is cut away on exactly this pass).
+    dense_tail_closed: bool = False
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
     memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
@@ -29078,6 +29103,8 @@ class Session:
         # This changes the CUT, not the TRIGGER: it runs for every pass,
         # advisory or not, and introduces no second gate.
         keep_recent = settings.keep_recent_tokens
+        task_anchor_missing = False
+        task_floor_clamped = False
         boundary_floor: Any = getattr(compaction_api, "task_boundary_floor", None)
         if parked_hint is not None:
             # IDLE PASS. The task floor measures "since the last genuine user
@@ -29100,12 +29127,15 @@ class Session:
                 for message in self._context.messages
                 if isinstance(message, Message) and message.role == "user"
             }
-            floor_value: Any = boundary_floor(
-                llm_history,
-                genuine_user_ids,
-                cap=self._advisor_floor_cap(settings),
-            )
+            floor_cap = self._advisor_floor_cap(settings)
+            floor_value: Any = boundary_floor(llm_history, genuine_user_ids, cap=floor_cap)
             keep_recent = max(keep_recent, int(floor_value))
+            # ``0`` is the floor saying there is NO operator turn left in this
+            # history to measure a task from (a positive cap never clamps a
+            # real span to zero); AT the cap, the task is wider than the floor
+            # protects. Both are read again at (2b').
+            task_anchor_missing = int(floor_value) == 0
+            task_floor_clamped = floor_cap > 0 and int(floor_value) >= floor_cap
         if advisor_hint is not None:
             # Clamped with the SAME cap the local floor uses. Uncapped, a wide
             # but perfectly legal hint turns "keep more" into "never compact":
@@ -29211,17 +29241,33 @@ class Session:
         # what they meant. Snapcompact only: context-full has no verbatim tail,
         # and handing the task to an LLM summary would paraphrase it.
         dense_tail_from: int | None = None
-        if (
-            strategy == "snapcompact"
-            and parked_hint is None
-            and advisor_hint is None
-            and keep_recent > settings.keep_recent_tokens
-        ):
-            dense_cut = await self._dense_tail_cut(
-                compaction_api, llm_history, cut, settings.keep_recent_tokens
-            )
-            if dense_cut is not None:
-                dense_tail_from, cut = cut, dense_cut
+        dense_tail_previous_chars = 0
+        dense_tail_closed = False
+        if strategy == "snapcompact" and parked_hint is None and advisor_hint is None:
+            if keep_recent > settings.keep_recent_tokens:
+                dense_cut = await self._dense_tail_cut(
+                    compaction_api, llm_history, cut, settings.keep_recent_tokens
+                )
+                if dense_cut is not None:
+                    dense_tail_from, cut = cut, dense_cut
+                    dense_tail_closed = task_floor_clamped
+            elif task_anchor_missing:
+                # THE SAME TASK, ONE PASS LATER. A dense pass archives the
+                # task's opening request with the task, so here the floor has
+                # no operator turn to measure from and the cut is already
+                # plain recency. If the previous archive recorded a protected
+                # live tail, everything this pass summarizes continues it:
+                # keep both on the new tail (bounded by ``_dense_tail_cap``)
+                # instead of letting the earlier steps fall into the paged
+                # middle after a single pass (agent review round 1, F1). A new
+                # operator turn gives the floor an anchor again, takes the
+                # branch above, and releases the earlier task. The record is
+                # absent once the task has outgrown the bound (see
+                # ``Archive.live_tail_chars``), and this pass is then the
+                # plain recency pass it is today.
+                dense_tail_previous_chars = self._previous_live_tail_chars()
+                if dense_tail_previous_chars > 0:
+                    dense_tail_from = 0
 
         # (2c) Byte-aware cut. The cut above is ruled in TOKENS; a screenshot
         # history is over the BYTE trigger long before it is over any token
@@ -29258,6 +29304,8 @@ class Session:
             llm_history=llm_history,
             cut=cut,
             dense_tail_from=dense_tail_from,
+            dense_tail_previous_chars=dense_tail_previous_chars,
+            dense_tail_closed=dense_tail_closed,
             context_tokens=context_tokens,
             tokens_before=local_estimate,
             # ATTRIBUTION, not influence. The hint above may have widened the
@@ -29334,20 +29382,32 @@ class Session:
         ``llm_history[wide_cut:returned]`` -- rides the archive's verbatim
         tail edge as serialized text (``compact_to_archive``'s
         ``protected_tail_messages``). On those 25 points the passes land at
-        55k / 69k / 87k for the same three groups (median 99k -> 63k overall,
-        worst case 155k -> 109k, none larger), with 100% of the task's steps
-        and assistant messages, 99% of its result heads and 97% of its
-        long-result ends still present, at the same CPU cost per pass.
+        54k / 69k / 87k for the same three groups (median 99k -> 64k overall,
+        worst case 155k -> 108k, none larger), with 1343 of the task's 1345
+        steps, every assistant message, 99% of its result first lines and 97%
+        of its long-result ends still present, at the same CPU cost per pass.
+
+        ACROSS PASSES. This cut archives the task's opening request with the
+        task, so the NEXT pass's floor has nothing to measure from. The
+        archive records what is still live (``Archive.live_tail_chars``) and
+        ``_plan_compaction`` continues it while no operator turn arrives,
+        bounded by :meth:`_dense_tail_cap`, on the horizon the raw floor has
+        (see ``compact_to_archive``). Without that the protection lasted one
+        pass: 127 of 415 steps after a second pass of two real tasks, against
+        284 with it and 284 for today's raw floor.
 
         WHAT IS GIVEN UP, stated because it is the whole trade: inside the
-        moved span the serializer keeps the first 1,500 and the last 500
-        characters of a tool result longer than ``TOOL_RESULT_MAX_CHARS``
+        moved span the serializer keeps the first 1,500 and up to the last
+        500 characters of a tool result longer than ``TOOL_RESULT_MAX_CHARS``
         and cuts the middle, cuts a tool call's arguments past
-        ``TOOL_ARGS_MAX_CHARS``, drops results flagged useless, and carries
-        no provider reasoning blocks. So the model still sees every step,
-        every assistant message and both ends of every output, but not the
-        middle of a long output or the body of a long write: it re-reads the
-        file or re-runs the command if it needs those. The operator's own
+        ``TOOL_ARGS_MAX_CHARS``, drops results flagged useless with their
+        calls, turns image and document blocks into placeholders (the raw
+        window kept them as images), and carries no provider reasoning
+        blocks. So the model still sees every step, every assistant message
+        and both ends of every output, but not the middle of a long output,
+        the body of a long write, or a screenshot older than the recent
+        window: it re-reads the file, re-runs the command or looks again if
+        it needs those. The operator's own
         turns are unaffected (preserved verbatim outside the archive), and
         the newest ``keep_recent_tokens`` stay raw as they always have.
 
@@ -29696,14 +29756,23 @@ class Session:
         )
 
     @classmethod
-    def _dense_tail_kwargs(cls, plan: _CompactionPlan) -> dict[str, int]:
-        """``dense_tail=N`` for :meth:`_produce_summary`, or nothing.
+    def _dense_tail_kwargs(cls, plan: _CompactionPlan) -> _DenseTailArgs:
+        """The dense-tail arguments for :meth:`_produce_summary`, or nothing.
 
         Passed only when set, so a duck-typed ``_produce_summary`` that
-        predates the parameter (the suite has several) keeps its signature.
+        predates the parameters (the suite has several) keeps its signature.
+        ``dense_previous_chars`` rides alone when a continuing pass has no new
+        message to archive: the earlier tail is still the live task.
         """
+        kwargs: _DenseTailArgs = {}
         count = cls._dense_tail_count(plan)
-        return {"dense_tail": count} if count else {}
+        if count:
+            kwargs["dense_tail"] = count
+        if plan.dense_tail_previous_chars > 0:
+            kwargs["dense_previous_chars"] = plan.dense_tail_previous_chars
+        if plan.dense_tail_closed:
+            kwargs["dense_closed"] = True
+        return kwargs
 
     def _carried_tier_live_state(
         self,
@@ -30689,8 +30758,17 @@ class Session:
         *,
         settings: Any = None,
         dense_tail: int = 0,
+        dense_previous_chars: int = 0,
+        dense_closed: bool = False,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
+
+        ``dense_previous_chars`` is the previous archive's still-live tail
+        (:attr:`_CompactionPlan.dense_tail_previous_chars`), kept on the new
+        tail together with this pass's span while the same task runs.
+        ``dense_closed`` says the task had already outgrown the floor when
+        this span was chosen (:attr:`_CompactionPlan.dense_tail_closed`), so
+        the archive carries it without recording it as continuable.
 
         ``dense_tail`` is how many TRAILING ``to_summarize`` messages are the
         live task the plan moved out of the raw window
@@ -30766,6 +30844,9 @@ class Session:
                     # Clamped to the span actually archived: lifting the
                     # leading marker above can only shorten it from the FRONT.
                     protected_tail_messages=min(max(0, dense_tail), len(archive_span)),
+                    protected_tail_previous_chars=max(0, dense_previous_chars),
+                    protected_tail_max_tokens=self._dense_tail_cap(settings),
+                    protected_tail_closed=bool(dense_closed),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id
@@ -30812,6 +30893,49 @@ class Session:
         if isinstance(snap, dict) and snap.get("text"):
             return str(snap["text"])
         return entry.payload.get("summary")
+
+    def _previous_live_tail_chars(self) -> int:
+        """``Archive.live_tail_chars`` of the latest pass, or ``0``.
+
+        How many trailing characters of :meth:`_previous_archive_text` the last
+        pass protected as the live task. ``0`` for no prior archive, a
+        context-full prior pass, an archive written before the field existed,
+        or a value that is not a usable count -- each of which means "nothing
+        is still protected", the behaviour before the field existed.
+        """
+        entry = self._transcript.latest_entry("compaction")
+        if entry is None:
+            return 0
+        preserve = entry.payload.get("preserve_data") or {}
+        snap = preserve.get("snapcompact")
+        value = snap.get("live_tail_chars") if isinstance(snap, dict) else None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+    def _dense_tail_cap(self, settings: Any) -> int:
+        """Token bound on the archive's protected live-task tail.
+
+        Three quarters of the task floor's own cap (:meth:`_advisor_floor_cap`):
+        75,000 on the shipped 1M-window default. Derived from the floor cap
+        because it bounds the same thing in its new carrier (the floor kept at
+        most that many RAW tokens of the live task; the tail holds serialized
+        text, which is denser), and the fraction is a measured calibration,
+        not a preference. Replaying real pairs of consecutive passes
+        (``docs/design/compaction-dense-tail.md``), on the two where today's
+        raw floor still protected the task at the second pass:
+
+        - at 1.0 the pass lands where today's does (129k-131k against
+          135k-139k local), which defeats the change;
+        - at 0.75 it keeps the SAME steps today's raw floor keeps (143 of 202
+          and 141 of 213, both ways) at 108k-109k, about a fifth smaller;
+        - at 0.6 and 0.5 it keeps fewer steps than today (134/124 and
+          117/120).
+
+        One pass on its own never reaches it on the 25 replayed points (the
+        widest protected span serialized to 73k tokens), so it binds only on a
+        task that runs across passes, where it is also what ends the
+        continuation (see ``Archive.live_tail_chars``).
+        """
+        return self._advisor_floor_cap(settings or self._compaction_settings) * 3 // 4
 
     def _previous_archive_carry(self) -> str | None:
         """The latest archive's carry digest, so a pass MERGES into the retained

@@ -29,6 +29,7 @@ from local_operator.compaction import api, snapcompact
 from local_operator.compaction.advisor import CompactionHint
 from local_operator.compaction.api import CompactionSettings
 from local_operator.compaction.cutpoint import is_rendered_injection
+from local_operator.compaction.tokens import estimate_tokens
 from local_operator.harness.types import (
     CustomMessage,
     Message,
@@ -98,13 +99,20 @@ def _step(tag: str, index: int) -> tuple[Message, Message]:
     return assistant, tool
 
 
-async def _grow(session: Session) -> None:
+async def _grow(session: Session, live_steps: int = LIVE_STEPS) -> None:
     """Finished older work, then ONE user request and a long run of tool steps."""
     await session.seed_history([Message.user("earlier question about the report")])
     for index in range(OLD_STEPS):
         session._context.messages.extend(_step("old", index))
     session._context.messages.append(Message.user(LIVE_REQUEST))
-    for index in range(LIVE_STEPS):
+    for index in range(live_steps):
+        session._context.messages.extend(_step("live", index))
+    await session._persist_new_messages(session._context.messages)
+
+
+async def _more(session: Session, steps: range) -> None:
+    """The SAME task carries on: more tool steps, no operator turn."""
+    for index in steps:
         session._context.messages.extend(_step("live", index))
     await session._persist_new_messages(session._context.messages)
 
@@ -213,6 +221,141 @@ async def test_a_resumed_session_rebuilds_the_same_tail(tmp_path):
     assert marker.details["preserve_data"]["snapcompact"]["text_tail"] == live_tail
     assert [m.id for m in replayed if not isinstance(m, CustomMessage)] == live_kept
     await session.dispose()
+
+
+def _step_markers(tag: str, steps: range) -> list[str]:
+    """One line per step that only that step's assistant message produces."""
+    return [f"{tag} step {index} reasoning" for index in steps]
+
+
+#: A live task NARROWER than the floor cap (the floor is not clamped), which is
+#: the case where today's raw floor still has its anchor at the next pass.
+FITTING_STEPS = 30
+#: ``Session._dense_tail_cap``: three quarters of the floor cap.
+TAIL_CAP = FLOOR_CAP * 3 // 4
+
+
+def _floor(session: Session) -> int:
+    history = session._render_for_compaction()
+    genuine = {m.id for m in session._context.messages if isinstance(m, Message)}
+    return api.task_boundary_floor(history, genuine, cap=FLOOR_CAP)
+
+
+@pytest.mark.asyncio
+async def test_a_task_still_running_at_the_next_pass_keeps_its_earlier_steps(tmp_path):
+    """Protection must outlive ONE pass (agent review round 1, F1).
+
+    The dense pass archives the task's opening request along with the task, so
+    the next pass's ``task_boundary_floor`` finds no operator turn to measure
+    from and answers 0. Before this was handled the previous protected tail
+    then became ordinary middle history after a single pass, where today's
+    raw floor (anchor still in the window) went on protecting the task.
+    """
+    session = _make_session(tmp_path)
+    await _grow(session, FITTING_STEPS)
+    assert KEEP_RECENT < _floor(session) < FLOOR_CAP, "fixture: widened, not clamped"
+    assert (await session.compact_now()).ran
+    first = _archive(session)
+    assert first.live_tail_chars == len(first.text_tail) > 0
+    held = _step_markers("live", range(FITTING_STEPS))
+    assert all(m in first.text_tail + "\n" + _live_texts(session) for m in held)
+
+    # Few enough new steps that both spans fit the tail bound: nothing may leave.
+    more = range(FITTING_STEPS, FITTING_STEPS + 12)
+    await _more(session, more)
+    assert _floor(session) == 0, "fixture: the request was archived, the floor has no anchor"
+
+    assert (await session.compact_now()).ran
+    second = _archive(session)
+    assert second.text_tail.startswith(first.text_tail), "the earlier protected tail was released"
+    assert second.live_tail_chars == len(second.text_tail)
+    context = second.text_tail + "\n" + _live_texts(session)
+    missing = [m for m in held + _step_markers("live", more) if m not in context]
+    assert not missing, f"{len(missing)} live steps are no longer verbatim text: {missing[:3]}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_new_operator_request_releases_the_earlier_task(tmp_path):
+    """The earlier tail is protected only while ITS task is the live one."""
+    session = _make_session(tmp_path)
+    await _grow(session, FITTING_STEPS)
+    assert (await session.compact_now()).ran
+    first = _archive(session)
+    assert first.live_tail_chars > 0
+
+    session._context.messages.append(Message.user("NEW TASK: now audit the refund path"))
+    for index in range(FITTING_STEPS):
+        session._context.messages.extend(_step("audit", index))
+    await session._persist_new_messages(session._context.messages)
+
+    assert (await session.compact_now()).ran
+    second = _archive(session)
+    assert second.live_tail_chars == len(second.text_tail)
+    assert "audit step 0 reasoning" in second.text_tail
+    assert "live step 0 reasoning" not in second.text_tail
+    assert not second.text_tail.startswith(first.text_tail)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_task_that_outgrows_the_tail_bound_is_carried_once_more_then_not(tmp_path):
+    """The continuation has the horizon the raw floor has, and no ratchet.
+
+    Today's floor protects a task while it fits the cap, keeps the newest
+    cap's worth on the pass where the task outgrows it, and is plain recency
+    after that. The tail does the same with its own bound: the pass that has
+    to trim still carries the newest steps on a bounded tail, records nothing
+    as continuable, and the pass after it is an ordinary recency pass.
+    """
+    session = _make_session(tmp_path)
+    assert session._dense_tail_cap(session._compaction_settings) == TAIL_CAP
+    await _grow(session, FITTING_STEPS)
+    assert (await session.compact_now()).ran
+    assert _archive(session).live_tail_chars > 0
+
+    # Far more than the bound holds.
+    await _more(session, range(FITTING_STEPS, FITTING_STEPS + 80))
+    assert (await session.compact_now()).ran
+    trimmed = _archive(session)
+    tail_tokens = estimate_tokens(Message.assistant(trimmed.text_tail))
+    default_tail = _archive_default_tail_chars()
+    assert len(trimmed.text_tail) > default_tail, "the bounded tail is still a protected one"
+    assert 0.8 * TAIL_CAP <= tail_tokens <= TAIL_CAP
+    assert f"live step {FITTING_STEPS + 60} reasoning" in trimmed.text_tail
+    assert "live step 0 reasoning" not in trimmed.text_tail
+    assert trimmed.live_tail_chars == 0, "a trimmed tail must not be continued"
+
+    await _more(session, range(FITTING_STEPS + 80, FITTING_STEPS + 140))
+    plan = await session._plan_compaction(respect_threshold=False)
+    assert isinstance(plan, _CompactionPlan)
+    assert plan.dense_tail_from is None and plan.dense_tail_previous_chars == 0
+    assert (await session.compact_now()).ran
+    assert len(_archive(session).text_tail) == default_tail
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_task_already_wider_than_the_floor_is_not_continued(tmp_path):
+    """A clamped floor has already lost its anchor: carry once, do not continue."""
+    session = _make_session(tmp_path)
+    await _grow(session)
+    assert _floor(session) == FLOOR_CAP, "fixture: the task is wider than the floor cap"
+    assert (await session.compact_now()).ran
+    first = _archive(session)
+    assert len(first.text_tail) > _archive_default_tail_chars(), "still carried on this pass"
+    assert first.live_tail_chars == 0
+
+    await _more(session, range(LIVE_STEPS, LIVE_STEPS + 40))
+    plan = await session._plan_compaction(respect_threshold=False)
+    assert isinstance(plan, _CompactionPlan)
+    assert plan.dense_tail_from is None
+    await session.dispose()
+
+
+def _archive_default_tail_chars() -> int:
+    shape = snapcompact.resolve_shape(VISION.provider, VISION.model_id)
+    return snapcompact.HQ_EDGE_FRAMES * shape.capacity
 
 
 @pytest.mark.asyncio
