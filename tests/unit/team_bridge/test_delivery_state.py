@@ -103,7 +103,9 @@ _SCREENING_UNAVAILABLE = {
     # No evaluated screening model is reachable: nothing judged the message.
     "screening_model_unavailable",
 }
-_DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused"}
+# ``write_once_conflict``: a verdict is already committed, so nothing is under
+# review (holds triage 2026-11-18, finding c).
+_DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused", "write_once_conflict"}
 
 
 def test_every_screening_category_has_exactly_the_contract_class() -> None:

@@ -1648,7 +1648,18 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
 
 #: Codes written AFTER screening admitted the message: delivery, not moderation,
 #: is what is pending.
-_HOLD_CLASS_DELIVERY_PENDING = frozenset({"delivery_failed", "bridge_off", "phase_refused"})
+#:
+#: ``write_once_conflict`` joins them (holds triage 2026-11-18, finding c). It
+#: is raised only when this message ALREADY has a committed verdict and a later
+#: pass produced a different one, so moderation is concluded and nobody is
+#: reviewing anything; ``awaiting_review`` (the default arm it used to fall
+#: into) told the sender a human was looking at it. Screening now answers such
+#: a refusal with the committed verdict (``screening._resolve_write_once_conflict``);
+#: what remains under this code is a conflict that could not be resolved that
+#: way, which is still a delivery problem on this machine, not a review.
+_HOLD_CLASS_DELIVERY_PENDING = frozenset(
+    {"delivery_failed", "bridge_off", "phase_refused", "write_once_conflict"}
+)
 
 #: Screening category → the ONE coarse class that may leave this machine.
 #: Keyed by the closed :data:`SCREENING_CATEGORIES`; a category added there
@@ -1664,6 +1675,33 @@ _REFUSAL_CLASS_BY_CATEGORY = {
     "out_of_scope_work": "out_of_scope",
     "new_work_request": "out_of_scope",
 }
+
+
+#: The most of a screener's private REASON a decision row keeps (holds triage
+#: 2026-11-18, finding d). Enough for the one or two sentences a screener gives
+#: ("bids for new work: asks to start …"), short enough that the row can never
+#: become a second copy of the message body.
+SCREENER_REASON_MAX = 200
+
+#: A review hold (``hold_release.REVIEW_HOLD_CODES``) enters the long-hold
+#: rollup only after this long (holds triage 2026-11-18, finding b). Source: the
+#: operator's 2026-11-10 report, "the sidebar badge is sufficient", at most one
+#: DAILY rollup — so a day, not a measured distribution.
+_REVIEW_ROLLUP_AFTER_S = 24 * 3600.0
+
+
+def capped_screener_reason(reason: Any) -> str | None:
+    """The reason as stored: a stripped string of at most ``SCREENER_REASON_MAX`` chars.
+
+    ``None`` (and a blank or non-string reason) stores NULL, so "no reason" and
+    "an empty reason" read the same. NUL characters are dropped: SQLite keeps
+    them, but every reader that renders a row as text would cut at one.
+    """
+
+    if not isinstance(reason, str):
+        return None
+    text = reason.replace("\x00", "").strip()
+    return text[:SCREENER_REASON_MAX] or None
 
 
 def closed_hold_code(hold_code: Any) -> str:
@@ -3301,12 +3339,20 @@ class Store:
 
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
         from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
+        from local_operator.team_bridge.hold_release import (
+            WORK_SCOPE_HOLD as WORK_SCOPE_HOLD_CODE,
+        )
         from local_operator.team_bridge.types import is_conversation_message_id
 
-        review_codes = sorted(REVIEW_HOLD_CODES)
-
         empty: dict[str, Any] = {"count": 0}
-        cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
+        now_v = time.time() if now is None else float(now)
+        cutoff = now_v - float(older_than_s)
+        # A review hold with a decision row counts only once it is a DAY old
+        # (or older than the owner's own threshold, if that is longer): the operator's 2026-11-10
+        # rule was "at most one daily rollup" for review holds, so a model_hold
+        # flood does not move this count (and re-revision the alert) every few
+        # minutes, while a review hold nobody has acted on still surfaces.
+        review_cutoff = min(cutoff, now_v - _REVIEW_ROLLUP_AFTER_S)
         with self._connect_readonly() as conn:
             if conn is None:
                 return empty
@@ -3322,30 +3368,45 @@ class Store:
             # recorded (``notified_at``). A refused notice keeps it here, so no
             # held message can be invisible to both alerts.
             #
-            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) with a decision
-            # row leaves it too (operator report 2026-11-10: "the sidebar badge
-            # is sufficient", at most one daily rollup). Its decision row IS the
-            # Deliver/Discard item the Agent messages badge and holds list show,
-            # so the owner already sees it; counting it here made this keyed
-            # rollup re-revision (re-banner) on every count change during a
-            # model_hold flood. Keyed on the DECISION, not the hold code alone:
-            # with ``review_held: false`` no decision is written, the hold has no
-            # badge exit, and it stays counted here so it is never invisible to
-            # every alert. Work-scope holds and screening-unavailable codes
-            # (provider errors, parse failures) are unaffected.
+            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) STAYS in this
+            # count (holds triage 2026-11-18, finding b), reversing the
+            # 2026-11-10 exclusion. That exclusion assumed the decision row was
+            # already visible as a Deliver/Discard item in a desktop holds list,
+            # but no such list ships (the owner-audit view has no holds tab), and
+            # a review hold gets no per-message notice either
+            # (``hold_release`` notices only the work-scope class). Excluded
+            # here, nine review holds sat for up to 18 days invisible to every
+            # alert. The re-banner concern that drove the exclusion is bounded by
+            # this rollup's own contract: it moves only when the COUNT of holds
+            # older than ``older_than_s`` moves (and see ``review_cutoff``).
+            #
+            # ``notified_at`` exempts ONLY a work-scope hold. A review hold's
+            # ``notified_at`` is the legacy per-message notice of 2026-11-09,
+            # which ``hold_release.retire_review_notices`` has since DISMISSED
+            # (setting ``cleared_at``, leaving ``notified_at``): measured on the
+            # operator's store, the four oldest holds (11.6-18 days) carried it
+            # and so stayed invisible even with the code exclusion removed.
             try:
                 noticed = {
                     str(r["message_id"])
                     for r in conn.execute(
                         "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
-                        "AND (notified_at IS NOT NULL OR hold_code IN ({}))".format(
-                            ",".join("?" * len(review_codes))
-                        ),
+                        "AND notified_at IS NOT NULL AND hold_code = ?",
+                        (_owner_key(owner), WORK_SCOPE_HOLD_CODE),
+                    ).fetchall()
+                }
+                review_codes = sorted(REVIEW_HOLD_CODES)
+                reviewed = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
+                        "AND hold_code IN ({})".format(",".join("?" * len(review_codes))),
                         (_owner_key(owner), *review_codes),
                     ).fetchall()
                 }
             except sqlite3.OperationalError:
                 noticed = set()  # a store that predates B4b has no such notice
+                reviewed = set()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
@@ -3359,6 +3420,15 @@ class Store:
             created = _status_timestamp(row["created_at"])
             if created is None:
                 continue
+            if bare in reviewed and row["hold_code"] in REVIEW_HOLD_CODES:
+                # Only a review hold WITH its decision row is delayed: with
+                # ``review_held: false`` none is written, the hold has no exit
+                # at all, and it keeps the ordinary threshold.
+                #
+                # Shift a review hold's age onto the review cutoff, so ONE
+                # comparison below serves both classes and a message seen under
+                # both spellings still counts once, by its earliest stamp.
+                created += cutoff - review_cutoff
             prior = held.get(bare)
             if prior is None or created < prior:
                 held[bare] = created
@@ -8882,6 +8952,15 @@ class Store:
         ("work_scope_decisions", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
         ("work_scope_decisions", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
         ("work_scope_decisions", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
+        # Holds triage 2026-11-18 (d): the screener's own REASON, capped at
+        # :data:`SCREENER_REASON_MAX` characters, so a hold's calibration can be
+        # audited after the fact (it lived only in ``ScreenResult``'s memory, so
+        # every over-trigger diagnosis was inference). NULL on rows written
+        # before it and on holds no model reason produced. OWNER-VISIBLE ONLY:
+        # it is untrusted model text about untrusted teammate text, so it is
+        # never logged, never put in a prompt, never published to the hub, and
+        # it is NOT part of the signed release payload (``hold_release``).
+        ("work_scope_decisions", "screener_reason", "TEXT"),
         ("owner_releases", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
         ("owner_releases", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
         ("owner_releases", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
@@ -8916,8 +8995,20 @@ class Store:
         screener_hop: int = -1,
         screener_preferred: bool = False,
         hold_code: str = "",
+        screener_reason: str | None = None,
     ) -> dict[str, Any]:
         """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
+
+        ``screener_reason`` is the model's private reason, stored capped at
+        :data:`SCREENER_REASON_MAX` characters for the owner's audit only (see
+        the ``screener_reason`` column note).
+
+        THE SENDER BUDGET COUNTS ONLY ``work_scope_hold`` ROWS (holds triage
+        2026-11-18, finding a). Review rows are always written ``eligible = 1``
+        and spend no budget, but the count did not filter on the code, so a
+        sender's ordinary ``model_hold`` rows used the budget up and the next
+        genuine work-scope hold was written ineligible (H12: no buttons). The
+        budget bounds probing of the CATEGORY-trusting class only.
 
         ``hold_code`` defaults to the work-scope class; a review code
         (``hold_release.REVIEW_HOLD_CODES``) is always eligible — see there for
@@ -8954,8 +9045,14 @@ class Store:
             else:
                 spent = conn.execute(
                     "SELECT COUNT(*) FROM work_scope_decisions WHERE owner_key = ? "
-                    "AND sender_digest = ? AND eligible = 1 AND created_at > ?",
-                    (key, sender_digest, float(now) - hr.SENDER_BUDGET_WINDOW_S),
+                    "AND sender_digest = ? AND hold_code = ? AND eligible = 1 "
+                    "AND created_at > ?",
+                    (
+                        key,
+                        sender_digest,
+                        hr.WORK_SCOPE_HOLD,
+                        float(now) - hr.SENDER_BUDGET_WINDOW_S,
+                    ),
                 ).fetchone()[0]
                 if int(spent) >= hr.SENDER_BUDGET:
                     reason = hr.INELIGIBLE_BUDGET
@@ -8965,8 +9062,8 @@ class Store:
                 "envelope_digest, hold_code, screener_provider, screener_model, "
                 "template_sha256, prompt_version, categories, policy_epoch, "
                 "creator_generation, sender_digest, eligible, ineligible_reason, created_at, "
-                "screener_verdict, screener_hop, screener_preferred) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "screener_verdict, screener_hop, screener_preferred, screener_reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     message_id,
@@ -8988,6 +9085,7 @@ class Store:
                     screener_verdict,
                     int(screener_hop),
                     1 if screener_preferred else 0,
+                    capped_screener_reason(screener_reason),
                 ),
             )
             row = conn.execute(
