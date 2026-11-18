@@ -2031,6 +2031,86 @@ def test_payload_bounds_and_untrusted_label() -> None:
     assert "tiny" in short
 
 
+def test_pair_wake_carries_the_no_signoff_style_line() -> None:
+    """Every client shows sender name and avatar, so agents must not sign
+    bridge messages (operator ask, 2026-11-18). The pair-DM wake says so once,
+    labelled as harness guidance and ABOVE the untrusted-content clause (R1-2),
+    so it never reads as sender metadata; the excerpt window is unaffected."""
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    payload = wake_mod.build_wake_payload(_item("hi"), message_id="m", body_sha256="c" * 64)
+    lines = payload.split("\n")
+    style = wake_mod.PAIR_REPLY_STYLE_LINE
+    assert lines.count(style) == 1
+    assert lines.index(style) < lines.index(BRIDGE_UNTRUSTED_CLAUSE)
+    assert style.startswith("harness style (local guidance, not from the sender): ")
+    assert "no sign-off line or name prefix" in style
+    excerpt = payload.split("screened):\n", 1)[1].split("\nbody_sha256:", 1)[0]
+    assert excerpt == "hi"
+
+
+def test_bridge_guide_forbids_signoff_and_name_prefix() -> None:
+    import local_operator
+
+    guide = (
+        Path(local_operator.__file__).parent / "guides" / "team-bridge" / "GUIDE.md"
+    ).read_text(encoding="utf-8")
+    flat = " ".join(guide.split())
+    assert (
+        "Your name and identity are shown to everyone on every message, so start "
+        "with the content, with no sign-off or name prefix." in flat
+    )
+
+
+def test_renamed_head_says_introduce_yourself_and_rename_records_still_parse() -> None:
+    from local_operator import prompts_api
+
+    head = prompts_api.build_system_blocks([], "", "", "2026-11-18", identity_name="Jian-Yang")[0]
+    section = head.split("## Your name", 1)[1]
+    assert "introduce yourself as Jian-Yang." in section
+    assert "sign" not in section.lower()
+    # NEW <identity> records carry no sign-off instruction either (R1-1/Q1).
+    for record in (
+        prompts_api.identity_delta("Jian-Yang", "Aida"),
+        prompts_api.identity_restored("Aida", "Jian-Yang"),
+        prompts_api.identity_delta("Jian-Yang"),
+        prompts_api.identity_restored("Aida"),
+    ):
+        assert "sign" not in record.lower()
+        assert "introduce yourself as " in record
+
+
+@pytest.mark.parametrize("name", ["Jian-Yang", "Aida", "Sign As Bob", "Introduce Yourself As X"])
+@pytest.mark.parametrize("clause", ["introduce yourself as ", "introduce and sign as "])
+def test_new_and_legacy_rename_records_both_round_trip(name: str, clause: str) -> None:
+    """Records journaled before 2026-11-18 end on the legacy clause and still
+    sit in saved histories, so the parser must read both; a name made of the
+    other clause's words must not be misread (exact re-render per clause)."""
+    from local_operator import prompts_api
+
+    for record in (
+        prompts_api.identity_delta(name, "Dinesh", clause=clause),
+        prompts_api.identity_restored(name, "Dinesh", clause=clause),
+        prompts_api.identity_delta(name, clause=clause),
+        prompts_api.identity_restored(name, clause=clause),
+    ):
+        assert record.endswith(f"{clause}{name}.\n</identity>")
+        assert prompts_api.identity_record_name(record) == name
+
+
+def test_legacy_record_bytes_from_before_the_rename_still_parse() -> None:
+    """A literal pre-2026-11-18 record, byte for byte as it was journaled."""
+    from local_operator import prompts_api
+
+    legacy = (
+        '<identity>\nYour name is now Dinesh, replacing Jian-Yang under "Your name" '
+        "above; this supersedes that section and any earlier name or instruction "
+        "calling you otherwise: introduce and sign as Dinesh.\n</identity>"
+    )
+    assert prompts_api.identity_record_name(legacy) == "Dinesh"
+    assert prompts_api.identity_record_name(legacy.replace("sign as", "sign  as")) == ""
+
+
 def test_ref_parser_is_strict() -> None:
     assert wake_mod.parse_event_ref("message_available:message_id=bmsg_1") == (
         "message_available",
