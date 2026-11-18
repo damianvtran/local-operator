@@ -834,6 +834,11 @@ class ProviderError(RenderedStreamError):
     the wait are composed in only on the way out.
     """
 
+    #: Set by ``clients.raise_for_status`` when the provider's JSON error fields
+    #: name a CONTENT verdict (PR #4212, S-7/S-12), read before ``message`` is
+    #: capped. Declared here so the stamp is a typed attribute, not a monkey-patch.
+    content_verdict_seen: bool = False
+
     def __init__(
         self,
         status: int | None,
