@@ -2694,20 +2694,49 @@ class TeamBridgeClient:
         first try, and only a miss pays for a read.
 
         Callers get a deep copy; the cached payload is never handed out to be
-        mutated.
+        mutated. A caller that decides whether to re-read needs to know where
+        the copy came from: use :meth:`directory_cached_read`.
+        """
+
+        payload, _fetched = await self.directory_cached_read(
+            tenant_id, expected_account_id=expected_account_id, refresh=refresh
+        )
+        return payload
+
+    async def directory_cached_read(
+        self,
+        tenant_id: str,
+        *,
+        expected_account_id: str | None = None,
+        refresh: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        """:meth:`directory_cached`, plus whether THIS call read the wire.
+
+        WHY. The forced re-read on a resolution miss exists only because a
+        cached copy may predate a teammate joining. A copy fetched by this very
+        call is already as fresh as a re-read would be, so re-reading it spends
+        a second directory request (against the per-IP edge limit the cache was
+        added to relieve) for an identical answer. Callers re-read on a miss
+        only when ``fetched`` is False — a cold cache then costs exactly one
+        read, a warm one at most one forced refresh.
+
+        ``fetched`` is True for every path that reached :meth:`directory`: a
+        cache miss or expiry, ``refresh=True``, and the uncached bypass (no
+        pinned account, or an ``expected_account_id`` fence that does not match).
         """
 
         access = await self.current_access()
         account = str(getattr(access, "account_id", "") or "")
         if not account or (expected_account_id is not None and expected_account_id != account):
-            return await self.directory(
+            payload = await self.directory(
                 tenant_id, access=access, expected_account_id=expected_account_id
             )
+            return payload, True
         key = (self.base_url, account, str(tenant_id))
         now = time.monotonic()
         hit = _DIRECTORY_CACHE.get(key)
         if not refresh and hit is not None and hit[0] > now:
-            return copy.deepcopy(hit[1])
+            return copy.deepcopy(hit[1]), False
         payload = await self.directory(
             tenant_id, access=access, expected_account_id=expected_account_id
         )
@@ -2717,8 +2746,8 @@ class TeamBridgeClient:
                 # only stops an unexpected key churn from growing the process.
                 _DIRECTORY_CACHE.clear()
             _DIRECTORY_CACHE[key] = (time.monotonic() + DIRECTORY_CACHE_TTL_S, payload)
-            return copy.deepcopy(payload)
-        return payload
+            return copy.deepcopy(payload), True
+        return payload, True
 
     async def tenant_state(
         self, tenant_id: str, *, access: OAuthAccess | None = None
