@@ -173,6 +173,62 @@ def test_actual_cli_rejects_invalid_infra_before_reading_selector(capsys, tmp_pa
     assert not (tmp_path / "must-not-exist").exists()
 
 
+def test_the_cli_runs_the_episode_inside_the_owned_broker_scope(
+    capsys, tmp_path, monkeypatch
+) -> None:
+    """``main`` is where the episode's broker lifetime is owned.
+
+    The scope must be OPEN while ``run`` executes (that is when the store is
+    resolved and a broker lazily started) and CLOSED before ``main`` returns,
+    on a preflight refusal as much as on a full run -- infra refs are resolved
+    before most refusals, so an early exit leaked a daemon just the same
+    (reproduced on the real entry: a ``secrets.brokerd`` reparented to pid 1
+    after an exit-2 refusal).
+    """
+    from contextlib import contextmanager
+
+    from local_operator.evaluation.runner import host_secrets
+
+    events: list[str] = []
+    real_run = run_episode.run
+
+    @contextmanager
+    def recording_scope():
+        events.append("scope-open")
+        try:
+            yield
+        finally:
+            events.append("scope-closed")
+
+    async def recording_run(args, **kwargs):
+        events.append("run-start")
+        try:
+            return await real_run(args, **kwargs)
+        finally:
+            events.append("run-end")
+
+    monkeypatch.setattr(host_secrets, "owned_broker_scope", recording_scope)
+    monkeypatch.setattr(run_episode, "run", recording_run)
+    status = run_episode.main(
+        [
+            "--selector",
+            str(tmp_path / "nonexistent.json"),
+            "--task-id",
+            "synthetic",
+            "--route",
+            "test/model",
+            "--run-root",
+            str(tmp_path / "must-not-exist"),
+            "--infra",
+            "OSWORLD_ACTION_SETTLE_POLICY=fast",
+            "--no-store",
+        ]
+    )
+    capsys.readouterr()
+    assert status == run_episode.EXIT_PREFLIGHT
+    assert events == ["scope-open", "run-start", "run-end", "scope-closed"]
+
+
 def test_the_cloud_lease_is_derived_to_outlast_the_wall_budget() -> None:
     """A raised wall must not be reclaimed by a shorter fixed lease.
 

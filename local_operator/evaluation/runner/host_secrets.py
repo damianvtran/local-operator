@@ -57,8 +57,11 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
-from typing import Any, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any, Iterator, Sequence
 
 from local_operator.evaluation.adapters.api import ResolvedSecret
 from local_operator.evaluation.runner.secrets import build_resolved_secret
@@ -235,3 +238,82 @@ class CredentialStoreResolver:
             # the store's own resolution no longer reads.
             resolved.append(build_resolved_secret(name, stored.get(name, "")))
         return tuple(resolved)
+
+
+def _broker_client() -> Any | None:
+    """The store's broker client IF this process has loaded it, else ``None``.
+
+    Read from ``sys.modules`` rather than imported: a broker can only have
+    been spawned by this process through that module, so "never loaded" is
+    exactly "nothing to own" -- and an episode that never touches the store
+    (``--no-store``) keeps importing nothing from the application, the rule
+    this module's docstring states. Also the seam the scope's tests replace
+    with a fake daemon.
+    """
+
+    return sys.modules.get("local_operator.secrets.client")
+
+
+@dataclass
+class OwnedBrokerScope:
+    """What :func:`owned_broker_scope` did at exit, for the host's own log."""
+
+    #: ``(broker pid, outcome)`` per broker this scope started; the outcome is
+    #: ``client.stop_spawned_broker``'s token, or ``error: <ExceptionName>``.
+    outcomes: list[tuple[int, str]] = field(default_factory=list)
+
+
+@contextmanager
+def owned_broker_scope() -> Iterator[OwnedBrokerScope]:
+    """Own the lifetime of any secret broker started INSIDE this scope.
+
+    WHY. ``CredentialStoreResolver.resolve`` (and the episode's own session)
+    reach the store through its broker, which is started lazily and DETACHED so
+    it outlives whoever started it -- right for an operator's store, whose
+    sessions share one daemon. An episode runs against a per-episode scratch
+    store, so the same laziness leaked one ``secrets.brokerd`` per episode
+    (measured on v0.107.2: each orphan held its socket until the 30-minute
+    idle timer; a campaign accumulates them). The episode host wraps its run in
+    this scope so the broker it caused is gone when the episode is.
+
+    THE RULE IS OWNERSHIP, NOT LOCATION -- nothing here asks whether the config
+    root "looks like" scratch:
+
+    - only a broker the store's client recorded THIS process spawning, and only
+      one spawned AFTER the scope opened, is a candidate (the difference of two
+      ``spawned_brokers()`` snapshots). A broker that was already listening --
+      the operator's own, or another episode's -- was merely ATTACHED to: it
+      never enters the registry, so it is never touched;
+    - the stop itself (``client.stop_spawned_broker``) re-reads the daemon's
+      live pid, and refuses if another session registered with it meanwhile or
+      the store's unlock lives only in its memory. Its refusals are recorded
+      as outcomes, not retried.
+
+    Teardown hygiene never replaces the episode's result: a failing stop is
+    logged and recorded, and the scope exits normally.
+    """
+
+    scope = OwnedBrokerScope()
+    client = _broker_client()
+    # No client loaded yet means nothing was spawned before the scope opened.
+    before = client.spawned_brokers() if client is not None else {}
+    try:
+        yield scope
+    finally:
+        client = _broker_client()
+        started = client.spawned_brokers() if client is not None else {}
+        for key, entry in started.items():
+            if client is None or before.get(key) == entry:
+                # Spawned before the scope opened: an outer owner's, not ours.
+                continue
+            try:
+                outcome = client.stop_spawned_broker(entry.base)
+            except Exception as error:  # noqa: BLE001 - teardown must not mask the episode
+                outcome = f"error: {type(error).__name__}"
+            scope.outcomes.append((entry.pid, outcome))
+            if outcome != "stopped":
+                logger.warning(
+                    "episode-started secret broker (pid %s) was not stopped: %s",
+                    entry.pid,
+                    outcome,
+                )

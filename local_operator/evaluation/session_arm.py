@@ -3532,6 +3532,12 @@ class EpisodeSession:
     #: ``verifier_started`` (``_arm_completion_verifier``): the ONLY selector
     #: for the cost row's ``verifier`` share. Empty when the verifier is off.
     verifier_job_ids: set[str] = field(default_factory=set, repr=False)
+    #: Whether the harness completion verifier was ARMED for this episode
+    #: (``_arm_completion_verifier`` ran). It is what lets the accounting
+    #: snapshot tell "a verifier existed and made N requests (possibly 0)"
+    #: from "this arm had no verifier": ``verifier_job_ids`` alone cannot,
+    #: because it is empty in both until a round starts.
+    verifier_armed: bool = False
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -3972,8 +3978,54 @@ def _session_accounting(
         legacy_screen_epochs=bridge.steps if bridge is not None else None,
         command_attempts=bridge.command_attempts if bridge is not None else None,
         logical_requests=len(handle.request_rows) if handle is not None else None,
+        verifier_requests=_verifier_request_count(handle),
         requests_complete=close_joined,
     )
+
+
+def _verifier_request_rows(handle: EpisodeSession) -> list[dict[str, Any]]:
+    """The harness completion verifier's request-final rows: ONE selector.
+
+    Shared by the ``requests`` cost row and the ``accounting`` snapshot so the
+    two can never disagree again (measured on a v0.107.2 episode: the cost row
+    counted 7 verifier requests while ``accounting.verifier_requests`` was
+    ``null``, because the snapshot never read the subset at all).
+
+    Selected by the job ids the arm recorded at ``verifier_started``
+    (``handle.verifier_job_ids``), NOT by ``actor_role == "verifier"`` (review
+    round 2, m3): the worker has ``task`` and may launch its own
+    ``task(agent="verifier")``, whose rows carry the same role name. Those are
+    the worker's spend, in both readers.
+    """
+
+    verifier_ids = frozenset(getattr(handle, "verifier_job_ids", ()) or ())
+    return [row for row in handle.request_rows if row.get("job_id") in verifier_ids]
+
+
+def _verifier_request_count(handle: EpisodeSession | None) -> int | None:
+    """``accounting.verifier_requests``: a count when ARMED, else unknown.
+
+    WHY ``None`` AND NOT ``0`` FOR AN ARM WITHOUT A VERIFIER. Every reader of
+    this field already treats ``null`` as "no separately identified verifier
+    subset exists" -- the class docstring above, the published contract in
+    ``docs/benchmarks/osworld_2/BUDGETS_AND_LATENCY.md`` ("do not ... invent
+    zero"), and the ``requests`` row, which omits its ``verifier`` key so a
+    verifier-off record stays byte-identical. A ``0`` there would make a
+    verifier-off run indistinguishable from a verifier-on run whose verifier
+    never issued a request, which is exactly the pooling an ablation must not
+    be able to make by accident. Once the verifier IS armed the subset is
+    identified, so the count is a measurement -- including a measured ``0``
+    (armed but never fired, or a target without the command capability).
+
+    Like ``logical_requests`` this is a snapshot of observed request finals
+    and is provisional until ``requests_complete`` is true. It is a SUBSET of
+    ``logical_requests``, never an addition to it, and it does not touch the
+    worker's decision-group clocks (#3887), which are read from the bridge.
+    """
+
+    if handle is None or not getattr(handle, "verifier_armed", False):
+        return None
+    return len(_verifier_request_rows(handle))
 
 
 @dataclass(frozen=True)
@@ -4802,17 +4854,27 @@ async def run_session_episode(
                 "error",
                 {"scope": "cleanup", "diagnostic": f"{type(error).__name__}: {error}"},
             )
-            # A dead worker cannot produce evidence, and "attempted" alone is
-            # never evidence of cleanup -- ``aggregate_cleanup`` is the one
-            # statement of that rule (exactly one receipt per declared action;
-            # only ``succeeded`` and ``not_needed`` aggregate clean).
-            rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
-            if rescue_required and descriptor is not None:
-                rescue_complete = await _attempt_rescue(
-                    descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
-                )
-            elif descriptor is not None:
-                _discard_descriptor(config)
+        # DECIDED ON THE RECEIPTS, OUTSIDE THE ``except`` (the reply arm's
+        # ``EpisodeRunner._close_out`` shape). This decision used to live inside
+        # the handler above, so it ran ONLY when cleanup raised: a CLEAN
+        # cleanup -- the ordinary ending -- never discarded ``rescue.json``
+        # (every finished episode left a descriptor telling the sweep it might
+        # still own a worker), and a cleanup that RETURNED a failed or missing
+        # receipt was never routed to rescue at all. A raise leaves
+        # ``receipts`` empty, which the aggregate reads as "unconfirmed", so
+        # the raising path is unchanged: a dead worker cannot produce evidence,
+        # and "attempted" alone is never evidence of cleanup --
+        # ``aggregate_cleanup`` is the one statement of that rule (exactly one
+        # receipt per declared action; only ``succeeded`` and ``not_needed``
+        # aggregate clean).
+        rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
+        rescue_complete = await _settle_descriptor_after_cleanup(
+            rescue_required=rescue_required,
+            descriptor=descriptor,
+            config=config,
+            secrets=secrets,
+            rescue=rescue,
+        )
         cleanup_done = True
         # A score failure on a run that already ended wedged is a CONSEQUENCE
         # of the wedge (a failed re-read poisons the session, and a poisoned
@@ -4932,10 +4994,24 @@ async def run_session_episode(
                     rescue_required = rescue_required or _cleanup_forces_rescue(plan, receipts)
                 except BaseException:
                     rescue_required = True
-        if rescue_required and descriptor is not None and not exc_retain:
-            rescue_complete = await _attempt_rescue(
-                descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
-            )
+                # The exception path ran the SAME cleanup, so it owes the same
+                # decision on its receipts: a turn that raised says nothing
+                # about whether the worker was released. Clean receipts retire
+                # the descriptor here exactly as they do on the normal path;
+                # anything else goes to rescue.
+                rescue_complete = await _settle_descriptor_after_cleanup(
+                    rescue_required=rescue_required,
+                    descriptor=descriptor,
+                    config=config,
+                    secrets=secrets,
+                    rescue=rescue,
+                )
+        # NO SECOND RESCUE BELOW. When the normal path already ran cleanup
+        # (``cleanup_done``) and an exception arrived afterwards -- a re-raised
+        # score failure is the common one -- that cleanup's receipts were
+        # settled where it ran, and ``rescue_complete`` already carries the
+        # answer. Rescuing again from here would re-release a worker a complete
+        # rescue had just retired the descriptor for.
         # The terminal error line comes FIRST: it is itself a sink write the
         # full volume may refuse, and a record failure it raises belongs in the
         # outcome below rather than after it was computed.
@@ -5311,15 +5387,12 @@ def _flush_request_observation(
     # Present only when a verifier made requests, so an arm without one
     # writes today's row byte for byte.
     #
-    # Selected by the job ids the arm recorded at ``verifier_started``
-    # (``handle.verifier_job_ids``), NOT by ``actor_role == "verifier"``
-    # (review round 2, m3): the worker has ``task`` and may launch its own
-    # ``task(agent="verifier")``, whose rows carry the same role name. Those
-    # are the worker's spend, and with the verifier off they must not add a
-    # ``verifier`` key to a record that is otherwise byte-identical.
+    # The subset comes from ``_verifier_request_rows`` -- the same selector the
+    # ``accounting`` snapshot counts, so the two figures are one reading. With
+    # the verifier off it selects nothing and no ``verifier`` key is added to a
+    # record that is otherwise byte-identical.
     verifier_share: dict[str, Any] = {}
-    verifier_ids = frozenset(getattr(handle, "verifier_job_ids", ()) or ())
-    verifier_rows = [row for row in rows if row.get("job_id") in verifier_ids]
+    verifier_rows = _verifier_request_rows(handle)
     if verifier_rows:
         from local_operator.harness.types import Usage
 
@@ -5406,6 +5479,10 @@ def _arm_completion_verifier(
         "skipped": [],
     }
     record.write("completion_verifier", config.stamp())
+    # Armed from here on, including the no-capability early return below: the
+    # verifier subset is now IDENTIFIED (possibly empty), which is what turns
+    # ``accounting.verifier_requests`` from unknown into a count.
+    handle.verifier_armed = True
     run_command = bridge.run_command
     if run_command is None:
         record.write("verifier_skipped", {"round": None, "reason": "no-command-capability"})
@@ -5784,6 +5861,41 @@ def _persist_descriptor(
     )
     persist_rescue(config.rescue_root, descriptor)
     return descriptor
+
+
+async def _settle_descriptor_after_cleanup(
+    *,
+    rescue_required: bool,
+    descriptor: RescueDescriptor | None,
+    config: EpisodeConfig,
+    secrets: Sequence[ResolvedSecret],
+    rescue: Any,
+) -> bool | None:
+    """Rescue or retire the descriptor once cleanup's receipts are known.
+
+    The ONE statement of the session arm's post-cleanup rule, mirroring the
+    reply arm's ``EpisodeRunner._close_out``:
+
+    - cleanup left anything unconfirmed -> the descriptor is KEPT and handed to
+      rescue, which retires it only on a complete aggregate (an incomplete
+      rescue leaves it in the inbox for ``rescue_sweep``);
+    - every declared action confirmed on the live session -> this episode owns
+      nothing any more, so the descriptor leaves the inbox. Only this branch
+      holds that confirmation; nothing is discarded on hope.
+
+    Returns ``rescue_complete`` (``None`` when no rescue ran). Callers must
+    reach this ONLY after cleanup actually ran: a retained (unverified) join
+    releases nothing and keeps its descriptor without consulting this.
+    """
+
+    if descriptor is None:
+        return None
+    if rescue_required:
+        return await _attempt_rescue(
+            descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
+        )
+    _discard_descriptor(config)
+    return None
 
 
 def _discard_descriptor(config: EpisodeConfig) -> None:

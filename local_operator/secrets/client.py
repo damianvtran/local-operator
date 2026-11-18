@@ -41,10 +41,12 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +84,12 @@ REQUEST_TIMEOUT_S = 10.0
 
 #: How long to wait for a just-spawned broker to start listening.
 STARTUP_TIMEOUT_S = 5.0
+
+#: How long :func:`stop_spawned_broker` waits for the daemon's socket to stop
+#: answering after SIGTERM. The SAME bound ``lop secret broker stop`` uses for
+#: the same wait (``handlers._BROKER_STOP_TIMEOUT_S``), for the same reason:
+#: the broker drains in-flight requests before exiting (§13).
+SPAWNED_BROKER_STOP_TIMEOUT_S = 10.0
 
 #: Non-blocking lock retry cadence during lazy start. Ten sessions racing to
 #: start a broker must produce ONE broker, and the losers must poll for the
@@ -317,7 +325,7 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
         # between our ping and our lock acquisition.
         if is_running(base):
             return True
-        _spawn_broker(base)
+        _record_spawn(base, _spawn_broker(base))
         while time.monotonic() < deadline:
             if is_running(base):
                 return True
@@ -330,7 +338,148 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
             os.close(handle)
 
 
-def _spawn_broker(base: Path | None) -> None:
+@dataclass(frozen=True)
+class SpawnedBroker:
+    """A broker THIS process started: which daemon, for which store."""
+
+    pid: int
+    base: Path | None
+    #: The pid of the process that did the spawning. ``fork`` copies the
+    #: registry below into the child, and a copied entry must not make the
+    #: child an owner (it would let two processes each believe the daemon is
+    #: theirs to stop), so ownership is re-checked against ``os.getpid()``.
+    spawner_pid: int
+
+
+#: Brokers this process started, keyed by socket path (one daemon per store).
+#:
+#: A PASSIVE record: nothing in an ordinary session reads it, so recording a
+#: spawn changes no behaviour there -- the broker still outlives its starter,
+#: which is its whole purpose for an operator's store. It exists for the one
+#: caller that must take a broker's lifetime back (:func:`stop_spawned_broker`,
+#: used by an evaluation episode over its scratch store), and it is what makes
+#: that caller's rule checkable: "started by me" is a fact recorded at the
+#: spawn, never an inference from "nothing was listening a moment ago", which
+#: two processes racing the same lazy start would both conclude.
+_SPAWNED_BROKERS: dict[str, SpawnedBroker] = {}
+
+
+def _record_spawn(base: Path | None, pid: int | None) -> None:
+    # ``pid`` is None only for a spawn seam that reports nothing (a test
+    # double); an unrecorded spawn is simply one nobody may stop.
+    if isinstance(pid, int):
+        _SPAWNED_BROKERS[str(socket_path(base))] = SpawnedBroker(
+            pid=pid, base=base, spawner_pid=os.getpid()
+        )
+
+
+def spawned_brokers() -> dict[str, SpawnedBroker]:
+    """The brokers THIS process started and has not yet settled, by socket path.
+
+    A snapshot: a caller that wants "the brokers started during my scope"
+    diffs two of these (``evaluation.runner.host_secrets.owned_broker_scope``).
+    Entries a ``fork`` copied in from a parent are not this process's and are
+    left out.
+    """
+
+    me = os.getpid()
+    return {key: entry for key, entry in _SPAWNED_BROKERS.items() if entry.spawner_pid == me}
+
+
+def stop_spawned_broker(
+    base: Path | None = None, *, timeout: float = SPAWNED_BROKER_STOP_TIMEOUT_S
+) -> str:
+    """Stop the broker THIS process started for ``base`` -- and only that one.
+
+    WHY THIS EXISTS. The broker is detached and idles for 30 minutes on
+    purpose: an operator's sessions share it. An evaluation episode resolves
+    its secrets against a per-episode SCRATCH store, so that same laziness
+    left one ``secrets.brokerd`` per episode behind (measured on v0.107.2),
+    each holding a socket for a store nothing would ever read again. This is
+    the primitive that lets the starter end what it started; it is never
+    called by an ordinary session.
+
+    It refuses far more readily than it stops. Returned verbatim so the caller
+    can record the reason:
+
+    - ``"not-spawned-here"`` -- this process did not start a broker for
+      ``base``. A broker it merely ATTACHED to (the operator's own, another
+      episode's) is never signalled, whatever its state.
+    - ``"already-gone"`` -- ours no longer answers (idle timer, crash, an
+      operator's ``broker stop``). No signal: its pid may be anything by now.
+    - ``"replaced"`` -- a broker answers on the socket but reports a DIFFERENT
+      pid: ours exited and someone else's took the path. The live ``status``
+      read is what makes the kill exact -- the pid signalled is always the one
+      the daemon holding this socket just reported, never a remembered number.
+    - ``"in-use"`` -- a session other than this process registered with it.
+      Started here, then adopted (an operator opened a session on the same
+      store): stopping it would cut a live session off, so it keeps the
+      ordinary idle lifetime instead.
+    - ``"holds-unlock"`` -- the store is in the passphrase tier, where the
+      broker's memory is the ONLY copy of the operator's unlock. Nothing here
+      can recreate that, so such a broker is never stopped.
+    - ``"stopped"`` / ``"timeout"`` -- SIGTERM was sent (the daemon's clean
+      path: ``brokerd`` turns it into the Ctrl-C shutdown and removes its
+      socket); the socket then stopped answering, or did not within
+      ``timeout``. A timeout is reported, never escalated to SIGKILL: a broker
+      draining a request is still the store's only notifier.
+
+    A concurrent client that was mid-request when the daemon exits sees an
+    unreachable broker, which ``access.retrieve_secret`` already treats as an
+    outage (it restarts one lazily, or reads locally in the keyfile tier).
+    """
+
+    key = str(socket_path(base))
+    entry = spawned_brokers().get(key)
+    if entry is None:
+        return "not-spawned-here"
+    try:
+        status = broker_status(base)
+    except SecretStoreError:
+        status = None
+    if status is None:
+        _SPAWNED_BROKERS.pop(key, None)
+        return "already-gone"
+    if status.get("pid") != entry.pid:
+        # Settled either way: the daemon we started no longer holds the socket.
+        _SPAWNED_BROKERS.pop(key, None)
+        return "replaced"
+    sessions = status.get("sessions")
+    others = [pid for pid in (sessions if isinstance(sessions, list) else []) if pid != os.getpid()]
+    if others:
+        return "in-use"
+    from local_operator.secrets.keys import key_mode
+
+    try:
+        if key_mode(base) == "passphrase":
+            return "holds-unlock"
+    except (SecretStoreError, OSError, ValueError):
+        # A tier that cannot be read cannot be shown to be the recreatable one.
+        return "holds-unlock"
+    try:
+        os.kill(entry.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        _SPAWNED_BROKERS.pop(key, None)
+        return "already-gone"
+
+    # ``is_running`` propagates a version refusal; here the only question is
+    # whether the socket still answers AT ALL (the ``_stop_broker`` rule).
+    def still_up() -> bool:
+        try:
+            return is_running(base)
+        except SecretStoreError:
+            return True
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and still_up():
+        time.sleep(_LOCK_POLL_S)
+    if still_up():
+        return "timeout"
+    _SPAWNED_BROKERS.pop(key, None)
+    return "stopped"
+
+
+def _spawn_broker(base: Path | None) -> int:
     """Launch a detached broker process.
 
     ``start_new_session`` detaches it from this process group so the daemon
@@ -380,7 +529,7 @@ def _spawn_broker(base: Path | None) -> None:
         environment[CONFIG_DIR_ENV] = str(base)
     argv0, executable = _broker_identity(base)
     with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
-        subprocess.Popen(
+        process = subprocess.Popen(
             # ``argv0``/``executable`` are the two independent name axes of
             # :mod:`local_operator.procname`, resolved as a PAIR by
             # ``_broker_identity`` and passed straight through. Never re-decorate
@@ -403,6 +552,10 @@ def _spawn_broker(base: Path | None) -> None:
             env=environment,
             close_fds=True,
         )
+    # The pid is the spawn's receipt (``_record_spawn``). The ``Popen`` object
+    # itself is still dropped, exactly as before: the daemon is detached and
+    # is never waited on by its starter.
+    return process.pid
 
 
 def _broker_identity(base: Path | None) -> tuple[str, str | None]:
@@ -617,5 +770,7 @@ __all__ = [
     "read_notification",
     "register_session",
     "retrieve",
+    "spawned_brokers",
+    "stop_spawned_broker",
     "unlock",
 ]

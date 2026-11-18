@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -714,3 +715,118 @@ async def test_synthetic_model_yields_to_more_severe_labels(
     )
     outcome = await runner.run()
     assert outcome.reportability_label == "cleanup_incomplete"
+
+
+# ---- the episode owns the lifetime of a broker it started --------------------
+
+
+class _FakeBrokerClient:
+    """``secrets.client`` as ``owned_broker_scope`` uses it, with a fake daemon.
+
+    ``attach`` models a broker that was ALREADY listening (the operator's own,
+    or another episode's): resolving through it spawns nothing, so the spawn
+    registry stays empty and the scope has nothing it may stop.
+    """
+
+    def __init__(self, *, attach: bool) -> None:
+        self.attach = attach
+        self.spawned: dict[str, Any] = {}
+        self.stopped: list[Any] = []
+        self.broker_alive = attach
+
+    def resolve_through_the_broker(self, base: Path) -> None:
+        """What ``CredentialStoreResolver.resolve`` causes: a lazy start."""
+        if self.broker_alive:
+            return
+        self.broker_alive = True
+        self.spawned[str(base / "broker.sock")] = SimpleNamespace(pid=5150, base=base)
+
+    def spawned_brokers(self) -> dict[str, Any]:
+        return dict(self.spawned)
+
+    def stop_spawned_broker(self, base: Path | None = None, **kwargs: Any) -> str:
+        del kwargs
+        self.stopped.append(base)
+        self.broker_alive = False
+        self.spawned.clear()
+        return "stopped"
+
+
+def test_the_scope_stops_the_broker_the_episode_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One orphaned ``secrets.brokerd`` per episode was the measured leak."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+        assert fake.broker_alive is True  # alive for the whole episode
+    assert fake.stopped == [tmp_path]
+    assert fake.broker_alive is False
+    assert scope.outcomes == [(5150, "stopped")]
+
+
+def test_the_scope_never_touches_a_broker_it_merely_attached_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=True)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+    assert fake.stopped == []
+    assert fake.broker_alive is True
+    assert scope.outcomes == []
+
+
+def test_the_scope_leaves_a_broker_started_before_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Started by this PROCESS but not by this EPISODE: an outer owner's."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    fake.resolve_through_the_broker(tmp_path)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+    assert fake.stopped == []
+    assert scope.outcomes == []
+
+
+def test_the_scope_stops_the_broker_when_the_episode_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with pytest.raises(RuntimeError, match="episode failed"):
+        with host_secrets.owned_broker_scope():
+            fake.resolve_through_the_broker(tmp_path)
+            raise RuntimeError("episode failed")
+    assert fake.stopped == [tmp_path]
+
+
+def test_a_failing_stop_never_replaces_the_episode_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teardown hygiene must not turn a scored episode into a crash."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    fake = _FakeBrokerClient(attach=False)
+
+    def exploding(base: Path | None = None, **kwargs: Any) -> str:
+        raise OSError("synthetic stop failure")
+
+    fake.stop_spawned_broker = exploding  # type: ignore[method-assign]
+    monkeypatch.setattr(host_secrets, "_broker_client", lambda: fake)
+    with host_secrets.owned_broker_scope() as scope:
+        fake.resolve_through_the_broker(tmp_path)
+    assert scope.outcomes == [(5150, "error: OSError")]
