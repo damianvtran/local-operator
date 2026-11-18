@@ -594,6 +594,35 @@ class TestCatalogueParity:
         assert any("unknown key" in p for p in problems)
         assert any("maxCells" in p for p in problems)
 
+    def test_context_sidecar_shared_schema(self, tmp_path, monkeypatch, i18n_check) -> None:
+        # read_public_copy refuses a whole sidecar over one bad entry, so the
+        # writer must reject the same shapes at authoring time, naming the
+        # field but never echoing a value (catalogues.CONTEXT_FIELDS).
+        keys = ["demo.a", "demo.b", "demo.c", "demo.d", "demo.e", "demo.ok"]
+        self._fixture(tmp_path, monkeypatch, {"en/demo.json": {k: "x" for k in keys}})
+        sidecar = tmp_path / "catalogues" / "en" / "demo.context.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "demo.a": {"length_hint": "sentinel-value"},
+                    "demo.b": {"placeholders": {"n": {"deep": "sentinel-value"}}},
+                    "demo.c": {"width": 3},
+                    "demo.d": "sentinel-value",
+                    "demo.e": {"maxCells": True},
+                    "demo.ok": {"width": "w", "length": "l", "placeholders": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("'demo.a' has unsupported field 'length_hint'" in p for p in problems)
+        assert any("'demo.b' field 'placeholders' has an invalid type" in p for p in problems)
+        assert any("'demo.c' field 'width' has an invalid type" in p for p in problems)
+        assert any("'demo.d' must be an object" in p for p in problems)
+        assert any("'demo.e' maxCells must be an int" in p for p in problems)
+        assert not any("demo.ok" in p for p in problems)
+        assert not any("sentinel-value" in p for p in problems)
+
     def test_the_shipped_catalogues_pass(self, i18n_check) -> None:
         assert i18n_check.check_catalogues() == []
 

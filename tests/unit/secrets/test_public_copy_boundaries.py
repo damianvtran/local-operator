@@ -38,6 +38,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.harness.types import ToolContext
+from local_operator.tools import public_copy
 from local_operator.tools.public_copy import (
     _PUBLIC_COPY_PATTERNS,
     MOBILE_REPOSITORY,
@@ -218,6 +219,15 @@ async def test_documented_context_is_complete_and_audited(tmp_path, monkeypatch,
         json.dumps({"demo.bad": {"maxCells": True}}),
         json.dumps({"demo.bad": {"maxCells": 43.0}}),
         json.dumps({"demo.bad": {"maxCells": "synthetic-sensitive-value"}}),
+        # The typed fields added for the cross-repo writer vocabulary stay closed.
+        json.dumps({"demo.bad": {"width": 12}}),
+        json.dumps({"demo.bad": {"length": ["synthetic-sensitive-value"]}}),
+        json.dumps({"demo.bad": {"placeholders": {"n": {"secret": "[redacted]"}}}}),
+        json.dumps({"demo.bad": {"placeholders": {"n": 1}}}),
+        json.dumps({"demo.bad": {"placeholders": {"": "synthetic-sensitive-value"}}}),
+        json.dumps({"demo.bad": {"placeholders": ["synthetic-sensitive-value"]}}),
+        json.dumps({"demo.bad": {"placeholders": "synthetic-sensitive-value"}}),
+        json.dumps({"demo.bad": {"length_hint": "synthetic-sensitive-value"}}),
     ],
 )
 async def test_invalid_context_never_leaks_contents(tmp_path, monkeypatch, invalid):
@@ -263,6 +273,68 @@ async def test_context_objects_do_not_relax_other_catalogues(tmp_path, relative)
     )
     assert result.is_error
     assert "keys and values must be strings" in result.text
+
+
+# Operator decision 2026-11-17 (ask a-82fb, "Extend the reader with exact
+# typed fields"): core and desktop writers already author ``width``/``length``
+# hints and per-argument ``placeholders``; the reader accepts exactly those, as
+# defined once in catalogues.CONTEXT_FIELDS, and nothing else.
+TYPED_CONTEXT = {
+    "demo.x": CONTEXT_ENTRY,
+    "demo.wide": {"role": "label", "width": "short", "length": "one word"},
+    "demo.args": {"note": "count", "placeholders": {"count": "how many sessions"}},
+    "demo.noargs": {"placeholders": {}},
+}
+
+
+@pytest.mark.asyncio
+async def test_context_accepts_the_shared_typed_fields(tmp_path):
+    root, relative = _context_repo(tmp_path)
+    _commit_context(root, relative, json.dumps(TYPED_CONTEXT))
+    context = _context(tmp_path, tmp_path)
+    for key in TYPED_CONTEXT:
+        result = await execute_read_public_copy(
+            key, {"path": relative, "key": key, "repo_root": str(root)}, context=context
+        )
+        assert not result.is_error, result.text
+        assert json.loads(result.text) == {key: TYPED_CONTEXT[key]}
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ("synthetic", "context entries must be metadata objects"),
+        ({"length_hint": "x"}, "context metadata contains an unsupported field"),
+        ({"width": 1}, "context metadata has an invalid field type"),
+        ({"placeholders": {"n": {"deep": "x"}}}, "context metadata has an invalid field type"),
+    ],
+)
+def test_context_refusal_messages_are_fixed(entry, message):
+    # The shared validator returns field names; the reader must not forward them.
+    with pytest.raises(ValueError) as caught:
+        public_copy._read_context_catalogue(json.dumps({"demo.x": entry}), None)
+    assert str(caught.value) == message
+
+
+def test_reader_accepts_every_committed_core_sidecar():
+    # Guards the schema against the real writer: a core sidecar the reader
+    # refused would make read_public_copy fail for that whole namespace.
+    repo = Path(__file__).resolve().parents[3]
+    listing = subprocess.run(
+        ["git", "ls-files", "local_operator/i18n/catalogues/en/*.context.json"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert listing, "expected committed core context sidecars"
+    refused = []
+    for relative in listing:
+        try:
+            public_copy._read_context_catalogue((repo / relative).read_text("utf-8"), None)
+        except ValueError as exc:
+            refused.append(f"{relative}: {exc}")
+    assert refused == []
 
 
 @pytest.mark.asyncio
