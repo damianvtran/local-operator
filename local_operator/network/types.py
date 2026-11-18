@@ -165,7 +165,8 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: for a signing challenge; the signature still decides admission), and
 #: ``unattended`` is the right to start sessions here without a per-card gate.
 #: Both are granted PER MEMBER: no ``read``/``drive`` role carries them — an
-#: ``admin`` member holds the full vocabulary (``ROLE_CAPABILITIES``), so a
+#: ``admin`` member holds every capability except the receiver-local
+#: ``workset_import`` (``ROLE_CAPABILITIES``), so a
 #: consumer reads the member row rather than a role name — and both are in
 #: :data:`GRANTABLE_CAPABILITIES`.
 #:

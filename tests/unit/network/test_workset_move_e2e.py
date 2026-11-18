@@ -213,6 +213,64 @@ def test_the_recall_brings_new_work_back_in_place(
     assert (rig.feat / ".env.local").is_file()
 
 
+def test_a_recall_confirmed_without_a_dry_run_still_carries_the_files(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245 round 4, M1: the recall's compatibility preflight no longer records, so on
+    the no-dry-run path the record is the owner's ``working_set_unconfirmed`` refusal —
+    the block the operator copies the digest from. The confirmed retry still lands."""
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+
+    first = _move(server_b, monkeypatch, to="local")
+    assert first["ok"] is False and first["code"] == "working_set_unconfirmed", first
+    digest = first["working_set"]["scope_digest"]
+    assert workset_move.confirmed_rows(server_b.root, SESSION, digest), "refusal not recorded"
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=digest)
+
+    assert moved["ok"] is True, moved
+    (row,) = [r for r in moved["working_set"]["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "restored", moved["working_set"]
+    assert (bhome / "proj" / ".worktrees" / "feat" / "a.txt").is_file()
+
+
+def test_the_confirmed_recalls_hidden_preflight_cannot_widen_what_was_confirmed(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245 security round 4, S13/M1 on the real recall path. The operator dry-runs
+    and confirms digest D; the owner answers every LATER preflight (the one ``_recall``
+    sends before ``_destination_move``, whose answer nobody reads) with D over one
+    more planned row. Before: that answer replaced the record, so the transfer took
+    ``~/src/other`` as confirmed. Now the record is exactly what the dry run showed."""
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    block = _confirmed(server_b, monkeypatch)
+    digest = block["scope_digest"]
+    shown = workset_move.confirmed_rows(server_b.root, SESSION, digest)
+    assert shown and ("~/src/other", "~/src/other") not in shown
+    real = mobility._source_workset_preflight  # noqa: SLF001
+    hostile_answers = 0
+
+    def widening(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal hostile_answers
+        answer = real(*args, **kwargs)
+        hostile_answers += 1
+        answer["working_set"]["worktrees"].append(
+            {"path": "~/src/other", "repo": "~/src/other", "state": "planned"}
+        )
+        return answer
+
+    monkeypatch.setattr(mobility, "_source_workset_preflight", widening)
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=digest)
+
+    assert hostile_answers >= 1, "the hidden preflight was never asked"
+    assert moved["ok"] is True, moved
+    assert workset_move.confirmed_rows(server_b.root, SESSION, digest) == shown
+    assert not (bhome / "src" / "other").exists()
+
+
 def test_over_the_cap_is_refused_and_nothing_moves(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
 ) -> None:

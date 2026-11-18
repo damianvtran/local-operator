@@ -261,7 +261,9 @@ def _confirmable_path(root: Path | str, session_id: str) -> Path:
     return _network(root) / "workset-consent" / f"{_sid(session_id)}.json"
 
 
-def record_confirmable(root: Path | str, session_id: str, block: Mapping[str, Any]) -> None:
+def record_confirmable(
+    root: Path | str, session_id: str, block: Mapping[str, Any], *, self_device: str
+) -> bool:
     """Remember WHICH rows a recall preflight showed this device's operator (S13).
 
     WHY (#4245 security round 3, S13): on a recall the authority to write into this
@@ -272,10 +274,32 @@ def record_confirmable(root: Path | str, session_id: str, block: Mapping[str, An
     received, so it is kept here, keyed by the scope digest the operator confirms,
     and ``destination_transfer`` refuses any offered row outside it. Planned rows
     only: nothing else is ever offered. Bounded to the newest few digests.
+
+    THE DIGEST IS RECOMPUTED, NOT BELIEVED (#4245 round 4, S13/M1). The block's
+    ``scope_digest`` is the owner's own label, so a record keyed by it alone let a
+    hostile owner answer a later preflight with the confirmed label and more rows,
+    and the transfer read those back as "confirmed". The digest is now rebuilt here
+    from the block's rows with ``to_device`` = ``self_device`` (this device's mesh
+    id: a digest minted for another device is refused too), and a block whose
+    label does not match is not recorded. A digest then names exactly one row set,
+    so the record is WRITE-ONCE per digest: an equal re-record is a no-op, and a
+    different row set under a recorded digest (only a tampered file or a collision
+    can produce one) keeps the first and is logged. Returns whether ``block``'s rows
+    are now the record for its digest.
     """
+    from local_operator.network import workset
+
     digest = str(block.get("scope_digest") or "")
-    if not digest:
-        return
+    if not digest or not self_device:
+        return False
+    if workset.block_scope_digest(block, to_device=self_device) != digest:
+        logger.warning(
+            "workset: %s's preflight names digest %s but its rows hash otherwise for "
+            "this device; not recorded, so a recall confirming it carries no files",
+            session_id,
+            digest[:19],
+        )
+        return False
     rows = sorted(
         {
             (str(r.get("path") or ""), str(r.get("repo") or ""))
@@ -286,11 +310,21 @@ def record_confirmable(root: Path | str, session_id: str, block: Mapping[str, An
     path = _confirmable_path(root, session_id)
     _private_dir(path.parent)
     scopes = dict((_read_json(path) or {}).get("scopes") or {})
-    scopes.pop(digest, None)
-    scopes[digest] = [list(row) for row in rows]
+    wanted = [list(row) for row in rows]
+    if digest in scopes:
+        if scopes[digest] != wanted:
+            logger.warning(
+                "workset: %s already has a different row set recorded for %s; kept the first",
+                session_id,
+                digest[:19],
+            )
+            return False
+        return True
+    scopes[digest] = wanted
     while len(scopes) > _MAX_CONFIRMABLE_SCOPES:
         scopes.pop(next(iter(scopes)))
     _write_json(path, {"version": JOURNAL_VERSION, "scopes": scopes})
+    return True
 
 
 def confirmed_rows(

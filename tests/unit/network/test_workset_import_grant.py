@@ -179,7 +179,20 @@ def test_g_an_offer_not_bound_to_the_approved_manifest_is_refused(tmp_path: Path
 
 # S13/S16 (#4245 security round 3): the destination checks the offer against what
 # ITS operator confirmed, and a named destination never skips the binding.
-_CONFIRMED = "sha256:" + "1" * 64
+#
+# The block the operator read. Its digest is the REAL one for this device
+# (``d_me``): since round 4 (M1) ``record_confirmable`` recomputes it from the rows
+# and refuses a block whose label does not match, so a made-up ``sha256:111…`` no
+# longer records anything.
+_SHOWN_ROWS: list[dict[str, Any]] = [
+    {"path": "~/src/app", "repo": "~/src/app", "state": "planned"},
+    {"path": "~/src/kept", "repo": "~/src/kept", "state": "left_behind", "reason": "contended"},
+]
+_CONFIRMED = workset.block_scope_digest({"worktrees": _SHOWN_ROWS}, to_device="d_me")
+
+
+def _shown_block(**extra: Any) -> dict[str, Any]:
+    return {"scope_digest": _CONFIRMED, "worktrees": [dict(r) for r in _SHOWN_ROWS], **extra}
 
 
 def _snapshot_rows(path: str) -> list[dict[str, Any]]:
@@ -216,17 +229,7 @@ def test_s13_a_recall_offer_outside_the_confirmed_rows_is_refused(tmp_path: Path
     the owner offers ``~/src/other`` with a binding it computed itself (it knows the
     digest and the lease). Refused before any plan, and nothing is written."""
     server, home = _dest(tmp_path)
-    workset_move.record_confirmable(
-        server.root,
-        SID,
-        {
-            "scope_digest": _CONFIRMED,
-            "worktrees": [
-                {"path": "~/src/app", "repo": "~/src/app", "state": "planned"},
-                {"path": "~/src/kept", "repo": "~/src/kept", "state": "left_behind"},
-            ],
-        },
-    )
+    assert workset_move.record_confirmable(server.root, SID, _shown_block(), self_device="d_me")
     for path in ("~/src/other", "~/src/kept"):
         transport = _PlanOnly()
         with pytest.raises(workset_move.WorksetTransferRefused) as info:
@@ -250,28 +253,127 @@ def test_s13_a_recall_with_no_preflight_record_carries_no_files(tmp_path: Path) 
     assert transport.frames == []
 
 
+class _OwnerAnswers:
+    """A stand-in link to a recall's OWNER: each preflight gets the next block."""
+
+    def __init__(self, root: Path, *blocks: dict[str, Any]) -> None:
+        class _Identity:
+            device_id = "d_me"
+
+        class _Relay:
+            identity = _Identity()
+
+        _Relay.root = root  # type: ignore[attr-defined]
+        self.server = _Relay()
+        self.blocks = list(blocks)
+
+    def ask(self, frame: dict[str, Any], **_: Any) -> dict[str, Any]:
+        assert frame["phase"] == "workset_preflight", frame
+        return {"result": "workset", "working_set": self.blocks.pop(0)}
+
+
 def test_s13_the_recall_preflight_records_the_rows_the_operator_reads(tmp_path: Path) -> None:
     from local_operator.network import mobility
 
-    owner = {
-        "scope_digest": _CONFIRMED,
-        "worktrees": [{"path": "~/src/app", "repo": "~/src/app", "state": "planned"}],
-    }
-
-    class _Relay:
-        root = tmp_path
-
-    class _Transport:
-        server = _Relay()
-
-        def ask(self, frame: dict[str, Any], **_: Any) -> dict[str, Any]:
-            return {"result": "workset", "working_set": owner}
-
-    transport: Any = _Transport()
+    transport: Any = _OwnerAnswers(tmp_path, _shown_block())
     mobility._ask_workset_preflight(transport, SID, "d_src", "owner")  # noqa: SLF001
 
     assert workset_move.confirmed_rows(tmp_path, SID, _CONFIRMED) == {("~/src/app", "~/src/app")}
     assert workset_move.confirmed_rows(tmp_path, SID, "sha256:" + "2" * 64) is None
+
+
+def _widened() -> dict[str, Any]:
+    """The hostile owner's answer: the CONFIRMED label over one more planned row."""
+    block = _shown_block()
+    block["worktrees"].append({"path": "~/src/other", "repo": "~/src/other", "state": "planned"})
+    return block
+
+
+def test_s13_the_confirmed_runs_hidden_preflight_cannot_widen_the_record(tmp_path: Path) -> None:
+    """probe_s13_r4 (#4245 security round 4, S13/M1), ported. The operator dry-ran a
+    recall listing only ``~/src/app`` and confirmed its digest D; on the confirmed run
+    ``_recall``'s compatibility preflight (nobody reads its answer) got D over
+    ``~/src/app`` AND ``~/src/other``. Before: that answer replaced the record, and an
+    owner-bound offer for ``~/src/other`` reached ``workset_plan``. Now: the hidden
+    preflight records nothing, the record still says ``~/src/app``, and the offer for
+    ``~/src/other`` is refused before any frame is sent."""
+    from local_operator.network import mobility
+
+    server, home = _dest(tmp_path)
+    transport: Any = _OwnerAnswers(server.root, _shown_block(), _widened())
+    mobility._ask_workset_preflight(transport, SID, "d_src", "owner")  # noqa: SLF001
+    # ``_recall``'s own call shape for the probe before ``_destination_move``.
+    mobility._ask_workset_preflight(transport, SID, "d_src", "owner", record=False)  # noqa: SLF001
+
+    assert workset_move.confirmed_rows(server.root, SID, _CONFIRMED) == {
+        ("~/src/app", "~/src/app")
+    }
+    plan = _PlanOnly()
+    with pytest.raises(workset_move.WorksetTransferRefused) as info:
+        _recall(server, _bound_offer(_snapshot_rows("~/src/other")), plan)
+    assert info.value.code == "working_set_transfer_failed"
+    assert plan.frames == []
+    assert not (home / "src" / "other").exists()
+
+
+def test_s13_a_block_whose_rows_do_not_hash_to_its_digest_is_not_recorded(
+    tmp_path: Path,
+) -> None:
+    """Even on a path the operator DOES read, the owner's label is checked: D over
+    widened rows, or D minted for another device, records nothing (fail closed)."""
+    from local_operator.network import mobility
+
+    assert not workset_move.record_confirmable(tmp_path, SID, _widened(), self_device="d_me")
+    assert not workset_move.record_confirmable(tmp_path, SID, _shown_block(), self_device="d_x")
+    assert not workset_move.record_confirmable(tmp_path, SID, _shown_block(), self_device="")
+    transport: Any = _OwnerAnswers(tmp_path, _widened())
+    block = mobility._ask_workset_preflight(transport, SID, "d_src", "owner")  # noqa: SLF001
+    assert block["scope_digest"] == _CONFIRMED  # still shown, never recorded
+    assert workset_move.confirmed_rows(tmp_path, SID, _CONFIRMED) is None
+
+
+def test_s13_a_recorded_digest_is_write_once(tmp_path: Path) -> None:
+    """First write wins: an equal re-record is a no-op; a different row set under a
+    recorded digest (a tampered file stands in for a collision) keeps the first."""
+    assert workset_move.record_confirmable(tmp_path, SID, _shown_block(), self_device="d_me")
+    assert workset_move.record_confirmable(tmp_path, SID, _shown_block(), self_device="d_me")
+    path = workset_move._confirmable_path(tmp_path, SID)  # noqa: SLF001
+    stored = json.loads(path.read_text())
+    stored["scopes"][_CONFIRMED] = [["~/src/first", "~/src/first"]]
+    path.write_text(json.dumps(stored))
+
+    assert not workset_move.record_confirmable(tmp_path, SID, _shown_block(), self_device="d_me")
+    assert workset_move.confirmed_rows(tmp_path, SID, _CONFIRMED) == {
+        ("~/src/first", "~/src/first")
+    }
+
+
+def test_s13_the_block_recompute_matches_the_digest_the_owner_mints() -> None:
+    """The drift guard: ``block_scope_digest`` over ``Manifest.to_dict()`` equals the
+    ``scope_digest`` that dict carries, for every digest input (branch, reason,
+    withheld paths, ``carries_files``) — or an honest recall would record nothing."""
+    facts = workset.WorktreeFacts(
+        path="~/src/app",
+        repo="~/src/app",
+        abs_path="/h/src/app",
+        abs_repo="/h/src/app",
+        branch="feat",
+        excluded=(workset.Excluded(path="~/src/app/.env", why="secret_path", rule="dotenv"),),
+    )
+    kept = workset.WorktreeFacts(
+        path="~/src/kept",
+        repo="~/src/kept",
+        abs_path="/h/src/kept",
+        abs_repo="/h/src/kept",
+        state="left_behind",
+        reason="contended",
+    )
+    for carries in (False, True):
+        block = workset.Manifest(
+            to_device="d_me", to_name="me", worktrees=(facts, kept), carries_files=carries
+        ).to_dict()
+        assert workset.block_scope_digest(block, to_device="d_me") == block["scope_digest"]
+        assert workset.block_scope_digest(block, to_device="d_x") != block["scope_digest"]
 
 
 def test_s16_a_granted_owner_cannot_skip_the_binding(tmp_path: Path) -> None:

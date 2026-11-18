@@ -2007,6 +2007,10 @@ def _destination_move(
                     time.sleep(min(MOVE_WAIT_POLL_S, remaining))
                     continue
             code = refusal.code if refusal.code in MOVE_REFUSAL_CODES else "refused"
+            if not asked and code in ("working_set_unconfirmed", "working_set_changed"):
+                # A RECALL's consent card is this refusal when no dry run preceded it:
+                # the operator copies the digest from this block, so it is what they read.
+                _record_recall_scope(transport, session_id, refusal.working_set)
             return (
                 None,
                 _move_refusal(session_id, code, refusal.message, working_set=refusal.working_set),
@@ -4919,9 +4923,17 @@ def _workset_min_version() -> int:
 
 
 def _ask_workset_preflight(
-    transport: "LinkTransport", session_id: str, owner_device: str, owner_name: str
+    transport: "LinkTransport",
+    session_id: str,
+    owner_device: str,
+    owner_name: str,
+    *,
+    record: bool = True,
 ) -> dict[str, Any]:
     """Ask a REMOTE owner for its manifest; the recall's preflight (design §10).
+
+    ``record`` keeps the answer as the rows this device's operator read (S13); it is
+    ``False`` for ``_recall``'s compatibility probe, whose answer nobody reads.
 
     An owner older than the phase answers ``unknown move phase`` as a bare error
     frame (``wire.refusal_frame`` drops the code), so that sentence is the only
@@ -4974,17 +4986,42 @@ def _ask_workset_preflight(
     block = scrub_peer_block(copy.deepcopy(raw)) if isinstance(raw, dict) else {}
     # S13 (#4245 security round 3): what the operator here is about to read is the
     # only evidence of what a recall may write into this home; keep it by digest.
+    if record:
+        _record_recall_scope(transport, session_id, block)
+    return block
+
+
+def _record_recall_scope(
+    transport: "LinkTransport", session_id: str, block: Mapping[str, Any] | None
+) -> None:
+    """Keep an owner's block as the rows THIS device's operator read (S13).
+
+    Called only where the block is the one rendered here: the ``--dry-run``
+    preflight, and the owner's ``working_set_unconfirmed``/``working_set_changed``
+    refusal a recall without (or with a stale) confirmation gets — which is what the
+    operator copies the digest from on the no-dry-run path. Never from ``_recall``'s
+    compatibility probe (#4245 round 4, M1): its answer is not shown to anyone, so
+    recording it let the owner speak for the operator on the confirmed run itself.
+    ``record_confirmable`` also recomputes the digest from the rows, so even a
+    recorded block cannot widen what a digest names.
+    """
     from local_operator.network import workset_move
 
+    if not isinstance(block, Mapping):
+        return
     try:
-        workset_move.record_confirmable(Path(transport.server.root), session_id, block)
+        workset_move.record_confirmable(
+            Path(transport.server.root),
+            session_id,
+            block,
+            self_device=str(transport.server.identity.device_id),
+        )
     except AttributeError:
         # A transport without a relay behind it (a unit double) has no home to keep it.
         pass
     except (OSError, ValueError, workset_move.WorksetTransferRefused):
         # Fail closed later, not here: without the record the recall carries no files.
         logger.warning("mobility: could not record %s's preflight", session_id, exc_info=True)
-    return block
 
 
 def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str) -> dict[str, Any]:
@@ -7676,7 +7713,11 @@ def _recall(
         # owner that does not know the phase is refused ``working_set_unsupported``
         # here, and only the explicit ``--without-working-set`` proceeds against it.
         try:
-            _ask_workset_preflight(transport, session_id, owner_device, owner_name)
+            # ``record=False`` (#4245 round 4, M1): this answer is a version probe
+            # nobody reads, so it must not become "what the operator confirmed".
+            _ask_workset_preflight(
+                transport, session_id, owner_device, owner_name, record=False
+            )
         except Moved as refusal:
             if refusal.code == "working_set_unsupported":
                 return _move_refusal(

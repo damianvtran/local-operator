@@ -400,17 +400,63 @@ def scope_digest(manifest: Manifest) -> str:
     ``_artifact_binding`` below rather than changing the inputs above, so a PR A
     consent stays comparable.
     """
+    return _scope_digest_of(
+        to_device=manifest.to_device,
+        worktrees=[[w.path, w.repo, w.branch, w.state, w.reason] for w in manifest.worktrees],
+        excluded=[[item.path, item.why] for item in manifest.excluded],
+        carries_files=manifest.carries_files,
+    )
+
+
+def _scope_digest_of(
+    *,
+    to_device: str,
+    worktrees: Iterable[list[str]],
+    excluded: Iterable[list[str]],
+    carries_files: bool,
+) -> str:
+    """The one canonical hash behind :func:`scope_digest` and :func:`block_scope_digest`.
+
+    Shared so the destination's recompute of a peer's block (S13) can never drift
+    from what the owner mints: a new digest input lands here, for both, or nowhere.
+    """
     payload = {
         "version": WORKSET_VERSION,
-        "to_device": manifest.to_device,
-        "worktrees": sorted(
-            [w.path, w.repo, w.branch, w.state, w.reason] for w in manifest.worktrees
-        ),
-        "excluded": sorted([item.path, item.why] for item in manifest.excluded),
-        **_artifact_binding(manifest),
+        "to_device": to_device,
+        "worktrees": sorted(worktrees),
+        "excluded": sorted(excluded),
+        **_artifact_inputs(carries_files),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def block_scope_digest(block: Mapping[str, Any], *, to_device: str) -> str:
+    """Recompute the scope digest a ``working_set`` block's OWN rows name, for ``to_device``.
+
+    WHY (#4245 security round 4, S13/M1): on a recall the block is the OWNER's answer
+    and its ``scope_digest`` is the owner's claim. The destination keeps the planned
+    rows of each block by digest, and the operator confirms a digest, so that claim
+    must be checked: recomputed from the rows that were shown, with ``to_device``
+    set to THIS device (never the block's own ``destination``), the digest names one
+    row set for one device. A block whose claim differs is a forgery or a
+    version skew, and either way it is not recorded (fail closed: no record, no
+    files). Reads exactly the fields :meth:`Manifest.to_dict` writes for the inputs
+    of :func:`scope_digest`: ``worktrees[].path/repo/branch/state/reason`` (absent
+    keys are the empty string ``to_dict`` omits), top-level ``excluded[].path/why``
+    and ``carries_files``.
+    """
+    rows = [r for r in block.get("worktrees") or [] if isinstance(r, Mapping)]
+    withheld = [e for e in block.get("excluded") or [] if isinstance(e, Mapping)]
+    return _scope_digest_of(
+        to_device=to_device,
+        worktrees=[
+            [str(r.get(k) or "") for k in ("path", "repo", "branch", "state", "reason")]
+            for r in rows
+        ],
+        excluded=[[str(e.get("path") or ""), str(e.get("why") or "")] for e in withheld],
+        carries_files=block.get("carries_files") is True,
+    )
 
 
 def _artifact_binding(manifest: Manifest) -> dict[str, Any]:
@@ -429,7 +475,12 @@ def _artifact_binding(manifest: Manifest) -> dict[str, Any]:
     enforces the cap on the bytes it stages — so the consent binds only that files
     travel at all.
     """
-    if not manifest.carries_files:
+    return _artifact_inputs(manifest.carries_files)
+
+
+def _artifact_inputs(carries_files: bool) -> dict[str, Any]:
+    """:func:`_artifact_binding` by its one input, so a block recompute shares it."""
+    if not carries_files:
         return {}
     return {"carries_files": True}
 

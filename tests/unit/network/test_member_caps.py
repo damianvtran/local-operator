@@ -536,6 +536,49 @@ def test_a_peer_table_never_brings_a_receiver_local_grant() -> None:
     assert rotated_in is not None and rotated_in.capabilities == ["list"]
 
 
+def test_a_join_never_adopts_a_receiver_local_grant(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4245 security round 4, S17 (probe_s15_join): the join-path sibling of S15.
+    The inviter's admission table names ``d_x`` with ``workset_import``; the fresh
+    joiner has granted nothing, so the row lands without it and ``import_granted``
+    stays false. Every other capability on the row is kept."""
+    from types import SimpleNamespace
+
+    from local_operator.network import workset_move
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    me, inviter, other = "d_" + "a" * 32, "d_" + "b" * 32, "d_" + "e" * 32
+    rows = [
+        types.MemberRecord(device_id=me, name="me", role="drive", capabilities=["list"]),
+        types.MemberRecord(device_id=inviter, name="inv", role="admin", capabilities=["list"]),
+        types.MemberRecord(
+            device_id=other,
+            name="x",
+            role="drive",
+            capabilities=["list", "view", "workset_import"],
+        ),
+    ]
+    answer = {
+        "network": {"network_id": "n_join", "name": "join", "epoch": 1},
+        "secret": "s3cret",
+        "members": [row.to_json() for row in rows],
+    }
+    envelope = SimpleNamespace(
+        inviter_device_id=inviter,
+        inviter_name="inv",
+        network_id="n_join",
+        network_name="join",
+        epoch=1,
+    )
+
+    net_cli._persist_join(answer, envelope, SimpleNamespace(device_id=me), "127.0.0.1", store)
+
+    joined = store.load("n_join", root).member(other)
+    assert joined is not None and joined.capabilities == ["list", "view"]
+    assert not workset_move.import_granted(root, other)
+
+
 # ---------------------------------------------------------------------------
 # F7 — the deciding device records its own decision (the onboarding scopes)
 # ---------------------------------------------------------------------------
