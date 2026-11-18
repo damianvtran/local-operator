@@ -146,6 +146,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "link_opened",
         "session_stream_opened",
         "session_stream_closed",
+        "session_file_read_admitted",
         "link_closed",
         "link_idle",
         "link_replaced",
@@ -523,6 +524,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # The close's `cause` is what tells the four ways a viewer goes away apart.
     "session_stream_opened": frozenset({"stream", "peer", "role"}),
     "session_stream_closed": frozenset({"stream", "peer", "role", "cause"}),
+    # Owner-observed admission, NOT transfer completion. No file contents or
+    # caller-asserted identity belong here; actor is the authenticated peer.
+    "session_file_read_admitted": frozenset({"reference", "admitted_bytes", "offset", "decision"}),
     "link_closed": frozenset({"cause", "frames_in", "frames_out"}),
     "link_idle": frozenset({"last_seen_at", "missed_beats"}),
     "link_replaced": frozenset({"instance_id", "age_s"}),
@@ -854,6 +858,10 @@ FORBIDDEN_DETAIL_KEYS: frozenset[str] = frozenset(
 #: probing a port wants exactly those records to be the ones that never landed.
 DURABLE_EVENTS: frozenset[str] = frozenset(
     {
+        # A content admission lost to a crash leaves disclosed session bytes
+        # unattributable. Each independently authorized fetch is an admission,
+        # not transport telemetry; ordinary frames remain unlogged/batched.
+        "session_file_read_admitted",
         "panic_raised",
         "panic_received",
         "disconnect_initiated",
@@ -1194,6 +1202,29 @@ class AuditLog:
             return "unknown"
 
     # -- writing ------------------------------------------------------------
+
+    def record_required(self, event: AuditEvent) -> bool:
+        """Commit a durable admission before its caller releases protected bytes.
+
+        Ordinary logging must not kill a relay on disk failure. Content egress,
+        however, must fail closed: disabled, previously degraded, failed append
+        and failed fsync are all refusals. Hold the writer's existing lock over
+        both the write and its acknowledgement so concurrent rows cannot stand
+        in for this one. This reuses the sole rotating writer, not another log.
+        """
+        if event.event not in self.DURABLE_EVENTS:
+            raise ValueError("a required audit record must be a durable event")
+        with self._write_lock:
+            if not self._enabled or self.degraded:
+                return False
+            before_seq, before_syncs = self._seq, self.syncs
+            self.record(event)
+            return (
+                not self.degraded
+                and self._seq > before_seq
+                and self._published_seq >= self._seq
+                and self.syncs > before_syncs
+            )
 
     def record(self, event: AuditEvent) -> None:
         """Append one event. Never raises: a lost record is worse than a dropped key.
