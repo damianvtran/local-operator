@@ -1378,12 +1378,14 @@ changes the `version =` line fails unless its title starts with
 `chore(release):`. Dependency and metadata edits to `pyproject.toml` are
 unaffected — the guard reads the version line, not the file.
 
-It makes the violation loud; it does not make it impossible. `main`'s ruleset
-requires one approving review and two required status checks, `CI Gate` and
-`Merge gate (full suite)` (see "Who may merge: two tiers"), and admins hold a configured bypass, so an `--admin` merge lands over a
-red guard. Treat a failing `version-bump-guard` as a stop signal rather than an
-obstacle to route around:
-the job is the reviewer's missing memory, not a lock.
+It blocks the merge, even an `--admin` one. `main` carries two rulesets (see
+"Who may merge: two tiers"): ruleset 3622629 requires one approving review,
+and the admin bypass covers only that rule; ruleset 26808267 requires two
+status checks, `CI Gate` and `Merge gate (full suite)`, and has no bypass
+actors. `CI Gate` fails closed on a red `version-bump-guard`, so a red guard
+turns `CI Gate` red and the ruleset refuses the merge. Treat a failing guard as
+a finding to fix, not an obstacle to route around: drop the bump, or retitle a
+genuine release PR `chore(release):`.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
@@ -1394,8 +1396,9 @@ triggers, a push to `release-next`/`release-next-*`, the runbook's bump
 branch). Every other `ci.yml` job reports skipping. The second required check,
 `Merge gate (full suite)`, is still required on a bump PR — the ruleset refuses
 even an `--admin` merge without it — so arm it with `make merge-gate PR=<n>`;
-its suite jobs report skipped on the version-only diff and the aggregator
-passes in minutes. The classifier keys on
+its suite jobs report skipped on the version-only diff, so the gate runs no
+suite and its wall time is the runner queue (about 13 min on #4165, about
+86 min on #4199). The classifier keys on
 the diff but the Release Gate keys on the branch name, so a bump pushed from
 any other branch shows only the two `ci.yml` checks: the artifact gate never
 ran, which is a reason to use the mandated branch, not a green. That is the
@@ -1643,9 +1646,10 @@ operator action on pypi.org; agents never delete releases or files.
    The other required check, `Merge gate (full suite)`, is not automatic but
    is still required: once the seven are green, run `make merge-gate PR=<n>`.
    The gate classifies the version-only diff as a release bump, its suite jobs
-   (`test`, `tui-e2e`, `coverage-report`) report skipped, and the aggregator
-   passes in minutes (it waits only on the runner queue) — so the PR ends with
-   eight required-relevant rows. An `--admin` merge before the gate is refused
+   (`test`, `tui-e2e`, `coverage-report`) report skipped, and the gate runs no
+   suite, so its wall time is the runner queue (about 13 min on #4165, about
+   86 min on #4199). The PR ends with the seven plus a green
+   `Merge gate (full suite)`. An `--admin` merge before the gate is refused
    by the ruleset (`Required status check "Merge gate (full suite)" is
    expected`; measured on bump PR #4199, 2026-11-18).
    The other four come from `.github/workflows/release-gate.yml`, which fires
@@ -2308,9 +2312,11 @@ Warnings that still hold, each of which has already cost a release:
   and has silently consumed the number you are about to use. That is exactly
   how 0.50.1 and 0.50.2 were burned — each consumed by a PR's own bump, neither
   ever built, tagged or published, and the next owner had to skip both. The
-  `version-bump-guard` CI job now catches this on the PR, but it does **not**
-  block an `--admin` merge, because `main`'s ruleset configures no required
-  status checks and admins hold a bypass. The pre-tag check is the backstop.
+  `version-bump-guard` CI job now catches this on the PR and, through the
+  required `CI Gate` (ruleset 26808267, no bypass actors), blocks even an
+  `--admin` merge; the admin bypass covers only the review rule. The pre-tag
+  check is the backstop for a bump that slipped in before the guard or under a
+  `chore(release):` title.
 - **A shard failure on your branch alone is not evidence your diff caused it.**
   CI shards the unit suite with `scripts/shard_tests.py` — a
   longest-processing-time-first (LPT) partition of
