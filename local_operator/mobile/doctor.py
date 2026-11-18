@@ -350,7 +350,11 @@ def inotify_usage(proc: Path = Path("/proc")) -> dict[str, Any] | None:
         instance_limit = int((_INOTIFY_LIMITS / "max_user_instances").read_text().strip())
     except (OSError, ValueError):
         return None
-    uid = os.getuid() if hasattr(os, "getuid") else -1
+    # A terminating guard, not a conditional expression: scripts/xplat_probe.py
+    # only reads this shape as POSIX-gated, and None is the documented non-Linux answer.
+    if not hasattr(os, "getuid"):
+        return None
+    uid = os.getuid()
     watches = instances = 0
     top_pid: int | None = None
     top_watches = 0
