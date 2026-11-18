@@ -422,9 +422,12 @@ def _ansi_c_end(text: str, i: int) -> int:
 
 
 def scan(
-    segment: str, *, heredoc: bool = False
+    segment: str, *, heredoc: bool = False, spans: list[tuple[int, int]] | None = None
 ) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
     """Split a segment, or tokenize expansion-active heredoc data.
+
+    When requested, spans also expose bare parentheses to the case walker.
+    Quote, escape and substitution handling must agree with word expansion.
 
     Heredoc data has literal quotes/operators/comments but the SAME dollar,
     backtick and escape rules below. Reuse those readers, not another shell
@@ -437,10 +440,14 @@ def scan(
     i = 0
     n = len(segment)
 
+    start = 0
+
     def finish() -> None:
         nonlocal cur, pending_redirect
         if cur is None:
             return
+        if spans is not None:
+            spans.append((start, i))
         if pending_redirect is not None:
             redirects.append((pending_redirect, cur))
             pending_redirect = None
@@ -460,11 +467,17 @@ def scan(
             finish()
             i += 1
             continue
+        if spans is not None and ch in "()":
+            finish()
+            spans.append((i, i + 1))
+            i += 1
+            continue
         if ch in "<>" and segment[i + 1 : i + 2] == "(":
             # Process substitution ``<(…)``/``>(…)``: the body RUNS as a command
             # and the word becomes a /dev/fd path, never a file we write.
             body, j, ok = _read_sub(segment, i + 2)
             if cur is None:
+                start = i
                 cur = _RawWord()
             cur.parts.append(_Part("proc", body))
             cur.broken |= not ok
@@ -497,6 +510,7 @@ def scan(
             i += 2
             continue
         if cur is None:
+            start = i
             cur = _RawWord()
         if ch == "'":
             end = segment.find("'", i + 1)
@@ -3738,6 +3752,111 @@ def _may_nest(text: str) -> bool:
     return any(word in _STRUCTURE_WORDS for word in re.split(r"[\s;&|()<>]+", blanked))
 
 
+_CASE_WORD_RE = re.compile(r"\bcase\s")
+_CASE_END_RE = re.compile(r"^esac(?:[\s)}<>]|$)")
+
+
+def _case_header_end(text: str) -> int | None:
+    """End of ``case WORD in`` at command position, not in another command's data."""
+    if not _CASE_WORD_RE.search(text):
+        return None
+    definition = _definition_start(text)
+    rest = definition[1][1] if definition else text
+    spans: list[tuple[int, int]] = []
+    scan(rest, spans=spans)
+    at = 0
+    for lo, hi in spans:
+        if rest[lo:hi] not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+            break
+        at += 1
+    head = spans[at : at + 3]
+    if len(head) != 3:
+        return None
+    (a, b), (c, d), (e, f) = head
+    if rest[a:b] == "case" and rest[e:f] == "in" and rest[c:d] not in {"(", ")"}:
+        return len(text) - len(rest) + f
+    return None
+
+
+def _case_pattern(text: str) -> tuple[str, str] | None:
+    """Pattern and body after the bare ``)``, or no complete pattern here."""
+    spans: list[tuple[int, int]] = []
+    scan(text, spans=spans)
+    nesting = 0
+    for index, (lo, hi) in enumerate(spans):
+        token = text[lo:hi]
+        if token == "(":
+            nesting += index != 0
+        elif token == ")":
+            if nesting == 0:
+                return text[:lo].lstrip().removeprefix("("), text[hi:].lstrip()
+            nesting -= 1
+    return None
+
+
+def _case_arm_pieces(
+    pieces: list[tuple[str, bool, str]], owned: list[list[str]]
+) -> tuple[list[tuple[str, bool, str]], list[list[str]]]:
+    """Separate patterns from commands before looking for bare function headers.
+
+    The shared lexer gives pattern alternatives the same ``|`` as pipelines,
+    and leaves the closing ``)`` glued to the first command. Only consume that
+    syntax in case-pattern position; neither the literal pattern words nor
+    their ``|`` should go through command dispatch. Keep their expansions.
+    """
+    if not any(_CASE_WORD_RE.search(text) for text, _, _ in pieces):
+        return pieces, owned
+    result: list[tuple[str, bool, str]] = []
+    bodies: list[list[str]] = []
+    waiting: list[bool] = []
+    alternatives: list[str] = []
+
+    def add(
+        text: str, piped: bool = False, op: str = ";", heredocs: list[str] | None = None
+    ) -> None:
+        result.append((text, piped, op))
+        bodies.append(heredocs if heredocs is not None else [])
+
+    for (text, piped, op), heredocs in zip(pieces, owned):
+        while text:
+            if waiting and not alternatives and _CASE_END_RE.match(text):
+                waiting.pop()
+                break
+            if waiting and waiting[-1]:
+                # A closing delimiter must be in this piece. Do not repeatedly
+                # scan all the prior alternatives in a long pattern list.
+                pattern = None
+                if ")" in text:
+                    pattern = _case_pattern(" | ".join([*alternatives, text]))
+                if pattern is None:
+                    if op in ("|", "\n") and not heredocs:
+                        alternatives.append(text)
+                        break
+                    # Unrecognised shape: do not discard the original pieces.
+                    return pieces, owned
+                pat, text = pattern
+                alternatives.clear()
+                add(pat, op="case-arm")
+                waiting[-1] = False
+                piped = False
+                continue
+            end = _case_header_end(text)
+            if end is not None:
+                add(text[:end], piped)
+                waiting.append(True)
+                text = text[end:].lstrip()
+                piped = False
+                continue
+            break
+        if text:
+            add(text, piped, op, heredocs)
+        if waiting and op == ";;":
+            waiting[-1] = True
+    if alternatives:
+        return pieces, owned
+    return result, bodies
+
+
 def _loop_opener(text: str) -> bool:
     words = text.split()
     while words and words[0] in (_COMMAND_LEAD_WORDS | {"{", "("}):
@@ -3906,8 +4025,11 @@ class _Walker:
         home: str,
         *,
         inline_functions: bool = False,
+        case_arms: bool = False,
     ) -> None:
         from local_operator.tools.shell_env import is_credential_shaped
+
+        self.case_arms = case_arms
 
         # S1: inherited credentials are unknown paths, never empty expansions.
         # This analysis-only copy must not alter the actual child's grants. An
@@ -4120,6 +4242,8 @@ class _Walker:
             self.result.opaque_reasons.append(
                 "command ends inside an unterminated quote, substitution or heredoc"
             )
+        if self.case_arms:
+            pieces, owned_bodies = _case_arm_pieces(pieces, owned_bodies)
         self._walk_pieces(pieces, owned_bodies, depth)
 
     def _walk_pieces(
@@ -4164,6 +4288,15 @@ class _Walker:
             opened = opened or (prior.nested if prior is not None else _may_nest(piece_text))
             nest_at.append(opened)
         for index, (text, _flag, op) in enumerate(pieces):
+            if op == "case-arm":
+                # Patterns may expand substitutions, but their literal words
+                # are never commands (even when they name a defined function).
+                words, _ = scan(text)
+                for raw in words:
+                    for body in expand(raw, self.state.env, self.state.home).substitutions:
+                        if body.strip() and body.strip() not in _EMPTY_BODIES:
+                            self._isolated_walk(body, depth + 1)
+                continue
             definition = definitions.get(index)
             if definition is not None and self.functions is not None:
                 # Defining runs nothing; the body is walked at each call.
@@ -8162,9 +8295,26 @@ def resolve_command(
     ``tests/unit/guardrails/test_loop_cd_never_lowers.py`` pins the
     invariant against base ``3bb7023``.
     """
-    result = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel())
+    result = _walk_ranked(command, cwd=cwd, env=env, home=home, case_arms=False)
+    if _CASE_WORD_RE.search(command):
+        # Re-segmentation can change inferred assignments, directories and
+        # definition positions. Preserve legacy rank facts (and its creation
+        # evidence) rather than letting a newly seen arm lower the rank.
+        arms = _walk_ranked(command, cwd=cwd, env=env, home=home, case_arms=True)
+        _union_ranked(result, arms)
+    return result
+
+
+def _walk_ranked(
+    command: str, *, cwd: str | None, env: Mapping[str, str], home: str, case_arms: bool
+) -> Resolution:
+    result = _walk_once(
+        command, cwd=cwd, env=env, home=home, model=_CwdModel(), case_arms=case_arms
+    )
     if result.engaged:
-        base = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel(base=True))
+        base = _walk_once(
+            command, cwd=cwd, env=env, home=home, model=_CwdModel(base=True), case_arms=case_arms
+        )
         _union_ranked(result.resolution, base.resolution)
     if _MAY_DEFINE_FUNCTION_RE.search(command):
         # Shell functions (see "Shell functions" above): bodies are walked
@@ -8172,7 +8322,13 @@ def resolve_command(
         # UNIONED in, so this pass can only raise what main ranked (PR #4147
         # Q5: walking bodies inside the main pass dropped CRITICAL to LOW).
         called = _walk_once(
-            command, cwd=cwd, env=env, home=home, model=_CwdModel(), inline_functions=True
+            command,
+            cwd=cwd,
+            env=env,
+            home=home,
+            model=_CwdModel(),
+            inline_functions=True,
+            case_arms=case_arms,
         )
         _union_ranked(result.resolution, called.resolution)
     return result.resolution
@@ -8192,8 +8348,9 @@ def _walk_once(
     home: str,
     model: _CwdModel,
     inline_functions: bool = False,
+    case_arms: bool = False,
 ) -> _Pass:
-    walker = _Walker(env, cwd, home, inline_functions=inline_functions)
+    walker = _Walker(env, cwd, home, inline_functions=inline_functions, case_arms=case_arms)
     # Raw text, not parsed words, so a nested ``bash -c``/``zsh -c`` string
     # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
     # because a wider walk only errs safe (review round 9, NIT-1).

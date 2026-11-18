@@ -24,6 +24,29 @@ import pytest
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
 from local_operator.guardrails.preview import preview_tool_call
+from local_operator.guardrails.resolve import resolve_command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'case choice in choice) tee marker ;; esac',
+        'case choice in\nchoice)\ntee marker\n;;\nesac',
+        'case choice in other) : ;; choice) tee marker ;; esac',
+        'case choice in other) tee marker ;; choice) : ;; esac',
+        'case choice in choice) case nested in nested) tee marker ;; esac ;; esac',
+        'case choice in (other|choice) tee marker ;; esac',
+        '''case choice in '(' | "a)b" | choice) tee marker ;; esac''',
+        r"case choice in a\)b|choice) tee marker ;; esac",
+        'emit(){ tee marker; }; case choice in choice) emit ;; esac',
+        'emit(){ case choice in choice) tee marker ;; esac; }; emit',
+        'emit(){ tee marker; }; case choice in other) emit(){ :; } ;; choice) emit ;; esac',
+    ],
+)
+def test_case_arm_reaches_output_target(command: str, tmp_path: Path) -> None:
+    resolution = resolve_command(command, cwd=str(tmp_path), home=str(tmp_path), env={})
+    assert [target.path for target in resolution.targets] == [str(tmp_path / "marker")]
+
 
 SID = "aaaaaaaaaaaa"
 SP = "$LOCAL_OPERATOR_SCRATCHPAD"
@@ -295,6 +318,34 @@ def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CallContext:
         "PATH": "/usr/bin:/bin",
     }
     return CallContext(cwd=str(home / "repo"), env=env, scratchpad=str(pad), session_id=SID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (
+            'case choice in choice) tee "$LOCAL_OPERATOR_CONFIG_DIR/config.yml" ;; esac',
+            Risk.CRITICAL,
+        ),
+        ('case choice in choice) tee "$LOCAL_OPERATOR_SCRATCHPAD/marker" ;; esac', Risk.LOW),
+        ('''case choice in "tee"|"marker) ;; esac") printf '%s' 'tee marker' ;; esac''', Risk.LOW),
+        ('''printf '%s' 'case choice in choice) tee marker ;; esac' ''', Risk.LOW),
+    ],
+)
+async def test_case_arm_checkpoint(ctx: CallContext, command: str, expected: Risk) -> None:
+    report = preview_tool_call(
+        "bash", {"command": command}, ctx, settings=GuardSettings(enabled=False)
+    )
+    assert report.builtin_risk == expected.name
+    result = await check_tool_call(
+        "bash",
+        {"command": command},
+        ctx,
+        judge=_judge("ALLOW"),
+        settings=GuardSettings(rules_dirs=()),
+    )
+    assert (result is not None and result.blocked) == (expected == Risk.CRITICAL)
 
 
 def _judge(answer: str):
