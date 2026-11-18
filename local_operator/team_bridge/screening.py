@@ -61,6 +61,7 @@ from local_operator.team_bridge.client import (
     SCREENING_VERSION_V3,
     SCREENING_VERSION_V4,
     SCREENING_VERSION_V5,
+    SCREENING_VERSION_V6,
     screening_template_sha256,
 )
 from local_operator.team_bridge.privacy_pass import (
@@ -1119,11 +1120,111 @@ def text_screening_version(
     if images is not None:
         return SCREENING_VERSION_V3
     if (
-        snapshot.addressed_version == SCREENING_VERSION_V5
+        snapshot.addressed_version in (SCREENING_VERSION_V5, SCREENING_VERSION_V6)
         and envelope.addressed in ADDRESSED_VALUES
     ):
-        return SCREENING_VERSION_V5
+        # v6 (holds triage 2026-11-18) is v5's successor in the same hub slot;
+        # either is rendered only as the version the hub offered with bytes we embed.
+        return snapshot.addressed_version
     return snapshot.screening_version
+
+
+#: The fixed local payload check (operator ruling 2026-11-18, holds triage H4/R4).
+#:
+#: WHY A LOCAL RULE AND NOT A PROMPT LINE. bridge-screen-v6 narrows ``hold`` to
+#: "unreadable, or you cannot tell whether a category applies" and stops reading
+#: replies and handoffs as new work (fix (e)). That makes the MODEL more willing to
+#: deliver, and the two messages that stayed correctly away from the agent in the
+#: triage were 13 KB base64+gzip bundles with instructions to decode and run them:
+#: text the screener cannot read, so its verdict on them is a guess either way. A
+#: guess must not be what admits an opaque payload, and a hold naming
+#: ``new_work_request`` must not turn it into an owner-releasable work-scope hold
+#: (R4 was exactly that shape). So this check runs on the body, after the model,
+#: and only ever makes the outcome STRICTER. Moderation stays fail-closed for
+#: injection and exfiltration; this is the part of it no template revision can
+#: weaken.
+#:
+#: Thresholds: 1 KiB of contiguous encoded alphabet (whitespace-wrapped lines
+#: joined, as base64 is usually wrapped at 64/76 columns). A run must be at least
+#: :data:`_PAYLOAD_MIN_RUN` characters to count, so prose, paths (``.``/``:`` are
+#: outside the alphabet) and a single 64-character hash never add up to a blob.
+PAYLOAD_BLOB_MIN_BYTES = 1024
+_PAYLOAD_MIN_RUN = 40
+_PAYLOAD_RUN = re.compile(r"[A-Za-z0-9+/=_-]+")
+#: Instructions to DECODE or RUN something: tool invocations and imperative
+#: phrasing. Past-tense reports ("I ran the suite") do not match; an instruction
+#: to the recipient's agent to execute or unpack text it was sent does. Kept
+#: deliberately concrete -- every entry names a decoder, an interpreter handoff or
+#: an imperative aimed at a payload -- because the check overrides the screener.
+_PAYLOAD_INSTRUCTION = re.compile(r"""(?imx)
+    \bbase64\s+(?:-d|-D|--decode)\b
+    | \bb64decode\b | \batob\s*\( | \bfrombase64string\b | \buudecode\b
+    | \bgunzip\b | \bgzip\s+(?:-\w*d|--decompress) | \bzcat\b | \bxxd\s+-r\b
+    | \bopenssl\s+(?:enc|base64)\b[^\n]*\s-d\b
+    | \|\s*(?:sudo\s+)?(?:sh|bash|zsh|python3?|node|perl|ruby)\b
+    | \b(?:sh|bash|zsh)\s+-c\b | \bpython3?\s+-c\b | \bnode\s+-e\b
+    | \beval\s*\( | \bexec\s*\( | \binvoke-expression\b
+    | \bdecode\s+(?:it|this|that|them|these
+        |the\s+(?:payload|blob|bundle|attachment|parts?|data|text|string|packet|file))\b
+    | \bdecode\s+(?:in|into|with|using|and|then)\b
+    # An imperative "Decode ..." opening a sentence or line, or after please/then/and
+    # (triage H4: "Decode in a NEW owner-created isolated directory, inspect JSON ...").
+    | (?:^|[.!?;:]\s+|\b(?:please|then|and)\s+)(?:decode|decompress|unpack|unzip)\b
+    | \b(?:run|execute)\s+(?:it|this|that|them|these
+        |the\s+(?:decoded|attached|following|below|enclosed|embedded)\b)
+    """)
+
+
+def opaque_payload(body: str) -> str:
+    """``"encoded_blob"`` / ``"decode_or_run"`` when the fixed local check fires, else ``""``.
+
+    Pure and linear in the body (two non-backtracking scans), so it can run on
+    every screened message and the eval can apply the identical rule to its
+    trials. See :data:`PAYLOAD_BLOB_MIN_BYTES` for why it exists.
+    """
+
+    if not isinstance(body, str) or not body:
+        return ""
+    joined, previous_end = 0, 0
+    for match in _PAYLOAD_RUN.finditer(body):
+        size = match.end() - match.start()
+        if joined and not body[previous_end : match.start()].strip():
+            # Continues the current run across pure whitespace (line wrapping),
+            # whatever its length: a wrapped blob's last line is usually short.
+            joined += size
+        else:
+            # Only a chunk of _PAYLOAD_MIN_RUN or more can START a run, so prose
+            # words never accumulate into one.
+            joined = size if size >= _PAYLOAD_MIN_RUN else 0
+        previous_end = match.end()
+        if joined >= PAYLOAD_BLOB_MIN_BYTES:
+            return "encoded_blob"
+    if _PAYLOAD_INSTRUCTION.search(body) is not None:
+        return "decode_or_run"
+    return ""
+
+
+def _payload_outcome(
+    parsed: "tuple[str, tuple[str, ...], str, str]", body: str
+) -> "tuple[tuple[str, tuple[str, ...], str, str], bool]":
+    """Apply :func:`opaque_payload` to a parsed verdict: ``(parsed', forced)``.
+
+    A firing check turns ``deliver``, ``hold`` and a bounce naming ONLY
+    ``new_work_request`` (the one shape B4b converts into an owner-releasable
+    ``work_scope_hold``) into a plain ``hold`` that must stay ``model_hold``. Every
+    other bounce -- a safety category, or the disclosure-class
+    ``out_of_scope_work``/``personal_info_request`` -- is left alone: a terminal
+    reject is already stricter than a review hold the owner could deliver.
+    """
+
+    disposition, categories, reason, verdict = parsed
+    code = opaque_payload(body)
+    if not code:
+        return parsed, False
+    if disposition == "bounce" and tuple(categories) != ("new_work_request",):
+        return parsed, False
+    local = f"local payload check: {code}"
+    return ("hold", (), f"{local}; screener: {reason}" if reason else local, verdict), True
 
 
 def unusable_reply_code(reply: Any) -> str:
@@ -2766,16 +2867,23 @@ def _conclude_parsed(
 
     envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
     message_id = envelope.message_id
+    # The fixed local payload check runs FIRST and only ever tightens: a forced
+    # hold skips the work-scope conversion below and lands as ``model_hold``.
+    parsed, payload_forced = _payload_outcome(parsed, envelope.private_body())
     disposition, categories, reason, _verdict = parsed
     cache_model = actual_model if answer_model is None else answer_model
-    if disposition == "hold" and _work_scope_hold_conversion(
-        store,
-        snapshot,
-        reason,
-        actual_model=actual_model,
-        served_provider=served_provider,
-        served_hop=served_hop,
-        screener_preferred=screener_preferred,
+    if (
+        disposition == "hold"
+        and not payload_forced
+        and _work_scope_hold_conversion(
+            store,
+            snapshot,
+            reason,
+            actual_model=actual_model,
+            served_provider=served_provider,
+            served_hop=served_hop,
+            screener_preferred=screener_preferred,
+        )
     ):
         # B4b scope update (2026-11-04, operator + Aida): under v2 the B4 relay
         # (rel-l01) is a HOLD naming new_work_request, not a bounce — measured on
