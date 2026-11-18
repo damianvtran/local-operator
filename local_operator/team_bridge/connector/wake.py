@@ -450,13 +450,19 @@ async def _screening_cycle(
 
     from local_operator.team_bridge import scheduler as _scheduler
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
-    from local_operator.team_bridge.screening import ScreenResult
     from local_operator.team_bridge.store import StoreRefused
 
-    def _held(code: str) -> Any:
-        if batch:
-            return [ScreenResult("hold", hold_code=code) for _ in items]
-        return ScreenResult("hold", hold_code=code)
+    def _authority_held(cause: str) -> Any:
+        # PR #4212 Q1: an authority refusal is aged BY CAUSE per message — a hub
+        # that says messaging is unavailable ages into the owner's review, an
+        # owner-only fix (sign in, consent, eligibility) into an owner-action
+        # code that never offers Deliver. Below the threshold: ``policy_stale``.
+        from local_operator.team_bridge.screening import aged_authority_hold
+
+        results = [
+            aged_authority_hold(owner, item, config_dir=config_dir, cause=cause) for item in items
+        ]
+        return results if batch else results[0]
 
     try:
         return await _scheduler.run_screening_cycle(
@@ -495,7 +501,9 @@ async def _screening_cycle(
                 else failure.code
             ),
         )
-        return _held("policy_stale")
+        from local_operator.team_bridge.store import AUTHORITY_CAUSE_SIGN_IN
+
+        return _authority_held(AUTHORITY_CAUSE_SIGN_IN)
     except StoreRefused as refusal:
         # The cycle's AUTHORITY refusals (a withdrawn status, an ineligible
         # org, stale consent, a moved owner) are typed ``policy_stale``
@@ -505,8 +513,11 @@ async def _screening_cycle(
         # same refusal visibly; a fresh screen now does too.
         if refusal.code != "policy_stale":
             raise
-        logger.warning("bridge: screening held code=policy_stale cause=authority")
-        return _held("policy_stale")
+        cause = str(getattr(refusal, "cause", "") or "")
+        logger.warning(
+            "bridge: screening held code=policy_stale cause=authority:%s", cause or "other"
+        )
+        return _authority_held(cause)
 
 
 def _owner_wire(owner: Any, config_dir: Path, auth_store: Any) -> Any:

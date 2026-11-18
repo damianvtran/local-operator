@@ -707,7 +707,7 @@ def test_input_refusal_400_on_hop0_holds_and_never_reaches_hop1(tmp_path, monkey
     assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("other",)]
 
 
-@pytest.mark.parametrize("status", [400, 403, 413, 422, 500, 501])
+@pytest.mark.parametrize("status", [400, 403, 413, 422])
 def test_sender_triggerable_statuses_stop_the_walk(tmp_path, monkeypatch, status) -> None:
     store, owner = _setup(tmp_path)
     _config(tmp_path, chain=["deepseek/deepseek-flash"])
@@ -717,7 +717,7 @@ def test_sender_triggerable_statuses_stop_the_walk(tmp_path, monkeypatch, status
     assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
 
 
-@pytest.mark.parametrize("status", [401, 404, 429, 502, 503, 504, 529])
+@pytest.mark.parametrize("status", [401, 404, 429, 500, 501, 502, 503, 504, 529])
 def test_route_failures_advance_to_hop1(tmp_path, monkeypatch, status) -> None:
     """A ROUTE failure advances: 404 included (PR #3632 review R1).
 
@@ -734,6 +734,20 @@ def test_route_failures_advance_to_hop1(tmp_path, monkeypatch, status) -> None:
     result = _cycle(tmp_path, owner)
     assert result.disposition == "deliver" and result.receipt.model == "deepseek-flash"
     assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash"]
+
+
+def test_a_preferred_hop_500_fails_over_like_a_429(tmp_path, monkeypatch) -> None:
+    """Operator rule (2026-11-17, PR #4212): a 5xx on the preferred hop moves to
+    the fallback hops before any hold, exactly as a 429 does."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    for status in (429, 500):
+        wire = _Wire({"gpt-5.4": ("fail", status), "deepseek-flash": ("reply", DELIVER)})
+        _install_wire(monkeypatch, wire)
+        result = _cycle(tmp_path, owner, message_id=f"bmsg_{status}")
+        assert result.disposition == "deliver", status
+        assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash"], status
 
 
 def test_guard_refusal_stops_the_walk(tmp_path, monkeypatch) -> None:
@@ -851,7 +865,12 @@ def test_advance_classifier_reads_raw_types_never_prose() -> None:
     # 404 is a ROUTE fact on its own (PR #3632 review R1): the pair is not
     # served here, and no submission can make a provider say so.
     assert _sender_cannot_cause(ProviderError(404, "x"))
-    for status in (400, 403, 413, 422, 500, 501):
+    # Operator rule 2026-11-17 (PR #4212): EVERY 5xx is the route being down.
+    for status in (500, 501, 599):
+        assert _sender_cannot_cause(ProviderError(status, "x")), status
+    # ...unless its raw text names a content verdict (one-way, S-1).
+    assert not _sender_cannot_cause(ProviderError(500, "Output flagged by moderation"))
+    for status in (400, 403, 413, 422):
         assert not _sender_cannot_cause(ProviderError(status, "x")), status
     assert not _sender_cannot_cause(RuntimeError("503 timeout quota"))
     assert not _sender_cannot_cause(ProviderError(None, "upstream 503 timed out"))

@@ -1420,3 +1420,39 @@ def test_a_receipt_damaged_between_hit_and_copy_holds_as_damaged_proof(
     assert hold is not None and hold["hold_code"] == "proof_corrupt"
     assert store.receipt_for_message(owner, "bmsg_2") is None
     assert len(runner.calls) == 1
+
+
+class _RouteDown(Exception):
+    """A dispatch failure the chain tagged as every hop failing on a ROUTE failure."""
+
+    tb_cascade_exhausted = True
+
+
+def test_an_aged_route_failed_batch_converts_each_message_to_owner_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4212 R1-m1: the batch path meets the same aged-hold exit as the single
+    path. Content-blind route holds stay batchable, so without the wrapper a
+    message whose retries always rode a batch would never reach review."""
+
+    store, owner = _setup(tmp_path)
+    clock = SimpleNamespace(now=time.time())
+    monkeypatch.setattr(time, "time", lambda: clock.now)
+
+    def down(prompt: str, *, default_model: str, images=None) -> Any:
+        raise _RouteDown("every hop unreachable")
+
+    items = _items("a", "b")
+    first = _batch(owner, tmp_path, down, items)
+    assert [r.hold_code for r in first] == ["screening_model_unavailable"] * 2
+    assert [store.work_scope_decision(owner, f"bmsg_{i}") for i in (1, 2)] == [None, None]
+
+    clock.now += 31 * 60  # past the 30-minute default
+    aged = _batch(owner, tmp_path, down, items)
+    assert [r.hold_code for r in aged] == ["model_hold"] * 2
+    for index in (1, 2):
+        decision = store.work_scope_decision(owner, f"bmsg_{index}")
+        assert decision is not None and decision["eligible"]
+        # S-1: nothing answered, so the row names no screener.
+        assert decision["screener_model"] == "" and decision["screener_verdict"] == ""
+        assert store.receipt_for_message(owner, f"bmsg_{index}") is None

@@ -168,6 +168,12 @@ HOLD_CODES = (
     # never a verdict: never answer-cached, never releasable, re-screened on
     # the retry pass, which re-resolves the chain.
     "screening_model_unavailable",
+    # Owner-action holds (PR #4212 Q1, ``OWNER_ACTION_HOLD_CODES``): the hub
+    # withdrew the owner's authority for a reason only they can fix. Never a
+    # Deliver item; published as ``awaiting_review`` (not "transient").
+    "sign_in_required",
+    "consent_required",
+    "owner_ineligible",
     # A8 privacy pass (``privacy_pass.PRIVACY_HOLD_CODES``; default OFF). Local
     # holds only: never a transport reject, never answer-cached, never a B4b
     # release. ``privacy_proof_missing`` is the native fence refusing an allow
@@ -320,6 +326,11 @@ class ScreenResult:
     hold_code: str | None = None
     retry_at: float | None = None
     screened_bytes: int | None = None
+    #: ROUTE evidence for a provider/breaker hold (PR #4212 S-3): ``True`` only
+    #: when the failure could not have been the sender's doing (the chain's
+    #: ``tb_cascade_exhausted``, or a breaker opened by a route-only class).
+    #: ``None`` = not a dispatch failure. Read by :func:`_aged_review_hold`.
+    route_failure: bool | None = None
     #: The image set this verdict SAW, or ``None`` when no image reached the
     #: screener. Only a deliver carrying it may admit images (the connector
     #: sends it as ``attachments_hash`` with the v3 template hash); every
@@ -1843,7 +1854,12 @@ def _screen_prepare(
             store,
             owner,
             _review_target(envelope, snapshot, epoch, item),
-            ScreenResult("hold", hold_code="breaker_open", retry_at=float(breaker["open_until"])),
+            ScreenResult(
+                "hold",
+                hold_code="breaker_open",
+                retry_at=float(breaker["open_until"]),
+                route_failure=breaker_route_failure(breaker.get("last_failure_class")),
+            ),
         )
 
     # 8. Availability before the reservation: a known-missing runner or an
@@ -2521,7 +2537,12 @@ async def _screen_spend(
             route_code,
             failure_class=failure_class,
         )
-        return ScreenResult("hold", hold_code=route_code, retry_at=retry_at)
+        return ScreenResult(
+            "hold",
+            hold_code=route_code,
+            retry_at=retry_at,
+            route_failure=bool(getattr(failure, "tb_cascade_exhausted", False)),
+        )
 
     # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
     #      SUCCESS: it resets consecutive failures (A5). Only the exception
@@ -2674,25 +2695,33 @@ def _unusable_review_hold(
     return ScreenResult("hold", hold_code=code)
 
 
-#: Screening-unavailable codes that convert to owner review once the hold is old
-#: enough (operator report 2026-11-17). Before this, only an empty/unparsable
+#: Screening-unavailable codes that may convert to owner review once the hold is
+#: old enough (operator report 2026-11-17). Before this, only an empty/unparsable
 #: reply had an exit (:func:`_unusable_review_hold`); every code here re-held on
 #: the connector's ladder forever, published as ``screening_unavailable`` with
 #: ``delay: transient``. Each one is reached only AFTER the envelope validated
 #: and the policy epoch is known, which is what a review decision row (and so a
-#: Deliver that can commit) needs. Deliberately NOT here: ``policy_stale`` raised
-#: BEFORE an epoch exists (no decision can bind to it; the post-dispatch
-#: ``policy_stale`` IS covered), ``owner_changed``/``stale_generation`` (the
-#: owner itself moved, so no row could be written), ``busy``/``retry_later``
-#: (another worker holds the turn; the next pass decides), ``template_mismatch``
-#: (pre-envelope), and ``parse_failed``/``empty_reply``, which keep their own
-#: pass-counted exit.
+#: Deliver that can commit) needs.
+#:
+#: Deliberately NOT here:
+#:
+#: * ``budget_exhausted`` (PR #4212 S-2): a spend ceiling, not an outage. It has a
+#:   durable retry at refill, and escalating it would turn a sender's flood past
+#:   its OWN ceiling into free, unscreened, uncapped Deliver items — and, under
+#:   the account ceiling, convert other senders' messages too.
+#: * ``owner_changed``/``stale_generation`` (the owner itself moved, so no row
+#:   could be written), ``busy``/``retry_later`` (another worker holds the turn),
+#:   ``template_mismatch`` (pre-envelope), and ``parse_failed``/``empty_reply``,
+#:   which keep their own pass-counted exit. Each is logged once when it outlives
+#:   the threshold (:func:`_note_stuck_hold`) so a persistent one is visible.
+#: * ``policy_stale`` from the hub's AUTHORITY refusal never reaches this code; the
+#:   connector ages it by cause (``connector/wake.py::_screening_cycle`` →
+#:   :func:`aged_authority_hold`).
 AGED_REVIEW_CODES = frozenset(
     {
         "provider_error",
         "breaker_open",
         "runner_unavailable",
-        "budget_exhausted",
         "policy_stale",
         "model_identity_unknown",
         "model_identity_mismatch",
@@ -2701,21 +2730,47 @@ AGED_REVIEW_CODES = frozenset(
     }
 )
 
+#: Codes that may only age on ROUTE evidence (PR #4212 S-3). ``provider_error`` is
+#: what the chain raises when a hop STOPPED the walk — a sender-triggerable status
+#: (content-filter 4xx, a 403) or a guard refusal — while "every hop failed on a
+#: route failure" is ``screening_model_unavailable`` (``provider_hold_code``). An
+#: unscreened Deliver item must never be something a crafted body can provoke, so
+#: these two convert only when :attr:`ScreenResult.route_failure` is ``True``:
+#: set from the chain's ``tb_cascade_exhausted`` tag for a dispatch failure, and
+#: from the breaker's last failure class (:data:`_BREAKER_ROUTE_CLASSES`) for an
+#: open breaker.
+_ROUTE_EVIDENCE_CODES = frozenset({"provider_error", "breaker_open"})
+
+#: Breaker failure classes that can ONLY come from a route failure: every one of
+#: them advances the chain (``model_boundary._sender_cannot_cause``), so it reaches
+#: the breaker only after the whole chain failed. ``auth_unusable`` is out (a 403
+#: stops the walk and records it), and so are ``provider_5xx`` (a content-verdict
+#: 5xx stops too) and ``other``/``stream_refused``.
+_BREAKER_ROUTE_CLASSES = frozenset({"quota", "timeout", "chain_exhausted"})
+
+
+def breaker_route_failure(failure_class: Any) -> bool:
+    """Whether an open breaker's last failure is route evidence (S-3)."""
+
+    return isinstance(failure_class, str) and failure_class in _BREAKER_ROUTE_CLASSES
+
 
 @dataclass(frozen=True)
 class _ReviewTarget:
     """The fields a review decision row binds to, for a hold raised before
-    :class:`_Prepared` exists (the breaker and availability checks)."""
+    :class:`_Prepared` exists (the breaker and availability checks, and the
+    connector's authority refusal). ``snapshot`` needs only ``template_sha256``,
+    ``screening_version`` and ``default_model``."""
 
     envelope: Envelope
-    snapshot: PolicySnapshot
+    snapshot: Any
     epoch: int
     sender_account_id: str
     conversation_id: str
 
 
 def _review_target(
-    envelope: Envelope, snapshot: PolicySnapshot, epoch: int, item: Mapping[str, Any]
+    envelope: Envelope, snapshot: Any, epoch: int, item: Mapping[str, Any]
 ) -> _ReviewTarget:
     # The same two identities ``_screen_prepare`` puts on ``_Prepared``, so a
     # review row raised before it exists binds exactly what a later one would.
@@ -2726,6 +2781,62 @@ def _review_target(
         sender_account_id=envelope.sender_account,
         conversation_id=_conversation_of(item),
     )
+
+
+#: Messages already logged as "held past the threshold under a code that never
+#: ages" (R1-m2), so the line is written once per message per process.
+_STUCK_LOGGED: set[str] = set()
+
+
+def _note_stuck_hold(
+    store: Store, owner: OwnerSnapshot, message_id: str, code: Any, threshold: float
+) -> None:
+    """Log ONCE when a non-ageing hold has outlived the review threshold (R1-m2).
+
+    Closed code and whole seconds only. A diagnostic, never a state change: the
+    codes it names keep their own exits (or deliberately have none).
+    """
+
+    if message_id in _STUCK_LOGGED:
+        return
+    first = store.screening_hold_first_held_at(owner, message_id)
+    if first is None:
+        return
+    import time as _time
+
+    age = _time.time() - first
+    if age < threshold:
+        return
+    if len(_STUCK_LOGGED) > 4096:
+        _STUCK_LOGGED.clear()  # bounded: a diagnostic, not state worth growth
+    _STUCK_LOGGED.add(message_id)
+    logger.warning(
+        "bridge: screening hold past review threshold without an exit code=%s age_s=%d",
+        _closed_code(code),
+        int(age),
+    )
+
+
+def _closed_code(code: Any) -> str:
+    from local_operator.team_bridge.store import closed_hold_code
+
+    return closed_hold_code(code)
+
+
+def _hold_has_aged(
+    store: Store, owner: OwnerSnapshot, message_id: str, threshold: float
+) -> tuple[bool, float]:
+    """``(aged, age_s)`` from the DURABLE ageing stamp (S-5), never in-memory state."""
+
+    import time as _time
+
+    now = _time.time()
+    first = store.note_aged_hold(owner, message_id, now=now)
+    if first is None:
+        # No durable hold row (the hold write was refused): nothing to age.
+        return False, 0.0
+    age = now - first
+    return age >= threshold, age
 
 
 def _aged_review_hold(
@@ -2750,16 +2861,18 @@ def _aged_review_hold(
     * NEVER DELIVERS. The conversion only hands the decision to the owner;
       nothing is admitted without their signed word. Moderation stays
       fail-closed.
-    * DURABLE AGE. Measured from the hold rows' ``created_at``
-      (:meth:`Store.screening_hold_first_held_at`), never from the loop's
-      in-memory ``_RETRY_ATTEMPTS``, so a connector restart cannot reset it.
+    * DURABLE AGE (S-5). Measured from the first hold under an ageing code
+      (:meth:`Store.note_aged_hold`), never from the loop's in-memory
+      ``_RETRY_ATTEMPTS`` and never from time spent under ``bridge_off`` & co.
+    * ROUTE FAILURES ONLY (S-3). See :data:`_ROUTE_EVIDENCE_CODES`.
     * THE CASCADE GETS ITS CHANCE FIRST. Called only with a pass's final hold —
-      after the screening chain walked the preferred hop and every fallback
-      (``ScreenChainRunner``), or with ``breaker_open``, which the breaker only
-      reaches after whole-chain failures. A pass on which any hop answered
-      never arrives here with one of these codes.
-    * NOT CACHED. No model answered, so nothing goes into the answer cache: an
-      identical later message gets its own screening. The decision row is
+      after the screening chain walked the preferred hop and every fallback. A
+      pass on which any hop answered never arrives here with one of these codes.
+    * HONEST PROVENANCE (S-1). Nothing answered, so the decision row names no
+      screener model, provider or hop; the signed release and the hub's
+      observation block therefore claim no model either. The holds list marks
+      the item ``unscreened`` (S-4).
+    * NOT CACHED. Nothing goes into the answer cache. The decision row is
       replayed by ``_replay_work_scope_decision`` with no model call.
     * ``review_held`` off or the threshold ``0`` keeps today's behaviour.
     """
@@ -2767,44 +2880,152 @@ def _aged_review_hold(
     from local_operator.team_bridge import hold_release as hr
 
     code = result.hold_code
-    if result.disposition != "hold" or code not in AGED_REVIEW_CODES:
+    if result.disposition != "hold":
         return result
     threshold = hr.screening_hold_review_after_s(store.config_dir)
     if threshold is None:
         return result
     message_id = target.envelope.message_id
-    first_held = store.screening_hold_first_held_at(owner, message_id)
-    if first_held is None:
-        # No durable row (the hold write was refused): nothing to age.
+    if code not in AGED_REVIEW_CODES or (
+        code in _ROUTE_EVIDENCE_CODES and result.route_failure is not True
+    ):
+        _note_stuck_hold(store, owner, message_id, code, threshold)
         return result
-    import time as _time
+    aged, age = _hold_has_aged(store, owner, message_id, threshold)
+    if not aged:
+        return result
+    return _convert_to_unscreened_review(store, owner, target, code, age)
 
-    age = _time.time() - first_held
-    if age < threshold:
-        return result
+
+def _convert_to_unscreened_review(
+    store: Store,
+    owner: OwnerSnapshot,
+    target: "_Prepared | _ReviewTarget",
+    code: Any,
+    age: float,
+) -> ScreenResult:
     review_code = "model_hold"
+    message_id = target.envelope.message_id
     _persist_hold(store, owner, message_id, review_code)
     _record_review_decision(
         store,
         owner,
         target,
         review_code,
-        # Nothing answered: the configured screener is the provenance (the row
-        # falls back to ``snapshot.default_model``), with no hop and no verdict,
-        # so the signed record never claims a model judged this message.
         actual_model="",
         served_provider="",
         served_hop=None,
         screener_preferred=False,
         screener_verdict="",
+        unscreened=True,
     )
     logger.info(
         "bridge: screening hold aged code=%s age_s=%d converted code=%s",
-        code,
+        _closed_code(code),
         int(age),
         review_code,
     )
     return ScreenResult("hold", hold_code=review_code)
+
+
+#: Owner-action hold codes (PR #4212 Q1): the hub refused the owner's AUTHORITY
+#: for a reason only the owner can fix. They are NOT review codes — no Deliver
+#: is ever offered, delivery stays fail-closed — and NOT screening-unavailable,
+#: so the published class is ``awaiting_review`` and the sender stops reading
+#: "transient". The code itself names the action in the owner's holds list.
+OWNER_ACTION_HOLD_CODES = {
+    "sign_in": "sign_in_required",
+    "consent": "consent_required",
+    "ineligible": "owner_ineligible",
+}
+
+
+def aged_authority_hold(
+    owner: OwnerSnapshot,
+    item: Mapping[str, Any],
+    *,
+    config_dir: Path,
+    cause: str,
+    held_code: str = "policy_stale",
+) -> ScreenResult:
+    """The hold for a hub AUTHORITY refusal (``policy_stale``), aged by cause (Q1).
+
+    The connector's screening cycle refuses BEFORE the pipeline runs when the
+    hub's status (or the local sign-in) withdraws authority, so these holds
+    never met :func:`_aged_review_hold` and re-held as transient forever (QA
+    round 1, Q-7). Past the review threshold:
+
+    * ``hub_unavailable`` (status ``available: false``) — the same unscreened
+      owner review as a provider outage, bound to the store's CURRENT policy
+      epoch (no epoch yet ⇒ nothing to bind, stays ``policy_stale``). The
+      release is consumed only once the hub serves again, because the pipeline
+      that reads it runs only then — and delivery needs the hub anyway.
+    * ``sign_in``/``consent``/``ineligible`` — an owner-action code
+      (:data:`OWNER_ACTION_HOLD_CODES`), never a Deliver item.
+    * anything else stays ``policy_stale`` (logged once past the threshold).
+
+    Below the threshold, or with the feature off, it is ``policy_stale`` exactly
+    as before. Never raises.
+    """
+
+    from local_operator.team_bridge import hold_release as hr
+
+    # ``held_code`` is the hold this refusal is below the threshold: the
+    # authority refusal's ``policy_stale``, or ``screening_model_unavailable``
+    # when the scheduler found NO screening chain at all (no preferred screener
+    # credentialed and no usable configured model) — which, like a hub that
+    # says unavailable, nobody but the owner fixes and the retry never clears.
+    held = ScreenResult("hold", hold_code=held_code)
+    try:
+        store = Store(config_dir)
+        threshold = hr.screening_hold_review_after_s(config_dir)
+        if threshold is None:
+            return held
+        envelope, _bad = validate_envelope(owner, item)
+        if envelope is None:
+            return held
+        message_id = envelope.message_id
+        decision = store.work_scope_decision(owner, message_id)
+        if decision is not None and str(decision.get("hold_code") or "") == "model_hold":
+            # Already the owner's: keep it, with no model call, while the hub is away.
+            _persist_hold(store, owner, message_id, "model_hold")
+            return ScreenResult("hold", hold_code="model_hold")
+        # The screener's own durable row, as every pipeline hold writes one, so
+        # the ageing stamp starts on THIS pass (the connector's feed-ref row is
+        # only written after we return).
+        _persist_hold(store, owner, message_id, held_code)
+        if cause in OWNER_ACTION_HOLD_CODES:
+            aged, age = _hold_has_aged(store, owner, message_id, threshold)
+            if not aged:
+                return held
+            code = OWNER_ACTION_HOLD_CODES[cause]
+            _persist_hold(store, owner, message_id, code)
+            logger.info(
+                "bridge: authority hold aged cause=%s age_s=%d code=%s", cause, int(age), code
+            )
+            return ScreenResult("hold", hold_code=code)
+        from local_operator.team_bridge.store import AUTHORITY_CAUSE_HUB_UNAVAILABLE
+
+        if cause != AUTHORITY_CAUSE_HUB_UNAVAILABLE:
+            _note_stuck_hold(store, owner, message_id, held_code, threshold)
+            return held
+        current = store.current_screening_policy(owner)
+        if current is None:
+            return held
+        aged, age = _hold_has_aged(store, owner, message_id, threshold)
+        if not aged:
+            return held
+        from types import SimpleNamespace
+
+        snapshot = SimpleNamespace(
+            template_sha256=current["template_sha256"],
+            screening_version=current["version"],
+            default_model=current.get("default_model"),
+        )
+        target = _review_target(envelope, snapshot, int(current["epoch"]), item)
+        return _convert_to_unscreened_review(store, owner, target, held_code, age)
+    except (StoreRefused, KeyError, TypeError, ValueError):
+        return held
 
 
 def _answer_key_model(
@@ -3546,6 +3767,7 @@ def _record_review_decision(
     screener_preferred: bool,
     screener_verdict: str,
     categories: Sequence[str] = (),
+    unscreened: bool = False,
 ) -> None:
     """Give a fresh cached-answer hold its EXIT: a per-message review decision row.
 
@@ -3586,7 +3808,12 @@ def _record_review_decision(
             body_sha256=envelope.body_sha256,
             envelope_digest=envelope.envelope_digest,
             screener_provider=served_provider,
-            screener_model=str(actual_model or snapshot.default_model or ""),
+            # ``unscreened`` (an aged hold, PR #4212 S-1): no model answered, so
+            # the row — and the signed release and hub observation built from it
+            # — names none. ``from_release_row`` sends no block for an empty model.
+            screener_model=(
+                "" if unscreened else str(actual_model or snapshot.default_model or "")
+            ),
             template_sha256=snapshot.template_sha256,
             prompt_version=snapshot.screening_version,
             categories=tuple(c for c in categories if c in SCREENING_CATEGORIES),

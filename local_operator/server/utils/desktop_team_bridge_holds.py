@@ -163,6 +163,17 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                     eligible and deliver_until is not None and now <= deliver_until
                 ),
                 "can_discard": eligible,
+                # PR #4212 S-4: an aged hold that NO model read (provider outage,
+                # hub unavailable) is a Deliver item too, but the owner must be able
+                # to tell it from a screener's "unsure": its decision row names no
+                # screener and no verdict. A closed boolean; the copy is the
+                # renderer's.
+                "unscreened": bool(
+                    decision is not None
+                    and code in hr.REVIEW_HOLD_CODES
+                    and not str(decision.get("screener_model") or "")
+                    and not str(decision.get("screener_verdict") or "")
+                ),
                 "deliver_until": _iso(deliver_until),
                 "decision": _decision_view(release),
             }

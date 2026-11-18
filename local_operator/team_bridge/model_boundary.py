@@ -683,11 +683,18 @@ def resolve_screening_selection(config_dir: Path) -> DefaultSelection | None:
 SCREENING_FAILURE_CLASSES = _STORE_FAILURE_CLASSES
 
 
-#: HTTP statuses that mean "this route is unavailable right now", which no
-#: submission can produce: gateway/overload responses. 500 is deliberately
-#: absent — providers report an output-side content filter as a 5xx, and a
-#: body crafted to trip it must not buy a different screener (S-1).
-_ADVANCE_STATUSES = frozenset({502, 503, 504, 529})
+#: HTTP statuses that mean "this route is unavailable right now": EVERY 5xx.
+#:
+#: OPERATOR RULE (2026-11-17, PR #4212): a 5xx from the preferred hop moves on to
+#: the fallback hops exactly as a 429 does, before any hold — a preferred model
+#: that is down must not block Team Bridge. Before this, 500 (and every 5xx but
+#: 502/503/504/529) STOPPED the walk, so a 500 outage on hop 0 never reached a
+#: healthy fallback (QA round 1 lead on #4212). The S-1 concern that kept 500 out
+#: — a provider reporting an output-side content filter as a 5xx — is still
+#: answered ONE-WAY by :data:`_CONTENT_VERDICT_MARKERS`: a 5xx whose raw text
+#: names a content verdict keeps stopping and holds. The fallback is always
+#: another hop of the operator's own approved chain, never an unvetted model.
+_ADVANCE_STATUSES = frozenset(range(500, 600))
 #: Rate limit / out of quota, and out of CREDIT (402: an empty Radient balance
 #: on a preferred hop). Floodable in principle, but bounded by the per-account
 #: HTTP budget and accepted by the operator (PR #3194 decisions). 402 joined on
@@ -770,7 +777,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     OAuth refresh that failed — never 403, see ``_AUTH_STATUSES``), quota
     (429), a route that does not serve the pair at all (404 — see
     ``_NOT_FOUND_STATUSES`` for why that advances while a 403 does not), a
-    timeout, a gateway/overload status (502/503/504/529) whose raw text names
+    timeout, a 5xx status (operator rule 2026-11-17) whose raw text names
     no content verdict, or a transport error our own client raised before the
     body was sent.
 
@@ -1608,7 +1615,7 @@ class ScreenChainRunner:
       check and the hop's own (provider, model) tuple check all still apply.
     * Advance ONLY on a failure a sender cannot cause (:func:`_sender_cannot_cause`:
       credential unusable, quota, a route that does not serve the pair (404),
-      timeout, 502/503/504/529, a pre-send transport error), or on the
+      timeout, any 5xx without a content verdict, a pre-send transport error), or on the
       unevidenced ``("", None)`` signal (serving identity is request-local
       provenance, not something a body controls).
       EVERYTHING ELSE STOPS AND HOLDS (S-1/S-2): any other 4xx (content-filter

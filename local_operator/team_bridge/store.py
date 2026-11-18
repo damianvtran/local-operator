@@ -200,11 +200,32 @@ _BUSY_TIMEOUT_MS = 2_000
 
 
 class StoreRefused(RuntimeError):
-    """A store mutation refused. ``code`` is a stable machine-readable tag."""
+    """A store mutation refused. ``code`` is a stable machine-readable tag.
 
-    def __init__(self, code: str, message: str = "") -> None:
+    ``cause`` is an optional CLOSED sub-tag for a ``policy_stale`` authority
+    refusal (``scheduler.AUTHORITY_CAUSES``): the connector needs to tell "the hub
+    says messaging is unavailable" (it ages into the owner's review) from "only
+    the owner can fix this" (sign in, consent, eligibility — never a Deliver)
+    without reading the prose ``message``. Empty means unclassified.
+    """
+
+    def __init__(self, code: str, message: str = "", *, cause: str = "") -> None:
         super().__init__(message or code)
         self.code = code
+        self.cause = cause
+
+
+#: ``StoreRefused.cause`` values for a ``policy_stale`` AUTHORITY refusal (PR #4212,
+#: Q1). ``hub_unavailable``: the hub's status says messaging is not available —
+#: nobody local can fix it, so the hold ages into the owner's review like a
+#: provider outage. The other three are the OWNER's to fix and never become a
+#: Deliver item: ``sign_in`` (no usable / not the enrolled sign-in), ``consent``
+#: (no current consent receipt), ``ineligible`` (organization or endpoint not
+#: eligible/active). Anything else stays an unclassified ``policy_stale``.
+AUTHORITY_CAUSE_HUB_UNAVAILABLE = "hub_unavailable"
+AUTHORITY_CAUSE_SIGN_IN = "sign_in"
+AUTHORITY_CAUSE_CONSENT = "consent"
+AUTHORITY_CAUSE_INELIGIBLE = "ineligible"
 
 
 def state_db_path(config_dir: Path) -> Path:
@@ -610,6 +631,24 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
+    """Create the aged-hold stamp on a store that predates it (PR #4212, S-5).
+
+    One row per message: WHEN it was first held under a code that may age into
+    the owner's review (``screening.AGED_REVIEW_CODES``). The hold row's own
+    ``created_at`` is not that fact — it survives code changes, so a message
+    parked for hours under ``bridge_off`` would convert on its first transient
+    pass. Same additive, authority-free rule as :func:`_ensure_unusable_pass_table`:
+    a lost row only restarts the clock, never admits anything.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_aged_holds ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, first_at REAL NOT NULL, "
+        "PRIMARY KEY (owner_key, message_id))"
+    )
 
 
 def _ensure_unusable_pass_table(conn: sqlite3.Connection) -> None:
@@ -3746,6 +3785,17 @@ class Store:
         conn.execute(
             "DELETE FROM screening_unusable_passes WHERE owner_key = ? AND message_id = ?",
             (owner_key, message_id),
+        )
+        # The aged-hold stamp shares this lifecycle; it is keyed by the BARE id
+        # (the screener's spelling), so a composite delete clears that too.
+        _ensure_aged_hold_table(conn)
+        try:
+            bare = screening_hold_message_id(message_id)
+        except Exception:  # noqa: BLE001 — a malformed key clears its raw spelling only
+            bare = message_id
+        conn.executemany(
+            "DELETE FROM screening_aged_holds WHERE owner_key = ? AND message_id = ?",
+            [(owner_key, key) for key in {message_id, bare}],
         )
 
     @staticmethod
@@ -8267,6 +8317,42 @@ class Store:
             return None
         finite = [stamp for stamp in stamps if math.isfinite(stamp)]
         return min(finite) if finite else None
+
+    def note_aged_hold(self, owner: OwnerSnapshot, message_id: str, *, now: float) -> float | None:
+        """Stamp (once) and return when this message entered an AGEING hold.
+
+        PR #4212 S-5: the escalation clock starts at the first hold under a code
+        that may age into review, not at the row's ``created_at``. Written only
+        while a hold row for the message exists (``None`` otherwise, which never
+        converts anything); the first stamp wins (``INSERT OR IGNORE``). Cleared
+        with every terminal outcome by :meth:`_clear_unusable_passes`.
+        """
+
+        if self.screening_hold_first_held_at(owner, message_id) is None:
+            return None
+        owner_key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "INSERT OR IGNORE INTO screening_aged_holds (owner_key, message_id, first_at) "
+                    "VALUES (?, ?, ?)",
+                    (owner_key, message_id, float(now)),
+                )
+                row = conn.execute(
+                    "SELECT first_at FROM screening_aged_holds "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, message_id),
+                ).fetchone()
+        except (sqlite3.Error, StoreRefused):
+            return None
+        if row is None:
+            return None
+        first = float(row["first_at"])
+        return first if math.isfinite(first) else None
 
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
