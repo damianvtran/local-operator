@@ -2263,6 +2263,7 @@ def stale_background_daemons(
     staleness: Callable[[int], bool | None] | None = None,
     generation: Callable[[int], Path | None] | None = None,
     wake_census: Callable[[], int | None] | None = None,
+    wake_kill_mode: Callable[[], str | None] | None = None,
 ) -> list[StaleDaemon]:
     """Every known background daemon whose RUNNING process is on an old build.
 
@@ -2288,7 +2289,9 @@ def stale_background_daemons(
                 continue
             name, reason = _DAEMON_MODULES[module]
             if module == "local_operator.wakes.supervisor":
-                reason = _wakes_left_reason(wake_census or update._wake_owned_runtime_count)
+                reason = _wakes_left_reason(
+                    wake_census or update._wake_owned_runtime_count, wake_kill_mode
+                )
             running = generation_of(pid)
             found.append(
                 StaleDaemon(
@@ -2303,7 +2306,10 @@ def stale_background_daemons(
     return found
 
 
-def _wakes_left_reason(census: Callable[[], int | None]) -> str:
+def _wakes_left_reason(
+    census: Callable[[], int | None],
+    kill_mode: Callable[[], str | None] | None = None,
+) -> str:
     """Why a stale wakes supervisor is still running, read NOW (review R1-3).
 
     The common reason on a ``KillMode=process`` unit is not the unit file at
@@ -2312,9 +2318,23 @@ def _wakes_left_reason(census: Callable[[], int | None]) -> str:
     So status asks the same census the refresher gates on and prints the same
     sentence (``update.wake_children_deferral``); with none running it names
     the move that now works, plus the unit rewrite an older install still needs.
+
+    THE KILLMODE GATE COMES FIRST, as in the refresher (#4175 QA Q2,
+    2026-11-18). A Linux unit still LOADED with ``KillMode=control-group`` is
+    refused before the census is even taken, so its real reason is the unit
+    rewrite, and the census sentence ("moves when they end") is false for it.
+    ``kill_mode`` reads the same loaded value (``update.wakes_unit_kill_mode``);
+    ``None`` (macOS, no unit, not addressable) skips the gate exactly as the
+    refresher does.
     """
     from local_operator import update
 
+    loaded = (kill_mode or update.wakes_unit_kill_mode)()
+    if loaded is not None and loaded != "process":
+        recovery = next(
+            r for _, unit, r, _ in update._LINUX_RESTART_UNITS if unit == update._WAKES_UNIT
+        )
+        return update.kill_mode_deferral(update._WAKES_UNIT, loaded, recovery)
     running = census()
     if running != 0:
         return update.wake_children_deferral(running)
@@ -2331,6 +2351,27 @@ def stale_daemon_lines(daemons: Sequence[StaleDaemon] | None = None) -> list[str
         f"STALE daemon: {d.name} (pid {d.pid}) runs {d.generation}, not current — {d.reason}"
         for d in rows
     ]
+
+
+def stale_daemon_status_line(
+    name: str, command: str, *, daemons: Sequence[StaleDaemon] | None = None
+) -> str:
+    """One daemon's "running an older build" status line, or ``""``.
+
+    For ``lop mobile status`` / ``lop tunnel status`` (field finding,
+    2026-11-18: an upgraded machine kept both on the old build and neither
+    status said so). :func:`stale_background_daemons` filtered to ``name`` — one
+    census, so this cannot disagree with ``lop services status`` — and, like it,
+    silent unless the staleness is PROVEN.
+    """
+    rows = stale_background_daemons() if daemons is None else daemons
+    found = next((d for d in rows if d.name == name), None)
+    if found is None:
+        return ""
+    from local_operator.i18n.keys import cli_daemon_build as _k
+    from local_operator.i18n.text import tr
+
+    return tr("cli.daemon_build")(_k.status_stale(generation=found.generation, command=command))
 
 
 # ---------------------------------------------------------------------------

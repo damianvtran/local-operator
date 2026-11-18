@@ -11240,6 +11240,15 @@ def mobile_command(args: argparse.Namespace) -> int:
                 )
             )
         print(f"healthy:      {'yes' if result['healthy'] else 'no'}{files_note}")
+        # A healthy daemon on an OLD BUILD reads as fine above; after an upgrade
+        # that is exactly what kept a phone on old code (2026-11-18).
+        from local_operator.services import stale_daemon_status_line
+
+        stale_build = stale_daemon_status_line("mobile", "lop mobile restart")
+        if stale_build:
+            # Bare: the line is keyed copy, and a label here would be the one
+            # untranslated word on it.
+            print(stale_build)
         # A healthy daemon with no bundle serves a 503 to every authenticated GET
         # ("mobile web bundle not built"), so `healthy: yes` on its own reads as
         # fine while the phone has no UI at all — the state generations

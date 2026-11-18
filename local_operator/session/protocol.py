@@ -762,7 +762,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 157 public members and a POSITIVE
+    than stylistic. This protocol carries 158 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -862,7 +862,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     on a probe of an undeclared name — not the declaration alone), 157 once
     the desktop answer route needed ``ask_consent_bearing`` — it reads, through
     the same ``bridge.remote`` binding as ``ask_respond``, whether the answer
-    just sent carried operator proof, and only the facade sends it), so
+    just sent carried operator proof, and only the facade sends it), 158 once
+    the same route needed ``bridge_decide_signature_free`` — whether a Team
+    Bridge card's decision would be signed, i.e. a Touch ID sheet), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -1561,6 +1563,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Declared because the desktop answer route reads it through the same
         duck-typed ``bridge.remote`` binding as :meth:`ask_respond`; viewer-only
         since only the facade sends the answer frame it reports on.
+        """
+        ...
+
+    async def bridge_decide_signature_free(self) -> bool:
+        """Whether this facade's ``bridge_decide`` would reach the runtime unsigned.
+
+        Declared because the desktop answer route probes it through the same
+        duck-typed ``bridge.remote`` binding (decision a-856f, PR #4208 S-1: a
+        Team Bridge card that would be signed, i.e. Touch ID, is decided through
+        the bearer path instead). Viewer-only: an in-process owner never signs.
         """
         ...
 

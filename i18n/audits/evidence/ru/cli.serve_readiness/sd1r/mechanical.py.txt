@@ -1,0 +1,46 @@
+"""Remediation-only assertions and reuse of retained 11-key mechanical coverage.
+Provenance: i18n/audits/evidence/ru/cli.serve_readiness/sd1r/record.json
+"""
+import hashlib
+import json
+from pathlib import Path
+import runpy
+
+ROOT = Path(__file__).resolve().parents[6]
+OLD = ROOT / 'i18n/audits/evidence/ru/cli.serve_readiness/sd1'
+record = json.loads((OLD / 'record.json').read_text())
+sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+for name in ('en', 'context'):
+    item = record['input_hashes'][name]
+    assert sha(ROOT / item['path']) == item['sha256'], name
+    print(f'PASS unchanged {name} SHA-256: {item["sha256"]}')
+path = ROOT / record['input_hashes']['ru']['path']
+current = json.loads(path.read_text())
+expected = {
+    'cli.serve_readiness.not_reporting': (
+        'зарегистрирован, но не отвечает (его пульс перестал поступать)',
+        'зарегистрирован, но не отвечает (сигналы активности больше не поступают)'),
+    'cli.serve_readiness.cgroup_unknown': (
+        'работает в cgroup, положение которой эта проверка не может определить',
+        'работает в cgroup, которую эта проверка не может распознать'),
+    'cli.serve_readiness.identity_restart': (
+        'на {device} выполните `lop services status`, чтобы проверить записи, затем `lop services restart` для записи данных об идентичности процессов; перед действием перезапуск проверяет каждый демон',
+        'на {device} выполните `lop services status`, чтобы просмотреть записи, затем `lop services restart`, чтобы записать идентификационные данные процессов; перед перезапуском команда проверяет каждый демон')
+}
+# Reverse only accepted exact replacements in the byte-preserving current text.
+# Matching the original input hash then proves all other keys/bytes are unchanged.
+reconstructed = path.read_text(encoding='utf-8')
+for key, (before, after) in expected.items():
+    assert current[key] == after, key
+    assert reconstructed.count(after) == 1, key
+    reconstructed = reconstructed.replace(after, before)
+    print(f'PASS exact accepted replacement: {key}')
+assert hashlib.sha256(reconstructed.encode('utf-8')).hexdigest() == record['input_hashes']['ru']['sha256']
+print('PASS reversing only the 3 accepted replacements recreates the exact sd1 target SHA-256; all 8 other keys and formatting unchanged')
+print('Current target SHA-256:', sha(path))
+# Reuse the immutable original pure-parser reproduction rather than rewriting it.
+reproduction = OLD / 'mechanical.py.txt'
+artifact = next(item for item in record['artifacts'] if item['path'].endswith('/mechanical.py.txt'))
+assert sha(reproduction) == artifact['sha256']
+runpy.run_path(str(reproduction), run_name='__main__')
+print('PASS remediation delta mechanics and retained whole-group mechanics')

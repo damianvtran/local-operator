@@ -1,0 +1,87 @@
+import json, re, hashlib, subprocess, unicodedata
+from pathlib import Path
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+root=Path.cwd()
+base=Path('local_operator/i18n/catalogues')
+ns='cli.serve_readiness'
+def strict_pairs(pairs):
+    out={}
+    for k,v in pairs:
+        assert k not in out, ('duplicate',k)
+        out[k]=v
+    return out
+load=lambda p:json.loads(p.read_bytes(),object_pairs_hook=strict_pairs)
+en=load(base/'en'/(ns+'.json'))
+fr=load(base/'fr'/(ns+'.json'))
+ctx=load(base/'en'/(ns+'.context.json'))
+assert len(en)==len(fr)==len(ctx)==15
+assert en.keys()==fr.keys()==ctx.keys()
+def args(nodes):
+    found=set()
+    for n in nodes:
+        if isinstance(n,rt._Arg):
+            found.add((n.name,n.kind,n.skeleton))
+            for _,body in n.parts: found.update(args(body))
+    return found
+def literals(nodes):
+    txt=''.join(n.value for n in nodes if isinstance(n,rt._Text))
+    return sorted(re.findall(r'`[^`]+`|</?[^>]+>',txt))
+def contract(src,dst):
+    assert args(src)==args(dst)
+    assert literals(src)==literals(dst)
+    sa={n.name:n for n in src if isinstance(n,rt._Arg) and n.parts}
+    da={n.name:n for n in dst if isinstance(n,rt._Arg) and n.parts}
+    assert sa.keys()==da.keys()
+    for name,snode in sa.items():
+        dnode=da[name]
+        sb,db=dict(snode.parts),dict(dnode.parts)
+        if snode.kind=='plural': assert set(db)=={'one','many','other'}
+        else: assert sb.keys()==db.keys()
+        for selector,body in db.items(): contract(sb.get(selector,sb['other']),body)
+params={'count':1,'device':'node-a:22','pids':'1001, 1002','builds':'v0.105.3+abc:def','install':'v0.105.4+fed:cba','recorded':'v0.105.3+abc:def','holders':'custom.service','reason':'DIAG_OPAQUE:XYZ','reasons':'REASONS_OPAQUE:XYZ'}
+plural_count=0
+for key in en:
+    contract(rt.parse_message(en[key]),rt.parse_message(fr[key]))
+    assert rt.message_arguments(en[key])==rt.message_arguments(fr[key])
+    assert not any(unicodedata.bidirectional(c) in {'LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI'} for c in fr[key])
+    has_plural=bool(rt.plural_selectors(fr[key]))
+    plural_count+=int(has_plural)
+    print('PASS',key,'args=',rt.message_arguments(fr[key]),'categories=',rt.plural_selectors(fr[key]))
+    for count in ((0,1,2,1000000,1500000) if has_plural else (1,)):
+        out=rt.render_message(fr[key],dict(params,count=count),'fr')
+        for name,kind in rt.message_arguments(fr[key]):
+            if kind=='simple': assert params[name] in out, (key,name,'opaque token mutated')
+        assert '{' not in out and '}' not in out
+        print('RENDER',count,'cells='+str(cell_len(out)),out)
+assert plural_count==6
+# Prove exact retained key-line bytes against the committed 11-key baseline.
+base_ref='1fc11dab96954dcc4c31abcc695c696baf2ead8c'
+old_bytes=subprocess.run(['git','show',base_ref+':'+str(base/'fr'/(ns+'.json'))],capture_output=True,check=True).stdout
+old=json.loads(old_bytes)
+changed=[k for k in old if old[k]!=fr[k]]
+added=[k for k in fr if k not in old]
+unchanged=[k for k in old if old[k]==fr[k]]
+assert len(changed)==7 and len(added)==4 and len(unchanged)==4
+for k in unchanged:
+    prefix=('  '+json.dumps(k)+': ').encode()
+    a=[line for line in old_bytes.splitlines() if line.startswith(prefix)]
+    b=[line for line in (base/'fr'/(ns+'.json')).read_bytes().splitlines() if line.startswith(prefix)]
+    assert len(a)==len(b)==1 and a==b
+    print('RETAINED EXACT JSON LINE',k,hashlib.sha256(a[0]).hexdigest())
+# Exercise actual translated diagnosis composition without importing live readiness/services.
+tr=lambda key,**kw:rt.render_message(fr[ns+'.'+key],kw,'fr')
+gap=tr('recorded_gap',recorded=params['recorded'],install=params['install'])
+reason=tr('unproven')+'; '+gap
+group=tr('pid_reason',count=2,pids=params['pids'],reason=reason)
+assert group.count(reason)==1
+assert group.count('identité')==1
+for n in (1,2,1000000):
+    detail=tr('unknown',count=2,device=params['device'],reasons=group+' '+tr('and_more',count=n))
+    assert '::' not in detail
+    assert detail.count(params['pids'])==1
+    print('GROUPED COMPOSITION overflow='+str(n),detail)
+for k in ('identity_no_action','identity_restart','identity_restart_manual'):
+    print('ACTION COPY',k,tr(k,**params))
+print('SUMMARY 15/15 mechanical/opaque checks; 6/6 French plurals one/many/other; 7 changed + 4 new + 4 exact unchanged JSON lines; grouped reason and overflow composition checked')
+print('LIMIT no services, pytest, translation APIs, installs, screenshots or runtime remedy-branch execution; source selection reviewed statically')

@@ -1,0 +1,31 @@
+import json, hashlib
+from pathlib import Path
+from local_operator.i18n.runtime import render_message
+root = Path.cwd()
+old_rel = 'i18n/audits/evidence/fr/cli.serve_readiness/sd1'
+new_rel = 'i18n/audits/evidence/fr/cli.serve_readiness/sd1r'
+prior = json.loads((root/old_rel/'record.json').read_text())
+sha = lambda data: hashlib.sha256(data).hexdigest()
+for kind in ('en', 'context'):
+    row=prior['input_hashes'][kind]
+    assert sha((root/row['path']).read_bytes()) == row['sha256']
+path=root/prior['input_hashes']['fr']['path']
+current=path.read_bytes()
+expected='est enregistré mais ne répond pas (il n’envoie plus de signal de vie)'
+previous='est enregistré mais ne répond pas (son heartbeat s’est arrêté)'
+assert current.count(expected.encode())==1
+assert sha(current.replace(expected.encode(),previous.encode(),1))==prior['input_hashes']['fr']['sha256']
+fr=json.loads(current)
+assert fr['cli.serve_readiness.not_reporting']==expected
+print('DELTA PASS: English/context hashes unchanged; exact FR-SD1-01 suggested replacement applied; all other French bytes unchanged')
+print('CURRENT FRENCH SHA256:',sha(current))
+verification=root/old_rel/'verify.py.txt'
+assert sha(verification.read_bytes())==next(a['sha256'] for a in prior['artifacts'] if a['path'].endswith('/verify.py.txt'))
+print('REUSING hash-verified original mechanical parser check, not repeating the semantic audit of unchanged keys')
+exec(compile(verification.read_text(), str(verification), 'exec'))
+reasons='pid 123 '+fr['cli.serve_readiness.not_reporting']
+for count in (1,2,1000000):
+    output=render_message(fr['cli.serve_readiness.unknown'],{'count':count,'device':'node-a','reasons':reasons},'fr')
+    assert expected in output
+    print('NEIGHBOR INTEGRATION count='+str(count)+':',output)
+print('SUMMARY: FR-SD1-01 fixed exactly; 10 unchanged keys retain original semantic coverage; direct unknown diagnostic composition renders; no live process or provider calls')

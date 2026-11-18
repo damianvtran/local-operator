@@ -1,0 +1,372 @@
+# Current sd4r catalogue renders — ur
+
+Offline production ICU rendering only, not terminal shaping/service execution.
+
+## cli.serve_readiness.unproven count=1
+
+ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)
+
+## cli.serve_readiness.not_reporting count=1
+
+ریکارڈ موجود ہے مگر کوئی جواب نہیں آ رہا (ہارٹ بیٹ رک گئی ہے)
+
+## cli.serve_readiness.not_this_daemon count=1
+
+ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.unknown_state count=1
+
+نامعلوم حالت والا ریکارڈ
+
+## cli.serve_readiness.install_unknown count=1
+
+ایسا بلڈ چلاتا ہے جس کا نصب شدہ بلڈ سے موازنہ نہیں کیا جا سکتا
+
+## cli.serve_readiness.cgroup_unknown count=1
+
+ایسے cgroup میں چلتا ہے جس کی نوعیت یہ جانچ متعین نہیں کر سکتی
+
+## cli.serve_readiness.recorded_gap count=1
+
+ریکارڈ میں بلڈ v0.99.0+recorded درج ہے؛ نصب شدہ بلڈ v0.99.2+installed ہے
+
+## cli.serve_readiness.unknown count=0
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=1
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہا ہے اور زیرِ نگرانی ہے یا نہیں
+
+## cli.serve_readiness.unknown count=2
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=3
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=4
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=5
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=11
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=21
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=22
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=25
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=1.5
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=1000000
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.unknown count=1500000
+
+host-sd4r پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## cli.serve_readiness.stale count=0
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=1
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتا ہے، مگر نصب شدہ بلڈ v0.99.2+installed ہے: اس کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرا بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=2
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=3
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=4
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=5
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=11
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=21
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=22
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=25
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=1.5
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=1000000
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.stale count=1500000
+
+host-sd4r پر `lop serve` ڈیمن (4102, 4103)، v0.99.1+running چلاتے ہیں، مگر نصب شدہ بلڈ v0.99.2+installed ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+
+## cli.serve_readiness.other_unit count=0
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=1
+
+host-sd4r پر `lop serve` ڈیمن کسی دوسری سروس (worker.service) کے تحت ہے، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=2
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=3
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=4
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=5
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=11
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=21
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=22
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=25
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=1.5
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=1000000
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.other_unit count=1500000
+
+host-sd4r پر `lop serve` ڈیمن دوسری سروسز (worker.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+
+## cli.serve_readiness.identity_restart count=1
+
+host-sd4r پر ریکارڈ میں درج ڈیمن کو نصب شدہ بلڈ پر منتقل کرنے کے لیے `lop services restart` چلائیں؛ یہ کمانڈ کارروائی سے پہلے ہر ڈیمن کی جانچ کرتی ہے
+
+## cli.serve_readiness.pid_reason count=0
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=1
+
+عمل کا شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=2
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=3
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=4
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=5
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=11
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=21
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=22
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=25
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=1.5
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=1000000
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.pid_reason count=1500000
+
+اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا
+
+## cli.serve_readiness.and_more count=0
+
+اور مزید 0
+
+## cli.serve_readiness.and_more count=1
+
+اور مزید 1
+
+## cli.serve_readiness.and_more count=2
+
+اور مزید 2
+
+## cli.serve_readiness.and_more count=3
+
+اور مزید 3
+
+## cli.serve_readiness.and_more count=4
+
+اور مزید 4
+
+## cli.serve_readiness.and_more count=5
+
+اور مزید 5
+
+## cli.serve_readiness.and_more count=11
+
+اور مزید 11
+
+## cli.serve_readiness.and_more count=21
+
+اور مزید 21
+
+## cli.serve_readiness.and_more count=22
+
+اور مزید 22
+
+## cli.serve_readiness.and_more count=25
+
+اور مزید 25
+
+## cli.serve_readiness.and_more count=1.5
+
+اور مزید 1.5
+
+## cli.serve_readiness.and_more count=1000000
+
+اور مزید 1,000,000
+
+## cli.serve_readiness.and_more count=1500000
+
+اور مزید 1,500,000
+
+## cli.serve_readiness.identity_no_action count=0
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=1
+
+جس ریکارڈ میں عمل کی شناخت ثابت نہیں، اس میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتا ہے؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=2
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=3
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=4
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=5
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=11
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=21
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=22
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=25
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=1.5
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=1000000
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_no_action count=1500000
+
+جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+
+## cli.serve_readiness.identity_restart_manual count=1
+
+host-sd4r پر ریکارڈ میں درج ڈیمن کو نصب شدہ بلڈ پر منتقل کرنے کے لیے `lop serve` کو دستی طور پر دوبارہ شروع کریں؛ یہ موجودہ عمل میں خود کو دوبارہ لوڈ نہیں کر سکتا
+
+## COMPOSED PID reuse count=1
+
+host-sd4r پر `lop serve` ڈیمن — عمل کا شناختی نمبر 4101 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہا ہے اور زیرِ نگرانی ہے یا نہیں
+
+## COMPOSED PID reuse count=2
+
+host-sd4r پر `lop serve` ڈیمن — اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## COMPOSED PID reuse count=3
+
+host-sd4r پر `lop serve` ڈیمن — اعمال کے شناختی نمبر 4104, 4105, 4106 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## COMPOSED PID reuse count=21
+
+host-sd4r پر `lop serve` ڈیمن — اعمال کے شناختی نمبر 4110, 4111 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+
+## COMPOSED disjoint diagnoses plus overflow
+
+host-sd4r پر `lop serve` ڈیمن — عمل کا شناختی نمبر 4101 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا); اعمال کے شناختی نمبر 4102, 4103 — ریکارڈ موجود ہے، مگر PID کا دوبارہ استعمال پایا گیا اور مزید 22، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+

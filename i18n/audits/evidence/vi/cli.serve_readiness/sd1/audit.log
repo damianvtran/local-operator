@@ -1,0 +1,133 @@
+Actual subprocess execution log. Timestamps are UTC capture completion times.
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+[UTC 2026-11-16T04:39:41.450556+00:00]
+stdout:
+check.py: catalogue checks: 0 problem(s)
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python -c 'import json, re, unicodedata, hashlib
+from pathlib import Path
+from collections import Counter
+from local_operator.i18n.runtime import message_arguments, parse_message, plural_selectors, render_message
+from rich.cells import cell_len
+root = Path.cwd()
+ns = "cli.serve_readiness"
+def unique(pairs):
+    out = {}
+    for key, value in pairs:
+        assert key not in out, ("duplicate key", key)
+        out[key] = value
+    return out
+def load(path):
+    return json.loads(path.read_text(), object_pairs_hook=unique)
+en = load(root / f"local_operator/i18n/catalogues/en/{ns}.json")
+vi = load(root / f"local_operator/i18n/catalogues/vi/{ns}.json")
+context = load(root / f"local_operator/i18n/catalogues/en/{ns}.context.json")
+assert len(en) == len(vi) == 11
+assert en.keys() == vi.keys() == context.keys()
+params = dict(count=1, device="node-a", pids="123, 456", builds="v1, v2", install="v3", holders="pid 123 under example.service", recorded="v1", reasons="pid 123: " + vi[ns + ".unproven"])
+for key, target in vi.items():
+    source = en[key]
+    parse_message(source); parse_message(target)
+    assert message_arguments(source) == message_arguments(target), key
+    branches = plural_selectors(target)
+    assert all(set(arms) == {"other"} for arms in branches), (key, branches)
+    assert unicodedata.normalize("NFC",target) == target, (key,"not NFC")
+    assert not any(unicodedata.category(char) in ("Mn", "Me") for char in target), (key,"combining marks")
+    assert not any(unicodedata.bidirectional(char) in ("RLE","LRE","RLO","LRO","PDF","LRI","RLI","FSI","PDI") for char in target), (key,"bidi controls")
+    # English plural alternatives repeat literals. Compare the literal set,
+    # then verify the one Vietnamese branch keeps each applicable literal.
+    assert set(re.findall(r"`([^`]+)`",source)) == set(re.findall(r"`([^`]+)`",target)), (key,"code literal drift")
+    assert target.count("`") % 2 == 0, key
+    assert re.findall(r"</?[A-Za-z][^>]*>|\[/?[A-Za-z][^\]]*\]",source) == re.findall(r"</?[A-Za-z][^>]*>|\[/?[A-Za-z][^\]]*\]",target), (key,"markup drift")
+    rendered = render_message(target, params, "vi")
+    hint = context[key]
+    assert "maxChars" not in hint or len(rendered) <= hint["maxChars"], key
+    assert "maxCells" not in hint or cell_len(rendered) <= hint["maxCells"], key
+    print(key, "PASS", "args="+repr(message_arguments(target)), "plural="+repr(branches), "sample_chars="+str(len(rendered)), "sample_cells="+str(cell_len(rendered)), "budget="+repr({k:v for k,v in hint.items() if k in ("maxCells","maxChars")}))
+    print("  sample:", rendered)
+    if branches:
+        # Exercise the complete vi CLDR category for zero, one and many.
+        for count in (0, 1, 2, 5, 101):
+            assert render_message(target, dict(params, count=count), "vi") == rendered
+        print("  plural samples 0,1,2,5,101: PASS (vi other only)")
+print("ALL 11: JSON/duplicate keys/key parity/context parity/argument name+kind+order/ICU/vi categories/code+markup/NFC/no combining marks/no bidi controls passed")
+print("No width hints in sidecar; measurements are illustrative inserted values, not a live rendered UI or universal width bound")
+for locale in ("en","vi"):
+    path = root / f"local_operator/i18n/catalogues/{locale}/{ns}.json"
+    print("SHA256",str(path.relative_to(root)),hashlib.sha256(path.read_bytes()).hexdigest())
+'
+[UTC 2026-11-16T04:40:18.269292+00:00]
+stdout:
+cli.serve_readiness.unproven PASS args=() plural=() sample_chars=119 sample_cells=119 budget={}
+  sample: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)
+cli.serve_readiness.not_reporting PASS args=() plural=() sample_chars=58 sample_cells=58 budget={}
+  sample: đã được ghi nhận nhưng không phản hồi (heartbeat đã ngừng)
+cli.serve_readiness.not_this_daemon PASS args=() plural=() sample_chars=60 sample_cells=60 budget={}
+  sample: đã được ghi nhận, nhưng PID đó hiện thuộc về tiến trình khác
+cli.serve_readiness.unknown_state PASS args=() plural=() sample_chars=41 sample_cells=41 budget={}
+  sample: được ghi nhận ở trạng thái không xác định
+cli.serve_readiness.install_unknown PASS args=() plural=() sample_chars=49 sample_cells=49 budget={}
+  sample: chạy bản dựng không thể đối chiếu với bản cài đặt
+cli.serve_readiness.cgroup_unknown PASS args=() plural=() sample_chars=63 sample_cells=63 budget={}
+  sample: chạy trong cgroup mà lần kiểm tra này không thể xác định vị trí
+cli.serve_readiness.recorded_gap PASS args=(('recorded', 'simple'), ('install', 'simple')) plural=() sample_chars=78 sample_cells=78 budget={}
+  sample: bản dựng được ghi nhận v1, bản cài đặt v3 (chưa xác minh danh tính tiến trình)
+cli.serve_readiness.unknown PASS args=(('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) plural=(('other',),) sample_chars=226 sample_cells=226 budget={}
+  sample: daemon `lop serve` trên node-a: pid 123: đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu), nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+  plural samples 0,1,2,5,101: PASS (vi other only)
+cli.serve_readiness.stale PASS args=(('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) plural=(('other',),) sample_chars=140 sample_cells=140 budget={}
+  sample: daemon `lop serve` trên node-a (123, 456) chạy v1, v2, nhưng bản cài đặt là v3: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+  plural samples 0,1,2,5,101: PASS (vi other only)
+cli.serve_readiness.other_unit PASS args=(('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) plural=(('other',),) sample_chars=109 sample_cells=109 budget={}
+  sample: daemon `lop serve` trên node-a thuộc dịch vụ khác (pid 123 under example.service), không thuộc unit lop serve
+  plural samples 0,1,2,5,101: PASS (vi other only)
+cli.serve_readiness.identity_restart PASS args=(('device', 'simple'),) plural=() sample_chars=194 sample_cells=194 budget={}
+  sample: trên node-a, chạy `lop services status` để kiểm tra các bản ghi, rồi chạy `lop services restart` để ghi nhận danh tính tiến trình; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện
+ALL 11: JSON/duplicate keys/key parity/context parity/argument name+kind+order/ICU/vi categories/code+markup/NFC/no combining marks/no bidi controls passed
+No width hints in sidecar; measurements are illustrative inserted values, not a live rendered UI or universal width bound
+SHA256 local_operator/i18n/catalogues/en/cli.serve_readiness.json 6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e
+SHA256 local_operator/i18n/catalogues/vi/cli.serve_readiness.json 76639bf0411f16c4c5a38c3f5ed852df89736e6cfb6c73658b6a7dcc1b261d1d
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --help
+[UTC 2026-11-16T04:40:51.444761+00:00]
+stdout:
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale vi --namespace cli.serve_readiness
+[UTC 2026-11-16T04:40:51.693804+00:00]
+stdout:
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/vi/cli.serve_readiness/sd1/ledger-receipt.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run
+[UTC 2026-11-16T04:41:46.006097+00:00]
+stdout:
+i18n/audit-history/vi/cli.serve_readiness.json
+
+stderr:
+
+exit_code: 0

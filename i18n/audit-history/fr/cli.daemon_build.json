@@ -1,0 +1,131 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.daemon_build",
+  "history_sha256": "85e114a7161725d125cc9ca8695fcf70c904a0173fed63618526f2c19f1a260e",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.daemon_build",
+      "source_sha256": "d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93",
+      "context_sha256": "a35175034f8cee80d9e80aef3deaf4d27809bf48e0ccea0b5d30246aed436c14",
+      "translator": {
+        "agent": "local-operator implementer (coder role), PR #4215 coder subagent",
+        "session": null,
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "623609b4ac65",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "changes_requested",
+        "findings": 5,
+        "unresolved_blocker_major": 3
+      },
+      "status": "changes_requested",
+      "note": "R1 r1-6236, 5/5 keys, parity ok; 3 MAJOR (FR-1,FR-2,FR-3), 2 MINOR: build≠version/bare-line fixes needed. Record: i18n/audits/evidence/fr/cli.daemon_build/r1-6236/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r1-6236/record.json",
+          "sha256": "10ab49139823d08b0a7fe58d4f4d110ca387d129a2ca20b410d9490aa591bc7d"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r1-6236/report.md",
+          "sha256": "1cb2a5507d4a0f9f54bc0888dbbce114a21f5856e19c7da877c91e33eae0a20d"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r1-6236/audit.log",
+          "sha256": "3a1b18e85721e660957b008f54e6d2708b74764a037aea74d349b463efd0cc08"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r1-6236/audit_checks.py.txt",
+          "sha256": "9fe25e772249eb0047db43d8c9d028cc23e7fe5680dfbc7dfc62732ea6a18aff"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.daemon_build",
+      "source_sha256": "d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93",
+      "context_sha256": "debe15d1868bfb9cc48d319b1faaf09ea5edd0d908269bb4bbe1442fd739c8cf",
+      "translator": {
+        "agent": "local-operator implementer (coder role), PR #4215 coder subagent",
+        "session": null,
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "2d9a335da8ba",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "changes_requested",
+        "findings": 1,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "R2 r2-2d9a delta re-audit, 5/5 keys, parity ok; FR-1..5 fixed, 1 new MAJOR (FR2-1): restart_failed reads 'running on the new build'. Record: i18n/audits/evidence/fr/cli.daemon_build/r2-2d9a/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r2-2d9a/record.json",
+          "sha256": "41319fba9a7890ec699a6749b65c9eac83bf7269f54bd6ea4dcccf1f21636189"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r2-2d9a/report.md",
+          "sha256": "f74618e839ca3ccce6b995bcf21b83f319760204e21b841a0d324e6e69601ec1"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r2-2d9a/audit.log",
+          "sha256": "0d81623dff4f92431708274ce12911cb07c8b85567482b55234db370580c2925"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r2-2d9a/audit_checks.py.txt",
+          "sha256": "b4c1f0a363dcaf136bd35861ca74918d7248466e4f081c0761f90d223db60042"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.daemon_build",
+      "source_sha256": "d2eca6d6879fb63e6433032158af8ba12186fdc2be7d371a40a17ecfdbcc1c93",
+      "context_sha256": "debe15d1868bfb9cc48d319b1faaf09ea5edd0d908269bb4bbe1442fd739c8cf",
+      "translator": {
+        "agent": "local-operator implementer (coder role), PR #4215 coder subagent",
+        "session": null,
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "0d00e986c25e",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "R3 r3-0d00 delta re-audit, 5/5 keys, parity ok; FR2-1 (MAJOR) fixed in 8300ed50, 0 findings. Record: i18n/audits/evidence/fr/cli.daemon_build/r3-0d00/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r3-0d00/record.json",
+          "sha256": "94e8d6df1c6e9f57cfbd5e737c095cc71a7ffb1e4a2d1ddc7a4a5645caadb18c"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r3-0d00/report.md",
+          "sha256": "1fc6253b384bd63081a375477dc3c62151cc2536b8ab410d276987df0956ca06"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r3-0d00/audit.log",
+          "sha256": "b73ecadba649d919d13b48f4db353073750be2bb6ba4a02aef198ce118186378"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.daemon_build/r3-0d00/audit_checks.py.txt",
+          "sha256": "077151a765d0f92f117ebc52d592a9b36d98eff095171abb9f0b1693fc5f9f1b"
+        }
+      ]
+    }
+  ]
+}

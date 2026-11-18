@@ -54,6 +54,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat as stat_mode
 import sys
 import tempfile
 import textwrap
@@ -613,28 +614,89 @@ def own_launcher_path_injection(
 def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     """``root/bin`` holding only a ``lop`` entry for ``launcher``, or ``None``.
 
-    Idempotent (an existing entry is left alone, so every bash call in a session
-    re-links nothing and the child's PATH text stays stable) and best-effort: a
-    root this session cannot write falls back to the pre-fix behaviour — no
+    Converges rather than creates-once: an entry already naming the desired
+    target is left alone (so every bash call in a session re-links nothing and
+    the child's PATH text stays stable), and an entry naming anything else, or
+    dangling, is replaced atomically (link to a temp name, then ``os.replace``,
+    so a concurrent bash call never sees the name missing). Best-effort: a root
+    this session cannot write falls back to the pre-fix behaviour — no
     injection — rather than failing the tool call. A symlink is preferred so the
     shim tracks the install; where symlinks are unavailable (Windows without the
     privilege) the launcher is copied, which is the same build's binary either
-    way.
+    way, and an existing copy is left alone (there is no generation layout there
+    to drift from).
+
+    NEVER A DIRECTORY: ``root`` is the session's scratchpad, which lives under
+    ``sessions/<id>/`` — the tree the session-deletion guard
+    (``tests/unit/session/test_no_session_deletion.py``) protects. The only
+    entries this function unlinks or replaces are the two fixed names
+    ``bin/<launcher-name>`` and ``bin/.<launcher-name>.<pid>.tmp``, and each is
+    ``lstat``-ed first: anything that is a real directory (not a symlink to one)
+    makes the shim give up, so a user's or another tool's directory at either
+    name is left byte-for-byte alone and the call falls back to no injection.
     """
     bin_dir = root / "bin"
     target = bin_dir / launcher.name
+    staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
+    desired = _stable_launcher(launcher)
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
-        if not target.is_file():
-            try:
-                target.symlink_to(launcher)
-            except OSError:
-                shutil.copyfile(launcher, target)
-                target.chmod(0o755)
+        if _is_real_directory(target) or _is_real_directory(staged):
+            return None
+        if target.is_symlink():
+            # ``exists()`` follows the link: a pruned generation reads as gone.
+            if os.readlink(target) == str(desired) and target.exists():
+                return bin_dir
+        elif target.is_file():
+            return bin_dir
+        with contextlib.suppress(FileNotFoundError):
+            staged.unlink()
+        try:
+            staged.symlink_to(desired)
+        except OSError:
+            shutil.copyfile(launcher, staged)
+            staged.chmod(0o755)
+        os.replace(staged, target)
         return bin_dir
     except OSError:
         logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
         return None
+
+
+def _is_real_directory(path: Path) -> bool:
+    """Whether ``path`` itself (not a symlink's target) is a directory.
+
+    ``lstat`` so a symlink to a directory reads as a link — removing or
+    replacing the link never touches the directory it names.
+    """
+    try:
+        return stat_mode.S_ISDIR(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _stable_launcher(launcher: Path) -> Path:
+    """``launcher`` re-anchored under ``current`` when it lives in a generation tree.
+
+    WHY: in a generation install ``sys.executable`` names THIS process's
+    generation (``~/.local/share/lop/generations/<stamp>/tools/…/bin/lop``), so
+    a shim linked to it kept running the old build after ``lop update`` flipped
+    ``current`` — and once that generation was pruned the link dangled and
+    ``lop`` in a bash child answered ``command not found`` (the node2 finding,
+    architect memo for manager 79bddc262663). The ``current/…`` spelling of the
+    same relative path is what a fresh ``lop`` would run, and it survives every
+    flip and prune. A launcher outside the generation tree (dev venv, pip,
+    desktop venv) is returned unchanged, as is one whose ``current`` twin does
+    not exist (pointer unreadable mid-flip, or a layout without it) — the
+    concrete launcher is still the right build for this session.
+    """
+    from local_operator.update import generation_containing, pointer_path
+
+    generation = generation_containing(launcher)
+    if generation is None:
+        return launcher
+    stable = pointer_path() / launcher.relative_to(generation)
+    return stable if stable.exists() else launcher
 
 
 def may_delegate_env_injection(context: object | None) -> dict[str, str]:
@@ -19114,6 +19176,14 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
         "transcript_path": None,
         "session_origin": None,
         "opened_by": None,
+        # THE BINDING: ``None`` is "no claim" -- the directory could not be
+        # read -- while ``""`` is the READ answer "this session carries no
+        # team". The two must stay distinguishable for the same reason
+        # ``sidebar_visibility`` keeps "unknown" beside "listed"/"hidden":
+        # printing an unreadable session's ``team: none`` would assert the one
+        # fact the read failed to establish.
+        "team": None,
+        "agent": None,
         # A directory that cannot be read is "unknown" visibility, never a
         # guess: the pre-seeded value is what both early returns carry, and
         # "listed" there asserted the one fact the read failed to establish
@@ -19128,6 +19198,14 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     except OSError:
         return extras
     extras["session_dir"] = str(directory)
+    # THE BINDING, through the claim helper: a read that FAILED makes no claim
+    # (``None``), where an absent sidecar is a successful read of an unbound
+    # session (``""``). The distinction is the one the pre-seeded block above
+    # documents.
+    claimable, team, agent = _sessions_attachment_claim(directory)
+    if claimable:
+        extras["team"] = team
+        extras["agent"] = agent
     from local_operator.session.session_tags import read_categories, read_entity_tags
 
     categories = read_categories(config_dir())
@@ -19199,8 +19277,91 @@ def _sessions_wait_phrase(row: Mapping[str, Any]) -> str:
     return f"waiting on {count} {'job' if count == 1 else 'jobs'}" if count > 0 else ""
 
 
+def _sessions_attachment_claim(session_dir: Path) -> tuple[bool, str, str]:
+    """``(claimable, team, agent)`` from a session's resume sidecar.
+
+    ``claimable`` is False when the answer could not be READ — the directory is
+    gone, or ``attachment.json`` is there but unreadable or unparseable — and a
+    caller must then make NO claim rather than print ``team: none``. A sidecar
+    that is simply ABSENT is a SUCCESSFUL read of an unbound session: claimable,
+    with ``""``. ``resume.read_session_attachment`` deliberately collapses
+    OSError and absence together (a resume must always open), which is right for
+    its own contract and useless for a display that must not assert a fact it
+    failed to read, so the stat decides here and the tolerant reader still does
+    the parsing.
+
+    Filesystem I/O: callers on the event loop go through ``asyncio.to_thread``.
+    """
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME, read_session_attachment
+
+    try:
+        os.stat(session_dir)
+    except OSError:
+        return False, "", ""
+    try:
+        os.stat(session_dir / ATTACHMENT_SIDECAR_NAME)
+    except FileNotFoundError:
+        return True, "", ""
+    except OSError:
+        return False, "", ""
+    stored = read_session_attachment(session_dir)
+    if stored is None:
+        # Present but unreadable or unparseable: something is there and its
+        # answer is unavailable, so this is not "no team".
+        return False, "", ""
+    return True, stored.team, stored.agent
+
+
+def _sessions_oneline(value: str) -> str:
+    """A NAME as one printable line.
+
+    WHY: the real setters validate team/profile names, but ``attachment.json``
+    is a file and a hand-written one is exactly the case the sessions guide
+    warns about. A newline in a name would forge a second field in a line a
+    model reads as structured (``team: x`` then a bogus ``origin: …``), so
+    whitespace collapses and other control characters become spaces. Display
+    only — a stored name is never rewritten.
+    """
+    if not value:
+        return ""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())
+
+
+def _sessions_row_team(row: Mapping[str, Any]) -> str | None:
+    """The team a listing row is bound to: ``""`` = none, ``None`` = no claim.
+
+    LOCAL row: the session's ``attachment.json``, read by the same tolerant
+    reader a resume uses. One small JSON read per SHOWN row -- the cost the
+    relay's own listing already pays per row (``relay._row_binding``) -- and a
+    listing's rows are bounded by ``limit``, so this stays a bounded read
+    rather than the per-row scan design §4 keeps out of the lean row. A row
+    whose sidecar cannot be READ answers ``None`` (no claim, the same rule
+    ``info`` follows), so "unreadable" never prints as "none".
+
+    REMOTE row: the peer stamps its own ``binding`` block with the same
+    ``"" -> None`` spelling, and the three answers are NOT interchangeable. A
+    peer carrying the key with a null team SAYS there is no team; a peer whose
+    build predates the key omits the block and has made no claim, which must
+    not be printed as ``team: none`` on a device that cannot see that sidecar.
+    """
+    if row.get("locality") == "remote" or "binding" in row:
+        binding = row.get("binding")
+        if not isinstance(binding, Mapping):
+            return None
+        value = binding.get("team")
+        return value if isinstance(value, str) else ""
+    session_id = str(row.get("session_id") or "")
+    if not session_id:
+        return None
+    claimable, team, _agent = _sessions_attachment_claim(config_dir() / "sessions" / session_id)
+    return team if claimable else None
+
+
 def _session_row_brief(
-    row: Mapping[str, Any], context: ToolContext | None = None, own_session_id: str = ""
+    row: Mapping[str, Any],
+    context: ToolContext | None = None,
+    own_session_id: str = "",
+    team: str | None = None,
 ) -> str:
     """One lean listing line: the fields a caller acts on. The full published
     row rides in ``details``, which costs no prompt tokens.
@@ -19217,6 +19378,10 @@ def _session_row_brief(
     applies to LOCAL rows only: ids are minted per device, so a peer's row
     that happens to share this id is a different session (``locality ==
     'remote'``).
+
+    ``team`` is :func:`_sessions_row_team`'s answer for this row, printed
+    beside the id because "which session" and "under which team" are one
+    identity question for a caller deciding whether to delegate to it.
     """
     block = row.get("peer") or {}
     unreachable = block.get("reachable") is False
@@ -19234,6 +19399,9 @@ def _session_row_brief(
     bits = [f"[{state}] {name}{' (this session)' if own else ''}"]
     if row.get("session_id"):
         bits.append(f"session {identifier_text(context, str(row['session_id']))}")
+    if team is not None:
+        shown_team = _sessions_oneline(team)
+        bits.append(f"team: {identifier_text(context, shown_team)}" if shown_team else "team: none")
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
@@ -19387,12 +19555,21 @@ async def _sessions_list(
     }
     if notes:
         details["notes"] = notes
+    # The sidecar reads happen OFF the loop, the same pattern ``list query=``
+    # uses: one bounded pass over at most ``limit`` rows, never a JSON read per
+    # row on the event loop.
+    row_teams = await asyncio.to_thread(lambda: [_sessions_row_team(row) for row in shown])
     lines: list[str] = [
         # The CALLER's id, so the caller's own row says so (see
         # ``_session_row_brief``). ``details['rows']`` above stays the
         # published shape byte-for-byte: the marker is text only.
-        _session_row_brief(row, context, str(getattr(context, "session_id", "") or ""))
-        for row in shown
+        _session_row_brief(
+            row,
+            context,
+            str(getattr(context, "session_id", "") or ""),
+            team=team,
+        )
+        for row, team in zip(shown, row_teams)
     ]
     if len(deduped) > len(shown):
         if scope == "local":
@@ -19446,7 +19623,7 @@ async def _sessions_list_query(
     # bytes rule the listing uses (see ``_session_row_brief``).
     own_session_id = str(getattr(context, "session_id", "") or "")
     rows: list[dict[str, Any]] = []
-    lines: list[str] = []
+    found: list[tuple[Any, Any]] = []
     for match in matches:
         session_row = match.row
         entry = live.get(session_row.id)
@@ -19460,6 +19637,13 @@ async def _sessions_list_query(
             row["pid"] = entry[0].pid
             row["model_label"] = entry[0].model_label
         rows.append(row)
+        found.append((session_row, entry))
+    # The binding, read once for the matched set rather than inside the render
+    # loop: one off-loop pass over at most ``limit`` sidecars, the same read the
+    # plain listing makes per shown row.
+    teams = await asyncio.to_thread(lambda: [_sessions_row_team(row) for row in rows])
+    lines: list[str] = []
+    for (session_row, entry), team in zip(found, teams):
         # Identifier fields: the title and id this search row prints are names
         # a caller quotes back; both are marked spans, not credentials.
         name = identifier_text(context, session_row.name or "(unnamed)")
@@ -19469,12 +19653,20 @@ async def _sessions_list_query(
             # session is unrecognisable.
             name += " (this session)"
         session_id = identifier_text(context, session_row.id)
+        binding = ""
+        if team is not None:
+            shown_team = _sessions_oneline(team)
+            binding = (
+                f", team: {identifier_text(context, shown_team)}" if shown_team else ", team: none"
+            )
         if entry:
-            lines.append(f"- [live] {name}, session {session_id}, pid {entry[0].pid}")
+            lines.append(f"- [live] {name}, session {session_id}, pid {entry[0].pid}{binding}")
         else:
             age = max(0.0, time.time() - float(session_row.mtime or 0.0))
             age_text = format_duration(int(age * 1000))
-            lines.append(f"- [stored] {name}, session {session_id}, last active {age_text} ago")
+            lines.append(
+                f"- [stored] {name}, session {session_id}, last active {age_text} ago{binding}"
+            )
     details: dict[str, Any] = {
         "op": "list",
         "query": params.query,
@@ -19506,6 +19698,22 @@ def _sessions_facts_line(extras: Mapping[str, Any], context: ToolContext | None 
         f"origin: {origin_text}",
         f"sidebar visibility: {extras.get('sidebar_visibility')}",
     ]
+    # THE BINDING, stated even when absent: a session with NO team is exactly
+    # the one a caller must not hand work that says "apply the team's
+    # standards" -- it cannot, and nothing else in this line would say so.
+    # ``None`` = the directory could not be read, so no claim is made.
+    team = extras.get("team")
+    if team is not None:
+        shown_team = _sessions_oneline(team)
+        second.append(
+            f"team: {identifier_text(context, shown_team)}" if shown_team else "team: none"
+        )
+    agent = extras.get("agent")
+    if agent and not team:
+        # A team OWNS the session's agent slot, so a stored agent beside it is
+        # superseded (``Session._apply_stored_attachment``); naming it would
+        # claim an identity that is not in force.
+        second.append(f"agent: {identifier_text(context, agent)}")
     opener = extras.get("opened_by")
     if opener:
         # Identifier fields: agent/profile name, its label and the opener
@@ -19798,6 +20006,13 @@ async def _sessions_info_mesh(
     # acts on; both are marked spans, never credentials.
     name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     bits = [f"[{state}] {name}", f"session {identifier_text(context, found.id)}"]
+    # The peer's own ``binding`` block, printed on the same rule the listing
+    # uses: a peer says "none" when it carries the key, and a build that
+    # predates the key has made no claim, so nothing is printed for it.
+    team = _sessions_row_team(row)
+    if team is not None:
+        shown_team = _sessions_oneline(team)
+        bits.append(f"team: {identifier_text(context, shown_team)}" if shown_team else "team: none")
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
@@ -20582,6 +20797,106 @@ def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[
     return argv
 
 
+#: Team names shorter than this are not searched for in a spawn's `name`/`prompt`.
+#:
+#: Whole-word matching alone is not enough: a registry may hold a team called
+#: ``ops``, ``dev`` or ``ai``, and those words sit inside ordinary prose all day
+#: ("dev server", "AI review"), so a warning that fired there would teach a
+#: model to skim past it. Four characters is the shortest length at which a team
+#: name is still specific enough to be worth a sentence. Advisory either way — a
+#: missed hint costs nothing, a noisy one costs the hint's meaning.
+_TEAM_MENTION_MIN_CHARS = 4
+
+
+def _sessions_team_mention_warning(params: SessionsParams, context: ToolContext | None) -> str:
+    """The spawn's advisory: a team is NAMED in the request, but none is attached.
+
+    WHY: a spawn for "the lopdev work" came up with no team, because a spawn
+    does not inherit the caller's (``_sessions_open_argv`` appends ``--team``
+    only from the argument), and the run then worked without that team's
+    briefs with nothing saying so. Naming the mismatch at the moment it is
+    cheap is the whole fix; the spawn proceeds either way.
+
+    Silent whenever this session has no team registry to ask (a reduced host, a
+    test double) or the registry cannot be read: a warning nobody could check
+    is worse than none. Matching is whole-word, case-insensitive, with
+    identifier-character lookarounds rather than ``\\b`` so a hyphenated name
+    (``lop-dev``) matches on its own edges; names under
+    ``_TEAM_MENTION_MIN_CHARS`` are skipped for the reason stated there.
+
+    Filesystem I/O (the registry read), so callers invoke it off the event loop.
+
+    A SPAWN THAT CARRIES ``profile=`` GETS A DIFFERENT SENTENCE: ``exec`` refuses
+    ``--team`` together with ``--profile`` at preflight (``exec_startup``, no
+    manager carve-out), so advising ``team=`` there would advise the one action
+    that fails. The note names the conflict instead.
+    """
+    if str(params.team or "").strip():
+        return ""
+    registry = getattr(context, "team_registry", None) if context is not None else None
+    if registry is None or not hasattr(registry, "list_teams"):
+        return ""
+    try:
+        names = [str(team.name or "").strip() for team in registry.list_teams()]
+    except Exception:  # noqa: BLE001 — advisory: a lock or recovery error must not gate a spawn
+        return ""
+    profile = _sessions_oneline(str(params.profile or "").strip())
+    fields = (("name", str(params.name or "")), ("prompt", str(params.prompt or "")))
+    for team_name in names:
+        if len(team_name) < _TEAM_MENTION_MIN_CHARS:
+            continue
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(team_name)}(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+        where = [field for field, value in fields if pattern.search(value)]
+        if not where:
+            continue
+        # Plural agreement, and every name printed as one line (a registry name
+        # is validated, but the note also goes into a receipt's prose).
+        subject = " and ".join(where)
+        verb = "names" if len(where) == 1 else "name"
+        shown = identifier_text(context, _sessions_oneline(team_name))
+        if profile:
+            return (
+                f"note: the {subject} {verb} the team {shown}, but this spawn carries "
+                f"`profile={identifier_text(context, profile)}` and `--team` cannot be "
+                "combined with `--profile` — spawn a second session with "
+                f"`team={_sessions_oneline(team_name)}` if this work needs that "
+                "team's briefs."
+            )
+        return (
+            f"note: the {subject} {verb} the team {shown}, but no `team=` was given "
+            "and a spawn does not inherit the caller's team — pass "
+            f"`team={_sessions_oneline(team_name)}` if this session should run under "
+            "that team's briefs."
+        )
+    return ""
+
+
+def _sessions_canonical_team_name(context: ToolContext | None, typed: str) -> str:
+    """The registry's own spelling of a team name, or the typed one.
+
+    A spawn's receipt must name the binding the run GETS, and the CLI resolves
+    through the same registry this reads (``get_team_by_name`` casefolds and
+    strips), so ``team="LOPDEV"`` binds the stored ``lopdev``. Echoing the typed
+    bytes would report a name the session does not carry.
+
+    Advisory by construction: no registry, no resolver, or a read that raises
+    echoes what the caller typed — a receipt must never fail a spawn.
+    Filesystem I/O, so callers invoke it off the event loop.
+    """
+    registry = getattr(context, "team_registry", None) if context is not None else None
+    if registry is None or not hasattr(registry, "get_team_by_name"):
+        return typed
+    try:
+        team = registry.get_team_by_name(typed)
+    except Exception:  # noqa: BLE001 — advisory: a receipt must not fail a spawn
+        return typed
+    name = str(getattr(team, "name", "") or "").strip()
+    return name or typed
+
+
 def _sessions_child_cwd(context: object | None) -> str | None:
     """The directory the spawned run starts in: this session's own cwd, when
     it is a real directory. Same rule the ``bash`` tool's cwd resolution
@@ -21034,6 +21349,17 @@ def _sessions_open_body(
         bits.append(f"pid {details['pid']}")
     if details.get("tags_applied"):
         bits.append("tags: " + ", ".join(details["tags"]))
+    # THE APPLIED BINDING: a spawn attaches exactly what `team=` named, so an
+    # absent team is stated (the session that must apply a team's standards
+    # cannot do it without one) and a named team says its briefs are in force.
+    if params.op == "spawn":
+        team = str(details.get("team") or "")
+        shown_team = _sessions_oneline(team)
+        bits.append(f"team: {identifier_text(context, shown_team)}" if shown_team else "team: none")
+    if details.get("profile"):
+        bits.append(
+            f"profile: {identifier_text(context, _sessions_oneline(str(details['profile'])))}"
+        )
     where = f" ({', '.join(bits)})" if bits else ""
     opener = details.get("opener") or {}
     opened_by = ""
@@ -21104,6 +21430,8 @@ def _sessions_open_body(
             f"route back is `lop exec --resume "
             f"{identifier_text(context, str(details['session_id']))}`."
         )
+    if details.get("team_hint"):
+        text += " " + str(details["team_hint"])
     return text
 
 
@@ -21333,6 +21661,24 @@ async def _sessions_open(
         if params.op == "spawn":
             return await _sessions_spawn_mesh(tool_call_id, params, context)
         return await _sessions_resume_mesh(tool_call_id, params, context)
+    # A LOCAL spawn's advisory only (see ``_sessions_team_mention_warning``):
+    # a mesh spawn's team must resolve on the OWNER's device, so this device's
+    # registry cannot answer for it and a hint from here could name a team the
+    # peer has never heard of.
+    team_hint = ""
+    applied_team = str(params.team or "").strip()
+    if params.op == "spawn":
+        if applied_team:
+            # Echo the name the run will CARRY, not the bytes the caller typed:
+            # the CLI resolves through this same registry, which casefolds and
+            # strips (``TeamRegistry.get_team_by_name``), so ``team="LOPDEV"``
+            # binds the stored ``lopdev`` and a receipt saying ``LOPDEV`` would
+            # misreport the binding.
+            applied_team = await asyncio.to_thread(
+                _sessions_canonical_team_name, context, applied_team
+            )
+        else:
+            team_hint = await asyncio.to_thread(_sessions_team_mention_warning, params, context)
     from local_operator.exec_mode import job_status
 
     resume_id = ""
@@ -21458,6 +21804,15 @@ async def _sessions_open(
         "pid": pid,
         "log_path": str(state.get("log") or "") or None,
     }
+    # WHAT THE SPAWN ACTUALLY ATTACHED. A spawn applies exactly what `team=` /
+    # `profile=` named and nothing by inheritance, so echoing it is the receipt's
+    # honest half of the spawn warning above: ``team: none`` is a fact a caller
+    # needs, not an absence.
+    if params.op == "spawn":
+        details["team"] = applied_team or None
+        details["profile"] = str(params.profile or "").strip() or None
+        if team_hint:
+            details["team_hint"] = team_hint
     if tag_ids is not None:
         from local_operator.session.session_tags import set_entity_tags
 

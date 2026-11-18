@@ -1,0 +1,55 @@
+import json, re, hashlib, unicodedata
+from pathlib import Path
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+base = Path('local_operator/i18n/catalogues')
+ns = 'cli.serve_readiness'
+def strict_pairs(pairs):
+    out = {}
+    for k, v in pairs:
+        assert k not in out, ('duplicate key', k)
+        out[k] = v
+    return out
+load = lambda p: json.loads(p.read_text(), object_pairs_hook=strict_pairs)
+en, fr = [load(base / loc / (ns + '.json')) for loc in ('en', 'fr')]
+ctx = load(base / 'en' / (ns + '.context.json'))
+assert len(en) == len(fr) == len(ctx) == 11
+assert en.keys() == fr.keys() == ctx.keys()
+def args(nodes):
+    result = set()
+    for n in nodes:
+        if isinstance(n, rt._Arg):
+            result.add((n.name, n.kind, n.skeleton))
+            for _, child in n.parts:
+                result.update(args(child))
+    return result
+def literals(nodes):
+    text = ''.join(n.value for n in nodes if isinstance(n, rt._Text))
+    return sorted(re.findall(r'`[^`]+`|</?[^>]+>', text))
+def contract(src, dst):
+    assert args(src) == args(dst)
+    assert literals(src) == literals(dst)
+    sa = {n.name:n for n in src if isinstance(n, rt._Arg) and n.parts}
+    da = {n.name:n for n in dst if isinstance(n, rt._Arg) and n.parts}
+    assert sa.keys() == da.keys()
+    for name,snode in sa.items():
+        dnode = da[name]
+        sb, db = dict(snode.parts), dict(dnode.parts)
+        if snode.kind == 'plural':
+            assert set(db) == {'one','many','other'}
+        else:
+            assert sb.keys() == db.keys()
+        for selector, body in db.items():
+            contract(sb.get(selector, sb['other']), body)
+params = {'count': 1, 'device':'node-a', 'pids':'123, 456', 'builds':'v1', 'install':'v2', 'recorded':'v1', 'holders':'custom.service', 'reasons':'pid 123 est enregistré, mais son identité reste non prouvée'}
+for key in en:
+    contract(rt.parse_message(en[key]), rt.parse_message(fr[key]))
+    assert all(unicodedata.bidirectional(c) not in {'LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI'} for c in fr[key])
+    print('PASS', key, 'arguments=', rt.message_arguments(fr[key]), 'plural_categories=', rt.plural_selectors(fr[key]))
+    counts = (0,1,2,1000000) if rt.plural_selectors(fr[key]) else (1,)
+    for count in counts:
+        out = rt.render_message(fr[key], dict(params, count=count), 'fr')
+        assert '{' not in out and '}' not in out
+        print('RENDER count=' + str(count), 'cells=' + str(cell_len(out)), out)
+print('SUMMARY: 11/11 keys; valid duplicate-free JSON; exact keys and context coverage; per-branch placeholder kinds and code/tag literals preserved; 3/3 plural messages contain one/many/other; no bidi controls')
+print('FIT: no maxCells/maxChars supplied; widths above use synthetic bounded values, not screenshot/layout evidence')

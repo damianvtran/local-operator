@@ -763,6 +763,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # children of the same quarantine directory. Neither can name a session
     # directory, and no path here is derived from a session id beyond the eight
     # characters sanitised into the directory's own label.
+    # The bash tool's `lop` shim (own_launcher_path_injection) lives in the
+    # session scratchpad, i.e. under sessions/<id>/, so these two calls DO sit in
+    # the protected tree. They are safe because both operate only on the two fixed
+    # entry names inside <scratchpad>/bin, and _launcher_shim_dir lstat-checks
+    # each and returns before either call when one is a real directory
+    # (test_shell_env.py::test_a_directory_at_the_shim_names_is_never_touched).
+    (
+        "local_operator/tools/builtin.py::_launcher_shim_dir",
+        "<path>.unlink",
+        "Removes only <scratchpad>/bin/.<launcher>.<pid>.tmp, this process's staged shim "
+        "entry, after an lstat check proved it is not a directory; unlink rejects directories.",
+    ),
+    (
+        "local_operator/tools/builtin.py::_launcher_shim_dir",
+        "os.replace",
+        "Renames the staged shim symlink/copy over <scratchpad>/bin/<launcher>, only after "
+        "an lstat check proved that target is not a directory; never a session directory.",
+    ),
     (
         "local_operator/tools/builtin.py::_unlink_quietly",
         "<path>.unlink",

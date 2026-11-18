@@ -1,0 +1,37 @@
+# Actual execution log
+Record reference: i18n/audits/evidence/fr/cli.serve_readiness/sd3r/record.json
+Auditor session 19f657b90086, actual model openai/gpt-6.1-sol; no fallback observed/reported
+UTC: 2026-11-16T05:25:17.485134+00:00
+CWD: /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+
+$ .venv/bin/python scripts/i18n/ledger.py append --help
+exit_code: 0
+stdout:
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+stderr:
+
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale fr --namespace cli.serve_readiness
+exit_code: 0
+stdout:
+a052b379228ca1206bccf0cc96ac39fe70599c9cd07d10b00857e0d0ff5f8f6b
+
+stderr:
+
+
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/fr/cli.serve_readiness/sd3r/ledger-receipt.json --expected-history-sha a052b379228ca1206bccf0cc96ac39fe70599c9cd07d10b00857e0d0ff5f8f6b --dry-run
+exit_code: 0
+stdout:
+i18n/audit-history/fr/cli.serve_readiness.json
+
+stderr:
+

@@ -107,7 +107,8 @@ def test_preference_and_held_review_are_independent(review_held: bool) -> None:
     assert values.screening_model == OPUS
     assert values.review_held is review_held
     assert values.enabled is False
-    assert values.hold_release is False
+    # The shipped default (ON since slice S3a), untouched by the preference.
+    assert values.hold_release is tb.DEFAULT_HOLD_RELEASE is True
 
 
 def test_a_listed_pair_splits_on_the_first_separator(tmp_path) -> None:

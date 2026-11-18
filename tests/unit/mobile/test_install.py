@@ -901,6 +901,8 @@ class _InstallRig:
         self.plist = plist
         self.calls: list[list[str]] = []
         self.serving = True
+        # The pid launchd publishes; `kickstart -k` respawns under a new one.
+        self.pid = 4242
         monkeypatch.setattr(install, "plist_path", lambda: plist)
         monkeypatch.setattr(install, "load_password", lambda: "a-password")
         monkeypatch.setattr(install, "ensure_bundle", lambda build=True: (True, "bundle present"))
@@ -916,7 +918,8 @@ class _InstallRig:
         self.calls.append(list(cmd))
         if cmd[:2] == ("kickstart", "-k"):
             self.serving = True  # the repair worked
-        return FakeProc(returncode=0, stdout="pid = 4242")
+            self.pid += 1
+        return FakeProc(returncode=0, stdout=f"pid = {self.pid}")
 
     def write_current_plist(self, port: int = install.DEFAULT_PORT) -> None:
         self.plist.parent.mkdir(parents=True, exist_ok=True)
@@ -955,20 +958,111 @@ def test_an_install_that_changes_nothing_does_not_write_or_reload(
     move (a rewrite is the EDR signal) and the call log must be EMPTY (a
     bootout/bootstrap is the other one).
     """
+    from local_operator import launchd
+
     rig = _InstallRig(monkeypatch, tmp_path)
     rig.write_current_plist()
     before = rig.plist.stat().st_mtime_ns
+    _running_build(monkeypatch, stale=None, verdict=False)
 
     result = install.install()
 
     assert result["ok"] is True
     steps = _steps(result)
     assert rig.plist.stat().st_mtime_ns == before, "the plist was rewritten"
-    assert rig.calls == [], f"install reached launchctl for no reason: {rig.calls}"
+    # ONE read-only `print`: the pid whose build proves "current" (2026-11-18).
+    # Nothing that writes, reloads or kicks.
+    assert rig.calls == [["print", f"{launchd.job_domain()}/{install.LABEL}"]], rig.calls
     assert any("already current" in step for step in steps), steps
     assert not any(
         "loaded the LaunchAgent" in step for step in steps
     ), "an install that skipped the load must not report one"
+    assert result["build"] == ""
+
+
+def _running_build(
+    monkeypatch, *, stale: Path | None, verdict: bool | None
+) -> None:  # noqa: ANN001
+    """Pin the running pid's build: the repair's reader and the tri-state together."""
+    from local_operator import update
+
+    monkeypatch.setattr(update, "stale_generation_of_process", lambda pid: stale)
+    monkeypatch.setattr(update, "generation_staleness_of_process", lambda pid: verdict)
+
+
+def test_a_current_plist_over_a_stale_build_restarts_the_daemon(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """Field finding 2026-11-18: "already current" while the phone got OLD code.
+
+    After 0.96.5 -> 0.106.7 the plist was byte-identical (it names the shim)
+    and the daemon served, so install left the old process in place. A PROVEN
+    stale build is kicked, confirmed by a new pid, and the step names it.
+    """
+    from local_operator import launchd
+
+    rig = _InstallRig(monkeypatch, tmp_path)
+    rig.write_current_plist()
+    before = rig.plist.stat().st_mtime_ns
+    _running_build(monkeypatch, stale=Path("/gen/20261113T090000Z-oldbuild"), verdict=True)
+
+    result = install.install()
+
+    assert result["ok"] is True, result
+    steps = _steps(result)
+    assert ["kickstart", "-k", f"{launchd.job_domain()}/{install.LABEL}"] in rig.calls
+    assert rig.pid == 4243, "the restart must be confirmed by a NEW pid"
+    assert rig.plist.stat().st_mtime_ns == before
+    assert any("20261113T090000Z-oldbuild" in step for step in steps), steps
+    assert not any("already current and serving" in step for step in steps), steps
+    # The build step alone, for `lop tunnel install`'s `_prepare_mobile` (R1-3).
+    assert "20261113T090000Z-oldbuild" in str(result["build"])
+
+
+def test_an_unconfirmed_build_is_restarted_not_called_current(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """No generation layout (pip/uv in place): the build cannot be read.
+
+    Mobile mirrors `update.mobile_refresh_command`: anything short of PROVEN
+    current bounces, so the phone never stays on old code behind "current".
+    """
+    from local_operator import launchd
+
+    rig = _InstallRig(monkeypatch, tmp_path)
+    rig.write_current_plist()
+    _running_build(monkeypatch, stale=None, verdict=None)
+
+    result = install.install()
+
+    assert result["ok"] is True, result
+    steps = _steps(result)
+    assert ["kickstart", "-k", f"{launchd.job_domain()}/{install.LABEL}"] in rig.calls
+    assert not any("already current and serving" in step for step in steps), steps
+    assert any("could not be confirmed" in step for step in steps), steps
+
+
+def test_a_refused_restart_onto_the_new_build_fails_the_install(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """A kick launchd refuses is a failed install naming `lop mobile restart`."""
+    rig = _InstallRig(monkeypatch, tmp_path)
+    rig.write_current_plist()
+    _running_build(monkeypatch, stale=Path("/gen/old"), verdict=True)
+    real = rig._launchctl
+
+    def refusing(*cmd: str) -> FakeProc:
+        if cmd[:1] == ("kickstart",):
+            rig.calls.append(list(cmd))
+            return FakeProc(returncode=1, stderr="Operation not permitted")
+        return real(*cmd)
+
+    monkeypatch.setattr(install, "_launchctl", refusing)
+
+    result = install.install()
+
+    assert result["ok"] is False
+    assert "lop mobile restart" in _error(result)
 
 
 def test_an_install_that_changes_the_plist_still_writes_and_reloads(
@@ -1130,3 +1224,116 @@ def test_a_wheel_shipped_dist_without_sources_is_never_discarded(tmp_path: Path)
     build.assert_not_called()
     assert (web / "dist" / "index.html").exists()
     assert (web / "dist" / "assets" / "a.js").exists()
+
+
+def test_linux_install_reports_a_restart_onto_the_new_build(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """The systemd twin of the 2026-11-18 finding: `enable --now` does not
+    restart a running unit, so install now asks #4175's build mover and prints
+    what it did. The mover itself is pinned in `test_update_daemon_parity`."""
+    from types import SimpleNamespace
+
+    from local_operator import supervisors, update
+
+    monkeypatch.setattr(install, "systemd_path", lambda: tmp_path / "mobile.service")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
+    monkeypatch.setattr(
+        supervisors, "systemctl_user", lambda *a, **k: SimpleNamespace(returncode=0, stderr="")
+    )
+    from local_operator import launchd
+
+    asked: list[dict[str, object]] = []
+
+    def mover(**kwargs: object) -> launchd.InstallBuildCheck:
+        asked.append(kwargs)
+        return launchd.InstallBuildCheck(
+            kind="restarted", recovery="lop mobile restart", generation="g-old"
+        )
+
+    monkeypatch.setattr(update, "systemd_install_build_line", mover)
+    steps: list[str] = []
+    note: list[str] = []
+
+    ok, error = install._install_systemd(
+        install.DEFAULT_PORT, dry_run=False, steps=steps, build_note=note
+    )
+
+    assert (ok, error) == (True, "")
+    # Mobile restarts on an UNPROVEN build too (R1-1), as on macOS.
+    assert asked == [
+        {
+            "name": "mobile",
+            "unit": install.SYSTEMD_UNIT,
+            "recovery": "lop mobile restart",
+            "restart_when_unproven": True,
+        }
+    ]
+    expected = launchd.InstallBuildCheck(
+        kind="restarted", recovery="lop mobile restart", generation="g-old"
+    ).step()
+    # Keyed copy, shared with macOS (R1-2), and surfaced for `_prepare_mobile` (R1-3).
+    assert steps[-1] == expected
+    assert note == [expected]
+
+
+def test_linux_install_fails_when_the_build_restart_fails(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """R1-2: a refused Linux restart fails the install, as `failed` does on macOS."""
+    from types import SimpleNamespace
+
+    from local_operator import launchd, supervisors, update
+
+    monkeypatch.setattr(install, "systemd_path", lambda: tmp_path / "mobile.service")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
+    monkeypatch.setattr(
+        supervisors, "systemctl_user", lambda *a, **k: SimpleNamespace(returncode=0, stderr="")
+    )
+    failed = launchd.InstallBuildCheck(kind="failed", recovery="lop mobile restart")
+    monkeypatch.setattr(update, "systemd_install_build_line", lambda **kwargs: failed)
+    steps: list[str] = []
+
+    ok, error = install._install_systemd(install.DEFAULT_PORT, dry_run=False, steps=steps)
+
+    assert ok is False
+    assert error == failed.step()
+    assert "lop mobile restart" in error
+    assert failed.step() not in steps
+
+
+def test_mobile_status_prints_the_stale_build_line_bare(
+    monkeypatch, capsys
+) -> None:  # noqa: ANN001
+    """R1-4: `lop mobile status` asks the census for "mobile" and prints its line."""
+    from local_operator import services
+    from local_operator.cli import build_cli_parser, mobile_command
+
+    monkeypatch.setattr(
+        install,
+        "status",
+        lambda: {
+            "ok": True,
+            "installed": True,
+            "password_set": True,
+            "healthy": True,
+            "gate_closed": True,
+            "bundle": "ok",
+            "log": "/dev/null",
+            "error": "",
+        },
+    )
+    asked: list[tuple[str, str]] = []
+
+    def line(name: str, command: str, **kwargs: object) -> str:
+        asked.append((name, command))
+        return "STALE-LINE"
+
+    monkeypatch.setattr(services, "stale_daemon_status_line", line)
+
+    mobile_command(build_cli_parser().parse_args(["mobile", "status"]))
+
+    assert asked == [("mobile", "lop mobile restart")]
+    assert "\nSTALE-LINE\n" in capsys.readouterr().out

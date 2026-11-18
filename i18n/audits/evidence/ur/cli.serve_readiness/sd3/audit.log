@@ -1,0 +1,133 @@
+ACTUAL EXECUTION LOG; Urdu auditor c736f176af6f
+UTC 2026-11-16T05:18:57.728619+00:00
+CWD /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade
+Interpreter /home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/ledger.py", "append", "--help"]
+EXIT 0
+STDOUT
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/check.py", "--catalogues-only"]
+EXIT 0
+STDOUT
+check.py: catalogue checks: 0 problem(s)
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "-"]
+STDIN_FROM i18n/audits/evidence/ur/cli.serve_readiness/sd3/mechanical.py.txt
+EXIT 0
+STDOUT
+INPUT_SHA256 en local_operator/i18n/catalogues/en/cli.serve_readiness.json c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10
+INPUT_SHA256 context local_operator/i18n/catalogues/en/cli.serve_readiness.context.json 40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428
+INPUT_SHA256 ur local_operator/i18n/catalogues/ur/cli.serve_readiness.json ea205b92cd2fdfa297a56464cd3ac44116fe37c6facce6b440a33fa02ad72e53
+HEAD 1fc11dab96954dcc4c31abcc695c696baf2ead8c
+UNCHANGED_VALUE_BYTES en cli.serve_readiness.cgroup_unknown 5f7bb362e191854c2fae045ccf22e8081ab60db087f2a65aa6f5f592de43368c
+UNCHANGED_VALUE_BYTES en cli.serve_readiness.install_unknown ecbf137d2c98bfe4f87b5244ebda7ba2d77f178d7866d583626a79984d7f45b8
+UNCHANGED_VALUE_BYTES en cli.serve_readiness.other_unit 03c7c68e179d3372d151d206bb9e630a608e63f24b53d93c95ffe8a74186c567
+UNCHANGED_VALUE_BYTES en cli.serve_readiness.stale 775803dd5c649de3de8ea616ce7514ff49306801fb2b286dff4626979ebc9143
+DELTA en updated 7 new 4 old_catalogue_sha256 6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e
+UNCHANGED_VALUE_BYTES ur cli.serve_readiness.cgroup_unknown dc5a5c024972260645c6b2a0440f197e4ef48f55edddc2f73fdebc5874a15516
+UNCHANGED_VALUE_BYTES ur cli.serve_readiness.install_unknown 0a9be5c5443af73b99614c038563ebbd5e28b36ed54e0f2eb0c5cae6f1f0a608
+UNCHANGED_VALUE_BYTES ur cli.serve_readiness.other_unit 1ff130bacc639999c3ea7fbf647e793f4452e2fb24c9f7a679ffa6c43870f853
+UNCHANGED_VALUE_BYTES ur cli.serve_readiness.stale 4dd323a19d78324b727fecdd133112f71e035a19e244c8c5bda343707544a102
+DELTA ur updated 7 new 4 old_catalogue_sha256 4180f78e34dd0ca0f9d0fa8b05a53de5abe8a103090d7f2bb9e0ae3446441f2a
+KEY_PASS cli.serve_readiness.unproven args () hints {}
+RENDER cli.serve_readiness.unproven count None cells 113 chars 113 ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)
+OPAQUE_PARAM_PASS cli.serve_readiness.unproven
+KEY_PASS cli.serve_readiness.not_reporting args () hints {}
+RENDER cli.serve_readiness.not_reporting count None cells 61 chars 61 ریکارڈ موجود ہے مگر کوئی جواب نہیں آ رہا (ہارٹ بیٹ رک گئی ہے)
+OPAQUE_PARAM_PASS cli.serve_readiness.not_reporting
+KEY_PASS cli.serve_readiness.not_this_daemon args () hints {}
+RENDER cli.serve_readiness.not_this_daemon count None cells 54 chars 54 ریکارڈ موجود ہے، مگر اب وہ PID کسی دوسرے عمل کے پاس ہے
+OPAQUE_PARAM_PASS cli.serve_readiness.not_this_daemon
+KEY_PASS cli.serve_readiness.unknown_state args () hints {}
+RENDER cli.serve_readiness.unknown_state count None cells 24 chars 24 نامعلوم حالت والا ریکارڈ
+OPAQUE_PARAM_PASS cli.serve_readiness.unknown_state
+KEY_PASS cli.serve_readiness.install_unknown args () hints {}
+RENDER cli.serve_readiness.install_unknown count None cells 62 chars 62 ایسا بلڈ چلاتا ہے جس کا نصب شدہ بلڈ سے موازنہ نہیں کیا جا سکتا
+OPAQUE_PARAM_PASS cli.serve_readiness.install_unknown
+KEY_PASS cli.serve_readiness.cgroup_unknown args () hints {}
+RENDER cli.serve_readiness.cgroup_unknown count None cells 62 chars 62 ایسے cgroup میں چلتا ہے جس کی نوعیت یہ جانچ متعین نہیں کر سکتی
+OPAQUE_PARAM_PASS cli.serve_readiness.cgroup_unknown
+KEY_PASS cli.serve_readiness.recorded_gap args (('recorded', 'simple'), ('install', 'simple')) hints {}
+RENDER cli.serve_readiness.recorded_gap count None cells 55 chars 55 ریکارڈ میں بلڈ v0.104.0 درج ہے؛ نصب شدہ بلڈ v0.105.3 ہے
+OPAQUE_PARAM_PASS cli.serve_readiness.recorded_gap
+KEY_PASS cli.serve_readiness.unknown args (('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) hints {}
+RENDER cli.serve_readiness.unknown count 0 cells 218 chars 219 node-2 پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+RENDER cli.serve_readiness.unknown count 1 cells 216 chars 217 node-2 پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہا ہے اور زیرِ نگرانی ہے یا نہیں
+RENDER cli.serve_readiness.unknown count 2 cells 218 chars 219 node-2 پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+RENDER cli.serve_readiness.unknown count 12 cells 218 chars 219 node-2 پر `lop serve` ڈیمن — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+OPAQUE_PARAM_PASS cli.serve_readiness.unknown
+KEY_PASS cli.serve_readiness.stale args (('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) hints {}
+RENDER cli.serve_readiness.stale count 0 cells 149 chars 149 node-2 پر `lop serve` ڈیمن (123, 456)، v0.104.0 چلاتے ہیں، مگر نصب شدہ بلڈ v0.105.3 ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+RENDER cli.serve_readiness.stale count 1 cells 148 chars 148 node-2 پر `lop serve` ڈیمن (123, 456)، v0.104.0 چلاتا ہے، مگر نصب شدہ بلڈ v0.105.3 ہے: اس کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرا بلڈ چلاتے ہیں
+RENDER cli.serve_readiness.stale count 2 cells 149 chars 149 node-2 پر `lop serve` ڈیمن (123, 456)، v0.104.0 چلاتے ہیں، مگر نصب شدہ بلڈ v0.105.3 ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+RENDER cli.serve_readiness.stale count 12 cells 149 chars 149 node-2 پر `lop serve` ڈیمن (123, 456)، v0.104.0 چلاتے ہیں، مگر نصب شدہ بلڈ v0.105.3 ہے: ان کی میزبانی میں چلنے والے ریموٹ سیشن وہ دوسرے بلڈ چلاتے ہیں
+OPAQUE_PARAM_PASS cli.serve_readiness.stale
+KEY_PASS cli.serve_readiness.other_unit args (('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) hints {}
+RENDER cli.serve_readiness.other_unit count 0 cells 110 chars 110 node-2 پر `lop serve` ڈیمن دوسری سروسز (pid 123 under external.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+RENDER cli.serve_readiness.other_unit count 1 cells 112 chars 112 node-2 پر `lop serve` ڈیمن کسی دوسری سروس (pid 123 under external.service) کے تحت ہے، lop serve یونٹ کے تحت نہیں
+RENDER cli.serve_readiness.other_unit count 2 cells 110 chars 110 node-2 پر `lop serve` ڈیمن دوسری سروسز (pid 123 under external.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+RENDER cli.serve_readiness.other_unit count 12 cells 110 chars 110 node-2 پر `lop serve` ڈیمن دوسری سروسز (pid 123 under external.service) کے تحت ہیں، lop serve یونٹ کے تحت نہیں
+OPAQUE_PARAM_PASS cli.serve_readiness.other_unit
+KEY_PASS cli.serve_readiness.identity_restart args (('device', 'simple'),) hints {}
+RENDER cli.serve_readiness.identity_restart count None cells 146 chars 146 node-2 پر ریکارڈ میں درج ڈیمن کو نصب شدہ بلڈ پر منتقل کرنے کے لیے `lop services restart` چلائیں؛ یہ کمانڈ کارروائی سے پہلے ہر ڈیمن کی جانچ کرتی ہے
+OPAQUE_PARAM_PASS cli.serve_readiness.identity_restart
+KEY_PASS cli.serve_readiness.pid_reason args (('count', 'plural'), ('pids', 'simple'), ('reason', 'simple')) hints {}
+RENDER cli.serve_readiness.pid_reason count 0 cells 145 chars 145 اعمال کے شناختی نمبر 123, 456 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)
+RENDER cli.serve_readiness.pid_reason count 1 cells 143 chars 143 عمل کا شناختی نمبر 123, 456 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)
+RENDER cli.serve_readiness.pid_reason count 2 cells 145 chars 145 اعمال کے شناختی نمبر 123, 456 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)
+RENDER cli.serve_readiness.pid_reason count 12 cells 145 chars 145 اعمال کے شناختی نمبر 123, 456 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا)
+OPAQUE_PARAM_PASS cli.serve_readiness.pid_reason
+KEY_PASS cli.serve_readiness.and_more args (('count', 'plural'),) hints {}
+RENDER cli.serve_readiness.and_more count 0 cells 10 chars 10 اور مزید 0
+RENDER cli.serve_readiness.and_more count 1 cells 10 chars 10 اور مزید 1
+RENDER cli.serve_readiness.and_more count 2 cells 10 chars 10 اور مزید 2
+RENDER cli.serve_readiness.and_more count 12 cells 11 chars 11 اور مزید 12
+OPAQUE_PARAM_PASS cli.serve_readiness.and_more
+KEY_PASS cli.serve_readiness.identity_no_action args (('count', 'plural'),) hints {}
+RENDER cli.serve_readiness.identity_no_action count 0 cells 140 chars 140 جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+RENDER cli.serve_readiness.identity_no_action count 1 cells 136 chars 136 جس ریکارڈ میں عمل کی شناخت ثابت نہیں، اس میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتا ہے؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+RENDER cli.serve_readiness.identity_no_action count 2 cells 140 chars 140 جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+RENDER cli.serve_readiness.identity_no_action count 12 cells 140 chars 140 جن ریکارڈز میں اعمال کی شناخت ثابت نہیں، ان میں درج بلڈ نصب شدہ بلڈ سے مطابقت رکھتے ہیں؛ اس غیر لازمی جانچ کے لیے کسی کارروائی کی ضرورت نہیں
+OPAQUE_PARAM_PASS cli.serve_readiness.identity_no_action
+KEY_PASS cli.serve_readiness.identity_restart_manual args (('device', 'simple'),) hints {}
+RENDER cli.serve_readiness.identity_restart_manual count None cells 159 chars 159 node-2 پر ریکارڈ میں درج ڈیمن کو نصب شدہ بلڈ پر منتقل کرنے کے لیے `lop serve` کو دستی طور پر دوبارہ شروع کریں؛ یہ موجودہ عمل میں خود کو دوبارہ لوڈ نہیں کر سکتا
+OPAQUE_PARAM_PASS cli.serve_readiness.identity_restart_manual
+GROUPED_DIAGNOSIS count 1 node-2 پر `lop serve` ڈیمن — عمل کا شناختی نمبر 123 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا); ریکارڈ میں بلڈ v0.104.0 درج ہے؛ نصب شدہ بلڈ v0.105.3 ہے، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہا ہے اور زیرِ نگرانی ہے یا نہیں
+GROUPED_DIAGNOSIS count 2 node-2 پر `lop serve` ڈیمن — اعمال کے شناختی نمبر 123, 456 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا); ریکارڈ میں بلڈ v0.104.0 درج ہے؛ نصب شدہ بلڈ v0.105.3 ہے، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+GROUPED_DIAGNOSIS count 12 node-2 پر `lop serve` ڈیمن — اعمال کے شناختی نمبر 123, 456 — ریکارڈ موجود ہے، مگر عمل کی شناخت ثابت نہیں کی جا سکتی (آغاز کے وقت کے کسی ٹائم اسٹیمپ کا موازنہ نہیں کیا جا سکا); ریکارڈ میں بلڈ v0.104.0 درج ہے؛ نصب شدہ بلڈ v0.105.3 ہے اور مزید 10، اس لیے معلوم نہیں کہ یہ نصب شدہ بلڈ چلا رہے ہیں اور زیرِ نگرانی ہیں یا نہیں
+PASS: 15 keys, six Urdu one/other plurals, exact four unchanged values per en/ur, opaque parameter preservation, grouped reason/no duplicate colon or identity parenthesis. Raw rendering and cells only; not terminal RTL or live remedy execution evidence.
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/ledger.py", "history-sha", "--locale", "ur", "--namespace", "cli.serve_readiness"]
+EXIT 0
+STDOUT
+c133486dfb91920d3a92b025400eb1a4eb8d10029bde3f2e96b1eee99562d151
+
+STDERR
+
+
+COMMAND ["/home/ec2-user/.local/share/lop/generations/20261115T203046Z-0.105.3/tools/local-operator/bin/python3", "scripts/i18n/ledger.py", "append", "--receipt", "i18n/audits/evidence/ur/cli.serve_readiness/sd3/ledger-receipt.json", "--expected-history-sha", "c133486dfb91920d3a92b025400eb1a4eb8d10029bde3f2e96b1eee99562d151", "--dry-run"]
+EXIT 0
+STDOUT
+i18n/audit-history/ur/cli.serve_readiness.json
+
+STDERR
+

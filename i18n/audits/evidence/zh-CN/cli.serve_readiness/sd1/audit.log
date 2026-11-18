@@ -1,0 +1,56 @@
+Actual execution log; auditor session 9d590e061719; model openai/gpt-6.1-sol; no fallback observed.
+{
+  "executed_at_utc": "2026-11-16T04:39:00.885469+00:00",
+  "command": [
+    "git",
+    "rev-parse",
+    "HEAD"
+  ],
+  "exit_code": 0,
+  "stdout": "e4a6b6e1d01ef269604fe6d005e6bce1453b66ca\n",
+  "stderr": ""
+}
+{
+  "executed_at_utc": "2026-11-16T04:39:00.915491+00:00",
+  "command": [
+    "python3",
+    "scripts/i18n/check.py",
+    "--catalogues-only"
+  ],
+  "exit_code": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\n  File \"/home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/scripts/i18n/check.py\", line 56, in <module>\n    import tomllib\nModuleNotFoundError: No module named 'tomllib'\n"
+}
+{
+  "executed_at_utc": "2026-11-16T04:39:00.954152+00:00",
+  "command": [
+    "python3",
+    "scripts/i18n/ledger.py",
+    "append",
+    "--help"
+  ],
+  "exit_code": 0,
+  "stdout": "usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT\n                        --expected-history-sha EXPECTED_HISTORY_SHA\n\noptional arguments:\n  -h, --help            show this help message and exit\n  --dry-run\n  --apply\n  --receipt RECEIPT\n  --expected-history-sha EXPECTED_HISTORY_SHA\n",
+  "stderr": ""
+}
+{
+  "executed_at_utc": "2026-11-16T04:39:18.592405+00:00",
+  "command": [
+    ".venv/bin/python",
+    "scripts/i18n/check.py",
+    "--catalogues-only"
+  ],
+  "exit_code": 0,
+  "stdout": "check.py: catalogue checks: 0 problem(s)\n",
+  "stderr": ""
+}
+{
+  "executed_at_utc": "2026-11-16T04:40:04.946119+00:00",
+  "command": [
+    ".venv/bin/python",
+    "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/verify.py.txt"
+  ],
+  "exit_code": 0,
+  "stdout": "INPUT local_operator/i18n/catalogues/en/cli.serve_readiness.json 6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e\nINPUT local_operator/i18n/catalogues/en/cli.serve_readiness.context.json e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693\nINPUT local_operator/i18n/catalogues/zh-CN/cli.serve_readiness.json c02337dab4639daae2784f9b089be5f95cda30406d504dfa558d19a94b569828\nKEY cli.serve_readiness.unproven arguments= () structures= [] width_hints= {}\n{\"count\": null, \"text\": \"已有记录，但无法证实其进程身份（没有可供比较的启动时间戳）\", \"sample_plain_cells\": 58, \"sample_chars\": 29}\nKEY cli.serve_readiness.not_reporting arguments= () structures= [] width_hints= {}\n{\"count\": null, \"text\": \"已有记录但未响应（心跳已停止）\", \"sample_plain_cells\": 30, \"sample_chars\": 15}\nKEY cli.serve_readiness.not_this_daemon arguments= () structures= [] width_hints= {}\n{\"count\": null, \"text\": \"已有记录，但该PID现已被其他进程占用\", \"sample_plain_cells\": 35, \"sample_chars\": 19}\nKEY cli.serve_readiness.unknown_state arguments= () structures= [] width_hints= {}\n{\"count\": null, \"text\": \"记录中的状态未知\", \"sample_plain_cells\": 16, \"sample_chars\": 8}\nKEY cli.serve_readiness.install_unknown arguments= () structures= [] width_hints= {}\n{\"count\": null, \"text\": \"运行的构建无法与当前安装的构建比较\", \"sample_plain_cells\": 34, \"sample_chars\": 17}\nKEY cli.serve_readiness.cgroup_unknown arguments= () structures= [] width_hints= {}\n{\"count\": null, \"text\": \"运行于此检查无法定位的cgroup中\", \"sample_plain_cells\": 30, \"sample_chars\": 18}\nKEY cli.serve_readiness.recorded_gap arguments= (('recorded', 'simple'), ('install', 'simple')) structures= [] width_hints= {}\n{\"count\": null, \"text\": \"记录中的构建为build-old，已安装的构建为build-new（进程身份未经证实）\", \"sample_plain_cells\": 68, \"sample_chars\": 43}\nKEY cli.serve_readiness.unknown arguments= (('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) structures= [('count', 'plural', ['other'])] width_hints= {}\n{\"count\": 0, \"text\": \"node-a上的`lop serve`守护进程：pid 123：已有记录，但无法证实其进程身份，因此无法确定是否与当前安装一致并受监督\", \"sample_plain_cells\": 110, \"sample_chars\": 67}\n{\"count\": 1, \"text\": \"node-a上的`lop serve`守护进程：pid 123：已有记录，但无法证实其进程身份，因此无法确定是否与当前安装一致并受监督\", \"sample_plain_cells\": 110, \"sample_chars\": 67}\n{\"count\": 2, \"text\": \"node-a上的`lop serve`守护进程：pid 123：已有记录，但无法证实其进程身份，因此无法确定是否与当前安装一致并受监督\", \"sample_plain_cells\": 110, \"sample_chars\": 67}\n{\"count\": 5, \"text\": \"node-a上的`lop serve`守护进程：pid 123：已有记录，但无法证实其进程身份，因此无法确定是否与当前安装一致并受监督\", \"sample_plain_cells\": 110, \"sample_chars\": 67}\n{\"count\": 21, \"text\": \"node-a上的`lop serve`守护进程：pid 123：已有记录，但无法证实其进程身份，因此无法确定是否与当前安装一致并受监督\", \"sample_plain_cells\": 110, \"sample_chars\": 67}\nKEY cli.serve_readiness.stale arguments= (('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) structures= [('count', 'plural', ['other'])] width_hints= {}\n{\"count\": 0, \"text\": \"node-a上的`lop serve`守护进程（pid 123, pid 456）运行的是build-old，但已安装的构建为build-new：其托管的远程会话也运行上述构建，而非已安装的构建\", \"sample_plain_cells\": 143, \"sample_chars\": 97}\n{\"count\": 1, \"text\": \"node-a上的`lop serve`守护进程（pid 123, pid 456）运行的是build-old，但已安装的构建为build-new：其托管的远程会话也运行上述构建，而非已安装的构建\", \"sample_plain_cells\": 143, \"sample_chars\": 97}\n{\"count\": 2, \"text\": \"node-a上的`lop serve`守护进程（pid 123, pid 456）运行的是build-old，但已安装的构建为build-new：其托管的远程会话也运行上述构建，而非已安装的构建\", \"sample_plain_cells\": 143, \"sample_chars\": 97}\n{\"count\": 5, \"text\": \"node-a上的`lop serve`守护进程（pid 123, pid 456）运行的是build-old，但已安装的构建为build-new：其托管的远程会话也运行上述构建，而非已安装的构建\", \"sample_plain_cells\": 143, \"sample_chars\": 97}\n{\"count\": 21, \"text\": \"node-a上的`lop serve`守护进程（pid 123, pid 456）运行的是build-old，但已安装的构建为build-new：其托管的远程会话也运行上述构建，而非已安装的构建\", \"sample_plain_cells\": 143, \"sample_chars\": 97}\nKEY cli.serve_readiness.other_unit arguments= (('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) structures= [('count', 'plural', ['other'])] width_hints= {}\n{\"count\": 0, \"text\": \"node-a上的`lop serve`守护进程由其他服务（pid 123 under example.service）管理，而非lop serve单元\", \"sample_plain_cells\": 95, \"sample_chars\": 75}\n{\"count\": 1, \"text\": \"node-a上的`lop serve`守护进程由其他服务（pid 123 under example.service）管理，而非lop serve单元\", \"sample_plain_cells\": 95, \"sample_chars\": 75}\n{\"count\": 2, \"text\": \"node-a上的`lop serve`守护进程由其他服务（pid 123 under example.service）管理，而非lop serve单元\", \"sample_plain_cells\": 95, \"sample_chars\": 75}\n{\"count\": 5, \"text\": \"node-a上的`lop serve`守护进程由其他服务（pid 123 under example.service）管理，而非lop serve单元\", \"sample_plain_cells\": 95, \"sample_chars\": 75}\n{\"count\": 21, \"text\": \"node-a上的`lop serve`守护进程由其他服务（pid 123 under example.service）管理，而非lop serve单元\", \"sample_plain_cells\": 95, \"sample_chars\": 75}\nKEY cli.serve_readiness.identity_restart arguments= (('device', 'simple'),) structures= [] width_hints= {}\n{\"count\": null, \"text\": \"请在node-a上运行`lop services status`检查记录，再运行`lop services restart`记录进程身份；重启操作会在采取行动前检查每个守护进程\", \"sample_plain_cells\": 127, \"sample_chars\": 88}\nPASS: all 11 keys; strict JSON/key/argument-kind parity; Chinese other-only plural; code/tag literals; no bidi format controls; all sample renders. No maxCells/maxChars hints. Width values are not rendered-frame or bounded-token proofs.\n",
+  "stderr": ""
+}

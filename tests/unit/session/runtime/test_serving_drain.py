@@ -971,6 +971,9 @@ class PromptHost(DrainHost):
 
     prompt = ServingSessionHandle.prompt
     steer = ServingSessionHandle.steer
+    # Refusals now release both the reservation and any frozen file ticket;
+    # borrow that production path too, rather than masking it with a fake no-op.
+    _refuse_admitted = ServingSessionHandle._refuse_admitted
     # The admission half the steer door now delegates to, so the borrow above
     # runs the production body rather than failing on a missing attribute.
     _admit_steer = ServingSessionHandle._admit_steer

@@ -1,0 +1,101 @@
+"""Read-only catalogue parser/render audit, not a daemon/service test.
+
+Run from checkout root with its existing .venv/bin/python. Baseline inspection is
+read-only git show; no fixtures, providers, service calls or translation tools.
+"""
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+from local_operator.i18n import runtime
+
+BUNDLE = Path('i18n/audits/evidence/zh-CN/cli.serve_readiness/sd3')
+NS = 'cli.serve_readiness'
+ROOT = Path('local_operator/i18n/catalogues')
+
+def strict_object(pairs):
+    result = {}
+    for key,value in pairs:
+        assert key not in result, ('duplicate JSON member',key)
+        result[key] = value
+    return result
+
+def load(path):
+    raw = path.read_bytes()
+    print('INPUT',path,hashlib.sha256(raw).hexdigest())
+    return json.loads(raw,object_pairs_hook=strict_object)
+
+en = load(ROOT/'en'/f'{NS}.json')
+context = load(ROOT/'en'/f'{NS}.context.json')
+zh_path = ROOT/'zh-CN'/f'{NS}.json'
+zh = load(zh_path)
+assert len(en)==len(context)==len(zh)==15
+assert set(en)==set(context)==set(zh)
+base_raw = subprocess.check_output(['git','show','1fc11dab:'+str(zh_path)])
+base = json.loads(base_raw,object_pairs_hook=strict_object)
+changed = [k for k in base if base[k]!=zh.get(k)]
+added = [k for k in zh if k not in base]
+unchanged = [k for k in base if base[k]==zh.get(k)]
+assert len(changed)==7 and len(added)==4 and len(unchanged)==4
+print('DELTA',json.dumps({'changed':changed,'added':added,'unchanged':unchanged,'baseline_target_sha256':hashlib.sha256(base_raw).hexdigest()},ensure_ascii=False))
+for key in unchanged:
+    old_line = next(line for line in base_raw.splitlines() if ('"'+key+'"').encode() in line)
+    new_line = next(line for line in zh_path.read_bytes().splitlines() if ('"'+key+'"').encode() in line)
+    assert old_line == new_line,key
+    print('UNCHANGED_MEMBER_BYTES',key,hashlib.sha256(new_line).hexdigest())
+
+def structures(nodes):
+    found=[]
+    for node in nodes:
+        if hasattr(node,'kind'):
+            if node.kind in ('plural','select'):
+                found.append((node.name,node.kind,[s for s,_ in node.parts]))
+            for _,body in node.parts:
+                found.extend(structures(body))
+    return found
+
+def cells(text):
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text)
+
+params = dict(device='node-a', pids='101, 102', holders='example.service',
+              recorded='old-build', install='new-build', builds='old-build',
+              reasons='诊断示例', reason='诊断示例')
+for key,text in zh.items():
+    en_args = runtime.message_arguments(en[key])
+    args = runtime.message_arguments(text)
+    assert args == en_args,(key,args,en_args)
+    plural = structures(runtime.parse_message(text))
+    for name,kind,selectors in plural:
+        assert kind != 'plural' or selectors == ['other'],(key,selectors)
+    assert set(re.findall(r'`[^`]*`',en[key])) == set(re.findall(r'`[^`]*`',text)),key
+    assert set(re.findall(r'</?[A-Za-z][^>]*>',en[key])) == set(re.findall(r'</?[A-Za-z][^>]*>',text)),key
+    assert not any(unicodedata.category(c)=='Cf' for c in text),key
+    print('KEY',key,'ARGS',args,'STRUCTURES',plural,'WIDTH_HINTS',{k:v for k,v in context[key].items() if k in ('maxCells','maxChars')})
+    counts = (0,1,2,5,21,1000) if any(n=='count' for n,_ in args) else (1,)
+    for count in counts:
+        rendered = runtime.render_message(text,dict(params,count=count),'zh-CN')
+        print(json.dumps({'key':key,'count':count,'text':rendered,'raw_cells':cells(rendered),'chars':len(rendered)},ensure_ascii=False))
+    opaque = {name: f'OPAQUE_{name}_{{unexpanded}}_[red]_`x`_/a-b' for name,kind in args if kind=='simple'}
+    rendered = runtime.render_message(text,dict(opaque,count=21),'zh-CN')
+    assert all(value in rendered for value in opaque.values()),key
+    print('OPAQUE_PASS',key)
+
+# Assemble exactly the catalogue-owned unknown/group fragments; separators are
+# caller-owned. This validates composition without importing readiness/services.
+def render(suffix,**values):
+    return runtime.render_message(zh[NS+'.'+suffix],values,'zh-CN')
+gap = render('recorded_gap',recorded='old-build',install='new-build')
+reason = zh[NS+'.unproven']+'; '+gap
+group = render('pid_reason',count=2,pids='101, 102',reason=reason)
+more = render('and_more',count=2)
+combined = render('unknown',count=4,device='node-a',reasons=group+' '+more)
+assert combined.count(zh[NS+'.unproven'])==1
+assert '::' not in combined and '：：' not in combined
+assert '（进程身份未经证实）' not in gap
+print('GROUPED_COMPOSITION',combined)
+print('NO_ACTION_WITH_UNKNOWN',render('unknown',count=1,device='node-a',reasons=render('pid_reason',count=1,pids='101',reason=zh[NS+'.unproven'])),render('identity_no_action',count=1))
+print('PASS: full 15-key strict JSON/key/argument-kind/code/tag/Chinese other-only parity; all plural samples and opaque-token renders; 7 changed + 4 new keys, 4 byte-identical retained members. No fixed width hints, rendered-frame or live selection execution claimed.')

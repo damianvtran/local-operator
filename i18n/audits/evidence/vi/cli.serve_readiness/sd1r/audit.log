@@ -1,0 +1,115 @@
+Actual captured subprocess executions; timestamps are UTC capture completion.
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+[UTC capture completed 2026-11-16T04:50:54.555331+00:00]
+stdout:
+check.py: catalogue checks: 0 problem(s)
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python -c 'import json,hashlib,re,unicodedata
+from pathlib import Path
+from local_operator.i18n.runtime import message_arguments,plural_selectors,parse_message,render_message
+from rich.cells import cell_len
+r=Path.cwd(); b=r/'"'"'i18n/audits/evidence/vi/cli.serve_readiness/sd1'"'"'; prior=json.loads((b/'"'"'record.json'"'"').read_text())
+def unique(pairs):
+    result={}
+    for k,v in pairs:
+        assert k not in result, ('"'"'duplicate key'"'"',k)
+        result[k]=v
+    return result
+def load(p): return json.loads(p.read_text(),object_pairs_hook=unique)
+inputs={k:r/v['"'"'path'"'"'] for k,v in prior['"'"'input_hashes'"'"'].items()}
+for k in ('"'"'en'"'"','"'"'context'"'"'):
+    assert hashlib.sha256(inputs[k].read_bytes()).hexdigest()==prior['"'"'input_hashes'"'"'][k]['"'"'sha256'"'"']
+en,ctx,vi=(load(inputs[k]) for k in ('"'"'en'"'"','"'"'context'"'"','"'"'vi'"'"'))
+assert len(vi)==11 and vi.keys()==en.keys()==ctx.keys()
+key='"'"'cli.serve_readiness.cgroup_unknown'"'"'
+assert vi[key]=='"'"'chạy trong cgroup mà lần kiểm tra này chưa phân loại được'"'"'
+old=dict(vi);old[key]='"'"'chạy trong cgroup mà lần kiểm tra này không thể xác định vị trí'"'"'
+old_bytes=(json.dumps(old,ensure_ascii=False,indent=2)+'"'"'\n'"'"').encode()
+assert hashlib.sha256(old_bytes).hexdigest()==prior['"'"'input_hashes'"'"']['"'"'vi'"'"']['"'"'sha256'"'"'], '"'"'Other target bytes changed'"'"'
+print('"'"'Exact accepted VI-SD1-01 replacement: PASS; reconstructing only this old value reproduces original target SHA256'"'"')
+for item in prior['"'"'guidance_hashes'"'"']:
+    assert hashlib.sha256((r/item['"'"'path'"'"']).read_bytes()).hexdigest()==item['"'"'sha256'"'"'],item['"'"'path'"'"']
+print('"'"'English, context and retained guidance bytes unchanged: PASS'"'"')
+for k,v in vi.items():
+    parse_message(v);assert message_arguments(v)==message_arguments(en[k]),k
+    assert all(set(p)=={'"'"'other'"'"'} for p in plural_selectors(v)),k
+    assert unicodedata.normalize('"'"'NFC'"'"',v)==v,k
+    assert not any(unicodedata.category(c) in ('"'"'Mn'"'"','"'"'Me'"'"') for c in v),k
+    assert set(re.findall(r'"'"'`([^`]+)`'"'"',v))==set(re.findall(r'"'"'`([^`]+)`'"'"',en[k])),k
+    assert v.count('"'"'`'"'"')%2==0,k
+    assert re.findall(r'"'"'</?[A-Za-z][^>]*>|\[/?[A-Za-z][^\]]*\]'"'"',v)==re.findall(r'"'"'</?[A-Za-z][^>]*>|\[/?[A-Za-z][^\]]*\]'"'"',en[k]),k
+    print(k,'"'"'mechanical PASS'"'"',message_arguments(v),plural_selectors(v))
+params=dict(count=1,device='"'"'node-a'"'"',reasons='"'"'pid 123: '"'"'+vi[key],holders='"'"'pid 123 under example.service'"'"',recorded='"'"'v1'"'"',install='"'"'v2'"'"')
+print('"'"'Changed fragment:'"'"',vi[key],'"'"'chars'"'"',len(vi[key]),'"'"'cells'"'"',cell_len(vi[key]))
+for k in ('"'"'cli.serve_readiness.unknown'"'"','"'"'cli.serve_readiness.other_unit'"'"','"'"'cli.serve_readiness.recorded_gap'"'"','"'"'cli.serve_readiness.unproven'"'"','"'"'cli.serve_readiness.identity_restart'"'"'):
+    for count in (0,1,2,5,101):
+        result=render_message(vi[k],dict(params,count=count),'"'"'vi'"'"')
+    print('"'"'Direct semantic neighbor sample:'"'"',k,result)
+print('"'"'11/11 keys mechanically clean. Changed key and direct neighbors exercised. No rendered UI claim.'"'"')
+'
+[UTC capture completed 2026-11-16T04:50:54.608975+00:00]
+stdout:
+Exact accepted VI-SD1-01 replacement: PASS; reconstructing only this old value reproduces original target SHA256
+English, context and retained guidance bytes unchanged: PASS
+cli.serve_readiness.unproven mechanical PASS () ()
+cli.serve_readiness.not_reporting mechanical PASS () ()
+cli.serve_readiness.not_this_daemon mechanical PASS () ()
+cli.serve_readiness.unknown_state mechanical PASS () ()
+cli.serve_readiness.install_unknown mechanical PASS () ()
+cli.serve_readiness.cgroup_unknown mechanical PASS () ()
+cli.serve_readiness.recorded_gap mechanical PASS (('recorded', 'simple'), ('install', 'simple')) ()
+cli.serve_readiness.unknown mechanical PASS (('count', 'plural'), ('device', 'simple'), ('reasons', 'simple')) (('other',),)
+cli.serve_readiness.stale mechanical PASS (('count', 'plural'), ('device', 'simple'), ('pids', 'simple'), ('builds', 'simple'), ('install', 'simple')) (('other',),)
+cli.serve_readiness.other_unit mechanical PASS (('count', 'plural'), ('device', 'simple'), ('holders', 'simple')) (('other',),)
+cli.serve_readiness.identity_restart mechanical PASS (('device', 'simple'),) ()
+Changed fragment: chạy trong cgroup mà lần kiểm tra này chưa phân loại được chars 57 cells 57
+Direct semantic neighbor sample: cli.serve_readiness.unknown daemon `lop serve` trên node-a: pid 123: chạy trong cgroup mà lần kiểm tra này chưa phân loại được, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+Direct semantic neighbor sample: cli.serve_readiness.other_unit daemon `lop serve` trên node-a thuộc dịch vụ khác (pid 123 under example.service), không thuộc unit lop serve
+Direct semantic neighbor sample: cli.serve_readiness.recorded_gap bản dựng được ghi nhận v1, bản cài đặt v2 (chưa xác minh danh tính tiến trình)
+Direct semantic neighbor sample: cli.serve_readiness.unproven đã được ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)
+Direct semantic neighbor sample: cli.serve_readiness.identity_restart trên node-a, chạy `lop services status` để kiểm tra các bản ghi, rồi chạy `lop services restart` để ghi nhận danh tính tiến trình; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện
+11/11 keys mechanically clean. Changed key and direct neighbors exercised. No rendered UI claim.
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --help
+[UTC capture completed 2026-11-16T04:50:54.648964+00:00]
+stdout:
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale vi --namespace cli.serve_readiness
+[UTC capture completed 2026-11-16T04:50:54.888494+00:00]
+stdout:
+cb85f93d7815a8750a87858c0c40bfa0ca1c4931e84c12765e8e5ead3bebf5f7
+
+stderr:
+
+exit_code: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/vi/cli.serve_readiness/sd1r/ledger-receipt.json --expected-history-sha cb85f93d7815a8750a87858c0c40bfa0ca1c4931e84c12765e8e5ead3bebf5f7 --dry-run
+[UTC capture completed 2026-11-16T04:51:50.091371+00:00]
+stdout:
+i18n/audit-history/vi/cli.serve_readiness.json
+
+stderr:
+
+exit_code: 0

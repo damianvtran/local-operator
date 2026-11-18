@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "Вопрос",
   "relay.transcript.label.messages": "Сообщения",
   "relay.transcript.composer.queued": "{count, plural, one {# в очереди} few {# в очереди} many {# в очереди} other {# в очереди}}",
-  "relay.transcript.session.unread_refused": "Не удалось прочитать непрочитанное — ничего не очищено. Повторите попытку."
+  "relay.transcript.session.unread_refused": "Не удалось прочитать непрочитанное — ничего не очищено. Повторите попытку.",
+  "relay.transcript.message.show_more": "Развернуть",
+  "relay.transcript.message.show_less": "Свернуть",
+  "relay.transcript.message.show_more_label": "Развернуть сообщение",
+  "relay.transcript.message.show_less_label": "Свернуть сообщение"
 }

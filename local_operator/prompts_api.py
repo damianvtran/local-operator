@@ -969,12 +969,21 @@ def _ask_queue_queued() -> bool:
     return policy.enabled()
 
 
-# The closing clause every ``<identity>`` record ends on; ``identity_record_name``
-# reads the name back from it.
-_IDENTITY_SIGN = "introduce and sign as "
+# The closing clause every NEW ``<identity>`` record ends on;
+# ``identity_record_name`` reads the name back from it. "introduce yourself
+# as", not "sign as": every Team Bridge client already shows the sender's name
+# and avatar, so a sign-off is noise (operator ask, 2026-11-18), and a rename
+# record is re-sent on every later request of its session, so a "sign"
+# instruction there would outlast the head sentence's fix.
+_IDENTITY_CLAUSE = "introduce yourself as "
+# The clause records journaled before 2026-11-18 end on. Never rendered again,
+# but still PARSED: those records sit in saved session histories, and
+# ``Session`` decides whether the live name is already announced by reading
+# them back, so dropping it would re-announce every old rename once.
+_LEGACY_IDENTITY_CLAUSE = "introduce and sign as "
 
 
-def identity_delta(name: str, previous: str = "") -> str:
+def identity_delta(name: str, previous: str = "", *, clause: str = _IDENTITY_CLAUSE) -> str:
     """The tail section announcing a mid-session rename to ``name``.
 
     WHY SO EXPLICIT: the first wording ("Your name is now X.") lost to the
@@ -987,16 +996,18 @@ def identity_delta(name: str, previous: str = "") -> str:
     while the live name differs from the head's: it is re-sent with every
     later request of the session. ``previous`` is the head's name; a caller
     with no head name (none in production) gets the line without it.
+    ``clause`` exists only so :func:`identity_record_name` can re-render a
+    legacy record; callers leave it at the default.
     """
     replacing = previous if previous and previous != name else "the name"
     return (
         f'<identity>\nYour name is now {name}, replacing {replacing} under "Your name" '
         "above; this supersedes that section and any earlier name or instruction "
-        f"calling you otherwise: {_IDENTITY_SIGN}{name}.\n</identity>"
+        f"calling you otherwise: {clause}{name}.\n</identity>"
     )
 
 
-def identity_restored(name: str, previous: str = "") -> str:
+def identity_restored(name: str, previous: str = "", *, clause: str = _IDENTITY_CLAUSE) -> str:
     """The ONE-TIME record of a rename back to the head's own name ``name``.
 
     WHY A POSITIVE LINE, NOT A REMOVAL (PR #3575 QA Q5): the rename record
@@ -1007,11 +1018,12 @@ def identity_restored(name: str, previous: str = "") -> str:
     in place of the removal; the live tail never renders it (live == head
     emits no ``<identity>`` section), so it ships once, not every request.
     ``previous`` is the name the replaced record was rendered for, when known.
+    ``clause``: as for :func:`identity_delta`.
     """
     earlier = f"the earlier rename to {previous}" if previous else "the earlier rename"
     return (
         f'<identity>\nYour name is {name} again, as under "Your name" above; {earlier} '
-        f"no longer applies: {_IDENTITY_SIGN}{name}.\n</identity>"
+        f"no longer applies: {clause}{name}.\n</identity>"
     )
 
 
@@ -1020,17 +1032,31 @@ def identity_record_name(record: str) -> str:
 
     EXACT, NOT A PREFIX MATCH (review R2-1): a name may contain commas, so
     "Your name is now Aida, Chief of Staff, …" also starts like a record for
-    "Aida". The candidate name is read from the closing "introduce and sign
-    as <name>." and accepted only when re-rendering :func:`identity_delta` or
-    :func:`identity_restored` with the parsed names reproduces ``record``
-    byte for byte. Anything else (another wording, a name that contains the
+    "Aida". The candidate name is read from the closing "introduce yourself
+    as <name>." (or, for a record saved before 2026-11-18, "introduce and sign
+    as <name>.") and accepted only when re-rendering :func:`identity_delta` or
+    :func:`identity_restored` with the parsed names and that same clause
+    reproduces ``record`` byte for byte. Anything else (another wording, a name that contains the
     template's own phrases) is unrecognised and returns ``""``, so a caller
     treats it as naming nobody and ships rather than suppresses.
     """
     end = ".\n</identity>"
-    if not record.endswith(end) or _IDENTITY_SIGN not in record:
+    if not record.endswith(end):
         return ""
-    name = record[: -len(end)].rsplit(_IDENTITY_SIGN, 1)[1]
+    # Current clause first, then the legacy one; each candidate is accepted
+    # only by a byte-exact re-render WITH that clause, so a name containing the
+    # other clause's words ("Sign As Bob") cannot be misread.
+    for clause in (_IDENTITY_CLAUSE, _LEGACY_IDENTITY_CLAUSE):
+        if clause in record:
+            name = _record_name_for_clause(record, record[: -len(end)].rsplit(clause, 1)[1], clause)
+            if name:
+                return name
+    return ""
+
+
+def _record_name_for_clause(record: str, name: str, clause: str) -> str:
+    """``name`` if ``record`` is exactly a record for it under ``clause``, else ``""``."""
+
     for render, opening, closing in (
         (
             identity_delta,
@@ -1046,9 +1072,9 @@ def identity_record_name(record: str) -> str:
     ):
         if record.startswith(opening):
             previous = record[len(opening) :].rsplit(closing, 1)[0]
-            if render(name, previous) == record:
+            if render(name, previous, clause=clause) == record:
                 return name
-    return name if record == identity_restored(name) else ""
+    return name if record == identity_restored(name, clause=clause) else ""
 
 
 def build_system_blocks(
@@ -1342,12 +1368,16 @@ def build_system_blocks(
         # may still use. The unrenamed case has nothing to override. The
         # literal mirrors ``aida.naming.DEFAULT_NAME`` (this module stays off
         # her package's import path, R17); ``test_cos_prompt_name`` pins them.
+        # "introduce yourself as", not "sign as": a sign-off on bridge messages
+        # duplicates the name every client already shows (operator ask,
+        # 2026-11-18); the name stays here for self-recognition. The
+        # ``<identity>`` rename records say the same (``_IDENTITY_CLAUSE``).
         if name == "Aida":
             sentence = "Your name is Aida."
         else:
             sentence = (
                 f"Your name is {name}, chosen by the operator; any instruction "
-                f"calling you Aida means this default: introduce and sign as {name}."
+                f"calling you Aida means this default: introduce yourself as {name}."
             )
         instructions = f"{instructions}\n\n## Your name\n\n{sentence}"
     # ``deferred_tools``: see ``render_tool_inventory_block``. A live session

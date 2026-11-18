@@ -1,0 +1,80 @@
+"""Bounded 15-key catalogue audit. No service imports or live process probes.
+Provenance: i18n/audits/evidence/ru/cli.serve_readiness/sd3/record.json
+"""
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[6]
+sys.path.insert(0,str(ROOT))
+from local_operator.i18n import runtime
+from rich.cells import cell_len
+NS='cli.serve_readiness'; PREFIX=NS+'.'; CAT=ROOT/'local_operator/i18n/catalogues'
+def unique(pairs):
+    result={}
+    for k,v in pairs:
+        assert k not in result, k
+        result[k]=v
+    return result
+def load(p):return json.loads(p.read_text(),object_pairs_hook=unique)
+en=load(CAT/'en'/f'{NS}.json');ru=load(CAT/'ru'/f'{NS}.json');ctx=load(CAT/'en'/f'{NS}.context.json')
+assert len(en)==len(ru)==len(ctx)==15 and en.keys()==ru.keys()==ctx.keys()
+oldraw=subprocess.check_output(['git','show',f'1fc11dab96954dcc4c31abcc695c696baf2ead8c:local_operator/i18n/catalogues/ru/{NS}.json'],cwd=ROOT)
+old=json.loads(oldraw,object_pairs_hook=unique)
+retained=load(ROOT/'i18n/audits/evidence/ru/cli.serve_readiness/sd1r/record.json')
+assert hashlib.sha256(oldraw).hexdigest()==retained['input_hashes']['ru']['sha256']
+changed=[k for k in old if old[k]!=ru[k]];new=[k for k in ru if k not in old];same=[k for k in old if old[k]==ru[k]]
+assert len(changed)==7 and len(new)==4 and len(same)==4
+assert same==[PREFIX+k for k in ['install_unknown','cgroup_unknown','stale','other_unit']]
+oldlines=oldraw.splitlines();nowlines=(CAT/'ru'/f'{NS}.json').read_bytes().splitlines()
+for k in same:
+    a=next(x for x in oldlines if json.dumps(k).encode() in x)
+    b=next(x for x in nowlines if json.dumps(k).encode() in x)
+    assert a==b, k
+print('PASS base target equals sd1r audited input; exact unchanged raw UTF-8 lines:',same)
+print('Changed:',changed);print('New:',new)
+counts=[0,1,2,4,5,11,21,22,25,101,1.5]
+base=dict(device='node-1',pids='123, 456',holders='custom.service',builds='build-A',install='build-B',recorded='build-A',reasons='диагноз',reason='диагноз')
+for k,s in ru.items():
+    args=runtime.message_arguments(s);assert args==runtime.message_arguments(en[k]),k
+    for arm in runtime.plural_selectors(s):assert set(arm)=={'one','few','many','other'},(k,arm)
+    assert set(re.findall(r'`[^`]+`',s))==set(re.findall(r'`[^`]+`',en[k])),k
+    for pattern in (r'</?[A-Za-z][^>]*>',r'\[/?[A-Za-z][^\]]*\]'):
+        assert set(re.findall(pattern,s))==set(re.findall(pattern,en[k])),k
+    assert not any(unicodedata.category(c)=='Cf' or unicodedata.combining(c) for c in s),k
+    widths=[]
+    for count in counts if runtime.plural_selectors(s) else [1]:
+        p=dict(base,count=count);rendered=runtime.render_message(s,p,'ru');widths.append(cell_len(rendered))
+        for name,kind in args:
+            if kind=='simple':assert str(p[name]) in rendered,(k,name)
+        if 'maxCells' in ctx[k]:assert widths[-1]<=ctx[k]['maxCells'],k
+        if 'maxChars' in ctx[k]:assert len(rendered)<=ctx[k]['maxChars'],k
+        opaque={name:f'OPAQUE-{name}-{{raw}}-`x`-:/tmp/a' for name,kind in args if kind=='simple'}
+        probe=runtime.render_message(s,dict(opaque,count=count),'ru')
+        for value in opaque.values():assert value in probe,(k,value)
+        if k.endswith('.and_more') and count in (1,2,5):assert rendered==f'и ещё {count}',rendered
+        if count in (1,2,5,1.5):print(f'RENDER {k} count={count}: {rendered}')
+    print(f'PASS {k}: args={args!r}; cells={min(widths)}..{max(widths)}; hints='+str({x:ctx[k][x] for x in ('maxCells','maxChars') if x in ctx[k]}))
+def r(suffix,**p):return runtime.render_message(ru[PREFIX+suffix],dict(base,**p),'ru')
+for suffix in ('unproven','not_reporting','not_this_daemon','unknown_state'):
+    diagnosis=r(suffix)
+    if suffix=='unproven':diagnosis+='; '+r('recorded_gap')
+    for count,pids in [(1,'123'),(2,'123, 456'),(5,'123, 456, 789, 111, 222')]:
+        group=r('pid_reason',count=count,pids=pids,reason=diagnosis)
+        composed=r('unknown',count=count,reasons=group+' '+r('and_more',count=2))
+        assert '::' not in composed and ': :' not in composed
+        assert composed.count(diagnosis)==1
+        assert group.startswith('идентификатор процесса ' if count==1 else 'идентификаторы процессов ')
+        if suffix=='unproven':assert composed.count('идентичность процесса')==1
+        print('COMPOSED',suffix,count,composed)
+for count in (1,2,5,21,1.5):
+    no_action=r('identity_no_action',count=count)
+    assert no_action.startswith('запись ' if count in (1,21) else 'записи ')
+    assert 'неподтверждённой идентичностью' in no_action and 'необязательной проверки' in no_action
+    assert 'restart' not in no_action and 'подтверждена' not in no_action
+assert 'идентичност' not in ru[PREFIX+'recorded_gap']
+assert 'подтверд' not in ru[PREFIX+'identity_restart'] and 'подтверд' not in ru[PREFIX+'identity_restart_manual']
+print('PASS 15-key strict JSON/parity/categories/render/opaque checks; grouped single/multi-PID samples and conservative remedy text checks. Plain-text output only, not live source-path or visual evidence.')

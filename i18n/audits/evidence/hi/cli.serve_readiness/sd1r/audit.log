@@ -1,0 +1,122 @@
+UTC: 2026-11-16T04:50:58.714316+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:50:58.770143+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python -c 'import json, hashlib, re
+from pathlib import Path
+from local_operator.i18n import runtime as rt
+from rich.cells import cell_len
+root=Path.cwd()
+previous=json.loads((root/'"'"'i18n/audits/evidence/hi/cli.serve_readiness/sd1/record.json'"'"').read_text())
+sha=lambda b:hashlib.sha256(b).hexdigest()
+for label in ('"'"'en'"'"','"'"'context'"'"'):
+    item=previous['"'"'input_hashes'"'"'][label]
+    assert sha((root/item['"'"'path'"'"']).read_bytes())==item['"'"'sha256'"'"'],label
+for item in previous['"'"'reference_hashes'"'"'][:2]:
+    assert sha((root/item['"'"'path'"'"']).read_bytes())==item['"'"'sha256'"'"'],item['"'"'path'"'"']
+print('"'"'PASS: English, context, glossary and Hindi style guide unchanged from sd1.'"'"')
+old='"'"'ऐसे cgroup में चलता है जिसका स्थान यह जाँच तय नहीं कर सकती'"'"'
+new='"'"'ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है'"'"'
+hi_path=root/previous['"'"'input_hashes'"'"']['"'"'hi'"'"']['"'"'path'"'"']
+data=hi_path.read_bytes()
+assert data.count(new.encode())==1
+assert sha(data.replace(new.encode(),old.encode()))==previous['"'"'input_hashes'"'"']['"'"'hi'"'"']['"'"'sha256'"'"']
+print('"'"'PASS: exact suggested replacement applied; reversing only cgroup_unknown restores entire sd1 target SHA-256. All other 10 keys byte-identical.'"'"')
+def pairs(items):
+    out={}
+    for key,value in items:
+        assert key not in out,key
+        out[key]=value
+    return out
+load=lambda p:json.loads(p.read_text(),object_pairs_hook=pairs)
+hi=load(hi_path)
+en=load(root/previous['"'"'input_hashes'"'"']['"'"'en'"'"']['"'"'path'"'"'])
+context=load(root/previous['"'"'input_hashes'"'"']['"'"'context'"'"']['"'"'path'"'"'])
+assert hi.keys()==en.keys()==context.keys() and len(hi)==11
+cats=set(load(root/'"'"'local_operator/i18n/data/plural_rules.json'"'"')['"'"'locales'"'"']['"'"'hi'"'"']['"'"'categories'"'"'])
+def structure(nodes):
+    return [(n.name,n.kind,n.skeleton,[(selector,structure(body)) for selector,body in n.parts]) for n in nodes if isinstance(n,rt._Arg)]
+for key in hi:
+    assert structure(rt.parse_message(hi[key]))==structure(rt.parse_message(en[key])),key
+    assert rt.message_arguments(hi[key])==rt.message_arguments(en[key]),key
+    assert re.findall(r'"'"'`[^`]*`'"'"',hi[key])==re.findall(r'"'"'`[^`]*`'"'"',en[key]),key
+    for selectors in rt.plural_selectors(hi[key]): assert set(selectors)==cats,key
+print('"'"'PASS: all 11 keys remain duplicate-free, exact argument/type/branch structure and backticks; all Hindi CLDR one/other categories present.'"'"')
+base='"'"'cli.serve_readiness.'"'"'
+assert hi[base+'"'"'cgroup_unknown'"'"']==new
+reason='"'"'pid 21: '"'"'+rt.render_message(hi[base+'"'"'cgroup_unknown'"'"'],{},'"'"'hi'"'"')
+params={'"'"'device'"'"':'"'"'node-a'"'"','"'"'reasons'"'"':reason,'"'"'holders'"'"':'"'"'example.service'"'"','"'"'recorded'"'"':'"'"'v0.89.0'"'"','"'"'install'"'"':'"'"'v0.91.0'"'"'}
+for suffix in ('"'"'cgroup_unknown'"'"','"'"'unproven'"'"','"'"'install_unknown'"'"','"'"'recorded_gap'"'"','"'"'unknown'"'"','"'"'other_unit'"'"','"'"'identity_restart'"'"'):
+    key=base+suffix
+    for count in ((0,1,2,5,21) if rt.plural_selectors(hi[key]) else (1,)):
+        text=rt.render_message(hi[key],dict(params,count=count),'"'"'hi'"'"')
+        print(f'"'"'{key} count={count} chars={len(text)} cells={cell_len(text)}: {text}'"'"')
+print('"'"'TEXT-ONLY renders. No frame capture or service operation. Semantic re-audit scope: changed cgroup key and six direct neighbors; unchanged initial all-key coverage retained.'"'"')
+for label in ('"'"'en'"'"','"'"'context'"'"','"'"'hi'"'"'):
+    item=previous['"'"'input_hashes'"'"'][label]
+    print('"'"'CURRENT_SHA256'"'"',label,item['"'"'path'"'"'],sha((root/item['"'"'path'"'"']).read_bytes()))
+'
+PASS: English, context, glossary and Hindi style guide unchanged from sd1.
+PASS: exact suggested replacement applied; reversing only cgroup_unknown restores entire sd1 target SHA-256. All other 10 keys byte-identical.
+PASS: all 11 keys remain duplicate-free, exact argument/type/branch structure and backticks; all Hindi CLDR one/other categories present.
+cli.serve_readiness.cgroup_unknown count=1 chars=68 cells=49: ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है
+cli.serve_readiness.unproven count=1 chars=126 cells=87: दर्ज है, लेकिन इसकी प्रक्रिया की पहचान प्रमाणित नहीं की जा सकती (शुरू होने के समय के किसी टाइमस्टैम्प की तुलना नहीं की जा सकी)
+cli.serve_readiness.install_unknown count=1 chars=72 cells=51: ऐसे बिल्ड पर चलता है जिसकी तुलना इंस्टॉल किए गए बिल्ड से नहीं की जा सकती
+cli.serve_readiness.recorded_gap count=1 chars=81 cells=61: दर्ज बिल्ड v0.89.0, इंस्टॉल किया गया बिल्ड v0.91.0 (प्रक्रिया की पहचान अप्रमाणित)
+cli.serve_readiness.unknown count=0 chars=192 cells=149: node-a पर `lop serve` डेमन: pid 21: ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+cli.serve_readiness.unknown count=1 chars=192 cells=149: node-a पर `lop serve` डेमन: pid 21: ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है, इसलिए यह पता नहीं है कि यह इंस्टॉल किए गए बिल्ड पर चल रहा है और निगरानी में है या नहीं
+cli.serve_readiness.unknown count=2 chars=194 cells=148: node-a पर `lop serve` डेमन: pid 21: ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+cli.serve_readiness.unknown count=5 chars=194 cells=148: node-a पर `lop serve` डेमन: pid 21: ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+cli.serve_readiness.unknown count=21 chars=194 cells=148: node-a पर `lop serve` डेमन: pid 21: ऐसे cgroup में चलता है जिसकी श्रेणी इस जाँच से पता नहीं चल पा रही है, इसलिए यह पता नहीं है कि ये इंस्टॉल किए गए बिल्ड पर चल रहे हैं और निगरानी में हैं या नहीं
+cli.serve_readiness.other_unit count=0 chars=96 cells=81: node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+cli.serve_readiness.other_unit count=1 chars=96 cells=81: node-a पर `lop serve` डेमन किसी दूसरी सेवा (example.service) के अधीन है, lop serve यूनिट के नहीं
+cli.serve_readiness.other_unit count=2 chars=94 cells=79: node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+cli.serve_readiness.other_unit count=5 chars=94 cells=79: node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+cli.serve_readiness.other_unit count=21 chars=94 cells=79: node-a पर `lop serve` डेमन दूसरी सेवाओं (example.service) के अधीन हैं, lop serve यूनिट के नहीं
+cli.serve_readiness.identity_restart count=1 chars=192 cells=150: node-a पर, रिकॉर्ड देखने के लिए `lop services status` चलाएँ, फिर प्रक्रियाओं की पहचान दर्ज करने के लिए `lop services restart` चलाएँ; पुनः प्रारंभ की कार्रवाई से पहले हर डेमन की जाँच की जाती है
+TEXT-ONLY renders. No frame capture or service operation. Semantic re-audit scope: changed cgroup key and six direct neighbors; unchanged initial all-key coverage retained.
+CURRENT_SHA256 en local_operator/i18n/catalogues/en/cli.serve_readiness.json 6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e
+CURRENT_SHA256 context local_operator/i18n/catalogues/en/cli.serve_readiness.context.json e8c5895f98c71f39385a3defe974919ba776a9eda4bf195ac687a6db9b0db693
+CURRENT_SHA256 hi local_operator/i18n/catalogues/hi/cli.serve_readiness.json c83b91c4e5297457edb1d1f281af71c80acac1b27f9953733bdcbe004e8bea9b
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:52:15.825070+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --help
+usage: ledger.py append [-h] (--dry-run | --apply) --receipt RECEIPT
+                        --expected-history-sha EXPECTED_HISTORY_SHA
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run
+  --apply
+  --receipt RECEIPT
+  --expected-history-sha EXPECTED_HISTORY_SHA
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:52:16.067840+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace cli.serve_readiness
+f9940bcdee0c1ada942b6eaadefa5bdf740518393f930cf44ec55b2d53ef7ccd
+
+STDERR:
+
+EXIT_CODE: 0
+
+UTC: 2026-11-16T04:52:16.385988+00:00
+$ /home/ec2-user/local-operator/.worktrees/mesh-excluded-row-cascade/.venv/bin/python scripts/i18n/ledger.py append --receipt i18n/audits/evidence/hi/cli.serve_readiness/sd1r/ledger-receipt.json --expected-history-sha f9940bcdee0c1ada942b6eaadefa5bdf740518393f930cf44ec55b2d53ef7ccd --dry-run
+i18n/audit-history/hi/cli.serve_readiness.json
+
+STDERR:
+
+EXIT_CODE: 0
+

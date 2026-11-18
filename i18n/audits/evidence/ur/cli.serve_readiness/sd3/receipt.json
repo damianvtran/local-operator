@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3",
+  "audit_date": "2026-11-16",
+  "record_reference": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/record.json",
+  "provenance": "Actual auditor/translator disclosures, input hashes, retained coverage and verdict are in record.json. No ledger append applied.",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "ledger_append_input": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/ledger-receipt.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/record.json",
+      "sha256": "9d446f56934b394482bf9d8b986e13404e2c7c67e61e176fa180b16211e4d74d"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/report.md",
+      "sha256": "0042b27bc41dd7e5827b2c17bd9dad70603b1f9d1e8524abbbcd1c7529991014"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/mechanical.py.txt",
+      "sha256": "4ef0b87a2f6d65e0141e5b7cab64cabf736f182d649b1a024e78034f55d88e89"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/audit.log",
+      "sha256": "a9b98be2f9b9e5e30bf357dd3502e94d2f710a365a7f39b5e3d565c74290dfc4"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/cli.serve_readiness/sd3/ledger-receipt.json",
+      "sha256": "ed231cf539b593ecc369f6387c16dc4b204c96fc48cf7b8ff8202a9efe282110"
+    }
+  ]
+}
