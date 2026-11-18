@@ -8,7 +8,7 @@ the one admitted write (``/v1/config/system-prompt``) needs no app state.
 """
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -16,7 +16,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.server import desktop as desktop_module
-from local_operator.server.app import _iter_routes, app
+from local_operator.server.app import _STANDALONE_ACTING_GETS, _iter_routes, app
 
 pytestmark = pytest.mark.asyncio
 
@@ -94,8 +94,8 @@ async def test_browser_writes_from_foreign_origins_never_reach_a_handler(
     # router was never reached (a 403 from a handler would carry another body).
     assert response.status_code == 403, (method, path, response.text[:200])
     assert REFUSAL in response.json()["detail"]
-    if headers.get("Origin") != "null":
-        assert "access-control-allow-origin" not in response.headers
+    # "null" included: its echo now survives on /health alone.
+    assert "access-control-allow-origin" not in response.headers
 
 
 async def test_foreign_write_leaves_no_file(client: AsyncClient, _standalone: Path) -> None:
@@ -216,3 +216,149 @@ async def test_managed_posture_is_untouched(
     # The managed allowlist-less posture keeps its historical CORS echo.
     health = await client.get("/health", headers={"Origin": EVIL})
     assert health.headers.get("access-control-allow-origin") == EVIL
+    # ...including "null" on every path: the /health-only restriction is
+    # standalone-only.
+    opaque = await client.get("/v1/agents", headers={"Origin": "null"})
+    assert opaque.headers.get("access-control-allow-origin") == "null"
+
+
+# --- GETs that act -----------------------------------------------------------
+#
+# Method-keying misses a GET that imports or calls out: a cross-site <img src>
+# sends exactly these headers (no Origin, no preflight) and the handler runs.
+
+#: What Chrome/Firefox/Safari attach to a cross-site <img src> subresource GET.
+IMG_HEADERS = {
+    "Sec-Fetch-Site": "cross-site",
+    "Sec-Fetch-Mode": "no-cors",
+    "Sec-Fetch-Dest": "image",
+}
+
+ACTING_GETS = sorted(re.sub(r"\{[^}]+\}", "x", path) for path in _STANDALONE_ACTING_GETS)
+
+
+async def test_every_named_acting_get_is_a_live_get_route() -> None:
+    # A rename that left a stale template here would silently ungate the route.
+    get_paths = {path for path, methods in _iter_routes(app.routes) if "GET" in methods}
+    missing = sorted(set(_STANDALONE_ACTING_GETS) - get_paths)
+    assert not missing, missing
+    assert "/v1/agents/{agent_id}/download" in _STANDALONE_ACTING_GETS
+    assert "/v1/teams/pull/{team_id}" in _STANDALONE_ACTING_GETS
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [IMG_HEADERS, {"Sec-Fetch-Site": "same-site"}, {"Origin": EVIL}, {"Origin": "null"}],
+    ids=["img-cross-site", "sfs-same-site", "foreign-origin", "null-origin"],
+)
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("path", ACTING_GETS)
+async def test_cross_site_acting_gets_are_refused_before_the_handler(
+    client: AsyncClient, path: str, method: str, headers: dict[str, str]
+) -> None:
+    response = await client.request(method, path, headers=headers)
+    assert response.status_code == 403, (method, path, response.text[:200])
+    if method == "GET":
+        assert REFUSAL in response.json()["detail"]
+    assert "access-control-allow-origin" not in response.headers
+
+
+class _RecordingRegistry:
+    """Stands in for the registry so the test sees whether the import ran."""
+
+    def __init__(self) -> None:
+        self.pulled: list[str] = []
+
+    def download_agent_from_radient(self, _client, agent_id: str, **_kwargs):
+        self.pulled.append(agent_id)
+        raise RuntimeError("stub: no hub in a unit test")
+
+
+@pytest.fixture
+def recording_registry(_standalone: Path) -> Iterator[_RecordingRegistry]:
+    from local_operator.config import ConfigManager
+    from local_operator.server import dependencies
+
+    registry = _RecordingRegistry()
+    app.dependency_overrides[dependencies.get_agent_registry] = lambda: registry
+    app.dependency_overrides[dependencies.get_config_manager] = lambda: ConfigManager(_standalone)
+    app.dependency_overrides[dependencies.get_provider_auth_store] = lambda: object()
+    try:
+        yield registry
+    finally:
+        for dep in (
+            dependencies.get_agent_registry,
+            dependencies.get_config_manager,
+            dependencies.get_provider_auth_store,
+        ):
+            app.dependency_overrides.pop(dep, None)
+
+
+async def test_img_tag_cannot_import_an_agent_but_native_and_same_origin_can(
+    client: AsyncClient, recording_registry: _RecordingRegistry
+) -> None:
+    refused = await client.get("/v1/agents/attacker-agent/download", headers=IMG_HEADERS)
+    assert refused.status_code == 403
+    assert recording_registry.pulled == []
+
+    # curl / CLI (no browser headers) and the daemon's own page still reach it.
+    await client.get("/v1/agents/mine/download")
+    await client.get("/v1/agents/docs-page/download", headers={"Sec-Fetch-Site": "same-origin"})
+    await client.get("/v1/agents/own-origin/download", headers={"Origin": "http://127.0.0.1:1111"})
+    assert recording_registry.pulled == ["mine", "docs-page", "own-origin"]
+
+
+async def test_allowlisted_origin_may_use_acting_gets(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    recording_registry: _RecordingRegistry,
+) -> None:
+    # Same escape hatch as for writes: an operator-listed dev renderer is trusted.
+    monkeypatch.setenv(desktop_module.ORIGINS_ENV, "http://localhost:5187")
+    await client.get(
+        "/v1/agents/dev/download",
+        headers={"Origin": "http://localhost:5187", "Sec-Fetch-Site": "same-site"},
+    )
+    assert recording_registry.pulled == ["dev"]
+
+
+async def test_cross_site_media_loads_are_not_gated(
+    client: AsyncClient, _standalone: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setattr(app.state, "config_manager", ConfigManager(_standalone), raising=False)
+    # The packaged renderer (file://) loads files exactly like this; gating every
+    # GET instead of the named set would blank its images.
+    image = _standalone / "pic.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
+    static = await client.get("/v1/static/images", params={"path": str(image)}, headers=IMG_HEADERS)
+    assert static.status_code == 200, static.text[:200]
+
+
+# --- the opaque origin -------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/v1/config", "/v1/agents", "/v1/config/system-prompt"])
+async def test_null_origin_reads_get_no_grant_off_health(
+    client: AsyncClient, path: str, _standalone: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    # The lifespan (not run under ASGITransport) is what installs these.
+    monkeypatch.setattr(app.state, "config_manager", ConfigManager(_standalone), raising=False)
+    monkeypatch.setattr(app.state, "agent_registry", AgentRegistry(_standalone), raising=False)
+    # A sandboxed iframe or data: document on any site presents "null".
+    response = await client.get(path, headers={"Origin": "null"})
+    assert "access-control-allow-origin" not in response.headers
+    assert "access-control-allow-credentials" not in response.headers
+
+
+async def test_null_origin_preflight_for_a_write_gets_no_grant(client: AsyncClient) -> None:
+    preflight = await client.options(
+        "/v1/config/system-prompt",
+        headers={"Origin": "null", "Access-Control-Request-Method": "PATCH"},
+    )
+    assert "access-control-allow-origin" not in preflight.headers
+    assert "access-control-allow-credentials" not in preflight.headers

@@ -1047,10 +1047,54 @@ async def managed_desktop_boundary(request: Request, call_next):
     return response
 
 
-#: Methods that change state. Keyed on the METHOD, not a route list, so a route
-#: added later is covered the day it lands; GET/HEAD/OPTIONS stay untouched
-#: (static file serving, ``/health``, CORS preflights).
+#: Methods that change state. Keyed on the METHOD, not a route list, so a write
+#: route added later is covered the day it lands. GET/HEAD/OPTIONS are not keyed
+#: here (static file serving, ``/health``, CORS preflights), which is why the
+#: GETs that DO act are named separately below.
 _STANDALONE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: GET routes that act rather than read, on a standalone daemon.
+#:
+#: WHY METHOD-KEYING ALONE IS NOT ENOUGH. A cross-site ``<img src>`` or a
+#: ``no-cors`` fetch sends a GET with no ``Origin`` and no preflight, so a GET
+#: that imports or spends a credential is reachable from any page -- and CORS
+#: only ever stops the page READING the reply, never the handler running. These
+#: routes predate the gate and are GET for client convenience, so they are named
+#: here instead of keyed on method.
+#:
+#: WHY NOT EVERY GET. The packaged renderer runs at ``file://`` and loads
+#: ``/v1/static/*`` media and agent avatars as cross-site ``<img>``/``<video>``
+#: requests; gating all GETs would break them. Reads stay ungated; their
+#: replies are already unreadable cross-site (``desktop_origin_cors``).
+#:
+#: Templates are the router's own paths (``starlette.routing.compile_path``
+#: matches them exactly as routing does), and
+#: ``tests/unit/server/test_standalone_browser_writes.py`` fails if one of them
+#: stops existing as a GET route, so a rename cannot silently ungate it. The
+#: enumeration that produced this list (every GET/HEAD reachable without
+#: ``require_desktop``, each handler read) is recorded on the fix's PR; a new
+#: acting GET must be added here.
+_STANDALONE_ACTING_GETS: dict[str, str] = {
+    "/v1/agents/{agent_id}/download": "imports a hub agent into the registry",
+    "/v1/teams/pull/{team_id}": "imports a hub team into the registry",
+    "/v1/memberships": "calls the hub with the stored account token",
+    "/v1/models": "calls model providers with stored API keys",
+    "/v1/agent-name-availability": "calls the hub on the caller's behalf",
+}
+
+
+@lru_cache(maxsize=1)
+def _standalone_acting_get_matchers() -> tuple[Pattern[str], ...]:
+    return tuple(compile_path(path)[0] for path in _STANDALONE_ACTING_GETS)
+
+
+def _is_standalone_acting_get(request: Request) -> bool:
+    # HEAD too: Starlette answers HEAD from the GET route, so it runs the handler.
+    if request.method not in {"GET", "HEAD"}:
+        return False
+    path = request.url.path
+    return any(matcher.match(path) for matcher in _standalone_acting_get_matchers())
+
 
 #: Refuses browser callers itself (``routes/desktop_claim.py``), and is the one
 #: route a standalone daemon must keep answering for the app to attach.
@@ -1068,7 +1112,8 @@ async def standalone_browser_write_gate(request: Request, call_next):
     request that CORS never gets to refuse. The admission rule and its threat
     model live in :func:`~local_operator.server.desktop.standalone_write_admitted`;
     native clients (curl, scripts, the CLI) send neither ``Origin`` nor
-    ``Sec-Fetch-Site`` and pass unchanged.
+    ``Sec-Fetch-Site`` and pass unchanged. The same rule covers the GETs named
+    in :data:`_STANDALONE_ACTING_GETS`, which a cross-site ``<img>`` reaches.
 
     PLACEMENT. Registered right after :func:`managed_desktop_boundary`, i.e.
     INSIDE ``CORSMiddleware`` and :func:`desktop_origin_cors`, so a refusal is
@@ -1077,12 +1122,17 @@ async def standalone_browser_write_gate(request: Request, call_next):
     reply. No websocket route exists on the serve app, so the HTTP gate is the
     whole surface.
     """
-    if (
+    gated = (
         request.method in _STANDALONE_WRITE_METHODS
         and request.url.path not in _STANDALONE_WRITE_EXEMPT
-        and not desktop_posture().enabled
-        and not standalone_write_admitted(request, desktop_posture().origins)
-    ):
+    ) or _is_standalone_acting_get(request)
+    if not gated:
+        return await call_next(request)
+    # One snapshot: ``enabled`` and ``origins`` must describe the same moment,
+    # or a claim landing between two reads could pair one posture's flag with
+    # the other's allowlist.
+    posture = desktop_posture()
+    if not posture.enabled and not standalone_write_admitted(request, posture.origins):
         return JSONResponse(
             status_code=403,
             content={
@@ -1317,9 +1367,12 @@ async def desktop_origin_cors(request: Request, call_next):
     renderer, which the UI PR does by probing health/version from main.
 
     A STANDALONE daemon (no bearer, no claim) with nothing admitted is the
-    exception: it strips the grant for every Origin except ``"null"`` (that same
-    renderer's pre-attach ``/health`` read) and its own origin, so a foreign
-    page can neither read its replies nor clear a preflight for a write.
+    exception: it strips the grant for every Origin except its own, and keeps
+    the ``"null"`` echo on ``/health`` ONLY (that same renderer's pre-attach
+    read). Every other path loses it, because ``"null"`` is also what a
+    sandboxed iframe or a ``data:`` document on any site presents; so a foreign
+    page, opaque or not, can neither read its replies nor clear a preflight for
+    a write.
     """
     response = await call_next(request)
     # The allowlist in force: the environment's, UNIONED with the origins the
@@ -1334,14 +1387,18 @@ async def desktop_origin_cors(request: Request, call_next):
     allowed = posture.origins
     origin = request.headers.get("origin")
     if not allowed:
-        if posture.enabled or origin is None or origin == "null":
+        if posture.enabled or origin is None:
             return response
         # STANDALONE with nothing admitted: no foreign page may READ this
         # daemon either (the write half is ``standalone_browser_write_gate``).
-        # Two echoes survive: ``"null"``, which the packaged renderer
-        # (``file://``) reads ``/health`` with before it has claimed anything,
+        # Two echoes survive: ``"null"`` on ``/health`` only, which the
+        # packaged renderer (``file://``) reads before it has claimed anything,
         # and the daemon's own origin, which needs no grant but is harmless.
-        # The managed allowlist-less posture keeps its historical echo above.
+        # ``"null"`` anywhere else would hand config, agents and conversations
+        # to any site's sandboxed iframe. The managed allowlist-less posture
+        # keeps its historical echo above.
+        if origin == "null" and request.url.path == "/health":
+            return response
         if origin.strip().lower() in request_own_origins(request):
             return response
         del response.headers["access-control-allow-origin"]

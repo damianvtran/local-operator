@@ -66,7 +66,8 @@ check is not a security boundary against a caller already authorized to
 reconfigure agents or use the unrestricted local harness.
 
 On a standalone daemon (not started or claimed by the desktop app), a
-browser-originated write (`POST`/`PUT`/`PATCH`/`DELETE`) is accepted only from
+browser-originated write (`POST`/`PUT`/`PATCH`/`DELETE`, plus the few `GET`s
+that import from the hub or call out with stored credentials) is accepted only from
 the daemon's own origin or an origin listed in `LOCAL_OPERATOR_DESKTOP_ORIGINS`,
 and foreign pages get no CORS grant; native clients (curl, scripts, the CLI)
 are unchanged. Known limitation: this does not authenticate other OS accounts

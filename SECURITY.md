@@ -68,7 +68,8 @@ macOS agents 4.6+ `Interoperability` is not supported.)
 - A standalone `lop serve` daemon on loopback does not authenticate other
   local OS accounts. Run it only on single-user hosts, or use the
   desktop-managed posture. Browser pages are already limited to the daemon's
-  own origin or origins listed in `LOCAL_OPERATOR_DESKTOP_ORIGINS`.
+  own origin or origins listed in `LOCAL_OPERATOR_DESKTOP_ORIGINS` for writes
+  and for reading responses with credentials.
 
 ## Reporting a Vulnerability
 

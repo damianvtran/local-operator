@@ -17,9 +17,10 @@ async def test_cors_headers(test_app_client):
     change — the app's middleware configuration is untouched.
     """
     # Origin "null" is the packaged renderer's real origin (it runs at file://)
-    # and the one foreign origin a standalone daemon still grants; any other
-    # foreign origin gets no grant there (test_standalone_browser_writes.py).
-    response = await test_app_client.get("/v1/agents", headers={"Origin": "null"})
+    # and the one foreign origin a standalone daemon still grants, on /health
+    # only; any other path or foreign origin gets no grant there
+    # (test_standalone_browser_writes.py).
+    response = await test_app_client.get("/health", headers={"Origin": "null"})
 
     # Verify that the CORS headers are present in the response
     assert response.status_code == 200

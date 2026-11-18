@@ -815,11 +815,14 @@ async def test_a_preflight_to_a_static_route_grants_a_foreign_origin_nothing(
 async def test_other_routes_keep_the_historical_cors_echo(test_app_client):
     """Scope guard: ``/health`` and the legacy reads keep the echo the app reads them with.
 
-    That echo is now ``"null"`` only (the packaged renderer's ``file://`` origin) on
-    a standalone daemon; a foreign page's origin gets no grant there.
+    That echo is now ``"null"`` on ``/health`` only (the packaged renderer's
+    ``file://`` pre-attach read) on a standalone daemon; a legacy read with
+    ``"null"`` and a foreign page's origin get no grant there.
     """
-    response = await test_app_client.get("/v1/agents", headers={"Origin": "null"})
+    response = await test_app_client.get("/health", headers={"Origin": "null"})
     assert response.headers.get("access-control-allow-origin") == "null"
+    opaque = await test_app_client.get("/v1/agents", headers={"Origin": "null"})
+    assert "access-control-allow-origin" not in opaque.headers
     foreign = await test_app_client.get("/v1/agents", headers={"Origin": "http://localhost:3000"})
     assert "access-control-allow-origin" not in foreign.headers
 
