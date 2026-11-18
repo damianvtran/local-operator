@@ -99,6 +99,18 @@ def add_parser(
         # i18n: ignore developer CLI flag help (see the pragma above)
         help="Add a short redacted excerpt of each held message (at most 160 characters)",
     )
+    # The `list` alias re-declares the same flags with SUPPRESS defaults: a
+    # child parser's own defaults overwrite what the parent already parsed, so
+    # `holds --json list` would otherwise print the table (#4251 review m1).
+    holds_list_flags = argparse.ArgumentParser(add_help=False)
+    for flag in ("--json", "--excerpt"):
+        holds_list_flags.add_argument(
+            flag,
+            action="store_true",
+            default=argparse.SUPPRESS,
+            # i18n: ignore developer CLI flag help (see the pragma above)
+            help="Same as on `holds`",
+        )
     holds = group_actions.add_parser(
         "holds",  # i18n: ignore CLI command name
         parents=[holds_flags],
@@ -108,7 +120,7 @@ def add_parser(
     holds_actions = holds.add_subparsers(dest="holds_command")
     holds_actions.add_parser(
         "list",  # i18n: ignore CLI command name
-        parents=[holds_flags],
+        parents=[holds_list_flags],
         # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
         help="Same as `holds`",
     )

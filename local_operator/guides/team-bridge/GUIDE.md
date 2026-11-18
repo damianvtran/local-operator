@@ -310,11 +310,13 @@ through your signed-in account; if that fails, the rows still print with
 - `--excerpt` adds at most 160 characters of the message, with
   credential-shaped text masked before the cut. Without it, no message text is
   printed.
-- It never delivers, discards or changes anything: do that in the app.
-- **Run by an agent** (from a `bash` tool call) it prints `from: withheld` and no
-  excerpt. A held message did not pass screening, so its text and its
-  sender-chosen labels stay out of model context. Ask the user to run it in
-  their own terminal when they want to know who sent what.
+- It never delivers or discards a message and writes nothing to the bridge
+  store: do those in the app.
+- **Run by an agent** (from any agent tool), or anywhere without a terminal on
+  stdin, it prints `from: withheld` and no excerpt. A held message did not pass
+  screening, so its text and its sender-chosen labels stay out of model context.
+  Ask the user to run it in their own terminal when they want to know who sent
+  what.
 
 ## Long-held messages
 

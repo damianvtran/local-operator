@@ -23,20 +23,37 @@ signed-in bridge credential to reach the hub. No desktop bearer, no daemon, and
 the receiver may be stopped. When the hub cannot be reached the local rows still
 print, with the sender column saying why it is missing.
 
-IT WRITES NOTHING. No deliver, discard or admit verb exists here (those stay the
-desktop's bearer-gated routes, ``desktop_team_bridge_holds.decide``), no store
-write, and no body cache: the excerpt is printed and forgotten.
+IT CHANGES NO HOLD AND WRITES NOTHING TO THE BRIDGE STORE. No deliver, discard
+or admit verb exists here (those stay the desktop's bearer-gated routes,
+``desktop_team_bridge_holds.decide``), and there is no body cache: the excerpt is
+printed and forgotten. The one write it can cause is OUTSIDE the bridge store:
+the hub call resolves the signed-in credential through the shared auth store,
+which may persist a refreshed token on a 401 exactly as any signed-in command
+does. A machine with no ``auth.db`` is answered ``sign_in_required`` without
+building the client, so the command never creates one (#4251 QA Q2).
 
-HUMAN-ONLY JOIN. The owner audit serves bodies the agent's screening HELD or
-REJECTED — the exact text screening keeps out of a model's context
-(``client.py``'s owner-audit section, ``test_owner_audit_isolation.py``). So the
-join is refused when this process descends from an agent's ``bash`` tool call
-(:func:`local_operator.agent_shell.in_agent_shell`): an agent running this gets
-the metadata (ids, codes, ages, flags — what the hold-alert already discloses)
-and ``sender: withheld``, never a held body or a sender-chosen label. THE LIMIT,
-STATED: that marker removes the ordinary path, it is not a same-uid boundary —
-a process that scrubs its environment can still reach the hub with the local
-credential, exactly as it could by importing the client. The excerpt is further
+HUMAN-ONLY JOIN, FAIL-CLOSED. The owner audit serves bodies the agent's
+screening HELD or REJECTED — the exact text screening keeps out of a model's
+context (``client.py``'s owner-audit section, ``test_owner_audit_isolation.py``).
+So the join needs a POSITIVE sign of a person (:func:`_human_at_terminal`): the
+agent-descent marker absent (:func:`local_operator.agent_shell.in_agent_shell`,
+set by the ``bash`` tool and the ``eval`` worker) AND stdin a terminal. Anything
+else — an agent tool, a cron job, ``env -i`` with no terminal — gets the
+metadata (ids, codes, ages, flags — what the hold-alert already discloses) and
+``sender: withheld``, never a held body or a sender-chosen label. The first
+cut gated on the marker alone, which failed OPEN on the ``eval`` worker that
+never carried it (#4251 security review S-1). Stdin, not stdout, so a person's
+``lop team-bridge holds --json | jq`` still works.
+
+THE LIMITS, STATED. (1) Not a same-uid boundary: a process that scrubs its
+environment and allocates a pty can still reach the hub with the local
+credential, exactly as it could by importing the client. (2) The ``console``
+tool drives a REAL pty whose environment is its host's, so it passes the
+terminal test and may lack the marker; a model driving ``lop team-bridge holds``
+through ``console`` gets the join. It is a deliberate interactive-terminal tool
+whose screen the operator can see, and marking its pty would also change every
+``in_agent_shell()`` refusal inside it, so it is recorded here rather than
+patched in this change. The excerpt is further
 opt-in (``--excerpt``), capped at :data:`EXCERPT_MAX` characters, and scrubbed
 by the harness's one credential-shape table BEFORE it is cut, so a token split
 by the cut cannot escape the shape match.
@@ -51,6 +68,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -103,10 +121,28 @@ def _client_for(root: Path) -> Any:
     return TeamBridgeClient(root)
 
 
-def _audit_withheld() -> bool:
+def _stdin_is_terminal() -> bool:
+    """A named seam: tests set the answer rather than allocate a pty."""
+
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False  # a closed or exotic stdin is no evidence of a person
+
+
+def _withheld_reason() -> str | None:
+    """Why the human-only join is refused here, or ``None`` when a person is present.
+
+    Fail-closed by construction: the join runs only on the positive answer.
+    """
+
     from local_operator.agent_shell import in_agent_shell
 
-    return in_agent_shell()
+    if in_agent_shell():
+        return "agent_shell"
+    if not _stdin_is_terminal():
+        return "no_terminal"
+    return None
 
 
 def reason_words(code: str, kind: str) -> str:
@@ -168,18 +204,26 @@ def _age_words(seconds: float | None) -> str:
 
 async def _join_audit(
     root: Path, owner: Any, items: list[dict[str, Any]], *, want_body: bool
-) -> tuple[str, dict[str, dict[str, Any]]]:
+) -> tuple[str, str | None, dict[str, dict[str, Any]]]:
     """Sender (and body) per held message id, from the owner-audit page at its seq.
 
-    Returns ``(audit_state, by_message_id)``. ``audit_state`` is ``ok`` or a
-    closed reason the whole join is missing (``withheld_agent_shell``,
-    ``sign_in_required``, ``unreachable``, ``refused:<code>``). A single message
-    the page does not carry (outside the audit window, or no seq) is simply
-    absent from the map.
+    Returns ``(audit, detail, by_message_id)``. ``audit`` is closed: ``ok``,
+    ``partial`` (``detail`` = how many rows the audit did not carry),
+    ``withheld`` (``agent_shell`` | ``no_terminal``), ``sign_in_required``,
+    ``unreachable`` or ``refused`` (``detail`` = the refusal code). Only a
+    per-conversation 404 — the hub's uniform answer for a conversation outside
+    the audit window — costs just that row; every other refusal (auth, account,
+    a refused destination) holds for every row and stops the lookup, so it is
+    never reported as "not in the audit" (#4251 QA Q1).
     """
 
-    if _audit_withheld():
-        return "withheld_agent_shell", {}
+    withheld = _withheld_reason()
+    if withheld is not None:
+        return "withheld", withheld, {}
+    if not (root / "auth.db").exists():
+        # Building the client would CREATE the auth store; with none there is
+        # no credential to find anyway.
+        return "sign_in_required", None, {}
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -209,17 +253,14 @@ async def _join_audit(
                 before_seq=int(seq) + 1 if seq is not None else None,
             )
         except BridgeSignInRequired:
-            return "sign_in_required", found
+            return "sign_in_required", None, found
         except BridgeUnreachable:
-            return "unreachable", found
+            return "unreachable", None, found
         except BridgeRefusal as refusal:
-            # An auth/account refusal holds for every row: stop asking. Anything
-            # else (a conversation outside the audit window is the hub's uniform
-            # 404) costs only that row its sender.
-            if refusal.http_status in (401, 403) or refusal.code.startswith("account"):
-                return f"refused:{refusal.code}", found
-            missed += 1
-            continue
+            if refusal.http_status == 404:
+                missed += 1
+                continue
+            return "refused", str(refusal.code), found
         for message in (page or {}).get("messages") or []:
             if str(message.get("id")) != item["message_id"]:
                 continue
@@ -233,7 +274,9 @@ async def _join_audit(
                 # Held in memory for this print only; never cached or written.
                 "body": message.get("body") if want_body else None,
             }
-    return ("ok" if not missed else f"partial:{missed}_not_in_audit"), found
+    if missed:
+        return "partial", f"{missed}_not_in_audit", found
+    return "ok", None, found
 
 
 def collect(
@@ -250,26 +293,30 @@ def collect(
     store = Store(root)
     owner = store.active_owner_readonly()
     if owner is None:
-        return {"enrolled": False, "audit": "no_owner", "items": []}
+        # The same top-level keys as an enrolled answer, so a `--json` consumer
+        # never branches on which keys exist (#4251 code review m3).
+        return {
+            "enrolled": False,
+            "release_enabled": None,
+            "key_protection": None,
+            "audit": "no_owner",
+            "audit_detail": None,
+            "count": 0,
+            "items": [],
+        }
     payload = holds.list_holds(root, owner, now=now)
-    # AGE IS FROM THE FIRST HOLD, not ``held_at``. The route's ``held_at`` is the
-    # decision time (the Deliver window's start), and a review decision can be
-    # written days after the message was first held — measured on the
-    # operator's store 2026-11-18: oldest hold 17.9 d, its decision 8.1 d. The
-    # question this command answers is "how long has this sat here", so it
-    # reads the hold row's own time through the route module's same join.
-    first_held = {
-        bare: row["created_at"] for bare, row in holds._conversation_rows(store, owner).items()
-    }
     items = list(payload["items"])
-    audit_state, joined = ("skipped", {})
+    audit_state, audit_detail, joined = ("skipped", None, {})
     if audit and items:
-        audit_state, joined = asyncio.run(_join_audit(root, owner, items, want_body=excerpt))
+        audit_state, audit_detail, joined = asyncio.run(
+            _join_audit(root, owner, items, want_body=excerpt)
+        )
     rows = []
     for item in items:
         join = joined.get(item["message_id"])
-        first = first_held.get(item["message_id"])
-        age = max(0.0, now - first) if first is not None else _age_seconds(item.get("held_at"), now)
+        # AGE IS FROM THE FIRST HOLD (the reader's ``first_held_at``), not
+        # ``held_at``, which is the decision time; see ``list_holds``.
+        age = _age_seconds(item.get("first_held_at") or item.get("held_at"), now)
         row = {
             "id": item["message_id"],
             "conversation_id": item["conversation_id"],
@@ -277,7 +324,7 @@ def collect(
             "reason_code": item["hold_code"],
             "reason": reason_words(item["hold_code"], item["kind"]),
             "kind": item["kind"],
-            "first_held_at": holds._iso(first),
+            "first_held_at": item.get("first_held_at"),
             "held_at": item["held_at"],
             "age_seconds": None if age is None else int(age),
             "sender_kind": join["sender_kind"] if join else None,
@@ -296,6 +343,7 @@ def collect(
         "release_enabled": payload["enabled"],
         "key_protection": payload["key_protection"],
         "audit": audit_state,
+        "audit_detail": audit_detail,
         "count": len(rows),
         "items": rows,
     }
@@ -303,7 +351,7 @@ def collect(
 
 def _sender_cell(row: dict[str, Any], audit_state: str) -> str:
     if row["sender_label"] is None:
-        return "withheld" if audit_state == "withheld_agent_shell" else "unavailable"
+        return "withheld" if audit_state == "withheld" else "unavailable"
     label = row["sender_label"] or "?"
     kind = row["sender_kind"] or "?"
     agent = f" via {row['agent_label']}" if row.get("agent_label") else ""
@@ -318,7 +366,8 @@ def render(answer: dict[str, Any]) -> str:
         return "Nothing is held on this machine."
     lines = [
         f"{answer['count']} held message(s). Releasing from the app: "
-        f"{'on' if answer['release_enabled'] else 'off'}. Sender lookup: {answer['audit']}."
+        f"{'on' if answer['release_enabled'] else 'off'}. Sender lookup: {answer['audit']}"
+        f"{' (' + answer['audit_detail'] + ')' if answer.get('audit_detail') else ''}."
     ]
     for row in items:
         flags = (

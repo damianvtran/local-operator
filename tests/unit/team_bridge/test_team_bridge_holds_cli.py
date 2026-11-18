@@ -26,7 +26,11 @@ from local_operator.agent_shell import AGENT_SHELL_ENV
 from local_operator.redaction_shapes import REDACTION_MARKER
 from local_operator.server.utils import desktop_team_bridge_holds as holds
 from local_operator.team_bridge import holds_cli
-from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+from local_operator.team_bridge.client import (
+    BridgeRefusal,
+    BridgeSignInRequired,
+    BridgeUnreachable,
+)
 from local_operator.team_bridge.store import state_db_path
 from tests.unit.team_bridge.test_hold_release import (  # noqa: F401 — ``rig`` is a fixture
     CONVERSATION_ID,
@@ -79,12 +83,21 @@ def held(rig, monkeypatch):  # noqa: F811 — imported fixture
     _server, _wakes, run = _spine(monkeypatch, config_dir, owner, Runner(DOUBT))
     assert run()["code"] == "model_hold"
     monkeypatch.setattr(holds_cli, "_config_dir", lambda: config_dir)
+    # A signed-in machine has an auth store; the join skips one that is absent.
+    (config_dir / "auth.db").touch()
     return config_dir, owner
 
 
 def _as_person(monkeypatch, client: Any) -> None:
     monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    # The pty half of the gate is proven for real in
+    # ``test_the_gate_needs_a_terminal_and_no_marker``; here it is the seam.
+    monkeypatch.setattr(holds_cli, "_stdin_is_terminal", lambda: True)
     monkeypatch.setattr(holds_cli, "_client_for", lambda root: client)
+
+
+def _no_client(root: Path) -> Any:
+    raise AssertionError("the human-only audit client must not even be built")
 
 
 def test_rows_are_the_desktop_readers_rows(held, monkeypatch) -> None:
@@ -112,16 +125,82 @@ def test_rows_are_the_desktop_readers_rows(held, monkeypatch) -> None:
 def test_agent_shell_gets_metadata_and_no_audit_request(held, monkeypatch) -> None:
     config_dir, _owner = held
     monkeypatch.setenv(AGENT_SHELL_ENV, "1")
-
-    def no_client(root: Path) -> Any:
-        raise AssertionError("an agent shell must not even build the audit client")
-
-    monkeypatch.setattr(holds_cli, "_client_for", no_client)
+    # Even with a terminal: the marker alone withholds.
+    monkeypatch.setattr(holds_cli, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(holds_cli, "_client_for", _no_client)
     answer = holds_cli.collect(config_dir, excerpt=True)
-    assert answer["audit"] == "withheld_agent_shell"
+    assert (answer["audit"], answer["audit_detail"]) == ("withheld", "agent_shell")
     row = answer["items"][0]
     assert row["id"] == MESSAGE_ID and row["sender_label"] is None and row["excerpt"] is None
     assert "from:          withheld" in holds_cli.render(answer)
+
+
+def test_no_terminal_withholds_even_without_the_marker(held, monkeypatch) -> None:
+    """S-1: the marker's ABSENCE is not a person. pytest's stdin is no tty, and
+    the real ``_stdin_is_terminal`` is what runs here (no seam)."""
+
+    config_dir, _owner = held
+    monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    monkeypatch.setattr(holds_cli, "_client_for", _no_client)
+    answer = holds_cli.collect(config_dir, excerpt=True)
+    assert (answer["audit"], answer["audit_detail"]) == ("withheld", "no_terminal")
+    assert answer["items"][0]["excerpt"] is None
+
+
+_GATE_PROBE = (
+    "from local_operator.team_bridge import holds_cli; print(holds_cli._withheld_reason())"
+)
+
+
+def _probe(env: dict[str, str], *, tty: bool) -> str:
+    """Run the REAL gate in a fresh interpreter, on a real pty or on a pipe."""
+
+    import os
+    import subprocess
+    import sys
+
+    if not tty:
+        done = subprocess.run(
+            [sys.executable, "-c", _GATE_PROBE],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return done.stdout.strip()
+    import pty
+
+    leader, follower = pty.openpty()
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _GATE_PROBE],
+            env=env,
+            stdin=follower,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        os.close(follower)
+        os.close(leader)
+    return done.stdout.strip()
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "openpty"), reason="needs a pty")
+def test_the_gate_needs_a_terminal_and_no_marker() -> None:
+    import os
+
+    bare = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")}
+    bare["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+    # The `bash` tool's marker, with or without a terminal.
+    assert _probe({**bare, AGENT_SHELL_ENV: "1"}, tty=False) == "agent_shell"
+    assert _probe({**bare, AGENT_SHELL_ENV: "1"}, tty=True) == "agent_shell"
+    # `env -i`-style: no marker, no terminal (an eval cell's subprocess before
+    # the worker carried the marker, a cron job) -> withheld.
+    assert _probe(bare, tty=False) == "no_terminal"
+    # A person: a real pty on stdin and no marker -> the lookup runs.
+    assert _probe(bare, tty=True) == "None"
 
 
 def test_person_sees_sender_and_redacted_excerpt_only_on_request(held, monkeypatch) -> None:
@@ -130,7 +209,8 @@ def test_person_sees_sender_and_redacted_excerpt_only_on_request(held, monkeypat
     _as_person(monkeypatch, client)
 
     plain = holds_cli.collect(config_dir)
-    assert plain["audit"] == "ok" and "excerpt" not in plain["items"][0]
+    assert (plain["audit"], plain["audit_detail"]) == ("ok", None)
+    assert "excerpt" not in plain["items"][0]
     assert plain["items"][0]["sender_label"] == "Victor"
     assert "Victor (human) via Victor's Aida" in holds_cli.render(plain)
     # The captured-owner receipt is the COMMITTED owner. This rig's hold row is
@@ -146,7 +226,7 @@ def test_person_sees_sender_and_redacted_excerpt_only_on_request(held, monkeypat
     assert TOKEN not in shown and TOKEN[:12] not in shown and REDACTION_MARKER in shown
 
 
-def test_a_hold_with_a_seq_reads_exactly_its_own_message(monkeypatch) -> None:
+def test_a_hold_with_a_seq_reads_exactly_its_own_message(monkeypatch, tmp_path) -> None:
     import asyncio
 
     from local_operator.team_bridge.store import OwnerSnapshot
@@ -155,12 +235,15 @@ def test_a_hold_with_a_seq_reads_exactly_its_own_message(monkeypatch) -> None:
     _as_person(monkeypatch, client)
     owner = OwnerSnapshot(7, "acc_recv", "tnt_1", "bep_recv", "https://hub.example/v1", 1)
     item = {"message_id": MESSAGE_ID, "conversation_id": CONVERSATION_ID, "seq": 41}
-    state, found = asyncio.run(holds_cli._join_audit(Path("."), owner, [item], want_body=False))
+    (tmp_path / "auth.db").touch()
+    state, _detail, found = asyncio.run(
+        holds_cli._join_audit(tmp_path, owner, [item], want_body=False)
+    )
     assert state == "ok" and found[MESSAGE_ID]["body"] is None
     assert client.calls[0]["before_seq"] == 42 and client.calls[0]["limit"] == 1
 
 
-def test_sender_text_cannot_drive_the_terminal(monkeypatch) -> None:
+def test_sender_text_cannot_drive_the_terminal(monkeypatch, tmp_path) -> None:
     import asyncio
 
     from local_operator.team_bridge.store import OwnerSnapshot
@@ -169,7 +252,10 @@ def test_sender_text_cannot_drive_the_terminal(monkeypatch) -> None:
     _as_person(monkeypatch, client)
     owner = OwnerSnapshot(7, "acc_recv", "tnt_1", "bep_recv", "https://hub.example/v1", 1)
     item = {"message_id": MESSAGE_ID, "conversation_id": CONVERSATION_ID, "seq": 1}
-    _state, found = asyncio.run(holds_cli._join_audit(Path("."), owner, [item], want_body=True))
+    (tmp_path / "auth.db").touch()
+    _state, _detail, found = asyncio.run(
+        holds_cli._join_audit(tmp_path, owner, [item], want_body=True)
+    )
     assert "\x1b" not in (holds_cli.excerpt_of(found[MESSAGE_ID]["body"]) or "")
     assert "\x07" not in (holds_cli.excerpt_of(found[MESSAGE_ID]["body"]) or "")
 
@@ -185,17 +271,27 @@ def test_redaction_happens_before_the_cut() -> None:
 @pytest.mark.parametrize(
     ("failure", "state"),
     [
-        (BridgeSignInRequired("sign in"), "sign_in_required"),
-        (BridgeRefusal("account_mismatch", "x", http_status=409), "refused:account_mismatch"),
-        (BridgeRefusal("forbidden", "x", http_status=403), "refused:forbidden"),
-        (BridgeRefusal("not_found", "x", http_status=404), "partial:1_not_in_audit"),
+        (BridgeSignInRequired("sign in"), ("sign_in_required", None)),
+        (BridgeUnreachable(), ("unreachable", None)),
+        (
+            BridgeRefusal("account_mismatch", "x", http_status=409),
+            ("refused", "account_mismatch"),
+        ),
+        (BridgeRefusal("forbidden", "x", http_status=403), ("refused", "forbidden")),
+        # QA Q1: a refused destination (no HTTP status at all) is the whole
+        # lookup refused, never "1 row not in the audit".
+        (
+            BridgeRefusal("bridge_destination_refused", "x"),
+            ("refused", "bridge_destination_refused"),
+        ),
+        (BridgeRefusal("not_found", "x", http_status=404), ("partial", "1_not_in_audit")),
     ],
 )
 def test_a_failed_join_still_prints_the_local_rows(held, monkeypatch, failure, state) -> None:
     config_dir, _owner = held
     _as_person(monkeypatch, FakeAuditClient(raise_with=failure))
     answer = holds_cli.collect(config_dir)
-    assert answer["audit"] == state
+    assert (answer["audit"], answer["audit_detail"]) == state
     assert [r["id"] for r in answer["items"]] == [MESSAGE_ID]
     assert "from:          unavailable" in holds_cli.render(answer)
 
@@ -210,8 +306,29 @@ def test_it_writes_nothing(held, monkeypatch, tmp_path_factory) -> None:
 
     empty = tmp_path_factory.mktemp("no-store")
     answer = holds_cli.collect(empty)
-    assert answer == {"enrolled": False, "audit": "no_owner", "items": []}
+    assert answer == {
+        "enrolled": False,
+        "release_enabled": None,
+        "key_protection": None,
+        "audit": "no_owner",
+        "audit_detail": None,
+        "count": 0,
+        "items": [],
+    }
     assert not state_db_path(empty).exists()
+
+
+def test_no_auth_store_is_sign_in_required_and_creates_none(held, monkeypatch) -> None:
+    """QA Q2: building the client would CREATE ``auth.db``; with none, skip it."""
+
+    config_dir, _owner = held
+    (config_dir / "auth.db").unlink()
+    monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    monkeypatch.setattr(holds_cli, "_stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(holds_cli, "_client_for", _no_client)
+    answer = holds_cli.collect(config_dir)
+    assert answer["audit"] == "sign_in_required" and answer["count"] == 1
+    assert not (config_dir / "auth.db").exists()
 
 
 def test_cli_parses_both_spellings_and_prints_json(held, monkeypatch, capsys) -> None:
@@ -222,6 +339,9 @@ def test_cli_parses_both_spellings_and_prints_json(held, monkeypatch, capsys) ->
     for argv in (
         ["team-bridge", "holds", "--json"],
         ["team-bridge", "holds", "list", "--json", "--excerpt"],
+        # Review m1: a flag BEFORE the alias must survive it.
+        ["team-bridge", "holds", "--json", "list"],
+        ["team-bridge", "holds", "--excerpt", "list", "--json"],
     ):
         args = parser.parse_args(argv)
         assert args.team_bridge_command == "holds"
