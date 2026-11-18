@@ -1,0 +1,9 @@
+{
+  "tui.session_move_workset.title_sends": "ورکنگ فائلیں {device} کو بھیجیں؟",
+  "tui.session_move_workset.title_stays": "ورکنگ فائلوں کے بغیر منتقل کریں؟",
+  "tui.session_move_workset.checkbox_sends": "مجھے یقین ہے کہ {device} کو یہ فائلیں ملنی چاہییں",
+  "tui.session_move_workset.checkbox_stays": "میں سمجھتا ہوں کہ یہ ورکنگ فائلیں اسی ڈیوائس پر رہیں گی",
+  "tui.session_move_workset.confirm": "منتقل کریں",
+  "tui.session_move_workset.cancel": "منسوخ کریں",
+  "tui.session_move_workset.loading": "اس گفتگو کی ورکنگ فائلیں چیک کی جا رہی ہیں…"
+}

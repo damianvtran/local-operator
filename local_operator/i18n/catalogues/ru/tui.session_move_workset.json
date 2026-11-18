@@ -1,0 +1,9 @@
+{
+  "tui.session_move_workset.title_sends": "Отправить рабочие файлы на {device}?",
+  "tui.session_move_workset.title_stays": "Перенести без рабочих файлов?",
+  "tui.session_move_workset.checkbox_sends": "Я уверен, что {device} должно получить эти файлы",
+  "tui.session_move_workset.checkbox_stays": "Я понимаю, что эти рабочие файлы остаются на этом устройстве",
+  "tui.session_move_workset.confirm": "Перенести",
+  "tui.session_move_workset.cancel": "Отмена",
+  "tui.session_move_workset.loading": "Проверяем рабочие файлы этого разговора…"
+}

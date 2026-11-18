@@ -66,7 +66,7 @@ WORKTREE_STATES = ("planned", "carried", "restored", "pending_restore", "left_be
 #: only; every surface renders the sentence from its own catalogue (design §12).
 #: ``not_transferred`` is PR A's honest arrival state: the move was confirmed, but this
 #: build does not carry worktrees yet, so each planned row ends up here on the receipt.
-#: ``history_unscanned``: the outgoing history was too large to scan for secrets, which
+#: ``history_unscannable``: the outgoing history was too large (or unreadable) to scan, which
 #: the security ruling treats exactly like a detected secret (no opt-in in v1).
 LEFT_BEHIND_REASONS = (
     "contended",
@@ -76,12 +76,17 @@ LEFT_BEHIND_REASONS = (
     "submodule",
     "lfs",
     "history_secret",
-    "history_unscanned",
+    "history_unscannable",
     "over_cap",
     "destination_conflict",
     "destination_cannot_clone",
     "unsupported_by_peer",
     "not_transferred",
+    # Shared with the transfer half (workset_transfer.py), one spelling each: a path
+    # that cannot be recreated safely on the destination, and a destination that
+    # lacks the free space the restore needs.
+    "unsafe_path",
+    "insufficient_space",
 )
 
 #: Bounds. Each is a ceiling far above anything observed, so it only stops a
@@ -582,6 +587,15 @@ def _worktree_list(top: Path) -> list[Path]:
     return paths or [top]
 
 
+def _worktree_list_quiet(top: Path) -> list[Path]:
+    """``_worktree_list`` for a DESCRIPTIVE use (nested-worktree filtering): a failure
+    here only means nothing is filtered, so it must not refuse the move."""
+    try:
+        return _worktree_list(top)
+    except WorksetUnknown:
+        return []
+
+
 def discover_worktrees(seeds: Iterable[Seed]) -> list[Candidate]:
     """Resolve seeds to the worktrees that contain them (§3.2 steps 3–5).
 
@@ -917,6 +931,24 @@ def worktree_facts(
     staged, unstaged, untracked, unmerged = _parse_status(
         status if isinstance(status, bytes) else b""
     )
+    # NESTED REGISTERED WORKTREES ARE NOT THIS TREE'S DIRTY STATE. A primary whose
+    # ``.worktrees/`` is not gitignored reports each nested worktree as an untracked
+    # directory (an embedded repository); snapshotting that would carry it as a gitlink
+    # and double-count it. Each nested worktree is its own manifest row (or not part
+    # of this session at all), so it is dropped from this tree's set.
+    nested = [
+        os.path.relpath(other, path)
+        for other in _worktree_list_quiet(path)
+        if other != path and str(other).startswith(str(path).rstrip(os.sep) + os.sep)
+    ]
+    if nested:
+        untracked = [
+            entry
+            for entry in untracked
+            if not any(
+                entry.rstrip("/") == prefix or entry.startswith(prefix + "/") for prefix in nested
+            )
+        ]
     dirty_paths = list(dict.fromkeys([*staged, *unstaged, *untracked]))
     dirty_bytes = 0
     for relative in dirty_paths:
@@ -931,6 +963,11 @@ def worktree_facts(
     home_text = os.path.normpath(str(home))
     if not os.path.normpath(str(path)).startswith(home_text + os.sep):
         reason = "outside_home"  # §7: home-relative is the only path both devices share
+    elif isinstance(status, bytes) and status.count(b"\0") > _MAX_STATUS_ENTRIES:
+        # The parse stopped at the bound, so the counts and the secret scan cover only
+        # part of the tree. Never present a partial set as the whole: no move can carry
+        # tens of thousands of dirty paths under the cap anyway.
+        reason = "over_cap"
     elif unmerged:
         reason = "unmerged"
     elif _in_progress_operation(git_dir):
@@ -943,7 +980,7 @@ def worktree_facts(
         history, scanned = _history_exclusions(path, home=home)
         excluded = [*excluded, *history]
         if not scanned:
-            reason = "history_unscanned"
+            reason = "history_unscannable"
         elif history:
             reason = "history_secret"
     return WorktreeFacts(

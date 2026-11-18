@@ -1,0 +1,9 @@
+{
+  "tui.session_move_workset.title_sends": "वर्किंग फ़ाइलें {device} पर भेजें?",
+  "tui.session_move_workset.title_stays": "वर्किंग फ़ाइलों के बिना ले जाएँ?",
+  "tui.session_move_workset.checkbox_sends": "मुझे भरोसा है कि {device} को ये फ़ाइलें मिलनी चाहिए",
+  "tui.session_move_workset.checkbox_stays": "मैं समझता हूँ कि ये वर्किंग फ़ाइलें इसी डिवाइस पर रहेंगी",
+  "tui.session_move_workset.confirm": "ले जाएँ",
+  "tui.session_move_workset.cancel": "रद्द करें",
+  "tui.session_move_workset.loading": "इस बातचीत की वर्किंग फ़ाइलें जाँची जा रही हैं…"
+}

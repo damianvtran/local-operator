@@ -1,0 +1,9 @@
+{
+  "tui.session_move_workset.title_sends": "¿Enviar los archivos de trabajo a {device}?",
+  "tui.session_move_workset.title_stays": "¿Mover sin los archivos de trabajo?",
+  "tui.session_move_workset.checkbox_sends": "Estoy seguro de que {device} debe recibir estos archivos",
+  "tui.session_move_workset.checkbox_stays": "Entiendo que estos archivos de trabajo se quedan en este dispositivo",
+  "tui.session_move_workset.confirm": "Mover",
+  "tui.session_move_workset.cancel": "Cancelar",
+  "tui.session_move_workset.loading": "Comprobando los archivos de trabajo de esta conversación…"
+}

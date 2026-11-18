@@ -144,6 +144,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+from local_operator.i18n.keys import cli_sessions_move_workset as _ws_keys
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
@@ -369,6 +370,7 @@ from local_operator.tui.session_move import (
     MoveTo,
     parse_move_to,
     run_session_move,
+    run_session_move_preflight,
 )
 from local_operator.tui.session_navigation import SessionNavigation
 from local_operator.tui.session_presentation import (
@@ -485,6 +487,7 @@ from local_operator.tui.widgets.library_view import (
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
+from local_operator.tui.widgets.move_workset_confirm import MoveWorkingSetConfirmScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
 from local_operator.tui.widgets.notifications_view import (
     NotificationsView,
@@ -628,6 +631,8 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: The working-set copy the `/move --to` card shares with the CLI (design §11.3, §12).
+_ws_render = tr("cli.sessions_move_workset")
 #: The `/language` receipts live in a deferred wire namespace so the phone-sheet
 #: twin (`session/runtime/serving.py`) renders the SAME words; resolved per call.
 _lang_t = tr("wire.language_receipts")
@@ -37542,6 +37547,35 @@ class OperatorApp(App[None]):
                     drop_checking()
                     self._system_notice(refusal, "warning")
                     return
+                # THE WORKING-SET GATE, BEFORE THE LEAVE (docs/design/move-working-
+                # set.md §11.3): a conversation that worked in git worktrees needs
+                # the user's explicit approval, so the preflight runs while the
+                # check row is still up and a non-empty manifest pushes the card.
+                # Cancelled → nothing left, nothing moved. A failed preflight is
+                # not a stop: the move is asked next and the owner's gate refuses
+                # an unconfirmed working set by itself. ``--keep`` is not gated
+                # (the source keeps everything); its receipt says what it lacks.
+                confirm_digest = ""
+                if not request.keep:
+                    preflight = await asyncio.to_thread(
+                        run_session_move_preflight, target_id, request.to
+                    )
+                    block = preflight.get("working_set")
+                    if (
+                        preflight.get("ok")
+                        and preflight.get("confirmation_required")
+                        and isinstance(block, dict)
+                    ):
+                        drop_checking()
+                        approved = await self.push_screen_wait(
+                            MoveWorkingSetConfirmScreen(
+                                block, session_id=target_id, device=request.to
+                            )
+                        )
+                        if not approved:
+                            self._system_notice(_ws_render(_ws_keys.aborted()), "note")
+                            return
+                        confirm_digest = str(block.get("scope_digest") or "")
                 # WITHDRAWN BEFORE THE LEAVE: the check row belongs to the
                 # transcript the leave is about to replace (U1), so leaving it
                 # mounted would paint "checking …" into a session that is gone.
@@ -37566,12 +37600,26 @@ class OperatorApp(App[None]):
                     keep=request.keep,
                     queue=request.queue,
                     drop_session_roles=request.drop_session_roles,
+                    confirm_working_set=confirm_digest,
                 )
             finally:
                 self._move_in_flight = False
             self._publish_move_result(
                 target_id, request, result, phase_notice, left=leaving, home=home_label
             )
+            # WHAT THE MOVE DID NOT CARRY, stated on the receipt (design §11.2): a
+            # confirmed move in this build leaves the worktrees on the source, and a
+            # keep copy arrives without them. Rendered from the owner's block.
+            block = result.get("working_set") if isinstance(result, dict) else None
+            if isinstance(block, dict) and result.get("ok"):
+                from local_operator.network import workset_text
+
+                source = result.get("from_device") or {}
+                for line in workset_text.receipt_lines(
+                    block,
+                    source=str(source.get("name") or source.get("device_id") or ""),
+                ):
+                    self._system_notice(line, "warning")
 
         self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
 

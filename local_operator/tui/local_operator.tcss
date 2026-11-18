@@ -3252,6 +3252,73 @@ MovePickerScreen .move-picker {
     color: $lo-fg;
 }
 
+/* ── /move --to: the working-set confirmation ──────────────────────────── *
+ *
+ * The same content-sized card over the dimmed transcript as the `/move`
+ * picker above (one family of move surfaces), with the operator's required
+ * approval: a checkbox, and Move disabled until it is ticked. The summary is
+ * plain prose plus `~/` paths, so it wraps inside the card's 86-cell cap
+ * rather than scrolling sideways (docs/design/move-working-set.md §11.3). */
+MoveWorkingSetConfirmScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+MoveWorkingSetConfirmScreen .move-workset {
+    width: 86;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    background: $lo-overlay;
+    padding: 1 2;
+}
+
+#move-workset-title {
+    text-style: bold;
+    color: $lo-fg;
+    margin-bottom: 1;
+}
+
+#move-workset-summary {
+    width: 100%;
+    height: auto;
+    color: $lo-fg;
+    margin-bottom: 1;
+}
+
+/* No border: the stock `tall` border drew stray edge glyphs on the card's
+ * overlay. Focus still reads from the label's selection tint. The toggle's
+ * glyph is HIDDEN until ticked (the stock dim X read as already-ticked in the
+ * first capture), and the ticked state uses the accent, so the one state the
+ * operator must set is unambiguous at a glance. */
+#move-workset-check {
+    width: 100%;
+    border: none;
+    padding: 0 1;
+    margin-bottom: 1;
+    background: $lo-overlay;
+}
+
+#move-workset-check > .toggle--button {
+    color: $lo-sunken;
+    background: $lo-sunken;
+}
+
+#move-workset-check.-on > .toggle--button {
+    color: $lo-bg;
+    background: $lo-accent;
+}
+
+#move-workset-buttons {
+    width: 100%;
+    height: auto;
+    align-horizontal: right;
+}
+
+#move-workset-buttons Button {
+    margin-left: 2;
+}
+
 
 /* ── /links: the URL picker ────────────────────────────────────────────── *
  *

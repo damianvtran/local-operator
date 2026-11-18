@@ -1,0 +1,37 @@
+{
+  "tui.session_move_workset.title_sends": {
+    "role": "TUI modal title",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim."
+  },
+  "tui.session_move_workset.title_stays": {
+    "role": "TUI modal title (files stay)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "tui.session_move_workset.checkbox_sends": {
+    "role": "TUI checkbox label the user must tick before Move is enabled",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim. First person, the user's own statement."
+  },
+  "tui.session_move_workset.checkbox_stays": {
+    "role": "TUI checkbox label (files stay)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "First person, the user's own statement."
+  },
+  "tui.session_move_workset.confirm": {
+    "role": "TUI button",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "one short verb"
+  },
+  "tui.session_move_workset.cancel": {
+    "role": "TUI button",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "one short verb"
+  },
+  "tui.session_move_workset.loading": {
+    "role": "TUI status line while the preflight runs",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  }
+}

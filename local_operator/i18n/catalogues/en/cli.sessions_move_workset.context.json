@@ -1,0 +1,202 @@
+{
+  "cli.sessions_move_workset.warning_sends": {
+    "role": "CLI/TUI heading line of the move confirmation (shown before the user approves moving a conversation to another device)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{session} is a conversation id (hex), {device} a device name; keep both verbatim. 'working files' = the git worktrees and uncommitted/unpushed work the conversation used. 'mid-conversation' = while the conversation is still going."
+  },
+  "cli.sessions_move_workset.warning_stays": {
+    "role": "CLI/TUI heading line of the move confirmation when this version cannot transfer the files",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{session} conversation id, {device} device name: keep verbatim. Must say clearly that the files do NOT travel and remain on the current device."
+  },
+  "cli.sessions_move_workset.brings_summary": {
+    "role": "one summary line of counts under the warning",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plurals: keep the three plural blocks and '#'. {size} is an already formatted byte size like '3.2 MB'. The middle dots are separators; keep them."
+  },
+  "cli.sessions_move_workset.worktree_line": {
+    "role": "one indented line per git worktree",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is a ~/ path, {branch} a git branch name: verbatim. The four numbers are counts of unpushed commits and staged/unstaged/untracked files; 'staged', 'unstaged', 'untracked' are git states: translate idiomatically or keep the git term the locale uses."
+  },
+  "cli.sessions_move_workset.worktree_left": {
+    "role": "one indented line per worktree that does not travel",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim; {reason} is one of the reason.* phrases (lower-case clause)."
+  },
+  "cli.sessions_move_workset.withheld_secret": {
+    "role": "list line: a file excluded because it looks like a credential",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim."
+  },
+  "cli.sessions_move_workset.withheld_history": {
+    "role": "list line: a worktree withheld because its unpushed commits look like they contain a credential",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim."
+  },
+  "cli.sessions_move_workset.leaves_behind": {
+    "role": "list line: a dependency folder that is never copied",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} verbatim (e.g. node_modules); {command} is a shell command, verbatim."
+  },
+  "cli.sessions_move_workset.advice_sends": {
+    "role": "closing advice before the yes/no prompt",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} device name verbatim."
+  },
+  "cli.sessions_move_workset.advice_stays": {
+    "role": "closing advice before the yes/no prompt (files stay here)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} device name verbatim."
+  },
+  "cli.sessions_move_workset.prompt_sends": {
+    "role": "interactive yes/no prompt",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep '[y/N] ' exactly, including the trailing space: the user types y."
+  },
+  "cli.sessions_move_workset.prompt_stays": {
+    "role": "interactive yes/no prompt (files stay)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep '[y/N] ' exactly, including the trailing space."
+  },
+  "cli.sessions_move_workset.aborted": {
+    "role": "CLI result after the user declined",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "cli.sessions_move_workset.needs_confirmation": {
+    "role": "CLI error when a script moved a conversation with working files without confirming",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --dry-run, --confirm-working-set, --yes, --without-working-set verbatim; {digest} is a sha256: token, verbatim."
+  },
+  "cli.sessions_move_workset.changed": {
+    "role": "CLI notice: the list changed between showing and confirming",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "cli.sessions_move_workset.unknown": {
+    "role": "CLI error: the git state could not be read, so the move was refused",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{step} is a machine word (e.g. status), {repo} a ~/ path: verbatim. Keep --without-working-set verbatim."
+  },
+  "cli.sessions_move_workset.unsupported": {
+    "role": "CLI error: the other device is too old",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim; keep --without-working-set verbatim."
+  },
+  "cli.sessions_move_workset.none": {
+    "role": "CLI --dry-run result when there is nothing to confirm",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": ""
+  },
+  "cli.sessions_move_workset.receipt_not_transferred": {
+    "role": "CLI line after a confirmed move: what did not travel",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {device} is the device the files stayed on."
+  },
+  "cli.sessions_move_workset.receipt_without": {
+    "role": "CLI line after a move with --without-working-set",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} verbatim."
+  },
+  "cli.sessions_move_workset.receipt_keep": {
+    "role": "CLI line after a --keep copy",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} = where the copy now is; verbatim."
+  },
+  "cli.sessions_move_workset.help_dry_run": {
+    "role": "argparse help for --dry-run",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case start, no final period (argparse help style)."
+  },
+  "cli.sessions_move_workset.help_confirm": {
+    "role": "argparse help for --confirm-working-set",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --dry-run and working_set.scope_digest verbatim; lower-case start, no period."
+  },
+  "cli.sessions_move_workset.help_without": {
+    "role": "argparse help for --without-working-set",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case start, no period."
+  },
+  "cli.sessions_move_workset.help_yes": {
+    "role": "argparse help for --yes",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case start, no period."
+  },
+  "cli.sessions_move_workset.reason.contended": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.outside_home": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.unmerged": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.in_progress_operation": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.submodule": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.lfs": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.history_secret": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.over_cap": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.destination_conflict": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.destination_cannot_clone": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.unsupported_by_peer": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.not_transferred": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.history_unscannable": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.unsafe_path": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.reason.insufficient_space": {
+    "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  }
+}

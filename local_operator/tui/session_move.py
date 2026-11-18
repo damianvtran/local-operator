@@ -168,6 +168,7 @@ def run_session_move(
     keep: bool = False,
     queue: bool = False,
     drop_session_roles: bool = False,
+    confirm_working_set: str = "",
 ) -> dict[str, Any]:
     """Run ``lop sessions move … --json`` and return its contract document.
 
@@ -189,7 +190,38 @@ def run_session_move(
         argv.append("--queue")
     if drop_session_roles:
         argv.append("--drop-session-roles")
+    if confirm_working_set:
+        # The scope digest the user approved in the working-set card (design §11.3);
+        # the owner refuses ``working_set_changed`` if the scope moved since.
+        argv.extend(["--confirm-working-set", confirm_working_set])
     argv.append("--json")
+    return _run_cli_json(session_id, to, argv)
+
+
+def run_session_move_preflight(session_id: str, to: str) -> dict[str, Any]:
+    """Run ``lop sessions move <id> --to <to> --dry-run --json``: the working set, nothing moved.
+
+    The answer is ``{ok, dry_run, session_id, confirmation_required, working_set}``, or
+    a refusal in the contract's shape. Blocking; the caller runs it off the loop. A
+    refusal here is NOT a reason to stop: the move itself is asked next and the owner's
+    gate is the authority, so the caller proceeds and reports whatever it answers.
+    """
+    argv = python_argv(
+        "-m",
+        "local_operator.cli",
+        "sessions",
+        "move",
+        session_id,
+        "--to",
+        to,
+        "--dry-run",
+        "--json",
+    )
+    return _run_cli_json(session_id, to, argv)
+
+
+def _run_cli_json(session_id: str, to: str, argv: list[str]) -> dict[str, Any]:
+    """One bounded, group-reaped CLI run whose stdout is a JSON document."""
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)
     try:

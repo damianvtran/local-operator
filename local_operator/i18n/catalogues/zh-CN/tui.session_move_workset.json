@@ -1,0 +1,9 @@
+{
+  "tui.session_move_workset.title_sends": "将工作文件发送到 {device}？",
+  "tui.session_move_workset.title_stays": "不带工作文件直接移动？",
+  "tui.session_move_workset.checkbox_sends": "我确定 {device} 应当接收这些文件",
+  "tui.session_move_workset.checkbox_stays": "我了解这些工作文件会留在本设备上",
+  "tui.session_move_workset.confirm": "移动",
+  "tui.session_move_workset.cancel": "取消",
+  "tui.session_move_workset.loading": "正在检查此对话的工作文件…"
+}

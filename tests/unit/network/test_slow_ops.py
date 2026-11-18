@@ -679,6 +679,11 @@ def test_the_session_move_contract_is_frozen() -> None:
         "engagement",
         "queue",
         "carry",
+        # The FIFTH optional member (docs/design/move-working-set.md §3.4): the
+        # session's git working set. ABSENT for every move whose manifest is empty
+        # (pinned on a document by test_workset_confirm_gate's empty-manifest cell),
+        # so a chat-only session's receipt is unchanged.
+        "working_set",
     }
     # The queue block's own shape: a projection of the source's record, so a
     # reader tolerates missing keys (``total=False``) rather than re-validating
@@ -740,5 +745,9 @@ def test_the_session_move_contract_is_frozen() -> None:
         "session_id",
         "phase_reached",
         "changed",
+        # Optional, and present only on the working-set gate's own refusals.
+        "working_set",
     }
     assert {"busy", "unreachable", "deadline_exceeded"} <= mobility.MOVE_REFUSAL_CODES
+    # The working-set gate's codes are part of the vocabulary a front end branches on.
+    assert mobility.WORKSET_REFUSAL_CODES <= mobility.MOVE_REFUSAL_CODES
