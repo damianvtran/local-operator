@@ -99,12 +99,9 @@ class FrameUnreadable(Exception):
 #: same wait: an authenticated dial always receives a projection first.
 WELCOME_TIMEOUT_S = 10.0
 
-#: How long the relay waits for the runtime's answer to its ``relay_attest``. No
-#: new number: the attest is answered on the runtime's READER loop with no hop
-#: into the session (``RuntimeServer._relay_attest_reply``), the same class of
-#: wait as the welcome above, so it shares that budget. A timeout is harmless —
-#: the dial proceeds unverified.
-ATTEST_TIMEOUT_S = WELCOME_TIMEOUT_S
+#: The ``req`` the relay's ``relay_attest`` carries, which is how its reply is
+#: recognised and consumed in :meth:`OwnerDial.recv` (never forwarded).
+ATTEST_REQ = "relay-attest"
 
 logger = logging.getLogger(__name__)
 
@@ -219,13 +216,12 @@ class OwnerDial:
     #: that only sees ``None`` cannot tell "nothing yet" from "owner gone",
     #: and those are different events to a viewer.
     eof: bool = False
-    #: Frames the runtime sent while the relay's ``relay_attest`` was in flight
-    #: (``_relay_attest``), returned by :meth:`recv` before the socket is read
-    #: again. Without it the attest's reply wait would swallow them — measured:
-    #: a stream's ``frontend_sync`` frames never reached the viewer
-    #: (``test_session_plane``'s pass-through cell) — so the pump must see exactly
-    #: the frames, in exactly the order, it would have without the proof.
-    held: list[dict[str, Any]] = field(default_factory=list)
+    #: True while the reply to this dial's ``relay_attest`` is still unread
+    #: (``_relay_attest``). The attest is sent WITHOUT waiting for its answer, and
+    #: :meth:`recv` swallows that answer whenever it arrives, so the pump sees
+    #: exactly the frames, in exactly the order, it would have without the proof
+    #: and no viewer ever receives the attest's ack.
+    attest_pending: bool = False
 
     def _read(self) -> "LineReader":
         if self.reader is None:
@@ -236,11 +232,22 @@ class OwnerDial:
 
     def recv(self, timeout_s: float) -> dict[str, Any] | None:
         """The next frame, or ``None`` on timeout or a closed socket."""
-        if self.held:
-            return self.held.pop(0)
-        frame = self._read().read_frame(timeout_s)
-        self.eof = self._read().eof
-        return frame
+        deadline = time.monotonic() + timeout_s
+        while True:
+            frame = self._read().read_frame(max(0.0, deadline - time.monotonic()))
+            self.eof = self._read().eof
+            if (
+                frame is None
+                or not self.attest_pending
+                or frame.get("req") != ATTEST_REQ
+                or frame.get("op") not in ("ack", "error")
+            ):
+                return frame
+            self.attest_pending = False
+            if frame.get("op") != "ack" or frame.get("verified") is not True:
+                logger.info("relay attest: not verified (reply op=%s)", frame.get("op"))
+            # Loop on: the swallowed reply was not the caller's frame. A spent
+            # budget still reads any frame already buffered (``read_frame(0)``).
 
     def send(self, frame: dict[str, Any]) -> None:
         self.sock.sendall(
@@ -469,10 +476,24 @@ def _relay_attest(
     Skipped (the dial still succeeds) when this dial offered no nonce or the
     runtime answered no ``relay_salt`` — an older runtime (§3.4): its rows simply
     stamp unverified. The salt is POPPED off the welcome before the caller sees
-    it, and the attest's reply is CONSUMED here, so neither reaches a viewer the
+    it, and the attest's reply is CONSUMED by ``recv``, so neither reaches a viewer the
     welcome is later forwarded to (``relay._accept_stream``). A refused or
     unanswered attest is logged as a fact and never fails the dial: the
     connection then runs exactly as it did before G6, unverified.
+
+    SENT, NOT AWAITED. Waiting here for the runtime's answer put a second full
+    wait (up to ``WELCOME_TIMEOUT_S`` again) between the welcome and the owner
+    relay's ``net_stream`` ack. A half-dead runtime — welcome sent, nothing after
+    — then held that ack past the viewer's ``ACK_TIMEOUT_S``, so the pilot read
+    "the local relay did not answer" instead of "stopped answering after
+    connecting" (``test_pilot_remote_busy``'s half-dead cells, from #4060), and
+    even a healthy-but-slow welcome could push welcome+attest past the ack
+    window. Not awaiting loses nothing the stamp relies on: the runtime answers
+    ``relay_attest`` inline on the connection's READER loop
+    (``RuntimeServer._relay_attest_reply``) before it dispatches any later frame
+    from that socket, so every prompt this relay forwards afterwards is judged
+    after the proof, exactly as when the relay waited. The reply is swallowed by
+    :meth:`OwnerDial.recv` (``attest_pending``), so it still never reaches a viewer.
     """
     salt = welcome.pop("relay_salt", None)
     if not nonce or key is None or not peer:
@@ -484,20 +505,9 @@ def _relay_attest(
         return
     block = origin.canonical_block(peer, capabilities or ())
     proof = origin.relay_proof(key, relay_nonce=nonce, relay_salt=str(salt), block=block)
-    # Everything else the runtime sends meanwhile is KEPT for the caller, in
-    # order (``OwnerDial.held``). Collected locally and handed over after, never
-    # appended to ``held`` mid-exchange: ``recv`` drains ``held`` first, so that
-    # would hand the same frame back to this wait forever.
-    interleaved: list[dict[str, Any]] = []
     try:
-        reply = dial.exchange(
-            {"op": origin.RELAY_ATTEST_OP, "req": "relay-attest", "proof": proof},
-            timeout_s=ATTEST_TIMEOUT_S,
-            on_frame=interleaved.append,
-        )
+        dial.send({"op": origin.RELAY_ATTEST_OP, "req": ATTEST_REQ, "proof": proof})
     except OSError:
         logger.info("relay attest: the runtime's socket failed during the proof")
-        reply = None
-    dial.held.extend(interleaved)
-    if reply is None or reply.get("op") != "ack" or reply.get("verified") is not True:
-        logger.info("relay attest: not verified (reply op=%s)", (reply or {}).get("op") or "none")
+        return
+    dial.attest_pending = True
