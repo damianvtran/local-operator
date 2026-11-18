@@ -36,7 +36,7 @@ import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -45,6 +45,7 @@ from local_operator.network import invite as invite_mod
 from local_operator.network import relay, store, types, wire
 from local_operator.network.credentials import offers
 from local_operator.network.credentials.types import BROKER_CAPABILITY
+from local_operator.network.handshake import Handshake
 from local_operator.network.types import PairDecision
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_cli import NETWORK, _parser, _save_network
@@ -207,7 +208,9 @@ def test_matching_policies_pass() -> None:
 def test_offer_builder_never_enumerates_under_the_policy(
     tmp_path: Path, build_spy: list[str]
 ) -> None:
-    handshake = SimpleNamespace(peer_capabilities=[wire.PAIR_OFFER_V1])
+    # The builder reads only `peer_capabilities`; a full Handshake needs live
+    # crypto state, so the double is cast to satisfy the type-check gate.
+    handshake = cast("Handshake", SimpleNamespace(peer_capabilities=[wire.PAIR_OFFER_V1]))
     send, items, detail = relay._pair_offer_for(  # noqa: SLF001 — the build site itself
         handshake, tmp_path, "net-synthetic", offers_allowed=False
     )
