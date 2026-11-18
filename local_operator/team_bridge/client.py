@@ -75,7 +75,7 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence, TypedDict
 
 import httpx
 
@@ -6536,6 +6536,11 @@ class _IdentityPublishDisabled(Exception):
     """The connector lost local permission to dispatch a name reconciliation."""
 
 
+class _IdentityPublishKwargs(TypedDict, total=False):
+    # Ordinary status reads and name reconciliations do not carry the publish guard.
+    pre_http_guard: Callable[[], None]
+
+
 class StatusDiscipline:
     """The ONE reader of ``GET /v1/messaging/status`` on this machine.
 
@@ -6896,7 +6901,9 @@ class StatusDiscipline:
             # The SAME pinned access the cache key was derived from rides
             # through the transport: the read cannot run as a different
             # account than the one this answer is filed under (finding 2).
-            extra = {"pre_http_guard": publish_guard} if publish_guard is not None else {}
+            extra: _IdentityPublishKwargs = (
+                {"pre_http_guard": publish_guard} if publish_guard is not None else {}
+            )
             payload = await self._client.status(access=access, **extra)
         except BridgeSignInRequired:
             return StatusCheck(
@@ -7503,7 +7510,9 @@ class StatusDiscipline:
         if self._agent_name_sent.get(endpoint_id) == wanted:
             return
         try:
-            extra = {"pre_http_guard": publish_guard} if publish_guard is not None else {}
+            extra: _IdentityPublishKwargs = (
+                {"pre_http_guard": publish_guard} if publish_guard is not None else {}
+            )
             await self._client.put_settings(
                 state="active",
                 tenant_id=tenant_id,

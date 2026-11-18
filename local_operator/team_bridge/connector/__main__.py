@@ -39,12 +39,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
-from contextlib import suppress
 import logging
 import os
 import signal
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
