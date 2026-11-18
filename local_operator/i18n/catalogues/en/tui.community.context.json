@@ -1,0 +1,727 @@
+{
+  "tui.community.audience_private": {
+    "note": "TUI /community page: audience private. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.audience_public": {
+    "note": "TUI /community page: audience public. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.badge_agent": {
+    "note": "TUI /community page: badge agent. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.badge_agent_plain": {
+    "note": "TUI /community page: badge agent plain. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_count": {
+    "note": "TUI /community page: browse count. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_empty": {
+    "note": "TUI /community page: browse empty. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_empty_filter": {
+    "note": "TUI /community page: browse empty filter. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_failed": {
+    "note": "TUI /community page: browse failed. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_filter": {
+    "note": "TUI /community page: browse filter. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_joined": {
+    "note": "TUI /community page: browse joined. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_keys": {
+    "note": "TUI /community page: browse keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_people_unavailable": {
+    "note": "TUI /community page: browse people unavailable. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_private": {
+    "note": "TUI /community page: browse private. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_search": {
+    "note": "TUI /community page: browse search. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_searching": {
+    "note": "TUI /community page: browse searching. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_suggest": {
+    "note": "TUI /community page: browse suggest. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_tab_channels": {
+    "note": "TUI /community page: browse tab channels. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.browse_title": {
+    "note": "TUI /community page: browse title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.cancel": {
+    "note": "TUI /community page: cancel. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.category_harassment_or_abuse": {
+    "note": "TUI /community page: category harassment or abuse. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.category_private_information": {
+    "note": "TUI /community page: category private information. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.category_spam_or_promotion": {
+    "note": "TUI /community page: category spam or promotion. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.category_unsafe_or_illegal": {
+    "note": "TUI /community page: category unsafe or illegal. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.composer_placeholder": {
+    "note": "TUI /community page: composer placeholder. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.degraded_draft": {
+    "note": "TUI /community page: degraded draft. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.degraded_not_you": {
+    "note": "TUI /community page: degraded not you. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.degraded_title": {
+    "note": "TUI /community page: degraded title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.edited": {
+    "note": "TUI /community page: edited. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.empty_checked": {
+    "note": "TUI /community page: empty checked. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.empty_start": {
+    "note": "TUI /community page: empty start. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.empty_title": {
+    "note": "TUI /community page: empty title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.error_keys": {
+    "note": "TUI /community page: error keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.error_title": {
+    "note": "TUI /community page: error title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.error_title_plain": {
+    "note": "TUI /community page: error title plain. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.error_unaffected": {
+    "note": "TUI /community page: error unaffected. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.footer_composer": {
+    "note": "TUI /community page: footer composer. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.footer_messages": {
+    "note": "TUI /community page: footer messages. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.footer_rail": {
+    "note": "TUI /community page: footer rail. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.former_member": {
+    "note": "TUI /community page: former member. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.header": {
+    "note": "TUI /community page: header. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.header_keys": {
+    "note": "TUI /community page: header keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.header_keys_typing": {
+    "note": "TUI /community page: header keys typing. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.images": {
+    "note": "TUI /community page: images. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.info_body": {
+    "note": "TUI /community page: info body. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.info_restore": {
+    "note": "TUI /community page: info restore. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.info_title": {
+    "note": "TUI /community page: info title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_agree": {
+    "note": "TUI /community page: join agree. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_button": {
+    "note": "TUI /community page: join button. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_disabled": {
+    "note": "TUI /community page: join disabled. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_failed": {
+    "note": "TUI /community page: join failed. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_guidelines": {
+    "note": "TUI /community page: join guidelines. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_keys": {
+    "note": "TUI /community page: join keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_moderation": {
+    "note": "TUI /community page: join moderation. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_profile": {
+    "note": "TUI /community page: join profile. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.join_title": {
+    "note": "TUI /community page: join title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.joining": {
+    "note": "TUI /community page: joining. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.keys_body": {
+    "note": "TUI /community page: keys body. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.keys_title": {
+    "note": "TUI /community page: keys title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.leave_confirm": {
+    "note": "TUI /community page: leave confirm. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.leave_effects": {
+    "note": "TUI /community page: leave effects. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.leave_failed": {
+    "note": "TUI /community page: leave failed. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.leave_stay": {
+    "note": "TUI /community page: leave stay. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.leave_switch": {
+    "note": "TUI /community page: leave switch. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.leave_title": {
+    "note": "TUI /community page: leave title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.loading": {
+    "note": "TUI /community page: loading. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.loading_detail": {
+    "note": "TUI /community page: loading detail. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.no_channel": {
+    "note": "TUI /community page: no channel. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.not_joined_body": {
+    "note": "TUI /community page: not joined body. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.not_joined_keys": {
+    "note": "TUI /community page: not joined keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.not_joined_title": {
+    "note": "TUI /community page: not joined title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.offline_keys": {
+    "note": "TUI /community page: offline keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.offline_title": {
+    "note": "TUI /community page: offline title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_all": {
+    "note": "TUI /community page: orgs all. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_community": {
+    "note": "TUI /community page: orgs community. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_failed": {
+    "note": "TUI /community page: orgs failed. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_group_communities": {
+    "note": "TUI /community page: orgs group communities. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_group_private": {
+    "note": "TUI /community page: orgs group private. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_invited": {
+    "note": "TUI /community page: orgs invited. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_keys": {
+    "note": "TUI /community page: orgs keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_loading": {
+    "note": "TUI /community page: orgs loading. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_none_communities": {
+    "note": "TUI /community page: orgs none communities. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_none_private": {
+    "note": "TUI /community page: orgs none private. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_note": {
+    "note": "TUI /community page: orgs note. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_switched": {
+    "note": "TUI /community page: orgs switched. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_team": {
+    "note": "TUI /community page: orgs team. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.orgs_title": {
+    "note": "TUI /community page: orgs title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.page_error": {
+    "note": "TUI /community page: page error. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.page_error_keys": {
+    "note": "TUI /community page: page error keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.page_loading": {
+    "note": "TUI /community page: page loading. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.page_none": {
+    "note": "TUI /community page: page none. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.page_signin": {
+    "note": "TUI /community page: page signin. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.rail_browse": {
+    "note": "TUI /community page: rail browse. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.rail_channels": {
+    "note": "TUI /community page: rail channels. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.rail_private": {
+    "note": "TUI /community page: rail private. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.rail_settings": {
+    "note": "TUI /community page: rail settings. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.replies": {
+    "note": "TUI /community page: replies. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_anonymous": {
+    "note": "TUI /community page: report anonymous. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_keys": {
+    "note": "TUI /community page: report keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_none": {
+    "note": "TUI /community page: report none. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_note": {
+    "note": "TUI /community page: report note. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_note_help": {
+    "note": "TUI /community page: report note help. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_send": {
+    "note": "TUI /community page: report send. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_title": {
+    "note": "TUI /community page: report title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_unavailable": {
+    "note": "TUI /community page: report unavailable. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.report_what": {
+    "note": "TUI /community page: report what. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_agents_head": {
+    "note": "TUI /community page: settings agents head. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_agents_no_grants": {
+    "note": "TUI /community page: settings agents no grants. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_agents_row": {
+    "note": "TUI /community page: settings agents row. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_agents_taint": {
+    "note": "TUI /community page: settings agents taint. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_keys": {
+    "note": "TUI /community page: settings keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_profile_unavailable": {
+    "note": "TUI /community page: settings profile unavailable. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_tab_agents": {
+    "note": "TUI /community page: settings tab agents. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_tab_leave": {
+    "note": "TUI /community page: settings tab leave. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_tab_profile": {
+    "note": "TUI /community page: settings tab profile. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_tabs": {
+    "note": "TUI /community page: settings tabs. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.settings_title": {
+    "note": "TUI /community page: settings title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.state_connected": {
+    "note": "TUI /community page: state connected. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.state_offline": {
+    "note": "TUI /community page: state offline. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_cancelled": {
+    "note": "TUI /community page: status cancelled. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_cancelled_aside": {
+    "note": "TUI /community page: status cancelled aside. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_checking": {
+    "note": "TUI /community page: status checking. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_error": {
+    "note": "TUI /community page: status error. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_guidelines": {
+    "note": "TUI /community page: status guidelines. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_idle": {
+    "note": "TUI /community page: status idle. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_local_command": {
+    "note": "TUI /community page: status local command. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_locked": {
+    "note": "TUI /community page: status locked. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_moderation": {
+    "note": "TUI /community page: status moderation. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_offline": {
+    "note": "TUI /community page: status offline. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_posted": {
+    "note": "TUI /community page: status posted. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_rate_burst": {
+    "note": "TUI /community page: status rate burst. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_rate_conversation": {
+    "note": "TUI /community page: status rate conversation. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_rate_daily": {
+    "note": "TUI /community page: status rate daily. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_rate_other": {
+    "note": "TUI /community page: status rate other. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_rate_probation": {
+    "note": "TUI /community page: status rate probation. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_read_only": {
+    "note": "TUI /community page: status read only. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_refused": {
+    "note": "TUI /community page: status refused. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_report_sent": {
+    "note": "TUI /community page: status report sent. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_restricted": {
+    "note": "TUI /community page: status restricted. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_signin": {
+    "note": "TUI /community page: status signin. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.status_too_late": {
+    "note": "TUI /community page: status too late. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.why_category": {
+    "note": "TUI /community page: why category. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.why_keys": {
+    "note": "TUI /community page: why keys. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.why_only_you": {
+    "note": "TUI /community page: why only you. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.why_reference": {
+    "note": "TUI /community page: why reference. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.why_title": {
+    "note": "TUI /community page: why title. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  }
+}

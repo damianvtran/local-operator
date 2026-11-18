@@ -2638,6 +2638,110 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page community view (`/community`, `/orgs`; dark) ──────────── *
+ *
+ * A sibling of the notifications mode (TUI frames T1–T10): header row, the
+ * body (channels rail + message column), one footer hint row. The message
+ * column stacks the scrolling pane, the audience line, the page's OWN
+ * composer and its sender-only status row; the composer is one row and never
+ * grows, so the message list never shifts while typing (frame T1 note). The
+ * rail is a fixed width set from Python (22 cells, 28 from 150 columns) and
+ * becomes a drawer below 72 columns. Overlays (join, browse, report, why,
+ * settings, orgs, keys) replace the body in place. */
+.community-view {
+    padding: 0 1;
+}
+
+.community-view-header {
+    height: 1;
+}
+
+.community-view-body {
+    height: 1fr;
+}
+
+.community-view-rail {
+    height: 1fr;
+    border-right: solid $lo-edge;
+    padding: 0 1 0 0;
+}
+
+.community-view-column {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 0 0 1;
+}
+
+.community-view-pane {
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+.community-view-text {
+    width: 1fr;
+    height: auto;
+}
+
+.community-view-audience {
+    /* 2 rows: the rule between the messages and the composer, then the line
+     * that says who will see the post (frame T1). A 1-row box with a border
+     * left the line itself a 0-row content box. */
+    height: 2;
+    border-top: solid $lo-edge;
+}
+
+.community-view-input {
+    height: 1;
+    border: none;
+    padding: 0;
+}
+
+.community-view-status {
+    height: 1;
+}
+
+.community-view-overlay {
+    height: 1fr;
+    border: round $lo-edge;
+    padding: 0 1;
+}
+
+.community-view-overlay-input {
+    height: 1;
+    border: none;
+    padding: 0;
+}
+
+.community-view-overlay-text {
+    width: 1fr;
+    height: auto;
+}
+
+.community-view-overlay-title {
+    height: 1;
+}
+
+/* The overlay's reading area scrolls; its controls (agree + Join, Send /
+ * Cancel) sit below it at their natural height and never scroll away. */
+.community-view-overlay-body {
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+.community-view-overlay-controls {
+    height: auto;
+    border-top: solid $lo-edge;
+}
+
+.community-view-footer {
+    height: 1;
+}
+
+
 /* ── full-page projects view ───────────────────────────────────────────── *
  *
  * The fourth sibling MODE (see the org-chart and settings blocks above):
