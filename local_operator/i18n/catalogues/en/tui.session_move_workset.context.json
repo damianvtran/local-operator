@@ -33,5 +33,20 @@
     "role": "TUI status line while the preflight runs",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": ""
+  },
+  "tui.session_move_workset.cancelled": {
+    "role": "transcript notice after the user pressed Cancel on the working-files card",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Neutral, not an error: the user chose not to move. Nothing was moved."
+  },
+  "tui.session_move_workset.confirm_without": {
+    "role": "button on the working-files card when the files could not be listed: moves the conversation and leaves any working files behind",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Short button label (verb first)."
+  },
+  "tui.session_move_workset.checkbox_without": {
+    "role": "required checkbox before 'Move without the working files'",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{source} is the device that keeps the files, verbatim. First person, like the other checkbox."
   }
 }

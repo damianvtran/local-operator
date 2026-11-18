@@ -5,5 +5,8 @@
   "tui.session_move_workset.checkbox_stays": "Tôi hiểu các tệp làm việc này vẫn ở trên {source}",
   "tui.session_move_workset.confirm": "Chuyển",
   "tui.session_move_workset.cancel": "Hủy",
-  "tui.session_move_workset.loading": "Đang kiểm tra các tệp làm việc của cuộc trò chuyện này…"
+  "tui.session_move_workset.loading": "Đang kiểm tra các tệp làm việc của cuộc trò chuyện này…",
+  "tui.session_move_workset.cancelled": "Đã hủy việc chuyển — chưa chuyển gì.",
+  "tui.session_move_workset.confirm_without": "Chuyển mà không kèm tệp làm việc",
+  "tui.session_move_workset.checkbox_without": "Tôi hiểu các tệp làm việc vẫn ở lại trên {source}"
 }

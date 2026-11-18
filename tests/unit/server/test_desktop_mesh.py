@@ -2533,3 +2533,33 @@ async def test_v1_transfer_has_no_history_secret_opt_in(mesh_api) -> None:
         json={"to": PEER, "include_history_secrets": True},
     )
     assert response.status_code == 422, response.text
+
+
+def test_the_desktop_receipt_carries_the_arrival_engagement() -> None:
+    """PR #4241 round 1: the dialog could not say an ACTIVE conversation resumed on
+    the destination with a note, because ``transfer_receipt`` dropped the block."""
+    from local_operator.server.models.desktop_mesh import TransferReceipt
+    from local_operator.server.utils.desktop_mesh import transfer_receipt
+
+    engagement = {
+        "engaged": True,
+        "detail": "runtime joining",
+        "session_id": MINE,
+        "reason": "active",
+        "arrival_note": "delivered",
+    }
+    result = {
+        "ok": True,
+        "mode": "move",
+        "state": "completed",
+        "to_device": {"device_id": PEER, "name": "peer"},
+        "phases": [{"phase": "done"}],
+        "engagement": engagement,
+    }
+
+    receipt = transfer_receipt(result, session_id=MINE, keep=False, to=PEER)
+
+    assert receipt["engagement"] == engagement
+    assert TransferReceipt(**receipt).engagement == engagement
+    cold = transfer_receipt({**result, "engagement": None}, session_id=MINE, keep=False, to=PEER)
+    assert cold["engagement"] is None

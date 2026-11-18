@@ -17,6 +17,7 @@ either sentence would lie in one of the two builds.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -56,8 +57,32 @@ def _member(block: Mapping[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+#: C0/C1 control characters, DEL and ESC sequences. Stripped from EVERY rendered
+#: line (security S3, round 1): paths, remotes, device names and branch names are
+#: interpolated from the owner's tree and the mesh, and a ``\x1b[2K\r\x1b[1A``
+#: inside one rewrote the lines above the CLI's y/N prompt.
+_CONTROL = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.?|[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean(text: str) -> str:
+    """``text`` without terminal control characters or escape sequences."""
+    return _CONTROL.sub("", str(text))
+
+
 def _t(message: Msg) -> str:
-    return render_resolved(message)
+    return clean(render_resolved(message))
+
+
+#: ``workset.GIT_FAILURE_CAUSES`` -> the sentence naming git's error class (U6).
+_CAUSES = {
+    "not_a_repository": _ws.cause_not_a_repository,
+    "dubious_ownership": _ws.cause_dubious_ownership,
+    "index_corrupt": _ws.cause_index_corrupt,
+    "object_corrupt": _ws.cause_object_corrupt,
+    "git_missing": _ws.cause_git_missing,
+    "timeout": _ws.cause_timeout,
+    "git_error": _ws.cause_git_error,
+}
 
 
 def _size(count: int) -> str:
@@ -92,23 +117,29 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
     keeper = source_label(block, "?")
     if state == "unknown":
         failure = _member(block, "failure")
+        repo = str(failure.get("repo") or "?")
+        cause = _CAUSES.get(str(failure.get("cause") or ""), _ws.cause_git_error)
         return [
-            _t(
-                _ws.unknown(
-                    source=keeper,
-                    step=str(failure.get("step") or "?"),
-                    repo=str(failure.get("repo") or "?"),
-                )
-            )
+            _t(_ws.unknown(source=keeper, step=str(failure.get("step") or "?"), repo=repo)),
+            "  " + _t(_ws.unknown_cause(cause=_t(cause()), repo=repo)),
         ]
+    if state == "unsupported" and _member(block, "update_device").get("role") == "destination":
+        # The DESTINATION dropped the consent on its way (review R3): only updating it
+        # helps, so the copy names it and offers no flag.
+        peer = _member(block, "update_device")
+        return [_t(_ws.unsupported_destination(device=str(peer.get("name") or label)))]
     if state == "unsupported":
         owner = _member(block, "owner")
         return [
             _t(_ws.unsupported(device=str(owner.get("name") or owner.get("device_id") or label)))
         ]
     worktrees = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
+    mentioned = [str(p) for p in block.get("mentioned") or [] if isinstance(p, str)]
     if not worktrees:
-        return [_t(_ws.none())]
+        lines = [_t(_ws.none())]
+        if mentioned:
+            lines.append("  " + _t(_ws.mentioned(paths=", ".join(mentioned[:_LIST_LIMIT]))))
+        return lines
     sends = bool(block.get("carries_files"))
     totals = _member(block, "totals")
     lines = [
@@ -132,12 +163,24 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
             )
         ),
     ]
+    # ONE PROBE ANSWER PER REMOTE (review U7, round 1): three worktrees of one
+    # repository printed the same cannot-fetch / HTTPS / remedy triple three times,
+    # which was most of what pushed the TUI card's controls off screen. The answer is
+    # per remote by construction (``workset_probe.probe_request``), so it is printed
+    # under the first worktree that uses that remote.
+    probed: set[str] = set()
     for row in worktrees:
         path = str(row.get("path") or "")
         if row.get("state") == "left_behind":
             lines.append(
                 "    "
-                + _t(_ws.worktree_left(path=path, reason=reason_text(str(row.get("reason") or ""))))
+                + _t(
+                    _ws.worktree_left(
+                        path=path,
+                        source=keeper,
+                        reason=reason_text(str(row.get("reason") or "")),
+                    )
+                )
             )
             continue
         lines.append(
@@ -153,6 +196,10 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
                 )
             )
         )
+        remote = str(row.get("remote_url") or "")
+        if remote in probed:
+            continue
+        probed.add(remote)
         lines.extend("      " + text for text in probe_row_lines(row, device=label))
     excluded = [item for item in block.get("excluded") or [] if isinstance(item, dict)]
     for item in excluded[:_LIST_LIMIT]:
@@ -175,6 +222,8 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
                 "  " + _t(_ws.leaves_behind(path=str(item.get("path") or ""), command=command))
             )
     lines.extend("  " + text for text in probe_block_lines(block, device=label))
+    if mentioned:
+        lines.append("  " + _t(_ws.mentioned(paths=", ".join(mentioned[:_LIST_LIMIT]))))
     lines.append(
         _t(
             _ws.advice_sends(device=label)
@@ -208,7 +257,7 @@ def probe_row_lines(row: Mapping[str, Any], *, device: str) -> list[str]:
         out.append(_t(_ws.probe_https_rewrite(device=device, url=str(rewrite["url"]))))
     remedy = _member(row, "remedy")
     if remedy.get("command"):
-        out.append(_t(_ws.probe_remedy(command=str(remedy["command"]))))
+        out.append(_t(_ws.probe_remedy(device=device, command=str(remedy["command"]))))
     return out
 
 

@@ -34,8 +34,40 @@ def brings_summary(
     )
 
 
+def cause_dubious_ownership() -> Msg:
+    return Msg("cli.sessions_move_workset.cause.dubious_ownership", {})
+
+
+def cause_git_error() -> Msg:
+    return Msg("cli.sessions_move_workset.cause.git_error", {})
+
+
+def cause_git_missing() -> Msg:
+    return Msg("cli.sessions_move_workset.cause.git_missing", {})
+
+
+def cause_index_corrupt() -> Msg:
+    return Msg("cli.sessions_move_workset.cause.index_corrupt", {})
+
+
+def cause_not_a_repository() -> Msg:
+    return Msg("cli.sessions_move_workset.cause.not_a_repository", {})
+
+
+def cause_object_corrupt() -> Msg:
+    return Msg("cli.sessions_move_workset.cause.object_corrupt", {})
+
+
+def cause_timeout() -> Msg:
+    return Msg("cli.sessions_move_workset.cause.timeout", {})
+
+
 def changed() -> Msg:
     return Msg("cli.sessions_move_workset.changed", {})
+
+
+def digest_mismatch() -> Msg:
+    return Msg("cli.sessions_move_workset.digest_mismatch", {})
 
 
 def help_confirm() -> Msg:
@@ -60,6 +92,10 @@ def help_yes() -> Msg:
 
 def leaves_behind(*, path: str, command: str) -> Msg:
     return Msg("cli.sessions_move_workset.leaves_behind", {"path": path, "command": command})
+
+
+def mentioned(*, paths: str) -> Msg:
+    return Msg("cli.sessions_move_workset.mentioned", {"paths": paths})
 
 
 def needs_confirmation(*, source: str, digest: str) -> Msg:
@@ -94,8 +130,8 @@ def probe_https_rewrite(*, device: str, url: str) -> Msg:
     return Msg("cli.sessions_move_workset.probe_https_rewrite", {"device": device, "url": url})
 
 
-def probe_remedy(*, command: str) -> Msg:
-    return Msg("cli.sessions_move_workset.probe_remedy", {"command": command})
+def probe_remedy(*, device: str, command: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_remedy", {"device": device, "command": command})
 
 
 def probe_unknown(*, device: str) -> Msg:
@@ -196,8 +232,16 @@ def unknown(*, source: str, step: str, repo: str) -> Msg:
     return Msg("cli.sessions_move_workset.unknown", {"source": source, "step": step, "repo": repo})
 
 
+def unknown_cause(*, cause: str, repo: str) -> Msg:
+    return Msg("cli.sessions_move_workset.unknown_cause", {"cause": cause, "repo": repo})
+
+
 def unsupported(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.unsupported", {"device": device})
+
+
+def unsupported_destination(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.unsupported_destination", {"device": device})
 
 
 def warning_sends(*, session: str, device: str) -> Msg:
@@ -219,8 +263,11 @@ def withheld_secret(*, path: str) -> Msg:
     return Msg("cli.sessions_move_workset.withheld_secret", {"path": path})
 
 
-def worktree_left(*, path: str, reason: str) -> Msg:
-    return Msg("cli.sessions_move_workset.worktree_left", {"path": path, "reason": reason})
+def worktree_left(*, path: str, source: str, reason: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.worktree_left",
+        {"path": path, "source": source, "reason": reason},
+    )
 
 
 def worktree_line(

@@ -144,7 +144,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
-from local_operator.i18n.keys import cli_sessions_move_workset as _ws_keys
+from local_operator.i18n.keys import tui_session_move_workset as _wsc_keys
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
@@ -631,8 +631,8 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
-#: The working-set copy the `/move --to` card shares with the CLI (design §11.3, §12).
-_ws_render = tr("cli.sessions_move_workset")
+#: The `/move --to` working-set card's own copy (design §11.3, §12).
+_wsc_render = tr("tui.session_move_workset")
 #: The `/language` receipts live in a deferred wire namespace so the phone-sheet
 #: twin (`session/runtime/serving.py`) renders the SAME words; resolved per call.
 _lang_t = tr("wire.language_receipts")
@@ -37556,7 +37556,8 @@ class OperatorApp(App[None]):
                 # an unconfirmed working set by itself. ``--keep`` is not gated
                 # (the source keeps everything); its receipt says what it lacks.
                 confirm_digest = ""
-                if not request.keep:
+                without_working_set = bool(request.without_working_set)
+                if not request.keep and not without_working_set:
                     preflight = await asyncio.to_thread(
                         run_session_move_preflight, target_id, request.to
                     )
@@ -37567,15 +37568,20 @@ class OperatorApp(App[None]):
                         and isinstance(block, dict)
                     ):
                         drop_checking()
-                        approved = await self.push_screen_wait(
+                        decision = await self.push_screen_wait(
                             MoveWorkingSetConfirmScreen(
                                 block, session_id=target_id, device=request.to
                             )
                         )
-                        if not approved:
-                            self._system_notice(_ws_render(_ws_keys.aborted()), "note")
+                        if decision == "without":
+                            without_working_set = True
+                        elif decision == "confirm":
+                            confirm_digest = str(block.get("scope_digest") or "")
+                        else:
+                            # A deliberate Cancel is not a failure (review D7): a
+                            # neutral note, never the CLI's "not confirmed" refusal.
+                            self._system_notice(_wsc_render(_wsc_keys.cancelled()), "note")
                             return
-                        confirm_digest = str(block.get("scope_digest") or "")
                 # WITHDRAWN BEFORE THE LEAVE: the check row belongs to the
                 # transcript the leave is about to replace (U1), so leaving it
                 # mounted would paint "checking …" into a session that is gone.
@@ -37601,6 +37607,7 @@ class OperatorApp(App[None]):
                     queue=request.queue,
                     drop_session_roles=request.drop_session_roles,
                     confirm_working_set=confirm_digest,
+                    without_working_set=without_working_set,
                 )
             finally:
                 self._move_in_flight = False

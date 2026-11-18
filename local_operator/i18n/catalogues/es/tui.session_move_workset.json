@@ -5,5 +5,8 @@
   "tui.session_move_workset.checkbox_stays": "Entiendo que estos archivos de trabajo se quedan en {source}",
   "tui.session_move_workset.confirm": "Mover",
   "tui.session_move_workset.cancel": "Cancelar",
-  "tui.session_move_workset.loading": "Comprobando los archivos de trabajo de esta conversación…"
+  "tui.session_move_workset.loading": "Comprobando los archivos de trabajo de esta conversación…",
+  "tui.session_move_workset.cancelled": "Movimiento cancelado: no se movió nada.",
+  "tui.session_move_workset.confirm_without": "Mover sin los archivos de trabajo",
+  "tui.session_move_workset.checkbox_without": "Entiendo que los archivos de trabajo se quedan en {source}"
 }

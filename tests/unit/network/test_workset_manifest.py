@@ -75,18 +75,63 @@ def test_the_cwd_seeds_its_worktree_with_exact_counts(root: Path, rig: Rig) -> N
     assert feat.head == git(rig.feat, "rev-parse", "HEAD")
 
 
-def test_a_transcript_mention_alone_finds_the_worktree(root: Path, rig: Rig) -> None:
+def test_a_transcript_mention_alone_lists_the_worktree_as_mentioned_never_planned(
+    root: Path, rig: Rig
+) -> None:
+    """Review R8 / security S5 (round 1): a repository the session only READ about is
+    shown as ``mentioned`` — not planned, not counted, not a digest input — so it can
+    never be auto-carried and a chat-only session needs no confirmation."""
     session = root / "sessions" / SID
     point_session_at(session, rig.home)  # cwd is home: not a repository
     (session / "transcript.jsonl").write_text(
-        json.dumps({"type": "user", "content": "cd ~/proj/.worktrees/other && make"}) + "\n",
+        json.dumps({"type": "user", "content": "cat ~/proj/.worktrees/other/README"}) + "\n",
         encoding="utf-8",
     )
 
-    rows = _rows(_manifest(root, rig))
+    manifest = _manifest(root, rig)
 
-    assert list(rows) == ["~/proj/.worktrees/other"]
-    assert rows["~/proj/.worktrees/other"].sources == ("mention",)
+    assert manifest.worktrees == ()
+    assert manifest.empty is True  # no confirmation for a session that only read
+    assert manifest.mentioned == ("~/proj/.worktrees/other",)
+    block = manifest.to_dict()
+    assert block["mentioned"] == ["~/proj/.worktrees/other"]
+    assert block["totals"]["worktrees"] == 0
+
+
+def test_a_mention_beside_a_cwd_does_not_widen_the_planned_set_or_the_digest(
+    root: Path, rig: Rig
+) -> None:
+    session = root / "sessions" / SID
+    point_session_at(session, rig.feat)
+    before = _manifest(root, rig)
+    (session / "transcript.jsonl").write_text(
+        json.dumps({"type": "user", "content": "see ~/proj/.worktrees/other/x"}) + "\n",
+        encoding="utf-8",
+    )
+
+    after = _manifest(root, rig)
+
+    assert [row.path for row in after.worktrees] == ["~/proj/.worktrees/feat"]
+    assert after.mentioned == ("~/proj/.worktrees/other",)
+    assert workset.scope_digest(after) == workset.scope_digest(before)
+
+
+def test_a_subagent_childs_mention_alone_is_mentioned_too(root: Path, rig: Rig) -> None:
+    parent = root / "sessions" / SID
+    point_session_at(parent, rig.home)
+    (parent / "subagent-lane-job1.v1.json").write_text(
+        json.dumps({"child_session_id": CHILD}), encoding="utf-8"
+    )
+    child = root / "sessions" / CHILD
+    point_session_at(child, rig.home)
+    (child / "transcript.jsonl").write_text(
+        json.dumps({"content": "read ~/proj/.worktrees/other/notes"}) + "\n", encoding="utf-8"
+    )
+
+    manifest = _manifest(root, rig)
+
+    assert manifest.worktrees == ()
+    assert manifest.mentioned == ("~/proj/.worktrees/other",)
 
 
 def test_a_provenance_record_seeds_its_worktree(root: Path, rig: Rig) -> None:
@@ -177,6 +222,70 @@ def test_a_primarys_nested_worktrees_are_not_its_untracked_files(root: Path, rig
 
     assert primary.untracked == 0, primary
     assert primary.is_primary is True
+
+
+def test_a_size_crossing_a_power_of_two_keeps_a_files_stay_digest(root: Path, rig: Rig) -> None:
+    """Review R2 (round 1): an active session writing while queued crossed 512/1024
+    bytes and every resume refused ``working_set_changed``. No size input while the
+    move carries no files; the bucket binds only once files travel."""
+    from dataclasses import replace
+
+    point_session_at(root / "sessions" / SID, rig.feat)
+    small = _manifest(root, rig)
+    assert small.total_bytes < 1024, small.total_bytes
+    with (rig.feat / "notes.txt").open("a", encoding="utf-8") as handle:
+        handle.write("x" * 4096)  # crosses at least two power-of-two buckets
+    large = _manifest(root, rig)
+    assert large.total_bytes > 2 * small.total_bytes
+
+    assert workset.scope_digest(large) == workset.scope_digest(small)
+    # ...but a consent to SEND files is bound to the payload's order of magnitude.
+    sends_small = workset.scope_digest(replace(small, carries_files=True))
+    sends_large = workset.scope_digest(replace(large, carries_files=True))
+    assert sends_small != sends_large
+    assert sends_small != workset.scope_digest(small)
+
+
+def test_a_broken_gitdir_pointer_fails_closed(root: Path, rig: Rig, tmp_path: Path) -> None:
+    """Review R4 (round 1): a ``.git`` file pointing at a removed gitdir read as "no
+    working files" and the move went ahead without a word."""
+    proj2 = rig.home / "proj2"
+    proj2.mkdir()
+    (proj2 / ".git").write_text(f"gitdir: {tmp_path / 'gone'}\n", encoding="utf-8")
+    (proj2 / "work.txt").write_text("uncommitted\n", encoding="utf-8")
+    point_session_at(root / "sessions" / SID, proj2)
+
+    with pytest.raises(workset.WorksetUnknown) as failure:
+        _manifest(root, rig)
+
+    assert failure.value.step == "discover"
+    assert failure.value.cause == "not_a_repository"
+
+
+def test_dubious_ownership_is_classed_not_echoed() -> None:
+    """U6: the cause is a CODE the surfaces translate, never git's text."""
+    text = b"fatal: detected dubious ownership in repository at '/x'\n"
+    assert workset.git_failure_cause(text) == "dubious_ownership"
+    assert workset.git_failure_cause(exc=FileNotFoundError("git")) == "git_missing"
+    assert workset.git_failure_cause(b"fatal: index file smaller than expected") == "index_corrupt"
+    assert workset.git_failure_cause(b"something else") == "git_error"
+
+
+def test_a_broken_repository_only_mentioned_does_not_refuse(
+    root: Path, rig: Rig, tmp_path: Path
+) -> None:
+    proj2 = rig.home / "proj2"
+    proj2.mkdir()
+    (proj2 / ".git").write_text(f"gitdir: {tmp_path / 'gone'}\n", encoding="utf-8")
+    session = root / "sessions" / SID
+    point_session_at(session, rig.feat)
+    (session / "transcript.jsonl").write_text(
+        json.dumps({"content": "ls ~/proj2/src"}) + "\n", encoding="utf-8"
+    )
+
+    manifest = _manifest(root, rig)
+
+    assert [row.path for row in manifest.worktrees] == ["~/proj/.worktrees/feat"]
 
 
 def test_the_scope_digest_ignores_bytes_and_binds_the_device(root: Path, rig: Rig) -> None:

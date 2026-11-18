@@ -52,11 +52,15 @@ when the source session shows it uses the bridge) never block a move.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
+import threading
 import tempfile
 import time
 from collections.abc import Iterable, Mapping
@@ -67,7 +71,28 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
-PROBE_VERSION = 1
+#: 2 (review round 1): rows are keyed by ``remote_url`` and carry no path or branch
+#: (S6), and the answer carries only booleans and fixed codes (S1/S3).
+PROBE_VERSION = 2
+
+#: The ONLY failure details a destination may return (security S1.4, round 1). git's
+#: stderr is classed HERE, on the destination, and never leaves it: its first line
+#: carried a redirected internal service's error body back to the asker, and its
+#: wording ("Failed to connect to <host>:<port>", "Connection closed by ...") made
+#: the probe a port scanner. The asker keeps only a value from this tuple.
+DETAIL_CODES = (
+    "auth_denied",
+    "not_found",
+    "unreachable",
+    "tls",
+    "host_key",
+    "timeout",
+    "host_refused",
+    "url_refused",
+    "git_missing",
+    "probe_error",
+    "error",
+)
 
 #: Every ``clone_check`` value a block may carry. ``pending_destination`` is the
 #: unprobed default (``WorktreeFacts.to_dict``); ``no_remote`` is a worktree with no
@@ -107,9 +132,21 @@ ASK_TIMEOUT_S = 120.0
 #: ``url.<path>.insteadOf``). Empty in production; never set from a frame.
 _EXTRA_CONFIG: tuple[str, ...] = ()
 
+#: TEST SEAM / OPERATOR ALLOWANCE: host names the destination may probe even though
+#: they resolve to a non-public address (security S1.3). Empty in production; the
+#: destination's operator may name their own self-hosted git servers in
+#: ``LOCAL_OPERATOR_MOVE_PROBE_HOSTS`` (comma-separated), which is THIS device's
+#: environment, never anything a frame carries.
+_ALLOWED_HOSTS: tuple[str, ...] = ()
+_ALLOWED_HOSTS_ENV = "LOCAL_OPERATOR_MOVE_PROBE_HOSTS"
+
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
+#: ssh user names: never option-shaped (``-oProxyCommand=...``), so the allowlist does
+#: not lean on git >= 2.14.1's own "strange hostname" refusal (security S7).
+_USER = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$")
 _SCP = re.compile(
-    r"^(?:(?P<user>[A-Za-z0-9._-]{1,64})@)?(?P<host>[A-Za-z0-9.-]{2,253}):(?P<path>[^:]+)$"
+    r"^(?:(?P<user>[A-Za-z0-9._][A-Za-z0-9._-]{0,63})@)?"
+    r"(?P<host>[A-Za-z0-9.-]{2,253}):(?P<path>[^:]+)$"
 )
 _UNSAFE_CHARS = re.compile(r"[\s\x00-\x1f\x7f\\]")
 #: git's built-in empty tree (always resolvable, even in an empty repository).
@@ -147,6 +184,8 @@ def classify_url(url: str) -> str | None:
         except ValueError:
             return None
         if not _HOST.match(host) or not parts.path.strip("/"):
+            return None
+        if parts.username is not None and not _USER.match(parts.username):
             return None
         return scheme
     match = _SCP.match(text)
@@ -243,20 +282,26 @@ def session_uses_team_bridge(root: Path, session_id: str) -> bool:
 def probe_request(
     block: Mapping[str, Any], *, session_id: str, team_bridge: bool
 ) -> dict[str, Any]:
-    """The ``workset_probe`` frame for ``block``: per row only path, remote, branch and
-    marker NAMES — nothing the destination could not already learn from the manifest."""
-    rows = []
+    """The ``workset_probe`` frame for ``block``: one row per distinct REMOTE URL with
+    the marker file NAMES of the worktrees that use it.
+
+    MINIMUM DISCLOSURE BEFORE CONSENT (security S6, round 1). The probe runs during
+    ``--dry-run`` and before the user has decided to trust the destination, so it
+    carries only what the destination needs to answer: the remote (it must dial it)
+    and the toolchain markers (it checks its own PATH). No worktree path, no branch,
+    no head — ``ls-remote <url> HEAD`` and the throwaway push need neither.
+    Mention-only worktrees are not in ``block["worktrees"]`` at all
+    (``workset.mention_only``), so they are never sent.
+    """
+    by_url: dict[str, list[str]] = {}
     for row in block.get("worktrees") or []:
         if not isinstance(row, Mapping):
             continue
-        rows.append(
-            {
-                "path": str(row.get("path") or ""),
-                "remote_url": str(row.get("remote_url") or ""),
-                "branch": str(row.get("branch") or ""),
-                "markers": [str(m) for m in row.get("markers") or [] if isinstance(m, str)],
-            }
-        )
+        markers = by_url.setdefault(str(row.get("remote_url") or ""), [])
+        for marker in row.get("markers") or []:
+            if isinstance(marker, str) and marker in TOOLCHAIN_MARKERS and marker not in markers:
+                markers.append(marker)
+    rows = [{"remote_url": url, "markers": sorted(markers)} for url, markers in by_url.items()]
     return {
         "op": "net_session_move",
         "phase": "workset_probe",
@@ -272,56 +317,232 @@ def probe_request(
 # ---------------------------------------------------------------------------
 
 
+#: The hardened ssh the probe uses when the destination's user has not configured
+#: their own (security S7): never prompt or pop an askpass dialog, never forward the
+#: agent or ports to a host a remote peer chose, and never write a new host key —
+#: ``StrictHostKeyChecking=yes`` checks against the destination user's own
+#: known_hosts (ssh's default file) and refuses an unknown host instead of learning
+#: it.
+_HARDENED_SSH = (
+    "ssh -o BatchMode=yes -o ForwardAgent=no -o ClearAllForwardings=yes "
+    "-o StrictHostKeyChecking=yes"
+)
+
+
+def _user_ssh_configured(env: Mapping[str, str]) -> bool:
+    if env.get("GIT_SSH_COMMAND") or env.get("GIT_SSH"):
+        return True
+    try:
+        done = subprocess.run(
+            ["git", "config", "--get", "core.sshCommand"],
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and bool(done.stdout.strip())
+
+
 def _probe_env(extra: Mapping[str, str]) -> dict[str, str]:
     env = dict(os.environ)
     for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         env.pop(name, None)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # ssh's own askpass (a GUI dialog on a desktop with DISPLAY set) is never used for
+    # a probe a remote peer triggered, whoever configured ssh.
+    env["SSH_ASKPASS_REQUIRE"] = "never"
+    if not _user_ssh_configured(env):
+        env["GIT_SSH_COMMAND"] = _HARDENED_SSH
     env.update(extra)
     return env
 
 
+#: Config every probe git call carries (security S1/S7/S8, round 1):
+#: * ``protocol.allow=never`` + https/ssh ``always``: git itself enforces the URL
+#:   allowlist, even after the destination's own ``insteadOf`` rewrites a URL;
+#: * ``http.followRedirects=false``: a redirect to an internal service was followed
+#:   and its error body echoed back (S1 repro 1); with it off, no request reached it;
+#: * ``core.hooksPath=/dev/null``: the throwaway push must not run the destination's
+#:   own pre-push / reference-transaction hooks with a peer-chosen URL (S8).
+_BASE_CONFIG = (
+    "protocol.ext.allow=never",
+    "protocol.allow=never",
+    "protocol.https.allow=always",
+    "protocol.ssh.allow=always",
+    "http.followRedirects=false",
+    f"core.hooksPath={os.devnull}",
+)
+
+
+def _classify(stderr: str) -> str:
+    """git's stderr -> one :data:`DETAIL_CODES` value. Runs on the destination only."""
+    text = stderr.lower()
+    if "host key verification failed" in text or "remote host identification" in text:
+        return "host_key"
+    if (
+        "denied" in text  # "Permission denied", GitHub's "Permission to x denied to y"
+        or "could not read username" in text
+        or "authentication failed" in text
+        or "403" in text
+        or "401" in text
+        or "write access" in text
+    ):
+        return "auth_denied"
+    if "not found" in text or "does not appear to be a git repository" in text or "404" in text:
+        return "not_found"
+    if "ssl" in text or "certificate" in text or "tls" in text:
+        return "tls"
+    if (
+        "could not resolve" in text
+        or "failed to connect" in text
+        or "connection refused" in text
+        or "connection closed" in text
+        or "connection timed out" in text
+        or "no route to host" in text
+        or "network is unreachable" in text
+        or "redirect" in text
+    ):
+        return "unreachable"
+    return "error"
+
+
 def _git(args: list[str], *, env: Mapping[str, str], cwd: str | None = None) -> tuple[bool, str]:
-    command = ["git", "-c", "protocol.ext.allow=never"]
-    for pair in _EXTRA_CONFIG:
+    """One probe git call: ``(ok, detail_code)``. The code is from :data:`DETAIL_CODES`.
+
+    THE WHOLE PROCESS GROUP DIES ON TIMEOUT (review R7, round 1): ``subprocess.run``
+    killed only ``git`` and left the ``ssh`` / ``git-remote-https`` child it spawned
+    running in the new session. The group exists already (``start_new_session``, which
+    is also what removes the controlling tty so ssh cannot prompt), so the timeout
+    kills it by its own id.
+    """
+    command = ["git"]
+    for pair in (*_BASE_CONFIG, *_EXTRA_CONFIG):
         command += ["-c", pair]
     command += args
     try:
-        done = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=cwd,
             env=dict(env),
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=GIT_PROBE_TIMEOUT_S,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             start_new_session=True,  # no controlling tty: ssh cannot prompt
-            check=False,
         )
+    except FileNotFoundError:
+        return False, "git_missing"
+    except OSError:
+        return False, "error"
+    try:
+        _out, err = process.communicate(timeout=GIT_PROBE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
+        _kill_group(process)
         return False, "timeout"
-    except OSError as exc:
-        return False, type(exc).__name__
-    # The FIRST line is the cause (``ERROR: Permission ... denied``, ``ssh: connect
-    # ... refused``, ``fatal: could not read Username``); git's trailing lines are a
-    # generic "make sure you have the correct access rights" paragraph.
-    lines = [
-        line
-        for line in (done.stderr or b"").decode("utf-8", "replace").splitlines()
-        if line.strip()
-    ]
-    return done.returncode == 0, (lines[0].strip()[:200] if lines else "")
+    if process.returncode == 0:
+        return True, ""
+    return False, _classify((err or b"").decode("utf-8", "replace"))
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Host policy (security S1.3)
+# ---------------------------------------------------------------------------
+
+
+def _allowed_hosts() -> set[str]:
+    named = {h.strip().lower() for h in os.environ.get(_ALLOWED_HOSTS_ENV, "").split(",")}
+    return {h for h in (*named, *(h.lower() for h in _ALLOWED_HOSTS)) if h}
+
+
+def _url_host_port(url: str) -> tuple[str, int]:
+    if "://" in url:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        return (parts.hostname or "").lower(), parts.port or (443 if scheme == "https" else 22)
+    match = _SCP.match(url)
+    return ((match.group("host") if match else "").lower(), 22)
+
+
+def _public(address: str) -> bool:
+    """Whether ``address`` is a globally routable unicast address.
+
+    ``is_global`` is False for loopback, RFC 1918, link-local (169.254.169.254, the
+    cloud metadata address), CGNAT 100.64/10, ULA fc00::/7, unspecified and the
+    documentation ranges; an IPv4-mapped IPv6 address is judged as its IPv4 form so
+    ``::ffff:127.0.0.1`` is not a way round it.
+    """
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return bool(ip.is_global) and not ip.is_multicast
+
+
+def host_policy(url: str) -> tuple[bool, list[str]]:
+    """``(allowed, pin_config)`` for probing ``url`` from this device.
+
+    REFUSED: a host that resolves to ANY non-public address, or does not resolve.
+    Resolving (rather than pattern-matching the spelling) is what catches every IP
+    form at once — ``0x7f000001``, ``2130706433``, ``127.1``, ``localhost`` and a DNS
+    name pointing inside — because the resolver is the same one git will use. A host
+    the destination's operator named (``LOCAL_OPERATOR_MOVE_PROBE_HOSTS``) is exempt:
+    that is their own self-hosted git server, not a peer's choice.
+
+    PINNED (HTTPS): the vetted addresses ride ``http.curloptResolve`` so git connects
+    to what was checked, not to a second DNS answer (rebinding). ssh has no such
+    knob; its window is the gap between this lookup and ssh's own, with redirects,
+    agent forwarding and new host keys all refused (S7).
+    """
+    host, port = _url_host_port(url)
+    if not host:
+        return False, []
+    if host in _allowed_hosts():
+        return True, []
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return False, []
+    addresses = list(dict.fromkeys(str(info[4][0]) for info in infos))
+    if not addresses or not all(_public(address) for address in addresses):
+        return False, []
+    if not url.lower().startswith("https://"):
+        return True, []
+    pinned = ",".join(f"[{a}]" if ":" in a else a for a in addresses)
+    return True, ["-c", f"http.curloptResolve={host}:{port}:{pinned}"]
 
 
 def _can_fetch(url: str, env: Mapping[str, str]) -> tuple[bool, str]:
-    return _git(["ls-remote", "--", url, "HEAD"], env=env)
+    allowed, pin = host_policy(url)
+    if not allowed:
+        return False, "host_refused"
+    return _git([*pin, "ls-remote", "--", url, "HEAD"], env=env)
 
 
 def _can_push(url: str, env: Mapping[str, str], scratch: Path) -> tuple[bool, str]:
     """``push --dry-run`` of a throwaway commit to a fresh branch name: authenticates at
     receive-pack and sends nothing (see the module docstring). The commit is of git's
     built-in empty tree, in a bare repository made for this one call."""
+    allowed, pin = host_policy(url)
+    if not allowed:
+        return False, "host_refused"
     repo = Path(tempfile.mkdtemp(prefix="probe-", dir=scratch))
-    ok, detail = _git(["init", "-q", "--bare", str(repo)], env=env)
+    # ``--template=``: no ``init.templateDir`` hooks are copied in (S8).
+    ok, detail = _git(["init", "-q", "--bare", "--template=", str(repo)], env=env)
     if not ok:
         return False, detail
     commit_env = {
@@ -340,17 +561,28 @@ def _can_push(url: str, env: Mapping[str, str], scratch: Path) -> tuple[bool, st
             timeout=GIT_PROBE_TIMEOUT_S,
             check=False,
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return False, type(exc).__name__
+    except (subprocess.TimeoutExpired, OSError):
+        return False, "probe_error"
     sha = (done.stdout or b"").decode("ascii", "replace").strip()
     if done.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
-        return False, "probe_commit"
+        return False, "probe_error"
     probe_ref = (
         "refs/heads/lop-move-probe-"
         + hashlib.sha256(f"{url}{time.time_ns()}".encode()).hexdigest()[:12]
     )
     return _git(
-        ["-C", str(repo), "push", "--dry-run", "--porcelain", "--", url, f"{sha}:{probe_ref}"],
+        [
+            *pin,
+            "-C",
+            str(repo),
+            "push",
+            "--dry-run",
+            "--no-verify",
+            "--porcelain",
+            "--",
+            url,
+            f"{sha}:{probe_ref}",
+        ],
         env=env,
     )
 
@@ -374,43 +606,34 @@ def _remedy(url: str, *, device: str, borrowing_github: bool) -> dict[str, str] 
 
 
 def _check_one(
-    url: str,
-    *,
-    env: Mapping[str, str],
-    scratch: Path,
-    device: str,
-    borrowing_github: bool,
-    have_git: bool,
+    url: str, *, env: Mapping[str, str], scratch: Path, have_git: bool
 ) -> dict[str, Any]:
+    """The destination's answer for one remote: a ``clone_check``, a detail CODE and,
+    for an SSH remote it cannot use, whether the HTTPS spelling fetches/pushes.
+
+    No remedy and no rewritten URL are returned (security S3, round 1): the asker
+    rebuilds both from the URL it sent and these booleans, so a hostile destination
+    cannot put text of its choosing on the consent screen.
+    """
     if not url:
         return {"clone_check": "no_remote"}
     if classify_url(url) is None:
         return {"clone_check": "destination_cannot_clone", "detail": "url_refused"}
     if not have_git:
         return {"clone_check": "destination_cannot_clone", "detail": "git_missing"}
-    answer: dict[str, Any] = {}
     fetch_ok, fetch_detail = _can_fetch(url, env)
-    if not fetch_ok:
-        answer = {"clone_check": "destination_cannot_fetch", "detail": fetch_detail}
-        rewrite = https_rewrite(url)
-        if rewrite:
-            rewrite_ok, _ = _can_fetch(rewrite, env)
-            if rewrite_ok:
-                push_ok, _ = _can_push(rewrite, env, scratch)
-                answer["https_rewrite"] = {"url": rewrite, "fetch": True, "push": push_ok}
-                if not push_ok:
-                    remedy = _remedy(rewrite, device=device, borrowing_github=borrowing_github)
-                    if remedy:
-                        answer["remedy"] = remedy
-                return answer
-    else:
+    if fetch_ok:
         push_ok, push_detail = _can_push(url, env, scratch)
         if push_ok:
             return {"clone_check": "ok"}
-        answer = {"clone_check": "destination_cannot_push", "detail": push_detail}
-    remedy = _remedy(url, device=device, borrowing_github=borrowing_github)
-    if remedy:
-        answer["remedy"] = remedy
+        return {"clone_check": "destination_cannot_push", "detail": push_detail}
+    answer: dict[str, Any] = {"clone_check": "destination_cannot_fetch", "detail": fetch_detail}
+    rewrite = https_rewrite(url)
+    if rewrite:
+        rewrite_ok, _ = _can_fetch(rewrite, env)
+        if rewrite_ok:
+            push_ok, _ = _can_push(rewrite, env, scratch)
+            answer["https_rewrite"] = {"fetch": True, "push": bool(push_ok)}
     return answer
 
 
@@ -439,13 +662,14 @@ def team_bridge_enrolled(root: Path) -> bool:
         return False
 
 
-def run_probe(root: Path, frame: Mapping[str, Any], *, device: str) -> dict[str, Any]:
+def run_probe(root: Path, frame: Mapping[str, Any], *, device: str = "") -> dict[str, Any]:
     """Serve ``workset_probe`` on the DESTINATION. Read-only, bounded, never raises
-    for a bad row (each row answers on its own); ``device`` is this device's name,
-    used only in a ``share --with`` remedy."""
+    for a bad row (each row answers on its own). ``device`` is unused since the asker
+    builds the remedy itself (S3); kept so older call sites keep their shape."""
+    del device
     rows = [row for row in frame.get("worktrees") or [] if isinstance(row, Mapping)]
     rows = rows[:MAX_PROBE_ROWS]
-    urls = {str(row.get("remote_url") or "") for row in rows}
+    urls = list(dict.fromkeys(str(row.get("remote_url") or "") for row in rows))
     lent: dict[str, str] = {}
     if any(
         github_repository(url) and (url.startswith("https://") or https_rewrite(url))
@@ -464,39 +688,84 @@ def run_probe(root: Path, frame: Mapping[str, Any], *, device: str) -> dict[str,
         scratch = Path(scratch_text)
         # One check per distinct URL: the push probe uses its own throwaway branch
         # name, so two worktrees of one repository get one answer.
-        keys = list(dict.fromkeys(str(r.get("remote_url") or "") for r in rows))
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = {
-                key: pool.submit(
-                    _check_one,
-                    key,
-                    env=env,
-                    scratch=scratch,
-                    device=device,
-                    borrowing_github=bool(lent),
-                    have_git=have_git,
-                )
-                for key in keys
+                url: pool.submit(_check_one, url, env=env, scratch=scratch, have_git=have_git)
+                for url in urls
             }
-            for key, future in futures.items():
+            for url, future in futures.items():
                 try:
-                    checks[key] = future.result()
+                    checks[url] = future.result()
                 except Exception:  # noqa: BLE001 — one row's bug must not sink the rest
                     logger.warning("workset probe: a row failed", exc_info=True)
-                    checks[key] = {
+                    checks[url] = {
                         "clone_check": "destination_cannot_clone",
                         "detail": "probe_error",
                     }
     answered = []
     for row in rows:
-        key = str(row.get("remote_url") or "")
-        item = {"path": str(row.get("path") or ""), **checks.get(key, {})}
+        url = str(row.get("remote_url") or "")
+        item = {"remote_url": url, **checks.get(url, {})}
         item["missing_tools"] = missing_tools(row.get("markers") or [])
         answered.append(item)
-    answer: dict[str, Any] = {"ok": True, "probe_version": PROBE_VERSION, "worktrees": answered}
+    answer: dict[str, Any] = {
+        "ok": True,
+        "probe_version": PROBE_VERSION,
+        "worktrees": answered,
+        # Whether a remedy should be ``include`` (a share exists) or ``share``; the
+        # asker builds the command (S3).
+        "borrowing_github": bool(lent),
+    }
     if frame.get("team_bridge"):
         answer["team_bridge"] = {"needed": True, "enrolled": team_bridge_enrolled(Path(root))}
     return answer
+
+
+# ---------------------------------------------------------------------------
+# Destination admission: owner binding, rate limit, audit summary (security S1)
+# ---------------------------------------------------------------------------
+
+#: Probes one asking device may trigger per window. NOT MEASURED against a traffic
+#: distribution (there is none yet): a move attempt asks at most twice (the CLI's
+#: prompt re-probes once, R6) and the TUI once, so 10 per minute is several times any
+#: interactive use while bounding a peer that loops the phase to scan hosts.
+PROBE_RATE_LIMIT = 10
+PROBE_RATE_WINDOW_S = 60.0
+_rate_lock = threading.Lock()
+_rate_seen: dict[str, list[float]] = {}
+
+
+def rate_limited(device_id: str, *, now: float | None = None) -> bool:
+    """Record one probe by ``device_id``; True when it exceeds the window's budget."""
+    moment = time.monotonic() if now is None else now
+    with _rate_lock:
+        recent = [t for t in _rate_seen.get(device_id, []) if moment - t < PROBE_RATE_WINDOW_S]
+        if len(recent) >= PROBE_RATE_LIMIT:
+            _rate_seen[device_id] = recent
+            return True
+        recent.append(moment)
+        _rate_seen[device_id] = recent
+        return False
+
+
+def audit_summary(frame: Mapping[str, Any], answer: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Bounded audit metadata for one served probe: host names and result codes only
+    (never a path, a URL's path or userinfo)."""
+    hosts: list[str] = []
+    for row in frame.get("worktrees") or []:
+        if isinstance(row, Mapping):
+            host = _url_host_port(str(row.get("remote_url") or ""))[0]
+            if host and host not in hosts:
+                hosts.append(host)
+    results: dict[str, int] = {}
+    for item in (answer or {}).get("worktrees") or []:
+        if isinstance(item, Mapping):
+            key = str(item.get("detail") or item.get("clone_check") or "")
+            results[key] = results.get(key, 0) + 1
+    return {
+        "hosts": ",".join(hosts[:16]),
+        "results": ",".join(f"{k}={v}" for k, v in sorted(results.items())),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -504,14 +773,24 @@ def run_probe(root: Path, frame: Mapping[str, Any], *, device: str) -> dict[str,
 # ---------------------------------------------------------------------------
 
 
-def apply_probe(block: dict[str, Any], answer: Mapping[str, Any] | None) -> dict[str, Any]:
+def apply_probe(
+    block: dict[str, Any], answer: Mapping[str, Any] | None, *, device: str = ""
+) -> dict[str, Any]:
     """Fold the destination's answer into ``block`` in place (and return it).
 
     ``answer=None`` means the destination does not serve the probe (an older lop):
     every row reads ``unknown_destination``, which a surface renders as "could not
-    check", never as a failure. Rows are matched by ``path``; a row the answer does
-    not name keeps ``pending_destination``. No row's ``state`` changes — see the
+    check", never as a failure. Rows are matched by ``remote_url``; a row the answer
+    does not name keeps ``pending_destination``. No row's ``state`` changes — see the
     module docstring for why the probe flags rather than leaves behind.
+
+    THE DESTINATION SUPPLIES NO TEXT (security S3, round 1). Only a ``clone_check``
+    from :data:`CLONE_CHECKS`, a detail from :data:`DETAIL_CODES`, the ``fetch`` /
+    ``push`` / ``borrowing_github`` booleans and tool names that are values of
+    :data:`TOOLCHAIN_MARKERS` are kept. The HTTPS spelling and the remedy command are
+    rebuilt HERE from the URL this device sent and ``device`` (the destination's
+    name), so a hostile destination cannot write a command, markup or a terminal
+    escape onto the consent screen.
     """
     rows = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
     if answer is None:
@@ -519,28 +798,48 @@ def apply_probe(block: dict[str, Any], answer: Mapping[str, Any] | None) -> dict
             row["clone_check"] = "unknown_destination"
         block["destination_probe"] = {"state": "unknown_destination"}
         return block
-    by_path = {
-        str(item.get("path") or ""): item
+    by_url = {
+        str(item.get("remote_url") or ""): item
         for item in answer.get("worktrees") or []
         if isinstance(item, Mapping)
     }
+    known_tools = {tool for tools in TOOLCHAIN_MARKERS.values() for tool in tools}
+    borrowing = answer.get("borrowing_github") is True
     missing_union: list[str] = []
     for row in rows:
-        item = by_path.get(str(row.get("path") or ""))
+        url = str(row.get("remote_url") or "")
+        item = by_url.get(url)
         if item is None:
             continue
         check = str(item.get("clone_check") or "")
-        row["clone_check"] = check if check in CLONE_CHECKS else "unknown_destination"
-        for key in ("detail", "https_rewrite", "remedy"):
-            if item.get(key):
-                row[key if key != "detail" else "clone_detail"] = item[key]
-        tools = [str(t) for t in item.get("missing_tools") or [] if isinstance(t, str)]
+        check = check if check in CLONE_CHECKS else "unknown_destination"
+        row["clone_check"] = check
+        detail = str(item.get("detail") or "")
+        if detail:
+            row["clone_detail"] = detail if detail in DETAIL_CODES else "error"
+        remedy_url = url
+        rewrite = item.get("https_rewrite")
+        rewritten = https_rewrite(url)
+        if isinstance(rewrite, Mapping) and rewrite.get("fetch") is True and rewritten:
+            push = rewrite.get("push") is True
+            row["https_rewrite"] = {"url": rewritten, "fetch": True, "push": push}
+            remedy_url = rewritten
+            needs_remedy = not push
+        else:
+            needs_remedy = check in ("destination_cannot_fetch", "destination_cannot_push")
+        if needs_remedy:
+            remedy = _remedy(remedy_url, device=device, borrowing_github=borrowing)
+            if remedy:
+                row["remedy"] = remedy
+        tools = sorted(
+            {str(t) for t in item.get("missing_tools") or [] if isinstance(t, str)} & known_tools
+        )
         row["missing_tools"] = tools
         missing_union.extend(t for t in tools if t not in missing_union)
     probe: dict[str, Any] = {"state": "answered", "missing_tools": sorted(missing_union)}
     bridge = answer.get("team_bridge")
     if isinstance(bridge, Mapping) and bridge.get("needed"):
-        probe["team_bridge"] = {"needed": True, "enrolled": bool(bridge.get("enrolled"))}
+        probe["team_bridge"] = {"needed": True, "enrolled": bridge.get("enrolled") is True}
     block["destination_probe"] = probe
     return block
 
@@ -608,15 +907,20 @@ def arrival_note(
 __all__ = [
     "ASK_TIMEOUT_S",
     "CLONE_CHECKS",
+    "DETAIL_CODES",
+    "PROBE_RATE_LIMIT",
     "PROBE_VERSION",
     "TOOLCHAIN_MARKERS",
     "apply_probe",
     "arrival_note",
+    "audit_summary",
     "classify_url",
     "github_repository",
+    "host_policy",
     "https_rewrite",
     "missing_tools",
     "probe_request",
+    "rate_limited",
     "run_probe",
     "session_uses_team_bridge",
     "team_bridge_enrolled",

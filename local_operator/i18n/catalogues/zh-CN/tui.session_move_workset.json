@@ -5,5 +5,8 @@
   "tui.session_move_workset.checkbox_stays": "我了解这些工作文件会留在{source}上",
   "tui.session_move_workset.confirm": "移动",
   "tui.session_move_workset.cancel": "取消",
-  "tui.session_move_workset.loading": "正在检查此对话的工作文件……"
+  "tui.session_move_workset.loading": "正在检查此对话的工作文件……",
+  "tui.session_move_workset.cancelled": "已取消移动——未移动任何内容。",
+  "tui.session_move_workset.confirm_without": "不带工作文件移动",
+  "tui.session_move_workset.checkbox_without": "我了解工作文件会留在{source}上"
 }

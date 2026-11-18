@@ -261,7 +261,13 @@ def test_an_unreadable_working_set_fails_closed_with_working_set_unknown(
     assert preflight["working_set"]["state"] == "unknown"
     assert refused["code"] == "working_set_unknown", refused
     assert refused["changed"] is False
-    assert refused["working_set"]["failure"] == {"step": "status", "repo": "~/proj/.worktrees/feat"}
+    failure = refused["working_set"]["failure"]
+    assert {k: failure[k] for k in ("step", "repo")} == {
+        "step": "status",
+        "repo": "~/proj/.worktrees/feat",
+    }
+    # U6: git's error CLASS rides the block as a code, never its text.
+    assert failure["cause"] in workset.GIT_FAILURE_CAUSES, failure
     assert journal_after_refusal == {}
     # The explicit escape still moves the conversation, and says nothing was carried.
     assert escaped["ok"] is True, escaped
@@ -286,3 +292,57 @@ def test_a_keep_copy_is_not_gated_but_says_it_arrives_without_the_work(
         ("~/proj/.worktrees/feat", "left_behind")
     ]
     assert source.is_dir()  # a keep copy never retires the source
+
+
+def _as_an_older_destination(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prepare frame an older destination sends: it never forwards ``working_set``."""
+    real = mobility._source_prepare
+
+    def older(server: Any, link: Any, frame: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        frame = {key: value for key, value in frame.items() if key != "working_set"}
+        return real(server, link, frame, *args, **kwargs)
+
+    monkeypatch.setattr(mobility, "_source_prepare", older)
+
+
+def test_a_destination_that_drops_the_consent_is_named_not_asked_again(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig
+) -> None:
+    """Review R3 (round 1): an older destination's prepare carries no ``working_set``,
+    so every confirmed move was refused ``working_set_unconfirmed`` and the user was
+    asked to confirm again — which could never succeed."""
+    from local_operator.network import workset_text
+
+    server_a, server_b, _host, _port = pair
+    source = _session_with_worktree(pair, monkeypatch, rig)
+    digest = _move(server_b, monkeypatch, to="local", dry_run=True)["working_set"]["scope_digest"]
+    _as_an_older_destination(monkeypatch)
+
+    refused = _move(server_b, monkeypatch, to="local", confirm_working_set=digest)
+
+    assert refused["code"] == "working_set_unsupported", refused
+    block = refused["working_set"]
+    assert block["update_device"]["device_id"] == server_b.identity.device_id
+    assert block["update_device"]["role"] == "destination"
+    text = " ".join(workset_text.summary_lines(block, session=SESSION))
+    assert "device-b runs an older lop" in text and "Update lop on device-b" in text
+    assert "--without-working-set" not in text  # no flag can help here
+    assert source.is_dir()
+    assert read_handoff_journal(server_a.root) == {}
+
+
+def test_a_chat_only_move_to_an_older_destination_still_works(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, tmp_path: Path
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    plain = tmp_path / "ws" / "home" / "not-a-repo"
+    plain.mkdir()
+    point_session_at(source, plain)
+    _as_an_older_destination(monkeypatch)
+
+    moved = _move(server_b, monkeypatch, to="local")
+
+    assert moved["ok"] is True, moved
+    assert "working_set" not in moved

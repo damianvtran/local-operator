@@ -7774,9 +7774,31 @@ def sessions_move_command(args: argparse.Namespace) -> int:
             )
         )
 
-    result = _issue(str(getattr(args, "confirm_working_set", "") or ""))
+    given_digest = str(getattr(args, "confirm_working_set", "") or "")
+    result = _issue(given_digest)
     code = str(result.get("code") or "")
     block = result.get("working_set") if isinstance(result.get("working_set"), dict) else None
+    if (
+        not result.get("ok")
+        and code in ("working_set_unconfirmed", "working_set_changed")
+        and block is not None
+        and block.get("scope_digest")
+        and not as_json
+        and not bool(getattr(args, "yes", False))
+    ):
+        # THE PROBED BLOCK, NOT THE GATE'S (review R6 / UX U3, round 1). The owner's
+        # refusal carries the manifest but never the destination's answer (can it
+        # fetch/push each remote, which toolchains it lacks), which only the dry-run
+        # preflight asks for — so the y/N prompt and the non-tty refusal showed less
+        # than `--dry-run` and the TUI did. One preflight here fixes both; its digest
+        # is the one confirmed, because it is the list the user is shown. A preflight
+        # that fails keeps the gate's block: the move is still refused or confirmed
+        # against the owner's own manifest, never widened.
+        probed = dict(mobility.request_move(session_id, to=to, dry_run=True))
+        fresh = probed.get("working_set")
+        if probed.get("ok") and isinstance(fresh, dict) and fresh.get("scope_digest"):
+            block = fresh
+            result = {**result, "working_set": fresh}
     if (
         not result.get("ok")
         and code in ("working_set_unconfirmed", "working_set_changed")
@@ -7792,7 +7814,18 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         if bool(getattr(args, "yes", False)):
             result = _issue(digest)
         elif not as_json and sys.stdin.isatty() and sys.stdout.isatty():
-            if _confirm_working_set(block, session_id=session_id, to=to, code=code):
+            # A mistyped `--confirm-working-set` is told apart from a list that moved
+            # (review U8): the owner can only say "this is not the current scope".
+            shown = "digest_mismatch" if (code == "working_set_changed" and given_digest) else code
+            try:
+                confirmed = _confirm_working_set(block, session_id=session_id, to=to, code=shown)
+            except KeyboardInterrupt:
+                # Ctrl-C at the prompt is a "no" (review U5): nothing was moved, so no
+                # traceback; 130 is the shell's own code for an interrupted command.
+                print(file=sys.stderr)
+                print(render_resolved(_wsh.aborted()), file=sys.stderr)
+                return 130
+            if confirmed:
                 result = _issue(digest)
             else:
                 print(render_resolved(_wsh.aborted()), file=sys.stderr)
@@ -7800,13 +7833,29 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     if as_json:
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
         return 0 if result.get("ok") else 1
-    lines = _sessions_move_words(
+    workset_lines = _sessions_move_workset_words(
         dict(result),
         session_id=session_id,
         to=to,
-        engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+        mistyped=bool(given_digest) and str(result.get("code") or "") == "working_set_changed",
     )
-    lines.extend(_sessions_move_workset_words(dict(result), session_id=session_id, to=to))
+    if (
+        not result.get("ok")
+        and str(result.get("code") or "") in mobility.WORKSET_REFUSAL_CODES
+        and workset_lines
+    ):
+        # ONE VOICE (review U4, round 1): the owner's `message` is its English relay
+        # fallback, written from the OWNER's side ("on this device" names the wrong
+        # machine on a recall). When the keyed summary renders, it alone speaks.
+        lines = workset_lines
+    else:
+        lines = _sessions_move_words(
+            dict(result),
+            session_id=session_id,
+            to=to,
+            engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+        )
+        lines.extend(workset_lines)
     if result.get("ok"):
         for line in lines:
             print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
@@ -7849,6 +7898,8 @@ def _confirm_working_set(block: dict[str, Any], *, session_id: str, to: str, cod
 
     if code == "working_set_changed":
         print(render_resolved(_wsh.changed()))
+    elif code == "digest_mismatch":
+        print(render_resolved(_wsh.digest_mismatch()))
     for line in workset_text.summary_lines(block, session=session_id, device=to):
         print(line)  # i18n: ignore rendered from cli.sessions_move_workset keys
     try:
@@ -7858,8 +7909,13 @@ def _confirm_working_set(block: dict[str, Any], *, session_id: str, to: str, cod
     return answer.strip().lower() in ("y", "yes")
 
 
-def _sessions_move_workset_words(result: dict[str, Any], *, session_id: str, to: str) -> list[str]:
-    """The working-set lines a move's text output adds (receipt or refusal)."""
+def _sessions_move_workset_words(
+    result: dict[str, Any], *, session_id: str, to: str, mistyped: bool = False
+) -> list[str]:
+    """The working-set lines a move's text output adds (receipt or refusal).
+
+    ``mistyped``: the refusal answered a digest the user passed by hand, so its lead
+    line says the digest does not match rather than "the files changed" (U8)."""
     from local_operator.network import workset_text
 
     block = result.get("working_set")
@@ -7873,6 +7929,8 @@ def _sessions_move_workset_words(result: dict[str, Any], *, session_id: str, to:
         )
     code = str(result.get("code") or "")
     lines = workset_text.summary_lines(block, session=session_id, device=to)
+    if mistyped:
+        lines.insert(0, render_resolved(_wsh.digest_mismatch()))
     if code in ("working_set_unconfirmed", "working_set_changed"):
         digest = str(block.get("scope_digest") or "")
         keeper = workset_text.source_label(block, "?")

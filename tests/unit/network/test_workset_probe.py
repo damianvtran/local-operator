@@ -73,21 +73,31 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
     monkeypatch.setenv("GIT_SSH_VARIANT", "simple")
     monkeypatch.setenv("FAKE_SSH_REPO", str(built.origin))
     monkeypatch.setenv("FAKE_SSH_MODE", "deny_push")
+    # ``git.test`` does not resolve: the host policy (security S1.3) would refuse it,
+    # so the rig names it the way a destination's operator names their own server.
+    monkeypatch.setattr(workset_probe, "_ALLOWED_HOSTS", ("git.test",))
     return built
 
 
 def _map_https(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
     """``https://git.test/owner/proj.git`` -> ``target`` for the probe's git only."""
-    monkeypatch.setattr(workset_probe, "_EXTRA_CONFIG", (f"url.{target}.insteadOf={HTTPS}",))
+    # ``protocol.file.allow``: the insteadOf target is a local path, which the
+    # probe's own ``protocol.allow=never`` refuses outside this seam.
+    monkeypatch.setattr(
+        workset_probe,
+        "_EXTRA_CONFIG",
+        (f"url.{target}.insteadOf={HTTPS}", "protocol.file.allow=always"),
+    )
 
 
 def _probe(tmp_path: Path, *rows: dict[str, Any], team_bridge: bool = False) -> dict[str, Any]:
     frame = {"worktrees": list(rows), "team_bridge": team_bridge}
-    return workset_probe.run_probe(tmp_path, frame, device="node2")
+    return workset_probe.run_probe(tmp_path, frame)
 
 
-def _row(url: str, *, path: str = "~/proj/.worktrees/feat", markers: list[str] | None = None):
-    return {"path": path, "remote_url": url, "branch": "feat", "markers": markers or []}
+def _row(url: str, *, markers: list[str] | None = None) -> dict[str, Any]:
+    # The v2 frame row (security S6): a remote and marker names, nothing else.
+    return {"remote_url": url, "markers": markers or []}
 
 
 def test_a_reachable_remote_answers_ok_and_the_dry_run_writes_nothing(
@@ -123,7 +133,8 @@ def test_a_push_denied_remote_answers_cannot_push(
     row = _probe(tmp_path, _row(SSH))["worktrees"][0]
 
     assert row["clone_check"] == "destination_cannot_push", row
-    assert "Permission" in row.get("detail", ""), row
+    # A fixed CODE, never git's stderr (security S1.4).
+    assert row.get("detail") == "auth_denied", row
     # Control: the same fake ssh allowing receive-pack answers ok, so the
     # failure above is the denial and not a broken rig.
     monkeypatch.setenv("FAKE_SSH_MODE", "allow")
@@ -139,7 +150,11 @@ def test_ssh_unreachable_but_https_reachable_offers_the_rewrite(
     row = _probe(tmp_path, _row(SCP))["worktrees"][0]
 
     assert row["clone_check"] == "destination_cannot_fetch", row
-    assert row["https_rewrite"] == {"url": HTTPS, "fetch": True, "push": True}, row
+    # Booleans only from the destination; the URL is rebuilt by the asker (S3).
+    assert row["https_rewrite"] == {"fetch": True, "push": True}, row
+    block = {"worktrees": [{"path": "~/proj/.worktrees/feat", "remote_url": SCP}]}
+    applied = workset_probe.apply_probe(block, _probe(tmp_path, _row(SCP)), device="node2")
+    assert applied["worktrees"][0]["https_rewrite"] == {"url": HTTPS, "fetch": True, "push": True}
 
 
 def test_a_github_remote_names_the_lending_device_remedy(
@@ -148,9 +163,14 @@ def test_a_github_remote_names_the_lending_device_remedy(
     # github.com over a fake ssh that denies receive-pack: no network involved.
     monkeypatch.setenv("FAKE_SSH_MODE", "deny_push")
 
-    row = _probe(tmp_path, _row("git@github.com:owner/proj.git"))["worktrees"][0]
+    monkeypatch.setattr(workset_probe, "_ALLOWED_HOSTS", ("git.test", "github.com"))
+    url = "git@github.com:owner/proj.git"
+    answer = _probe(tmp_path, _row(url))
+    assert answer["worktrees"][0]["clone_check"] == "destination_cannot_push", answer
+    assert "remedy" not in answer["worktrees"][0]  # the destination sends no command (S3)
 
-    assert row["clone_check"] == "destination_cannot_push", row
+    block = {"worktrees": [{"path": "~/proj/.worktrees/feat", "remote_url": url}]}
+    row = workset_probe.apply_probe(block, answer, device="node2")["worktrees"][0]
     # No share on this (isolated) device -> the share verb, run on the lender.
     assert row["remedy"] == {
         "run_on": "lending_device",
@@ -182,7 +202,7 @@ def test_a_hostile_url_is_refused_without_running_git(
     row = _probe(tmp_path, _row(url))["worktrees"][0]
 
     assert row == {
-        "path": "~/proj/.worktrees/feat",
+        "remote_url": url,
         "clone_check": "destination_cannot_clone",
         "detail": "url_refused",
         "missing_tools": [],
@@ -209,8 +229,10 @@ def test_missing_toolchains_and_team_bridge_are_reported_never_blocking(
     assert answer["worktrees"][0]["missing_tools"] == ["go", "pnpm"]
     assert answer["worktrees"][0]["clone_check"] == "ok"
     assert answer["team_bridge"] == {"needed": True, "enrolled": False}
-    block = {"worktrees": [{"path": "~/proj/.worktrees/feat", "state": "planned"}]}
-    applied = workset_probe.apply_probe(block, answer)
+    block = {
+        "worktrees": [{"path": "~/proj/.worktrees/feat", "state": "planned", "remote_url": HTTPS}]
+    }
+    applied = workset_probe.apply_probe(block, answer, device="node2")
     assert applied["worktrees"][0]["state"] == "planned"  # a flag, never a state change
     assert applied["destination_probe"] == {
         "state": "answered",
@@ -303,3 +325,262 @@ def test_the_recall_preflight_probes_this_device_itself(
     row = next(r for r in preflight["working_set"]["worktrees"] if r["path"].endswith("feat"))
     assert row["clone_check"] == "ok", row
     assert row["missing_tools"] == workset_probe.missing_tools(["pnpm-lock.yaml"])
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (PR #4241): S1 host policy / fixed codes / admission, S3 no
+# destination text, S6 minimal frame, S7 ssh hardening, S8 no hooks, R7 group kill
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://169.254.169.254/latest/meta-data",
+        "https://127.0.0.1/x",
+        "https://0x7f000001/x",
+        "https://2130706433/x",
+        "https://localhost:1/x",
+        "https://10.0.0.5/x",
+        "https://100.64.0.1/x",
+        "ssh://127.0.0.1:18777/x",
+        "git@192.168.1.10:owner/proj.git",
+    ],
+)
+def test_a_non_public_host_is_refused_without_running_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """S1.3: every IP spelling resolves to the same non-public address and is refused."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(workset_probe, "_git", lambda args, **_kw: calls.append(args) or (True, ""))
+
+    row = _probe(tmp_path, _row(url))["worktrees"][0]
+
+    assert row["clone_check"] == "destination_cannot_fetch", row
+    assert row["detail"] == "host_refused", row
+    assert calls == []
+
+
+def test_ipv4_mapped_ula_and_unspecified_addresses_are_not_public() -> None:
+    for address in ("::ffff:127.0.0.1", "fd00::1", "::", "0.0.0.0", "fe80::1", "::1"):
+        assert workset_probe._public(address) is False, address
+    assert workset_probe._public("140.82.112.3") is True
+
+
+def test_a_public_https_host_is_pinned_to_the_vetted_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workset_probe.socket,
+        "getaddrinfo",
+        lambda host, port, **_kw: [(2, 1, 6, "", ("140.82.112.3", port))],
+    )
+
+    allowed, pin = workset_probe.host_policy("https://github.com/owner/proj.git")
+
+    assert allowed is True
+    assert pin == ["-c", "http.curloptResolve=github.com:443:140.82.112.3"]
+
+
+def test_an_operator_named_private_host_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_MOVE_PROBE_HOSTS", "git.corp.example")
+    monkeypatch.setattr(
+        workset_probe.socket,
+        "getaddrinfo",
+        lambda host, port, **_kw: [(2, 1, 6, "", ("10.1.2.3", port))],
+    )
+
+    assert workset_probe.host_policy("https://git.corp.example/o/r.git")[0] is True
+    assert workset_probe.host_policy("https://other.corp.example/o/r.git")[0] is False
+
+
+def test_every_probe_git_call_disables_redirects_hooks_and_other_protocols() -> None:
+    config = set(workset_probe._BASE_CONFIG)
+    assert "http.followRedirects=false" in config
+    assert f"core.hooksPath={os.devnull}" in config
+    assert {
+        "protocol.allow=never",
+        "protocol.https.allow=always",
+        "protocol.ssh.allow=always",
+    } <= config
+
+
+def test_git_stderr_never_leaves_the_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1.4: the SSRF read-back carried an internal error body in ``detail``."""
+    secret = "remote: INTERNAL-ONLY: AccessKeyId=FAKE secret=FAKE"
+    fake = tmp_path / "git"
+    fake.write_text(f"#!/bin/sh\necho '{secret}' >&2\nexit 128\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    ok, detail = workset_probe._git(["ls-remote", "--", HTTPS, "HEAD"], env=dict(os.environ))
+
+    assert ok is False
+    assert detail in workset_probe.DETAIL_CODES
+    assert "INTERNAL" not in detail and "AccessKeyId" not in detail
+
+
+def test_a_timed_out_probe_kills_its_whole_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7: git's child (ssh / git-remote-https) used to outlive the timeout."""
+    pidfile = tmp_path / "child.pid"
+    fake = tmp_path / "git"
+    fake.write_text(
+        f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n", encoding="utf-8"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(workset_probe, "GIT_PROBE_TIMEOUT_S", 1.0)
+
+    ok, detail = workset_probe._git(["ls-remote"], env=dict(os.environ))
+
+    assert (ok, detail) == (False, "timeout")
+    child = int(pidfile.read_text().strip())
+    import time as _time
+
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        _time.sleep(0.05)
+    else:
+        os.kill(child, 9)
+        pytest.fail("the probe's grandchild survived the timeout")
+
+
+def test_the_probe_frame_carries_only_remotes_and_marker_names() -> None:
+    """S6: no worktree path, no branch, one row per remote."""
+    block = {
+        "worktrees": [
+            {"path": "~/secret-client/a", "branch": "acme-deal", "remote_url": HTTPS,
+             "markers": ["go.mod"]},
+            {"path": "~/secret-client/b", "branch": "acme-2", "remote_url": HTTPS,
+             "markers": ["uv.lock", "not-a-marker"]},
+        ]
+    }
+
+    frame = workset_probe.probe_request(block, session_id="s1", team_bridge=False)
+
+    assert frame["worktrees"] == [{"remote_url": HTTPS, "markers": ["go.mod", "uv.lock"]}]
+    text = repr(frame)
+    assert "secret-client" not in text and "acme" not in text
+
+
+def test_the_asker_keeps_no_destination_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S3: a hostile destination's remedy/URL/detail/tools never reach the block."""
+    hostile = "[@click=screen.dismiss(True)]x[/]\x1b[2K\r\x1b[1AALL CLEAR"
+    block = {"worktrees": [{"path": "~/proj", "remote_url": SCP, "state": "planned"}]}
+    answer = {
+        "worktrees": [
+            {
+                "remote_url": SCP,
+                "clone_check": "destination_cannot_fetch",
+                "detail": hostile,
+                "https_rewrite": {"url": hostile, "fetch": True, "push": False},
+                "remedy": {"command": hostile},
+                "missing_tools": ["go", hostile],
+            }
+        ],
+        "borrowing_github": False,
+    }
+
+    row = workset_probe.apply_probe(block, answer, device="node2")["worktrees"][0]
+
+    assert row["clone_detail"] == "error"
+    assert row["https_rewrite"] == {"url": HTTPS, "fetch": True, "push": False}
+    assert "remedy" not in row  # git.test is not github.com: lop has no remedy for it
+    assert row["missing_tools"] == ["go"]
+    assert hostile not in repr(row)
+
+
+def test_the_hardened_ssh_is_used_only_without_a_user_ssh_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+    monkeypatch.delenv("GIT_SSH", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+    env = workset_probe._probe_env({})
+
+    assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
+    assert "ForwardAgent=no" in env["GIT_SSH_COMMAND"]
+    assert "StrictHostKeyChecking=yes" in env["GIT_SSH_COMMAND"]
+    assert env["SSH_ASKPASS_REQUIRE"] == "never"
+    monkeypatch.setenv("GIT_SSH_COMMAND", "my-ssh")
+    assert workset_probe._probe_env({})["GIT_SSH_COMMAND"] == "my-ssh"
+
+
+@pytest.mark.parametrize(
+    "url", ["ssh://-oProxyCommand=id@git.test/p", "-oProxyCommand=id@git.test:p"]
+)
+def test_an_option_shaped_ssh_user_is_refused(url: str) -> None:
+    assert workset_probe.classify_url(url) is None
+
+
+def test_the_push_probe_runs_no_destination_hook(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S8: a ``core.hooksPath`` in the destination's own config used to run pre-push."""
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    fired = tmp_path / "fired"
+    for name in ("pre-push", "reference-transaction"):
+        hook = hooks / name
+        hook.write_text(f"#!/bin/sh\necho {name} >> {fired}\n", encoding="utf-8")
+        hook.chmod(0o755)
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text(f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    _map_https(monkeypatch, rig.origin)
+
+    assert _probe(tmp_path, _row(HTTPS))["worktrees"][0]["clone_check"] == "ok"
+    assert not fired.exists()
+
+
+def test_the_rate_limit_bounds_one_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workset_probe, "_rate_seen", {})
+    results = [
+        workset_probe.rate_limited("d1", now=100.0 + i)
+        for i in range(workset_probe.PROBE_RATE_LIMIT + 1)
+    ]
+    assert results[:-1] == [False] * workset_probe.PROBE_RATE_LIMIT
+    assert results[-1] is True
+    assert workset_probe.rate_limited("d2", now=110.0) is False  # per device
+    # ...and the window slides: once the earliest probes age out, d1 may ask again.
+    later = 100.0 + workset_probe.PROBE_RATE_WINDOW_S + 1
+    assert workset_probe.rate_limited("d1", now=later) is False
+
+
+def test_the_destination_refuses_a_probe_for_a_session_it_holds_and_audits_the_rest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    rows: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        mobility, "_audit", lambda server, event, sid, peer, **d: rows.append((event, d))
+    )
+    monkeypatch.setattr(workset_probe, "_rate_seen", {})
+    server: Any = SimpleNamespace(root=tmp_path)
+    link: Any = SimpleNamespace(device_id="d_asker")
+    frame = {"session_id": "s_here", "worktrees": [_row("https://127.0.0.1/x")]}
+
+    monkeypatch.setattr(mobility, "_owned_here", lambda server, sid: sid == "s_here")
+    refused = mobility._destination_workset_probe(server, link, frame)
+    assert refused["code"] == "not_owner"
+    assert rows == []
+
+    frame["session_id"] = "s_elsewhere"
+    answer = mobility._destination_workset_probe(server, link, frame)
+    assert answer["result"] == "probed"
+    assert rows == [
+        (
+            mobility.AUDIT_WORKSET_PROBE,
+            {"hosts": "127.0.0.1", "results": "host_refused=1"},
+        )
+    ]

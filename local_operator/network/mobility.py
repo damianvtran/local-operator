@@ -274,6 +274,9 @@ AUDIT_ROLLED_BACK = "session.handoff.rolled_back"
 AUDIT_DONE = "session.handoff.done"
 #: design §8.3: the owner answered a working-set preflight (counts only, no paths).
 AUDIT_WORKSET_PREFLIGHT = "session.workset.preflight"
+#: One destination-side probe served for a peer (security S1/S9, round 1): the
+#: destination acted on the network at a peer's request, so it keeps a row.
+AUDIT_WORKSET_PROBE = "session.workset.probe"
 
 # ---------------------------------------------------------------------------
 # The ``session_move`` contract (frozen at P0; slices V and DB build against it)
@@ -392,8 +395,14 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         "working_set_over_cap",  # the payload is over ``workset.DEFAULT_CAP_BYTES``
         "working_set_unsupported",  # the owner predates the gate; --without-working-set
         "working_set_unknown",  # the git state could not be read: fail closed
+        # This device's relay predates the gate (``WORKSET_MOVE_CAPABILITY``), so a
+        # dry run or a consent sent to it would run as a real, ungated move.
+        "relay_restart_required",
     }
 )
+
+#: Spelled once; ``wire.LINK_CAPABILITIES`` carries it (review R1, round 1).
+WORKSET_MOVE_CAPABILITY = "session-move-workset-v1"  # == wire.SESSION_MOVE_WORKSET_V1
 
 #: The subset of :data:`MOVE_REFUSAL_CODES` the working-set gate produces. A surface
 #: that holds one of these re-renders the refusal's ``working_set`` block and asks
@@ -4080,6 +4089,9 @@ def _workset_unknown_block(
         },
         "failure": {
             "step": str(getattr(failure, "step", "") or "manifest"),
+            # The CLASS of git's error (``workset.GIT_FAILURE_CAUSES``), never its
+            # text (review U6 within security S3's "codes only" rule).
+            "cause": str(getattr(failure, "cause", "") or "git_error"),
             "repo": (
                 workset.home_relative(failure.repo, Path.home())
                 if getattr(failure, "repo", "")
@@ -4145,6 +4157,7 @@ def _workset_gate(
     to_device: str,
     consent: Mapping[str, Any] | None,
     to_name: str = "",
+    consent_present: bool = True,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """``(refusal, arrival_block)`` for a ``move`` of ``session_id`` to ``to_device``.
 
@@ -4161,6 +4174,14 @@ def _workset_gate(
     after P3 and binds their artifact digests to the lease epoch
     (``workset._artifact_binding``); the over-cap refusal below is live only then,
     because a cap on bytes that are not sent would refuse moves for nothing.
+
+    ``consent_present=False`` is a prepare frame with NO ``working_set`` key at all: the
+    destination asking to pull predates the gate and drops the user's answer on the
+    way (review R3, round 1). Every requester of this build sends the key on every
+    prepare (``_destination_move``), so its absence is not "unconfirmed" — asking the
+    user to confirm again could never succeed — but ``working_set_unsupported``
+    naming the device that must be updated. A session with no working files still
+    moves, so a chat-only move to an older peer keeps working during a rollout.
     """
     from local_operator.network import workset
 
@@ -4169,6 +4190,8 @@ def _workset_gate(
         manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
     except workset.WorksetUnknown as failure:
         unknown = _workset_unknown_block(server, failure, to_device=to_device, to_name=to_name)
+        if not consent_present:
+            return _workset_outdated_peer(session_id, unknown, to_device=to_device), None
         if given["without"]:
             # The explicit escape: the user said "leave whatever is there behind".
             unknown["consent"] = "without"
@@ -4180,6 +4203,8 @@ def _workset_gate(
         return None, None
     block = manifest.to_dict()
     label = manifest.to_name or to_device
+    if not consent_present:
+        return _workset_outdated_peer(session_id, block, to_device=to_device), None
     if given["without"]:
         arrival = workset.arrival_block(manifest)
         arrival["consent"] = "without"
@@ -4193,6 +4218,30 @@ def _workset_gate(
     arrival = workset.arrival_block(manifest)
     arrival["consent"] = "confirmed"
     return None, arrival
+
+
+def _workset_outdated_peer(
+    session_id: str, block: dict[str, Any], *, to_device: str
+) -> dict[str, Any]:
+    """The ``working_set_unsupported`` refusal for a DESTINATION too old to forward
+    the user's consent (review R3): the block names that device under
+    ``update_device`` so every surface says which machine to update."""
+    destination = block.get("destination") if isinstance(block.get("destination"), dict) else {}
+    name = str((destination or {}).get("name") or to_device)
+    block = dict(block)
+    block["state"] = "unsupported"
+    block["update_device"] = {"device_id": to_device, "name": name, "role": "destination"}
+    return {
+        "result": "refused",
+        "code": "working_set_unsupported",
+        "message": (
+            f"{name} runs an older lop that cannot pass on your answer about this "
+            "conversation's working files, so nothing was moved; update lop on "
+            f"{name} and try again"
+        ),
+        "session_id": session_id,
+        "working_set": block,
+    }
 
 
 def _source_workset_preflight(
@@ -4258,14 +4307,44 @@ def _destination_workset_probe(
     """
     from local_operator.network import workset_probe
 
-    del link  # admitted by the op's capability check; the answer names no peer
+    session_id = str(frame.get("session_id") or "")
+    # ADMISSION BEYOND ``move`` (security S1, round 1). The authorizer's carve-out
+    # lets any ``move`` member reach this phase for an id this device does not own,
+    # which made it a git-transport SSRF and credential oracle. Three bounds:
+    #
+    # 1. OWNER BINDING, AS FAR AS THIS DEVICE CAN KNOW IT WITHOUT DIALLING. The
+    #    asker must be the session's owner. A session this device itself holds
+    #    cannot be the asker's to move here, so that is refused outright. For any
+    #    other id the authoritative owner lives in the federated listing, which is a
+    #    fan-out that refreshes membership and dials every peer — the asker
+    #    included, while it waits on this answer — so it is NOT read per probe.
+    #    What admits the rest is the ``move`` capability plus the bounds below.
+    # 2. A RATE LIMIT per asking device (``workset_probe.PROBE_RATE_LIMIT``).
+    # 3. AN AUDIT ROW per probe (hosts and result codes only), and the probe's own
+    #    host policy and fixed answer codes (``workset_probe`` S1 notes), so what a
+    #    peer can learn is "public host X answered class Y", recorded here.
+    if session_id and _owned_here(server, session_id):
+        return {
+            "result": "refused",
+            "code": "not_owner",
+            "message": "this device holds that conversation; only its owner may ask",
+        }
+    if workset_probe.rate_limited(link.device_id):
+        _audit(server, AUDIT_WORKSET_PROBE, session_id, link.device_id, refused="rate_limited")
+        return {"result": "refused", "code": "rate_limited", "message": "too many probes"}
     try:
-        answer = workset_probe.run_probe(
-            Path(server.root), frame, device=str(server._own_label())  # noqa: SLF001
-        )
+        answer = workset_probe.run_probe(Path(server.root), frame)
     except Exception:  # noqa: BLE001 — a probe bug reads as "could not check"
         logger.warning("mobility: the working-set probe failed", exc_info=True)
+        _audit(server, AUDIT_WORKSET_PROBE, session_id, link.device_id, refused="probe_error")
         return {"result": "refused", "code": "refused", "message": "probe failed"}
+    _audit(
+        server,
+        AUDIT_WORKSET_PROBE,
+        session_id,
+        link.device_id,
+        **workset_probe.audit_summary(frame, answer),
+    )
     return {"result": "probed", **answer}
 
 
@@ -4295,9 +4374,7 @@ def _probe_destination(
         block, session_id=session_id, team_bridge=bool(block.get("team_bridge_used"))
     )
     if here:
-        answer: dict[str, Any] | None = workset_probe.run_probe(
-            Path(server.root), frame, device=str(server._own_label())  # noqa: SLF001
-        )
+        answer: dict[str, Any] | None = workset_probe.run_probe(Path(server.root), frame)
     else:
         try:
             link = _link_for_move(server, target_device, target_name)
@@ -4316,7 +4393,11 @@ def _probe_destination(
             answer = None
         if answer is not None and answer.get("result") != "probed":
             answer = None
-    return workset_probe.apply_probe(block, answer)
+    # The remedy names the DESTINATION (``share github --with <it>``): the peer on an
+    # offload, this device on a recall. Built here, never taken from the answer (S3).
+    own = str(server._own_label())  # noqa: SLF001
+    destination = own if here else (target_name or target_device)
+    return workset_probe.apply_probe(block, answer, device=destination)
 
 
 def _ask_workset_preflight(
@@ -4741,10 +4822,16 @@ def _source_prepare(
     workset_consent = _consent_frame(
         frame.get("working_set") if isinstance(frame.get("working_set"), dict) else None
     )
+    # An ABSENT key is an older destination, not an unconfirmed move (review R3).
+    consent_present = isinstance(frame.get("working_set"), dict)
     workset_arrival: dict[str, Any] | None = None
     if not keep:
         refused_ws, workset_arrival = _workset_gate(
-            server, session_id, to_device=link.device_id, consent=workset_consent
+            server,
+            session_id,
+            to_device=link.device_id,
+            consent=workset_consent,
+            consent_present=consent_present,
         )
         if refused_ws is not None:
             return refused_ws
@@ -5056,7 +5143,11 @@ def _source_prepare(
     # deleted, the same honest "ask again" as the busy refusal above. Run even when P1
     # found nothing: a worktree the session entered during the retire's wait counts.
     refused_ws, workset_arrival = _workset_gate(
-        server, session_id, to_device=link.device_id, consent=workset_consent
+        server,
+        session_id,
+        to_device=link.device_id,
+        consent=workset_consent,
+        consent_present=consent_present,
     )
     if refused_ws is not None:
         return refused_ws
@@ -7710,6 +7801,23 @@ def request_move(
     record = store.find_own_relay(resolved)
     if record is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())
+    # FAIL CLOSED ON A RELAY OLDER THAN THIS CLI (review R1, round 1). The relay is
+    # a long-lived process that keeps the build it started with across an update,
+    # and one that predates the working-set gate reads neither ``dry_run`` nor
+    # ``working_set``: a preflight sent to it MOVED the conversation, ungated, away
+    # from its worktrees. Same shape as ``_EXCLUSIVE_MOVE_CAPABILITY``: refuse, and
+    # name the restart. A plain move (no dry run, no consent) is forwarded as
+    # before — it is exactly what that relay already did for every caller.
+    consenting = bool(dry_run or confirm_working_set or without_working_set)
+    advertised = tuple(getattr(record, "capabilities", None) or ())
+    if consenting and WORKSET_MOVE_CAPABILITY not in advertised:
+        return _relay_refusal(
+            session_id,
+            "relay_restart_required",
+            "this device's relay is older than this lop and cannot check working files "
+            "safely, so nothing was moved; restart it with `lop network restart`, then "
+            "try again",
+        )
     action = "recover" if from_replica else ("recall" if to == "local" else "offload")
     # THE CALLER'S OWN ENVELOPE IS THE RELAY'S BOUND PLUS ITS MARGIN, and both terms
     # come from ``move_hold_s`` so the two cannot drift: a caller that gives up FIRST

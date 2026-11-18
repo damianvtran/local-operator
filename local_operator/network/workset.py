@@ -93,6 +93,7 @@ LEFT_BEHIND_REASONS = (
 #: pathological input from stalling a relay thread; none is a tuning knob.
 _MAX_TREE_SESSIONS = 256  # sessions in one subagent tree
 _MAX_MENTIONS = 4000  # distinct path mentions read from transcripts
+_MAX_MENTIONED = 20  # mention-only worktrees listed on a block (display bound only)
 _MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024  # per transcript read for mentions
 _MAX_STATUS_ENTRIES = 50_000  # porcelain entries per worktree
 _CONTENT_SCAN_MAX_BYTES = 1024 * 1024  # §8.1: text files <= 1 MiB are content-scanned
@@ -115,7 +116,23 @@ class Seed:
     """A path that says the session tree worked somewhere, and why we think so."""
 
     path: str
-    source: str  # "cwd" | "provenance" | "mention", or "subagent:<child_id>" prefix form
+    source: str  # "cwd" | "provenance" | "mention"; a child's: "subagent:<id>[:mention]"
+
+
+def mention_only(sources: Iterable[str]) -> bool:
+    """Whether every source that found a worktree is a transcript MENTION.
+
+    WHY IT MATTERS (review R8 / security S5, round 1). A mention is any ``~/`` path
+    string in the transcript — a file the agent only READ, a path in fetched web
+    text, ``find ~ -name .git`` output. Planning such a repository put the shared
+    primary checkout (and other sessions' dirty counts) on the consent list, sent
+    its remote to the destination's probe, and would ship it once bytes travel. A
+    worktree the session never ran in (cwd) and never wrote through a file tool
+    (provenance) is therefore listed ``mentioned`` — shown, never planned, never
+    counted, never a digest input.
+    """
+    items = tuple(sources)
+    return bool(items) and all(s == "mention" or s.endswith(":mention") for s in items)
 
 
 @dataclass(frozen=True)
@@ -261,6 +278,11 @@ class Manifest:
     #: device" would name the wrong machine. Not a digest input.
     from_device: str = ""
     from_name: str = ""
+    #: Home-relative worktrees the transcript only MENTIONS (``mention_only``):
+    #: shown so the user knows they were seen and not included, never planned,
+    #: never counted, never a digest input, never probed. Not part of ``empty``: a
+    #: session that only read about a repository needs no confirmation.
+    mentioned: tuple[str, ...] = ()
 
     @property
     def empty(self) -> bool:
@@ -307,6 +329,8 @@ class Manifest:
             "worktrees": [w.to_dict() for w in self.worktrees],
             "excluded": [item.to_dict() for item in self.excluded],
             "left_behind": [item.to_dict() for item in self.left_behind],
+            # Additive and absent when empty (frozen-contract parity).
+            **({"mentioned": list(self.mentioned)} if self.mentioned else {}),
         }
 
 
@@ -321,9 +345,21 @@ def scope_digest(manifest: Manifest) -> str:
     Not a digest of the full manifest, deliberately (§3.5): a ``--queue``d session keeps
     editing until its turn ends, so byte-exact consent would refuse every queued move.
     The user confirms the SCOPE — a new worktree, a new withheld path, a different state
-    or reason, a different destination device id, or the payload crossing a power-of-two
-    bucket changes it, and the owner refuses ``working_set_changed`` rather than widening
-    the move silently.
+    or reason, or a different destination device id changes it, and the owner refuses
+    ``working_set_changed`` rather than widening the move silently.
+
+    NO SIZE INPUT WHILE NO BYTES TRAVEL (review R2, round 1). A power-of-two size
+    bucket used to be an input here, and an active session crosses 512/1024/2048…
+    bytes routinely while it waits at a queued or ``--wait`` safe point, so the resume
+    prepare refused ``working_set_changed`` and the queue record failed — the exact
+    case this digest exists to avoid. With ``carries_files`` false (PR A) the size
+    describes nothing the user is consenting to send, and the gate re-checks
+    ``over_cap`` against the current manifest on its own, so the bucket bought
+    nothing. It is bound in ``_artifact_binding`` ONLY when files are carried.
+
+    NOT AN AUTHENTICATOR (security S9). The digest binds user intent and staleness:
+    any ``move``-capable destination can read it from ``workset_preflight`` for
+    itself. Authorisation stays the ``move`` capability (§8.2).
 
     BOUND TO THE AUTHENTICATED DESTINATION (security lead, 2026-11-18): ``to_device`` is
     the mesh device id the owner resolved/authenticated, never a display name, so a
@@ -334,7 +370,6 @@ def scope_digest(manifest: Manifest) -> str:
     ``_artifact_binding`` below rather than changing the inputs above, so a PR A
     consent stays comparable.
     """
-    total = manifest.total_bytes
     payload = {
         "version": WORKSET_VERSION,
         "to_device": manifest.to_device,
@@ -342,7 +377,6 @@ def scope_digest(manifest: Manifest) -> str:
             [w.path, w.repo, w.branch, w.state, w.reason] for w in manifest.worktrees
         ),
         "excluded": sorted([item.path, item.why] for item in manifest.excluded),
-        "bytes_bucket": math.ceil(math.log2(max(total, 1))),
         **_artifact_binding(manifest),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -350,9 +384,21 @@ def scope_digest(manifest: Manifest) -> str:
 
 
 def _artifact_binding(manifest: Manifest) -> dict[str, Any]:
-    """Extra digest inputs the transfer half contributes. Empty in PR A by design."""
-    del manifest
-    return {}
+    """Extra digest inputs that exist only when the move SENDS files.
+
+    Empty while ``carries_files`` is false, so a "files stay" consent is immune to
+    the session's own edits (see ``scope_digest``). When files are carried, the
+    payload's power-of-two size bucket is bound — a consent to send ~1 MiB must not
+    authorise sending ~1 GiB — together with ``carries_files`` itself, which the
+    transfer half (PR B) relies on to keep a "they stay" consent from authorising a
+    move that sends them.
+    """
+    if not manifest.carries_files:
+        return {}
+    return {
+        "carries_files": True,
+        "bytes_bucket": math.ceil(math.log2(max(manifest.total_bytes, 1))),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +515,9 @@ def candidate_seeds(
                 if raw in mentions_seen or not raw.startswith(str(home_path) + os.sep):
                     continue
                 mentions_seen.add(raw)
-                seeds.append(Seed(raw, tag or "mention"))
+                # A child's mention keeps its kind (``subagent:<id>:mention``) so
+                # ``mention_only`` can tell it from the child's own cwd.
+                seeds.append(Seed(raw, f"{tag}:mention" if tag else "mention"))
                 if len(mentions_seen) >= _MAX_MENTIONS:
                     break
     return seeds
@@ -496,11 +544,48 @@ class WorksetUnknown(Exception):
     explicit escape is ``--without-working-set``.
     """
 
-    def __init__(self, step: str, repo: str = "", detail: str = "") -> None:
+    def __init__(self, step: str, repo: str = "", detail: str = "", cause: str = "") -> None:
         super().__init__(f"{step} failed in {repo or '?'}: {detail}")
         self.step = step
         self.repo = repo
         self.detail = detail
+        #: One of :data:`GIT_FAILURE_CAUSES` — the CLASS of git's error, never its
+        #: text (which can carry paths outside home or a remote's error body).
+        self.cause = cause if cause in GIT_FAILURE_CAUSES else "git_error"
+
+
+#: What a failed read-only git call is classed as (review U6, round 1): enough for the
+#: user to know what to fix ("dubious ownership" needs ``safe.directory``; a corrupt
+#: index needs ``git status`` run by hand) without echoing git's stderr. Every
+#: surface renders the sentence from its own catalogue; an unknown class is shown
+#: as ``git_error``.
+GIT_FAILURE_CAUSES = (
+    "not_a_repository",
+    "dubious_ownership",
+    "index_corrupt",
+    "object_corrupt",
+    "git_missing",
+    "timeout",
+    "git_error",
+)
+
+
+def git_failure_cause(stderr: bytes | str = b"", exc: BaseException | None = None) -> str:
+    """Class git's failure (a stderr text or a launch exception) into a cause code."""
+    if isinstance(exc, FileNotFoundError):
+        return "git_missing"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "timeout"
+    text = (stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr).lower()
+    if "dubious ownership" in text or "safe.directory" in text:
+        return "dubious_ownership"
+    if "index file" in text or "index uses" in text:
+        return "index_corrupt"
+    if "not a git repository" in text:
+        return "not_a_repository"
+    if "bad object" in text or "corrupt" in text or "loose object" in text:
+        return "object_corrupt"
+    return "git_error"
 
 
 def _git(
@@ -516,6 +601,7 @@ def _git(
     caller sees ``len(out) == limit`` and treats the range as unscannable).
     """
     command = ["git", "-C", str(cwd), *args]
+    stderr = b""
     try:
         if limit:
             with subprocess.Popen(
@@ -537,14 +623,18 @@ def _git(
                 timeout=_GIT_TIMEOUT_S,
                 check=False,
             )
-            out, code = completed.stdout, completed.returncode
+            out, code, stderr = completed.stdout, completed.returncode, completed.stderr
     except (OSError, subprocess.SubprocessError) as exc:
         if required:
-            raise WorksetUnknown(required, str(cwd), type(exc).__name__) from exc
+            raise WorksetUnknown(
+                required, str(cwd), type(exc).__name__, git_failure_cause(exc=exc)
+            ) from exc
         return None
     if code != 0:
         if required:
-            raise WorksetUnknown(required, str(cwd), f"git exited {code}")
+            raise WorksetUnknown(
+                required, str(cwd), f"git exited {code}", git_failure_cause(stderr or b"")
+            )
         return None
     return out if binary else out.decode("utf-8", "replace").strip()
 
@@ -628,22 +718,44 @@ def discover_worktrees(seeds: Iterable[Seed]) -> list[Candidate]:
         tops.setdefault(top, [])
         tops[top].append(f"{seed.source}\0{directory}")
     # Group by repository, read each repository's worktree list once.
+    #
+    # FAIL CLOSED ON A TOP THE SESSION WORKED IN (review R4, round 1): ``top`` holds a
+    # ``.git`` entry by construction, so a failing ``rev-parse`` there is never "not a
+    # repository" — it is a removed gitdir a ``.git`` file still points at, a
+    # ``safe.directory`` "dubious ownership" refusal, or git missing from the relay's
+    # PATH. Skipping it read as "no working files" and let the move go ahead without
+    # a word, so it raises ``WorksetUnknown`` (step ``discover``). A top found ONLY
+    # through transcript mentions is the exception: it is never planned
+    # (``mention_only``), so an unreadable one is simply not listed rather than
+    # refusing a move over a repository the session merely read about.
     by_repo: dict[Path, tuple[Path, list[Path]]] = {}
-    for top in tops:
-        common = _git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    commons: dict[Path, Path] = {}
+    for top, tagged in tops.items():
+        passive = mention_only(item.split("\0", 1)[0] for item in tagged)
+        common = _git(
+            top,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            required="" if passive else "discover",
+        )
         if not isinstance(common, str) or not common:
-            continue
+            if passive:
+                continue
+            raise WorksetUnknown("discover", str(top), "empty git-common-dir")
         common_dir = Path(common)
+        commons[top] = common_dir
         if common_dir not in by_repo:
-            worktrees = _worktree_list(top)
+            worktrees = (_worktree_list_quiet(top) or [top]) if passive else _worktree_list(top)
             primary = worktrees[0] if worktrees else top
             by_repo[common_dir] = (primary, worktrees)
     found: dict[Path, Candidate] = {}
     for top, tagged in tops.items():
-        common = _git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        if not isinstance(common, str) or Path(common) not in by_repo:
+        common_path = commons.get(top)
+        if common_path is None or common_path not in by_repo:
             continue
-        primary, worktrees = by_repo[Path(common)]
+        common = str(common_path)
+        primary, worktrees = by_repo[common_path]
         for item in tagged:
             source, directory = item.split("\0", 1)
             target = _deepest_containing(Path(directory), worktrees)
@@ -804,10 +916,23 @@ def _history_exclusions(worktree: Path, *, home: Path) -> tuple[list[Excluded], 
             found.append(
                 Excluded(home_relative(worktree / name, home), "history_secret_path", rule)
             )
+    # RAW CONTENT, NOT GIT'S PRESENTATION OF IT (security S4, round 1). ``log -p``
+    # honours attributes: ``*.txt -diff`` (or ``binary``, ``-text``) turned the patch
+    # into "Binary files differ" and a textconv driver rewrote it, so a repository
+    # could hide a key from this scan while the bundle still carries the blob.
+    # ``--text`` forces every blob to be diffed as text, ``--no-textconv`` and
+    # ``--no-ext-diff`` bypass drivers, the global attributes file is nulled, and
+    # ``--diff-merges=first-parent`` shows the content a merge commit introduces
+    # (an "evil merge" has no diff under the default).
     patch = _git(
         worktree,
+        "-c",
+        f"core.attributesFile={os.devnull}",
         "log",
         "-p",
+        "--text",
+        "--no-textconv",
+        "--diff-merges=first-parent",
         "--format=",
         "--no-color",
         "--no-ext-diff",
@@ -1084,6 +1209,16 @@ def compute_manifest(
     tree = session_tree(Path(root), session_id)
     seeds = candidate_seeds(Path(root), tree, cwd_hint=cwd_hint, home=home_path)
     candidates = discover_worktrees(seeds)
+    # Mention-only worktrees are LISTED, never planned (``mention_only``): no facts
+    # are read for them (no ``git status`` of a tree the session never ran in, so
+    # one that is unreadable cannot refuse the move), they are not counted and not
+    # digest inputs, and they never reach the destination's probe.
+    mentioned = tuple(
+        sorted(
+            home_relative(c.path, home_path) for c in candidates if mention_only(c.sources)
+        )[:_MAX_MENTIONED]
+    )
+    candidates = [c for c in candidates if not mention_only(c.sources)]
     live = _live_cwds(Path(root), set(tree))
     facts: list[WorktreeFacts] = []
     for candidate in candidates:
@@ -1109,6 +1244,7 @@ def compute_manifest(
         cap_bytes=int(cap),
         from_device=from_device,
         from_name=from_name,
+        mentioned=mentioned,
     )
 
 

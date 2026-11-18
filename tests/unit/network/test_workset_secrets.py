@@ -83,6 +83,25 @@ def test_secret_shaped_content_in_unpushed_history_leaves_it_behind(rig: Rig) ->
     assert "history_secret_content" in {item.why for item in feat.excluded}
 
 
+@pytest.mark.parametrize("attribute", ["*.txt -diff", "*.txt binary", "*.txt diff=hide"])
+def test_git_attributes_cannot_hide_history_content_from_the_scan(
+    rig: Rig, attribute: str
+) -> None:
+    """Security S4 (round 1): ``.gitattributes`` turned the patch into "Binary files
+    differ" (or a textconv rewrite) and the secret-shaped line was never scanned."""
+    (rig.feat / ".gitattributes").write_text(attribute + "\n", encoding="utf-8")
+    git(rig.feat, "config", "diff.hide.textconv", "true")
+    (rig.feat / "notes.txt").unlink()  # the rig's untracked notes.txt: commit our own
+    (rig.feat / "notes.txt").write_text(f"key {AWS_SHAPED}\n", encoding="utf-8")
+    git(rig.feat, "add", ".gitattributes", "notes.txt")
+    git(rig.feat, "commit", "-q", "-m", "hidden")
+
+    feat = _feat(rig)
+
+    assert "history_secret_content" in {item.why for item in feat.excluded}, feat.excluded
+    assert (feat.state, feat.reason) == ("left_behind", "history_secret")
+
+
 def test_history_too_large_to_scan_is_never_read_as_clean(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

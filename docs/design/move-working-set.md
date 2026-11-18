@@ -264,14 +264,28 @@ core block carries no English beyond paths and commands.
 ### 3.5 The scope digest (what "confirmed" means)
 
 `scope_digest = sha256(canonical_json({version, to_device, worktrees: sorted
-[(path, repo, branch, state)], excluded: sorted [(path, why)], bytes_bucket}))`
-where `bytes_bucket = ceil(log2(max(bytes,1)))`.
+[(path, repo, branch, state, reason)], excluded: sorted [(path, why)],
+...artifact_binding}))`, where `artifact_binding` is EMPTY while the move carries no
+files and `{carries_files: true, bytes_bucket}` (with `bytes_bucket =
+ceil(log2(max(bytes,1)))`) once it does. Mention-only worktrees (§3.2, listed as
+`mentioned`) are not inputs.
+
+**No size input while nothing travels** (PR #4241 review R2): with a bucket in the
+PR A digest, an active session that crossed 512/1024/2048 bytes while it waited at
+a queued or `--wait` safe point was refused `working_set_changed` at resume. The
+size describes nothing a "files stay" consent covers, and the gate checks
+`over_cap` against the current manifest itself.
+
+**Not an authenticator** (security S9): the digest binds the user's intent to one
+scope and one destination and makes a stale consent fail; it proves nothing about
+who sends it. Any `move`-capable destination can read it from `workset_preflight`
+for itself. Authorisation stays the `move` capability (§8.2).
 
 **Why not a digest of the full manifest:** a session queued with `--queue` keeps
 editing until its turn ends, so a byte-exact digest would refuse every queued move.
 What the user is confirming is *which trees go to which device and what is
 withheld*; that is the scope. A new worktree, a newly excluded secret, a different
-destination, or the payload more than doubling changes the scope and the move is
+destination, or (once files travel) the payload more than doubling changes the scope and the move is
 refused `working_set_changed` with the fresh manifest — never silently widened.
 
 ## 4. Transfer protocol, inserted into §6.3
@@ -551,10 +565,13 @@ system note; if none fits, add `SOURCE_MOVE` beside `SOURCE_RECALL`,
   the bundled range (`<tips> --not <have>`):
   `git log --format= --name-only <range>` → `is_sensitive` on each path, and
   `git log -p --format= <range>` added lines → `credential_classes`. Any hit →
-  that worktree is `left_behind`, `history_secret`, with the paths listed, unless
-  the move carries `--include-history-secrets` (CLI) /
-  `include_history_secrets: true` (route), which the confirmation dialog shows as
-  its own line. Measured cost is negligible: the largest delta bundle on this
+  that worktree is `left_behind`, `history_secret`, with the paths listed. **There
+  is no opt-in in v1** (security ruling, 2026-11-18): `--include-history-secrets` /
+  `include_history_secrets` were dropped; push or rewrite the commits instead. The
+  patch is read raw — `-c core.attributesFile=/dev/null log -p --text
+  --no-textconv --no-ext-diff --diff-merges=first-parent` — so `.gitattributes`
+  (`-diff`, `binary`, a textconv driver) cannot hide content from the scan and an
+  evil merge's content is seen (PR #4241 security S4). Measured cost is negligible: the largest delta bundle on this
   node is 16 KB (§8.4). A full-bundle fallback (no `have`) scans the whole history,
   which is one more reason the full fallback is effectively clone-only.
 
@@ -573,11 +590,15 @@ PR #4228 owner's guidance: S1's file-read event/authority does **not** cover
 bundle egress; this design adds **its own event types**, built on
 `AuditLog.record_required` (#4228; `AuditLog` is `network/audit.py:1027` on main,
 whose `record` at `:1198` is not durable-before-bytes). Dependency: **PR B stacks
-on #4228** (or merges main after it lands). PR A needs no audit (no bytes leave).
+on #4228** (or merges main after it lands). PR A moves no bytes, but its
+destination probe makes the DESTINATION act on the network at a peer's request, so
+it is audited too (PR #4241 security S1/S9): `session.workset.probe`, one row per
+served probe with host names and fixed result codes only.
 
 | Event | Where | Fields (bounded; no payloads, no secret values) |
 |---|---|---|
 | `session.workset.preflight` | owner | session_id, requester, worktree count, bytes, excluded count |
+| `session.workset.probe` | destination (PR A) | session_id, requester, host names, result-code counts, or `refused` (rate limit / probe error) |
 | `session.workset.serve` | owner, before first chunk of each artifact (required) | session_id, to_device, lease_epoch, artifact digest, bytes, repo key, home-relative worktree paths |
 | `session.workset.restore` | destination | session_id, from_device, per-worktree state + reason codes |
 | `session.workset.departed` | owner at commit | session_id, to_device, marked paths |
@@ -699,9 +720,22 @@ A Mac → node2 move showed `clone_check: "pending_destination"` on every row; n
 could neither fetch the SSH remote nor push the HTTPS one. The preflight now asks the
 DESTINATION before the confirmation (`network/workset_probe.py`):
 
-- **Op**: `net_session_move {phase: "workset_probe", worktrees: [{path, remote_url,
-  branch, markers}], team_bridge}` served by the destination (authorizer carve-out
-  beside `invite`: it reads nothing of the session). Offload: the owner asks over the
+- **Op**: `net_session_move {phase: "workset_probe", probe_version: 2, worktrees:
+  [{remote_url, markers}], team_bridge}` served by the destination (authorizer
+  carve-out beside `invite`: it reads nothing of the session). **What the preflight
+  discloses** (PR #4241 security S6): the remote URLs and toolchain marker names,
+  one row per distinct remote — no worktree path, branch or head — and it does so
+  during `--dry-run` too, i.e. before the user has decided to trust the
+  destination. Mention-only worktrees are never sent.
+- **Admission and answers** (security S1/S3): the destination refuses a probe for a
+  session it holds itself, rate-limits per asking device (10 / 60 s), writes a
+  `session.workset.probe` audit row, refuses hosts that resolve to a non-public
+  address unless its operator names them in `LOCAL_OPERATOR_MOVE_PROBE_HOSTS`, pins
+  HTTPS to the vetted address, and runs git with `http.followRedirects=false`,
+  `core.hooksPath=/dev/null`, a protocol allowlist and (absent the user's own ssh
+  command) `BatchMode=yes`, `ForwardAgent=no`, `StrictHostKeyChecking=yes`. Its
+  answer carries only a `clone_check`, a fixed detail code, booleans and known tool
+  names; the asker rebuilds the HTTPS URL and the remedy command itself. Offload: the owner asks over the
   link; recall: this device is the destination and probes itself. An older
   destination answers `unknown move phase` → every row `unknown_destination` and
   `destination_probe.state: "unknown_destination"` — "could not check", never a

@@ -1031,4 +1031,7 @@ def transfer_receipt(
         "working_set": (
             result.get("working_set") if isinstance(result.get("working_set"), dict) else None
         ),
+        "engagement": (
+            result.get("engagement") if isinstance(result.get("engagement"), dict) else None
+        ),
     }

@@ -5,5 +5,8 @@
   "tui.session_move_workset.checkbox_stays": "Я понимаю, что эти рабочие файлы остаются на {source}",
   "tui.session_move_workset.confirm": "Перенести",
   "tui.session_move_workset.cancel": "Отмена",
-  "tui.session_move_workset.loading": "Проверяем рабочие файлы этого разговора…"
+  "tui.session_move_workset.loading": "Проверяем рабочие файлы этого разговора…",
+  "tui.session_move_workset.cancelled": "Перенос отменён — ничего не перенесено.",
+  "tui.session_move_workset.confirm_without": "Перенести без рабочих файлов",
+  "tui.session_move_workset.checkbox_without": "Я понимаю, что рабочие файлы остаются на {source}"
 }

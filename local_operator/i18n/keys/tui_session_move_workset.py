@@ -13,6 +13,10 @@ def cancel() -> Msg:
     return Msg("tui.session_move_workset.cancel", {})
 
 
+def cancelled() -> Msg:
+    return Msg("tui.session_move_workset.cancelled", {})
+
+
 def checkbox_sends(*, device: str) -> Msg:
     return Msg("tui.session_move_workset.checkbox_sends", {"device": device})
 
@@ -21,8 +25,16 @@ def checkbox_stays(*, source: str) -> Msg:
     return Msg("tui.session_move_workset.checkbox_stays", {"source": source})
 
 
+def checkbox_without(*, source: str) -> Msg:
+    return Msg("tui.session_move_workset.checkbox_without", {"source": source})
+
+
 def confirm() -> Msg:
     return Msg("tui.session_move_workset.confirm", {})
+
+
+def confirm_without() -> Msg:
+    return Msg("tui.session_move_workset.confirm_without", {})
 
 
 def loading() -> Msg:

@@ -247,3 +247,11 @@ class TransferReceipt(BaseModel):
     #: The move's working-set block, ABSENT (``None``) when the session had none.
     #: Until the transfer half lands it reports ``transferred: false``.
     working_set: dict[str, Any] | None = None
+    #: What the destination did about arriving live (``mobility.MoveEngagement``):
+    #: ``engaged``, ``reason: "active"`` when an ACTIVE conversation was resumed there
+    #: by default, and ``arrival_note`` (``delivered`` / ``already_delivered`` /
+    #: ``failed``). ``None`` when the receipt carries none (a cold move, or an offload
+    #: that settled before the destination engaged). Verbatim, so the dialog can say
+    #: "it resumed on <device> with a note about what stayed behind" — the CLI's
+    #: ``receipt_resumed`` line — rather than leave the user to guess.
+    engagement: dict[str, Any] | None = None

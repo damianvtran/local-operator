@@ -265,3 +265,129 @@ def test_no_engage_on_arrival_reaches_the_move_request(monkeypatch: pytest.Monke
     # The two flags contradict each other: refused before anything is sent.
     assert _run(["--engage-on-arrival", "--no-engage-on-arrival"]) == 2
     assert len(seen) == 2
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (PR #4241): R6/U3 probed prompt, U4 one voice, U5 Ctrl-C,
+# U8 mistyped digest, R1 a relay that predates the gate
+# ---------------------------------------------------------------------------
+
+
+def _interactive(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> list[str]:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    prompts: list[str] = []
+    replies = iter(answers)
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        reply = next(replies)
+        if reply == "^C":
+            raise KeyboardInterrupt
+        return reply
+
+    monkeypatch.setattr("builtins.input", answer)
+    return prompts
+
+
+def test_the_interactive_prompt_shows_the_probed_block(
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6/U3: the y/N summary omitted the destination's answer that --dry-run shows."""
+    from local_operator.network import workset_probe
+
+    (_server_a, server_b, _h, _p), _rig = staged
+    # The recall probes THIS device: answer "cannot fetch" for the rig's remote.
+    monkeypatch.setattr(
+        workset_probe,
+        "_check_one",
+        lambda url, **_kw: {"clone_check": "destination_cannot_fetch", "detail": "unreachable"},
+    )
+    _interactive(monkeypatch, [""])
+
+    code = _run([])
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "cannot fetch" in out.out, out.out
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_ctrl_c_at_the_prompt_moves_nothing_and_exits_130(
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U5: Ctrl-C printed a KeyboardInterrupt traceback."""
+    (server_a, server_b, _h, _p), _rig = staged
+    _interactive(monkeypatch, ["^C"])
+
+    code = _run([])
+
+    out = capsys.readouterr()
+    assert code == 130
+    assert "Not moved" in out.err and "Traceback" not in out.err
+    assert (server_a.root / "sessions" / SESSION).is_dir()
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_a_mistyped_digest_says_it_does_not_match(
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U8: a digest that matches nothing read as "the files changed since confirmed"."""
+    (_server_a, server_b, _h, _p), _rig = staged
+    _interactive(monkeypatch, [""])
+
+    code = _run(["--confirm-working-set", "sha256:garbage"])
+
+    out = capsys.readouterr()
+    assert code == 1
+    assert "does not match this conversation's current working files" in out.out
+    assert "changed since they were shown" not in out.out
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_a_scripted_refusal_speaks_once_and_names_the_keeper(
+    staged: tuple[Devices, Rig], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U4: a non-tty refusal printed the owner's English sentence ("on this device",
+    the wrong machine on a recall) and then the keyed summary."""
+    code = _run([])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "on this device" not in err
+    assert "this conversation worked in" not in err  # the owner's fallback sentence
+    assert "They stay on device-a:" in err
+    assert "--confirm-working-set sha256:" in err
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"dry_run": True}, {"confirm_working_set": "sha256:x"}, {"without_working_set": True}],
+)
+def test_a_relay_older_than_the_gate_is_never_sent_a_dry_run_or_a_consent(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]
+) -> None:
+    """R1: a pre-gate relay ignored ``dry_run`` and MOVED the conversation."""
+    from types import SimpleNamespace
+
+    from local_operator.network import mobility, relay, store
+
+    sent: list[dict[str, Any]] = []
+    old = SimpleNamespace(capabilities=["mesh-net-v1", "session-mobility-v1"])
+    monkeypatch.setattr(store, "find_own_relay", lambda root=None: old)
+    monkeypatch.setattr(relay, "control_request", lambda *a, **k: sent.append(k) or None)
+
+    refused: dict[str, Any] = dict(mobility.request_move(SESSION, to="peer", **kwargs))
+
+    assert refused["code"] == "relay_restart_required", refused
+    assert sent == []
+    # Control: the same relay is still asked a plain move, which is all it ever did.
+    mobility.request_move(SESSION, to="peer")
+    assert len(sent) == 1
+    assert mobility.WORKSET_MOVE_CAPABILITY in relay.wire.LINK_CAPABILITIES

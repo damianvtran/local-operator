@@ -248,5 +248,60 @@
     "role": "CLI receipt line after a successful move",
     "tone": "plain, factual, calm",
     "note": "{device} destination device name, verbatim. The conversation was started on the destination automatically and given one note listing working files that did not come."
+  },
+  "cli.sessions_move_workset.unsupported_destination": {
+    "role": "refusal shown when the destination device is too old to forward the user's working-files confirmation",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} is a device name, verbatim (twice). The only remedy is updating lop on that device; do not suggest a flag."
+  },
+  "cli.sessions_move_workset.unknown_cause": {
+    "role": "second line under the 'could not read the working files' refusal: git's error class and a command to see it",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{cause} is one of the cause.* sentences (already translated, lowercase start). Keep `git -C {repo} status` verbatim: it is a command; {repo} is a path."
+  },
+  "cli.sessions_move_workset.cause.not_a_repository": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (a .git file pointing at a removed repository). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.dubious_ownership": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (git's safe.directory ownership refusal). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.index_corrupt": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (a damaged index file). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.object_corrupt": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (damaged git objects). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.git_missing": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (git not installed / not on PATH). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.timeout": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (git did not answer in time). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.cause.git_error": {
+    "role": "the class of a git failure, inserted as {cause} into unknown_cause",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Lowercase fragment completing 'Git's reason: …' (any other git error). Keep git, .git, safe.directory and PATH verbatim."
+  },
+  "cli.sessions_move_workset.mentioned": {
+    "role": "one line listing repositories the conversation only mentioned (read or quoted), which the move ignores",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{paths} is a comma-separated list of ~/ paths, verbatim. Must say they are NOT included in the move."
+  },
+  "cli.sessions_move_workset.digest_mismatch": {
+    "role": "shown when the digest the user passed to --confirm-working-set matches nothing current",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "Keep --confirm-working-set and --dry-run verbatim. 'digest' is the scope_digest token; a following list of files is printed after this line."
   }
 }
