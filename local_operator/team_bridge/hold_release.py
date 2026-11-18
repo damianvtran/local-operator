@@ -88,9 +88,26 @@ WORK_SCOPE_HOLD = "work_scope_hold"
 #: spends no sender budget: those gates exist because a work-scope conversion
 #: TRUSTS the screener's category to offer a release, while a review hold trusts
 #: only the person, and a hold with no exit is the failure this closes.
+#: Terminal owner state for a message EVERY screener failed on while the account
+#: screened other messages fine (PR #4212 round 3, S-13 / R3-1 / Q4). Nothing read
+#: it and the failure is the message's own, so it is DISCARD-ONLY: the owner can
+#: end it, never deliver it (:data:`DISCARD_ONLY_HOLD_CODES`). A review code so it
+#: has a decision row, a notice and a replay with no further dispatch.
+SCREENING_FAILED_HOLD = "screening_failed"
+
 REVIEW_HOLD_CODES = frozenset(
-    {"model_hold", "model_refused", "reply_truncated", "bounce_without_category"}
+    {
+        "model_hold",
+        "model_refused",
+        "reply_truncated",
+        "bounce_without_category",
+        SCREENING_FAILED_HOLD,
+    }
 )
+#: Review codes whose only word is Discard. Enforced where a Deliver could be
+#: signed (the desktop decide route) AND where one is consumed (the connector),
+#: so a hand-written release row cannot deliver one either.
+DISCARD_ONLY_HOLD_CODES = frozenset({SCREENING_FAILED_HOLD})
 RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD}) | REVIEW_HOLD_CODES
 
 #: The ONLY category tuple that may become a releasable hold (Amendment 1, D2).

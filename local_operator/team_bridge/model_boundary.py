@@ -691,7 +691,7 @@ SCREENING_FAILURE_CLASSES = _STORE_FAILURE_CLASSES
 #: 502/503/504/529) STOPPED the walk, so a 500 outage on hop 0 never reached a
 #: healthy fallback (QA round 1 lead on #4212). The S-1 concern that kept 500 out
 #: — a provider reporting an output-side content filter as a 5xx — is still
-#: answered ONE-WAY by :data:`_CONTENT_VERDICT_MARKERS`: a 5xx whose raw text
+#: answered ONE-WAY by ``failover.names_content_verdict``: a 5xx whose text
 #: names a content verdict keeps stopping and holds. The fallback is always
 #: another hop of the operator's own approved chain, never an unvetted model.
 _ADVANCE_STATUSES = frozenset(range(500, 600))
@@ -737,7 +737,7 @@ _NOT_FOUND_STATUSES = frozenset({404})
 #: Matched case-insensitively on the RAW message, and also read from the
 #: client's uncapped stamp (``content_verdict_seen``). ONE-WAY by construction:
 #: it can only turn an advance into a hold, never the reverse. The list itself is
-#: ``failover.CONTENT_VERDICT_MARKERS``, shared so the two cannot drift (S-7);
+#: ``failover.names_content_verdict``, shared so the two cannot drift (S-7);
 #: imported lazily in :func:`_sender_cannot_cause`, like ``ProviderError``, so
 #: this module stays cheap to import.
 
@@ -802,7 +802,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
             return True  # credential resolution / OAuth refresh failed
     except ImportError:  # pragma: no cover
         pass
-    from local_operator.providers.failover import CONTENT_VERDICT_MARKERS, ProviderError
+    from local_operator.providers.failover import ProviderError, names_content_verdict
 
     if not isinstance(failure, ProviderError):
         return False
@@ -817,8 +817,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
             return False
         if getattr(failure, "content_verdict_seen", False) is True:
             return False  # matched on the full body, past the message cap (S-7)
-        raw = str(getattr(failure, "message", "") or "").lower()
-        return not any(marker in raw for marker in CONTENT_VERDICT_MARKERS)
+        return not names_content_verdict(str(getattr(failure, "message", "") or ""))
     # No status: a status-less ``kind`` is classified from PROVIDER TEXT (an
     # in-band error chunk on a 200 stream), which a crafted body can steer — so
     # it never advances on its own. Only typed provenance does: a failure OUR

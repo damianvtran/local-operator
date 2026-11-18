@@ -84,6 +84,8 @@ def _chain_rig(monkeypatch: pytest.MonkeyPatch) -> Any:
 DELIVER = "VERDICT: deliver\nREASON: ordinary."
 HOLD = "VERDICT: hold\nREASON: needs a human."
 VENDOR_CANARY = "VENDOR-PROSE-CANARY upstream exploded"
+#: How the fake vendor recognises the screening ROUTE canary's prompt (S-9).
+_CANARY_MARK = "Team Bridge route check"
 
 
 def _config(tmp_path: Path, *, chain: list[str] | None) -> None:
@@ -114,13 +116,22 @@ class _Wire:
         # the guard is not testing production's layering (B1, PR #3212).
         self.guard_entries: list[str] = []
         self.failover_entries: list[str] = []
+        # The content-free route canary (PR #4212 S-9) rides the same chain; its
+        # sends are kept apart so a test reads the MESSAGE's walk, and it may be
+        # scripted on its own (``None``: the same script as the message).
+        self.canary_sends: list[dict[str, Any]] = []
+        self.canary_script: dict[str, Any] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         import json
 
         payload = json.loads(request.content or b"{}")
-        self.sends.append(payload)
-        action = self.script[payload["model"]]
+        if payload.pop("canary", False):
+            self.canary_sends.append(payload)
+            action = (self.canary_script or self.script)[payload["model"]]
+        else:
+            self.sends.append(payload)
+            action = self.script[payload["model"]]
         if action[0] == "fail":
             return httpx.Response(action[1], json={"error": VENDOR_CANARY})
         if action[0] == "reply_as":
@@ -195,6 +206,7 @@ def _install_wire(
                             "model": request.model.model_id,
                             "temperature": request.temperature,
                             "isolated": request.isolated,
+                            "canary": _CANARY_MARK in repr(request),
                         },
                     )
                     if response.status_code >= 400:
@@ -1679,9 +1691,15 @@ def test_a_message_specific_5xx_never_ages_while_others_screen(
         now[0] = t0 + minutes * 60
         wire.script = dict(down)
         result = _cycle(tmp_path, owner, message_id="bmsg_poison")
-        if minutes < 30 or benign_traffic:
+        if minutes < 30:
             assert result.hold_code != "model_hold", (minutes, result.hold_code)
             assert store.work_scope_decision(owner, "bmsg_poison") is None
+        elif benign_traffic:
+            # Round 3 (S-13): terminal and Discard-only — never a Deliver item,
+            # never a transient hold forever.
+            assert result.hold_code == "screening_failed", (minutes, result.hold_code)
+            decision = store.work_scope_decision(owner, "bmsg_poison")
+            assert decision is not None and decision["hold_code"] == "screening_failed"
         else:
             assert result.hold_code == "model_hold"
             decision = store.work_scope_decision(owner, "bmsg_poison")
@@ -1745,3 +1763,79 @@ def test_a_verdict_past_the_message_cap_still_stops_the_walk() -> None:
     assert "flagged" not in str(getattr(failure, "message", ""))  # the cap cut it off
     assert failure.content_verdict_seen is True
     assert model_boundary._sender_cannot_cause(failure) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Error parsing harmony output (openai_harmony)",
+        "pharmacy-region gateway unavailable",
+        "connection blocked by egress policy",
+        "duplicate key value violates unique constraint",
+        "unavailable for safety maintenance",
+    ],
+)
+def test_outage_wording_that_resembles_a_verdict_still_fails_over(
+    tmp_path, monkeypatch, text
+) -> None:
+    """S-12 / m2 (round 3): the verdict markers are word-bounded, so ordinary
+    outage wording that merely CONTAINS a stem ("harm" in "harmony", "blocked" by
+    an egress policy) still fails over to the next hop (operator rule)."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"gpt-5.4": ("fail", 503), "deepseek-flash": ("reply", DELIVER)})
+    original = wire.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = original(request)
+        if response.status_code == 503:
+            return httpx.Response(503, json={"error": {"message": text}})
+        return response
+
+    wire.handler = handler  # type: ignore[method-assign]
+    _install_wire(monkeypatch, wire)
+    result = _cycle(tmp_path, owner)
+    assert result.disposition == "deliver", text
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash"]
+
+
+def test_a_sender_pinned_breaker_never_yields_an_unscreened_deliver(tmp_path, monkeypatch) -> None:
+    """S-9 (round 3), the security probe's P2 shape. Three crafted messages fail
+    every hop (each 5xx fails over, so each exhausts the chain), and a benign
+    message is always queued behind them. Before the canary that pinned the
+    breaker: no success could ever be seen, and at +31 min every held message —
+    the poison included — became a one-click unscreened Deliver. Now the content-
+    free canary answers after the first exhaustion: the breaker clears, the benign
+    message delivers, and the poison ends Discard-only, never a Deliver item."""
+
+    now = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    store, owner = _setup(tmp_path)
+    _aged_config(tmp_path, chain=["deepseek/deepseek-flash"])
+    down = {"gpt-5.4": ("fail", 500), "deepseek-flash": ("fail", 500)}
+    up = {"gpt-5.4": ("reply", DELIVER), "deepseek-flash": ("reply", DELIVER)}
+    wire = _Wire(dict(down))
+    wire.canary_script = dict(up)  # the route is healthy; only the poison fails
+    _install_wire(monkeypatch, wire)
+    t0 = now[0]
+    benign_done = False
+    for minutes in (0, 1, 3, 7, 15, 31, 180):
+        now[0] = t0 + minutes * 60
+        wire.script = dict(down)
+        for index in (1, 2, 3):
+            result = _cycle(tmp_path, owner, message_id=f"bmsg_p{index}", body=f"poison {index}")
+            assert result.disposition == "hold"
+            decision = store.work_scope_decision(owner, f"bmsg_p{index}")
+            if decision is not None:
+                assert decision["hold_code"] == "screening_failed", (minutes, decision)
+        if not benign_done:
+            wire.script = dict(up)
+            benign = _cycle(tmp_path, owner, message_id="bmsg_b1", body="ordinary note")
+            benign_done = benign.disposition == "deliver"
+            assert store.work_scope_decision(owner, "bmsg_b1") is None
+    assert benign_done, "the benign message was screened and delivered"
+    assert wire.canary_sends, "the canary decided, not the absence of success"
+    for index in (1, 2, 3):
+        decision = store.work_scope_decision(owner, f"bmsg_p{index}")
+        assert decision is not None and decision["hold_code"] == "screening_failed"

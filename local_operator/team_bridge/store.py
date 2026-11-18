@@ -667,19 +667,24 @@ def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_last_success_table(conn: sqlite3.Connection) -> None:
-    """Create the account's last-successful-screen stamp (PR #4212 round 2, S-6).
+    """Create the account's route-evidence stamps (PR #4212, S-6 / S-9).
 
     The breaker row is DELETED on success, so it cannot answer "did anything
-    screen since this message's hold began?". This one row per account scope
-    can: an ageing hold whose route failure is contradicted by a later success
-    on the same account was message-specific, not an outage. Additive and
-    authority-free: a lost row only makes a hold look like an outage again,
-    which still converts to the owner's review, never to a delivery.
+    screen since this message's hold began?". One row per account scope:
+    ``success_at`` — the last provider response to ANY screen or to the
+    content-free route canary; ``canary_failed_at`` — the last time that canary
+    ALSO failed after a message's whole chain did. An outage is corroborated
+    only by a canary failure with no success since (``screening`` reads both):
+    the canary carries no sender bytes, so a crafted message cannot fake it.
+    Additive and authority-free: a lost row means "no evidence", which never
+    corroborates an outage — the hold then ends in the Discard-only
+    ``screening_failed`` (or, for a Deliver already given, stays pending);
+    nothing is ever delivered on it.
     """
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS screening_last_success ("
-        "account_scope TEXT PRIMARY KEY, at REAL NOT NULL)"
+        "CREATE TABLE IF NOT EXISTS screening_route_evidence ("
+        "account_scope TEXT PRIMARY KEY, success_at REAL, canary_failed_at REAL)"
     )
 
 
@@ -8416,29 +8421,82 @@ class Store:
         except (sqlite3.Error, StoreRefused):
             return
 
-    def last_screening_success_at(self, owner: OwnerSnapshot) -> float | None:
-        """When this account last got a provider response to a screen (S-6); read-only."""
+    def screening_route_evidence(self, owner: OwnerSnapshot) -> dict[str, float | None]:
+        """``{"success_at", "canary_failed_at"}`` for this account (S-6/S-9); read-only."""
 
+        empty: dict[str, float | None] = {"success_at": None, "canary_failed_at": None}
         try:
             with self._connect_readonly() as conn:
                 if conn is None:
-                    return None
+                    return empty
                 exists = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-                    "AND name = 'screening_last_success'"
+                    "AND name = 'screening_route_evidence'"
                 ).fetchone()
                 if exists is None:
-                    return None
+                    return empty
                 row = conn.execute(
-                    "SELECT at FROM screening_last_success WHERE account_scope = ?",
+                    "SELECT success_at, canary_failed_at FROM screening_route_evidence "
+                    "WHERE account_scope = ?",
                     (self._account_scope(owner),),
                 ).fetchone()
         except sqlite3.Error:
-            return None
+            return empty
         if row is None:
-            return None
-        at = float(row[0])
-        return at if math.isfinite(at) else None
+            return empty
+
+        def _finite(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        return {"success_at": _finite(row[0]), "canary_failed_at": _finite(row[1])}
+
+    def record_canary_failure(self, owner: OwnerSnapshot) -> None:
+        """The content-free route canary failed too (S-9): outage evidence. Best effort."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_last_success_table(conn)
+                conn.execute(
+                    "INSERT INTO screening_route_evidence (account_scope, canary_failed_at) "
+                    "VALUES (?, ?) ON CONFLICT(account_scope) "
+                    "DO UPDATE SET canary_failed_at = excluded.canary_failed_at",
+                    (self._account_scope(owner), time.time()),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def drop_review_decision(self, owner: OwnerSnapshot, message_id: str) -> None:
+        """Remove ONE message's review decision and its release row (round 3, Q3).
+
+        Only for an UNSCREENED decision a re-screen just answered: the screener's
+        own decision replaces it, so the owner's next Deliver is a screened
+        decision instead of a dead button on a refused release. Never raises.
+        """
+
+        key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_work_scope_tables(conn)
+                conn.execute(
+                    "DELETE FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+                conn.execute(
+                    "DELETE FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
 
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
@@ -8723,8 +8781,8 @@ class Store:
             conn.execute("DELETE FROM screening_breaker WHERE account_scope = ?", (scope,))
             _ensure_last_success_table(conn)
             conn.execute(
-                "INSERT INTO screening_last_success (account_scope, at) VALUES (?, ?) "
-                "ON CONFLICT(account_scope) DO UPDATE SET at = excluded.at",
+                "INSERT INTO screening_route_evidence (account_scope, success_at) VALUES (?, ?) "
+                "ON CONFLICT(account_scope) DO UPDATE SET success_at = excluded.success_at",
                 (scope, time.time()),
             )
 

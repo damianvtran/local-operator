@@ -966,11 +966,23 @@ async def run_screening_cycle(
         from local_operator.team_bridge.screening import aged_authority_hold
         from local_operator.team_bridge.store import AUTHORITY_CAUSE_NO_SCREENER
 
+        # N1 (round 3): on a Radient-only machine a revoked sign-in ALSO empties
+        # the chain (its only credentialed screener is that sign-in), and the
+        # action the owner needs is "sign in again", not "configure a screener".
+        # Both are owner-action codes with no Deliver; this only picks the label.
+        cause = AUTHORITY_CAUSE_NO_SCREENER
+        if auth_store is not None:
+            try:
+                await _verify_live_identity(owner, auth_store, config_dir)
+            except StoreRefused as refusal:
+                cause = str(getattr(refusal, "cause", "") or "") or cause
+            except Exception:  # noqa: BLE001 — a label only; the hold is the same
+                pass
         return aged_authority_hold(
             owner,
             items[0],
             config_dir=config_dir,
-            cause=AUTHORITY_CAUSE_NO_SCREENER,
+            cause=cause,
             held_code=SCREENING_MODEL_UNAVAILABLE,
         )
     selection = chain[0]

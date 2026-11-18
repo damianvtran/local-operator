@@ -2038,7 +2038,11 @@ def test_a_screening_unavailable_hold_becomes_owner_review_after_the_threshold(
     assert below_code != "model_hold" and delivery_hold_class(below_code) == "screening_unavailable"
     assert store.work_scope_decision(owner, MESSAGE_ID) is None
 
-    # Past it: the owner's review, published as awaiting_review.
+    # Past it: the owner's review, published as awaiting_review. An open breaker
+    # never dispatched this message, so the outage it reports must be proved by
+    # the half-open probe's route canary failing too (S-9); stamp that here.
+    if code == "breaker_open":
+        store.record_canary_failure(owner)
     clock.now = t0 + _THRESHOLD_MIN * 60 + 5
     aged = _run(owner, config_dir)
     assert _handled_code(aged) == "model_hold"
@@ -2199,7 +2203,16 @@ def test_a_sender_triggerable_stop_never_ages_into_a_deliver_item(
             assert _handled_code(_run(owner, config_dir)) in {"provider_error", "breaker_open"}
     assert store.work_scope_decision(owner, MESSAGE_ID) is None
     assert all(not rows for rows in transcripts.values()) and server.admits == []
-    assert caplog.text.count("screening hold past review threshold without an exit") == 1
+    # R3-2: once per (message, code) — this message may stick under the chain's
+    # stop code AND the breaker it opened, depending on test order, so count the
+    # distinct codes actually logged rather than assume one.
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "screening hold past review threshold without an exit" in r.getMessage()
+    ]
+    codes = {line.split("code=")[1].split()[0] for line in lines}
+    assert lines and len(lines) == len(codes), lines
 
 
 def test_time_held_under_a_non_ageing_code_does_not_count(review_rig, monkeypatch) -> None:
@@ -2354,8 +2367,13 @@ def test_an_unscreened_deliver_yields_to_a_screener_hold(review_rig, monkeypatch
         _run(owner, config_dir)
     assert screener.calls == 1
     assert all(not rows for rows in transcripts.values()) and server.admits == []
-    release = store.owner_release(owner, MESSAGE_ID)
-    assert release is not None and release["outcome"] == "refused:rescreened_hold"
+    # Q3 (round 3): the screener's own decision REPLACES the unscreened one, and
+    # the refused release goes with it — the owner's next Deliver is a screened
+    # decision, not a dead button.
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "model_hold"
+    assert decision["screener_model"] == SONNET[1] and decision["screener_verdict"] == "hold"
 
 
 def test_an_unscreened_deliver_stands_when_screening_is_still_down(review_rig, monkeypatch) -> None:
@@ -2370,7 +2388,9 @@ def test_an_unscreened_deliver_stands_when_screening_is_still_down(review_rig, m
     screener = _hub_back(monkeypatch, _BareRunner(raises=_RouteDown("every hop down")))
     clock.now += 2 * 3600
     _run(owner, config_dir)
-    assert screener.calls == 1
+    # The message, then the content-free route canary (S-9), which fails too:
+    # a corroborated outage, so the person's word stands.
+    assert screener.calls == 2
     assert len([row for rows in transcripts.values() for row in rows]) == 1
     receipt = store.receipt_for_message(owner, MESSAGE_ID)
     assert receipt is not None and receipt["template_sha256"] == hr.OWNER_RELEASE_SHA256
@@ -2389,10 +2409,87 @@ def test_an_unscreened_deliver_is_refused_when_others_screen_fine(review_rig, mo
     screener = _hub_back(monkeypatch, _BareRunner(raises=_RouteDown("every hop down")))
     clock.now += 2 * 3600
     _run(owner, config_dir)
-    assert screener.calls == 1, "screened once more, route-failed again"
+    assert screener.calls == 2, "the message, then the route canary"
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+    # S-13 + Q3: the route works and this message fails every hop — the item
+    # becomes the Discard-only terminal state, and no Deliver remains.
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "screening_failed"
+    assert store.owner_release(owner, MESSAGE_ID) is None
+
+
+def test_an_unscreened_deliver_waits_while_the_breaker_is_open(review_rig, monkeypatch) -> None:
+    """S-11: an open breaker means no model call on this pass, so the Deliver on
+    an unscreened item WAITS — it is never honoured without a dispatch."""
+
+    from tests.unit.team_bridge.test_hold_release import SONNET
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    monkeypatch.setattr(
+        Store,
+        "screening_breaker_state",
+        lambda self, owner: {
+            "failures": 8,
+            "open_until": time.time() + 10**6,
+            "last_failure_class": "chain_exhausted",
+        },
+    )
+    screener = _hub_back(monkeypatch, _BareRunner(model=SONNET[1]))
+    # Even with outage evidence on record, an open breaker means no dispatch.
+    store.record_canary_failure(owner)
+    for _ in range(3):
+        clock.now += 2 * 3600
+        assert _handled_code(_run(owner, config_dir)) != "delivered"
+    assert screener.calls == 0
     assert all(not rows for rows in transcripts.values()) and server.admits == []
     release = store.owner_release(owner, MESSAGE_ID)
-    assert release is not None and release["outcome"] == "refused:rescreened_hold"
+    assert release is not None and release["outcome"] == "pending"
+
+
+def test_a_message_every_hop_fails_while_others_screen_ends_discard_only(
+    review_rig, monkeypatch
+) -> None:
+    """S-13 / R3-1 / Q4: the route works (others screen) and THIS message fails
+    every hop. Past the threshold it is the terminal ``screening_failed``: Discard
+    only, published as awaiting review, never re-dispatched, never a Deliver."""
+
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+    from local_operator.team_bridge.store import delivery_hold_class
+
+    config_dir, store, owner = review_rig
+    make, built = _scenario("screening_model_unavailable", monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    assert _handled_code(_run(owner, config_dir)) == "screening_model_unavailable"
+    clock.now += 60
+    store.record_screening_success(owner)  # another message screened fine
+    clock.now += _THRESHOLD_MIN * 60
+    assert _handled_code(_run(owner, config_dir)) == "screening_failed"
+    assert delivery_hold_class("screening_failed") == "awaiting_review"
+    listed = next(
+        i for i in holds.list_holds(config_dir, owner)["items"] if i["message_id"] == MESSAGE_ID
+    )
+    assert listed["hold_code"] == "screening_failed"
+    assert listed["can_discard"] and not listed["can_deliver"]
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["screener_model"] == ""
+    with pytest.raises(holds.HoldRefused) as refused:
+        holds.decide(
+            config_dir,
+            owner,
+            message_id=MESSAGE_ID,
+            conversation_id=str(decision["conversation_id"]),
+            body_sha256=str(decision["body_sha256"]),
+            word="deliver",
+            account_id=owner.account_id,
+        )
+    assert refused.value.code == "hold_not_releasable"
+    calls = sum(r.calls for r in built)
+    clock.now += 3 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "screening_failed"
+    assert sum(r.calls for r in built) == calls, "terminal: no further dispatch"
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
 
 
 def test_owner_action_time_never_counts_toward_the_screening_review(

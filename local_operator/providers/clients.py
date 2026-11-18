@@ -1163,25 +1163,44 @@ def raise_for_status(response: httpx.Response) -> None:
         retry_after_ms=_parse_retry_after(response, payload),
         auth_error=auth_error,
     )
-    # Marker match on the FULL body, before ``message`` was capped (PR #4212
-    # round 2, S-7): an upstream that echoes the input ahead of its verdict must
-    # not push the verdict past the cap. Bounded read; a typed bool only.
-    error.content_verdict_seen = _names_content_verdict(response)
+    # Verdict match on the error's own FIELDS, uncapped (PR #4212, S-7 / S-12):
+    # an upstream echoing the input ahead of its verdict must not push the
+    # verdict past the message cap, and an HTML error page's scripts or a JSON
+    # key elsewhere in the body must not stop a real outage at hop 0.
+    error.content_verdict_seen = _names_content_verdict(payload)
     raise error
 
 
-#: Upper bound on the error body scanned for content-verdict wording.
-_CONTENT_VERDICT_SCAN_CHARS = 256 * 1024
+#: Bound on each error field scanned for content-verdict wording.
+_CONTENT_VERDICT_SCAN_CHARS = 64 * 1024
 
 
-def _names_content_verdict(response: httpx.Response) -> bool:
-    from local_operator.providers.failover import CONTENT_VERDICT_MARKERS
+def _error_fields(payload: Any) -> list[str]:
+    """The provider's error TEXT fields: ``error`` (string, or its ``message``,
+    ``code``, ``type`` and a relayed ``metadata.raw``), top-level ``message`` /
+    ``detail``. Nothing else in the body is read."""
+
+    fields: list[Any] = []
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            fields += [error.get("message"), error.get("code"), error.get("type")]
+            metadata = error.get("metadata")
+            if isinstance(metadata, Mapping):
+                fields.append(metadata.get("raw"))
+        else:
+            fields.append(error)
+        fields += [payload.get("message"), payload.get("detail")]
+    return [str(f)[:_CONTENT_VERDICT_SCAN_CHARS] for f in fields if isinstance(f, (str, int))]
+
+
+def _names_content_verdict(payload: Any) -> bool:
+    from local_operator.providers.failover import names_content_verdict
 
     try:
-        text = response.text[:_CONTENT_VERDICT_SCAN_CHARS].lower()
+        return any(names_content_verdict(text) for text in _error_fields(payload))
     except Exception:  # noqa: BLE001 — an unreadable body is simply not evidence
         return False
-    return any(marker in text for marker in CONTENT_VERDICT_MARKERS)
 
 
 def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:

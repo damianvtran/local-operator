@@ -177,6 +177,9 @@ HOLD_CODES = (
     "consent_required",
     "owner_ineligible",
     "screener_required",
+    # Round 3 (S-13): every screener failed on THIS message while the account
+    # screened others; terminal and Discard-only (``hold_release``).
+    "screening_failed",
     # A8 privacy pass (``privacy_pass.PRIVACY_HOLD_CODES``; default OFF). Local
     # holds only: never a transport reject, never answer-cached, never a B4b
     # release. ``privacy_proof_missing`` is the native fence refusing an allow
@@ -1596,6 +1599,10 @@ def _finish_pass(
     return _aged_review_hold(store, owner, prepared, result)
 
 
+#: Holds raised with NO model call on a re-screen pass (S-11): honouring the
+#: Deliver on one would admit an unscreened message without ever dispatching.
+_RESCREEN_NO_DISPATCH = frozenset({"breaker_open", "runner_unavailable"})
+
 #: Holds that answer nothing about THIS message's content on a re-screen pass:
 #: another worker, a spend ceiling, the owner or policy moving. The Deliver stays
 #: pending and the next pass re-screens.
@@ -1649,12 +1656,20 @@ def _settle_rescreen(
     message_id = envelope.message_id
     now = _time.time()
     if result.disposition != "hold":
-        _set_release_outcome(store, owner, message_id, "refused:rescreened", now)
+        # The screener decided it (already committed by the pass). The
+        # unscreened decision and its release are spent: dropping them keeps a
+        # later pass from replaying the old review hold over a delivered
+        # message (real-connector check, round 3).
+        store.drop_review_decision(owner, message_id)
         return result
     code = str(result.hold_code or "")
     # Still cannot screen, for a reason no sender controls: the same codes that
     # aged it into review, under the same route-evidence rule (S-3). A policy
     # moving mid-pass is a new question for the next pass, not an answer.
+    if code in _RESCREEN_UNDECIDED or code in _RESCREEN_NO_DISPATCH:
+        # S-11: no model was called on this pass (an open breaker, no runner),
+        # or nothing about the content was decided: the Deliver waits.
+        return result
     route_shaped = (
         code in AGED_REVIEW_CODES
         and code != "policy_stale"
@@ -1663,16 +1678,31 @@ def _settle_rescreen(
     if route_shaped:
         decision = store.work_scope_decision(owner, message_id) or {}
         try:
-            since = now - float(decision.get("created_at") or now)
+            since = float(decision.get("created_at") or now)
         except (TypeError, ValueError):
-            since = 0.0
-        if code not in _CORROBORATED_CODES or _outage_corroborated(store, owner, since):
+            since = now
+        verdict = _route_verdict(store, owner, since) if code in _CORROBORATED_CODES else ""
+        if code not in _CORROBORATED_CODES or verdict == "outage":
             committed = _consume_owner_release(
                 store, owner, envelope, snapshot, epoch, rescreened=True
             )
             return committed if committed is not None else result
-    elif code in _RESCREEN_UNDECIDED or (code == "breaker_open" and not result.route_failure):
-        return result
+        if verdict == "message":
+            # The route works and THIS message still fails every hop: the
+            # Deliver becomes the Discard-only terminal state (S-13), replacing
+            # the unscreened decision so no dead Deliver button remains (Q3).
+            target = _ReviewTarget(
+                envelope=envelope,
+                snapshot=snapshot,
+                epoch=int(epoch),
+                sender_account_id=envelope.sender_account,
+                conversation_id=str(decision.get("conversation_id") or ""),
+            )
+            store.drop_review_decision(owner, message_id)
+            return _convert_to_unscreened_review(
+                store, owner, target, code, now - since, review_code="screening_failed"
+            )
+        return result  # no evidence either way yet: the Deliver waits
     _set_release_outcome(store, owner, message_id, "refused:rescreened_hold", now)
     logger.info("bridge: unscreened deliver refused after re-screen code=%s", _closed_code(code))
     return result
@@ -2687,6 +2717,10 @@ async def _screen_spend(
             if _is_input_refusal(failure)
             else _record_failure(store, owner, failure_class=failure_class)
         )
+        if retry_at is not None and getattr(failure, "tb_cascade_exhausted", False):
+            # S-9: every hop failed on the ROUTE — ask the same chain the
+            # content-free canary before this counts as an outage anywhere.
+            await _route_canary(store, owner, runner, prepared.snapshot.default_model)
         # A 402 is its own owner-visible reason (an empty balance only a
         # top-up clears), still a route failure for the breaker.
         from local_operator.team_bridge.model_boundary import provider_hold_code
@@ -3021,13 +3055,88 @@ def _hold_has_aged(
 _CORROBORATED_CODES = frozenset({"screening_model_unavailable", "breaker_open", "provider_error"})
 
 
-def _outage_corroborated(store: Store, owner: OwnerSnapshot, age: float) -> bool:
-    """Whether no screen succeeded on this account since the hold began (S-6)."""
+def _route_verdict(store: Store, owner: OwnerSnapshot, since: float) -> str:
+    """What the account's route evidence says about a hold that began at ``since``.
+
+    ``"outage"``: the content-free route canary failed since then and nothing
+    screened since (S-6 + S-9) — the only state that may become an unscreened
+    Deliver item. ``"message"``: something DID screen since, so the route works
+    and the failure is this message's own. ``"unknown"``: neither; never read
+    as an outage, because an absence of success is exactly what a sender-pinned
+    breaker manufactures (S-9).
+    """
+
+    evidence = store.screening_route_evidence(owner)
+    success = evidence.get("success_at")
+    canary_failed = evidence.get("canary_failed_at")
+    if success is not None and success >= since:
+        return "message"
+    # A canary is skipped while a verdict is fresh (``_ROUTE_CANARY_FRESH_S``),
+    # so one that failed just before this hold began still covers it.
+    if canary_failed is not None and canary_failed >= since - _ROUTE_CANARY_FRESH_S:
+        return "outage"
+    return "unknown"
+
+
+#: The fixed route canary (S-9). No sender byte, no envelope, no attachment: the
+#: same chain is asked a question a crafted message cannot shape, so its answer
+#: tells a dead route from a message every hop refuses. Any provider RESPONSE
+#: counts as the route working; its verdict is never used for anything.
+_ROUTE_CANARY_PROMPT = (
+    "Team Bridge route check: a fixed probe that carries no message.\n"
+    "Reply with exactly these two lines:\n"
+    "VERDICT: deliver\n"
+    "REASON: route check."
+)
+#: A route verdict this fresh is reused rather than re-probed, bounding a burst
+#: of failing messages to one canary a minute.
+_ROUTE_CANARY_FRESH_S = 60.0
+
+
+async def _route_canary(
+    store: Store, owner: OwnerSnapshot, runner: Any, default_model: str | None
+) -> None:
+    """After a whole-chain ROUTE failure, probe the same chain with the canary.
+
+    PR #4212 round 3, S-9: a sender could exhaust the chain with a crafted body,
+    open the breaker, and so starve the account of the successes S-6 looks for
+    — every held message then read as an outage. The canary decides instead. It
+    answers → :meth:`Store.record_screening_success` (clears the breaker and
+    stamps a success: the failure was the message's own). Every hop fails on
+    the route too → :meth:`Store.record_canary_failure` (a real outage). Anything
+    else (a guard refusal, a local defect) records nothing. Best effort; only
+    cancellation propagates.
+    """
 
     import time as _time
 
-    last = store.last_screening_success_at(owner)
-    return last is None or last < _time.time() - age
+    if runner is None or not default_model:
+        return
+    evidence = store.screening_route_evidence(owner)
+    now = _time.time()
+    if any(
+        stamp is not None and 0 <= now - stamp < _ROUTE_CANARY_FRESH_S
+        for stamp in (evidence.get("success_at"), evidence.get("canary_failed_at"))
+    ):
+        return
+    try:
+        reply, model = await _maybe_await(
+            _invoke_runner(runner, _ROUTE_CANARY_PROMPT, default_model)
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as failure:  # noqa: BLE001 — classified by its typed tag only
+        if getattr(failure, "tb_cascade_exhausted", False):
+            store.record_canary_failure(owner)
+            logger.info("bridge: route canary failed on every hop: outage")
+        return
+    if model is None and not reply:
+        return  # unevidenced: says nothing about the route
+    try:
+        store.record_screening_success(owner)
+    except StoreRefused:
+        return
+    logger.info("bridge: route canary answered: the failure was message-specific")
 
 
 def _aged_review_hold(
@@ -3078,6 +3187,11 @@ def _aged_review_hold(
     if threshold is None:
         return result
     message_id = target.envelope.message_id
+    from local_operator.team_bridge.store import HOLD_CLOCK_OWNER_ACTION
+
+    # m1 (round 3): this pass reached the pipeline, so the owner is no longer
+    # the blocker; a later lapse starts its owner-action clock afresh.
+    store.clear_hold_clock(owner, message_id, clock=HOLD_CLOCK_OWNER_ACTION)
     if code not in AGED_REVIEW_CODES or (
         code in _ROUTE_EVIDENCE_CODES and result.route_failure is not True
     ):
@@ -3086,11 +3200,24 @@ def _aged_review_hold(
     aged, age = _hold_has_aged(store, owner, message_id, threshold)
     if not aged:
         return result
-    if code in _CORROBORATED_CODES and not _outage_corroborated(store, owner, age):
-        # Others screened while this one kept failing: message-specific, so it
-        # stays held (fail-closed) and is logged once — never a Deliver item.
-        _note_stuck_hold(store, owner, message_id, code, threshold)
-        return result
+    if code in _CORROBORATED_CODES:
+        import time as _time
+
+        verdict = _route_verdict(store, owner, _time.time() - age)
+        if verdict != "outage":
+            if code == "breaker_open":
+                # Never dispatched on this pass: the half-open probe (and its
+                # canary) will decide; it stays held until then.
+                _note_stuck_hold(store, owner, message_id, code, threshold)
+                return result
+            # S-13 / R3-1 / Q4: THIS message failed every hop and the route was
+            # not shown to be down (it answered others or the canary, or nothing
+            # proved an outage). Terminal and Discard-only, published as
+            # awaiting review, and replayed with no further dispatch — never a
+            # Deliver item, never a transient hold forever.
+            return _convert_to_unscreened_review(
+                store, owner, target, code, age, review_code="screening_failed"
+            )
     return _convert_to_unscreened_review(store, owner, target, code, age)
 
 
@@ -3100,8 +3227,9 @@ def _convert_to_unscreened_review(
     target: "_Prepared | _ReviewTarget",
     code: Any,
     age: float,
+    *,
+    review_code: str = "model_hold",
 ) -> ScreenResult:
-    review_code = "model_hold"
     message_id = target.envelope.message_id
     _persist_hold(store, owner, message_id, review_code)
     _record_review_decision(
@@ -3608,6 +3736,12 @@ def _consume_owner_release(
         outcome(owner, envelope.message_id, "refused:body_hash_mismatch", now=now)
         _persist_hold(store, owner, envelope.message_id, "body_hash_mismatch")
         return ScreenResult("hold", hold_code="body_hash_mismatch")
+    if deliver and str(decision.get("hold_code") or "") in hr.DISCARD_ONLY_HOLD_CODES:
+        # Round 3 (S-13): a Discard-only decision. A Deliver row, however it was
+        # written, is refused here — never admitted.
+        hr.log_release("decision_changed")
+        outcome(owner, envelope.message_id, "refused:discard_only", now=now)
+        return None
     if deliver and not rescreened and _decision_unscreened(decision):
         # S-8: screen it once before honouring the Deliver (``_settle_rescreen``).
         # A re-screen that already produced a screener answer refused this
@@ -4023,6 +4157,14 @@ def _record_review_decision(
     # cache stays primary-only for exactly that reason. While the row waits,
     # ``_replay_work_scope_decision`` replays its hold with no model call, so the
     # fallback's hold is terminal and is never re-drawn hoping for ``deliver``.
+    if getattr(prepared, "rescreen_release", False) and actual_model and not unscreened:
+        # Q3 (round 3): the re-screen of an unscreened Deliver ANSWERED. Its
+        # screener-named decision replaces the unscreened one (the refused
+        # release goes with it), so the owner's next word is on a screened
+        # decision instead of a dead Deliver button.
+        existing = store.work_scope_decision(owner, envelope.message_id)
+        if existing is not None and _decision_unscreened(existing):
+            store.drop_review_decision(owner, envelope.message_id)
     try:
         store.record_work_scope_decision(
             owner,
@@ -5043,8 +5185,18 @@ async def _screen_batch_pass(
             # spent; a typed budget hold for every message, no breaker advance.
             _commit_each("budget_exhausted", failure_class=failure_class)
             return _finish()
+        if len(jobs) > 1:
+            # S-10 (round 3): a failed MULTI-message call says nothing about any
+            # one message — one poisoned batch-mate can fail every hop for all
+            # of them. Each is re-screened ALONE, exactly like an answered
+            # refusal above, and the call is not route evidence: the breaker and
+            # the canary hear only from single-message dispatches.
+            _commit_each(HOLD_BATCH_UNRESOLVED, failure_class=failure_class)
+            return _finish()
         if not _is_input_refusal(failure):
             _record_failure(store, owner, failure_class=failure_class)
+            if getattr(failure, "tb_cascade_exhausted", False):
+                await _route_canary(store, owner, runner, snapshot.default_model)
         _commit_each(provider_hold_code(failure), failure_class=failure_class)
         return _finish()
 
