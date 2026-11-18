@@ -30,7 +30,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from rich.cells import cell_len
+from rich.cells import cell_len, set_cell_size
+from rich.console import Console, ConsoleOptions, RenderResult
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -80,6 +81,127 @@ def _now_hhmm() -> str:
 
 def _wait(seconds: int) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+#: The separator every catalogue uses between a status row's clauses. The
+#: context sidecar fixes it as display vocabulary, so a row's LAST clause can
+#: be found in any locale by this, without a per-locale table.
+SEPARATOR = " · "
+
+
+def pinned_tail(text: str, anchor: str = "") -> str:
+    """The part of ``text`` a cut must never touch (design review D1).
+
+    ``anchor`` names the essential VALUE when it is not simply the last clause
+    (the refusal category: "Not posted: <category> · f2 why" must keep the
+    category AND the key). Otherwise the last `` · `` clause is the tail: the
+    countdown, ``↵ retry``, ``checked first``, ``esc cancel``. A row with no
+    separator has no tail, and the caller wraps it instead of cutting it.
+    """
+    if anchor and anchor in text:
+        return text[text.rfind(anchor) :]
+    index = text.rfind(SEPARATOR)
+    return text[index:] if index > 0 else ""
+
+
+def fit_pinned(text: str, tail: str, width: int) -> str:
+    """``text`` in ``width`` cells, cutting only the lead in front of ``tail``.
+
+    WHY. Rows above and below the composer are one line each (the composer is
+    3 fixed rows, so the message list never moves while typing), and at the
+    default 80x24 the column is 53 cells: French, Russian, Spanish and
+    Vietnamese — and English ``status_restricted`` — do not fit. A plain
+    end-cut dropped exactly the words the row exists for (the countdown, the
+    moderation disclosure), silently. So the LEAD is shortened, marked with
+    ``…``, and the tail is kept whole: ``◷ Ralentissez : 10 par minute… ·
+    envoi dans 0:42``. Measured in terminal cells (``rich.cells``), never
+    ``len``, because CJK and Devanagari glyphs are not one cell each.
+    """
+    if width <= 0:
+        return ""
+    if cell_len(text) <= width:
+        return text
+    if not tail or not text.endswith(tail):
+        return set_cell_size(text, max(0, width - 1)).rstrip() + "…"
+    room = width - cell_len(tail) - 1
+    if room < 1:
+        # Tail wider than the row once the lead is gone (Vietnamese read-only
+        # at 80 columns; any row at drawer width): drop the lead and the
+        # tail's own separator, then keep the clause's END, where the value
+        # sits ("… chỉ người kiểm duyệt …", "…0:42").
+        clause = tail.removeprefix(SEPARATOR)
+        if cell_len(clause) + 2 <= width:
+            return "… " + clause
+        while clause and cell_len(clause) > width - 1:
+            clause = clause[1:]
+        return "…" + clause
+    lead = set_cell_size(text[: len(text) - len(tail)], room).rstrip(" ·:：,")
+    return lead + "…" + tail
+
+
+class PinnedRow:
+    """A one-line row fitted to the width it is RENDERED at (see :func:`fit_pinned`).
+
+    A renderable rather than a pre-cut string because the column's width is
+    only known at render time: the page repaints from ``on_resize`` before its
+    children are laid out, and a string cut to a stale width is the silent
+    clip this replaces. ``tail=None`` marks a row with no pinned clause; it
+    wraps (the status row allows 2 lines for exactly those, D1 fix 2).
+    """
+
+    def __init__(self, text: str, tail: str | None, style: str = "") -> None:
+        self.text = text
+        self.tail = tail
+        self.style = style
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        if self.tail is None:
+            yield Text(self.text, style=self.style, overflow="ellipsis")
+            return
+        line = fit_pinned(self.text, self.tail, options.max_width)
+        yield Text(line, style=self.style, no_wrap=True, overflow="ellipsis")
+
+    @property
+    def plain(self) -> str:
+        return self.text
+
+
+def fit_header(left: str, right: str, width: int) -> str:
+    """The page header in ``width`` cells: name on the left, key hints right.
+
+    Hints yield as whole `` · `` segments (R1-7: a half-cut hint ran into the
+    name as "connected g orgs") and from the FRONT (design review D1):
+    ``ctrl+k`` first, then ``g``/``/orgs``. The last hint, ``?``/``/keys``,
+    never goes, because it is how every other key is found; when even it does
+    not fit beside the name, the name is shortened instead. Two cells of gap
+    at least, so name and hints never touch.
+    """
+    segments = right.split(SEPARATOR)
+    while len(segments) > 1 and cell_len(left) + cell_len(SEPARATOR.join(segments)) + 4 > width:
+        segments.pop(0)
+    right = SEPARATOR.join(segments)
+    room = width - cell_len(right) - 4
+    if cell_len(left) > room:
+        left = (set_cell_size(left, room - 1).rstrip() + "…") if room > 1 else ""
+    gap = max(2, width - cell_len(left) - cell_len(right) - 2)
+    return set_cell_size(f" {left}{' ' * gap}{right} ", width)
+
+
+class HeaderRow:
+    """The header fitted at RENDER width (:func:`fit_header`), like :class:`PinnedRow`.
+
+    The page's own width is not the header's: the page pads one cell each
+    side, and sizing the line to the page cut the last two cells, which is
+    where ``? keys`` sits.
+    """
+
+    def __init__(self, left: str, right: str) -> None:
+        self.left = left
+        self.right = right
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        line = fit_header(self.left, self.right, options.max_width)
+        yield Text(line, style="bold", no_wrap=True, overflow="ellipsis")
 
 
 def _category(category: str | None) -> str:
@@ -418,7 +540,12 @@ class CommunityView(Vertical):
         if self.overlay is not None:
             return
         order = ["rail", "messages", "composer"]
-        nxt = order[(order.index(self.area) + 1) % 3]
+        composer = self.composer()
+        if composer is not None and composer.status in ("read_only", "locked"):
+            # D3: a disabled composer cannot take focus, so "[composer] ↵ send"
+            # in the footer beside letter-key header hints was a mixed signal.
+            order.remove("composer")
+        nxt = order[(order.index(self.area) + 1) % len(order) if self.area in order else 0]
         if self.narrow:
             self.drawer_open = nxt == "rail"
             self._apply_layout()
@@ -726,6 +853,12 @@ class CommunityView(Vertical):
         self._footer.update(self._paint_footer())
 
     def _typing(self) -> bool:
+        # ``area`` too, not only the focused widget: Textual moves focus after
+        # the paint that ``_set_area`` triggers, so the header advertised
+        # ``? keys`` (a key that would type "?") beside "[composer]" in the
+        # footer (design review D3, mixed focus signal).
+        if self.overlay is None and self.area == "composer":
+            return True
         return self.screen.focused in (self._input, self._overlay_input)
 
     def _paint_header(self) -> None:
@@ -734,18 +867,7 @@ class CommunityView(Vertical):
         state = _t(_k.state_offline() if offline else _k.state_connected())
         left = _t(_k.header(community=name, state=state)) if name else ""
         right = _t(_k.header_keys_typing() if self._typing() else _k.header_keys())
-        width = max(20, self.size.width or 80)
-        # The key hints yield whole segments, last first (R1-7): a narrow
-        # header used to run the name into a half-cut hint ("connected g orgs").
-        # Two cells of gap at least, so the name and the hints never touch.
-        segments = right.split(" · ")
-        while segments and cell_len(left) + cell_len(" · ".join(segments)) + 4 > width:
-            segments.pop()
-        right = " · ".join(segments)
-        gap = max(2, width - cell_len(left) - cell_len(right) - 2)
-        line = Text(f" {left}{' ' * gap}{right} ", style="bold", no_wrap=True, overflow="ellipsis")
-        line.truncate(width, overflow="ellipsis")
-        self._header.update(line)
+        self._header.update(HeaderRow(left, right))
 
     def _paint_rail(self) -> Text:
         text = Text()
@@ -791,7 +913,9 @@ class CommunityView(Vertical):
                 else _t(_k.badge_agent_plain())
             )
         when = _hhmm(message.created_at)
-        left = f"{'▸' if selected else ' '}{name}" + (f"  {badge}" if badge else "")
+        # One gutter cell after the marker on every row (D10): ``▸Alex`` ran
+        # the marker into the name while unselected rows had a space.
+        left = f"{'▸' if selected else ' '} {name}" + (f"  {badge}" if badge else "")
         line = Text(left, style="bold")
         line.append(" " * max(1, width - len(left) - len(when)) + when, style="dim")
         return line
@@ -805,8 +929,9 @@ class CommunityView(Vertical):
             if failure is not None and getattr(failure, "code", "") == "community_signin_required":
                 return Text(_t(_k.page_signin()))
             if failure is not None:
-                code = service.error_word(failure)
-                return Text(_t(_k.page_error(code=code)) + "\n" + _t(_k.page_error_keys()))
+                # No code in the sentence (D4): ``community_unreachable`` is a
+                # machine word; ``r`` retrying is what the reader can act on.
+                return Text(_t(_k.page_error()) + "\n" + _t(_k.page_error_keys()))
             return Text(_t(_k.page_none()))
         if not self.home.joined:
             name = self.home.community.name
@@ -822,7 +947,9 @@ class CommunityView(Vertical):
         view = model.pane_state(rows, failure=failure if failure is not True else None)
         name = channel.name
         if view.state == "loading":
-            text.append(_t(_k.loading(channel=name)) + "\n\n")
+            # One line (D9): the detail starts with its own "·", which reads
+            # as an orphan on a row of its own.
+            text.append(_t(_k.loading(channel=name)) + " ")
             text.append(_t(_k.loading_detail()), style="dim")
             return text
         if view.state == "error":
@@ -854,7 +981,9 @@ class CommunityView(Vertical):
             text.append("\n")
             body = message.text or ""
             for line in body.splitlines() or [""]:
-                text.append(f"{'▸' if selected else ' '}  {line}\n")
+                # The author row carries the selection marker; repeating it
+                # on every body row was noise (D10).
+                text.append(f"   {line}\n")
             extras = []
             if message.asset_ids:
                 extras.append(_t(_k.images(count=len(message.asset_ids))))
@@ -878,17 +1007,30 @@ class CommunityView(Vertical):
         self._status.display = show
         if not show or channel is None:
             return
-        if composer is not None and composer.status in ("read_only", "locked"):
-            # T10: a channel nobody here can post in says so where the
-            # audience line would be; the status row keeps the reason.
-            self._audience.update(Text(""))
-        elif channel.visibility == "private":
-            self._audience.update(_t(_k.audience_private(channel=channel.name)))
+        closed = composer is not None and composer.status in ("read_only", "locked")
+        if closed and composer is not None:
+            # T10 (design review D3): a channel nobody here can post in leads
+            # with WHY, on the row the eye lands on first, and the composer
+            # offers nothing to type into: no placeholder (a "Message #x"
+            # prompt invites typing a disabled box refuses), no send hint.
+            reason = _k.status_read_only if composer.status == "read_only" else _k.status_locked
+            line = _t(reason(channel=channel.name))
+            self._audience.update(PinnedRow(line, pinned_tail(line), "dim"))
+            self._input.placeholder = ""
         else:
-            self._audience.update(_t(_k.audience_public(channel=channel.name)))
-        self._input.placeholder = _t(_k.composer_placeholder(channel=channel.name))
-        self._input.disabled = composer is not None and composer.status in ("read_only", "locked")
+            maker = _k.audience_private if channel.visibility == "private" else _k.audience_public
+            line = _t(maker(channel=channel.name))
+            # The moderation disclosure ("checked first") is the tail: the RFC
+            # says it always shows, so it is the clause a cut must keep.
+            self._audience.update(PinnedRow(line, pinned_tail(line)))
+            self._input.placeholder = _t(_k.composer_placeholder(channel=channel.name))
+        self._input.disabled = closed
         self._paint_status()
+
+    #: Status tone -> the CSS class the stylesheet colours from the theme
+    #: (design review D5): raw ``red``/``yellow`` painted pure ANSI next to the
+    #: warm palette and fell under 4.5:1 on the input surface.
+    _TONES = ("success", "warning", "danger")
 
     def _paint_status(self) -> None:
         composer = self.composer()
@@ -896,29 +1038,43 @@ class CommunityView(Vertical):
         if composer is None or channel is None:
             return
         if self.notice:
-            self._status.update(Text(self.notice, style="dim"))
+            line, tail, tone = self.notice, None, "dim"
             self.notice = ""
-            return
-        self._status.update(self._status_text(composer, channel.name))
+        else:
+            line, tail, tone = self._status_row(composer, channel.name)
+        for name in self._TONES:
+            self._status.set_class(tone == name, f"-tone-{name}")
+        self._status.update(PinnedRow(line, tail, "dim" if tone == "dim" else ""))
 
-    def _status_text(self, composer: model.Composer, channel: str) -> Text:
+    def _status_row(self, composer: model.Composer, channel: str) -> tuple[str, str | None, str]:
+        """``(line, pinned tail, tone)`` for the sender-only row under the composer.
+
+        The tail is what a narrow column must still show (D1): the countdown,
+        the refusal category with ``f2 why``, ``↵ retry``. ``None`` marks a
+        row with no tail clause; it wraps onto the row's second line instead
+        of losing its second half (``status_local_command``,
+        ``status_restricted``).
+        """
         outcome = composer.outcome
         kind = composer.status
+
+        def row(line: str, tone: str = "", anchor: str = "") -> tuple[str, str | None, str]:
+            tail = pinned_tail(line, anchor)
+            return line, (tail or None), tone
+
         if kind == "checking":
-            return Text(_t(_k.status_checking()))
+            return row(_t(_k.status_checking()))
         if kind == "posted":
-            return Text(_t(_k.status_posted(time=composer.at or _now_hhmm())), style="green")
+            return row(_t(_k.status_posted(time=composer.at or _now_hhmm())), "success")
         if kind == "too_late":
-            return Text(_t(_k.status_too_late(time=composer.at or _now_hhmm())))
+            return row(_t(_k.status_too_late(time=composer.at or _now_hhmm())))
         if kind == "cancelled":
-            return Text(
+            return row(
                 _t(_k.status_cancelled_aside() if composer.set_aside else _k.status_cancelled())
             )
         if kind == "refused":
-            return Text(
-                _t(_k.status_refused(category=_category(outcome.category if outcome else None))),
-                style="red",
-            )
+            category = _category(outcome.category if outcome else None)
+            return row(_t(_k.status_refused(category=category)), "danger", category)
         if kind == "rate_limited":
             wait = _wait(composer.seconds_left())
             scope = outcome.scope if outcome else None
@@ -928,30 +1084,27 @@ class CommunityView(Vertical):
                 "account_daily": _k.status_rate_daily,
                 "probation": _k.status_rate_probation,
             }.get(scope or "", _k.status_rate_other)
-            return Text(_t(maker(wait=wait)), style="yellow")
+            return row(_t(maker(wait=wait)), "warning")
         if kind == "moderation_unavailable":
-            return Text(_t(_k.status_moderation()), style="yellow")
+            return row(_t(_k.status_moderation()), "warning")
         if kind == "offline":
-            return Text(_t(_k.status_offline()), style="yellow")
+            return row(_t(_k.status_offline()), "warning")
         if kind == "restricted":
-            return Text(_t(_k.status_restricted(channel=channel)), style="red")
-        if kind == "read_only":
-            return Text(_t(_k.status_read_only(channel=channel)), style="dim")
-        if kind == "locked":
-            return Text(_t(_k.status_locked(channel=channel)), style="dim")
+            # Two clauses of equal weight ("can't post right now" and "reading
+            # still works"): wrapped whole rather than one of them cut.
+            return _t(_k.status_restricted(channel=channel)), None, "danger"
+        if kind in ("read_only", "locked"):
+            # The reason leads on the audience row (D3); nothing to repeat here.
+            return "", None, "dim"
         if kind == "guidelines":
-            return Text(
-                _t(_k.status_guidelines(version=(outcome.version if outcome else "") or ""))
-            )
+            return row(_t(_k.status_guidelines(version=(outcome.version if outcome else "") or "")))
         if kind == "report_sent":
-            return Text(_t(_k.status_report_sent()), style="dim")
+            return row(_t(_k.status_report_sent()), "dim")
         if kind == "error":
             if outcome is not None and outcome.code == "community_signin_required":
-                return Text(_t(_k.status_signin()))
-            return Text(
-                _t(_k.status_error(code=(outcome.code if outcome else "") or "")), style="red"
-            )
-        return Text(_t(_k.status_idle()), style="dim")
+                return row(_t(_k.status_signin()))
+            return row(_t(_k.status_error(code=(outcome.code if outcome else "") or "")), "danger")
+        return row(_t(_k.status_idle()), "dim")
 
     def _paint_footer(self) -> Text:
         if self.overlay is not None:
@@ -1024,9 +1177,11 @@ class CommunityView(Vertical):
             button = f"[ {_t(_k.join_button())} ]"
             text.append(f"{'▸' if self.join_focus == 1 else ' '} ")
             text.append(button, style="bold" if self.join_agree else "dim")
+            # Cancel sits right after Join and the "accept first" note after
+            # both (D6): ticking the box used to slide Cancel 25 columns left.
+            text.append(f"    {'▸' if self.join_focus == 2 else ' '} [ {_t(_k.cancel())} ]")
             if not self.join_agree:
                 text.append("  " + _t(_k.join_disabled()), style="dim")
-            text.append(f"    {'▸' if self.join_focus == 2 else ' '} [ {_t(_k.cancel())} ]")
             if self.join_busy:
                 text.append("\n" + _t(_k.joining()), style="dim")
             if self.join_error:
@@ -1129,8 +1284,8 @@ class CommunityView(Vertical):
                 )
                 + "\n"
             )
-        text.append(_t(_k.why_only_you()) + "\n\n")
-        text.append(_t(_k.why_keys()), style="dim")
+        # Keys live in the page footer only (D8: they printed twice).
+        text.append(_t(_k.why_only_you()) + "\n")
         return text
 
     def _paint_info(self) -> Text:
@@ -1140,7 +1295,6 @@ class CommunityView(Vertical):
         composer = self.composer()
         if composer is not None and composer.set_aside:
             text.append(_t(_k.info_restore()) + "\n")
-        text.append("\n" + _t(_k.why_keys()), style="dim")
         return text
 
     def _paint_keys(self) -> Text:
@@ -1228,8 +1382,8 @@ class CommunityView(Vertical):
                 f"{_t(_k.orgs_community(name=entry.name))}\n"
             )
             index += 1
-        text.append("\n" + _t(_k.orgs_note()) + "\n\n", style="dim")
-        text.append(_t(_k.orgs_keys()), style="dim")
+        # Keys live in the page footer only (D8: they printed twice).
+        text.append("\n" + _t(_k.orgs_note()) + "\n", style="dim")
         return text
 
 

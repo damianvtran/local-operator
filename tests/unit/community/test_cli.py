@@ -232,3 +232,84 @@ def test_text_mode_strips_control_sequences_and_json_escapes_them(
     assert "Mallory" in out and "hi  there" in out
     code, payload = _run(["read", "#general"], hub, capsys)
     assert code == 0 and payload["messages"][0]["text"] == hostile, "--json stays exact"
+
+
+def _text(argv: list[str], hub: FakeHub, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
+    args = build_cli_parser().parse_args(["community", *argv])
+    code = cli.main(args, client_factory=lambda _cfg: make_client(hub))
+    return code, capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected", "absent"),
+    [
+        (200, outcome(), "Posted to #general\n", "message_id"),
+        (
+            422,
+            {"status": "refused", "category": "spam_or_promotion", "reference": "MOD-AAAA-BBBB"},
+            "Not posted: Spam or undisclosed promotion · reference MOD-AAAA-BBBB\n",
+            "category",
+        ),
+        (
+            429,
+            {"retry_after": 42, "scope": "account_burst"},
+            "Slow down: 10 a minute for you · send in 0:42\n",
+            "scope",
+        ),
+        (
+            409,
+            {"code": "guidelines_changed", "guidelines_version": "2026-12"},
+            "Guidelines updated to 2026-12 · accept them first: "
+            "lop community join --accept-guidelines 2026-12\n",
+            "version",
+        ),
+    ],
+)
+def test_text_mode_speaks_human_copy_and_json_keeps_the_codes(
+    status: int, body: Any, expected: str, absent: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Design review D4: category and scope labels, no message ids, the exact
+    # acceptance command; the codes and ids stay in --json for scripts.
+    hub = _hub(submit=(status, body))
+    _code, out = _text(["post", "#general", "--text", "hello"], hub, capsys)
+    assert out == expected
+    for code_word in ("msg_2", "spam_or_promotion", "account_burst", "guidelines_changed"):
+        assert code_word not in out
+    _code, payload = _run(
+        ["post", "#general", "--text", "hello"], _hub(submit=(status, body)), capsys
+    )
+    assert absent in payload, payload
+
+
+def test_read_prints_local_times_not_utc_stamps(capsys: pytest.CaptureFixture[str]) -> None:
+    from datetime import datetime
+
+    code, out = _text(["read", "#general"], _hub(), capsys)
+    local = datetime.fromisoformat("2026-11-18T10:00:00+00:00").astimezone()
+    assert code == 0 and "T10:00:00Z" not in out
+    assert local.strftime("%H:%M") in out.splitlines()[0]
+
+
+def test_join_re_accepts_newer_guidelines_for_a_member(capsys: pytest.CaptureFixture[str]) -> None:
+    # The refusal above names `join --accept-guidelines`; for a member on an
+    # older version that must re-accept, not answer "already joined".
+    hub = _hub()
+    previous = hub.override
+    assert previous is not None
+    newer = {**JOINED, "guidelines": {"version": "2026-12", "text": "Be kinder."}}
+
+    def updated(sent: Any) -> httpx.Response | None:
+        if sent.path.endswith("/bootstrap"):
+            return httpx.Response(200, json=newer)
+        if sent.path == JOIN:
+            return httpx.Response(200, json=newer)
+        return previous(sent)
+
+    hub.override = updated
+    code, payload = _run(["join", "--accept-guidelines", "2026-12"], hub, capsys)
+    assert code == 0 and payload["state"] == "joined"
+    (sent,) = [s for s in hub.sent if s.path == JOIN]
+    assert json.loads(sent.body) == {"guidelines_version": "2026-12", "accept_guidelines": True}
+    # Same version already accepted: still nothing sent.
+    code, payload = _run(["join", "--accept-guidelines", "2026-11-01"], _hub(), capsys)
+    assert code == 0 and payload["state"] == "already_joined"

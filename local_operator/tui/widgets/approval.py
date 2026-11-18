@@ -1194,6 +1194,10 @@ class ApprovalPrompt(AskPickerScreen):
         if reveal:
             return lines
         cap = self._question_bound(width, len(lines))
+        #: Read by ``_row_label`` (D2). A flag set here, not a re-measure there,
+        #: because the label is read while the layout that decides the cut is
+        #: still being computed.
+        self._post_cut = len(lines) > cap
         if len(lines) <= cap:
             return lines
         if getattr(self, "_community_post", False) and cap > self._post_header_rows(width):
@@ -1210,6 +1214,19 @@ class ApprovalPrompt(AskPickerScreen):
             more = len(lines) - len(kept)
             hint = tr("tui.community")(community_copy.post_card_more(count=more))
             return [*kept, truncate_cells(hint, max(1, width))]
+        if getattr(self, "_community_post", False):
+            # Header-only card (80x24): no row to spare for the hint above, so
+            # the cut row's own ellipsis names the hidden post and its key
+            # (design review D2). A bare "…" made a one-line post and a
+            # 66-line one look identical, and Allow look like approving text
+            # already seen.
+            from local_operator.i18n.keys import tui_community as community_copy
+
+            cue = tr("tui.community")(community_copy.post_card_cut())
+            room = max(1, width - cell_len(cue) - 1)
+            tail = truncate_cells(lines[max(0, cap - 1)], room)
+            tail = tail[:-1].rstrip() if tail.endswith("…") else tail
+            return [*lines[: max(0, cap - 1)], truncate_cells(f"{tail} {cue}", max(1, width))]
         tail = truncate_cells(lines[max(0, cap - 1)], max(1, width - 2))
         tail = tail[:-1].rstrip() if tail.endswith("…") else tail
         return [*lines[: max(0, cap - 1)], f"{tail} …"]
@@ -2282,6 +2299,24 @@ class ApprovalPrompt(AskPickerScreen):
             self.resolve(True, answer=ALLOW_ALL_ANSWER)
             return
         self.resolve(key == "y", answer=key)
+
+    def _row_label(self, index: int) -> str:
+        """Allow says what ``y`` does on a post card that hides the post (D2).
+
+        ``y`` opens the whole post first (``_post_unread``); a label still
+        reading "Allow" promised an approval the key does not give.
+        """
+        label = super()._row_label(index)
+        if (
+            label == "Allow"
+            and getattr(self, "_community_post", False)
+            and getattr(self, "_post_cut", False)
+            and not self._post_read
+        ):
+            from local_operator.i18n.keys import tui_community as community_copy
+
+            return tr("tui.community")(community_copy.post_allow_unread())
+        return label
 
     def _post_header_rows(self, width: int) -> int:
         """Rows the post card's header (everything above the ``┊`` text) wraps to."""

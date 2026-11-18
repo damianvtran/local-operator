@@ -454,6 +454,16 @@
     "role": "TUI /community page",
     "tone": "plain, kind, sentence case, no emoji"
   },
+  "tui.community.post_allow_unread": {
+    "note": "Approval card for an agent's community post: the label of the Allow answer while the post text is hidden by the card. Pressing y opens the whole post first; approving needs reading it to the end. Imperative, short (it is an option label).",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.post_card_cut": {
+    "note": "Approval card for an agent's community post, when the card is too short to show any of the post: the end of the last visible row, replacing a bare '…'. Says the post text is hidden and that the v key shows it. 'v' is a key name and stays untranslated; keep the leading '…'. Keep it short: it shares one 53-cell row with other text at 80 columns.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
   "tui.community.post_card_more": {
     "note": "Approval card for an agent's community post: the last visible row when the post is cut. {count} is how many rows are hidden. 'v' is a key name and stays untranslated; Allow is the card's answer label.",
     "role": "TUI /community page",

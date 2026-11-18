@@ -2699,7 +2699,28 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 .community-view-status {
-    height: 1;
+    /* One row, except a status with no tail clause to pin (the local-command
+     * hint, "can't post here right now · reading still works"): it wraps to
+     * a second row rather than losing half its sentence at 80 columns
+     * (design review D1). Every other row is fitted to one line in Python
+     * (`community_view.fit_pinned`), so the composer does not move. */
+    height: auto;
+    max-height: 2;
+}
+
+/* Outcome tones from the theme, not raw ANSI red/yellow (design review D5):
+ * dark-theme danger #ef8078 / warning #e0b04b / success #57c785 are each
+ * >= 4.5:1 on both the page (#14110c) and the input surface (#1e1a14). */
+.community-view-status.-tone-danger {
+    color: $lo-danger;
+}
+
+.community-view-status.-tone-warning {
+    color: $lo-warning;
+}
+
+.community-view-status.-tone-success {
+    color: $lo-success;
 }
 
 .community-view-overlay {
@@ -3660,6 +3681,12 @@ AskPickerScreen .ask-picker {
 
 #post-view-scroll {
     height: 1fr;
+}
+
+/* One gutter cell before the scrollbar (design review D10): the text ran
+ * straight into it. */
+#post-view-body {
+    padding-right: 1;
 }
 
 #post-view-hint {

@@ -356,8 +356,8 @@ def orgs_title() -> Msg:
     return Msg("tui.community.orgs_title", {})
 
 
-def page_error(*, code: str) -> Msg:
-    return Msg("tui.community.page_error", {"code": code})
+def page_error() -> Msg:
+    return Msg("tui.community.page_error", {})
 
 
 def page_error_keys() -> Msg:
@@ -374,6 +374,14 @@ def page_none() -> Msg:
 
 def page_signin() -> Msg:
     return Msg("tui.community.page_signin", {})
+
+
+def post_allow_unread() -> Msg:
+    return Msg("tui.community.post_allow_unread", {})
+
+
+def post_card_cut() -> Msg:
+    return Msg("tui.community.post_card_cut", {})
 
 
 def post_card_more(*, count: int | float) -> Msg:

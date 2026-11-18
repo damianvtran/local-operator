@@ -68,6 +68,10 @@ async def test_cut_post_needs_reading_to_the_end_before_allow() -> None:
         lines = "\n".join(card.render_lines_for_test())
         assert "Audience" in lines and "Shown as your own post" in lines
         assert "Deny" in lines, "the answers stay on the card"
+        # Design review D2: the header-only card says the post is hidden and
+        # what y does, instead of a bare "…" and an "Allow" it will not give.
+        assert "… v reads the post" in lines
+        assert "Read the post, then allow" in lines
 
         await pilot.press("y")
         await _settle(pilot)
@@ -90,6 +94,8 @@ async def test_cut_post_needs_reading_to_the_end_before_allow() -> None:
         assert app.screen.read_to_end  # type: ignore[attr-defined]
         await pilot.press("escape")
         await _settle(pilot)
+        relabelled = "\n".join(card.render_lines_for_test())
+        assert "Read the post, then allow" not in relabelled and "Allow" in relabelled
         await pilot.press("y")
         assert await asyncio.wait_for(pending, 3) is True
 

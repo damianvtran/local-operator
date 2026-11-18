@@ -59,6 +59,7 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import datetime
 from typing import Any
 
 from local_operator.community import service
@@ -236,9 +237,13 @@ async def _run(command: str, args: Any, client_factory: Any) -> int:
                 f"(lop community guidelines) and pass --accept-guidelines {current}",
             )
             return service.EXIT_CODES["guidelines"]
-        if boot.membership is not None:
+        if boot.membership is not None and boot.membership.guidelines_version == current:
             _say(args, {"ok": True, "state": "already_joined"}, f"{community.name}: already joined")
             return 0
+        # A member whose accepted version is older re-accepts through the same
+        # JoinRequest (``CommunityGuidelinesChanged``: "re-read, re-accept").
+        # The post refusal names this exact command (design review D4), so
+        # answering "already joined" here would leave that advice a no-op.
         joined_boot = await client.join(
             community.id, guidelines_version=current, accept_guidelines=True
         )
@@ -292,7 +297,7 @@ async def _run(command: str, args: Any, client_factory: Any) -> int:
             "messages": [item.model_dump(exclude_none=True) for item in items],
         }
         lines = [
-            f"{m.created_at}  {m.author.display_name}"
+            f"{_when(m.created_at)}  {m.author.display_name}"
             + ("  [Agent]" if m.author.kind == "agent" else "")
             + f"\n  {m.text or ''}"
             for m in items
@@ -369,16 +374,68 @@ async def _run(command: str, args: Any, client_factory: Any) -> int:
     return 2
 
 
+def _when(stamp: str | None) -> str:
+    """A message time as a person reads it (design review D4).
+
+    Local ``HH:MM`` for today, ``YYYY-MM-DD HH:MM`` otherwise; the raw UTC
+    ISO stamp stays in ``--json``. An unparsable stamp prints as it came.
+    """
+    try:
+        moment = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).astimezone()
+    except (TypeError, ValueError):
+        return str(stamp or "")
+    if moment.date() == datetime.now().astimezone().date():
+        return moment.strftime("%H:%M")
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def _english(key: str, **params: Any) -> str:
+    """One ``tui.community`` message, rendered in English.
+
+    The page's category and rate-limit wording is the reviewed human copy for
+    the same outcome (design review D4: the CLI printed ``spam_or_promotion``
+    and ``account_burst``). Rendered in ``en`` because this CLI's lines are
+    English by policy (module doc, COPY): a translated label inside an English
+    sentence would be two languages on one line. Codes stay in ``--json``.
+    """
+    from local_operator.i18n import messages
+
+    return messages.render(f"tui.community.{key}", params, locale="en")
+
+
+#: Refusal category -> its ``tui.community.category_*`` label.
+_CATEGORIES = frozenset(
+    {"unsafe_or_illegal", "harassment_or_abuse", "spam_or_promotion", "private_information"}
+)
+
+#: Rate-limit scope -> the page's status line naming that limit.
+_RATE_SCOPES = {
+    "account_burst": "status_rate_burst",
+    "conversation": "status_rate_conversation",
+    "account_daily": "status_rate_daily",
+    "probation": "status_rate_probation",
+}
+
+
 def _post_line(outcome: service.PostOutcome, channel: str) -> str:
     kind = outcome.kind
     if kind == "posted":
-        return f"Posted to #{channel} · {outcome.message_id}"
+        return f"Posted to #{channel}"
     if kind == "checking":
         return f"Checking · lop community cancel {outcome.submission_id}"
     if kind == "refused":
-        return f"Not posted: {outcome.category} · {outcome.reference}"
+        category = outcome.category or ""
+        label = _english(f"category_{category}") if category in _CATEGORIES else category
+        # The reference is what support asks for, so it stays, labelled the
+        # way the page's f2 screen labels it.
+        reference = f" · reference {outcome.reference}" if outcome.reference else ""
+        return f"Not posted: {label}{reference}"
     if kind == "rate_limited":
-        return f"Slow down ({outcome.scope}) · retry in {outcome.retry_after_s} s"
+        seconds = int(outcome.retry_after_s or 0)
+        wait = f"{seconds // 60}:{seconds % 60:02d}"
+        line = _english(_RATE_SCOPES.get(outcome.scope or "", "status_rate_other"), wait=wait)
+        # The page's clock glyph is a status-row icon, not CLI text.
+        return line.removeprefix("◷ ")
     if kind == "moderation_unavailable":
         return "Moderation unavailable · not posted · retry later"
     if kind == "offline":
@@ -386,7 +443,11 @@ def _post_line(outcome: service.PostOutcome, channel: str) -> str:
     if kind == "restricted":
         return f"You can't post in #{channel}"
     if kind == "guidelines":
-        return f"Guidelines updated to {outcome.version} · accept them first"
+        # The exact command (D4): "accept them first" did not say how.
+        return (
+            f"Guidelines updated to {outcome.version} · "
+            f"accept them first: lop community join --accept-guidelines {outcome.version}"
+        )
     return f"Not posted ({outcome.code})"
 
 
