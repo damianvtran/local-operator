@@ -77,9 +77,7 @@ def test_a_silent_peer_gets_one_ping_per_keepalive_not_two_per_second(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _FakeClock(1_000_000.0)
-    monkeypatch.setattr(
-        relay, "time", SimpleNamespace(time=clock.time, monotonic=clock.time)
-    )
+    monkeypatch.setattr(relay, "time", SimpleNamespace(time=clock.time, monotonic=clock.time))
 
     def no_disk_scan() -> Any:
         raise AssertionError("the keepalive must not rebuild the peer record per ping")
@@ -140,9 +138,7 @@ def _writer_after_clock_gap(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Run the actual writer across one synthetic sleep, never sleeping the host."""
     wall, monotonic = _FakeClock(1_000_000.0), _FakeClock(100.0)
-    monkeypatch.setattr(
-        relay, "time", SimpleNamespace(time=wall.time, monotonic=monotonic.time)
-    )
+    monkeypatch.setattr(relay, "time", SimpleNamespace(time=wall.time, monotonic=monotonic.time))
     rows: list[dict[str, Any]] = []
     server: Any = SimpleNamespace(
         audit=SimpleNamespace(
@@ -152,7 +148,9 @@ def _writer_after_clock_gap(
         _links_lock=threading.RLock(),
     )
     server.audit_idle = lambda link: relay.RelayServer.audit_idle(server, link)
-    server.audit_host_resume = lambda **kwargs: relay.RelayServer.audit_host_resume(server, **kwargs)
+    server.audit_host_resume = lambda **kwargs: relay.RelayServer.audit_host_resume(
+        server, **kwargs
+    )
     link = _writer_link(server)
     link.network_id = "n_sleep"
     link.epoch = 1
