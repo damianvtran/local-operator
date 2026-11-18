@@ -20,17 +20,18 @@ because ``_sync_agent_name`` PUTs only when the hub's answer differs.
 
 WHAT FIRES IT. The process config watcher (``config_watch``): every writer
 lands in ``config.yml`` — ``aida.name`` for a rename, ``team_bridge.session``
-when the designated chief of staff changes — and the watcher reports which
-registry keys moved within its 2 s poll. Also once at start, so a rename made
-while the connector was down is published when it comes back. Event-driven,
+when the designated chief of staff changes, and ``team_bridge.enabled`` to
+settle on opt-out or reconcile the latest name on re-enable. The watcher
+reports which registry keys moved within its 2 s poll. Also once at start, so a
+rename made while the connector was down is published when it comes back. Event-driven,
 never a timer: the connector's "no periodic status call" rule holds.
 
 RETRY. A refused/unavailable read or a failed PUT is retried after
 ``RETRY_DELAYS_S`` (5 s, 30 s, 120 s, 300 s), then left to the ordinary
 status boundary. The last step is 300 s because the edge WAF's throttle
 answers "retry in 300 seconds" (#4172), and the status discipline holds a
-throttled answer for the wait it names, so a retry inside that window costs no
-request. A new rename resets the schedule.
+throttled status answer for the wait it names, so a retry inside that window
+costs no status request. A new rename resets the retry schedule, not the hold.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from typing import Any, Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 #: The registry keys whose change can alter the published name.
-IDENTITY_KEYS = frozenset({"aida.name", "team_bridge.session"})
+IDENTITY_KEYS = frozenset({"aida.name", "team_bridge.session", "team_bridge.enabled"})
 
 #: Delays before each retry of a publish that did not settle (see module doc).
 RETRY_DELAYS_S: tuple[float, ...] = (5.0, 30.0, 120.0, 300.0)
@@ -54,7 +55,7 @@ async def run(
     *,
     base_url: str,
     stop: asyncio.Event,
-    publish: Callable[[], Awaitable[bool]] | None = None,
+    publish: Callable[[bool], Awaitable[bool]] | None = None,
     watcher: Any = None,
     retry_delays: tuple[float, ...] = RETRY_DELAYS_S,
 ) -> None:
@@ -91,8 +92,8 @@ async def run(
             if not await _wait_either(changed, stop, None):
                 return
             changed.clear()
-            for delay in (*retry_delays, None):
-                if await _publish_once(publish):
+            for attempt, delay in enumerate((*retry_delays, None)):
+                if await _publish_once(publish, retry=attempt > 0):
                     break
                 if delay is None:
                     logger.info("bridge connector: identity publish left to the next status read")
@@ -104,9 +105,9 @@ async def run(
         unsubscribe()
 
 
-async def _publish_once(publish: Callable[[], Awaitable[bool]]) -> bool:
+async def _publish_once(publish: Callable[[bool], Awaitable[bool]], *, retry: bool) -> bool:
     try:
-        return bool(await publish())
+        return bool(await publish(retry))
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - retried; class name only (prose may carry the name)

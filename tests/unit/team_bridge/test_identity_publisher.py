@@ -48,10 +48,10 @@ async def _settle() -> None:
 
 
 async def _run(tmp_path: Path, answers: list[bool], delays=(0.01, 0.01)):
-    calls: list[int] = []
+    calls: list[bool] = []
 
-    async def publish() -> bool:
-        calls.append(1)
+    async def publish(retry: bool) -> bool:
+        calls.append(retry)
         return answers.pop(0) if answers else True
 
     watcher = _Watcher()
@@ -95,7 +95,7 @@ async def test_an_unsettled_publish_is_retried_then_left_to_the_status_read(tmp_
     calls, _watcher, stop, task = await _run(tmp_path, [False, False, False, False])
     await asyncio.sleep(0.1)
     # One attempt plus one per retry delay, then it stops trying.
-    assert len(calls) == 3
+    assert calls == [False, True, True]
     stop.set()
     await asyncio.wait_for(task, 1)
 
@@ -109,10 +109,10 @@ async def test_a_retry_stops_once_settled(tmp_path: Path):
 
 
 async def test_a_raising_publish_never_kills_the_publisher(tmp_path: Path):
-    calls: list[int] = []
+    calls: list[bool] = []
 
-    async def publish() -> bool:
-        calls.append(1)
+    async def publish(retry: bool) -> bool:
+        calls.append(retry)
         raise RuntimeError("boom")
 
     watcher = _Watcher()

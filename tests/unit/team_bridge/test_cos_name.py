@@ -490,8 +490,10 @@ async def test_publish_identity_reports_a_failed_put_for_retry(tmp_path: Path):
     discipline = _discipline(_Counter(responder), tmp_path)
 
     assert await discipline.publish_identity() is False
-    assert await discipline.publish_identity() is True
+    revision = discipline._identity_revision
+    assert await discipline.publish_identity(retry=True) is True
     assert len(puts) == 2
+    assert discipline._identity_revision == revision
 
 
 async def test_publish_identity_in_step_is_settled_without_a_put(tmp_path: Path):
@@ -500,3 +502,77 @@ async def test_publish_identity_in_step_is_settled_without_a_put(tmp_path: Path)
 
     assert await _discipline(counter, tmp_path).publish_identity() is True
     assert [r.method for r in counter.requests] == ["GET"]
+
+
+@pytest.mark.parametrize("code,status", [("rate_limited", 429), ("messaging_unavailable", 503)])
+async def test_publisher_holds_a_cached_status_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str, status: int
+):
+    _enrolled_aida(tmp_path)
+    refused = False
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        if refused:
+            headers = {"Retry-After": "300"} if status == 429 else {}
+            return httpx.Response(status, json={"code": code, "error": "busy"}, headers=headers)
+        return _ok(_echoing("Aida"))
+
+    counter = _Counter(responder)
+    discipline = _discipline(counter, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    refused = True
+    aida_naming.set_name(tmp_path, "Aubee")
+    assert await discipline.publish_identity() is False
+    revision = discipline._identity_revision
+    for _ in range(4):
+        assert await discipline.publish_identity(retry=True) is False
+    assert [r.method for r in counter.requests] == ["GET", "GET"]
+    assert discipline._identity_revision == revision
+
+    # New edits may supersede a good cached answer, but must not reset a hold.
+    aida_naming.set_name(tmp_path, "Bea")
+    assert await discipline.publish_identity() is False
+    assert [r.method for r in counter.requests] == ["GET", "GET"]
+    refused = False
+    monkeypatch.setattr(tb_client, "STATUS_ERROR_TTL_S", 0.0)
+    monkeypatch.setattr(tb_client, "STATUS_CACHE_TTL_S", 0.0)
+    assert await discipline.publish_identity(retry=True) is True
+    assert [r.method for r in counter.requests] == ["GET", "GET", "GET", "PUT"]
+    assert json.loads(counter.requests[-1].content)["agent_name"] == "Bea"
+
+
+async def test_publisher_local_off_blocks_reads_and_writes(tmp_path: Path):
+    _enrolled_aida(tmp_path, "Aubee")
+    settings_io.write_setting(
+        ConfigManager(tmp_path), settings_io.BY_KEY["team_bridge.enabled"], False
+    )
+    counter = _Counter(lambda request: _ok(_echoing("Aida")))
+    discipline = _discipline(counter, tmp_path)
+
+    assert await discipline.publish_identity() is True
+    assert counter.requests == []
+
+
+async def test_publisher_rechecks_local_off_after_an_in_flight_retry_read(tmp_path: Path):
+    _enrolled_aida(tmp_path, "Aubee")
+    reads = 0
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal reads
+        if request.method == "GET":
+            reads += 1
+            if reads == 2:
+                settings_io.write_setting(
+                    ConfigManager(tmp_path), settings_io.BY_KEY["team_bridge.enabled"], False
+                )
+            return _ok(_echoing("Aida"))
+        return httpx.Response(503, json={"error": "busy", "code": "service_unavailable"})
+
+    counter = _Counter(responder)
+    discipline = _discipline(counter, tmp_path)
+    assert await discipline.publish_identity() is False
+    assert await discipline.publish_identity(retry=True) is True
+    assert await discipline.publish_identity(retry=True) is True
+    assert [r.method for r in counter.requests] == ["GET", "PUT", "GET"]

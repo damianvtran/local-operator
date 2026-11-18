@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+from contextlib import suppress
 import logging
 import os
 import signal
@@ -440,11 +441,16 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
             )
     finally:
         identity_task.cancel()
-        if keeper is not None:
-            keeper.cancel()
-        auth_store.close()
-        _runtime.clear_own_record(config_dir)
-        lock.release()
+        try:
+            # The next lock holder must not race an old publisher unwinding.
+            with suppress(asyncio.CancelledError):
+                await identity_task
+        finally:
+            if keeper is not None:
+                keeper.cancel()
+            auth_store.close()
+            _runtime.clear_own_record(config_dir)
+            lock.release()
     return 0
 
 
