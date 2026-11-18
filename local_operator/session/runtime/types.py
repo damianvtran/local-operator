@@ -186,6 +186,16 @@ EVENT_MUTE_CAPABILITY = "event-mute-v1"
 #: ``EVENT_MUTE_CAPABILITY`` above; presence of the string is the whole check.
 ATTACH_ACTIVITY_CAPABILITY = "attach-activity-v1"
 
+#: This session reads the Team Bridge inbox through the ROUTED-session lookup
+#: (``COALESCE(routed_session, designated_session)``), so the connector may hand
+#: it a message addressed to the session that asked rather than the designated
+#: one. Advertised because the connector and the session are separate processes
+#: that can run different builds during an upgrade: a session without this string
+#: would never find a row routed to it, and the connector must not route there.
+#: Unconditional like ``EVENT_MUTE_CAPABILITY``: the lookup is the session
+#: runtime's own code, not something a handle implements.
+TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY = "team-bridge-routed-inbox-v1"
+
 #: Additive attach capability: this owner accepts the ``operator_challenge`` op
 #: and will admit an authority-increasing frame that carries a valid
 #: ``operator_sig`` (with ``operator_key_id``, and ``operator_cert`` for a
