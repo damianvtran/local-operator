@@ -201,7 +201,11 @@ class TransferPreflight(BaseModel):
     ``scope_digest``, ``state`` (``preflight``/``unsupported``), ``carries_files``,
     ``destination {device_id, name}``, ``totals``, ``worktrees[]``, ``excluded[]``,
     ``left_behind[]``. Kept as a mapping, not a nested model, so a field the transfer
-    half adds reaches the renderer without a second server change.
+    half adds reaches the renderer without a second server change — as the
+    destination probe's do (``session_transfer_working_set_probe``): per row
+    ``clone_check``, ``clone_detail``, ``https_rewrite {url, fetch, push}``,
+    ``remedy {run_on, command}``, ``missing_tools[]``, ``markers[]``; per block
+    ``destination_probe {state, missing_tools[], team_bridge?}``.
     """
 
     session_id: str

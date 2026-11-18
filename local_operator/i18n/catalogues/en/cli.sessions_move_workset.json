@@ -38,5 +38,15 @@
   "cli.sessions_move_workset.reason.not_transferred": "this version of lop does not transfer working files yet",
   "cli.sessions_move_workset.reason.history_unscannable": "its unpushed commits are too large to check for secrets; push them first",
   "cli.sessions_move_workset.reason.unsafe_path": "its path is not safe to recreate on another device",
-  "cli.sessions_move_workset.reason.insufficient_space": "the destination does not have enough free disk space"
+  "cli.sessions_move_workset.reason.insufficient_space": "the destination does not have enough free disk space",
+  "cli.sessions_move_workset.probe_cannot_fetch": "{device} cannot fetch {remote} with its own access",
+  "cli.sessions_move_workset.probe_cannot_push": "{device} can fetch {remote} but cannot push to it",
+  "cli.sessions_move_workset.probe_cannot_clone": "{device} will not use {remote}: the address is not allowed, or git is missing there",
+  "cli.sessions_move_workset.probe_https_rewrite": "SSH does not reach it from {device}; HTTPS does: {url}",
+  "cli.sessions_move_workset.probe_remedy": "To fix, run on the device that lends GitHub access: {command}",
+  "cli.sessions_move_workset.probe_unknown": "Could not check whether {device} can reach these repositories; it may run an older lop.",
+  "cli.sessions_move_workset.prereq_missing_tools": "{device} is missing: {tools} (these projects need them; the move still works)",
+  "cli.sessions_move_workset.prereq_team_bridge": "{device} is not enrolled in Team Bridge, which this conversation uses (the move still works)",
+  "cli.sessions_move_workset.help_no_engage_on_arrival": "do not resume an active conversation on the destination (by default it starts there with a note about its working files)",
+  "cli.sessions_move_workset.receipt_resumed": "The conversation was active, so it resumed on {device} with a note about what stayed behind."
 }

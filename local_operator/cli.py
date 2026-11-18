@@ -1847,6 +1847,15 @@ def build_cli_parser() -> LocalizedArgumentParser:
         action="store_true",
         help=(_sh.move_engage_on_arrival().envelope(locale=help_locale)["text"]),
     )
+    # THE OPT-OUT FROM THE ACTIVE-MOVE RESUME (docs/design/move-working-set.md §7.4): a
+    # conversation that was active when it moved is engaged on arrival by default and
+    # handed one continuation note; this flag keeps the old cold arrival. Its help
+    # lives in the fully translated working-set namespace, like the flags below.
+    move_parser.add_argument(
+        "--no-engage-on-arrival",
+        action="store_true",
+        help=_wsh.help_no_engage_on_arrival().envelope(locale=help_locale)["text"],
+    )
     # THE WORKING-SET GATE (docs/design/move-working-set.md §11.2). A conversation
     # that worked in git worktrees is refused by the owner until the user has seen
     # what the move leaves behind: `--dry-run` shows it, an interactive terminal is
@@ -7613,6 +7622,11 @@ def _sessions_move_words(
                 "The move itself succeeded — open the conversation there to start it."
             ]
         )
+        if engaged and engagement.get("reason") == "active":
+            # THE ACTIVE-MOVE RESUME (nobody passed --engage-on-arrival): say WHY it is
+            # live and that it was handed a note. Keyed, unlike the lines above, because
+            # it is new copy (AGENTS.md i18n: new user-visible text is keyed).
+            engage_lines.append(render_resolved(_wsh.receipt_resumed(device=target)))
     elif engage_on_arrival:
         # ASKED HERE, ANSWERED THERE. On an offload the receipt is the SOURCE's, and the
         # engage is the destination's own post-move work: this device settles on its own
@@ -7713,6 +7727,14 @@ def sessions_move_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    if bool(getattr(args, "engage_on_arrival", False)) and bool(
+        getattr(args, "no_engage_on_arrival", False)
+    ):
+        print(
+            "--engage-on-arrival and --no-engage-on-arrival cannot be combined",
+            file=sys.stderr,
+        )
+        return 2
     wait_s = mobility.MOVE_MAX_WAIT_S if int(args.wait) < 0 else float(args.wait)
     as_json = bool(getattr(args, "json", False))
     if bool(getattr(args, "dry_run", False)):
@@ -7732,6 +7754,10 @@ def sessions_move_command(args: argparse.Namespace) -> int:
                 # cold, which is today's behaviour and the behaviour every existing
                 # caller keeps.
                 engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+                # ``--no-engage-on-arrival``: the opt-out from the active-move resume
+                # (an ACTIVE conversation is engaged on arrival and handed one
+                # continuation note by default). Absent attribute reads False.
+                no_engage_on_arrival=bool(getattr(args, "no_engage_on_arrival", False)),
                 # ``--queue``: the explicit "move at the next safe point" request. Read
                 # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
                 # off, the same contract the parser's default gives it.

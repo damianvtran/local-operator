@@ -602,6 +602,14 @@ class MoveEngagement(TypedDict):
     #: The id engaged, which for a ``keep`` copy is the freshly minted one — the same
     #: id the receipt tells the caller to open.
     session_id: str
+    #: ``"active"`` when the engage was the active-move resume's default rather than
+    #: ``--engage-on-arrival`` (absent then): the conversation was busy, queued, had a
+    #: running subagent or a turn within the keep-alive window when it moved.
+    reason: NotRequired[Literal["active"]]
+    #: The one continuation note's fate on an active resume: ``delivered`` (spooled
+    #: for the runtime's boot drain), ``already_delivered`` (a retry of the same move,
+    #: by its lease epoch) or ``failed`` (logged; the move still succeeded).
+    arrival_note: NotRequired[str]
 
 
 class SessionMoveRefusal(TypedDict):
@@ -1617,6 +1625,7 @@ def _destination_move(
     asked: bool = False,
     adopt_under_id: str = "",
     engage_on_arrival: bool = False,
+    no_engage_on_arrival: bool = False,
     unattended: bool = False,
     queue: bool = False,
     request_id: str = "",
@@ -1826,6 +1835,9 @@ def _destination_move(
         # verbatim (absent when the session has none, and from an older owner).
         raw_workset = prepared.get("working_set")
         arrival_workset = dict(raw_workset) if isinstance(raw_workset, dict) else None
+        # The SOURCE's reading of "was it active" (``_arrival_active``), absent from an
+        # older owner — which therefore keeps today's cold arrival.
+        arrival_active = bool(prepared.get("arrival_active") or False)
         lease_epoch = str(prepared.get("lease_epoch") or "")
         manifest_raw = prepared.get("manifest")
         manifest: dict[str, Any] = manifest_raw if isinstance(manifest_raw, dict) else {}
@@ -2283,7 +2295,31 @@ def _destination_move(
     # the phases reported are the MOVE's phases either way — arriving live is not a
     # phase, and a failed engage must never make a finished move report a shorter
     # one.
-    engagement = _arrival_engagement(server, target_id) if engage_on_arrival else None
+    #
+    # THE ACTIVE-MOVE RESUME (operator request, 2026-11-18): a conversation that was
+    # active when it moved — queued/busy move, a running subagent, a turn within the
+    # keep-alive window — is engaged here BY DEFAULT and handed ONE continuation note
+    # (what came, what stayed, what this device lacks), so the work resumes instead of
+    # sitting cold on a device the user may not be looking at. ``keep`` never resumes
+    # (the source keeps running; a second live fork would duplicate the work), and
+    # ``--no-engage-on-arrival`` is the opt-out. The note is written to the inbox
+    # BEFORE the engage, because the runtime's boot drain is what delivers it.
+    auto_resume = arrival_active and not keep and not no_engage_on_arrival
+    arrival_note = ""
+    if auto_resume:
+        arrival_note = _arrival_resume_note(
+            server,
+            target_id,
+            lease_epoch=lease_epoch,
+            block=arrival_workset,
+            source=owner_name or owner_device,
+        )
+    engagement = (
+        _arrival_engagement(server, target_id) if (engage_on_arrival or auto_resume) else None
+    )
+    if engagement is not None and auto_resume:
+        engagement["reason"] = "active"
+        engagement["arrival_note"] = arrival_note
     receipt: dict[str, Any] = {
         "ok": True,
         "session_id": session_id,
@@ -2387,6 +2423,87 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
             engagement.get("detail") or "no reason given",
         )
     return engagement
+
+
+#: The marker a delivered arrival note leaves in the session directory, keyed by the
+#: move's lease epoch. NOT in ``sync.COPY_SET_NAMES``, so it never travels on.
+ARRIVAL_NOTE_MARKER = "move-arrival-note.json"
+
+
+def _arrival_resume_note(
+    server: "RelayServer",
+    session_id: str,
+    *,
+    lease_epoch: str,
+    block: Mapping[str, Any] | None,
+    source: str,
+) -> str:
+    """Spool the ONE continuation note for an active arrival; idempotent per move.
+
+    EXACTLY ONCE ACROSS RETRY AND RECONCILE, by two independent fences: a marker in
+    the session directory naming the move's ``lease_epoch`` (a second call for the
+    same move returns ``already_delivered`` without writing), and a ``message_id``
+    derived from the session id and epoch, which the receiving session's duplicate
+    gate (``Session.receive_peer_message``) refuses to admit twice even if a crash
+    landed between the spool append and the marker write. A LATER move of the same
+    conversation has a new epoch and gets its own note.
+
+    The row is a waking mailbox row: the runtime's boot drain
+    (``process._drain_inbox_into``) delivers it as one turn. The text is
+    model-facing English by design (``workset_probe.arrival_note``). Never raises:
+    a note that could not be written is logged and reported ``failed`` — the move
+    has already committed.
+    """
+    from local_operator.network import workset_probe
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    directory = Path(server.root) / "sessions" / session_id
+    marker = directory / ARRIVAL_NOTE_MARKER
+    epoch = lease_epoch or "no-epoch"
+    try:
+        if marker.is_file():
+            recorded = json.loads(marker.read_text(encoding="utf-8"))
+            if isinstance(recorded, dict) and recorded.get("lease_epoch") == epoch:
+                return "already_delivered"
+    except (OSError, ValueError):
+        pass  # an unreadable marker is no marker; the message id still dedupes
+    try:
+        import hashlib
+
+        message_id = (
+            "peer-" + hashlib.sha256(f"move-arrival:{session_id}:{epoch}".encode()).hexdigest()[:32]
+        )
+        text = workset_probe.arrival_note(
+            block,
+            session_id=session_id,
+            source=source,
+            destination=str(server._own_label()),  # noqa: SLF001
+        )
+        written = append_inbox(
+            directory,
+            InboxLine(
+                text=text,
+                sender={"conversation_name": "session move"},
+                mode="mailbox",
+                written_at=time.time(),
+                wake=True,
+                message_id=message_id,
+            ),
+        )
+        if not written:
+            return "failed"
+        staged = marker.with_suffix(".tmp")
+        staged.write_text(
+            json.dumps({"lease_epoch": epoch, "message_id": message_id, "at": time.time()}),
+            encoding="utf-8",
+        )
+        os.replace(staged, marker)
+    except Exception:  # noqa: BLE001 — the move has committed; report, never raise
+        logger.warning(
+            "mobility: the arrival note for %s was not written", session_id, exc_info=True
+        )
+        return "failed"
+    return "delivered"
 
 
 def _finish_from_tombstone(
@@ -4101,6 +4218,7 @@ def _source_workset_preflight(
             "session_id": session_id,
         }
     block = _workset_block(server, session_id, to_device=link.device_id)
+    _note_team_bridge_use(server, session_id, block)
     _audit(
         server,
         AUDIT_WORKSET_PREFLIGHT,
@@ -4109,6 +4227,96 @@ def _source_workset_preflight(
         **workset.manifest_summary(block),
     )
     return {"result": "preflight", "session_id": session_id, "working_set": block}
+
+
+def _note_team_bridge_use(server: "RelayServer", session_id: str, block: dict[str, Any]) -> None:
+    """Mark a block whose session evidently uses Team Bridge (``team_bridge_used``).
+
+    Computed by the OWNER (it holds the transcript and the bridge store); the
+    destination's probe reads it to decide whether its own enrolment is worth a
+    warning. Additive and absent when false, so an older reader sees no change.
+    """
+    from local_operator.network import workset_probe
+
+    if block.get("worktrees") and workset_probe.session_uses_team_bridge(
+        Path(server.root), session_id
+    ):
+        block["team_bridge_used"] = True
+
+
+def _destination_workset_probe(
+    server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
+) -> dict[str, Any]:
+    """``net_session_move {phase: "workset_probe"}``, served by the DESTINATION.
+
+    The owner asks, before the user confirms, whether THIS device can fetch and push
+    each worktree's remote with its own credentials and which toolchains it lacks
+    (``workset_probe`` module docstring: URL allowlist, no remote writes, no prompts).
+    Read-only and journal-free, so it runs before the reconcile like
+    ``workset_preflight``. An older destination answers ``unknown move phase``, which
+    the asker turns into ``clone_check: "unknown_destination"`` — never a failure.
+    """
+    from local_operator.network import workset_probe
+
+    del link  # admitted by the op's capability check; the answer names no peer
+    try:
+        answer = workset_probe.run_probe(
+            Path(server.root), frame, device=str(server._own_label())  # noqa: SLF001
+        )
+    except Exception:  # noqa: BLE001 — a probe bug reads as "could not check"
+        logger.warning("mobility: the working-set probe failed", exc_info=True)
+        return {"result": "refused", "code": "refused", "message": "probe failed"}
+    return {"result": "probed", **answer}
+
+
+def _probe_destination(
+    server: "RelayServer",
+    block: dict[str, Any],
+    session_id: str,
+    *,
+    target_device: str,
+    target_name: str,
+    here: bool,
+) -> dict[str, Any]:
+    """Fold the destination's reachability/prerequisite answer into ``block``.
+
+    ``here`` is the recall: THIS device is the destination, so it probes itself.
+    Otherwise the peer is asked over its link. Any failure to get an answer (an older
+    peer's ``unknown move phase``, an unreachable link, a timeout) reads as
+    ``unknown_destination`` on every row — a preflight never fails because the
+    destination could not be asked. Blocks with no worktree, or an ``unknown`` /
+    ``unsupported`` manifest, are returned untouched.
+    """
+    from local_operator.network import workset_probe
+
+    if not block.get("worktrees") or block.get("state") in ("unknown", "unsupported"):
+        return block
+    frame = workset_probe.probe_request(
+        block, session_id=session_id, team_bridge=bool(block.get("team_bridge_used"))
+    )
+    if here:
+        answer: dict[str, Any] | None = workset_probe.run_probe(
+            Path(server.root), frame, device=str(server._own_label())  # noqa: SLF001
+        )
+    else:
+        try:
+            link = _link_for_move(server, target_device, target_name)
+            answer = LinkTransport(server, link, session_id).ask(
+                frame, timeout=workset_probe.ASK_TIMEOUT_S
+            )
+        except Moved as refusal:
+            logger.info(
+                "mobility: %s did not answer the working-set probe: %s",
+                target_name or target_device,
+                refusal.message,
+            )
+            answer = None
+        except Exception:  # noqa: BLE001 — "could not check" is the honest answer
+            logger.info("mobility: the working-set probe ask failed", exc_info=True)
+            answer = None
+        if answer is not None and answer.get("result") != "probed":
+            answer = None
+    return workset_probe.apply_probe(block, answer)
 
 
 def _ask_workset_preflight(
@@ -4158,6 +4366,7 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
     ``confirmation_required`` is the one boolean a surface branches on: an empty
     manifest moves exactly as before, a non-empty one needs the scope digest.
     """
+    target_device = target_name = ""
     if to == "local":
         if _owned_here(server, session_id):
             raise Moved("already_local", f"{session_id} is already on this device")
@@ -4178,6 +4387,19 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
             )
         target_device, target_name = _resolve_typed_peer(server, to)
         block = _workset_block(server, session_id, to_device=target_device, to_name=target_name)
+        _note_team_bridge_use(server, session_id, block)
+    # DESTINATION REACHABILITY, BEFORE THE CONFIRMATION (live Mac -> node2 move,
+    # 2026-11-18): the destination answers for its own credentials and toolchains;
+    # the flags ride the block the user confirms. Not a digest input (see
+    # ``workset_probe``), so a probe that flaps never refuses a confirmed move.
+    block = _probe_destination(
+        server,
+        block,
+        session_id,
+        target_device=target_device,
+        target_name=target_name,
+        here=to == "local",
+    )
     # ``unknown`` and ``unsupported`` need a decision too: only --without-working-set
     # proceeds past either, so the surface must show them rather than "nothing here".
     required = bool(block.get("worktrees")) or block.get("state") in ("unsupported", "unknown")
@@ -4188,6 +4410,58 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
         "confirmation_required": required,
         "working_set": block,
     }
+
+
+def _arrival_active(server: "RelayServer", session_id: str, *, resuming: bool) -> bool:
+    """Whether a move of ``session_id`` is a move of an ACTIVE conversation.
+
+    Active means any of: the move was QUEUED and is now resuming at its safe point
+    (the user asked to move mid-work), or the conversation or any session in its
+    subagent tree (``workset.session_tree``) wrote a transcript row within the last
+    ``DEFAULT_KEEP_ALIVE_SECONDS`` (``session/runtime/process.py``, 300 s). That
+    window is the codebase's own "a person is involved with this runtime" bound —
+    the post-viewer residency a runtime keeps before it drains — so a conversation
+    inside it is one the user (or a running subagent) was just using. A finished
+    ``--wait`` busy move lands inside it by construction (its turn just ended).
+
+    Reads the LAST row's ``ts`` (the transcript's own row clock), never the file
+    mtime: a copy, a touch or a sync rewrite moves an mtime without a turn. Never
+    raises; anything unreadable is "not active", which keeps today's cold arrival.
+    """
+    if resuming:
+        return True
+    try:
+        from local_operator.network import workset
+        from local_operator.session.runtime.process import DEFAULT_KEEP_ALIVE_SECONDS
+
+        root = Path(server.root)
+        horizon = time.time() - float(DEFAULT_KEEP_ALIVE_SECONDS)
+        for member in workset.session_tree(root, session_id):
+            if _last_row_ts(root / "sessions" / member / "transcript.jsonl") >= horizon:
+                return True
+    except Exception:  # noqa: BLE001 — unknown is "not active" (cold, as before)
+        logger.debug("mobility: could not tell whether %s is active", session_id, exc_info=True)
+    return False
+
+
+def _last_row_ts(path: Path) -> float:
+    """The ``ts`` of the last transcript row that has one (tail read, 64 KiB), else 0."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 65536))
+            tail = handle.read()
+    except OSError:
+        return 0.0
+    for raw in reversed(tail.splitlines()):
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("ts"), int | float):
+            return float(row["ts"])
+    return 0.0
 
 
 def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
@@ -4450,6 +4724,13 @@ def _source_prepare(
                 ),
                 "session_id": session_id,
             }
+    # WAS THE CONVERSATION ACTIVE? Read BEFORE the retire below quiets it, and only
+    # for a real move (a keep copy forks; nothing is resumed). The destination uses
+    # it to engage on arrival and hand the model one continuation note
+    # (``_arrival_resume``) unless the user said ``--no-engage-on-arrival``.
+    arrival_active = not keep and _arrival_active(
+        server, session_id, resuming=bool(frame.get("resume_queued") or False)
+    )
     # P1 — THE WORKING-SET CONSENT GATE, BEFORE THE RETIRE (design §4). Cheap (git
     # reads only), nothing mutated, so an unconfirmed move costs the user nothing: the
     # conversation keeps serving. ``to_device`` is the LINK's authenticated id — the
@@ -4620,6 +4901,7 @@ def _source_prepare(
                     request_id=request_id or f"move-{session_id}-{int(time.time() * 1000)}",
                     requested_by=str(frame.get("requester") or link.device_id),
                     engage_on_arrival=bool(frame.get("engage_on_arrival") or False),
+                    no_engage_on_arrival=bool(frame.get("no_engage_on_arrival") or False),
                     drop_session_roles=drop_session_roles,
                     session_roles=len(session_roles) if drop_session_roles else 0,
                     session_roles_notice=(
@@ -4840,6 +5122,10 @@ def _source_prepare(
     if workset_arrival is not None:
         # ADDITIVE: the destination copies it into its receipt; an older one ignores it.
         answer["working_set"] = workset_arrival
+    if arrival_active:
+        # ADDITIVE and absent when false: an older destination ignores it and keeps
+        # today's cold arrival.
+        answer["arrival_active"] = True
     # THE SESSION'S LINKED PROJECTS TRAVEL WITH IT (2026-11-13: a session moved to
     # lop-remote-node-2 found "no project named secret-guardrails-relax" there — the
     # project store is per-device). Additive: an older destination ignores the key.
@@ -5357,6 +5643,9 @@ def _destination_invite(
     # so a peer older than this field — which sends no key at all — arrives cold,
     # exactly as it did before the flag existed.
     engage_on_arrival = bool(frame.get("engage_on_arrival") or False)
+    # THE OPT-OUT from the active-move resume (``_arrival_resume``); absent reads
+    # False, so an older peer gets the new default, never a refusal.
+    no_engage_on_arrival = bool(frame.get("no_engage_on_arrival") or False)
     # THE CARRY OF THE SESSION'S AUTO AUTHORITY (§6 defect 2), read off the invite
     # like every other optional field on it: absent reads off, which is what an
     # older source sends and what every session that never asked for full-auto
@@ -5421,6 +5710,7 @@ def _destination_invite(
                 # the inviter was told about rather than a second, unreachable one.
                 adopt_under_id=new_id,
                 engage_on_arrival=engage_on_arrival,
+                no_engage_on_arrival=no_engage_on_arrival,
                 unattended=unattended,
                 queue=queue,
                 request_id=request_id,
@@ -6281,6 +6571,9 @@ def make_handler(
             # READ-ONLY, so before the reconcile for the same reason as ``refused``:
             # a preflight must never do recovery work for a move nobody started.
             return _source_workset_preflight(server, link, frame)
+        if phase == "workset_probe":
+            # The DESTINATION's half of the preflight; read-only for the same reason.
+            return _destination_workset_probe(server, link, frame)
         if phase == "cancel_queue":
             # THE QUEUE'S CANCEL, and it runs before the reconcile for the same
             # reason ``refused`` does: it is a durable-RECORD op and must be able
@@ -6363,6 +6656,9 @@ def local_move_handler(server: "RelayServer") -> Any:
         # not a direction to engage either — the same reading every other optional
         # field on this frame gets.
         engage_on_arrival = bool(frame.get("engage_on_arrival") or False)
+        # THE OPT-OUT from the active-move resume (``_arrival_resume``); absent reads
+        # False, so an older peer gets the new default, never a refusal.
+        no_engage_on_arrival = bool(frame.get("no_engage_on_arrival") or False)
         # THE QUEUE FLAG AND ITS ID, read as ``bool``/``str`` with the same
         # absent-reads-false contract as ``engage_on_arrival`` above.
         queue = bool(frame.get("queue") or False)
@@ -6396,6 +6692,7 @@ def local_move_handler(server: "RelayServer") -> Any:
                     keep=keep,
                     wait_s=wait_s,
                     engage_on_arrival=engage_on_arrival,
+                    no_engage_on_arrival=no_engage_on_arrival,
                     queue=queue,
                     drop_session_roles=drop_session_roles,
                     request_id=request_id,
@@ -6409,6 +6706,7 @@ def local_move_handler(server: "RelayServer") -> Any:
                 keep=keep,
                 wait_s=wait_s,
                 engage_on_arrival=engage_on_arrival,
+                no_engage_on_arrival=no_engage_on_arrival,
                 queue=queue,
                 request_id=request_id,
                 drop_session_roles=drop_session_roles,
@@ -6448,6 +6746,7 @@ def _recall(
     keep: bool,
     wait_s: float,
     engage_on_arrival: bool = False,
+    no_engage_on_arrival: bool = False,
     queue: bool = False,
     request_id: str = "",
     resume_queued: bool = False,
@@ -6540,6 +6839,7 @@ def _recall(
         owner_device=owner_device,
         owner_name=owner_name,
         engage_on_arrival=engage_on_arrival,
+        no_engage_on_arrival=no_engage_on_arrival,
         queue=queue,
         request_id=request_id,
         resume_queued=resume_queued,
@@ -6648,6 +6948,7 @@ def _offload(
     keep: bool,
     wait_s: float,
     engage_on_arrival: bool = False,
+    no_engage_on_arrival: bool = False,
     queue: bool = False,
     request_id: str = "",
     drop_session_roles: bool = False,
@@ -6833,6 +7134,7 @@ def _offload(
                 # off — the older-peer half of the contract, which is what
                 # ``request_move`` sends the same field for on the way in.
                 "engage_on_arrival": engage_on_arrival,
+                "no_engage_on_arrival": no_engage_on_arrival,
                 # THE QUEUE REQUEST, carried to the destination because the step it
                 # configures runs on the SOURCE through the destination's prepare
                 # frame: the pull IS how the source learns of a queued move from
@@ -7360,6 +7662,7 @@ def request_move(
     root: Path | None = None,
     from_replica: bool = False,
     engage_on_arrival: bool = False,
+    no_engage_on_arrival: bool = False,
     queue: bool = False,
     drop_session_roles: bool = False,
     confirm_working_set: str = "",
@@ -7437,6 +7740,7 @@ def request_move(
         # key and a false one the same way (off), and a frame whose shape depends on a
         # boolean is one a future reader has to prove is not load-bearing.
         engage_on_arrival=bool(engage_on_arrival),
+        no_engage_on_arrival=bool(no_engage_on_arrival),
         # THE QUEUE FLAG, same contract, PLUS A REQUEST ID minted here — the
         # outbound half of the idempotence seam (`--queue` twice is one intent;
         # a second attempt after a failure gets a new id). Never sent with

@@ -190,3 +190,78 @@ def test_yes_confirms_without_a_prompt(
     assert code == 0, receipt
     assert receipt["working_set"]["consent"] == "confirmed"
     assert (server_b.root / "sessions" / SESSION).is_dir()
+
+
+# ---------------------------------------------------------------------------
+# The destination probe's flags and the active-move resume opt-out
+# ---------------------------------------------------------------------------
+
+
+def test_the_summary_renders_the_destinations_probe_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each probe flag reaches the confirmation text the CLI prompt and TUI dialog show
+    (``workset_text.summary_lines``); English pinned so the assertion reads the copy."""
+    from local_operator.network import workset_text
+
+    monkeypatch.setenv("LOCAL_OPERATOR_LANGUAGE", "en")
+    monkeypatch.setattr(
+        "local_operator.i18n.resolve.resolve_language", lambda *a, **k: "en", raising=False
+    )
+    block = {
+        "carries_files": False,
+        "destination": {"device_id": "d_x", "name": "node2"},
+        "source": {"device_id": "d_y", "name": "mac"},
+        "totals": {"bytes": 10},
+        "worktrees": [
+            {
+                "path": "~/proj/.worktrees/feat",
+                "state": "planned",
+                "branch": "feat",
+                "remote_url": "git@github.com:owner/proj.git",
+                "clone_check": "destination_cannot_fetch",
+                "https_rewrite": {"url": "https://github.com/owner/proj.git", "fetch": True},
+                "remedy": {
+                    "run_on": "lending_device",
+                    "command": "lop network credential github include owner/proj",
+                },
+            }
+        ],
+        "destination_probe": {
+            "state": "answered",
+            "missing_tools": ["go", "pnpm"],
+            "team_bridge": {"needed": True, "enrolled": False},
+        },
+    }
+
+    text = "\n".join(workset_text.summary_lines(block, session=SESSION))
+
+    assert "node2 cannot fetch git@github.com:owner/proj.git with its own access" in text
+    assert "HTTPS does: https://github.com/owner/proj.git" in text
+    assert "lop network credential github include owner/proj" in text
+    assert "node2 is missing: go, pnpm" in text
+    assert "Team Bridge" in text
+    unknown = dict(block, destination_probe={"state": "unknown_destination"})
+    assert "Could not check whether node2" in "\n".join(
+        workset_text.summary_lines(unknown, session=SESSION)
+    )
+
+
+def test_no_engage_on_arrival_reaches_the_move_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.network import mobility
+
+    seen: list[dict[str, Any]] = []
+
+    def fake(session_id: str, **kwargs: Any) -> dict[str, Any]:
+        seen.append(kwargs)
+        return {"ok": False, "code": "refused", "message": "stub", "changed": False}
+
+    monkeypatch.setattr(mobility, "request_move", fake)
+
+    assert _run(["--no-engage-on-arrival", "--json"]) == 1
+    assert seen[0]["no_engage_on_arrival"] is True
+    assert _run(["--json"]) == 1
+    assert seen[1]["no_engage_on_arrival"] is False
+    # The two flags contradict each other: refused before anything is sent.
+    assert _run(["--engage-on-arrival", "--no-engage-on-arrival"]) == 2
+    assert len(seen) == 2

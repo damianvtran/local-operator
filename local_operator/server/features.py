@@ -986,6 +986,14 @@ def static_feature_flags() -> dict[str, Any]:
         # meets an honest ``working_set_unconfirmed`` refusal (with the manifest)
         # only for a session that has git worktrees to account for.
         "session_transfer_working_set": 1,
+        # The preflight's DESTINATION PROBE (move-working-set.md §11.1): each
+        # ``working_set.worktrees[]`` row carries the destination's own
+        # ``clone_check`` answer (``ok``/``destination_cannot_fetch``/``_push``/
+        # ``_clone``/``unknown_destination``/``no_remote``), optional
+        # ``https_rewrite``/``remedy``/``missing_tools``, and the block carries
+        # ``destination_probe``. Additive members of the same mapping; a renderer
+        # without this key simply does not show them.
+        "session_transfer_working_set_probe": 1,
         # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
         # tool and ``/project``). ONE key gating both the affordance and
         # the reads: the Projects tab, its CRUD dialogs and the

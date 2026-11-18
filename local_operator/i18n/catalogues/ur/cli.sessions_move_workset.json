@@ -38,5 +38,15 @@
   "cli.sessions_move_workset.reason.not_transferred": "lop کا یہ ورژن ابھی ورکنگ فائلیں منتقل نہیں کرتا",
   "cli.sessions_move_workset.reason.history_unscannable": "اس کے غیر push شدہ commits رازوں کی جانچ کے لیے بہت بڑے ہیں؛ پہلے انہیں push کریں",
   "cli.sessions_move_workset.reason.unsafe_path": "اس کا راستہ دوسری ڈیوائس پر محفوظ طریقے سے دوبارہ نہیں بنایا جا سکتا",
-  "cli.sessions_move_workset.reason.insufficient_space": "منزل پر ڈسک کی کافی خالی جگہ نہیں ہے"
+  "cli.sessions_move_workset.reason.insufficient_space": "منزل پر ڈسک کی کافی خالی جگہ نہیں ہے",
+  "cli.sessions_move_workset.probe_cannot_fetch": "{device} اپنی رسائی سے {remote} fetch نہیں کر سکتا",
+  "cli.sessions_move_workset.probe_cannot_push": "{device} {remote} fetch کر سکتا ہے، لیکن اس میں push نہیں کر سکتا",
+  "cli.sessions_move_workset.probe_cannot_clone": "{device} {remote} استعمال نہیں کرے گا: یہ پتا اجازت یافتہ نہیں، یا وہاں git موجود نہیں",
+  "cli.sessions_move_workset.probe_https_rewrite": "{device} سے SSH وہاں نہیں پہنچتا؛ HTTPS پہنچتا ہے: {url}",
+  "cli.sessions_move_workset.probe_remedy": "درست کرنے کے لیے، GitHub رسائی دینے والے ڈیوائس پر چلائیں: {command}",
+  "cli.sessions_move_workset.probe_unknown": "یہ جانچا نہیں جا سکا کہ {device} ان ریپوزیٹریز تک پہنچ سکتا ہے یا نہیں؛ شاید اس پر lop کا پرانا ورژن ہے۔",
+  "cli.sessions_move_workset.prereq_missing_tools": "{device} پر یہ موجود نہیں: {tools} (ان پروجیکٹس کو ان کی ضرورت ہے؛ منتقلی پھر بھی ہوگی)",
+  "cli.sessions_move_workset.prereq_team_bridge": "{device} Team Bridge میں اندراج شدہ نہیں، جسے یہ گفتگو استعمال کرتی ہے (منتقلی پھر بھی ہوگی)",
+  "cli.sessions_move_workset.help_no_engage_on_arrival": "فعال گفتگو کو منزل پر دوبارہ شروع نہ کریں (پہلے سے طے شدہ طور پر وہ وہاں اپنی ورکنگ فائلوں کے بارے میں ایک نوٹ کے ساتھ شروع ہوتی ہے)",
+  "cli.sessions_move_workset.receipt_resumed": "گفتگو فعال تھی، اس لیے وہ {device} پر دوبارہ شروع ہوئی، ساتھ ایک نوٹ کہ کیا پیچھے رہ گیا۔"
 }

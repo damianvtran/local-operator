@@ -198,5 +198,55 @@
     "role": "lower-case clause explaining why one worktree stays on this device; completes 'stays here: …'",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "no final period; keep 'Git LFS', 'git submodules' as technical terms."
+  },
+  "cli.sessions_move_workset.probe_cannot_fetch": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} destination device name, {remote} a git remote URL; both verbatim. 'its own access' = the destination's own credentials (SSH key, login), not the source's. Warning only."
+  },
+  "cli.sessions_move_workset.probe_cannot_push": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, {remote} git remote URL, verbatim. 'push' is the git verb; keep it as the locale's usual git term."
+  },
+  "cli.sessions_move_workset.probe_cannot_clone": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, {remote} git remote URL, verbatim. Two causes: the remote address is of a kind lop refuses to try (local path, unusual transport), or git is not installed on the destination."
+  },
+  "cli.sessions_move_workset.probe_https_rewrite": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name; {url} an https:// URL the destination could use instead of the SSH remote; verbatim. Only an offer: nothing is changed now."
+  },
+  "cli.sessions_move_workset.probe_remedy": {
+    "role": "CLI/TUI move confirmation, indented under one worktree row",
+    "tone": "plain, factual, calm",
+    "note": "{command} is a lop command (e.g. `lop network credential github include owner/repo`), verbatim, never translated. 'the device that lends GitHub access' = the mesh device whose GitHub login is shared with others."
+  },
+  "cli.sessions_move_workset.probe_unknown": {
+    "role": "CLI/TUI move confirmation, one line for the whole manifest",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, verbatim. Not an error: the destination could not be asked (older version or not reachable). 'lop' is the product name."
+  },
+  "cli.sessions_move_workset.prereq_missing_tools": {
+    "role": "CLI/TUI move confirmation, one line for the whole manifest; warning only",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name; {tools} a comma-separated list of program names (go, pnpm, node, uv, cargo, npm), verbatim. Must say the move is not blocked."
+  },
+  "cli.sessions_move_workset.prereq_team_bridge": {
+    "role": "CLI/TUI move confirmation, one line; warning only",
+    "tone": "plain, factual, calm",
+    "note": "{device} device name, verbatim. 'Team Bridge' is a product feature name, keep in English. Must say the move is not blocked."
+  },
+  "cli.sessions_move_workset.help_no_engage_on_arrival": {
+    "role": "argparse help for --no-engage-on-arrival on `lop sessions move`",
+    "tone": "plain, factual, calm",
+    "note": "lower-case start, no final period (argparse style). 'active conversation' = one the user or a subagent was using in the last few minutes or that was queued to move."
+  },
+  "cli.sessions_move_workset.receipt_resumed": {
+    "role": "CLI receipt line after a successful move",
+    "tone": "plain, factual, calm",
+    "note": "{device} destination device name, verbatim. The conversation was started on the destination automatically and given one note listing working files that did not come."
   }
 }

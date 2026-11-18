@@ -38,5 +38,15 @@
   "cli.sessions_move_workset.reason.not_transferred": "esta versión de lop todavía no transfiere archivos de trabajo",
   "cli.sessions_move_workset.reason.history_unscannable": "sus commits sin subir son demasiado grandes para revisar si contienen secretos; súbelos primero",
   "cli.sessions_move_workset.reason.unsafe_path": "su ruta no se puede recrear de forma segura en otro dispositivo",
-  "cli.sessions_move_workset.reason.insufficient_space": "el destino no tiene suficiente espacio libre en disco"
+  "cli.sessions_move_workset.reason.insufficient_space": "el destino no tiene suficiente espacio libre en disco",
+  "cli.sessions_move_workset.probe_cannot_fetch": "{device} no puede descargar {remote} con su propio acceso",
+  "cli.sessions_move_workset.probe_cannot_push": "{device} puede descargar {remote}, pero no puede subir cambios",
+  "cli.sessions_move_workset.probe_cannot_clone": "{device} no usará {remote}: la dirección no está permitida o falta git en ese dispositivo",
+  "cli.sessions_move_workset.probe_https_rewrite": "Desde {device} no se llega por SSH, pero sí por HTTPS: {url}",
+  "cli.sessions_move_workset.probe_remedy": "Para solucionarlo, ejecuta en el dispositivo que presta el acceso a GitHub: {command}",
+  "cli.sessions_move_workset.probe_unknown": "No se pudo comprobar si {device} puede acceder a estos repositorios; quizá use una versión anterior de lop.",
+  "cli.sessions_move_workset.prereq_missing_tools": "A {device} le falta: {tools} (estos proyectos lo necesitan; el traslado funciona igualmente)",
+  "cli.sessions_move_workset.prereq_team_bridge": "{device} no está inscrito en Team Bridge, que esta conversación usa (el traslado funciona igualmente)",
+  "cli.sessions_move_workset.help_no_engage_on_arrival": "no reanudar en el destino una conversación activa (por defecto se inicia allí con una nota sobre sus archivos de trabajo)",
+  "cli.sessions_move_workset.receipt_resumed": "La conversación estaba activa, así que se reanudó en {device} con una nota sobre lo que se quedó atrás."
 }

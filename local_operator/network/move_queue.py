@@ -249,6 +249,7 @@ def enqueue(
     request_id: str,
     requested_by: str,
     engage_on_arrival: bool = False,
+    no_engage_on_arrival: bool = False,
     drop_session_roles: bool = False,
     session_roles: int = 0,
     session_roles_notice: str = "",
@@ -276,6 +277,7 @@ def enqueue(
             "requested_by": requested_by,
             "mode": "move",
             "engage_on_arrival": bool(engage_on_arrival),
+            "no_engage_on_arrival": bool(no_engage_on_arrival),
             # THE ROLE-GATE'S OPT-OUT RIDES THE INTENT (agent review round 1, M3):
             # the resume prepare runs on the SOURCE, long after this frame is
             # gone, and without the stored flag the gate would refuse the move it
@@ -895,6 +897,7 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
                 "wait_s": 0.0,
                 "mode": "move",
                 "engage_on_arrival": bool(record.get("engage_on_arrival") or False),
+                "no_engage_on_arrival": bool(record.get("no_engage_on_arrival") or False),
                 "to_device": target_device,
                 # THE COMMIT'S OWN CREDENTIALS: the record's request id (its
                 # transfer key) plus the resume flag, so the source's queue

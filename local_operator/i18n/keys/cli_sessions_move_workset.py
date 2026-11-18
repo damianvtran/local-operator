@@ -46,6 +46,10 @@ def help_dry_run() -> Msg:
     return Msg("cli.sessions_move_workset.help_dry_run", {})
 
 
+def help_no_engage_on_arrival() -> Msg:
+    return Msg("cli.sessions_move_workset.help_no_engage_on_arrival", {})
+
+
 def help_without() -> Msg:
     return Msg("cli.sessions_move_workset.help_without", {})
 
@@ -64,6 +68,38 @@ def needs_confirmation(*, source: str, digest: str) -> Msg:
 
 def none() -> Msg:
     return Msg("cli.sessions_move_workset.none", {})
+
+
+def prereq_missing_tools(*, device: str, tools: str) -> Msg:
+    return Msg("cli.sessions_move_workset.prereq_missing_tools", {"device": device, "tools": tools})
+
+
+def prereq_team_bridge(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.prereq_team_bridge", {"device": device})
+
+
+def probe_cannot_clone(*, device: str, remote: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_cannot_clone", {"device": device, "remote": remote})
+
+
+def probe_cannot_fetch(*, device: str, remote: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_cannot_fetch", {"device": device, "remote": remote})
+
+
+def probe_cannot_push(*, device: str, remote: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_cannot_push", {"device": device, "remote": remote})
+
+
+def probe_https_rewrite(*, device: str, url: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_https_rewrite", {"device": device, "url": url})
+
+
+def probe_remedy(*, command: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_remedy", {"command": command})
+
+
+def probe_unknown(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_unknown", {"device": device})
 
 
 def prompt_sends(*, device: str) -> Msg:
@@ -146,6 +182,10 @@ def receipt_not_transferred(*, count: int | float, device: str) -> Msg:
         "cli.sessions_move_workset.receipt_not_transferred",
         {"count": count, "device": device},
     )
+
+
+def receipt_resumed(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_resumed", {"device": device})
 
 
 def receipt_without(*, device: str) -> Msg:

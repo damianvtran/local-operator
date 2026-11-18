@@ -737,7 +737,16 @@ def test_the_session_move_contract_is_frozen() -> None:
     # ``tests/unit/network/test_engage_on_arrival.py::test_a_move_without_the_flag_still_arrives_cold``
     # is what actually pins the runtime behaviour that matters: a move that did not ask
     # for the engage carries no ``engagement`` member at all.
-    assert set(mobility.MoveEngagement.__annotations__) == {"engaged", "detail", "session_id"}
+    # ``reason``/``arrival_note`` (move-working-set.md §7.4): present only when the
+    # engage was the ACTIVE-MOVE RESUME's default, never on an ``--engage-on-arrival``
+    # engage — pinned by tests/unit/network/test_workset_arrival_resume.py.
+    assert set(mobility.MoveEngagement.__annotations__) == {
+        "engaged",
+        "detail",
+        "session_id",
+        "reason",
+        "arrival_note",
+    }
     assert set(mobility.SessionMoveRefusal.__annotations__) == {
         "ok",
         "code",

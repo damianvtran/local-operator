@@ -226,8 +226,19 @@ JSON Schema (draft 2020-12):
         "sources": {"type": "array", "items": {"type": "string"}},
         "state": {"enum": ["planned", "carried", "restored", "pending_restore", "left_behind"]},
         "reason": {"type": "string", "description": "machine code when left_behind: contended, outside_home, unmerged, in_progress_operation, submodule, lfs, history_secret, over_cap, destination_conflict, unsupported_by_peer"},
-        "recipes": {"type": "array", "items": {"$ref": "#/$defs/recipe"}}
+        "recipes": {"type": "array", "items": {"$ref": "#/$defs/recipe"}},
+        "markers": {"type": "array", "items": {"type": "string"}, "description": "toolchain marker files at the worktree root (go.mod, pnpm-lock.yaml, ...)"},
+        "clone_check": {"enum": ["pending_destination", "ok", "destination_cannot_fetch", "destination_cannot_push", "destination_cannot_clone", "unknown_destination", "no_remote"], "description": "the DESTINATION's own answer (§11.1 destination probe); pending_destination = not probed"},
+        "clone_detail": {"type": "string", "description": "first line of git's stderr, or url_refused / git_missing / probe_error"},
+        "https_rewrite": {"type": "object", "required": ["url"], "properties": {"url": {"type": "string"}, "fetch": {"type": "boolean"}, "push": {"type": "boolean"}}, "description": "offered only; applied at restore (PR B)"},
+        "remedy": {"type": "object", "required": ["command"], "properties": {"run_on": {"const": "lending_device"}, "command": {"type": "string"}}},
+        "missing_tools": {"type": "array", "items": {"type": "string"}}
       }}},
+    "destination_probe": {"type": "object", "required": ["state"], "properties": {
+      "state": {"enum": ["answered", "unknown_destination"]},
+      "missing_tools": {"type": "array", "items": {"type": "string"}},
+      "team_bridge": {"type": "object", "properties": {"needed": {"type": "boolean"}, "enrolled": {"type": "boolean"}}}}},
+    "team_bridge_used": {"type": "boolean"},
     "excluded": {"type": "array", "items": {"type": "object", "required": ["path", "why"],
       "properties": {"path": {"type": "string"},
         "why": {"enum": ["secret_path", "secret_content", "history_secret_path", "history_secret_content"]},
@@ -496,6 +507,23 @@ wrong repo.
 
 ### 7.4 Continuation note
 
+**PR A (landed): the active-move resume.** A move of an ACTIVE conversation — a
+queued move resuming at its safe point, or a transcript row (`ts`) within
+`DEFAULT_KEEP_ALIVE_SECONDS` (300 s, `session/runtime/process.py`, the runtime's own
+"a person is involved" residency) in the session or any subagent of its tree — is
+engaged on arrival by default (`engagement.reason: "active"`) and handed ONE waking
+inbox row (`sender: "session move"`) before the engage, so the runtime's boot drain
+delivers it as a turn. The model-facing text (English by design) lists each
+worktree, that it stayed on `<source>` and how to get it (push from the source and
+fetch here, or `lop sessions move <id> --to <source>`), left-behind trees with their
+recipes, withheld files, and toolchains this device lacks. Exactly once per move: a
+`move-arrival-note.json` marker keyed by lease epoch, plus a deterministic
+`peer-<hex>` message id the receiving session's duplicate gate refuses twice.
+`keep` copies never resume; `--no-engage-on-arrival` (frame
+`no_engage_on_arrival`) keeps the cold arrival. The receipt line is keyed
+(`cli.sessions_move_workset.receipt_resumed`). PR B replaces "stayed on" with the
+restored/remapped paths below.
+
 After restore the destination appends one inbox line
 (`session/runtime/inbox.py:755` `append_inbox`, non-waking) listing remapped paths
 and any `pending_restore`/`left_behind` items, so the next turn's model sees the
@@ -664,6 +692,50 @@ destination should receive them.
   key, per that file's rule: an existing surface (the old dialog) must keep working
   byte for byte — and it will, as an honest refusal naming the update, for sessions
   with a non-empty manifest (§16 rollout risk).
+
+### 11.1a Destination probe (PR A, live-move finding 2026-11-18 17:12Z)
+
+A Mac → node2 move showed `clone_check: "pending_destination"` on every row; node2
+could neither fetch the SSH remote nor push the HTTPS one. The preflight now asks the
+DESTINATION before the confirmation (`network/workset_probe.py`):
+
+- **Op**: `net_session_move {phase: "workset_probe", worktrees: [{path, remote_url,
+  branch, markers}], team_bridge}` served by the destination (authorizer carve-out
+  beside `invite`: it reads nothing of the session). Offload: the owner asks over the
+  link; recall: this device is the destination and probes itself. An older
+  destination answers `unknown move phase` → every row `unknown_destination` and
+  `destination_probe.state: "unknown_destination"` — "could not check", never a
+  refusal. Feature key `session_transfer_working_set_probe`.
+- **Checks**, with the destination's OWN credentials (its env, SSH agent, helpers,
+  plus the mesh-lent `github` helper via `borrowed_git_env`): `git ls-remote <url>
+  HEAD` (fetch) and `git push --dry-run <url> <empty-commit>:refs/heads/lop-move-probe-<hex>`
+  from a throwaway bare repo (push). Chosen over the GitHub permissions API: host
+  agnostic, and it exercises the exact transport/credential the restore will use;
+  write permission is enforced at receive-pack's advertisement and `--dry-run` sends
+  no pack or ref update, so nothing is written remotely.
+- **URL policy**: allowlist `https://`, `ssh://`, scp `user@host:path`; refused
+  without running git: `file://`, local paths, `<helper>::`/`ext::`, option-shaped
+  or whitespace/control-character URLs (`destination_cannot_clone`, `url_refused`).
+  `protocol.ext.allow=never` as a belt; no prompts (`GIT_TERMINAL_PROMPT=0`, stdin
+  `/dev/null`, new session so ssh has no tty), 20 s per git call, 4 lanes.
+- **Failure flags, never re-states** (decision): the row stays `planned` with the
+  `clone_check` code, `clone_detail`, and a `remedy` when lop has one —
+  `lop network credential github include <owner/repo>` when the device already
+  borrows a `github` share, else `lop network credential share github --with <device>`,
+  both run on the LENDING device. Not a digest input: the gate recomputes the
+  manifest without re-probing, so a probe-derived state would refuse every confirmed
+  move `working_set_changed`; and PR B's bundle still carries commits a
+  cannot-fetch destination lacks. PR B's plan step decides what to leave behind.
+- **`https_rewrite`**: when the SSH form cannot be fetched but its HTTPS spelling
+  can, `{url, fetch: true, push}` is OFFERED; PR B applies it at restore.
+- **Prerequisites, warn-only**: `missing_tools` per row and in
+  `destination_probe.missing_tools`, from root markers (`go.mod`→go,
+  `pnpm-lock.yaml`→pnpm+node, `package-lock.json`→npm+node, `uv.lock`/`pyproject.toml`→uv,
+  `Cargo.toml`→cargo) and `shutil.which` on the destination. Team Bridge: lop has no
+  per-session "uses the bridge" flag, so the owner sets `team_bridge_used` only when
+  the session is the designated chief-of-staff session or its transcript holds a
+  `bridge` tool row or a `team_bridge_message` card; only then does the destination
+  report its enrolment (`team_bridge.enabled` + a committed enrolment).
 
 ### 11.2 CLI (PR A)
 

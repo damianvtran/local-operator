@@ -38,5 +38,15 @@
   "cli.sessions_move_workset.reason.not_transferred": "cette version de lop ne transfère pas encore les fichiers de travail",
   "cli.sessions_move_workset.reason.history_unscannable": "ses commits non poussés sont trop volumineux pour y rechercher des secrets ; poussez-les d’abord",
   "cli.sessions_move_workset.reason.unsafe_path": "son chemin ne peut pas être recréé sans risque sur un autre appareil",
-  "cli.sessions_move_workset.reason.insufficient_space": "la destination n’a pas assez d’espace disque libre"
+  "cli.sessions_move_workset.reason.insufficient_space": "la destination n’a pas assez d’espace disque libre",
+  "cli.sessions_move_workset.probe_cannot_fetch": "{device} ne peut pas récupérer {remote} avec ses propres accès",
+  "cli.sessions_move_workset.probe_cannot_push": "{device} peut récupérer {remote}, mais ne peut pas y pousser",
+  "cli.sessions_move_workset.probe_cannot_clone": "{device} n’utilisera pas {remote} : l’adresse n’est pas autorisée, ou git n’y est pas installé",
+  "cli.sessions_move_workset.probe_https_rewrite": "Depuis {device}, SSH ne passe pas, mais HTTPS oui : {url}",
+  "cli.sessions_move_workset.probe_remedy": "Pour corriger, exécutez sur l’appareil qui prête l’accès GitHub : {command}",
+  "cli.sessions_move_workset.probe_unknown": "Impossible de vérifier si {device} peut accéder à ces dépôts ; il utilise peut-être une version plus ancienne de lop.",
+  "cli.sessions_move_workset.prereq_missing_tools": "Il manque sur {device} : {tools} (ces projets en ont besoin ; le déplacement fonctionne quand même)",
+  "cli.sessions_move_workset.prereq_team_bridge": "{device} n’est pas inscrit à Team Bridge, que cette conversation utilise (le déplacement fonctionne quand même)",
+  "cli.sessions_move_workset.help_no_engage_on_arrival": "ne pas reprendre une conversation active sur la destination (par défaut, elle y démarre avec une note sur ses fichiers de travail)",
+  "cli.sessions_move_workset.receipt_resumed": "La conversation était active : elle a repris sur {device} avec une note sur ce qui est resté en arrière."
 }

@@ -153,6 +153,7 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
                 )
             )
         )
+        lines.extend("      " + text for text in probe_row_lines(row, device=label))
     excluded = [item for item in block.get("excluded") or [] if isinstance(item, dict)]
     for item in excluded[:_LIST_LIMIT]:
         why = str(item.get("why") or "")
@@ -173,6 +174,7 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
             lines.append(
                 "  " + _t(_ws.leaves_behind(path=str(item.get("path") or ""), command=command))
             )
+    lines.extend("  " + text for text in probe_block_lines(block, device=label))
     lines.append(
         _t(
             _ws.advice_sends(device=label)
@@ -181,6 +183,50 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
         )
     )
     return lines
+
+
+#: ``clone_check`` -> the sentence for a row the destination could not use. ``ok``,
+#: ``no_remote`` and the unprobed default say nothing; ``unknown_destination`` is said
+#: once for the block (``probe_block_lines``), never per row.
+_CLONE_CHECKS = {
+    "destination_cannot_fetch": _ws.probe_cannot_fetch,
+    "destination_cannot_push": _ws.probe_cannot_push,
+    "destination_cannot_clone": _ws.probe_cannot_clone,
+}
+
+
+def probe_row_lines(row: Mapping[str, Any], *, device: str) -> list[str]:
+    """The destination's answer for one worktree (``workset_probe.apply_probe``):
+    what it cannot do with the remote, the offered HTTPS spelling, the exact remedy."""
+    out: list[str] = []
+    remote = str(row.get("remote_url") or "")
+    builder = _CLONE_CHECKS.get(str(row.get("clone_check") or ""))
+    if builder is not None:
+        out.append(_t(builder(device=device, remote=remote)))
+    rewrite = _member(row, "https_rewrite")
+    if rewrite.get("url"):
+        out.append(_t(_ws.probe_https_rewrite(device=device, url=str(rewrite["url"]))))
+    remedy = _member(row, "remedy")
+    if remedy.get("command"):
+        out.append(_t(_ws.probe_remedy(command=str(remedy["command"]))))
+    return out
+
+
+def probe_block_lines(block: Mapping[str, Any], *, device: str) -> list[str]:
+    """Block-level destination warnings, all warn-only: the probe could not be asked,
+    toolchains the destination lacks, Team Bridge enrolment the session needs."""
+    probe = _member(block, "destination_probe")
+    state = str(probe.get("state") or "")
+    if state == "unknown_destination":
+        return [_t(_ws.probe_unknown(device=device))]
+    out: list[str] = []
+    tools = [str(tool) for tool in probe.get("missing_tools") or [] if isinstance(tool, str)]
+    if tools:
+        out.append(_t(_ws.prereq_missing_tools(device=device, tools=", ".join(tools))))
+    bridge = _member(probe, "team_bridge")
+    if bridge.get("needed") and not bridge.get("enrolled"):
+        out.append(_t(_ws.prereq_team_bridge(device=device)))
+    return out
 
 
 def prompt_text(block: Mapping[str, Any], *, session: str, device: str = "") -> str:

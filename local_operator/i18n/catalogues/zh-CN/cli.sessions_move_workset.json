@@ -17,7 +17,7 @@
   "cli.sessions_move_workset.unknown": "无法读取{source}上的工作文件（步骤：{step}，仓库：{repo}），因此没有移动任何内容。请修复该仓库，或使用--without-working-set重新运行，把所有工作文件留在原处。",
   "cli.sessions_move_workset.unsupported": "{device}上的lop版本过旧，无法列出此对话的工作文件。请在该设备上更新lop，或使用--without-working-set重新运行，将它们留在该设备上。",
   "cli.sessions_move_workset.none": "没有工作文件：此次移动无需确认。",
-  "cli.sessions_move_workset.receipt_not_transferred": "工作文件未被传输：{count, plural, other {#个worktree留在}} {device}上。",
+  "cli.sessions_move_workset.receipt_not_transferred": "工作文件未被传输：{count, plural, other {#个worktree留在}}{device}上。",
   "cli.sessions_move_workset.receipt_without": "已按要求将工作文件留在{device}上。",
   "cli.sessions_move_workset.receipt_keep": "{device}上的副本没有此对话的工作文件；它们仍留在{source}上。",
   "cli.sessions_move_workset.help_dry_run": "显示此次移动会涉及的对话工作文件（git worktree、未推送和未提交的工作），不移动任何内容",
@@ -38,5 +38,15 @@
   "cli.sessions_move_workset.reason.not_transferred": "此版本的lop尚不支持传输工作文件",
   "cli.sessions_move_workset.reason.history_unscannable": "它未推送的commit太大，无法检查是否含有密钥；请先推送它们",
   "cli.sessions_move_workset.reason.unsafe_path": "它的路径无法在另一台设备上安全地重建",
-  "cli.sessions_move_workset.reason.insufficient_space": "目标设备的可用磁盘空间不足"
+  "cli.sessions_move_workset.reason.insufficient_space": "目标设备的可用磁盘空间不足",
+  "cli.sessions_move_workset.probe_cannot_fetch": "{device}无法用自身的访问权限获取{remote}",
+  "cli.sessions_move_workset.probe_cannot_push": "{device}可以获取{remote}，但无法向其推送",
+  "cli.sessions_move_workset.probe_cannot_clone": "{device}不会使用{remote}：该地址不被允许，或该设备上没有git",
+  "cli.sessions_move_workset.probe_https_rewrite": "从{device}通过SSH无法访问，通过HTTPS可以：{url}",
+  "cli.sessions_move_workset.probe_remedy": "要修复，请在提供GitHub访问权限的设备上运行：{command}",
+  "cli.sessions_move_workset.probe_unknown": "无法检查{device}能否访问这些仓库；它可能运行的是较旧版本的lop。",
+  "cli.sessions_move_workset.prereq_missing_tools": "{device}缺少：{tools}（这些项目需要它们；移动仍可进行）",
+  "cli.sessions_move_workset.prereq_team_bridge": "{device}尚未注册Team Bridge，而此对话会用到它（移动仍可进行）",
+  "cli.sessions_move_workset.help_no_engage_on_arrival": "不在目标设备上恢复进行中的对话（默认会在那里启动，并附上一条关于其工作文件的说明）",
+  "cli.sessions_move_workset.receipt_resumed": "该对话处于进行中，因此已在{device}上恢复，并附上一条说明，列出留在原处的内容。"
 }

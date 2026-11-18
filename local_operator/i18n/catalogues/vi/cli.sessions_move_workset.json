@@ -38,5 +38,15 @@
   "cli.sessions_move_workset.reason.not_transferred": "phiên bản lop này chưa chuyển được tệp làm việc",
   "cli.sessions_move_workset.reason.history_unscannable": "các commit chưa push của nó quá lớn để kiểm tra bí mật; hãy push chúng trước",
   "cli.sessions_move_workset.reason.unsafe_path": "đường dẫn của nó không an toàn để tạo lại trên thiết bị khác",
-  "cli.sessions_move_workset.reason.insufficient_space": "thiết bị đích không đủ dung lượng đĩa trống"
+  "cli.sessions_move_workset.reason.insufficient_space": "thiết bị đích không đủ dung lượng đĩa trống",
+  "cli.sessions_move_workset.probe_cannot_fetch": "{device} không thể fetch {remote} bằng quyền truy cập của chính nó",
+  "cli.sessions_move_workset.probe_cannot_push": "{device} có thể fetch {remote} nhưng không thể push lên đó",
+  "cli.sessions_move_workset.probe_cannot_clone": "{device} sẽ không dùng {remote}: địa chỉ không được phép, hoặc thiết bị đó chưa có git",
+  "cli.sessions_move_workset.probe_https_rewrite": "Từ {device}, SSH không kết nối được, nhưng HTTPS thì được: {url}",
+  "cli.sessions_move_workset.probe_remedy": "Để khắc phục, hãy chạy trên thiết bị cho mượn quyền truy cập GitHub: {command}",
+  "cli.sessions_move_workset.probe_unknown": "Không thể kiểm tra {device} có truy cập được các kho này hay không; có thể thiết bị đó đang chạy phiên bản lop cũ hơn.",
+  "cli.sessions_move_workset.prereq_missing_tools": "{device} đang thiếu: {tools} (các dự án này cần chúng; việc chuyển vẫn diễn ra bình thường)",
+  "cli.sessions_move_workset.prereq_team_bridge": "{device} chưa đăng ký Team Bridge, thứ mà cuộc trò chuyện này đang dùng (việc chuyển vẫn diễn ra bình thường)",
+  "cli.sessions_move_workset.help_no_engage_on_arrival": "không tiếp tục cuộc trò chuyện đang hoạt động trên thiết bị đích (mặc định nó sẽ bắt đầu ở đó kèm một ghi chú về các tệp làm việc)",
+  "cli.sessions_move_workset.receipt_resumed": "Cuộc trò chuyện đang hoạt động nên đã tiếp tục trên {device}, kèm một ghi chú về những gì còn ở lại."
 }

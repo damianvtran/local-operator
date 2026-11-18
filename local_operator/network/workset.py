@@ -193,6 +193,11 @@ class WorktreeFacts:
     contended_by: tuple[str, ...] = ()
     excluded: tuple[Excluded, ...] = ()
     left_behind: tuple[LeftBehind, ...] = ()
+    #: Toolchain marker files at the worktree root (``go.mod``, ``pnpm-lock.yaml``...),
+    #: from ``workset_probe.TOOLCHAIN_MARKERS``. File NAMES only: the destination's
+    #: probe turns them into "this device lacks <tool>" warnings (never a block), and
+    #: it cannot read the source's tree, so the owner names them here.
+    markers: tuple[str, ...] = ()
 
     @property
     def dirty_files(self) -> int:
@@ -217,10 +222,12 @@ class WorktreeFacts:
             "sources": list(self.sources),
             # Coordinator ruling (2026-11-18): whether the DESTINATION can clone the
             # primary with its own credential is the destination's answer, which the
-            # owner cannot know at preflight. PR A states that honestly; the transfer
-            # half's ``workset_plan`` replaces it with "ok" or turns the row into
-            # ``left_behind``/``destination_cannot_clone`` before the confirmation.
+            # owner cannot know by itself. This is the UNPROBED default every block
+            # carries; the preflight (``mobility._workset_preflight_local``) asks the
+            # destination (``net_session_move {phase: "workset_probe"}``) and replaces
+            # it per row (``workset_probe.CLONE_CHECKS``) BEFORE the user confirms.
             "clone_check": "pending_destination",
+            "markers": list(self.markers),
         }
         for key in ("branch", "upstream", "base", "remote_url"):
             value = getattr(self, key)
@@ -1011,7 +1018,15 @@ def worktree_facts(
         reason=reason,
         excluded=tuple(excluded),
         left_behind=tuple(dependency_left_behind(path, primary, home=home)),
+        markers=_toolchain_markers(path),
     )
+
+
+def _toolchain_markers(path: Path) -> tuple[str, ...]:
+    """Which ``workset_probe.TOOLCHAIN_MARKERS`` files sit at the worktree root."""
+    from local_operator.network.workset_probe import TOOLCHAIN_MARKERS
+
+    return tuple(name for name in TOOLCHAIN_MARKERS if (path / name).is_file())
 
 
 def _uses_lfs(path: Path) -> bool:

@@ -38,5 +38,15 @@
   "cli.sessions_move_workset.reason.not_transferred": "эта версия lop пока не передаёт рабочие файлы",
   "cli.sessions_move_workset.reason.history_unscannable": "его неотправленные commit слишком велики для проверки на секреты; сначала выполните push",
   "cli.sessions_move_workset.reason.unsafe_path": "его путь небезопасно воссоздавать на другом устройстве",
-  "cli.sessions_move_workset.reason.insufficient_space": "на целевом устройстве недостаточно свободного места на диске"
+  "cli.sessions_move_workset.reason.insufficient_space": "на целевом устройстве недостаточно свободного места на диске",
+  "cli.sessions_move_workset.probe_cannot_fetch": "{device} не может получить {remote} со своим доступом",
+  "cli.sessions_move_workset.probe_cannot_push": "{device} может получить {remote}, но не может выполнить в него push",
+  "cli.sessions_move_workset.probe_cannot_clone": "{device} не будет использовать {remote}: адрес не разрешён или там не установлен git",
+  "cli.sessions_move_workset.probe_https_rewrite": "С {device} SSH до него не доходит, а HTTPS доходит: {url}",
+  "cli.sessions_move_workset.probe_remedy": "Чтобы исправить, выполните на устройстве, которое предоставляет доступ к GitHub: {command}",
+  "cli.sessions_move_workset.probe_unknown": "Не удалось проверить, есть ли у {device} доступ к этим репозиториям; возможно, там установлена более старая версия lop.",
+  "cli.sessions_move_workset.prereq_missing_tools": "На {device} нет: {tools} (они нужны этим проектам; перенос всё равно выполнится)",
+  "cli.sessions_move_workset.prereq_team_bridge": "{device} не подключён к Team Bridge, которым пользуется этот разговор (перенос всё равно выполнится)",
+  "cli.sessions_move_workset.help_no_engage_on_arrival": "не возобновлять активный разговор на целевом устройстве (по умолчанию он запускается там с заметкой о его рабочих файлах)",
+  "cli.sessions_move_workset.receipt_resumed": "Разговор был активен, поэтому он возобновился на {device} с заметкой о том, что осталось на прежнем месте."
 }
