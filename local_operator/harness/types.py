@@ -1790,12 +1790,16 @@ class BrowserSurface:
         "handed",
         "handed_to",
         "late_handoff_to_parent",
+        "terminal_cleanup_generation",
     )
 
     def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
+        # The child runner alone consumes this exact failed-close marker after
+        # disposal, while it still owns the live job's resume fence.
+        self.terminal_cleanup_generation: str = ""
         # Whether the tool has already spent its ONE line telling the agent that
         # a newer browser extension exists. It lives HERE, on the host-owned
         # holder, because the ToolContext is rebuilt at the start of every turn
