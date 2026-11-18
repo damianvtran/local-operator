@@ -1751,8 +1751,8 @@ class Resolution:
     #: The parser met a construct it cannot follow that MAY delete (``eval`` of a
     #: deleting word, an unbalanced quote around one): reasons, for the judge.
     opaque_reasons: list[str] = field(default_factory=list)
-    #: Directories the command may create (see :class:`Creation`). Never used
-    #: to rank THIS command; the loop records them after it runs.
+    #: Creation candidates from the primary walk. Also checked as protected
+    #: writes; only this list is available to the provenance ledger.
     created: list[Creation] = field(default_factory=list)
     #: Paths checked against the guard's own evidence (``<state>/sessions/``,
     #: ``<state>/guardrails/``) by ``classify._touch_reason``. Two shapes, by
@@ -3804,8 +3804,13 @@ def _case_arm_pieces(
     syntax in case-pattern position; neither the literal pattern words nor
     their ``|`` should go through command dispatch. Keep their expansions.
     """
+    def legacy_pieces() -> tuple[list[tuple[str, bool, str]], list[list[str]]]:
+        # Standalone terminators are private to this consumer, even on fallback.
+        kept = [(piece, bodies) for piece, bodies in zip(pieces, owned) if piece[0]]
+        return [piece for piece, _ in kept], [bodies for _, bodies in kept]
+
     if not any(_CASE_WORD_RE.search(text) for text, _, _ in pieces):
-        return pieces, owned
+        return legacy_pieces()
     result: list[tuple[str, bool, str]] = []
     bodies: list[list[str]] = []
     waiting: list[bool] = []
@@ -3833,7 +3838,7 @@ def _case_arm_pieces(
                         alternatives.append(text)
                         break
                     # Unrecognised shape: do not discard the original pieces.
-                    return pieces, owned
+                    return legacy_pieces()
                 pat, text = pattern
                 alternatives.clear()
                 add(pat, op="case-arm")
@@ -3853,7 +3858,7 @@ def _case_arm_pieces(
         if waiting and op == ";;":
             waiting[-1] = True
     if alternatives:
-        return pieces, owned
+        return legacy_pieces()
     return result, bodies
 
 
@@ -4196,7 +4201,7 @@ class _Walker:
         # S2-4: each heredoc body belongs to the segment whose ``<<`` opened it.
         # ``_split`` blanks the bodies but keeps the openers, in order, so the
         # bodies are dealt out to segments by counting the openers in each.
-        lexed = lex(command)
+        lexed = lex(command, keep_empty_case_terminators=self.case_arms)
         owned_bodies = [list(bodies) for bodies in lexed.bodies]
         if not lexed.open:
             for index, (text, _piped, _op) in enumerate(lexed.segments):
@@ -8301,7 +8306,7 @@ def resolve_command(
         # definition positions. Preserve legacy rank facts (and its creation
         # evidence) rather than letting a newly seen arm lower the rank.
         arms = _walk_ranked(command, cwd=cwd, env=env, home=home, case_arms=True)
-        _union_ranked(result, arms)
+        _union_ranked(result, arms, rank_creations=True)
     return result
 
 
@@ -8315,7 +8320,7 @@ def _walk_ranked(
         base = _walk_once(
             command, cwd=cwd, env=env, home=home, model=_CwdModel(base=True), case_arms=case_arms
         )
-        _union_ranked(result.resolution, base.resolution)
+        _union_ranked(result.resolution, base.resolution, rank_creations=case_arms)
     if _MAY_DEFINE_FUNCTION_RE.search(command):
         # Shell functions (see "Shell functions" above): bodies are walked
         # where they are CALLED in a separate pass whose ranked facts are
@@ -8330,7 +8335,7 @@ def _walk_ranked(
             inline_functions=True,
             case_arms=case_arms,
         )
-        _union_ranked(result.resolution, called.resolution)
+        _union_ranked(result.resolution, called.resolution, rank_creations=case_arms)
     return result.resolution
 
 
@@ -8368,8 +8373,16 @@ def _walk_once(
     return _Pass(walker.result, model.engaged)
 
 
-def _union_ranked(into: Resolution, extra: Resolution) -> None:
-    """Add every ranked fact of ``extra`` missing from ``into`` (not ``created``)."""
+def _union_ranked(into: Resolution, extra: Resolution, *, rank_creations: bool = False) -> None:
+    """Union rank facts without appending any provenance candidates."""
+    if rank_creations:
+        # Concrete supplementary creations can write protected evidence, but
+        # only the primary walk is allowed to nominate ledger candidates.
+        for creation in extra.created:
+            if creation.path is not None:
+                write = Target(path=creation.path, op="write", program=creation.kind)
+                if write not in into.touched:
+                    into.touched.append(write)
     # Two loops, one per element type, rather than one tuple of mixed pairs:
     # a heterogeneous tuple widens each pair to ``list[Target] | list[str]`` and
     # pyright then rejects the append. Same pairs, same order, same dedupe.

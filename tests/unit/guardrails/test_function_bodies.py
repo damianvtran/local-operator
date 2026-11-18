@@ -21,10 +21,13 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.guardrails import resolve
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
 from local_operator.guardrails.preview import preview_tool_call
-from local_operator.guardrails.resolve import resolve_command
+from local_operator.guardrails.provenance import plan_creations
+from local_operator.guardrails.resolve import Creation, Resolution, resolve_command
+from local_operator.tools.search_guard import lex
 
 
 @pytest.mark.parametrize(
@@ -46,6 +49,56 @@ from local_operator.guardrails.resolve import resolve_command
 def test_case_arm_reaches_output_target(command: str, tmp_path: Path) -> None:
     resolution = resolve_command(command, cwd=str(tmp_path), home=str(tmp_path), env={})
     assert [target.path for target in resolution.targets] == [str(tmp_path / "marker")]
+
+
+def test_case_standalone_terminators_reach_later_arms(tmp_path: Path) -> None:
+    command = (
+        "case choice in\nfirst) tee first-marker\n;;\n"
+        "second) :\n;;\nthird) tee third-marker\n;;\nesac"
+    )
+    resolution = resolve_command(command, cwd=str(tmp_path), home=str(tmp_path), env={})
+    assert [target.path for target in resolution.targets] == [
+        str(tmp_path / "first-marker"),
+        str(tmp_path / "third-marker"),
+    ]
+
+
+def test_case_standalone_terminator_is_opt_in() -> None:
+    text = "printf ';;'\n;;\nprintf done"
+    ordinary = lex(text)
+    assert ordinary.segments == [("printf ';;'", False, "\n"), ("printf done", False, "")]
+    structural = lex(text, keep_empty_case_terminators=True)
+    assert structural.segments == [ordinary.segments[0], ("", False, ";;"), ordinary.segments[1]]
+    assert structural.bodies == [[], [], []]
+
+
+@pytest.mark.parametrize("in_called_function", [False, True], ids=["case-walk", "call-walk"])
+def test_supplementary_creation_ranks_but_cannot_nominate_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, in_called_function: bool
+) -> None:
+    command = "emit(){ :; }; case choice in choice) emit ;; esac"
+    primary = Creation(kind="mkdir", path=str(tmp_path / "primary"))
+    extra = Creation(kind="mkdir", path=str(tmp_path / "state" / "sessions" / "extra"))
+    env = {"HOME": str(tmp_path), "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / "state")}
+
+    def walk(
+        *_args: object, case_arms: bool, inline_functions: bool = False, **_kwargs: object
+    ) -> resolve._Pass:
+        created = []
+        if case_arms and inline_functions == in_called_function:
+            created.append(extra)
+        elif not case_arms and not inline_functions:
+            created.append(primary)
+        return resolve._Pass(Resolution(created=created), engaged=False)
+
+    monkeypatch.setattr(resolve, "_walk_once", walk)
+
+    pending = plan_creations(command, cwd=str(tmp_path), env=env)
+    assert pending is not None
+    assert pending.exact == [(primary.kind, primary.path, primary.path)]
+    assert not pending.links and not pending.patterned
+    verdict = classify_bash(command, cwd=str(tmp_path), env=env, scratchpad=None)
+    assert verdict.risk == Risk.CRITICAL
 
 
 SID = "aaaaaaaaaaaa"
