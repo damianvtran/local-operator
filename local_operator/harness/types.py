@@ -2658,6 +2658,16 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    #: The session's BASE approval gate, present even under ``--yolo`` (where
+    #: ``request_approval`` is ``None`` because yolo skips the tool gate). Only
+    #: for a person-only card a tool raises itself
+    #: (``harness.approval.never_auto_approved``: the community post): every
+    #: base gate routes those to a person or refuses (the TUI card, desktop
+    #: serving, the yolo/tty gate, SDK ``auto()``), so handing it over lets the
+    #: owner at the keyboard answer instead of the run refusing outright.
+    #: ``None`` on hosts that do not set it; callers fall back to
+    #: ``request_approval``. Host state, never serialized.
+    person_approval: ApprovalGate | None = Field(default=None, exclude=True, repr=False)
     # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
     # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
     # store is a user decision, and a model must not be able to stamp its own

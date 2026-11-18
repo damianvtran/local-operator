@@ -14,7 +14,13 @@ import httpx
 import pytest
 
 from local_operator.tui.community_backend import LiveCommunityBackend
-from tests.unit.community.fakehub import COMMUNITY, JOINED, FakeHub, make_client, outcome
+from tests.unit.community.fakehub import (
+    COMMUNITY,
+    JOINED,
+    FakeHub,
+    make_client,
+    outcome,
+)
 
 SUBMIT = "/community/v1/communities/local-operator/conversations/conv_general/submissions"
 

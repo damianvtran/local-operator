@@ -1,10 +1,10 @@
 """``lop community …`` — the script surface of the community page (TUI doc, "Commands for scripts").
 
-WHY. A person in a shell, or an agent working in one, needs the same member
-operations the ``/community`` page offers, with answers a script can branch on:
-``--json`` everywhere and the documented exit codes (``service.EXIT_CODES``).
-Every rule lives in :mod:`local_operator.community.service` and the client; this
-module parses arguments and prints.
+WHY. A person in a shell needs the same member operations the ``/community``
+page offers, with answers a script can branch on: ``--json`` everywhere and the
+documented exit codes (``service.EXIT_CODES``). Every rule lives in
+:mod:`local_operator.community.service` and the client; this module parses
+arguments and prints.
 
     lop community status                          joined? which guidelines?
     lop community guidelines [--version]          the current guidelines text
@@ -14,6 +14,30 @@ module parses arguments and prints.
     lop community post '#help' --text -           (exit 0/3/4/5/6/7/8)
     lop community cancel <submission-id>          (exit 0 cancelled, 9 already posted)
     lop community leave --yes
+                                                  (post/join/leave/cancel/read: exit 10
+                                                   inside an agent's shell)
+
+NOT FROM AN AGENT'S SHELL (review R1-1). This command posts as the owner and
+reads strangers' text, and it has no approval card: the person typing it IS
+the approval. An agent's ``bash`` call carries ``LOCAL_OPERATOR_AGENT_SHELL``
+(``agent_shell.in_agent_shell``), and there the verbs in
+:data:`AGENT_SHELL_VERBS` exit 10 before any request, naming the bridge ops
+that keep the RFC v2.4 §5.9 controls: ``community_post`` asks the owner per
+post, ``community_read`` marks the text untrusted and taints the session. A
+community post read by an agent must never be able to say "run ``lop community
+post …``" and have it publish. The ``team-bridge setup`` precedent: remove the
+terminal consent path from the agent rather than harden it. The marker is not
+a security boundary (``agent_shell``'s module doc says why); it stops the naive
+route, which is the one an injected instruction takes. ``status``,
+``guidelines`` and ``channels`` stay available: they show the operator's own
+membership, the operator-published guidelines and the directory, not members'
+posts, and they change nothing.
+
+TERMINAL SAFETY (review R1-3). Names, purposes, guidelines and post text are
+server-sourced and partly stranger-authored, so every text line is printed
+through ``strip_control_sequences`` (no OSC 52 clipboard writes, screen
+clears or title changes), and ``--json`` escapes the C1 range that
+``json.dumps(ensure_ascii=False)`` would otherwise emit raw.
 
 DARK. Hidden from ``lop --help`` (the subparser takes no ``help=``, the
 ``resume-click`` idiom) and refused unless ``LOCAL_OPERATOR_COMMUNITY=1``
@@ -43,6 +67,19 @@ from local_operator.community import service
 #: ``DirFilter`` (``not-joined`` is the TUI's word for ``public`` + not a
 #: member, which the directory answers as ``public`` and we narrow locally).
 _FILTERS = {"joined": "joined", "not-joined": "public", "private": "private"}
+
+#: The verbs an agent's shell may not run: everything that acts as the owner
+#: or pulls members' posts into the agent's context (see "NOT FROM AN AGENT'S
+#: SHELL" above). Each maps to the route the refusal names instead.
+AGENT_SHELL_VERBS: dict[str, str] = {
+    "post": "use the bridge tool, op=community_post: the owner approves each post",
+    "cancel": "posts made through bridge op=community_post are the owner's to cancel",
+    "read": (
+        "use the bridge tool, op=community_read: it marks community text as " "untrusted for you"
+    ),
+    "join": "joining accepts the guidelines, which is the owner's act (/community in the app)",
+    "leave": "leaving is the owner's act (/community in the app)",
+}
 
 
 def add_parser(subparsers: Any, parent_parser: argparse.ArgumentParser | None = None) -> None:
@@ -97,6 +134,10 @@ def main(args: argparse.Namespace, *, client_factory: Any = None) -> int:
     if not command:
         print("usage: lop community {status,guidelines,join,channels,read,post,cancel,leave}")
         return 2
+    refusal = _agent_shell_refusal(command)
+    if refusal is not None:
+        _say(args, {"ok": False, "code": "agent_shell", "use": refusal}, refusal)
+        return service.EXIT_CODES["agent_shell"]
     try:
         return asyncio.run(_run(command, args, client_factory))
     except Exception as exc:  # noqa: BLE001 - a CLI reports the refusal it was given
@@ -109,11 +150,36 @@ def main(args: argparse.Namespace, *, client_factory: Any = None) -> int:
         return outcome.exit_code
 
 
+def _agent_shell_refusal(command: str) -> str | None:
+    """The model-facing refusal for ``command`` in an agent's shell, else ``None``."""
+
+    from local_operator.agent_shell import in_agent_shell
+
+    route = AGENT_SHELL_VERBS.get(command)
+    if route is None or not in_agent_shell():
+        return None
+    return (
+        f"community {command}: not run from an agent's shell (exit 10) — this command "
+        f"acts or reads as the owner with no approval step. Instead, {route}."
+    )
+
+
+#: C1 controls survive ``json.dumps(ensure_ascii=False)`` as raw code points
+#: (C0 and DEL are escaped already); a terminal may act on them, so ``--json``
+#: escapes them losslessly. A script still gets the exact server string back.
+_C1 = {code: f"\\u{code:04x}" for code in range(0x7F, 0xA0)}
+
+
 def _say(args: Any, payload: dict[str, Any], line: str) -> None:
+    from local_operator.ansi import strip_control_sequences
+
     if getattr(args, "json", False):
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2).translate(_C1))
     else:
-        print(line)
+        # The one print path for text mode, so every server-sourced field in a
+        # line (names, purposes, guidelines, posts, refusal references) is
+        # stripped here rather than at each call site. Newlines and tabs stay.
+        print(strip_control_sequences(line))
 
 
 def _config_dir() -> Any:

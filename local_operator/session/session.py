@@ -16693,6 +16693,11 @@ class Session:
         """
         if self._yolo:
             return None
+        from local_operator.harness.bridge_egress import (
+            ApprovalGrant,
+            session_grant_covers,
+        )
+
         base = self._request_approval
         declared = self._declared_tools
         if base is None or declared is None or not self._declared_tools_unattended:
@@ -16706,7 +16711,13 @@ class Session:
             taint_raised: bool = False,
             bridge_latched: bool = False,
         ) -> bool:
-            if tool_name in declared:
+            if tool_name in declared and session_grant_covers(
+                ApprovalGrant(auto=True), title=tool_name
+            ):
+                # A person-only gate is never answered by declaration: its title
+                # holds a space no tool name can, so this is belt and braces for
+                # a future gate whose title could be declared (review R1-2).
+                #
                 # A declared unattended inventory approves by declaration even
                 # in a Team-Bridge-latched session: the S-51 carve-out, left
                 # as is (accepted risk outside ask mode).
@@ -23893,6 +23904,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The BASE gate, kept under --yolo, for person-only cards a tool
+            # raises itself (a community post): yolo skips the tool gate, not
+            # the person (the profile save's route, ``_request_approval``).
+            person_approval=self._request_approval,
             # The host's consent seam for tool-issued ACCOUNT writes. Held on
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).

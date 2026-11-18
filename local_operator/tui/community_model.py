@@ -280,7 +280,9 @@ def org_entries(
                 home=bool(row.get("is_home")) and status == "active",
             )
         )
-    if len(orgs) > 1:
+    # An invitation is not membership (R1-8): "All organizations" merges orgs
+    # the person belongs to, so it needs two ACTIVE ones.
+    if sum(1 for entry in orgs if not entry.invited) > 1:
         orgs = [OrgEntry("all", "all", ""), *orgs]
     joined = [OrgEntry("community", c.id, c.name) for c in communities]
     return orgs, joined

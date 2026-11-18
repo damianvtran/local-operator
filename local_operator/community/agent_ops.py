@@ -293,9 +293,15 @@ async def community_read(
 
 
 def post_card(*, community: str, channel: str, text: str, tainted: bool) -> str:
-    """The person-only approval card: exact text, audience, label, why it asks.
+    """The person-only approval card: audience, label, why it asks, then the exact text.
 
     Authored rows (the profile-save layout keeps each line, ``approval.py``).
+
+    ORDER (review R1-5). Who will read it and that it shows as the owner's own
+    post come FIRST, the text last: a card cut to the terminal cuts its tail,
+    so a 4000-character post can only ever hide more of itself, never the
+    lines that say where it goes. The TUI card also refuses ``y`` until the
+    whole text has been on screen (``ApprovalPrompt``'s read-in-full rule).
     """
 
     from local_operator.i18n.keys import wire_community as k
@@ -303,10 +309,10 @@ def post_card(*, community: str, channel: str, text: str, tainted: bool) -> str:
 
     t = tr("wire.community")
     lines = [t(k.post_card_title(channel=channel, community=community))]
-    lines.extend(f"┊ {line}" for line in (text.splitlines() or [""]))
     lines.append(t(k.post_card_audience(channel=channel)))
     lines.append(t(k.post_card_label()))
     lines.append(t(k.post_card_tainted() if tainted else k.post_card_each_time()))
+    lines.extend(f"┊ {line}" for line in (text.splitlines() or [""]))
     return "\n".join(lines)
 
 
@@ -355,7 +361,11 @@ async def community_post(
     card = post_card(
         community=community.name, channel=f"#{channel.name}", text=text, tainted=tainted
     )
-    gate = getattr(context, "request_approval", None)
+    # The person-only base gate first: under --yolo ``request_approval`` is
+    # None, yet a person may be at the keyboard to answer this card (review
+    # R1-4; the profile save asks the same gate). Every base gate refuses or
+    # asks a person for COMMUNITY_POST_GATE — none answers it automatically.
+    gate = getattr(context, "person_approval", None) or getattr(context, "request_approval", None)
     if gate is None:
         return _error("not posted: nobody can approve community posts on this run", "no_approver")
     try:

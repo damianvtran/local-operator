@@ -50,7 +50,8 @@ class Ctx:
             self.asked.append((tool_name, description))
             return self.answer
 
-        self.request_approval = gate
+        self.request_approval: Any = gate
+        self.person_approval: Any = None
 
 
 def _hub(*, joined: bool = True, messages: list[dict[str, Any]] | None = None) -> FakeHub:
@@ -212,6 +213,7 @@ async def test_tainted_session_card_says_standing_permissions_do_not_apply(enabl
 async def test_refused_post_maps_category_and_reference(enabled: None) -> None:
     hub = _hub()
     base = hub.override
+    assert base is not None
 
     def override(sent: Any) -> httpx.Response | None:
         if sent.path == SUBMIT:
@@ -264,6 +266,40 @@ def test_bridge_tool_routes_community_ops_and_tiers_them_read(
     tool = build_bridge_tool(context)
     assert tool is not None
     assert "community_post" in tool.parameters["properties"]["op"]["enum"]
-    assert tool.call_approval_tier({"op": "community_post"}) == "read"
-    assert tool.call_approval_tier({"op": "channel_post"}) == "write"
+    tier = tool.call_approval_tier
+    assert tier is not None
+    assert tier({"op": "community_post"}) == "read"
+    assert tier({"op": "channel_post"}) == "write"
     _ = outcome  # fake hub helper imported for parity with the client tests
+
+
+@pytest.mark.asyncio
+async def test_yolo_post_card_reaches_the_person_gate(enabled: None) -> None:
+    # R1-4: under --yolo the session hands tools no ``request_approval`` (yolo
+    # skips the tool gate) but keeps its base gate as ``person_approval``; the
+    # post card goes there, as the profile save does, instead of refusing
+    # while the owner sits at the keyboard.
+    hub = _hub()
+    ctx = Ctx(answer=True)
+    ctx.person_approval = ctx.request_approval
+    ctx.request_approval = None
+    result = await agent_ops.execute_community_op(
+        {"op": "community_post", "channel_id": "#general", "text": "hello"},
+        ctx,
+        config_dir=None,
+        client_factory=_factory(hub),
+    )
+    assert [name for name, _card in ctx.asked] == [COMMUNITY_POST_GATE]
+    assert result["ok"] is True and result["state"] == "published"
+
+
+def test_post_card_puts_audience_and_label_before_the_text() -> None:
+    # R1-5: a card cut to the terminal cuts its tail, so the tail is the post.
+    card = agent_ops.post_card(
+        community="LOC", channel="#help", text="line one\nline two", tainted=False
+    ).splitlines()
+    first_body = next(i for i, line in enumerate(card) if line.startswith("┊ "))
+    assert first_body == 4
+    assert any("Audience" in line for line in card[:first_body])
+    assert any("Shown as your own post" in line for line in card[:first_body])
+    assert card[first_body:] == ["┊ line one", "┊ line two"]

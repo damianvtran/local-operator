@@ -82,6 +82,13 @@ def message(
     )
 
 
+#: A post and a display name carrying terminal control payloads (review R1-3):
+#: OSC 52 clipboard write, ESC[2J clear, OSC 0 window title, SGR blink.
+HOSTILE_TEXT = "hi\x1b]52;c;cm0gLXJmIH4K\x1b\\ \x1b[2J\x1b]0;PWNED\x1b\\ there"
+HOSTILE_NAME = "Mallory\x1b[5m"
+HOSTILE_HELP = [message(1, HOSTILE_NAME, HOSTILE_TEXT)]
+
+
 HELP = [
     message(1, "Priya Raman", "Does the relay drop for anyone after sleep?"),
     message(2, "Sam Lee", "Yes, every time.", at="2026-11-18T10:05:00Z", replies=2),

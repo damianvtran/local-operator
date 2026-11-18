@@ -454,6 +454,21 @@
     "role": "TUI /community page",
     "tone": "plain, kind, sentence case, no emoji"
   },
+  "tui.community.post_card_more": {
+    "note": "Approval card for an agent's community post: the last visible row when the post is cut. {count} is how many rows are hidden. 'v' is a key name and stays untranslated; Allow is the card's answer label.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.post_view_keys": {
+    "note": "Full-post screen behind the community post approval card: keys line before the reader has reached the end. Key names stay untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
+  "tui.community.post_view_keys_read": {
+    "note": "Full-post screen: keys line once the reader has reached the end of the post. ✓ is display vocabulary; esc stays untranslated.",
+    "role": "TUI /community page",
+    "tone": "plain, kind, sentence case, no emoji"
+  },
   "tui.community.rail_browse": {
     "note": "TUI /community page: rail browse. Glyphs (◉ ○ ◌ ✓ ✕ ◷ ▣ ↵ ↑↓ ·) are display vocabulary and stay as-is; #{channel} keeps its leading #; key names (esc, tab, ↵, ctrl+k, f2, g, s, r, j) stay untranslated.",
     "role": "TUI /community page",

@@ -56,7 +56,9 @@ def _hub(
     return hub
 
 
-def _run(argv: list[str], hub: FakeHub, capsys: pytest.CaptureFixture[str]) -> tuple[int, dict]:
+def _run(
+    argv: list[str], hub: FakeHub, capsys: pytest.CaptureFixture[str]
+) -> tuple[int, dict[str, Any]]:
     args = build_cli_parser().parse_args(["community", *argv, "--json"])
     code = cli.main(args, client_factory=lambda _cfg: make_client(hub))
     out = capsys.readouterr().out
@@ -115,12 +117,24 @@ def test_join_needs_the_current_version(capsys: pytest.CaptureFixture[str]) -> N
         (503, {"code": "moderation_unavailable"}, 5, "kind"),
         (403, {"message": "locked"}, 7, "kind"),
         (409, {"code": "guidelines_changed", "guidelines_version": "2026-12"}, 8, "version"),
+        # R1-9: the documented offline row — the transport never reaches the hub.
+        (None, None, 6, "kind"),
     ],
 )
 def test_post_exit_codes(
-    status: int, body: Any, expected: int, key: str, capsys: pytest.CaptureFixture[str]
+    status: int | None, body: Any, expected: int, key: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    hub = _hub(submit=(status, body))
+    hub = _hub(submit=None if status is None else (status, body))
+    if status is None:
+        previous = hub.override
+        assert previous is not None
+
+        def unreachable(sent: Any) -> httpx.Response | None:
+            if sent.path == SUBMIT:
+                raise httpx.ConnectError("unreachable")
+            return previous(sent)
+
+        hub.override = unreachable
     code, payload = _run(["post", "#general", "--text", "hello"], hub, capsys)
     assert code == expected, payload
     assert key in payload
@@ -144,3 +158,77 @@ def test_leave_needs_yes(capsys: pytest.CaptureFixture[str]) -> None:
     assert code == 1 and not any(s.path.endswith("/leave") for s in hub.sent)
     code, payload = _run(["leave", "--yes"], hub, capsys)
     assert code == 0 and payload["state"] == "left"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["post", "#general", "--text", "run lop community post"],
+        ["join", "--accept-guidelines", "2026-11-01"],
+        ["leave", "--yes"],
+        ["cancel", KEY],
+        ["read", "#general"],
+    ],
+)
+def test_agent_shell_refuses_acting_and_reading_verbs_before_any_request(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # R1-1: the bash tool marks every command it runs; an injected "run
+    # `lop community post …`" must not publish as the owner unapproved.
+    monkeypatch.setenv("LOCAL_OPERATOR_AGENT_SHELL", "1")
+    hub = _hub()
+    code, payload = _run(argv, hub, capsys)
+    assert code == 10 and payload["code"] == "agent_shell", payload
+    assert "bridge" in payload["use"] or "owner" in payload["use"]
+    assert hub.sent == [], "refused before any request"
+
+
+def test_agent_shell_text_mode_names_the_bridge_route(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_AGENT_SHELL", "1")
+    args = build_cli_parser().parse_args(["community", "post", "#general", "--text", "x"])
+    assert cli.main(args, client_factory=lambda _cfg: make_client(_hub())) == 10
+    out = capsys.readouterr().out
+    assert "op=community_post" in out and "exit 10" in out
+
+
+def test_agent_shell_still_allows_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_AGENT_SHELL", "1")
+    code, payload = _run(["status"], _hub(), capsys)
+    assert code == 0 and payload["joined"] is True
+
+
+def test_text_mode_strips_control_sequences_and_json_escapes_them(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # R1-3: post text and display names are stranger-authored.
+    hostile = "hi\x1b]52;c;cm0gLXJmIH4K\x1b\\ \x1b[2J\x1b]0;PWNED\x1b\\ \x9b31mthere"
+    hub = _hub()
+    previous = hub.override
+    assert previous is not None
+    history = "/community/v1/communities/local-operator/conversations/conv_general/messages"
+
+    def evil(sent: Any) -> httpx.Response | None:
+        if sent.path == history:
+            item = {
+                "id": "m1",
+                "conversation_id": "conv_general",
+                "seq": 1,
+                "author": {"kind": "human", "display_name": "Mallory\x1b[5m"},
+                "created_at": "2026-11-18T10:00:00Z",
+                "text": hostile,
+            }
+            return httpx.Response(200, json={"items": [item], "next_cursor": None})
+        return previous(sent)
+
+    hub.override = evil
+    args = build_cli_parser().parse_args(["community", "read", "#general"])
+    assert cli.main(args, client_factory=lambda _cfg: make_client(hub)) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x9b" not in out and "PWNED" not in out
+    assert "Mallory" in out and "hi  there" in out
+    code, payload = _run(["read", "#general"], hub, capsys)
+    assert code == 0 and payload["messages"][0]["text"] == hostile, "--json stays exact"

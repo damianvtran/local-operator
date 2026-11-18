@@ -30,6 +30,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -222,7 +223,9 @@ class CommunityView(Vertical):
         self.home_failure = None
         self.paint()
         try:
-            self.home = await self.backend.home()
+            # Every backend read enters through ``service.display_safe``: the
+            # page paints server text in dozens of places (R1-3).
+            self.home = service.display_safe(await self.backend.home())
         except Exception as exc:  # noqa: BLE001 - painted as the page error state
             self.home_failure = exc
             self.home = None
@@ -278,7 +281,7 @@ class CommunityView(Vertical):
 
     async def _load_history(self, channel: Any) -> None:
         try:
-            rows = await self.backend.history(self.community_id, channel.id)
+            rows = service.display_safe(await self.backend.history(self.community_id, channel.id))
         except Exception as exc:  # noqa: BLE001 - the pane's error state
             self.failures[channel.id] = exc
             self.messages[channel.id] = self.messages.get(channel.id) or []
@@ -340,7 +343,9 @@ class CommunityView(Vertical):
 
     async def _submit(self, channel: Any, text: str, key: str) -> None:
         version = self.home.accepted_version if self.home is not None else None
-        outcome = await self.backend.submit(self.community_id, channel.id, text, key, version)
+        outcome = service.display_safe(
+            await self.backend.submit(self.community_id, channel.id, text, key, version)
+        )
         composer = self.composers.get(channel.id)
         if composer is None or composer.in_flight_key != key:
             # The attempt was cancelled first; a late "published" is the
@@ -363,7 +368,7 @@ class CommunityView(Vertical):
         key = composer.in_flight_key
         if key is None:
             return
-        outcome = await self.backend.cancel(self.community_id, key)
+        outcome = service.display_safe(await self.backend.cancel(self.community_id, key))
         if composer.in_flight_key != key:
             self.paint()
             return
@@ -606,7 +611,7 @@ class CommunityView(Vertical):
             await self.backend.join(self.community_id, version)
         except Exception as exc:  # noqa: BLE001
             self.join_busy = False
-            self.join_error = getattr(exc, "code", None) or type(exc).__name__
+            self.join_error = service.error_word(exc)
             self.paint()
             return
         self.join_busy = False
@@ -617,7 +622,7 @@ class CommunityView(Vertical):
         try:
             await self.backend.leave(self.community_id)
         except Exception as exc:  # noqa: BLE001
-            self.notice = _t(_k.leave_failed(code=getattr(exc, "code", None) or type(exc).__name__))
+            self.notice = _t(_k.leave_failed(code=service.error_word(exc)))
             self.paint()
             return
         self.post_message(CommunityViewDismissed())
@@ -628,11 +633,13 @@ class CommunityView(Vertical):
         self.browse_state = "searching"
         self.paint()
         try:
-            rows = await self.backend.browse(
-                self.community_id, self._overlay_input.value.strip(), self.browse_filter
+            rows = service.display_safe(
+                await self.backend.browse(
+                    self.community_id, self._overlay_input.value.strip(), self.browse_filter
+                )
             )
         except Exception as exc:  # noqa: BLE001
-            self.browse_state = f"failed:{getattr(exc, 'code', None) or type(exc).__name__}"
+            self.browse_state = f"failed:{service.error_word(exc)}"
         else:
             self.browse_rows = model.rail_order(rows)
             self.browse_index = 0
@@ -675,9 +682,9 @@ class CommunityView(Vertical):
 
     async def _load_orgs(self) -> None:
         try:
-            memberships, communities = await self.backend.orgs()
+            memberships, communities = service.display_safe(await self.backend.orgs())
         except Exception as exc:  # noqa: BLE001
-            self.orgs_state = f"failed:{getattr(exc, 'code', None) or type(exc).__name__}"
+            self.orgs_state = f"failed:{service.error_word(exc)}"
             self.paint()
             return
         self.orgs_private, self.orgs_communities = model.org_entries(memberships, communities)
@@ -728,8 +735,17 @@ class CommunityView(Vertical):
         left = _t(_k.header(community=name, state=state)) if name else ""
         right = _t(_k.header_keys_typing() if self._typing() else _k.header_keys())
         width = max(20, self.size.width or 80)
-        gap = max(1, width - len(left) - len(right) - 2)
-        self._header.update(Text(f" {left}{' ' * gap}{right} ", style="bold"))
+        # The key hints yield whole segments, last first (R1-7): a narrow
+        # header used to run the name into a half-cut hint ("connected g orgs").
+        # Two cells of gap at least, so the name and the hints never touch.
+        segments = right.split(" · ")
+        while segments and cell_len(left) + cell_len(" · ".join(segments)) + 4 > width:
+            segments.pop()
+        right = " · ".join(segments)
+        gap = max(2, width - cell_len(left) - cell_len(right) - 2)
+        line = Text(f" {left}{' ' * gap}{right} ", style="bold", no_wrap=True, overflow="ellipsis")
+        line.truncate(width, overflow="ellipsis")
+        self._header.update(line)
 
     def _paint_rail(self) -> Text:
         text = Text()
@@ -789,7 +805,7 @@ class CommunityView(Vertical):
             if failure is not None and getattr(failure, "code", "") == "community_signin_required":
                 return Text(_t(_k.page_signin()))
             if failure is not None:
-                code = getattr(failure, "code", None) or type(failure).__name__
+                code = service.error_word(failure)
                 return Text(_t(_k.page_error(code=code)) + "\n" + _t(_k.page_error_keys()))
             return Text(_t(_k.page_none()))
         if not self.home.joined:
@@ -1159,6 +1175,27 @@ class CommunityView(Vertical):
             text.append(_t(_k.leave_effects()))
         return text
 
+    def _current_org_key(self) -> str | None:
+        """The org being VIEWED, which the switcher checks apart from its cursor (R1-6, D21).
+
+        Opened over the community page, that is the community on screen. Opened
+        on its own (``/orgs`` from a session), it is the last selection — the
+        private org this machine was last pointed at — else the home org.
+        """
+        if self.home is not None and not self._overlay_is_page:
+            return str(self.home.community.id)
+        every = [*self.orgs_private, *self.orgs_communities]
+        last = self.backend.last_selection()
+        if last and any(entry.key == last for entry in every):
+            return last
+        home = next((entry for entry in self.orgs_private if entry.home), None)
+        return home.key if home is not None else None
+
+    def _org_marks(self, index: int, entry: Any, current: str | None) -> str:
+        """Cursor then check: ``▸ ✓``. Two columns, so moving never reflows a row."""
+        cursor = "▸" if index == self.orgs_index else " "
+        return f"{cursor} {'✓' if current is not None and entry.key == current else ' '}"
+
     def _paint_orgs(self) -> Text:
         text = Text()
         text.append(_t(_k.orgs_title()) + "\n", style="bold")
@@ -1172,6 +1209,7 @@ class CommunityView(Vertical):
         text.append(_t(_k.orgs_group_private()) + "\n", style="dim")
         if not self.orgs_private:
             text.append("  " + _t(_k.orgs_none_private()) + "\n", style="dim")
+        current = self._current_org_key()
         for entry in self.orgs_private:
             if entry.kind == "all":
                 label = _t(_k.orgs_all())
@@ -1179,14 +1217,14 @@ class CommunityView(Vertical):
                 label = _t(_k.orgs_invited(name=entry.name))
             else:
                 label = _t(_k.orgs_team(name=entry.name))
-            text.append(f"{'▸' if index == self.orgs_index else ' '} {label}\n")
+            text.append(f"{self._org_marks(index, entry, current)} {label}\n")
             index += 1
         text.append(_t(_k.orgs_group_communities()) + "\n", style="dim")
         if not self.orgs_communities:
             text.append("  " + _t(_k.orgs_none_communities()) + "\n", style="dim")
         for entry in self.orgs_communities:
             text.append(
-                f"{'▸' if index == self.orgs_index else ' '} "
+                f"{self._org_marks(index, entry, current)} "
                 f"{_t(_k.orgs_community(name=entry.name))}\n"
             )
             index += 1

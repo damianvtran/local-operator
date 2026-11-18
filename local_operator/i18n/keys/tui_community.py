@@ -376,6 +376,18 @@ def page_signin() -> Msg:
     return Msg("tui.community.page_signin", {})
 
 
+def post_card_more(*, count: int | float) -> Msg:
+    return Msg("tui.community.post_card_more", {"count": count})
+
+
+def post_view_keys() -> Msg:
+    return Msg("tui.community.post_view_keys", {})
+
+
+def post_view_keys_read() -> Msg:
+    return Msg("tui.community.post_view_keys_read", {})
+
+
 def rail_browse() -> Msg:
     return Msg("tui.community.rail_browse", {})
 

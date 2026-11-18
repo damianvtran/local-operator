@@ -65,7 +65,29 @@ STATES: dict[str, tuple[tuple[int, int], str]] = {
     "settings-leave": ((80, 24), "/community"),
     "orgs": ((80, 24), "/orgs"),
     "orgs-invited": ((80, 24), "/orgs"),
+    "orgs-from-page": ((80, 24), "/community"),
+    # Hostile server text (review R1-3): OSC 52 / clear / title payloads in a
+    # post and a display name, painted through the page's ingress sanitiser.
+    "hostile-text": ((80, 24), "/community"),
 }
+
+#: The agent-post approval card and the full-post screen behind it (review
+#: R1-5). Raised through the gate the real app installs, as a tool call does.
+CARD_STATES: dict[str, tuple[tuple[int, int], str, str]] = {
+    "post-card-short-110x34": ((110, 34), "short", ""),
+    "post-card-short-80x24": ((80, 24), "short", ""),
+    "post-card-long-110x34": ((110, 34), "long", ""),
+    "post-card-long-80x24": ((80, 24), "long", ""),
+    "post-view-long-80x24": ((80, 24), "long", "y"),
+    "post-view-read-80x24": ((80, 24), "long", "y,end"),
+}
+
+SHORT_POST = "Doctor fixed it for me too: `lop doctor --fix`, then restart the app."
+LONG_POST = "\n\n".join(
+    f"Step {i}: "
+    + "run the doctor, read what it reports, and paste the summary here so others can compare. " * 3
+    for i in range(1, 15)
+)
 
 
 def _backend(state: str) -> FakeBackend:
@@ -102,6 +124,10 @@ def _backend(state: str) -> FakeBackend:
         )
     if state == "moderation-unavailable":
         backend.next_outcome = PostOutcome("moderation_unavailable", submission_id="k")
+    if state == "hostile-text":
+        from tests.unit.tui.community_fakes import HOSTILE_HELP
+
+        backend.histories["c_help"] = list(HOSTILE_HELP)
     if state == "orgs-invited":
         backend.memberships.append(
             {"tenant_id": "t_new", "tenant_name": "Northwind", "status": "invited"}
@@ -189,6 +215,10 @@ async def capture(state: str, out_dir: Path) -> Path:
             await pilot.press("s")
         if state == "settings-leave":
             await pilot.press("s", "tab")
+        if state == "orgs-from-page":
+            await pilot.press("g")
+            for _ in range(3):
+                await pilot.pause()
         for _ in range(3):
             await pilot.pause()
         target = out_dir / f"{state}.svg"
@@ -196,15 +226,45 @@ async def capture(state: str, out_dir: Path) -> Path:
     return target
 
 
+async def capture_card(state: str, out_dir: Path) -> Path:
+    from local_operator.community.agent_ops import post_card
+    from local_operator.harness.approval import COMMUNITY_POST_GATE
+    from tests.unit.tui.test_approvals_ux import GatedSession, _gate, _wait_prompt
+
+    size, which, keys = CARD_STATES[state]
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=size) as pilot:
+        await _await_session(app, pilot)
+        card = post_card(
+            community="Local Operator Community",
+            channel="#help",
+            text=SHORT_POST if which == "short" else LONG_POST,
+            tainted=which == "long",
+        )
+        pending = asyncio.ensure_future(_gate(session)(COMMUNITY_POST_GATE, card))
+        await _wait_prompt(pilot, app)
+        for key in filter(None, keys.split(",")):
+            await pilot.press(key)
+            for _ in range(3):
+                await pilot.pause()
+        for _ in range(3):
+            await pilot.pause()
+        target = out_dir / f"{state}.svg"
+        save_capture(app, target)
+        pending.cancel()
+    return target
+
+
 async def main() -> None:
     if "--list" in sys.argv:
-        print("\n".join(STATES))
+        print("\n".join([*STATES, *CARD_STATES]))
         return
     out_dir = Path(sys.argv[1])
     out_dir.mkdir(parents=True, exist_ok=True)
-    wanted = sys.argv[2:] or list(STATES)
+    wanted = sys.argv[2:] or [*STATES, *CARD_STATES]
     for state in wanted:
-        print(await capture(state, out_dir))
+        print(await (capture_card if state in CARD_STATES else capture)(state, out_dir))
 
 
 asyncio.run(main())

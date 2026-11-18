@@ -18,7 +18,7 @@ from local_operator.tui import community_backend
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.community_view import CommunityView
 from local_operator.tui.widgets.editor import Editor
-from tests.unit.tui.community_fakes import FakeBackend
+from tests.unit.tui.community_fakes import HOSTILE_HELP, FakeBackend
 from tests.unit.tui.test_app_pilot import FakeSession, _await_session, _factory
 
 
@@ -176,3 +176,59 @@ async def test_leave_defaults_to_stay(backend: FakeBackend) -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert backend.left == 0 and view.overlay is None
+
+
+def _painted(widget: Any) -> str:
+    """Every segment the widget would hand the terminal, joined."""
+    from textual.geometry import Region
+
+    region = Region(0, 0, widget.size.width, widget.size.height)
+    return "".join(segment.text for strip in widget.render_lines(region) for segment in strip)
+
+
+@pytest.mark.asyncio
+async def test_hostile_post_and_name_reach_the_terminal_without_control_sequences(
+    backend: FakeBackend,
+) -> None:
+    # R1-3: OSC 52 (clipboard), ESC[2J (clear), OSC 0 (title) and SGR blink in a
+    # stranger's post and display name, through the real app and page.
+    backend.histories["c_help"] = list(HOSTILE_HELP)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        view = await _open(app, pilot)
+        view.channel_index = next(i for i, c in enumerate(view.channels) if c.name == "help")
+        view._open_channel()
+        for _ in range(4):
+            await pilot.pause()
+        painted = _painted(view._pane_text)
+        assert "Mallory" in painted and "hi  there" in painted
+        for payload in ("\x1b", "\x9b", "PWNED", "cm0gLXJmIH4K"):
+            assert payload not in painted, payload
+        # The model the pane reads is the sanitised copy; the backend's is exact.
+        assert "\x1b" not in (view.messages["c_help"] or [])[0].text
+        assert "\x1b" in backend.histories["c_help"][0].text
+
+
+@pytest.mark.asyncio
+async def test_orgs_checks_the_viewed_org_apart_from_the_cursor(backend: FakeBackend) -> None:
+    # R1-6 (D21): from the community page the community is the one viewed,
+    # while the cursor still defaults to the home org (Amendment A).
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        view = await _open(app, pilot)
+        await pilot.press("g")
+        for _ in range(4):
+            await pilot.pause()
+        rows = view._paint_orgs().plain.splitlines()
+        assert any(row.startswith("  ✓ ") and "Local Operator Community" in row for row in rows)
+        assert any(row.startswith("▸   ") and "Tran Robotics" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_narrow_header_drops_whole_key_hints(backend: FakeBackend) -> None:
+    # R1-7: at 60 columns the name and the hints never run together.
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 20)) as pilot:
+        view = await _open(app, pilot)
+        header = _painted(view._header)
+        assert "connected g" not in header and "? ke" not in header.replace("? keys", "")

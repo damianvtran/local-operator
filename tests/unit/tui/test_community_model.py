@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 from local_operator.community.service import PostOutcome
 from local_operator.tui import community_model as model
@@ -93,17 +94,26 @@ def test_groups_never_merge_and_all_is_private_only() -> None:
     assert [c.kind for c in communities] == ["community"]
     single, _ = model.org_entries([TRAN], [COMMUNITY])
     assert [o.kind for o in single] == ["private"], "no All row for one org"
+    # R1-8: an invitation is not membership, so it does not make two orgs.
+    invited, _ = model.org_entries([TRAN, INVITE], [COMMUNITY])
+    assert [o.kind for o in invited] == ["private", "private"], "no All row for one + invite"
+
+
+def _pick(orgs: Any, communities: Any, last: str | None) -> Any:
+    chosen = model.default_selection(orgs, communities, last)
+    assert chosen is not None
+    return chosen
 
 
 def test_default_is_invitation_then_home_then_last_never_the_community() -> None:
     orgs, communities = model.org_entries([TRAN, HOME, INVITE], [COMMUNITY])
-    assert model.default_selection(orgs, communities, "local-operator").key == "t3"
+    assert _pick(orgs, communities, "local-operator").key == "t3"
     orgs, communities = model.org_entries([TRAN, HOME], [COMMUNITY])
-    assert model.default_selection(orgs, communities, "local-operator").key == "t2"
+    assert _pick(orgs, communities, "local-operator").key == "t2"
     orgs, communities = model.org_entries([TRAN, {**HOME, "is_home": False}], [COMMUNITY])
-    assert model.default_selection(orgs, communities, "t1").key == "t1"
+    assert _pick(orgs, communities, "t1").key == "t1"
     # A community as the last selection never wins while a private org exists.
-    assert model.default_selection(orgs, communities, "local-operator").kind == "all"
+    assert _pick(orgs, communities, "local-operator").kind == "all"
     # No private org at all: the community is the answer.
     _, only = model.org_entries([], [COMMUNITY])
-    assert model.default_selection([], only, None).key == "local-operator"
+    assert _pick([], only, None).key == "local-operator"

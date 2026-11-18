@@ -1196,6 +1196,20 @@ class ApprovalPrompt(AskPickerScreen):
         cap = self._question_bound(width, len(lines))
         if len(lines) <= cap:
             return lines
+        if getattr(self, "_community_post", False) and cap > self._post_header_rows(width):
+            # The cut row names what is hidden and the key that shows it: a
+            # post card's tail is the post itself, which ``y`` will not approve
+            # unread (R1-5; ``_post_unread``). Only once the whole header is
+            # drawn: at 80x24 the dock affords exactly the header (title,
+            # audience, "shown as your own post"), and those rows outrank the
+            # hint — ``y`` opens the whole post either way. Raising the bound
+            # instead was measured windowing Deny off the card.
+            from local_operator.i18n.keys import tui_community as community_copy
+
+            kept = lines[: max(0, cap - 1)]
+            more = len(lines) - len(kept)
+            hint = tr("tui.community")(community_copy.post_card_more(count=more))
+            return [*kept, truncate_cells(hint, max(1, width))]
         tail = truncate_cells(lines[max(0, cap - 1)], max(1, width - 2))
         tail = tail[:-1].rstrip() if tail.endswith("…") else tail
         return [*lines[: max(0, cap - 1)], f"{tail} …"]
@@ -1237,6 +1251,14 @@ class ApprovalPrompt(AskPickerScreen):
 
         #: Drives the profile-diff question LAYOUT only (``_question_lines``).
         self._profile_save = never_auto_approved(tool_name)
+        from local_operator.harness.approval import COMMUNITY_POST_GATE
+
+        #: A chief of staff's community post (R1-5, RFC T6: never approve text
+        #: you have not read in full). When the card cuts the post, ``y``
+        #: opens the whole post (``community_post_view``) instead of approving,
+        #: until the reader has scrolled it to the end once.
+        self._community_post = tool_name == COMMUNITY_POST_GATE
+        self._post_read = False
         #: Drives the answer and setting refusals and the chrome (S-59): a
         #: profile save, or any card the host raised in a Team-Bridge-latched
         #: session. ``A``, ``S`` and ``G`` are inert on such a card and only
@@ -2250,10 +2272,51 @@ class ApprovalPrompt(AskPickerScreen):
         """
         if self._person_only and key not in {"y", "n"}:
             return
+        if key == "y" and self._post_unread():
+            # Every Allow route (letter, enter on the row, click, composer
+            # routing) lands here, so this is the one place the read-in-full
+            # rule needs to live. Deny stays one key.
+            self._open_post_view()
+            return
         if key == ALLOW_ALL_KEY:
             self.resolve(True, answer=ALLOW_ALL_ANSWER)
             return
         self.resolve(key == "y", answer=key)
+
+    def _post_header_rows(self, width: int) -> int:
+        """Rows the post card's header (everything above the ``┊`` text) wraps to."""
+        from local_operator.tui.widgets.community_post_view import split_card
+        from local_operator.tui.widgets.transcript import wrap_cells
+
+        header, _body = split_card(self.question.question)
+        return sum(len(wrap_cells(line, width) or [""]) for line in header)
+
+    def _post_unread(self) -> bool:
+        """Whether this is a post card whose text the reader has not yet seen whole.
+
+        "Seen whole" is either the card drawing every question row right now,
+        or the full-post screen having been scrolled to its end once.
+        """
+        if not getattr(self, "_community_post", False) or self._post_read:
+            return False
+        plan = self._layout()
+        return len(plan.question) < len(self._question_lines(plan.width, reveal=True))
+
+    def _open_post_view(self) -> None:
+        """Push the whole post (pinned header, scrolling text); note when it was read."""
+        from local_operator.tui.widgets.community_post_view import CommunityPostScreen
+
+        if self._answer is not None or not self.is_mounted:
+            return
+
+        def closed(read: bool | None) -> None:
+            if read:
+                self._post_read = True
+            if self.is_mounted:
+                self._repaint()
+                self.focus()
+
+        self.app.push_screen(CommunityPostScreen(self.question.question), closed)
 
     def _answered(self, answers: dict[str, list[str]] | None) -> None:
         """Bridge the picker's label answer onto the gate's boolean.
@@ -2290,6 +2353,13 @@ class ApprovalPrompt(AskPickerScreen):
         """
         character = event.character
         if character is None:
+            return
+        if character == "v" and getattr(self, "_community_post", False) and self._answer is None:
+            # ``v``: read the whole post (R1-5). Consumed so it never reaches
+            # the composer; not an answer.
+            event.stop()
+            event.prevent_default()
+            self._open_post_view()
             return
         if character in LATCHED_INERT_KEYS and self._latched_notice and self._answer is None:
             # A withdrawn key on a latched card: consumed (it must not reach

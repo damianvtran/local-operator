@@ -3423,13 +3423,14 @@ LinkPickerScreen .link-picker {
  * `ReportView` — a line-API widget that converts only the lines the compositor
  * asks for. Why that one needed its own shape (it repaints per mouse event, not
  * per key) and its rule (`#analytics-scroll`) are below. */
-AnalyticsScreen, SessionScreen, InfoScreen, NetworkScreen {
+AnalyticsScreen, SessionScreen, InfoScreen, NetworkScreen, CommunityPostScreen {
     align: center middle;
     background: $lo-sunken;
 }
 
 AnalyticsScreen .analytics-panel, SessionScreen .analytics-panel,
-InfoScreen .analytics-panel, NetworkScreen .analytics-panel {
+InfoScreen .analytics-panel, NetworkScreen .analytics-panel,
+CommunityPostScreen .analytics-panel {
     /* Responsive: 90% of the terminal, capped generously so a large screen
      * actually gets a larger frame (the token+cost tables have more columns to
      * show) while a small one still fits. The old max-width of 100 left a wide
@@ -3644,4 +3645,25 @@ AskPickerScreen .ask-picker {
     width: auto;
     height: auto;
     color: $lo-fg;
+}
+
+/* The whole community post behind its approval card (review R1-5,
+ * `widgets/community_post_view.py`): the card's header rows are PINNED above
+ * the scrolling text and the keys line below it, so "who reads this" and
+ * "shown as your own post" can never scroll away from the words they qualify.
+ * Head and hint size to their content; the text takes the rest. */
+#post-view-head {
+    width: 100%;
+    height: auto;
+    padding-bottom: 1;
+}
+
+#post-view-scroll {
+    height: 1fr;
+}
+
+#post-view-hint {
+    width: 100%;
+    height: 1;
+    padding-top: 0;
 }

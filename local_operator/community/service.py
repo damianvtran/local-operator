@@ -17,14 +17,15 @@ exactly those fields and never the message text: refused text is never stored
 EXIT CODES (``tui-frames.md`` "Commands for scripts"): 0 posted, 3 refused
 ``{category, reference}``, 4 rate limited ``{scope, retry_after_s}``, 5
 moderation unavailable, 6 offline, 7 restricted, 8 guidelines acceptance needed
-``{version}``; ``cancel``: 0 cancelled, 9 already posted. 1 is every other
-failure, 2 is argparse's usage error.
+``{version}``; ``cancel``: 0 cancelled, 9 already posted; 10 refused because
+the command ran inside an agent's shell (``cli.AGENT_SHELL_VERBS``). 1 is every
+other failure, 2 is argparse's usage error.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from typing import Any, Literal
 
 from local_operator.community import errors as e
@@ -59,6 +60,9 @@ EXIT_CODES: dict[str, int] = {
     "restricted": 7,
     "guidelines": 8,
     "too_late": 9,
+    # Not a hub outcome: ``lop community`` refuses its acting/reading verbs in
+    # an agent's shell before any request (``cli._agent_shell_refusal``).
+    "agent_shell": 10,
     "signin": 1,
     "error": 1,
 }
@@ -93,6 +97,59 @@ class PostOutcome:
 
     def as_json(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+def display_safe(value: Any) -> Any:
+    """A copy of ``value`` with every string run through ``strip_control_sequences``.
+
+    WHY (review R1-3). Post text, display names, channel names and purposes,
+    guidelines, refusal references and error codes come from the community
+    server, and much of it is written by strangers. Painted raw, an OSC 52
+    sequence writes the owner's clipboard, ``ESC[2J`` clears their screen and
+    an OSC 0 retitles the window — ``rich`` strips only BEL/BS/VT/FF/CR, not
+    ESC. Both terminal surfaces read through this ONE function at their ingress
+    (the page's backend reads, the CLI's text printer) instead of guarding
+    each paint site, so a field added to a model later is covered without
+    anyone remembering to. Newlines and tabs survive (post bodies are
+    multi-line); printable text, including emoji and RTL, is unchanged.
+
+    Walks pydantic models, dataclasses, lists, tuples and dicts; returns other
+    values as they are. Enum members are left alone (their values are ours).
+    The wire objects are never mutated — the client's own copies stay exact,
+    which is what ``--json`` and the request path must see.
+    """
+
+    from enum import Enum
+
+    from pydantic import BaseModel
+
+    from local_operator.ansi import strip_control_sequences
+
+    if isinstance(value, Enum):
+        return value
+    if isinstance(value, str):
+        return strip_control_sequences(value)
+    if isinstance(value, BaseModel):
+        return value.model_copy(
+            update={name: display_safe(getattr(value, name)) for name in type(value).model_fields}
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        return replace(
+            value, **{f.name: display_safe(getattr(value, f.name)) for f in fields(value) if f.init}
+        )
+    if isinstance(value, list):
+        return [display_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(display_safe(item) for item in value)
+    if isinstance(value, dict):
+        return {key: display_safe(item) for key, item in value.items()}
+    return value
+
+
+def error_word(exc: BaseException) -> str:
+    """The short code a surface paints for a failure, display-safe (a hub code is server text)."""
+
+    return display_safe(str(getattr(exc, "code", None) or type(exc).__name__))
 
 
 def outcome_from_submission(outcome: Any) -> PostOutcome:
