@@ -152,12 +152,17 @@ window. Figures are after pass 2; steps are those still findable as text.
 | What happened between the passes | n | After, today | After, new | Steps, today | Steps, new |
 |---|---|---|---|---|---|
 | Same task, fitted the floor at pass 1 (continued) | 2 | 136.8k | 108.5k | 284/415 | 284/415 |
-| Same task, already past the floor at pass 1 | 7 | 57.8k | 50.1k | 352/1308 | 366/1308 |
+| Not continued (see below) | 7 | 57.8k | 50.1k | 352/1308 | 366/1308 |
 | New operator turn before pass 2 | 5 | 110.5k | 75.4k | 299/351 | 259/351 |
 | All | 14 | 69.4k | 55.0k | 935/2074 | 909/2074 |
 
 No pass 2 is larger than today's. Without step 2 of the design, the continued
 row was 49.0k with 127/415 steps: the protection lasted one pass.
+
+The seven not continued: in three the floor was already clamped at pass 1, in
+three the task's request had been archived before pass 1, and in one a new
+operator turn arrived inside the recency window. Today's behaviour is plain
+recency at pass 2 in all seven as well.
 
 The tail bound was sized on the continued row. At the full floor cap the pass
 lands where today's does (129k-131k against 135k-139k); at three quarters it
