@@ -10755,6 +10755,18 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
         "runtimes": {
             "measured": measured,
             **{key: value if measured else None for key, value in counts.items()},
+            # "RETIRING", NOT "LEFT BEHIND" (update-parity item 4, 2026-11-18). The
+            # receipt is written seconds after the flip, but an idle runtime on a
+            # superseded generation leaves on its OWN soft refresh — the settle
+            # (``buildwatch.BUILD_SETTLE_S``, 10 s) plus a stagger of up to
+            # ``BUILD_STAGGER_S`` (20 s) — so ``known_old_idle`` alone read as
+            # runtimes the update had stranded when they were ~30 s from gone.
+            # The smaller of the two honest fixes: a label, not a 35 s re-count
+            # that would hold every `lop update` exit (and the desktop app's
+            # blocking wait on this line) for a reading that changes nothing it
+            # does. Additive, so the ``rolling-no-kill-v1`` keys keep their
+            # meaning; busy ones are NOT retiring — they wait for their turn.
+            "retiring": counts["known_old_idle"] if measured else None,
         },
     }
 
