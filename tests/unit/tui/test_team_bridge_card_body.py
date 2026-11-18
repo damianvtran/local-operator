@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rich.style import Style
 
 from local_operator.tui.bridge_card_body import card_body_loader
 from local_operator.tui.widgets.transcript import TeamBridgeBlock
@@ -228,10 +229,14 @@ def test_state_lines_use_the_header_ink_not_dim() -> None:
 
     content = _open(_answer(_item("refused")))._build_content(80)
     start = content.plain.index("Refused by moderation")
+    # ``Span.style`` is ``str | Style``; only a resolved ``Style`` carries an ink,
+    # so narrow on the real type instead of probing attributes.
     colours = {
         str(span.style.color.triplet.hex) if span.style.color.triplet else ""
         for span in content.spans
-        if span.start <= start < span.end and hasattr(span.style, "color") and span.style.color
+        if span.start <= start < span.end
+        and isinstance(span.style, Style)
+        and span.style.color
     }
     assert theme_mod.semantic_color("muted").lower() in {c.lower() for c in colours}
     assert theme_mod.semantic_color("dim").lower() not in {c.lower() for c in colours}
@@ -248,6 +253,6 @@ def test_body_markdown_uses_the_brand_markdown_theme() -> None:
     painted = [
         span.style.color
         for span in row.spans
-        if span.start <= start < span.end and getattr(span.style, "color", None)
+        if span.start <= start < span.end and isinstance(span.style, Style) and span.style.color
     ]
     assert expected is not None and expected in painted
