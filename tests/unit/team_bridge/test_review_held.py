@@ -240,7 +240,7 @@ def test_model_hold_raises_no_notice_and_deliver_admits(
 
     now = time.time()
     assert store.long_holds_readonly(owner, older_than_s=0.0, now=now + 3600.0)["count"] == 0
-    assert store.long_holds_readonly(owner, older_than_s=0.0, now=now + 25 * 3600.0)["count"] == 1
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=now + 49 * 3600.0)["count"] == 1
 
     from local_operator.server.utils import desktop_team_bridge_holds as holds
 
@@ -960,7 +960,7 @@ def test_the_connector_loop_retires_on_start_and_survives_a_failure(tmp_path, mo
 # count change, so a review flood past 60 minutes re-notified. Holds triage
 # 2026-11-18 (finding b): no holds list ships, so leaving review holds out entirely
 # hid them from every alert for up to 18 days. A review hold with a decision row
-# now enters the rollup once it is a day old.
+# now enters the rollup at the first UTC midnight a full day after it was held.
 
 
 def _tick_late(config_dir, owner, *, hours: float = 2.0, stamp: float = 1000.0) -> str:
@@ -995,7 +995,7 @@ def test_a_review_only_burst_raises_the_long_hold_alert_only_after_a_day(
     _review_burst(config_dir, store, owner)
     assert _tick_late(config_dir, owner) == "none_held"
     assert _all_notifications(config_dir) == []
-    assert _tick_late(config_dir, owner, hours=30.0, stamp=10**6) == "raised"
+    assert _tick_late(config_dir, owner, hours=49.0, stamp=10**6) == "raised"
     rows = [r for r in _all_notifications(config_dir) if r["dismissed_at"] is None]
     assert [r["key"] for r in rows] == [hold_alert._key(owner.endpoint_id)]
 

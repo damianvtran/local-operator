@@ -1235,8 +1235,17 @@ def receipt_authority(
     *,
     release: Mapping[str, Any] | None = None,
     principal: tuple[str, str] | None = None,
+    epoch_bound: bool = True,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
+
+    ``epoch_bound=False`` waives ONLY the epoch equality, keeping every other
+    check (template, serving model, admission revision, creator generation and
+    the whole integrity half). Its one caller is
+    :meth:`Store.write_once_resolution`: the epoch also advances on changes
+    that leave the receipt's substance current (holds triage 2026-11-18: H5's
+    receipt is epoch 10 under a live epoch 12 with the same template, revision
+    and serving model), and that caller checks the privacy pass itself.
 
     ``principal`` is the validated envelope's ``(sender_account, sender_kind)``;
     only an :data:`OWNER_PRINCIPAL_SHA256` receipt reads it (see
@@ -1325,7 +1334,9 @@ def receipt_authority(
         # longer be ESTABLISHED at all, which is damage rather than a miss — a
         # miss would invite a caller to re-screen behind a row nobody can read.
         return None, RECEIPT_CORRUPT, "epoch or creator generation is not a number"
-    if policy_epoch != receipt_epoch or creator_generation != owner.enrollment_generation:
+    if (
+        epoch_bound and policy_epoch != receipt_epoch
+    ) or creator_generation != owner.enrollment_generation:
         return None, RECEIPT_STALE, ""
     try:
         decoded = _decode_categories_text(receipt.get("categories"))
@@ -3337,22 +3348,27 @@ class Store:
         zero. ``now`` defaults to the wall clock.
         """
 
+        from local_operator.team_bridge import hold_release as _hr
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
-        from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
-        from local_operator.team_bridge.hold_release import (
-            WORK_SCOPE_HOLD as WORK_SCOPE_HOLD_CODE,
-        )
         from local_operator.team_bridge.types import is_conversation_message_id
 
         empty: dict[str, Any] = {"count": 0}
         now_v = time.time() if now is None else float(now)
         cutoff = now_v - float(older_than_s)
-        # A review hold with a decision row counts only once it is a DAY old
-        # (or older than the owner's own threshold, if that is longer): the operator's 2026-11-10
+        # A review hold with a decision row counts only once it is at least a
+        # DAY old (or older than the owner's own threshold, if that is longer):
+        # the operator's 2026-11-10
         # rule was "at most one daily rollup" for review holds, so a model_hold
         # flood does not move this count (and re-revision the alert) every few
         # minutes, while a review hold nobody has acted on still surfaces.
-        review_cutoff = min(cutoff, now_v - _REVIEW_ROLLUP_AFTER_S)
+        #
+        # QUANTIZED to a UTC day boundary (agent review m1 on #4249): a plain
+        # 24 h age floor still moved the count once per held message, a day
+        # after the flood, at the cadence it arrived. Holds created before the
+        # start of YESTERDAY all enter together at midnight, so review holds
+        # move this count (and revise the alert) at most once a day.
+        day = _REVIEW_ROLLUP_AFTER_S
+        review_cutoff = min(cutoff, math.floor((now_v - day) / day) * day)
         with self._connect_readonly() as conn:
             if conn is None:
                 return empty
@@ -3392,10 +3408,10 @@ class Store:
                     for r in conn.execute(
                         "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
                         "AND notified_at IS NOT NULL AND hold_code = ?",
-                        (_owner_key(owner), WORK_SCOPE_HOLD_CODE),
+                        (_owner_key(owner), _hr.WORK_SCOPE_HOLD),
                     ).fetchall()
                 }
-                review_codes = sorted(REVIEW_HOLD_CODES)
+                review_codes = sorted(_hr.REVIEW_HOLD_CODES)
                 reviewed = {
                     str(r["message_id"])
                     for r in conn.execute(
@@ -3420,7 +3436,7 @@ class Store:
             created = _status_timestamp(row["created_at"])
             if created is None:
                 continue
-            if bare in reviewed and row["hold_code"] in REVIEW_HOLD_CODES:
+            if bare in reviewed and row["hold_code"] in _hr.REVIEW_HOLD_CODES:
                 # Only a review hold WITH its decision row is delayed: with
                 # ``review_held: false`` none is written, the hold has no exit
                 # at all, and it keeps the ordinary threshold.
@@ -6126,6 +6142,125 @@ class Store:
                 ),
             ).rowcount
             return removed == 1
+
+    def write_once_resolution(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        body_sha256: str,
+        envelope_digest: str,
+    ) -> dict[str, Any] | None:
+        """The committed receipt a ``write_once_conflict`` may be answered with, or ``None``.
+
+        WHY (holds triage 2026-11-18 finding c; security review S-1/S-2 on
+        #4249). Write-once makes the FIRST verdict authoritative, but only while
+        it is still evidence under the LIVE policy: a receipt the owner has
+        since superseded (a tightened template, a new admission revision, a
+        serving model no longer approved, a privacy pass switched on) must
+        never override the current pass's answer. So the row goes through
+        :func:`receipt_authority` — the one copy of the currency and integrity
+        checks — with only the epoch equality waived (see ``epoch_bound``).
+
+        Also required: the same body and envelope (sender, type, request
+        block); an ``allow`` from a PREFERRED screener (an unsent fallback allow
+        is provisional and is re-screened, never revived here); and, when the
+        privacy pass is on or the policy was minted with it, a FINAL privacy
+        allow for this message, envelope, revision and the CURRENT control
+        generation (the same proof :meth:`_require_privacy_proof` demands of a
+        fresh allow). Read-only; ``None`` on anything else, including damage.
+        """
+
+        try:
+            # The ordinary connection (as :meth:`receipt_for_message`), not the
+            # ``mode=ro`` one: ``_privacy_control`` ensures its tables exist, and
+            # a refused CREATE on a read-only handle would read as "no proof"
+            # even with the pass off. Nothing here writes a row.
+            with self._connect() as conn:
+                self._init(conn)
+                key = _owner_key(owner)
+                policy = conn.execute(
+                    "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+                ).fetchone()
+                receipt = conn.execute(
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (key, str(message_id)),
+                ).fetchone()
+                if policy is None or receipt is None:
+                    return None
+                receipt_row = dict(receipt)
+                if (
+                    receipt_row.get("body_sha256") != body_sha256
+                    or receipt_row.get("envelope_digest") != envelope_digest
+                ):
+                    return None
+                decoded, _damage, _note = receipt_authority(
+                    owner, dict(policy), receipt_row, epoch_bound=False
+                )
+                if decoded is None:
+                    return None
+                preferred = receipt_row.get("screener_preferred") == 1
+                if decoded["verdict"] == "allow":
+                    if not preferred:
+                        return None
+                    if not self._final_privacy_allow(
+                        conn,
+                        owner,
+                        dict(policy),
+                        message_id=str(message_id),
+                        envelope_digest=envelope_digest,
+                        admission_revision=receipt_row.get("admission_revision"),
+                    ):
+                        return None
+                return {**decoded, "screener_preferred": preferred}
+        except (sqlite3.Error, StoreRefused, TypeError, ValueError):
+            return None
+
+    def _final_privacy_allow(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        policy: Mapping[str, Any],
+        *,
+        message_id: str,
+        envelope_digest: str,
+        admission_revision: Any,
+    ) -> bool:
+        """Whether an allow may stand under A8: pass off, or a final privacy allow on record.
+
+        The read-only twin of :meth:`_require_privacy_proof`'s acceptance
+        rule, keyed by the message (a resolution has no decision id of its
+        own). A table or column that is absent reads as "no proof".
+        """
+
+        control = self._privacy_control(conn)
+        enabled = control is not None and int(control["enabled"]) == 1
+        minted = int(policy.get("privacy_generation") or 0)
+        if not enabled and minted == 0:
+            return True
+        if not enabled or control is None or minted != int(control["generation"]):
+            return False
+        for row in conn.execute(
+            "SELECT * FROM privacy_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND envelope_digest = ? AND admission_revision = ? AND control_generation = ?",
+            (
+                _owner_key(owner),
+                message_id,
+                envelope_digest,
+                admission_revision,
+                int(control["generation"]),
+            ),
+        ).fetchall():
+            if row["final"] == "bypass" and int(row["first_preferred"]) == 1:
+                return True
+            if (
+                row["final"] == "admit"
+                and row["stage_state"] == "completed"
+                and row["privacy_result"] == "deliver"
+                and row["first_disposition"] == "deliver"
+            ):
+                return True
+        return False
 
     def receipt_for_message(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
         """THE trusted record for one screened message, by message id (H5 F3).

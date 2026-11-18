@@ -15,22 +15,30 @@ screening hold to the person who can release it:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import math
+import sqlite3
 import time
 
 from local_operator.team_bridge import hold_release as hr
 from local_operator.team_bridge import screening
 from local_operator.team_bridge.store import (
     SCREENER_REASON_MAX,
-    StoreRefused,
     capped_screener_reason,
     delivery_hold_class,
+    state_db_path,
 )
 from tests.unit.team_bridge.test_hold_release import (  # noqa: F401 — ``rig`` is a fixture
     DELIVER,
     DOUBT,
     MESSAGE_ID,
     NEW_WORK,
+    PRYING,
+    SCREENING_TEMPLATE_V2_SHA256,
+    SCREENING_VERSION_V2,
+    SONNET,
+    Policy,
     Runner,
     _item,
     _screen,
@@ -106,13 +114,39 @@ def test_an_unactioned_review_hold_enters_the_rollup_after_a_day(
         "count": 0
     }
     # Before the fix this stayed 0 forever (H1-H4, H6-H10: up to 18 days unseen).
-    assert store.long_holds_readonly(owner, older_than_s=3600.0, now=now + 25 * 3600.0) == {
+    assert store.long_holds_readonly(owner, older_than_s=3600.0, now=now + 49 * 3600.0) == {
         "count": 1
     }
     # An owner threshold longer than a day wins over the review floor.
     assert store.long_holds_readonly(owner, older_than_s=48 * 3600.0, now=now + 25 * 3600.0) == {
         "count": 0
     }
+
+
+def test_review_holds_enter_the_rollup_together_at_a_day_boundary(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """Agent review m1 on #4249: at most one review-driven count change a day.
+
+    Two review holds written at different times on the same UTC day enter the
+    count at the SAME instant (the start of the day after next), so a flood
+    revises the alert once, not once per held message."""
+
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(DOUBT))
+    _screen(config_dir, owner, Runner(DOUBT), item=_item(body="another", message_id="bcmsg_ab02"))
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        stamps = [r[0] for r in conn.execute("SELECT created_at FROM screening_holds")]
+    day = 24 * 3600.0
+    start = math.floor(min(stamps) / day) * day
+    assert math.floor(max(stamps) / day) * day == start  # same UTC day
+    boundary = start + 2 * day
+
+    def count(now: float) -> int:
+        return store.long_holds_readonly(owner, older_than_s=3600.0, now=now)["count"]
+
+    assert count(boundary - 1.0) == 0
+    assert count(boundary) == 2
 
 
 def test_a_retired_legacy_review_notice_does_not_hide_the_hold(
@@ -125,7 +159,7 @@ def test_a_retired_legacy_review_notice_does_not_hide_the_hold(
     _screen(config_dir, owner, Runner(DOUBT))
     store.mark_work_scope_notified(owner, MESSAGE_ID, now=time.time())
     store.mark_work_scope_cleared(owner, MESSAGE_ID, now=time.time())
-    later = time.time() + 30 * 3600.0
+    later = time.time() + 49 * 3600.0
     assert store.long_holds_readonly(owner, older_than_s=3600.0, now=later) == {"count": 1}
 
 
@@ -153,65 +187,156 @@ def _envelope(owner, item):
     return envelope
 
 
-def test_a_committed_preferred_allow_resolves_the_conflict(
+def _republish(store, owner, *, revision="rev-1", default_model=SONNET[1]) -> int:
+    """Publish a policy the way the scheduler does (a new epoch on any change)."""
+
+    current = store.current_screening_policy(owner)
+    return store.publish_screening_policy(
+        owner,
+        version=SCREENING_VERSION_V2,
+        template_sha256=SCREENING_TEMPLATE_V2_SHA256,
+        default_model=default_model,
+        revision=revision,
+        expected_epoch=int(current["epoch"]),
+    )
+
+
+def _bump_epoch_only(store, owner) -> int:
+    """H5's shape: the epoch advanced, the template/revision/serving model did not."""
+
+    _republish(store, owner, default_model="claude-opus-5-5")
+    return _republish(store, owner)
+
+
+def _tamper(config_dir, column: str, value) -> None:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(f"UPDATE screening_receipts SET {column} = ?", (value,))
+
+
+def test_a_current_preferred_allow_resolves_the_conflict(
     rig,  # noqa: F811 — imported fixture
 ) -> None:
     config_dir, store, owner = rig
-    first = _screen(config_dir, owner, Runner(DELIVER))
-    assert first.disposition == "deliver"
+    assert _screen(config_dir, owner, Runner(DELIVER)).disposition == "deliver"
     resolved = screening._resolve_write_once_conflict(store, owner, _envelope(owner, _item()))
     assert resolved is not None and resolved.disposition == "deliver"
     assert resolved.receipt.verdict == "allow"
-    # Text only: no image or file set is admitted on a resolution.
     assert resolved.attachments_hash is None and resolved.files_hash is None
 
 
-def test_the_conflict_is_kept_when_the_committed_verdict_does_not_match(
-    rig, monkeypatch  # noqa: F811 — imported fixture
+def test_the_commit_door_resolves_h5s_shape_epoch_moved_substance_current(
+    rig,  # noqa: F811 — imported fixture
 ) -> None:
-    config_dir, store, owner = rig
-    _screen(config_dir, owner, Runner(DELIVER))
-    # Different bytes under the same id: never answered by the old receipt.
-    other = _item(body="a different body entirely")
-    assert screening._resolve_write_once_conflict(store, owner, _envelope(owner, other)) is None
-    # No receipt at all.
-    fresh = _item(message_id="bcmsg_noreceipt")
-    assert screening._resolve_write_once_conflict(store, owner, _envelope(owner, fresh)) is None
-    # A non-preferred allow is provisional: it must be re-screened, not revived.
-    real = store.receipt_for_message
-
-    def not_preferred(owner_, message_id):
-        row = real(owner_, message_id)
-        return None if row is None else {**row, "screener_preferred": False}
-
-    monkeypatch.setattr(store, "receipt_for_message", not_preferred)
-    assert screening._resolve_write_once_conflict(store, owner, _envelope(owner, _item())) is None
-    # Another enrollment generation's receipt.
-    monkeypatch.setattr(
-        store,
-        "receipt_for_message",
-        lambda o, m: {**real(o, m), "creator_generation": owner.enrollment_generation + 1},
-    )
-    assert screening._resolve_write_once_conflict(store, owner, _envelope(owner, _item())) is None
-
-
-def test_the_pipeline_answers_a_write_once_refusal_with_the_committed_verdict(
-    rig, monkeypatch  # noqa: F811 — imported fixture
-) -> None:
-    """The real commit path: a re-draw whose receipt differs is refused, then resolved."""
+    """Real ``screen_message``, no store patch: allow at epoch 1, the epoch moves
+    with the substance unchanged, a re-draw answers reject, ``finish_screening``
+    refuses ``write_once_conflict``, and the committed allow stands."""
 
     config_dir, store, owner = rig
     assert _screen(config_dir, owner, Runner(DELIVER)).disposition == "deliver"
+    assert _bump_epoch_only(store, owner) > 1
+    redraw = Runner(PRYING)
+    out = _screen(config_dir, owner, redraw)
+    assert redraw.calls == 1  # a real re-draw reached the commit door
+    assert out.disposition == "deliver" and out.receipt.verdict == "allow"
 
-    def refuse(*_a, **_k):
-        raise StoreRefused("write_once_conflict", MESSAGE_ID)
 
-    # Every commit door refuses as the store does for an already-committed id.
-    monkeypatch.setattr(store.__class__, "finish_screening", refuse, raising=False)
-    monkeypatch.setattr(store.__class__, "adopt_cached_receipt", refuse, raising=False)
+def test_a_committed_reject_resolves_to_its_bounce(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    config_dir, store, owner = rig
+    assert _screen(config_dir, owner, Runner(PRYING)).disposition == "bounce"
+    _bump_epoch_only(store, owner)
     out = _screen(config_dir, owner, Runner(DELIVER))
-    assert out.disposition == "deliver" and out.hold_code is None
-    assert out.receipt is not None and out.receipt.verdict == "allow"
+    assert out.disposition == "bounce" and out.receipt.verdict == "reject"
+    assert out.receipt.categories == ("personal_info_request",)
+
+
+def test_a_tightened_policy_keeps_the_hold_instead_of_reviving_the_old_allow(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """Security review S-1 on #4249, through the real path: allow under policy A,
+    the owner publishes a tightened policy B, the re-screen rejects, and the
+    message stays held rather than going out on A's allow."""
+
+    config_dir, store, owner = rig
+    assert _screen(config_dir, owner, Runner(DELIVER)).disposition == "deliver"
+    _republish(store, owner, revision="rev-2-tightened")
+    tightened = Policy()
+    tightened.admission_revision = "rev-2-tightened"
+    redraw = Runner(PRYING)
+    out = _screen(config_dir, owner, redraw, policy=tightened)
+    assert redraw.calls == 1
+    assert out.disposition == "hold" and out.hold_code == "write_once_conflict"
+    assert (
+        store.write_once_resolution(
+            owner,
+            MESSAGE_ID,
+            body_sha256=_envelope(owner, _item()).body_sha256,
+            envelope_digest=_envelope(owner, _item()).envelope_digest,
+        )
+        is None
+    )
+
+
+def test_the_conflict_is_kept_when_the_committed_verdict_cannot_stand(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(DELIVER))
+
+    def resolve(item=None):
+        return screening._resolve_write_once_conflict(
+            store, owner, _envelope(owner, item or _item())
+        )
+
+    # Different bytes under the same id, and an id with no receipt at all.
+    assert resolve(_item(body="a different body entirely")) is None
+    assert resolve(_item(message_id="bcmsg_noreceipt")) is None
+    # Images or files: no grant to carry, so the hold stays here (S-3).
+    envelope = _envelope(owner, _item())
+    for field in ("attachments_hash", "files_hash"):
+        carrying = dataclasses.replace(envelope, **{field: "f" * 64})
+        assert screening._resolve_write_once_conflict(store, owner, carrying) is None
+    assert resolve() is not None  # the control: the untouched row resolves
+    # A non-preferred allow is provisional: re-screened, never revived.
+    _tamper(config_dir, "screener_preferred", 0)
+    assert resolve() is None
+    _tamper(config_dir, "screener_preferred", 1)
+    # Another enrollment generation's receipt, and damaged integers (S-2).
+    _tamper(config_dir, "creator_generation", owner.enrollment_generation + 1)
+    assert resolve() is None
+    _tamper(config_dir, "creator_generation", "not-a-number")
+    assert resolve() is None
+    _tamper(config_dir, "creator_generation", owner.enrollment_generation)
+    # An allow carrying categories, and a verdict outside the closed set (S-2).
+    _tamper(config_dir, "categories", '["personal_info_request"]')
+    assert resolve() is None
+    _tamper(config_dir, "categories", "[]")
+    _tamper(config_dir, "verdict", "hold")
+    assert resolve() is None
+
+
+def test_a_privacy_pass_without_a_final_allow_keeps_the_hold(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(DELIVER))
+    envelope = _envelope(owner, _item())
+    args = {"body_sha256": envelope.body_sha256, "envelope_digest": envelope.envelope_digest}
+    assert store.write_once_resolution(owner, MESSAGE_ID, **args) is not None
+    generation = store.advance_privacy_control(enabled=True)
+    current = store.current_screening_policy(owner)
+    store.publish_screening_policy(
+        owner,
+        version=SCREENING_VERSION_V2,
+        template_sha256=SCREENING_TEMPLATE_V2_SHA256,
+        default_model=SONNET[1],
+        revision="rev-1",
+        expected_epoch=int(current["epoch"]),
+        privacy_generation=generation,
+    )
+    # The pass is on and this message has no final privacy allow on record.
+    assert store.write_once_resolution(owner, MESSAGE_ID, **args) is None
 
 
 # --- (d) the screener's reason is persisted, capped, and never logged -------------

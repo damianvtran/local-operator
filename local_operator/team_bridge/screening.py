@@ -1220,45 +1220,42 @@ def _resolve_write_once_conflict(
 
     WHY (holds triage 2026-11-18, finding c; H5). The refusal means this
     message already has a committed receipt and a later pass produced a
-    different one (a re-draw under a moved template, another hop's answer).
-    Write-once says the FIRST verdict stands, yet the caller held the message
-    under ``write_once_conflict``: no retry could ever commit (the conflict is
-    permanent), no owner action existed (it is not a review code), and the
-    sender was told a human was reviewing it. One such hold was re-driven 368
-    times over eight days. Answering with the committed verdict is the only
-    resolution the write-once rule itself allows; it is the same authority the
-    connector's recorded-verdict recovery (``connector.wake``) already hands
-    off on, and every outcome still passes ``pre_handoff_gate`` and the ACK.
+    different one. Write-once says the FIRST verdict stands, yet the caller
+    held the message under ``write_once_conflict``: no retry could ever commit
+    (the conflict is permanent), no owner action existed (it is not a review
+    code), and the sender was told a human was reviewing it. One such hold was
+    re-driven 368 times over eight days.
 
-    WHAT IT TRUSTS, AND WHY THAT IS NO WIDER THAN TODAY. Only THIS message's
-    own receipt, from THIS enrollment generation, for these exact body bytes
-    and envelope (sender, type, request block) — a different body or envelope
-    keeps the hold. An ``allow`` must come from a PREFERRED screener: an unsent
-    fallback allow is provisional (``Store.retire_unsent_fallback_allow``) and
-    must be re-screened, never revived through this door. A ``reject`` answers
-    with the bounce it already was. The conflicting NEW verdict is discarded,
-    exactly as the store discarded it; nothing is written. Images and files
-    are never admitted on this path (text only), so a resolution can grant no
-    bytes the committed verdict did not provably judge.
+    WHAT IT TRUSTS (security review S-1/S-2 on #4249). The committed verdict
+    stands only while it is still evidence under the LIVE policy:
+    :meth:`Store.write_once_resolution` puts it through ``receipt_authority``
+    (template, serving model, admission revision, creator generation, closed
+    categories and verdict) with only the epoch waived, and requires these
+    exact body bytes and envelope, a PREFERRED screener for an ``allow``, and a
+    final privacy allow when the privacy pass is on. A receipt the owner has
+    since superseded keeps the hold: the current pass's answer is never
+    overridden by an older policy's. Every outcome still passes
+    ``pre_handoff_gate`` and the ACK. Nothing is written.
+
+    TEXT ONLY, ENFORCED HERE (S-3). An envelope carrying images or files keeps
+    its hold: a resolution has no image or file grant to carry, so delivering
+    it would only park the message again downstream (``attachments_unbound`` /
+    ``files_unbound`` in the connector) and re-spend a screen on every re-drive.
 
     ``None`` (keep holding) on anything else, including an unreadable row.
     """
 
-    existing = store.receipt_for_message(owner, envelope.message_id)
+    if envelope.attachments_hash is not None or envelope.files_hash is not None:
+        return None
+    existing = store.write_once_resolution(
+        owner,
+        envelope.message_id,
+        body_sha256=envelope.body_sha256,
+        envelope_digest=envelope.envelope_digest,
+    )
     if existing is None:
         return None
-    generation = existing.get("creator_generation")
-    if generation is None or int(generation) != int(owner.enrollment_generation):
-        return None
-    if existing.get("body_sha256") != envelope.body_sha256:
-        return None
-    if existing.get("envelope_digest") != envelope.envelope_digest:
-        return None
-    verdict = existing.get("verdict")
-    if verdict == "allow" and not existing.get("screener_preferred"):
-        return None
-    if verdict not in ("allow", "reject"):
-        return None
+    verdict = existing["verdict"]
     receipt = ScreeningReceipt(
         verdict=str(verdict),
         model=str(existing.get("model") or ""),
