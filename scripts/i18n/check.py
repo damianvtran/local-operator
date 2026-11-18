@@ -28,7 +28,8 @@ TWO JOBS, one cheap entry point (CI job `i18n`, and a unit test):
    lower snake_case and namespaced; per namespace, every locale's key set,
    argument tuples (name AND kind) and plural categories match ``en``; a
    plural branch must define ``other``; the en-only context sidecar may only
-   describe keys that exist.
+   describe keys that exist, using only the shared typed field set
+   (``catalogues.CONTEXT_FIELDS``) the ``read_public_copy`` reader accepts.
 
 The ratchet's counts are a SNAPSHOT, not a truth: they pin what "the tree as
 it stands" means so a diff's effect is measurable. ``--init`` is therefore
@@ -748,14 +749,26 @@ def _check_context_sidecar(
     for key, entry in sidecar.items():
         if key not in messages:
             problems.append(f"{locale}/{namespace}: context sidecar describes unknown key {key!r}")
-        if not isinstance(entry, dict):
-            problems.append(f"{locale}/{namespace}: context sidecar {key!r} must be an object")
+        # Authoring-time half of the shared schema (catalogues.CONTEXT_FIELDS):
+        # read_public_copy refuses a WHOLE sidecar with one bad entry, so an
+        # unknown or mistyped field must fail here, naming key and field,
+        # before it can make the file unreadable. Values are never echoed.
+        problem = catalogues.context_entry_problem(entry)
+        if problem is None:
             continue
-        max_cells = entry.get("maxCells")
-        if max_cells is not None and not isinstance(max_cells, int):
-            problems.append(
-                f"{locale}/{namespace}: context sidecar {key!r} maxCells must be an int"
-            )
+        kind, field = problem
+        if kind == "not-object":
+            detail = "must be an object"
+        elif kind == "unsupported-field":
+            detail = f"has unsupported field {field!r}"
+        elif field == "maxCells":
+            detail = "maxCells must be an int"
+        else:
+            detail = f"field {field!r} has an invalid type"
+        problems.append(
+            # i18n: ignore checker diagnostic (operator tooling output, English-only)
+            f"{locale}/{namespace}: context sidecar {key!r} {detail}"
+        )
 
 
 # ---------------------------------------------------------------------------
