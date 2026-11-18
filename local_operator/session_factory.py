@@ -1111,13 +1111,17 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
             # would then publish text the person never saw (review R2-1, a
             # 3,689-character post). Print the whole card, line by line, BEFORE
             # the question instead. Each line is still sanitised (escapes, Cf
-            # characters), but its limit is its own length — nothing is cut.
-            # The post is bounded by ``community.limits.MAX_TEXT_CHARS`` and
+            # characters), but it is never cut: the limit is ``sys.maxsize``,
+            # not the line's raw length, because sanitising EXPANDS each
+            # invisible Cf character into a visible ``\\u200d``-style escape
+            # (1 char -> 6) before the limit applies, so a raw-length limit
+            # silently dropped the tail of any line with a zero-width joiner,
+            # direction mark or soft hyphen (review R3-1). Totals stay bounded:
+            # the post is capped by ``community.limits.MAX_TEXT_CHARS`` and
             # the terminal's scrollback is the pager; the question itself stays
             # short so it is the last thing on screen.
             card_lines = [
-                sanitize_prompt_line(line, limit=max(len(line), 1))
-                for line in description.splitlines()
+                sanitize_prompt_line(line, limit=sys.maxsize) for line in description.splitlines()
             ]
             try:
                 await asyncio.to_thread(print, "\n".join(card_lines), flush=True)

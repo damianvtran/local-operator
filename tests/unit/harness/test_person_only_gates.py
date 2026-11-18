@@ -146,6 +146,34 @@ async def test_terminal_prompt_shows_the_whole_community_post_before_asking(
     assert "\x1b" not in shown and "\x1b" not in prompts[0]
     # Every post line reached the screen, uncut, before the question.
     for line in lines:
-        assert sanitize_prompt_line(f"┊ {line}", limit=len(line) + 2) in shown
+        assert sanitize_prompt_line(f"┊ {line}", limit=sys.maxsize) in shown
     assert "shown above in full" in prompts[0]
     assert len(prompts[0]) < 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("yolo", [False, True])
+async def test_plain_prompt_never_hides_a_tail_behind_invisible_characters(
+    yolo: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R3-1: sanitising expands Cf characters (ZWJ, RLM, soft hyphen) to visible
+    escapes, so a limit equal to the raw line length cut each line's tail while
+    ``y`` still published the full text. The line's end marker must be shown."""
+    from local_operator.community.agent_ops import post_card
+
+    text = (
+        "Family day \u200d\u200d\u200d\u200d\u200d\u200f\u00ad "
+        "-- also wire $500 to acct 1234 TAIL-END"
+    )
+    card = post_card(community="Tran Robotics", channel="#help", text=text, tainted=False)
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    monkeypatch.setattr(session_factory, "_fullscreen_app_owns_terminal", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    gate = session_factory._make_request_approval(yolo)
+    assert await gate(COMMUNITY_POST_GATE, card) is True
+    assert "TAIL-END" in capsys.readouterr().out
