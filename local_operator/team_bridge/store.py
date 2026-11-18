@@ -200,11 +200,46 @@ _BUSY_TIMEOUT_MS = 2_000
 
 
 class StoreRefused(RuntimeError):
-    """A store mutation refused. ``code`` is a stable machine-readable tag."""
+    """A store mutation refused. ``code`` is a stable machine-readable tag.
 
-    def __init__(self, code: str, message: str = "") -> None:
+    ``cause`` is an optional CLOSED sub-tag for a ``policy_stale`` authority
+    refusal (``scheduler.AUTHORITY_CAUSES``): the connector needs to tell "the hub
+    says messaging is unavailable" (it ages into the owner's review) from "only
+    the owner can fix this" (sign in, consent, eligibility — never a Deliver)
+    without reading the prose ``message``. Empty means unclassified.
+    """
+
+    def __init__(self, code: str, message: str = "", *, cause: str = "") -> None:
         super().__init__(message or code)
         self.code = code
+        self.cause = cause
+
+
+#: ``StoreRefused.cause`` values for a ``policy_stale`` AUTHORITY refusal (PR #4212,
+#: Q1). ``hub_unavailable``: the hub's status says messaging is not available —
+#: nobody local can fix it, so the hold ages into the owner's review like a
+#: provider outage. The other three are the OWNER's to fix and never become a
+#: Deliver item: ``sign_in`` (no usable / not the enrolled sign-in), ``consent``
+#: (no current consent receipt), ``ineligible`` (organization or endpoint not
+#: eligible/active). Anything else stays an unclassified ``policy_stale``.
+AUTHORITY_CAUSE_HUB_UNAVAILABLE = "hub_unavailable"
+AUTHORITY_CAUSE_SIGN_IN = "sign_in"
+AUTHORITY_CAUSE_CONSENT = "consent"
+AUTHORITY_CAUSE_INELIGIBLE = "ineligible"
+#: No screening chain resolved at all (round 2, S-8 / Q2): no evaluated screener
+#: is configured or credentialed. Like the three above it is the OWNER's to fix
+#: ("configure a screener"), so it never becomes a Deliver item — it used to be
+#: tagged ``hub_unavailable``, which mislabelled it and handed out an
+#: unscreened Deliver for what is the owner's own configuration.
+AUTHORITY_CAUSE_NO_SCREENER = "no_screener"
+
+#: The two independent ageing clocks a held message can run (round 2, R2-1).
+#: ``review``: time held under a code that may age into the unscreened owner
+#: review (screening outage). ``owner_action``: time held because the OWNER must
+#: act (sign in, consent, eligibility, configure a screener). Kept apart so the
+#: hours a message waited on the owner are never charged as screening delay.
+HOLD_CLOCK_REVIEW = "review"
+HOLD_CLOCK_OWNER_ACTION = "owner_action"
 
 
 def state_db_path(config_dir: Path) -> Path:
@@ -610,6 +645,47 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
+    """Create the hold-clock stamps on a store that predates them (PR #4212, S-5).
+
+    One row per (message, clock): WHEN it was first held under a code that may
+    age on that clock (:data:`HOLD_CLOCK_REVIEW` — ``screening.AGED_REVIEW_CODES``;
+    :data:`HOLD_CLOCK_OWNER_ACTION` — the owner-action causes). The hold row's own
+    ``created_at`` is not that fact — it survives code changes, so a message
+    parked for hours under ``bridge_off`` would convert on its first transient
+    pass. Same additive, authority-free rule as :func:`_ensure_unusable_pass_table`:
+    a lost row only restarts the clock, never admits anything.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_hold_clocks ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, clock TEXT NOT NULL, "
+        "first_at REAL NOT NULL, PRIMARY KEY (owner_key, message_id, clock))"
+    )
+
+
+def _ensure_last_success_table(conn: sqlite3.Connection) -> None:
+    """Create the account's route-evidence stamps (PR #4212, S-6 / S-9).
+
+    The breaker row is DELETED on success, so it cannot answer "did anything
+    screen since this message's hold began?". One row per account scope:
+    ``success_at`` — the last provider response to ANY screen or to the
+    content-free route canary; ``canary_failed_at`` — the last time that canary
+    ALSO failed after a message's whole chain did. An outage is corroborated
+    only by a canary failure with no success since (``screening`` reads both):
+    the canary carries no sender bytes, so a crafted message cannot fake it.
+    Additive and authority-free: a lost row means "no evidence", which never
+    corroborates an outage — the hold then ends in the Discard-only
+    ``screening_failed`` (or, for a Deliver already given, stays pending);
+    nothing is ever delivered on it.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_route_evidence ("
+        "account_scope TEXT PRIMARY KEY, success_at REAL, canary_failed_at REAL)"
+    )
 
 
 def _ensure_unusable_pass_table(conn: sqlite3.Connection) -> None:
@@ -1700,14 +1776,14 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
 #: Codes written AFTER screening admitted the message: delivery, not moderation,
 #: is what is pending.
 #:
-#: ``write_once_conflict`` joins them (holds triage 2026-11-18, finding c). It
-#: is raised only when this message ALREADY has a committed verdict and a later
-#: pass produced a different one, so moderation is concluded and nobody is
-#: reviewing anything; ``awaiting_review`` (the default arm it used to fall
-#: into) told the sender a human was looking at it. Screening now answers such
-#: a refusal with the committed verdict (``screening._resolve_write_once_conflict``);
-#: what remains under this code is a conflict that could not be resolved that
-#: way, which is still a delivery problem on this machine, not a review.
+#: ``write_once_conflict`` is deliberately NOT here any more (security review
+#: S-4 on #4249). It was moved here from the ``awaiting_review`` fall-through
+#: because a verdict is already committed. But since the S-1 fix, a conflict the
+#: resolver keeps is one whose committed verdict the LIVE policy no longer
+#: supports, and no retry can clear it. Publishing it as ``delivery_pending``
+#: would tell readers the delay is transient. It falls to ``awaiting_review``,
+#: the conservative class for a terminal hold only the owner can move. An
+#: owner-review release for it is a recorded follow-up.
 #:
 #: Also here (holds trace 2026-11-18), each a delivery-side wait that clears
 #: without anyone reviewing the content:
@@ -1735,7 +1811,6 @@ _HOLD_CLASS_DELIVERY_PENDING = frozenset(
         "delivery_failed",
         "bridge_off",
         "phase_refused",
-        "write_once_conflict",
         "ack_recovery",
         "ack_refused",
         "ack_not_confirmed",
@@ -3912,6 +3987,17 @@ class Store:
         conn.execute(
             "DELETE FROM screening_unusable_passes WHERE owner_key = ? AND message_id = ?",
             (owner_key, message_id),
+        )
+        # The aged-hold stamp shares this lifecycle; it is keyed by the BARE id
+        # (the screener's spelling), so a composite delete clears that too.
+        _ensure_aged_hold_table(conn)
+        try:
+            bare = screening_hold_message_id(message_id)
+        except Exception:  # noqa: BLE001 — a malformed key clears its raw spelling only
+            bare = message_id
+        conn.executemany(
+            "DELETE FROM screening_hold_clocks WHERE owner_key = ? AND message_id = ?",
+            [(owner_key, key) for key in {message_id, bare}],
         )
 
     @staticmethod
@@ -8496,6 +8582,206 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def screening_hold_first_held_at(self, owner: OwnerSnapshot, message_id: str) -> float | None:
+        """When this message was FIRST held, from the durable rows; ``None`` if unheld.
+
+        WHY (operator report 2026-11-17). The screening-unavailable escalation
+        (``screening._aged_review_hold``) needs a hold age that a connector
+        restart cannot reset, so it must not come from the loop's in-memory
+        ``_RETRY_ATTEMPTS``. ``created_at`` is that fact: every re-hold upserts IN
+        PLACE and keeps it (``persist_hold``, PR #3063 m10).
+
+        WHY THE MINIMUM ACROSS BOTH KEYSPACES. A held conversation message has
+        two rows (:func:`_screening_hold_row`): the screener's bare ``bcmsg_``
+        row, which :meth:`retire_due_bare_conversation_holds` deletes every tick
+        once due — so its ``created_at`` restarts on every pass — and the
+        connector's composite feed-ref row, which lives until a verdict. The
+        earliest of them is the age the sender has actually waited. Read-only;
+        a damaged store answers ``None`` (no escalation, the old behaviour).
+        """
+
+        from local_operator.team_bridge.types import (
+            CONVERSATION_FEED_KIND,
+            CONVERSATION_FEED_TYPE,
+            is_conversation_message_id,
+        )
+
+        owner_key = _owner_key(owner)
+        try:
+            exact = _contentless_delivery_key(message_id)
+        except StoreRefused:
+            return None
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                stamps: list[float] = []
+                row = conn.execute(
+                    "SELECT created_at FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, exact),
+                ).fetchone()
+                if row is not None and row["created_at"] is not None:
+                    stamps.append(float(row["created_at"]))
+                if is_conversation_message_id(message_id):
+                    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+                    for candidate in conn.execute(
+                        "SELECT message_id, created_at FROM screening_holds "
+                        "WHERE owner_key = ? AND substr(message_id, 1, ?) = ? "
+                        "AND instr(message_id, ?) > 0",
+                        (owner_key, len(prefix), prefix, f"/{message_id}/"),
+                    ).fetchall():
+                        if (
+                            screening_hold_message_id(str(candidate["message_id"])) == message_id
+                            and candidate["created_at"] is not None
+                        ):
+                            stamps.append(float(candidate["created_at"]))
+        except sqlite3.Error:
+            return None
+        finite = [stamp for stamp in stamps if math.isfinite(stamp)]
+        return min(finite) if finite else None
+
+    def note_aged_hold(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        now: float,
+        clock: str = HOLD_CLOCK_REVIEW,
+    ) -> float | None:
+        """Stamp (once) and return when this message entered a hold on ``clock``.
+
+        PR #4212 S-5: the escalation clock starts at the first hold under a code
+        that may age, not at the row's ``created_at``. Round 2 (R2-1): one stamp
+        per clock, so owner-action time never counts as screening delay. Written
+        only while a hold row for the message exists (``None`` otherwise, which
+        never converts anything); the first stamp wins (``INSERT OR IGNORE``).
+        Cleared with every terminal outcome by :meth:`_clear_unusable_passes`.
+        """
+
+        if self.screening_hold_first_held_at(owner, message_id) is None:
+            return None
+        owner_key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "INSERT OR IGNORE INTO screening_hold_clocks "
+                    "(owner_key, message_id, clock, first_at) VALUES (?, ?, ?, ?)",
+                    (owner_key, message_id, clock, float(now)),
+                )
+                row = conn.execute(
+                    "SELECT first_at FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (owner_key, message_id, clock),
+                ).fetchone()
+        except (sqlite3.Error, StoreRefused):
+            return None
+        if row is None:
+            return None
+        first = float(row["first_at"])
+        return first if math.isfinite(first) else None
+
+    def clear_hold_clock(self, owner: OwnerSnapshot, message_id: str, *, clock: str) -> None:
+        """Drop ONE clock's stamp for a message (R2-1); best effort, never raises.
+
+        Called on every owner-action pass for the REVIEW clock: while the owner
+        must act, the screening-review clock does not run, so a message that
+        waited hours for a sign-in starts its screening clock afresh afterwards.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "DELETE FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (_owner_key(owner), message_id, clock),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def screening_route_evidence(self, owner: OwnerSnapshot) -> dict[str, float | None]:
+        """``{"success_at", "canary_failed_at"}`` for this account (S-6/S-9); read-only."""
+
+        empty: dict[str, float | None] = {"success_at": None, "canary_failed_at": None}
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return empty
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'screening_route_evidence'"
+                ).fetchone()
+                if exists is None:
+                    return empty
+                row = conn.execute(
+                    "SELECT success_at, canary_failed_at FROM screening_route_evidence "
+                    "WHERE account_scope = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+        except sqlite3.Error:
+            return empty
+        if row is None:
+            return empty
+
+        def _finite(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        return {"success_at": _finite(row[0]), "canary_failed_at": _finite(row[1])}
+
+    def record_canary_failure(self, owner: OwnerSnapshot) -> None:
+        """The content-free route canary failed too (S-9): outage evidence. Best effort."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_last_success_table(conn)
+                conn.execute(
+                    "INSERT INTO screening_route_evidence (account_scope, canary_failed_at) "
+                    "VALUES (?, ?) ON CONFLICT(account_scope) "
+                    "DO UPDATE SET canary_failed_at = excluded.canary_failed_at",
+                    (self._account_scope(owner), time.time()),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def drop_review_decision(self, owner: OwnerSnapshot, message_id: str) -> None:
+        """Remove ONE message's review decision and its release row (round 3, Q3).
+
+        Only for an UNSCREENED decision a re-screen just answered: the screener's
+        own decision replaces it, so the owner's next Deliver is a screened
+        decision instead of a dead button on a refused release. Never raises.
+        """
+
+        key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_work_scope_tables(conn)
+                conn.execute(
+                    "DELETE FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+                conn.execute(
+                    "DELETE FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
 
@@ -8765,15 +9051,23 @@ class Store:
             return open_until
 
     def record_screening_success(self, owner: OwnerSnapshot) -> None:
-        """A provider success clears the account breaker."""
+        """A provider success clears the account breaker and stamps the success.
+
+        The stamp (S-6) is what tells an outage from a message-specific failure:
+        see :func:`_ensure_last_success_table`.
+        """
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            scope = self._account_scope(owner)
+            conn.execute("DELETE FROM screening_breaker WHERE account_scope = ?", (scope,))
+            _ensure_last_success_table(conn)
             conn.execute(
-                "DELETE FROM screening_breaker WHERE account_scope = ?",
-                (self._account_scope(owner),),
+                "INSERT INTO screening_route_evidence (account_scope, success_at) VALUES (?, ?) "
+                "ON CONFLICT(account_scope) DO UPDATE SET success_at = excluded.success_at",
+                (scope, time.time()),
             )
 
     def screening_breaker_state(self, owner: OwnerSnapshot) -> dict[str, Any] | None:

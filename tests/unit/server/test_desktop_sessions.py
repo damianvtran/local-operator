@@ -9682,6 +9682,103 @@ async def test_a_decline_receipt_never_reports_consent_bearing(answers_api) -> N
     assert remote.calls == [("a-1", None, True, False)]
 
 
+class _StampingAskRemote(_ProvingAskRemote):
+    """A facade whose client returns the runtime's STAMPED surface (PR #4132).
+
+    ``AttachClient.ask_respond``/``ask_revise`` return a ``StampedReceipt``: the
+    sentence plus the label the runtime recorded. ``bearing`` is the cap probe,
+    set to DISAGREE with the stamp in the convergence cells, so a route still
+    reading the probe fails them.
+    """
+
+    def __init__(self, *, surface: str | None, bearing: bool) -> None:
+        super().__init__(bearing=bearing)
+        self.surface = surface
+
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: Any = None,
+        *,
+        decline: bool = False,
+        revise: bool = False,
+        images: Any = None,
+    ) -> str:
+        from local_operator.asks.surfaces import StampedReceipt
+
+        detail = await super().ask_respond(ask_id, answers, decline=decline, revise=revise)
+        return StampedReceipt(detail, self.surface)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "bearing", "expected", "revise"),
+    [
+        # (a) F2: the app-signature attestation stamps ``desktop`` with no cap.
+        ("desktop", False, True, False),
+        ("desktop", False, True, True),
+        # (b) Part C: a cap answer to an INHERITED ask is stamped ``unverified``.
+        ("unverified", True, False, False),
+        ("unverified", True, False, True),
+        # (c) a cap answer to an ask minted here still stamps ``desktop``.
+        ("desktop", True, True, False),
+        # A relayed hop is never consent, whatever the probe says.
+        ("remote", True, False, False),
+    ],
+)
+async def test_consent_bearing_is_the_runtime_stamp_not_the_cap_probe(
+    answers_api, surface: str, bearing: bool, expected: bool, revise: bool
+) -> None:
+    """#4127 convergence: the receipt reports what the runtime RECORDED.
+
+    After F2 the cap probe and the stamp disagree both ways, and the guard reads
+    only the stamp, so a receipt derived from the probe would tell the operator
+    an attested answer cannot authorise a delete (it can) and an inherited-ask
+    cap answer can (it cannot). The probe is not even consulted once a stamp is
+    present.
+    """
+    client, app = answers_api
+    remote = _StampingAskRemote(surface=surface, bearing=bearing)
+    remote.detail = "revised" if revise else "answered"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "revise": revise},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": remote.detail, "consent_bearing": expected}
+    assert remote.probes == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_answer_stamped_desktop_is_still_not_consent_bearing(answers_api) -> None:
+    """Negative control: the peer short-circuit stays ahead of the stamp."""
+    client, app = answers_api
+    remote = _StampingAskRemote(surface="desktop", bearing=True)
+    _install_ask_remote(app, remote, remote_row=SimpleNamespace(device_id="dev-peer"))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["consent_bearing"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_attested_decline_still_reports_no_consent(answers_api) -> None:
+    """PR #4127 QA Q2 survives the convergence: a decline reads null even when
+    the runtime stamped it ``desktop``."""
+    client, app = answers_api
+    remote = _StampingAskRemote(surface="desktop", bearing=True)
+    remote.detail = "declined"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "declined", "consent_bearing": None}
+
+
 @pytest.mark.asyncio
 async def test_the_ask_consent_bearing_feature_is_published_desktop_only(answers_api) -> None:
     from local_operator.server.features import DESKTOP_ONLY_FEATURES

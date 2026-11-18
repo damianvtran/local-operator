@@ -4173,6 +4173,11 @@ class AttachedSession:
     def ask_consent_bearing(self) -> bool:
         """Whether the last ask answer this facade sent carried operator proof.
 
+        FALLBACK ONLY since PR #4132: the route reports the runtime's stamped
+        surface (``StampedReceipt.surface``) and reads this probe only when the
+        runtime predates that ack field, i.e. has no app-signature attestation
+        and no minted-here rule, so the cap decision IS its stamp.
+
         Read by the desktop answer route right after :meth:`ask_respond` (so a
         cold bind that this process just engaged counts), and reported to the
         card as ``consent_bearing``. The value is captured at SEND time from the

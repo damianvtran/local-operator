@@ -813,9 +813,18 @@ async def test_a_preflight_to_a_static_route_grants_a_foreign_origin_nothing(
 
 @pytest.mark.asyncio
 async def test_other_routes_keep_the_historical_cors_echo(test_app_client):
-    """Scope guard: only /v1/static changed; ``/health`` is read cross-origin by the app."""
-    response = await test_app_client.get("/v1/agents", headers={"Origin": "http://localhost:3000"})
-    assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+    """Scope guard: ``/health`` and the legacy reads keep the echo the app reads them with.
+
+    That echo is now ``"null"`` on ``/health`` only (the packaged renderer's
+    ``file://`` pre-attach read) on a standalone daemon; a legacy read with
+    ``"null"`` and a foreign page's origin get no grant there.
+    """
+    response = await test_app_client.get("/health", headers={"Origin": "null"})
+    assert response.headers.get("access-control-allow-origin") == "null"
+    opaque = await test_app_client.get("/v1/agents", headers={"Origin": "null"})
+    assert "access-control-allow-origin" not in opaque.headers
+    foreign = await test_app_client.get("/v1/agents", headers={"Origin": "http://localhost:3000"})
+    assert "access-control-allow-origin" not in foreign.headers
 
 
 @pytest.mark.asyncio
@@ -868,7 +877,7 @@ async def test_every_route_refuses_a_rebinding_host(test_app_client):
 
 @pytest.mark.asyncio
 async def test_patching_an_agent_cwd_does_not_widen_what_is_served(test_app_client, tmp_path):
-    """R2, the reviewer's exact repro: PATCH a cwd with a foreign Origin, then GET.
+    """R2, the reviewer's repro: PATCH a cwd, then GET.
 
     Before: GET 403 -> PATCH 200 (ACAO echoed, cwd persisted) -> GET 200.
     """
@@ -911,10 +920,17 @@ async def test_patching_an_agent_cwd_does_not_widen_what_is_served(test_app_clie
     params = {"path": str(private / "a.png")}
     assert (await test_app_client.get("/v1/static/images", params=params)).status_code == 403
 
-    patched = await test_app_client.patch(
+    # A foreign page can no longer make this write at all on a standalone daemon...
+    refused = await test_app_client.patch(
         f"/v1/agents/{agent.id}",
         json={"current_working_directory": str(tmp_path)},
         headers={"Origin": "https://attacker.example"},
+    )
+    assert refused.status_code == 403
+    # ...but a native client still can, and the widened cwd must not matter.
+    patched = await test_app_client.patch(
+        f"/v1/agents/{agent.id}",
+        json={"current_working_directory": str(tmp_path)},
     )
     assert patched.status_code == 200  # the route stays ungated: the point is it no longer matters
     assert app.state.agent_registry.get_agent(agent.id).current_working_directory == str(tmp_path)

@@ -221,6 +221,14 @@ ROLES: tuple[str, ...] = ("read", "drive", "admin")
 #: makes the grant deliberate.
 INVITE_ROLES: tuple[str, ...] = ("read", "drive", "admin")
 
+#: The one non-default invite credential-offer policy (``--no-credential-offers``).
+#: A string rather than a bool so the token/record field can grow a value later
+#: without a second field, and so an UNKNOWN value is refusable by name instead
+#: of coercing to truthy/falsy.
+CREDENTIAL_OFFERS_NONE = "none"
+#: Every policy this build understands; ``""`` is the default (legacy) ceremony.
+CREDENTIAL_OFFER_POLICIES: tuple[str, ...] = ("", CREDENTIAL_OFFERS_NONE)
+
 
 def capabilities_for_role(role: str) -> frozenset[str]:
     """The capability set a role grants, or :class:`KeyError` for an unknown role.
@@ -471,6 +479,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "net_rename",
     "net_rm",
     "net_invite",
+    # The policy-carrying mint (``lop network invite --no-credential-offers``).
+    # A SEPARATE NAME rather than a field on ``net_invite`` so a relay that
+    # predates the policy refuses it unserved instead of ignoring the field and
+    # minting a credential-offering invite (PR #4233 review round 1, S2).
+    "net_invite_policy",
     "net_join",
     "net_member_rm",
     "net_peer_ls",
@@ -1819,6 +1832,22 @@ class InviteRecord:
     #: :data:`local_operator.network.invite.PAIRING_MAX_FORGIVEN_FAILURES`, and it lives
     #: on the record so a relay restart cannot hand the same token a fresh budget.
     attempts: int = 0
+    #: The invite-level credential-offer policy (``lop network invite
+    #: --no-credential-offers``): ``""`` is the default ceremony (the owner builds
+    #: and sends its share list), :data:`CREDENTIAL_OFFERS_NONE` means the owner
+    #: never enumerates its store for this pairing, sends an explicit EMPTY list,
+    #: and grants nothing. THIS ROW IS THE AUTHORITY, not the token: the token's
+    #: tag is keyed by the network secret it carries, so any holder can re-tag an
+    #: edited payload, and the owner therefore enforces what it SAVED at mint. A
+    #: row written before the field existed loads as ``""`` — legacy invites keep
+    #: their old meaning. Independent of ``role``: a read invite still offers by
+    #: default, and read-only rigs are told (docs) to pass the flag.
+    credential_offers: str = ""
+
+    @property
+    def offers_credentials(self) -> bool:
+        """Whether this invite's ceremony may build, send or grant credentials."""
+        return self.credential_offers != CREDENTIAL_OFFERS_NONE
 
     @property
     def expires_at(self) -> float:

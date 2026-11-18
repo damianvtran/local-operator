@@ -126,14 +126,12 @@ _SCREENING_UNAVAILABLE = {
     "privacy_pending",
     "privacy_control_unavailable",
 }
-# ``write_once_conflict``: a verdict is already committed, so nothing is under
-# review (holds triage 2026-11-18, finding c). The rest: delivery-side waits
+# Delivery-side waits
 # after a verdict, or owner-setup waits like ``bridge_off`` (holds trace).
 _DELIVERY_PENDING = {
     "delivery_failed",
     "bridge_off",
     "phase_refused",
-    "write_once_conflict",
     "ack_recovery",
     "ack_refused",
     "ack_not_confirmed",
@@ -152,7 +150,17 @@ _DELIVERY_PENDING = {
 # owner-review and work-scope holds), or the hold is terminal and fail-closed so
 # only the owner can move it — claiming a transient delay would be false.
 _AWAITING_REVIEW = {
-    # a person decides
+    # a person decides (``screening_failed`` is a Discard-only review code)
+    "screening_failed",
+    # owner-action holds: only the owner can restore the authority the hub
+    # withdrew (``OWNER_ACTION_HOLD_CODES``, published awaiting_review on main)
+    "sign_in_required",
+    "consent_required",
+    "owner_ineligible",
+    "screener_required",
+    # a write-once conflict the resolver keeps: the committed verdict no
+    # longer stands under the live policy, so no retry clears it (S-4)
+    "write_once_conflict",
     "model_hold",
     "model_refused",
     "reply_truncated",

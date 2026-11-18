@@ -13077,9 +13077,20 @@ class RelayServer:
             # joiner's bounded drain plus its tolerant first-result read absorb a
             # slow frame rather than failing the ceremony.
             from local_operator.network.credentials import offers as offers_mod
+            from local_operator.network.invite import check_offer_policy
 
+            # THE SAVED INVITE IS THE POLICY (``--no-credential-offers``), read
+            # before anything is enumerated: a token holder can re-tag an edited
+            # payload, so the joiner's claim is only COMPARED (a mismatch is a
+            # terminal, consumed refusal through the handler below) and never
+            # decides what this device builds or grants.
+            stored_invite = record.invite(invite_id)
+            if stored_invite is None:
+                raise PairingRefusal("invite_invalid", "that invite was never minted here")
+            check_offer_policy(stored_invite, handshake.join_block)
+            offers_allowed = stored_invite.offers_credentials
             send_offer, offer_items, offer_detail = _pair_offer_for(
-                handshake, self.root, record.network_id
+                handshake, self.root, record.network_id, offers_allowed=offers_allowed
             )
             if send_offer:
                 sock.sendall(
@@ -13213,6 +13224,7 @@ class RelayServer:
                     record,
                     joiner_id=joiner_id,
                     decision=decision,
+                    offers_allowed=offers_allowed,
                     offer_items=offer_items,
                     owner_name=self.identity.name or record.self_device_id,
                     root=self.root,
@@ -13968,6 +13980,7 @@ class RelayServer:
             "net_show": lambda frame: self.network_detail(str(frame.get("network") or "")),
             "net_peer_ls": lambda frame: self.peer_status(),
             "net_invite": self._ctl_invite,
+            "net_invite_policy": self._ctl_invite_policy,
             "net_member_rm": self._ctl_member_rm,
             "net_trust_local": self._ctl_trust,
             "net_panic_local": self._ctl_panic,
@@ -14015,6 +14028,32 @@ class RelayServer:
             for record in store.list_networks(self.root)
         ]
 
+    def _ctl_invite_policy(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """``net_invite_policy``: mint an invite that carries a NON-DEFAULT offer policy.
+
+        WHY A SEPARATE OP (review round 1, S2/R1-2): ``net_invite`` cannot carry
+        a restrictive policy safely across versions. A relay built before the
+        policy existed ignores the unknown ``credential_offers`` field, mints an
+        ordinary credential-offering invite and writes its token file BEFORE the
+        CLI can read the reply and notice — leaving exactly the invite the
+        operator asked not to create. An op name such a relay does not serve is
+        refused by ``control_dispatch`` with nothing changed, so the version
+        check happens before any mutation instead of after it.
+
+        The policy is REQUIRED here and must be one this build understands and
+        not the default; a default mint keeps using ``net_invite`` unchanged.
+        """
+        from local_operator.network.types import CREDENTIAL_OFFER_POLICIES
+
+        policy = frame.get("credential_offers")
+        if not isinstance(policy, str) or not policy or policy not in CREDENTIAL_OFFER_POLICIES:
+            raise MeshRefusal(
+                "bad_offer_policy",
+                f"net_invite_policy needs a known non-default credential-offer policy; "
+                f"got {policy!r}. Nothing was minted.",
+            )
+        return self._ctl_invite(frame)
+
     def _ctl_invite(self, frame: dict[str, Any]) -> dict[str, Any]:
         # ``_require_network`` resolves a name to an id and answers the refusal;
         # the record it returns is not the one this WRITES. Minting appends an
@@ -14044,6 +14083,7 @@ class RelayServer:
                 or self.advertised_endpoints()
                 or None,
                 device_id=str(frame.get("device_id") or ""),
+                credential_offers=str(frame.get("credential_offers") or ""),
             )
             # MINTING IS WHERE THE LIST GROWS, so it is where the dead entries go:
             # the same locked write that adds a row drops the ones past their own
@@ -14067,6 +14107,7 @@ class RelayServer:
                     "role": minted.record.role,
                     "expires_at": minted.record.expires_at,
                     "bound_device": minted.record.device_id,
+                    "credential_offers": minted.record.credential_offers,
                 },
             )
         )
@@ -14081,6 +14122,7 @@ class RelayServer:
             "hosts": list(minted.record.hosts),
             "network_id": record.network_id,
             "network_name": record.name,
+            "credential_offers": minted.record.credential_offers,
         }
 
     def _ctl_member_rm(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -16265,7 +16307,7 @@ def build_stamp() -> dict[str, str]:
 
 
 def _pair_offer_for(
-    handshake: Handshake, root: Path, network_id: str
+    handshake: Handshake, root: Path, network_id: str, *, offers_allowed: bool = True
 ) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
     """``(send, items, audit detail)`` for the pair ceremony's share list.
 
@@ -16295,6 +16337,15 @@ def _pair_offer_for(
 
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
         return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
+    if not offers_allowed:
+        # ``--no-credential-offers``: the store is NEVER enumerated (``build_items``
+        # reads MCP and provider credentials), and the joiner still gets an
+        # EXPLICIT sealed empty list rather than no frame — an absent frame reads
+        # as an old owner ("did not offer") and costs the joiner its drain wait,
+        # while an empty list is the true statement and parses on every build that
+        # knows the frame. ``offer_policy`` lets the audit say why it was empty.
+        empty = offers_mod.digest_of([])
+        return True, [], {"offer_sent": 0, "offer_digest": empty, "offer_policy": "none"}
     try:
         items = offers_mod.build_items(root, network_id=network_id)
     except offers_mod.OfferEnumerationError:
@@ -16316,6 +16367,7 @@ def _grant_pair_shares(
     owner_name: str,
     root: Path,
     audit: Any,
+    offers_allowed: bool = True,
 ) -> tuple[list[str], list[str]]:
     """Admission's credential grants: ``(granted, reduced)``. Caller holds the lock.
 
@@ -16335,6 +16387,15 @@ def _grant_pair_shares(
     with an audit row and left out of the receipt, which names the remedy. Labels
     and emails never enter the audit (§9: masked is display-level).
     """
+    if not offers_allowed:
+        # INDEPENDENT OF THE OFFER (defence in depth for ``--no-credential-offers``):
+        # the offer was empty, so ``_ctl_pair_confirm`` already refuses any named
+        # share — but a decision written another way must still place nothing and,
+        # above all, never add the broker capability. Nothing was offered, so
+        # nothing is ``reduced`` either.
+        if decision.shares:
+            _audit_pair_grant(audit, record, joiner_id, "", holders=0, skipped="invite_policy_none")
+        return [], []
     from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers as offers_mod
     from local_operator.network.credentials import placement as placement_mod
@@ -16475,8 +16536,20 @@ def _invite_role(record: NetworkRecord, invite_id: str) -> str:
 
 
 def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
+    """The capabilities admission grants for ``invite_id``: the saved row's, under its policy.
+
+    The policy filter repeats the one ``invite.mint`` applies (review round 1,
+    S1/R1-1): a ``--no-credential-offers`` row must never admit
+    ``broker_credential`` — the ``admin`` role carries it — so admission
+    enforces that from the row's own policy rather than trusting how the row's
+    capability list was written.
+    """
+    from local_operator.network.invite import capabilities_under_policy
+
     invite = record.invite(invite_id)
-    return set(invite.capabilities) if invite else set()
+    if invite is None:
+        return set()
+    return capabilities_under_policy(invite.capabilities, invite.credential_offers)
 
 
 #: The refusals that are about TIME or about a motion a human can correct, and which

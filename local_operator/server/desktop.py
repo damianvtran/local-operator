@@ -541,6 +541,69 @@ def _require_allowed_origin(request: Request, allowed: frozenset[str]) -> None:
         )
 
 
+def request_own_origins(request: Request) -> frozenset[str]:
+    """The origins a page served BY THIS DAEMON would present, from its ``Host``.
+
+    Trustworthy only because ``host_admission`` (``server/app.py``) has already
+    refused every ``Host`` that is not an IP literal, ``localhost`` or the bound
+    name, so a DNS-rebinding page -- the one actor that could otherwise be
+    "same-origin" with a name of its choosing -- never gets this far. Both
+    schemes are listed: the daemon itself speaks plain HTTP, but an operator's
+    own TLS port-forward in front of it presents ``https://`` with the same
+    authority, and that page is exactly as local as the plain one. Lower-cased
+    because browsers serialise the Origin host lower-case while a hand-typed
+    ``Host`` need not be.
+    """
+    host = (request.headers.get("host") or "").strip().lower()
+    if not host:
+        return frozenset()
+    return frozenset({f"http://{host}", f"https://{host}"})
+
+
+def standalone_write_admitted(request: Request, allowed: frozenset[str]) -> bool:
+    """Whether a state-changing request may reach a STANDALONE daemon's handler.
+
+    THREAT MODEL. A standalone ``local-operator serve`` (no desktop bearer, no
+    accepted claim) authenticates nobody: every native client on the machine --
+    curl, scripts, the CLI -- is trusted the way a user's own shell is. What
+    that posture must NOT trust is a web page. Any site the user visits can fire
+    a "simple" cross-origin request (``text/plain`` POST, a form submit) at a
+    predictable loopback port without a preflight, and Chrome's Local Network
+    Access prompt, once granted to a site, lets it go further; sandboxed iframes
+    and ``data:`` documents present the opaque origin ``"null"``. Those requests
+    reach the handler even when the CORS layer later refuses to let the page
+    READ the reply, so withholding CORS alone does not stop the write.
+
+    The browser marks its own requests in ways page script cannot undo:
+    ``Origin`` on every non-GET request, and ``Sec-Fetch-Site`` (forbidden
+    header, see :func:`_is_non_browser_caller`). So this admits:
+
+    * a native caller -- neither header present;
+    * a page this daemon itself served (Origin equals the request's own,
+      already Host-admitted, authority) -- e.g. ``/docs``;
+    * an origin the operator named in :data:`ORIGINS_ENV` -- the escape hatch
+      for a dev renderer or an extension talking to a standalone daemon;
+    * an Origin-less browser request the browser itself labels
+      ``same-origin`` or ``none`` (user-initiated navigation).
+
+    and refuses everything else, ``"null"`` included (``_parse_origins`` never
+    lets ``"null"`` into ``allowed``, so it cannot be allowlisted by accident).
+
+    OUT OF SCOPE: other OS accounts on the same host. They are native callers
+    and indistinguishable from the owner's curl at this layer; that is a known
+    limitation of the standalone posture (docs/API_FILESYSTEM_BOUNDARIES.md
+    "Trust model", SECURITY.md), not something an Origin rule can close.
+    """
+    origin = request.headers.get("origin")
+    if origin is None:
+        if _is_non_browser_caller(request):
+            return True
+        return request.headers.get("sec-fetch-site", "").strip().lower() in {"same-origin", "none"}
+    if origin in allowed:
+        return True
+    return origin.strip().lower() in request_own_origins(request)
+
+
 def require_desktop(request: Request) -> None:
     """Open the desktop plane to this request, or raise the refusal.
 

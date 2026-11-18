@@ -920,18 +920,23 @@ def fold(
                 # for the honest case.
                 if isinstance(by, Mapping):
                     surfaces = [str(by.get("surface") or "")]
+                    proofs = {str(by.get("proof") or "")}
                     for event in events:
                         if (
                             event.get("kind") == EVENT_REVISED
                             and str(event.get("ask_id")) == ask_id
                         ):
                             rev_by = event.get("by")
-                            surfaces.append(
-                                str(rev_by.get("surface") or "")
-                                if isinstance(rev_by, Mapping)
-                                else ""
-                            )
-                    record["answered_by"] = {**dict(by), "surface": weakest_surface(*surfaces)}
+                            rev_map = rev_by if isinstance(rev_by, Mapping) else {}
+                            surfaces.append(str(rev_map.get("surface") or ""))
+                            proofs.add(str(rev_map.get("proof") or ""))
+                    merged = {**dict(by), "surface": weakest_surface(*surfaces)}
+                    # ``proof`` (F2, R1-m3) follows the same laundering rule:
+                    # it is kept only when EVERY write carried the same one,
+                    # so an unproven revision never sits under a signature.
+                    if len(proofs) != 1 or "" in proofs:
+                        merged.pop("proof", None)
+                    record["answered_by"] = merged
         records.append(record)
     return records
 

@@ -33,7 +33,9 @@ lop serve                 # http://127.0.0.1:1111, docs at /docs
 The legacy HTTP API has no authentication and defaults to loopback. Keep it
 away from untrusted clients; an explicit `--host` can widen the bind only when
 you provide access controls in front. This is separate from the authenticated
-mobile relay. See
+mobile relay. Browser pages may change it only from the server's own origin or
+an origin listed in `LOCAL_OPERATOR_DESKTOP_ORIGINS`; native clients such as
+curl and scripts are unaffected. See
 [API filesystem boundaries](../../docs/API_FILESYSTEM_BOUNDARIES.md) for
 fresh-ID profile imports, workspace-confined edit reads and live editor
 buffers.

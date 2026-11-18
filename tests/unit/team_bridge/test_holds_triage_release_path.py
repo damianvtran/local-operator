@@ -8,8 +8,8 @@ screening hold to the person who can release it:
   ``work_scope_hold`` ineligible (H12: no Deliver/Discard);
 * (b) review holds were left out of the long-hold rollup although no holds list
   ships, so nine of them sat for up to 18 days with no alert of any kind;
-* (c) ``write_once_conflict`` was published to the sender as ``awaiting_review``
-  and could never clear (H5: re-driven 368 times with a committed allow);
+* (c) ``write_once_conflict`` could never clear (H5: re-driven 368 times with a
+  committed allow);
 * (d) the screener's REASON was never persisted, so calibration was inference.
 """
 
@@ -177,8 +177,11 @@ def test_a_noticed_work_scope_hold_still_leaves_the_rollup(
 # --- (c) write_once_conflict: honest class, resolved by the committed verdict -----
 
 
-def test_write_once_conflict_is_not_published_as_awaiting_review() -> None:
-    assert delivery_hold_class("write_once_conflict") == "delivery_pending"
+def test_a_kept_write_once_conflict_is_not_published_as_transient() -> None:
+    # Security review S-4 on #4249: a conflict the resolver KEEPS has a
+    # committed verdict the live policy no longer supports, so it is terminal.
+    # ``delivery_pending`` would tell readers it is a transient delay.
+    assert delivery_hold_class("write_once_conflict") == "awaiting_review"
 
 
 def _envelope(owner, item):
