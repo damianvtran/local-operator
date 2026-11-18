@@ -198,7 +198,11 @@ def _install_wire(
                         },
                     )
                     if response.status_code >= 400:
-                        raise ProviderError(response.status_code, VENDOR_CANARY)
+                        # The vendor's own words only when a test scripts them
+                        # (``{"error": {"message": ...}}``); otherwise the canary.
+                        error = response.json().get("error")
+                        text = error.get("message") if isinstance(error, dict) else None
+                        raise ProviderError(response.status_code, text or VENDOR_CANARY)
                     after = (postwire or {}).get(mid)
                     if after is not None:
                         # AFTER the send: in-band provider text, status-less.
@@ -239,7 +243,7 @@ def _install_wire(
     assert real_transport is not None
 
 
-def _cycle(tmp_path: Path, owner: Any, message_id: str = "bmsg_1") -> Any:
+def _cycle(tmp_path: Path, owner: Any, message_id: str = "bmsg_1", body: str | None = None) -> Any:
     raw = _consent_status(owner, {"version": "bridge_consent_v1", "text": "v1 consent"})
     verified = _scheduler.VerifiedStatus(_scheduler._VERIFIED_TOKEN, raw)
 
@@ -250,7 +254,7 @@ def _cycle(tmp_path: Path, owner: Any, message_id: str = "bmsg_1") -> Any:
         return await _scheduler.run_screening_cycle(
             config_dir=tmp_path,
             owner=owner,
-            items=[_item(message_id=message_id)],
+            items=[_item(message_id=message_id) if body is None else _item(body, message_id)],
             auth_store=None,
             status_fetcher=fetch,
         )
@@ -463,8 +467,9 @@ def test_a_single_evaluated_model_is_a_single_attempt(tmp_path, monkeypatch) -> 
     assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
     breaker = store.screening_breaker_state(owner)
     assert breaker is not None and int(breaker["failures"]) == 1
-    # One hop, so the class is the hop's own — not chain_exhausted.
-    assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("provider_5xx",)]
+    # One hop whose ROUTE failed is still the whole chain failing (R2-2, PR #4212):
+    # the breaker must record route evidence, or its holds would never age.
+    assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("chain_exhausted",)]
 
 
 def test_failure_class_is_derived_from_type_never_prose() -> None:
@@ -1635,3 +1640,108 @@ def test_every_aliased_flavour_folds_only_onto_an_identical_credential(
     # The pair this guards: with both Anthropic variables set it is NOT one credential.
     assert "anthropic-key" not in folded_when_all_set
     assert folded_when_all_set == set(flavours) - {"anthropic-key"}
+
+
+def _aged_config(tmp_path: Path, *, chain: list[str]) -> None:
+    """``_config`` plus the owner-review exit at a 30-minute threshold."""
+
+    _config(tmp_path, chain=chain)
+    with (tmp_path / "config.yml").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "  team_bridge:\n    enabled: true\n    review_held: true\n"
+            "    screening_hold_review_after_minutes: 30\n"
+        )
+
+
+@pytest.mark.parametrize("benign_traffic", [True, False], ids=["poisoned", "outage"])
+def test_a_message_specific_5xx_never_ages_while_others_screen(
+    tmp_path, monkeypatch, benign_traffic
+) -> None:
+    """PR #4212 round 2, S-6 (the security probe's vector).
+
+    One message draws a bare 500 on EVERY hop — each 5xx fails over, so the walk
+    exhausts the chain exactly as an outage does — while ordinary traffic on the
+    same route screens fine. That failure is the message's own: it must never
+    become an unscreened Deliver item (stays held, logged once). The control is
+    a real outage (no message screens): it still converts, as before.
+    """
+
+    now = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    store, owner = _setup(tmp_path)
+    _aged_config(tmp_path, chain=["deepseek/deepseek-flash"])
+    down = {"gpt-5.4": ("fail", 500), "deepseek-flash": ("fail", 500)}
+    up = {"gpt-5.4": ("reply", DELIVER), "deepseek-flash": ("reply", DELIVER)}
+    wire = _Wire(dict(down))
+    _install_wire(monkeypatch, wire)
+    t0 = now[0]
+    for step, minutes in enumerate((0, 16, 31, 180)):
+        now[0] = t0 + minutes * 60
+        wire.script = dict(down)
+        result = _cycle(tmp_path, owner, message_id="bmsg_poison")
+        if minutes < 30 or benign_traffic:
+            assert result.hold_code != "model_hold", (minutes, result.hold_code)
+            assert store.work_scope_decision(owner, "bmsg_poison") is None
+        else:
+            assert result.hold_code == "model_hold"
+            decision = store.work_scope_decision(owner, "bmsg_poison")
+            assert decision is not None and decision["screener_model"] == ""
+        assert result.disposition == "hold"
+        if benign_traffic:
+            now[0] += 60
+            wire.script = dict(up)
+            benign = _cycle(
+                tmp_path, owner, message_id=f"bmsg_benign{step}", body=f"ordinary note {step}"
+            )
+            assert benign.disposition == "deliver"
+    # Both hops were really tried for the poisoned message (failover kept).
+    assert {"gpt-5.4", "deepseek-flash"} <= {s["model"] for s in wire.sends}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Request blocked by content filter",
+        "SAFETY: prohibited content",
+        "Content Exists Risk",
+        "data_inspection_failed",
+        "Your request violates our usage policy",
+        "flagged as harmful",
+    ],
+)
+def test_a_content_verdict_5xx_stops_the_walk(tmp_path, monkeypatch, text) -> None:
+    """S-7: provider content-verdict wordings on a 5xx stop at hop 0, never fail over."""
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _Wire({"gpt-5.4": ("fail", 500), "deepseek-flash": ("reply", DELIVER)})
+    original = wire.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = original(request)
+        if response.status_code == 500:
+            return httpx.Response(500, json={"error": {"message": text}})
+        return response
+
+    wire.handler = handler  # type: ignore[method-assign]
+    _install_wire(monkeypatch, wire)
+    result = _cycle(tmp_path, owner)
+    assert result.disposition == "hold"
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
+
+
+def test_a_verdict_past_the_message_cap_still_stops_the_walk() -> None:
+    """S-7: the marker is matched on the FULL body, before the 500-char cap, so an
+    upstream echoing the input ahead of its verdict cannot push it out of view."""
+
+    from local_operator.providers import clients
+    from local_operator.team_bridge import model_boundary
+
+    body = {"error": {"message": "x" * 2000 + " Output flagged by moderation"}}
+    response = httpx.Response(500, json=body, request=httpx.Request("POST", "https://h/v1"))
+    with pytest.raises(Exception) as raised:
+        clients.raise_for_status(response)
+    failure = raised.value
+    assert "flagged" not in str(getattr(failure, "message", ""))  # the cap cut it off
+    assert failure.content_verdict_seen is True
+    assert model_boundary._sender_cannot_cause(failure) is False

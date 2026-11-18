@@ -1156,13 +1156,32 @@ def raise_for_status(response: httpx.Response) -> None:
     # bad-request 404 stays a request defect.
     if _openrouter_no_route(status, message):
         retryable = True
-    raise ProviderError(
+    error = ProviderError(
         status,
         message,
         retryable=retryable,
         retry_after_ms=_parse_retry_after(response, payload),
         auth_error=auth_error,
     )
+    # Marker match on the FULL body, before ``message`` was capped (PR #4212
+    # round 2, S-7): an upstream that echoes the input ahead of its verdict must
+    # not push the verdict past the cap. Bounded read; a typed bool only.
+    error.content_verdict_seen = _names_content_verdict(response)
+    raise error
+
+
+#: Upper bound on the error body scanned for content-verdict wording.
+_CONTENT_VERDICT_SCAN_CHARS = 256 * 1024
+
+
+def _names_content_verdict(response: httpx.Response) -> bool:
+    from local_operator.providers.failover import CONTENT_VERDICT_MARKERS
+
+    try:
+        text = response.text[:_CONTENT_VERDICT_SCAN_CHARS].lower()
+    except Exception:  # noqa: BLE001 — an unreadable body is simply not evidence
+        return False
+    return any(marker in text for marker in CONTENT_VERDICT_MARKERS)
 
 
 def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:

@@ -958,17 +958,19 @@ async def run_screening_cycle(
         # not count a model call that never happened.
         if batch:
             return None
-        # PR #4212: this hold never reaches the pipeline, so it ages here — into
-        # the same unscreened owner review a provider outage gets, bound to the
-        # store's current policy epoch (none yet ⇒ it stays as it was).
+        # PR #4212: this hold never reaches the pipeline, so it ages here. No
+        # screener configured is the OWNER's to fix (round 2, S-8 / Q2): past the
+        # threshold it becomes ``screener_required`` — never a Deliver item, and
+        # it needs no policy epoch, so a machine that never published one exits
+        # too.
         from local_operator.team_bridge.screening import aged_authority_hold
-        from local_operator.team_bridge.store import AUTHORITY_CAUSE_HUB_UNAVAILABLE
+        from local_operator.team_bridge.store import AUTHORITY_CAUSE_NO_SCREENER
 
         return aged_authority_hold(
             owner,
             items[0],
             config_dir=config_dir,
-            cause=AUTHORITY_CAUSE_HUB_UNAVAILABLE,
+            cause=AUTHORITY_CAUSE_NO_SCREENER,
             held_code=SCREENING_MODEL_UNAVAILABLE,
         )
     selection = chain[0]

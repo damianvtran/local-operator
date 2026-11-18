@@ -734,17 +734,12 @@ _NOT_FOUND_STATUSES = frozenset({404})
 #: Content-verdict wording a provider can relay on an otherwise-advancing
 #: gateway status — Alibaba's "Output data may contain inappropriate content"
 #: arrives as a relayed 502 (``failover.py`` ``is_input_refusal`` docstring).
-#: Matched case-insensitively on the RAW message. ONE-WAY by construction: it
-#: can only turn an advance into a hold, never the reverse, so a provider
-#: phrasing an outage this way costs a held message, not a weaker screener.
-_CONTENT_VERDICT_MARKERS = (
-    "inappropriate content",
-    "moderation",
-    "flagged",
-    "content_policy",
-    "content policy",
-    "guardrail",
-)
+#: Matched case-insensitively on the RAW message, and also read from the
+#: client's uncapped stamp (``content_verdict_seen``). ONE-WAY by construction:
+#: it can only turn an advance into a hold, never the reverse. The list itself is
+#: ``failover.CONTENT_VERDICT_MARKERS``, shared so the two cannot drift (S-7);
+#: imported lazily in :func:`_sender_cannot_cause`, like ``ProviderError``, so
+#: this module stays cheap to import.
 
 #: Typed flag the guard sets on a scrubbed wire failure. ``True`` only when
 #: the RAW failure was on the allow-list below; the walk reads nothing else.
@@ -807,7 +802,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
             return True  # credential resolution / OAuth refresh failed
     except ImportError:  # pragma: no cover
         pass
-    from local_operator.providers.failover import ProviderError
+    from local_operator.providers.failover import CONTENT_VERDICT_MARKERS, ProviderError
 
     if not isinstance(failure, ProviderError):
         return False
@@ -820,8 +815,10 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
             return True
         if status not in _ADVANCE_STATUSES and status not in _NOT_FOUND_STATUSES:
             return False
+        if getattr(failure, "content_verdict_seen", False) is True:
+            return False  # matched on the full body, past the message cap (S-7)
         raw = str(getattr(failure, "message", "") or "").lower()
-        return not any(marker in raw for marker in _CONTENT_VERDICT_MARKERS)
+        return not any(marker in raw for marker in CONTENT_VERDICT_MARKERS)
     # No status: a status-less ``kind`` is classified from PROVIDER TEXT (an
     # in-band error chunk on a 200 stream), which a crafted body can steer — so
     # it never advances on its own. Only typed provenance does: a failure OUR
@@ -932,6 +929,11 @@ def screening_failure_class(failure: BaseException) -> str:
         if kind == "timeout":
             return "timeout"
         if kind == "transient" or (isinstance(status, int) and 500 <= status <= 599):
+            # R2-2: a single-hop chain whose only hop failed on the ROUTE is a
+            # whole-chain failure too (``tb_chain_exhausted`` is set only when
+            # more than one hop ran), so its breaker must record route evidence.
+            if getattr(failure, "tb_cascade_exhausted", False):
+                return "chain_exhausted"
             return "provider_5xx"
     return "other"
 

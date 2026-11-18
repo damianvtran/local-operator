@@ -2253,25 +2253,167 @@ def test_a_hub_that_says_unavailable_ages_into_owner_review(review_rig, monkeypa
     assert _handled_code(_run(owner, config_dir)) == "model_hold"
     assert all(not rows for rows in transcripts.values()) and server.admits == []
 
-    # The owner says Deliver; the release is consumed once the hub serves again
-    # (the pipeline that reads it runs only then), with no model call.
-    from local_operator.team_bridge import screening as screening_mod
-    from tests.unit.team_bridge.test_hold_release import Policy, _decide
+    # The owner says Deliver. Once the hub serves again the message is screened
+    # ONCE before that Deliver is honoured (round 2, S-8): the hub's word that it
+    # was unavailable must not let it skip a screener that now answers.
+    from tests.unit.team_bridge.test_hold_release import SONNET, _decide
 
     _decide(config_dir, owner, "deliver", body=BODY)
-    never = _BareRunner(raises=AssertionError("a released message must not be re-screened"))
+    screener = _hub_back(monkeypatch, _BareRunner(model=SONNET[1]))
+    clock.now += 2 * 3600
+    _run(owner, config_dir)
+    assert screener.calls == 1
+    assert len([row for rows in transcripts.values() for row in rows]) == 1
+    assert {row["verdict"] for row in server.admits} == {"allow"}
+    receipt = store.receipt_for_message(owner, MESSAGE_ID)
+    assert receipt is not None and receipt["model"] == SONNET[1], "the screener's allow"
+
+
+def _hub_back(monkeypatch, runner: "_BareRunner") -> "_BareRunner":
+    """The hub serves again: the connector's screen runs the real pipeline."""
+
+    from local_operator.team_bridge import screening as screening_mod
+    from tests.unit.team_bridge.test_hold_release import Policy
 
     async def hub_back(o: Any, item: Any, *, config_dir: Path, **_kw: Any) -> Any:
         return await screening_mod.screen_message_async(
-            o, item, config_dir=config_dir, policy=Policy(), runner=never
+            o, item, config_dir=config_dir, policy=Policy(), runner=runner
         )
 
     monkeypatch.setattr(conversation_mod, "screen_item", hub_back)
+    return runner
+
+
+def _unscreened_review_then_deliver(review_rig, monkeypatch):
+    """A hub-unavailable hold aged into the unscreened review, then Delivered."""
+
+    from local_operator.team_bridge.store import AUTHORITY_CAUSE_HUB_UNAVAILABLE
+    from tests.unit.team_bridge.test_hold_release import _decide
+
+    config_dir, store, owner = review_rig
+    server, transcripts, clock = _authority_rig(
+        monkeypatch, config_dir, owner, AUTHORITY_CAUSE_HUB_UNAVAILABLE
+    )
+    _run(owner, config_dir)
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    _decide(config_dir, owner, "deliver", body=BODY)
+    return config_dir, store, owner, server, transcripts, clock
+
+
+def test_an_unscreened_deliver_yields_to_a_screener_hold(review_rig, monkeypatch) -> None:
+    """S-8: the re-screen ANSWERED hold, so the owner's Deliver is refused and the
+    message stays held — and later passes do not re-screen or deliver it."""
+
+    from tests.unit.team_bridge.test_hold_release import DOUBT, SONNET
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    screener = _hub_back(monkeypatch, _BareRunner(model=SONNET[1], reply=DOUBT))
+    for _ in range(3):
+        clock.now += 2 * 3600
+        _run(owner, config_dir)
+    assert screener.calls == 1
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert release is not None and release["outcome"] == "refused:rescreened_hold"
+
+
+def test_an_unscreened_deliver_stands_when_screening_is_still_down(review_rig, monkeypatch) -> None:
+    """S-8: the re-screen is route-failed again and nothing else screened, so the
+    person's Deliver is honoured on that same pass (owner-release provenance)."""
+
+    from local_operator.team_bridge import hold_release as hr
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    screener = _hub_back(monkeypatch, _BareRunner(raises=_RouteDown("every hop down")))
     clock.now += 2 * 3600
     _run(owner, config_dir)
-    assert never.calls == 0
+    assert screener.calls == 1
     assert len([row for rows in transcripts.values() for row in rows]) == 1
-    assert {row["verdict"] for row in server.admits} == {"allow"}
+    receipt = store.receipt_for_message(owner, MESSAGE_ID)
+    assert receipt is not None and receipt["template_sha256"] == hr.OWNER_RELEASE_SHA256
+
+
+def test_an_unscreened_deliver_is_refused_when_others_screen_fine(review_rig, monkeypatch) -> None:
+    """S-6 x S-8: the re-screen is route-failed, but the account screened other
+    messages since the item was created — the failure is this message's own,
+    so the Deliver is refused rather than honoured."""
+
+    config_dir, store, owner, server, transcripts, clock = _unscreened_review_then_deliver(
+        review_rig, monkeypatch
+    )
+    clock.now += 60
+    store.record_screening_success(owner)  # another message screened fine
+    screener = _hub_back(monkeypatch, _BareRunner(raises=_RouteDown("every hop down")))
+    clock.now += 2 * 3600
+    _run(owner, config_dir)
+    assert screener.calls == 1, "screened once more, route-failed again"
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert release is not None and release["outcome"] == "refused:rescreened_hold"
+
+
+def test_owner_action_time_never_counts_toward_the_screening_review(
+    review_rig, monkeypatch
+) -> None:
+    """R2-1: three hours waiting for the owner to sign in are not screening
+    delay. After sign-in, the first transient pass must not convert; the review
+    clock starts on that pass and converts a full threshold later."""
+
+    config_dir, store, owner = review_rig
+    _server, transcripts, clock = _authority_rig(monkeypatch, config_dir, owner, "sign_in")
+    assert _handled_code(_run(owner, config_dir)) == "policy_stale"
+    t0 = clock.now
+    clock.now = t0 + 3 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "sign_in_required"
+
+    # Signed in again: the real pipeline runs, with a transient identity hold.
+    _hub_back(monkeypatch, _BareRunner(model=None))
+    clock.now += 2 * 3600  # due again
+    signed_in = clock.now
+    assert _handled_code(_run(owner, config_dir)) == "model_identity_unknown"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    clock.now = signed_in + _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert all(not rows for rows in transcripts.values())
+
+
+def test_no_screener_configured_is_the_owners_action_not_a_deliver(review_rig, monkeypatch) -> None:
+    """S-8 / Q2: no screening chain at all is the owner's configuration. Past the
+    threshold it is ``screener_required`` — never a Deliver item, and it needs no
+    policy epoch, so a machine that never published one exits too."""
+
+    from local_operator.team_bridge import screening as screening_mod
+    from local_operator.team_bridge.store import (
+        AUTHORITY_CAUSE_NO_SCREENER,
+        delivery_hold_class,
+    )
+
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("model_identity_unknown", monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    assert store.current_screening_policy(owner) is None  # never published
+
+    async def no_chain(o: Any, item: Any, *, config_dir: Path, **_kw: Any) -> Any:
+        return screening_mod.aged_authority_hold(
+            o,
+            item,
+            config_dir=config_dir,
+            cause=AUTHORITY_CAUSE_NO_SCREENER,
+            held_code="screening_model_unavailable",
+        )
+
+    monkeypatch.setattr(conversation_mod, "screen_item", no_chain)
+    assert _handled_code(_run(owner, config_dir)) == "screening_model_unavailable"
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "screener_required"
+    assert delivery_hold_class("screener_required") == "awaiting_review"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    assert all(not rows for rows in transcripts.values()) and server.admits == []
 
 
 @pytest.mark.parametrize(

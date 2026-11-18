@@ -226,6 +226,20 @@ AUTHORITY_CAUSE_HUB_UNAVAILABLE = "hub_unavailable"
 AUTHORITY_CAUSE_SIGN_IN = "sign_in"
 AUTHORITY_CAUSE_CONSENT = "consent"
 AUTHORITY_CAUSE_INELIGIBLE = "ineligible"
+#: No screening chain resolved at all (round 2, S-8 / Q2): no evaluated screener
+#: is configured or credentialed. Like the three above it is the OWNER's to fix
+#: ("configure a screener"), so it never becomes a Deliver item — it used to be
+#: tagged ``hub_unavailable``, which mislabelled it and handed out an
+#: unscreened Deliver for what is the owner's own configuration.
+AUTHORITY_CAUSE_NO_SCREENER = "no_screener"
+
+#: The two independent ageing clocks a held message can run (round 2, R2-1).
+#: ``review``: time held under a code that may age into the unscreened owner
+#: review (screening outage). ``owner_action``: time held because the OWNER must
+#: act (sign in, consent, eligibility, configure a screener). Kept apart so the
+#: hours a message waited on the owner are never charged as screening delay.
+HOLD_CLOCK_REVIEW = "review"
+HOLD_CLOCK_OWNER_ACTION = "owner_action"
 
 
 def state_db_path(config_dir: Path) -> Path:
@@ -634,10 +648,11 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
-    """Create the aged-hold stamp on a store that predates it (PR #4212, S-5).
+    """Create the hold-clock stamps on a store that predates them (PR #4212, S-5).
 
-    One row per message: WHEN it was first held under a code that may age into
-    the owner's review (``screening.AGED_REVIEW_CODES``). The hold row's own
+    One row per (message, clock): WHEN it was first held under a code that may
+    age on that clock (:data:`HOLD_CLOCK_REVIEW` — ``screening.AGED_REVIEW_CODES``;
+    :data:`HOLD_CLOCK_OWNER_ACTION` — the owner-action causes). The hold row's own
     ``created_at`` is not that fact — it survives code changes, so a message
     parked for hours under ``bridge_off`` would convert on its first transient
     pass. Same additive, authority-free rule as :func:`_ensure_unusable_pass_table`:
@@ -645,9 +660,26 @@ def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
     """
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS screening_aged_holds ("
-        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, first_at REAL NOT NULL, "
-        "PRIMARY KEY (owner_key, message_id))"
+        "CREATE TABLE IF NOT EXISTS screening_hold_clocks ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, clock TEXT NOT NULL, "
+        "first_at REAL NOT NULL, PRIMARY KEY (owner_key, message_id, clock))"
+    )
+
+
+def _ensure_last_success_table(conn: sqlite3.Connection) -> None:
+    """Create the account's last-successful-screen stamp (PR #4212 round 2, S-6).
+
+    The breaker row is DELETED on success, so it cannot answer "did anything
+    screen since this message's hold began?". This one row per account scope
+    can: an ageing hold whose route failure is contradicted by a later success
+    on the same account was message-specific, not an outage. Additive and
+    authority-free: a lost row only makes a hold look like an outage again,
+    which still converts to the owner's review, never to a delivery.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_last_success ("
+        "account_scope TEXT PRIMARY KEY, at REAL NOT NULL)"
     )
 
 
@@ -3794,7 +3826,7 @@ class Store:
         except Exception:  # noqa: BLE001 — a malformed key clears its raw spelling only
             bare = message_id
         conn.executemany(
-            "DELETE FROM screening_aged_holds WHERE owner_key = ? AND message_id = ?",
+            "DELETE FROM screening_hold_clocks WHERE owner_key = ? AND message_id = ?",
             [(owner_key, key) for key in {message_id, bare}],
         )
 
@@ -8318,14 +8350,22 @@ class Store:
         finite = [stamp for stamp in stamps if math.isfinite(stamp)]
         return min(finite) if finite else None
 
-    def note_aged_hold(self, owner: OwnerSnapshot, message_id: str, *, now: float) -> float | None:
-        """Stamp (once) and return when this message entered an AGEING hold.
+    def note_aged_hold(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        now: float,
+        clock: str = HOLD_CLOCK_REVIEW,
+    ) -> float | None:
+        """Stamp (once) and return when this message entered a hold on ``clock``.
 
         PR #4212 S-5: the escalation clock starts at the first hold under a code
-        that may age into review, not at the row's ``created_at``. Written only
-        while a hold row for the message exists (``None`` otherwise, which never
-        converts anything); the first stamp wins (``INSERT OR IGNORE``). Cleared
-        with every terminal outcome by :meth:`_clear_unusable_passes`.
+        that may age, not at the row's ``created_at``. Round 2 (R2-1): one stamp
+        per clock, so owner-action time never counts as screening delay. Written
+        only while a hold row for the message exists (``None`` otherwise, which
+        never converts anything); the first stamp wins (``INSERT OR IGNORE``).
+        Cleared with every terminal outcome by :meth:`_clear_unusable_passes`.
         """
 
         if self.screening_hold_first_held_at(owner, message_id) is None:
@@ -8338,14 +8378,14 @@ class Store:
                 self._require_live(conn, owner)
                 _ensure_aged_hold_table(conn)
                 conn.execute(
-                    "INSERT OR IGNORE INTO screening_aged_holds (owner_key, message_id, first_at) "
-                    "VALUES (?, ?, ?)",
-                    (owner_key, message_id, float(now)),
+                    "INSERT OR IGNORE INTO screening_hold_clocks "
+                    "(owner_key, message_id, clock, first_at) VALUES (?, ?, ?, ?)",
+                    (owner_key, message_id, clock, float(now)),
                 )
                 row = conn.execute(
-                    "SELECT first_at FROM screening_aged_holds "
-                    "WHERE owner_key = ? AND message_id = ?",
-                    (owner_key, message_id),
+                    "SELECT first_at FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (owner_key, message_id, clock),
                 ).fetchone()
         except (sqlite3.Error, StoreRefused):
             return None
@@ -8353,6 +8393,52 @@ class Store:
             return None
         first = float(row["first_at"])
         return first if math.isfinite(first) else None
+
+    def clear_hold_clock(self, owner: OwnerSnapshot, message_id: str, *, clock: str) -> None:
+        """Drop ONE clock's stamp for a message (R2-1); best effort, never raises.
+
+        Called on every owner-action pass for the REVIEW clock: while the owner
+        must act, the screening-review clock does not run, so a message that
+        waited hours for a sign-in starts its screening clock afresh afterwards.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                _ensure_aged_hold_table(conn)
+                conn.execute(
+                    "DELETE FROM screening_hold_clocks "
+                    "WHERE owner_key = ? AND message_id = ? AND clock = ?",
+                    (_owner_key(owner), message_id, clock),
+                )
+        except (sqlite3.Error, StoreRefused):
+            return
+
+    def last_screening_success_at(self, owner: OwnerSnapshot) -> float | None:
+        """When this account last got a provider response to a screen (S-6); read-only."""
+
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return None
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'screening_last_success'"
+                ).fetchone()
+                if exists is None:
+                    return None
+                row = conn.execute(
+                    "SELECT at FROM screening_last_success WHERE account_scope = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        at = float(row[0])
+        return at if math.isfinite(at) else None
 
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
@@ -8623,15 +8709,23 @@ class Store:
             return open_until
 
     def record_screening_success(self, owner: OwnerSnapshot) -> None:
-        """A provider success clears the account breaker."""
+        """A provider success clears the account breaker and stamps the success.
+
+        The stamp (S-6) is what tells an outage from a message-specific failure:
+        see :func:`_ensure_last_success_table`.
+        """
 
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            scope = self._account_scope(owner)
+            conn.execute("DELETE FROM screening_breaker WHERE account_scope = ?", (scope,))
+            _ensure_last_success_table(conn)
             conn.execute(
-                "DELETE FROM screening_breaker WHERE account_scope = ?",
-                (self._account_scope(owner),),
+                "INSERT INTO screening_last_success (account_scope, at) VALUES (?, ?) "
+                "ON CONFLICT(account_scope) DO UPDATE SET at = excluded.at",
+                (scope, time.time()),
             )
 
     def screening_breaker_state(self, owner: OwnerSnapshot) -> dict[str, Any] | None:

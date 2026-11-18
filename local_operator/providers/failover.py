@@ -1275,6 +1275,34 @@ _INPUT_REFUSAL_MARKERS = (
     "data_inspection_failed",
 )
 
+#: Wording by which providers report a CONTENT verdict (moderation, safety or
+#: guardrail refusal), on any status. ONE list for every consumer so they cannot
+#: drift (PR #4212 round 2, S-7): Team Bridge screening reads it to keep a
+#: content-verdict 5xx from failing over to another screener
+#: (``model_boundary._sender_cannot_cause``), and the HTTP client stamps
+#: ``ProviderError.content_verdict_seen`` from it on the FULL error body, before
+#: the message is capped at ``clients.MAX_ERROR_MESSAGE_CHARS``. Lower-case
+#: substrings. Deliberately broad: its consumers use it ONE-WAY (a match only
+#: ever turns an advance into a hold), so an outage phrased like a verdict costs
+#: a held message, never a weaker screener.
+CONTENT_VERDICT_MARKERS = (
+    *_INPUT_REFUSAL_MARKERS,
+    "inappropriate content",
+    "moderation",
+    "flagged",
+    "content_policy",
+    "content policy",
+    "content_filter",
+    "content filter",
+    "content exists risk",  # DeepSeek
+    "guardrail",
+    "safety",  # Gemini SAFETY
+    "prohibited",  # Gemini PROHIBITED_CONTENT
+    "violat",
+    "harm",
+    "blocked",
+)
+
 #: The INPUT-side sentences the guardrail publishes, matched as whole PHRASES
 #: rather than as loose words. The loose form ("inappropriate content" and
 #: "input" anywhere in the message) over-matched: "Output data may contain

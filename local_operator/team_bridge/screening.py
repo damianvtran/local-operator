@@ -43,6 +43,7 @@ physical requests (auth re-resolve + fast resend); the wire decorator
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import inspect
 import json
@@ -50,6 +51,7 @@ import logging
 import re
 import secrets
 import weakref as _weakref
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -174,6 +176,7 @@ HOLD_CODES = (
     "sign_in_required",
     "consent_required",
     "owner_ineligible",
+    "screener_required",
     # A8 privacy pass (``privacy_pass.PRIVACY_HOLD_CODES``; default OFF). Local
     # holds only: never a transport reject, never answer-cached, never a B4b
     # release. ``privacy_proof_missing`` is the native fence refusing an allow
@@ -1534,9 +1537,165 @@ class _Prepared:
     #: Neither is a display label.
     sender_account_id: str = ""
     conversation_id: str = ""
+    #: Round 2, S-8: the person pressed Deliver on an UNSCREENED review item and
+    #: screening is reachable again, so this pass screens it once first; its
+    #: outcome is settled by :func:`_settle_rescreen`, not by the review exit.
+    rescreen_release: bool = False
+
+
+#: Set (per synchronous prepare) by :func:`_consume_owner_release` when a Deliver
+#: on an unscreened item must be screened once before it is honoured (S-8).
+#: Holds ``(envelope, snapshot, epoch)``. A ContextVar because the prepare steps
+#: return from many places and the flag must reach :func:`_screen_prepare`'s
+#: wrapper without threading a parameter through each of them.
+_RESCREEN_PENDING: "ContextVar[tuple[Any, Any, int] | None]" = ContextVar(
+    "tb_rescreen_pending", default=None
+)
 
 
 def _screen_prepare(
+    owner: OwnerSnapshot,
+    item: Mapping[str, Any],
+    *,
+    config_dir: Path,
+    policy: ScreeningPolicy,
+    runner: ScreenRunner | None,
+) -> "_Prepared | ScreenResult":
+    """:func:`_screen_prepare_steps`, plus the S-8 re-screen of an unscreened Deliver.
+
+    A prepare that ends EARLY on a re-screen pass (a cache hit, an open breaker,
+    a missing runner) is settled here; one that reaches the spend carries
+    ``rescreen_release`` so its caller settles the spend's result the same way.
+    """
+
+    token = _RESCREEN_PENDING.set(None)
+    try:
+        out = _screen_prepare_steps(
+            owner, item, config_dir=config_dir, policy=policy, runner=runner
+        )
+        pending = _RESCREEN_PENDING.get()
+    finally:
+        _RESCREEN_PENDING.reset(token)
+    if pending is None:
+        return out
+    if isinstance(out, _Prepared):
+        return dataclasses.replace(out, rescreen_release=True)
+    envelope, snapshot, epoch = pending
+    return _settle_rescreen(Store(config_dir), owner, envelope, snapshot, epoch, out)
+
+
+def _finish_pass(
+    store: Store, owner: OwnerSnapshot, prepared: "_Prepared", result: ScreenResult
+) -> ScreenResult:
+    """The exit a spent pass's final result takes: S-8 settle, else the review exit."""
+
+    if prepared.rescreen_release:
+        return _settle_rescreen(
+            store, owner, prepared.envelope, prepared.snapshot, prepared.epoch, result
+        )
+    return _aged_review_hold(store, owner, prepared, result)
+
+
+#: Holds that answer nothing about THIS message's content on a re-screen pass:
+#: another worker, a spend ceiling, the owner or policy moving. The Deliver stays
+#: pending and the next pass re-screens.
+_RESCREEN_UNDECIDED = frozenset(
+    {
+        "busy",
+        "retry_later",
+        "budget_exhausted",
+        "owner_changed",
+        "stale_generation",
+        "policy_stale",
+        "ack_recovery",
+        "local_quarantine",
+        "owner_mismatch",
+        "schema_damaged",
+    }
+)
+
+
+def _settle_rescreen(
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    snapshot: Any,
+    epoch: int,
+    result: ScreenResult,
+) -> ScreenResult:
+    """Settle a Deliver on an unscreened item after its one re-screen (S-8).
+
+    WHY. An unscreened review item exists because nothing could screen the
+    message; the person's Deliver is their word for THAT situation. Once a
+    screener is reachable again it reads the message first: the hub's word that
+    it was "unavailable" (or a run of failures) must not let the message skip a
+    screener that now answers.
+
+    * The screener ADMITTED or BOUNCED it: that verdict stands (already
+      committed by the pass); the release is marked ``refused:rescreened``.
+    * The pass still could not screen (every hop down, an open route breaker,
+      no runner, an unproven serving identity) and the outage is corroborated
+      (S-6: nothing screened on the account since the item was created): the
+      person's Deliver is honoured.
+    * Undecided (busy, budget, policy moving …): stays pending, next pass.
+    * Anything else — a screener hold, a sender-triggerable stop, a failure
+      other messages do not share: the release is refused
+      (``refused:rescreened_hold``) and the message stays held. Never delivers
+      on a pass that produced evidence about the content.
+    """
+
+    import time as _time
+
+    message_id = envelope.message_id
+    now = _time.time()
+    if result.disposition != "hold":
+        _set_release_outcome(store, owner, message_id, "refused:rescreened", now)
+        return result
+    code = str(result.hold_code or "")
+    # Still cannot screen, for a reason no sender controls: the same codes that
+    # aged it into review, under the same route-evidence rule (S-3). A policy
+    # moving mid-pass is a new question for the next pass, not an answer.
+    route_shaped = (
+        code in AGED_REVIEW_CODES
+        and code != "policy_stale"
+        and not (code in _ROUTE_EVIDENCE_CODES and result.route_failure is not True)
+    )
+    if route_shaped:
+        decision = store.work_scope_decision(owner, message_id) or {}
+        try:
+            since = now - float(decision.get("created_at") or now)
+        except (TypeError, ValueError):
+            since = 0.0
+        if code not in _CORROBORATED_CODES or _outage_corroborated(store, owner, since):
+            committed = _consume_owner_release(
+                store, owner, envelope, snapshot, epoch, rescreened=True
+            )
+            return committed if committed is not None else result
+    elif code in _RESCREEN_UNDECIDED or (code == "breaker_open" and not result.route_failure):
+        return result
+    _set_release_outcome(store, owner, message_id, "refused:rescreened_hold", now)
+    logger.info("bridge: unscreened deliver refused after re-screen code=%s", _closed_code(code))
+    return result
+
+
+def _set_release_outcome(
+    store: Store, owner: OwnerSnapshot, message_id: str, outcome: str, now: float
+) -> None:
+    try:
+        store.set_owner_release_outcome(owner, message_id, outcome, now=now)
+    except StoreRefused:
+        pass
+
+
+def _decision_unscreened(decision: Mapping[str, Any]) -> bool:
+    """A review decision no model answered: no screener named, no verdict (S-1/S-4)."""
+
+    return not str(decision.get("screener_model") or "") and not str(
+        decision.get("screener_verdict") or ""
+    )
+
+
+def _screen_prepare_steps(
     owner: OwnerSnapshot,
     item: Mapping[str, Any],
     *,
@@ -1679,13 +1838,19 @@ def _screen_prepare(
     released = _consume_owner_release(store, owner, envelope, snapshot, epoch)
     if released is not None:
         return released
-    replayed = _replay_work_scope_decision(
-        store,
-        owner,
-        envelope,
-        epoch,
-        prepared_item=item,
-        template_sha256=snapshot.template_sha256,
+    # S-8: a Deliver on an unscreened item screens once first, so its review
+    # decision must not replay the hold over that pass.
+    replayed = (
+        None
+        if _RESCREEN_PENDING.get() is not None
+        else _replay_work_scope_decision(
+            store,
+            owner,
+            envelope,
+            epoch,
+            prepared_item=item,
+            template_sha256=snapshot.template_sha256,
+        )
     )
     if replayed is not None:
         return replayed
@@ -1994,7 +2159,7 @@ async def _screen_core(
         privacy_runner_factory=privacy_runner_factory,
     )
     # The pass's FINAL hold: the chain has already walked every hop.
-    return _aged_review_hold(store, owner, prepared, result)
+    return _finish_pass(store, owner, prepared, result)
 
 
 def _item_message_id(item: Mapping[str, Any]) -> str:
@@ -2785,7 +2950,9 @@ def _review_target(
 
 #: Messages already logged as "held past the threshold under a code that never
 #: ages" (R1-m2), so the line is written once per message per process.
-_STUCK_LOGGED: set[str] = set()
+#: ``(message_id, closed code)`` pairs already logged (R2-3: a message stuck
+#: under a NEW code is logged again; the same pair is not).
+_STUCK_LOGGED: set[tuple[str, str]] = set()
 
 
 def _note_stuck_hold(
@@ -2797,7 +2964,8 @@ def _note_stuck_hold(
     codes it names keep their own exits (or deliberately have none).
     """
 
-    if message_id in _STUCK_LOGGED:
+    key = (message_id, _closed_code(code))
+    if key in _STUCK_LOGGED:
         return
     first = store.screening_hold_first_held_at(owner, message_id)
     if first is None:
@@ -2809,7 +2977,7 @@ def _note_stuck_hold(
         return
     if len(_STUCK_LOGGED) > 4096:
         _STUCK_LOGGED.clear()  # bounded: a diagnostic, not state worth growth
-    _STUCK_LOGGED.add(message_id)
+    _STUCK_LOGGED.add(key)
     logger.warning(
         "bridge: screening hold past review threshold without an exit code=%s age_s=%d",
         _closed_code(code),
@@ -2824,19 +2992,42 @@ def _closed_code(code: Any) -> str:
 
 
 def _hold_has_aged(
-    store: Store, owner: OwnerSnapshot, message_id: str, threshold: float
+    store: Store,
+    owner: OwnerSnapshot,
+    message_id: str,
+    threshold: float,
+    *,
+    clock: str = "review",
 ) -> tuple[bool, float]:
-    """``(aged, age_s)`` from the DURABLE ageing stamp (S-5), never in-memory state."""
+    """``(aged, age_s)`` from the DURABLE ``clock`` stamp (S-5, R2-1), never memory."""
 
     import time as _time
 
     now = _time.time()
-    first = store.note_aged_hold(owner, message_id, now=now)
+    first = store.note_aged_hold(owner, message_id, now=now, clock=clock)
     if first is None:
         # No durable hold row (the hold write was refused): nothing to age.
         return False, 0.0
     age = now - first
     return age >= threshold, age
+
+
+#: Codes whose ageing needs the outage CORROBORATED (round 2, S-6): each says
+#: "every route failed", which a crafted body can provoke for ONE message since
+#: every 5xx now fails over (operator rule) — a message-specific 500 on every
+#: hop exhausts the chain exactly like an outage. An outage stops ALL screening
+#: on the account; a poisoned message does not. So these convert only if the
+#: account saw no successful screen since the message's ageing clock started.
+_CORROBORATED_CODES = frozenset({"screening_model_unavailable", "breaker_open", "provider_error"})
+
+
+def _outage_corroborated(store: Store, owner: OwnerSnapshot, age: float) -> bool:
+    """Whether no screen succeeded on this account since the hold began (S-6)."""
+
+    import time as _time
+
+    last = store.last_screening_success_at(owner)
+    return last is None or last < _time.time() - age
 
 
 def _aged_review_hold(
@@ -2880,7 +3071,8 @@ def _aged_review_hold(
     from local_operator.team_bridge import hold_release as hr
 
     code = result.hold_code
-    if result.disposition != "hold":
+    if result.disposition != "hold" or _RESCREEN_PENDING.get() is not None:
+        # A re-screen pass (S-8) is settled by ``_settle_rescreen`` instead.
         return result
     threshold = hr.screening_hold_review_after_s(store.config_dir)
     if threshold is None:
@@ -2893,6 +3085,11 @@ def _aged_review_hold(
         return result
     aged, age = _hold_has_aged(store, owner, message_id, threshold)
     if not aged:
+        return result
+    if code in _CORROBORATED_CODES and not _outage_corroborated(store, owner, age):
+        # Others screened while this one kept failing: message-specific, so it
+        # stays held (fail-closed) and is logged once — never a Deliver item.
+        _note_stuck_hold(store, owner, message_id, code, threshold)
         return result
     return _convert_to_unscreened_review(store, owner, target, code, age)
 
@@ -2937,6 +3134,8 @@ OWNER_ACTION_HOLD_CODES = {
     "sign_in": "sign_in_required",
     "consent": "consent_required",
     "ineligible": "owner_ineligible",
+    # Round 2 (S-8 / Q2): no screening chain at all is the owner's configuration.
+    "no_screener": "screener_required",
 }
 
 
@@ -2995,7 +3194,18 @@ def aged_authority_hold(
         # only written after we return).
         _persist_hold(store, owner, message_id, held_code)
         if cause in OWNER_ACTION_HOLD_CODES:
-            aged, age = _hold_has_aged(store, owner, message_id, threshold)
+            from local_operator.team_bridge.store import (
+                HOLD_CLOCK_OWNER_ACTION,
+                HOLD_CLOCK_REVIEW,
+            )
+
+            # R2-1: waiting on the OWNER is not screening delay. Its own clock,
+            # and the review clock is dropped on every such pass, so a message
+            # that waited hours for a sign-in starts screening's clock afresh.
+            store.clear_hold_clock(owner, message_id, clock=HOLD_CLOCK_REVIEW)
+            aged, age = _hold_has_aged(
+                store, owner, message_id, threshold, clock=HOLD_CLOCK_OWNER_ACTION
+            )
             if not aged:
                 return held
             code = OWNER_ACTION_HOLD_CODES[cause]
@@ -3011,6 +3221,9 @@ def aged_authority_hold(
             return held
         current = store.current_screening_policy(owner)
         if current is None:
+            # No epoch to bind a decision to (Q2): stays held, logged once past
+            # the threshold so it is never a silent forever-hold.
+            _note_stuck_hold(store, owner, message_id, held_code, threshold)
             return held
         aged, age = _hold_has_aged(store, owner, message_id, threshold)
         if not aged:
@@ -3333,6 +3546,8 @@ def _consume_owner_release(
     envelope: Envelope,
     snapshot: "PolicySnapshot",
     epoch: int,
+    *,
+    rescreened: bool = False,
 ) -> ScreenResult | None:
     """A signed owner release for this message as a :class:`ScreenResult`, or ``None``.
 
@@ -3393,6 +3608,14 @@ def _consume_owner_release(
         outcome(owner, envelope.message_id, "refused:body_hash_mismatch", now=now)
         _persist_hold(store, owner, envelope.message_id, "body_hash_mismatch")
         return ScreenResult("hold", hold_code="body_hash_mismatch")
+    if deliver and not rescreened and _decision_unscreened(decision):
+        # S-8: screen it once before honouring the Deliver (``_settle_rescreen``).
+        # A re-screen that already produced a screener answer refused this
+        # release for good; the decision's hold replays.
+        if str(release.get("outcome") or "") in ("refused:rescreened_hold", "refused:rescreened"):
+            return None
+        _RESCREEN_PENDING.set((envelope, snapshot, epoch))
+        return None
     return _commit_release_receipt(store, owner, envelope, epoch, release, deliver=deliver)
 
 
@@ -4615,11 +4838,7 @@ async def _screen_batch_core(
     )
     store = Store(config_dir)
     return [
-        (
-            _aged_review_hold(store, owner, prepared_at[index], result)
-            if index in prepared_at
-            else result
-        )
+        (_finish_pass(store, owner, prepared_at[index], result) if index in prepared_at else result)
         for index, result in enumerate(results)
     ]
 
