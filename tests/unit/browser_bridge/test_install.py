@@ -1482,3 +1482,66 @@ def test_the_verbs_refuse_a_redirected_home(
     assert result["ok"] is False, result
     assert calls == [], f"a redirected home reached launchd: {calls}"
     assert "not the LaunchAgent the real home owns" in str(result["error"])
+
+
+# --------------------------------------------------------------------------
+# Running build on Linux (review R1-1/R1-2, 2026-11-18): `enable --now` does
+# not restart a running unit, so the install asks the running build.
+# --------------------------------------------------------------------------
+
+
+def _linux_build_rig(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, check: object
+) -> list[dict[str, object]]:
+    from local_operator import update
+
+    monkeypatch.setattr(install, "systemd_path", lambda: tmp_path / "unit.service")
+    monkeypatch.setattr(install, "log_path", lambda: tmp_path / "bridge.log")
+    monkeypatch.setattr(install, "health", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(install, "enable_linger", lambda: True)
+    monkeypatch.setattr(
+        install.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+    asked: list[dict[str, object]] = []
+
+    def build_line(**kwargs: object) -> object:
+        asked.append(kwargs)
+        return check
+
+    monkeypatch.setattr(update, "systemd_install_build_line", build_line)
+    return asked
+
+
+def test_linux_unknown_build_is_named_not_bounced(
+    linux: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator import launchd
+
+    check = launchd.InstallBuildCheck(kind="unconfirmed", recovery="lop browser restart")
+    asked = _linux_build_rig(monkeypatch, tmp_path, check)
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    assert asked[0]["restart_when_unproven"] is False
+    assert asked[0]["recovery"] == "lop browser restart"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert check.step() in steps
+    assert "lop browser restart" in check.step()
+
+
+def test_linux_failed_build_restart_fails_the_install(
+    linux: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator import launchd
+
+    check = launchd.InstallBuildCheck(kind="failed", recovery="lop browser restart")
+    _linux_build_rig(monkeypatch, tmp_path, check)
+
+    result = install.install(4099)
+
+    assert result["ok"] is False
+    assert result["error"] == check.step()

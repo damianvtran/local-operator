@@ -17,6 +17,6 @@
   },
   "cli.daemon_build.status_stale": {
     "role": "lop mobile status / lop tunnel status line: the running daemon is provably on an older build",
-    "note": "Shown after a 'build:' label. {generation} is a build/generation directory name such as 20260924T103058Z-509c7450dbf6; keep it verbatim. {command} is a literal CLI command such as `lop mobile restart`; keep it and its backticks verbatim."
+    "note": "Printed alone on its own line, with no label before it; the service (mobile relay or tunnel connector) is its implied subject, so it must read as a complete status line without one. {generation} is a build/generation directory name such as 20260924T103058Z-509c7450dbf6; keep it verbatim. {command} is a literal CLI command such as `lop mobile restart`; keep it and its backticks verbatim."
   }
 }

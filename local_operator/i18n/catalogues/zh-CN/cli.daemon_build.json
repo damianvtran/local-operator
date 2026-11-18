@@ -1,7 +1,7 @@
 {
-  "cli.daemon_build.install_restarted": "已将正在运行的服务重启到新版本（它此前仍在运行 {generation}）",
-  "cli.daemon_build.install_restarted_unconfirmed": "已重启正在运行的服务，因为无法确认它运行的是当前版本",
-  "cli.daemon_build.install_restart_failed": "无法将正在运行的服务重启到新版本；请运行 `{command}` 将其切换过去",
-  "cli.daemon_build.install_unconfirmed": "无法确认正在运行的服务是否已是新版本；如果它仍表现得像旧版本，请运行 `{command}`",
-  "cli.daemon_build.status_stale": "正在运行旧版本（{generation}）；请运行 `{command}` 将其重启到新版本"
+  "cli.daemon_build.install_restarted": "已将正在运行的服务重启到新构建（它此前仍在运行{generation}）",
+  "cli.daemon_build.install_restarted_unconfirmed": "已重启正在运行的服务，因为无法确认它运行的是当前构建",
+  "cli.daemon_build.install_restart_failed": "无法将正在运行的服务重启到新构建；请运行`{command}`将其切换过去",
+  "cli.daemon_build.install_unconfirmed": "无法确认正在运行的服务是否已是新构建；如果它仍表现得像旧构建，请运行`{command}`",
+  "cli.daemon_build.status_stale": "正在运行旧构建（{generation}）；请运行`{command}`将其重启到新构建"
 }

@@ -1761,6 +1761,8 @@ def check_running_build_on_install(
             return InstallBuildCheck(kind="current", recovery=recovery)
         if not restart_when_unproven:
             return InstallBuildCheck(kind="unconfirmed", recovery=recovery)
+    # ``pid is None`` lands here on purpose: no pid means no build could be
+    # read, which is "unproven", so a ``restart_when_unproven`` caller kicks.
     if not kickstart(label=label, path=path, run=run):
         return InstallBuildCheck(kind="failed", recovery=recovery)
     if _await_new_pid(label=label, path=path, previous=pid, run=run) is None:

@@ -995,9 +995,17 @@ def install() -> str:
         _run(["systemctl", "--user", "enable", "--now", path.name])
         from local_operator import update
 
-        return update.systemd_install_build_line(
-            name="tunnel", unit=path.name, recovery="lop tunnel restart"
+        # Unproven build → named, not bounced, as on macOS (see the launchd
+        # skip branch above for why the connector is not restarted on a guess).
+        build = update.systemd_install_build_line(
+            name="tunnel",
+            unit=path.name,
+            recovery="lop tunnel restart",
+            restart_when_unproven=False,
         )
+        if build.kind == "failed":
+            raise ValueError(build.step())
+        return build.step()
     else:  # schtasks
         xml = render_task_xml()
         # The record first: it is what `uninstall` and a future diff read, and it

@@ -1,7 +1,7 @@
 {
-  "cli.daemon_build.install_restarted": "đã khởi động lại dịch vụ đang chạy trên bản dựng mới (trước đó nó vẫn chạy {generation})",
+  "cli.daemon_build.install_restarted": "đã khởi động lại dịch vụ đang chạy sang bản dựng mới (trước đó nó vẫn chạy {generation})",
   "cli.daemon_build.install_restarted_unconfirmed": "đã khởi động lại dịch vụ đang chạy vì không thể xác nhận bản dựng của nó là bản hiện tại",
-  "cli.daemon_build.install_restart_failed": "không thể khởi động lại dịch vụ đang chạy trên bản dựng mới; hãy chạy `{command}` để chuyển nó sang",
+  "cli.daemon_build.install_restart_failed": "không thể đưa dịch vụ đang chạy lên bản dựng mới; hãy chạy `{command}` để chuyển nó sang",
   "cli.daemon_build.install_unconfirmed": "không thể xác nhận dịch vụ đang chạy dùng bản dựng mới; hãy chạy `{command}` nếu nó vẫn hoạt động như bản cũ",
-  "cli.daemon_build.status_stale": "đang chạy một bản dựng cũ hơn ({generation}); hãy chạy `{command}` để khởi động lại nó trên bản dựng mới"
+  "cli.daemon_build.status_stale": "đang chạy một bản dựng cũ hơn ({generation}); hãy chạy `{command}` để khởi động lại nó sang bản dựng mới"
 }

@@ -1,7 +1,7 @@
 {
-  "cli.daemon_build.install_restarted": "se reinició el servicio en ejecución con la nueva versión (aún ejecutaba {generation})",
-  "cli.daemon_build.install_restarted_unconfirmed": "se reinició el servicio en ejecución porque no se pudo confirmar que su versión fuera la actual",
-  "cli.daemon_build.install_restart_failed": "no se pudo reiniciar el servicio en ejecución con la nueva versión; ejecuta `{command}` para pasarlo a ella",
-  "cli.daemon_build.install_unconfirmed": "no se pudo confirmar que el servicio en ejecución use la nueva versión; ejecuta `{command}` si sigue comportándose como la anterior",
-  "cli.daemon_build.status_stale": "ejecuta una versión anterior ({generation}); ejecuta `{command}` para reiniciarlo con la nueva versión"
+  "cli.daemon_build.install_restarted": "se reinició el servicio en ejecución con la nueva compilación (aún ejecutaba {generation})",
+  "cli.daemon_build.install_restarted_unconfirmed": "se reinició el servicio en ejecución porque no se pudo confirmar que su compilación fuera la actual",
+  "cli.daemon_build.install_restart_failed": "no se pudo pasar el servicio en ejecución a la nueva compilación; ejecuta `{command}` para hacerlo",
+  "cli.daemon_build.install_unconfirmed": "no se pudo confirmar que el servicio en ejecución use la nueva compilación; ejecuta `{command}` si sigue comportándose como la anterior",
+  "cli.daemon_build.status_stale": "en ejecución con una compilación anterior ({generation}); ejecuta `{command}` para reiniciarlo con la nueva compilación"
 }

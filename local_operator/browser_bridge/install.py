@@ -987,11 +987,18 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             steps.append(f"enabled the systemd user service ({systemd_unit()})")
             from local_operator import update
 
-            moved = update.systemd_install_build_line(
-                name="browser bridge", unit=systemd_unit(), recovery="lop browser restart"
+            # Unproven build → named, not bounced, as on macOS (an attached
+            # browser would lose its connection mid-action).
+            build = update.systemd_install_build_line(
+                name="browser bridge",
+                unit=systemd_unit(),
+                recovery="lop browser restart",
+                restart_when_unproven=False,
             )
-            if moved:
-                steps.append(moved)
+            if build.kind == "failed":
+                return {"ok": False, "steps": steps, "error": build.step()}
+            if build.step():
+                steps.append(build.step())
     elif supervisor == "schtasks":
         # Task Scheduler cannot redirect a task's stdout, so the log the other
         # two platforms get from launchd/systemd is provided by the task's own

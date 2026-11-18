@@ -977,6 +977,7 @@ def test_an_install_that_changes_nothing_does_not_write_or_reload(
     assert not any(
         "loaded the LaunchAgent" in step for step in steps
     ), "an install that skipped the load must not report one"
+    assert result["build"] == ""
 
 
 def _running_build(
@@ -1014,6 +1015,8 @@ def test_a_current_plist_over_a_stale_build_restarts_the_daemon(
     assert rig.plist.stat().st_mtime_ns == before
     assert any("20261113T090000Z-oldbuild" in step for step in steps), steps
     assert not any("already current and serving" in step for step in steps), steps
+    # The build step alone, for `lop tunnel install`'s `_prepare_mobile` (R1-3).
+    assert "20261113T090000Z-oldbuild" in str(result["build"])
 
 
 def test_an_unconfirmed_build_is_restarted_not_called_current(
@@ -1239,19 +1242,98 @@ def test_linux_install_reports_a_restart_onto_the_new_build(
     monkeypatch.setattr(
         supervisors, "systemctl_user", lambda *a, **k: SimpleNamespace(returncode=0, stderr="")
     )
-    asked: list[dict[str, str]] = []
+    from local_operator import launchd
 
-    def mover(**kwargs: str) -> str:
+    asked: list[dict[str, object]] = []
+
+    def mover(**kwargs: object) -> launchd.InstallBuildCheck:
         asked.append(kwargs)
-        return "mobile daemon: restarted onto the new build (was on g-old)"
+        return launchd.InstallBuildCheck(
+            kind="restarted", recovery="lop mobile restart", generation="g-old"
+        )
 
     monkeypatch.setattr(update, "systemd_install_build_line", mover)
+    steps: list[str] = []
+    note: list[str] = []
+
+    ok, error = install._install_systemd(
+        install.DEFAULT_PORT, dry_run=False, steps=steps, build_note=note
+    )
+
+    assert (ok, error) == (True, "")
+    # Mobile restarts on an UNPROVEN build too (R1-1), as on macOS.
+    assert asked == [
+        {
+            "name": "mobile",
+            "unit": install.SYSTEMD_UNIT,
+            "recovery": "lop mobile restart",
+            "restart_when_unproven": True,
+        }
+    ]
+    expected = launchd.InstallBuildCheck(
+        kind="restarted", recovery="lop mobile restart", generation="g-old"
+    ).step()
+    # Keyed copy, shared with macOS (R1-2), and surfaced for `_prepare_mobile` (R1-3).
+    assert steps[-1] == expected
+    assert note == [expected]
+
+
+def test_linux_install_fails_when_the_build_restart_fails(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """R1-2: a refused Linux restart fails the install, as `failed` does on macOS."""
+    from types import SimpleNamespace
+
+    from local_operator import launchd, supervisors, update
+
+    monkeypatch.setattr(install, "systemd_path", lambda: tmp_path / "mobile.service")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
+    monkeypatch.setattr(
+        supervisors, "systemctl_user", lambda *a, **k: SimpleNamespace(returncode=0, stderr="")
+    )
+    failed = launchd.InstallBuildCheck(kind="failed", recovery="lop mobile restart")
+    monkeypatch.setattr(update, "systemd_install_build_line", lambda **kwargs: failed)
     steps: list[str] = []
 
     ok, error = install._install_systemd(install.DEFAULT_PORT, dry_run=False, steps=steps)
 
-    assert (ok, error) == (True, "")
-    assert asked == [
-        {"name": "mobile", "unit": install.SYSTEMD_UNIT, "recovery": "lop mobile restart"}
-    ]
-    assert steps[-1] == "mobile daemon: restarted onto the new build (was on g-old)"
+    assert ok is False
+    assert error == failed.step()
+    assert "lop mobile restart" in error
+    assert failed.step() not in steps
+
+
+def test_mobile_status_prints_the_stale_build_line_bare(
+    monkeypatch, capsys
+) -> None:  # noqa: ANN001
+    """R1-4: `lop mobile status` asks the census for "mobile" and prints its line."""
+    from local_operator import services
+    from local_operator.cli import build_cli_parser, mobile_command
+
+    monkeypatch.setattr(
+        install,
+        "status",
+        lambda: {
+            "ok": True,
+            "installed": True,
+            "password_set": True,
+            "healthy": True,
+            "gate_closed": True,
+            "bundle": "ok",
+            "log": "/dev/null",
+            "error": "",
+        },
+    )
+    asked: list[tuple[str, str]] = []
+
+    def line(name: str, command: str, **kwargs: object) -> str:
+        asked.append((name, command))
+        return "STALE-LINE"
+
+    monkeypatch.setattr(services, "stale_daemon_status_line", line)
+
+    mobile_command(build_cli_parser().parse_args(["mobile", "status"]))
+
+    assert asked == [("mobile", "lop mobile restart")]
+    assert "\nSTALE-LINE\n" in capsys.readouterr().out
