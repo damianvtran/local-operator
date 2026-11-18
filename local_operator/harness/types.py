@@ -2579,6 +2579,13 @@ class ToolContext(BaseModel):
     #: (team-bridge-egress.md: "Propagation between sessions").
     #: Tighten-only: a child inherits its parent's taint for life.
     inherited_bridge_taint: bool = False
+    #: The session's community read flag (``community/taint.py``
+    #: ``CommunityTaint``, RFC v2.4 §5.9), owned by the session and injected
+    #: per turn. The bridge tool's ``community_post`` reads it to tell the owner
+    #: why a standing permission does not apply; ``None`` on a host that does
+    #: not track it, which then reads as tainted (fail closed). Host state,
+    #: never serialized.
+    community_taint: Any = Field(default=None, exclude=True, repr=False)
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
