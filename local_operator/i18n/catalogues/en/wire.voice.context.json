@@ -105,6 +105,11 @@
     "tone": "concise, neutral, actionable",
     "note": "English-only addition with English fallback until independently translated and audited."
   },
+  "wire.voice.rate_limited_unknown": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
   "wire.voice.phrase.on_screen_first": {
     "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
     "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",

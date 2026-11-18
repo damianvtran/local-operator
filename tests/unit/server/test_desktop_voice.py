@@ -1539,7 +1539,6 @@ def _limited(status: int = 429, **details: Any) -> Any:
         # No remaining count: the size of retry-after decides (D4's fallback).
         ({"retry_after_s": 8.0}, "minute", 8.0, None),
         ({"retry_after_s": 3600.0}, "day", 3600.0, None),
-        ({}, "minute", None, None),
     ],
 )
 @pytest.mark.asyncio
@@ -1867,3 +1866,220 @@ def test_features_voice_is_2() -> None:
     from local_operator.server.features import feature_flags
 
     assert feature_flags()["voice"] == 2
+
+
+# -- a 429 or 502 says what the provider said, and the daemon logs it ------------
+
+_EL_KEY = "elk-7f3a9c21d4b8e6"  # no recognisable key shape: only a value pass can mask it
+_EL_LIMIT_MESSAGE = "Too many concurrent requests: your plan allows 2 at once."
+_EL_RATE_BODIES = {
+    "json": {"detail": {"status": "too_many_concurrent_requests", "message": _EL_LIMIT_MESSAGE}},
+    "empty": None,
+}
+_RECORDING_LOGGER = "local_operator.server.routes.desktop_voice"
+
+
+def _elevenlabs_refusal(status: int, body: dict[str, Any] | None, *, headers: Any = None) -> Any:
+    """The error ElevenLabs' client builds from a real httpx response (the real builder,
+    so ``details``/``body`` have exactly the shape production has)."""
+    import httpx
+
+    from local_operator.stt.errors import api_error_from_httpx_response
+
+    response = (
+        httpx.Response(status, json=body, headers=headers)
+        if body is not None
+        else (httpx.Response(status, headers=headers))
+    )
+    return api_error_from_httpx_response(
+        response, fallback_message="ElevenLabs refused the request", secrets=[_EL_KEY]
+    )
+
+
+def _el_fails_with(real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, error: Any):
+    from local_operator.stt import cascade as stt_cascade
+    from local_operator.tts import cascade as tts_cascade
+
+    async def refused(*_a: Any, **_k: Any) -> Any:
+        real_cascades.called.append("el")
+        raise error
+
+    monkeypatch.setattr(stt_cascade, "_run_elevenlabs_rung", refused)
+    monkeypatch.setattr(tts_cascade, "_run_elevenlabs_rung", refused)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("door", ["hear", "speak"])
+@pytest.mark.parametrize("shape", ["json", "empty"])
+async def test_an_elevenlabs_429_quotes_the_provider_and_does_not_invent_a_scope(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    door: str,
+    shape: str,
+) -> None:
+    real_cascades.elevenlabs_key()
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    _el_fails_with(real_cascades, monkeypatch, _elevenlabs_refusal(429, _EL_RATE_BODIES[shape]))
+    response = await (_recording_with(rig) if door == "hear" else _phrase_speech(rig))
+    assert response.status_code == 429, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "voice_rate_limited"
+    text = detail["text"]
+    assert text.startswith("The speech provider refused the request as over its limit: ")
+    # What is known, in the provider's words; never a window the provider did not name.
+    assert (_EL_LIMIT_MESSAGE if shape == "json" else "HTTP 429") in text
+    assert "per-minute" not in text and "daily" not in text
+    assert detail["scope"] is None
+    assert detail["retry_after_s"] is None and detail["remaining_requests"] is None
+    assert detail["rung"] == (
+        "provider_stt_elevenlabs" if door == "hear" else "provider_tts_elevenlabs"
+    )
+    assert "retry-after" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_a_long_provider_message_is_cut_in_the_sentence(
+    rig: Any, real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_cascades.elevenlabs_key()
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    body = {"detail": {"message": "x" * 900}}
+    _el_fails_with(real_cascades, monkeypatch, _elevenlabs_refusal(429, body))
+    text = (await _phrase_speech(rig)).json()["detail"]["text"]
+    quoted = text.removeprefix("The speech provider refused the request as over its limit: ")
+    assert 150 < len(quoted) <= 200 and quoted.endswith("\u2026")
+
+
+@pytest.mark.asyncio
+async def test_a_groq_style_429_with_nothing_left_today_still_says_daily(
+    rig: Any, real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_cascades.elevenlabs_key()
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    error = _elevenlabs_refusal(
+        429,
+        {"error": "Rate limit reached"},
+        headers={"retry-after": "41000", "x-ratelimit-remaining-requests": "0"},
+    )
+    _el_fails_with(real_cascades, monkeypatch, error)
+    response = await _recording_with(rig)
+    assert response.status_code == 429, response.text
+    detail = response.json()["detail"]
+    assert detail["scope"] == "day" and detail["remaining_requests"] == 0
+    assert "daily" in detail["text"]
+    assert response.headers["retry-after"] == "41000"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("door", ["hear", "speak"])
+async def test_a_pinned_failure_is_logged_with_what_the_provider_said_and_no_key(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    door: str,
+) -> None:
+    """The provider's refusal is the only evidence of WHY a real take failed; the log
+    carries it, the audio's size and kind, and never the key: the REAL client builds
+    the error from a response that echoes the key back."""
+    import httpx
+
+    from local_operator.clients._http import REDACTION_MARKER
+    from local_operator.stt import cascade as stt_cascade
+    from local_operator.stt.clients import ElevenLabsSttClient
+    from local_operator.tts import cascade as tts_cascade
+
+    echo = {
+        "detail": {
+            "status": "too_many_concurrent_requests",
+            "message": f"Rejected key {_EL_KEY}: too many concurrent requests.",
+        }
+    }
+    transport = httpx.MockTransport(lambda _request: httpx.Response(429, json=echo))
+
+    async def stt_leg(audio: bytes, *, mime: str, **_k: Any) -> Any:
+        client = ElevenLabsSttClient(_EL_KEY, client=httpx.AsyncClient(transport=transport))
+        return await client.transcribe(audio, mime=mime)
+
+    async def tts_leg(*_a: Any, **_k: Any) -> Any:
+        # The TTS client builds its refusal with the same builder and key list.
+        raise _elevenlabs_refusal(429, echo)
+
+    monkeypatch.setattr(stt_cascade, "_run_elevenlabs_rung", stt_leg)
+    monkeypatch.setattr(tts_cascade, "_run_elevenlabs_rung", tts_leg)
+    real_cascades.elevenlabs_key()
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    caplog.set_level("WARNING", logger=_RECORDING_LOGGER)
+    response = await (_recording_with(rig) if door == "hear" else _phrase_speech(rig))
+    assert response.status_code == 429, response.text
+
+    (record,) = [r for r in caplog.records if r.name == _RECORDING_LOGGER]
+    line = record.getMessage()
+    assert record.levelname == "WARNING"
+    assert "elevenlabs" in line and "status=429" in line
+    assert "too many concurrent requests" in line
+    assert REDACTION_MARKER in line  # the echoed key was masked, not dropped with the line
+    assert "details=" in line
+    if door == "hear":
+        assert f"bytes={len(_wav_bytes())}" in line and "audio/wav" in line
+        assert "provider_stt_elevenlabs" in line
+    else:
+        assert "provider_tts_elevenlabs" in line
+    # The key reaches neither the log nor the answer, whatever the upstream echoed.
+    assert _EL_KEY not in caplog.text
+    assert _EL_KEY not in response.text
+
+
+@pytest.mark.asyncio
+async def test_a_credential_named_detail_key_is_not_logged(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from local_operator.clients._http import APIError
+
+    real_cascades.elevenlabs_key()
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    error = APIError(
+        "no",
+        status_code=429,
+        details={"api_key": "should-not-appear", "status": "x", "retry_after_s": 3},
+    )
+    _el_fails_with(real_cascades, monkeypatch, error)
+    caplog.set_level("WARNING", logger=_RECORDING_LOGGER)
+    await _phrase_speech(rig)
+    assert "api_key" not in caplog.text and "should-not-appear" not in caplog.text
+    assert "status" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_stt_502_quotes_the_providers_own_sentence_and_is_logged(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    real_cascades.elevenlabs_key()
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    sentence = "The audio could not be decoded as a supported container."
+    _el_fails_with(
+        real_cascades,
+        monkeypatch,
+        _elevenlabs_refusal(400, {"detail": {"status": "invalid_audio", "message": sentence}}),
+    )
+    caplog.set_level("WARNING", logger=_RECORDING_LOGGER)
+    response = await _recording_with(rig)
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "stt_unavailable"
+    assert sentence in response.json()["detail"]["text"]
+    assert any(
+        "status=400" in r.getMessage() and sentence in r.getMessage() for r in caplog.records
+    )

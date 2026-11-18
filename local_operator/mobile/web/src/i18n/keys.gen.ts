@@ -2248,6 +2248,7 @@ export type MessageParams = {
   "wire.voice.provider_unset": undefined;
   "wire.voice.rate_limited_day": undefined;
   "wire.voice.rate_limited_minute": undefined;
+  "wire.voice.rate_limited_unknown": { "detail": string };
   "wire.voice.store_busy": undefined;
   "wire.voice.stt_unavailable": { "reason": string };
   "wire.voice.title": undefined;

@@ -329,9 +329,11 @@ Plumbing: the shared builder (`stt/errors.py:358`) records `retry-after` and
 `x-ratelimit-remaining-requests` into `APIError.details` (`retry_after_s`,
 `remaining_requests`) for any 429. Both clients get them, nothing else changes,
 and no new field is added to `APIError`. The voice routes answer `429` with
-`detail.code = "voice_rate_limited"`, `detail.scope ∈ {minute, day}` and
+`detail.code = "voice_rate_limited"`, `detail.scope ∈ {minute, day, null}` and
 `detail.retry_after_s`. `scope` is `day` when `remaining_requests == "0"`,
-otherwise `minute`. Fall-forward is free: a Groq 429 moves to the next rung
+otherwise `minute`; it is `null` (text quotes the provider, no window claimed)
+when the details carry neither `remaining_requests` nor `retry_after_s`, which is
+every ElevenLabs 429 (qwen-voice V17). Fall-forward is free: a Groq 429 moves to the next rung
 when one exists (`tts/cascade.py:539-545`). Groq is last (D8), so for a
 Groq-only user the 429 reaches the app.
 

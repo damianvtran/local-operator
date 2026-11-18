@@ -260,6 +260,15 @@ except where noted.
   the route surfaced as a `502`. The `Content-Type` is the sniffed container
   (`audio/mpeg`; a Groq answer stays `audio/wav`), and the phrase cache stores the
   rung's own container (`.mp3`, `.wav` for Groq).
+  **Failures say what the provider said (2026-11-18).** Every pinned upstream
+  failure is logged at WARNING (rung, status, the provider's own message, request
+  id, upload bytes and sniffed mime, `details` key names; never audio, key or
+  headers). `429 voice_rate_limited` carries `scope`, `retry_after_s`,
+  `remaining_requests`, `rung`; `scope` is `day`/`minute` only when `details` hold
+  `remaining_requests` or `retry_after_s` (Groq sends them, ElevenLabs does not).
+  With neither, `scope` is `null` and `detail.text` is `wire.voice.rate_limited_unknown`:
+  "The speech provider refused the request as over its limit: {provider message,
+  ≤200 chars}". A `502` text quotes the provider's sentence the same way.
 - **V14 — Binding a take to its turn.** A take binds to the turn whose stream
   carries the user `message_start` with `message.id ==` the take's
   `request_id`, for a prompt, a mid-turn steer and a tail steer, live and on

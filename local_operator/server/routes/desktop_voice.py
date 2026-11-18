@@ -24,6 +24,8 @@ The frozen contract, which both repositories build against:
         200 audio/mpeg or audio/wav (X-Voice-Path, X-Voice-Spoken-Chars); 404 unknown_source |
         unknown_segment; 409 voice_not_enabled | voice_unavailable |
         voice_provider_unset; 429 voice_rate_limited
+        {scope: day|minute|null, retry_after_s, remaining_requests, rung}; ``scope``
+        is null when the provider named no window (the text then quotes it)
 
 and the ``type: "voice"`` frame on ``GET /v1/desktop/events`` (published by
 ``server/utils/desktop_feed.py``), ``{active}``, on every slot change.
@@ -95,6 +97,7 @@ URLs, a cap) and the cleaned text is RETURNED for the rig to speak verbatim.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -116,6 +119,7 @@ from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
 from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.providers.auth_store import AuthStore
+from local_operator.redaction_shapes import is_credential_name
 from local_operator.server.dependencies import (
     get_config_manager,
     get_env_config,
@@ -243,6 +247,8 @@ PHRASES = {
 #: A 429 with no ``remaining_requests`` falls back to the size of ``retry-after``
 #: (D4): a wait longer than this is a daily limit, not a minute one.
 _DAY_SCOPE_RETRY_S = 60.0
+#: How much of the provider's own message goes into a user-facing sentence.
+_PROVIDER_SENTENCE_CHARS = 200
 
 
 def _refuse(status: int, code: str, message: Any) -> HTTPException:
@@ -449,11 +455,15 @@ async def voice_control(
 # -- 429 -> voice_rate_limited (D4) ---------------------------------------------
 
 
-def _rate_limit_scope(details: dict[str, Any]) -> tuple[str, float | None, int | None]:
+def _rate_limit_scope(
+    details: dict[str, Any],
+) -> tuple[str | None, float | None, int | None]:
     """``(scope, retry_after_s, remaining_requests)`` from ``APIError.details``.
 
     ``day`` when the provider reports ZERO requests left today; with no count the
     size of ``retry-after`` decides. Tolerant of a count that arrives as a string.
+    ``None`` when the details carry neither number: Groq sends them as headers, but
+    ElevenLabs does not, and a window the provider never named is not one to claim.
     """
     retry: float | None
     try:
@@ -466,10 +476,85 @@ def _rate_limit_scope(details: dict[str, Any]) -> tuple[str, float | None, int |
     except (KeyError, TypeError, ValueError):
         remaining = None
     if remaining is not None:
-        scope = "day" if remaining <= 0 else "minute"
+        scope: str | None = "day" if remaining <= 0 else "minute"
+    elif retry is not None:
+        scope = "day" if retry > _DAY_SCOPE_RETRY_S else "minute"
     else:
-        scope = "day" if retry is not None and retry > _DAY_SCOPE_RETRY_S else "minute"
+        scope = None
     return scope, retry, remaining
+
+
+def _provider_sentence(error: BaseException) -> str:
+    """The provider's own sentence for a failure, cut to ``_PROVIDER_SENTENCE_CHARS``.
+
+    The client keeps a refusal's message only for the hub's ``{"error": ...}``
+    envelope; ElevenLabs answers ``{"detail": {"status", "message"}}`` (or a bare
+    ``{"detail": "..."}``), which the client files under its generic fallback and
+    keeps only in ``APIError.body`` (already scrubbed of the caller's key). Read
+    the sentence from there, then fall back to the error's own text: an empty or
+    HTML body says nothing worth quoting, and the status line the client wrote is
+    all that is known.
+    """
+    sentence = ""
+    body = getattr(error, "body", None)
+    if isinstance(body, str) and body.strip():
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for holder in (parsed.get("detail"), parsed.get("error"), parsed):
+                candidate = holder.get("message") if isinstance(holder, dict) else holder
+                if isinstance(candidate, str) and candidate.strip():
+                    sentence = candidate
+                    break
+    sentence = " ".join((sentence or str(error)).split())
+    if len(sentence) > _PROVIDER_SENTENCE_CHARS:
+        sentence = sentence[: _PROVIDER_SENTENCE_CHARS - 1].rstrip() + "\u2026"
+    return sentence
+
+
+def _log_upstream_failure(
+    channel: str,
+    error: BaseException | None,
+    *,
+    rung: Any,
+    request_id: str,
+    session_id: str,
+    audio_bytes: int | None = None,
+    audio_mime: str | None = None,
+    attempts: Any = (),
+) -> None:
+    """One WARNING for a pinned provider's failure, with what it said.
+
+    Before this the daemon logged nothing about an upstream refusal, so a real take
+    that failed where a scripted one did not left no evidence at all. The sentence
+    comes from :func:`_provider_sentence` (the body the client already scrubbed of
+    its key); ``details`` is logged as KEY NAMES plus the two rate-limit numbers,
+    never the values of anything that could be a credential, and never the audio,
+    the key or a header.
+    """
+    details = dict(getattr(error, "details", None) or {})
+    keys = sorted(str(k) for k in details if not is_credential_name(str(k)))
+    logger.warning(
+        "voice %s upstream failure: rung=%s status=%s code=%s error_type=%s request_id=%s "
+        "session_id=%s bytes=%s mime=%s retry_after_s=%s remaining_requests=%s details=%s "
+        "attempts=%s message=%s",
+        channel,
+        getattr(rung, "value", rung),
+        getattr(error, "status_code", None),
+        getattr(error, "code", None),
+        type(error).__name__ if error is not None else None,
+        request_id,
+        session_id,
+        audio_bytes,
+        audio_mime,
+        details.get("retry_after_s"),
+        details.get("remaining_requests"),
+        keys,
+        [f"{getattr(a.path, 'value', a.path)}:{a.outcome}" for a in attempts],
+        _provider_sentence(error) if error is not None else None,
+    )
 
 
 def _rate_limited(error: BaseException | None, rung: Any) -> HTTPException | None:
@@ -478,11 +563,21 @@ def _rate_limited(error: BaseException | None, rung: Any) -> HTTPException | Non
     Built BEFORE ``_speech_refusal`` / the STT classifier, because their 429 arm
     is a fixed sentence that carries no ``retry_after_s``, and the app needs the
     number to decide between waiting once and stopping for the day.
+
+    The minute/day sentences are for the details that prove a window. With none,
+    ``scope`` is ``None`` and the sentence quotes the provider instead of
+    guessing which limit it hit (a concurrency cap and a per-minute cap look
+    alike from here, and are not the same remedy).
     """
     if not isinstance(error, APIError) or error.status_code != 429:
         return None
     scope, retry, remaining = _rate_limit_scope(dict(error.details or {}))
-    message = _wv.rate_limited_day() if scope == "day" else _wv.rate_limited_minute()
+    if scope == "day":
+        message = _wv.rate_limited_day()
+    elif scope == "minute":
+        message = _wv.rate_limited_minute()
+    else:
+        message = _wv.rate_limited_unknown(detail=_provider_sentence(error))
     detail = message.envelope(code="voice_rate_limited")
     detail.update(
         {
@@ -549,7 +644,8 @@ async def _transcribe(
     """
     from local_operator.stt.cascade import SttUnavailable, transcribe_audio
 
-    _mime, path = await _save_upload(file)
+    mime, path = await _save_upload(file)
+    upload_bytes = path.stat().st_size
     try:
         try:
             outcome = await transcribe_audio(
@@ -562,6 +658,17 @@ async def _transcribe(
                 only=only,
             )
         except SttUnavailable as exc:
+            if exc.attempts:
+                _log_upstream_failure(
+                    "stt",
+                    exc.error,
+                    rung=exc.attempts[-1].path,
+                    request_id=request_id,
+                    session_id=session_id,
+                    audio_bytes=upload_bytes,
+                    audio_mime=mime,
+                    attempts=exc.attempts,
+                )
             limited = _rate_limited(exc.error, exc.attempts[-1].path if exc.attempts else None)
             if limited is not None:
                 raise limited from None
@@ -1001,6 +1108,14 @@ async def voice_speech(
             raise _refuse(
                 409, "voice_unavailable", _wv.unavailable(reason=unavailable.resolution.reason)
             ) from None
+        _log_upstream_failure(
+            "tts",
+            unavailable.error,
+            rung=unavailable.failed_path,
+            request_id=request_id,
+            session_id=body.session_id,
+            attempts=unavailable.attempts,
+        )
         limited = _rate_limited(unavailable.error, unavailable.failed_path)
         if limited is not None:
             raise limited from None

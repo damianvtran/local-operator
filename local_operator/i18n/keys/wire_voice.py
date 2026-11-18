@@ -117,6 +117,10 @@ def rate_limited_minute() -> Msg:
     return Msg("wire.voice.rate_limited_minute", {})
 
 
+def rate_limited_unknown(*, detail: str) -> Msg:
+    return Msg("wire.voice.rate_limited_unknown", {"detail": detail})
+
+
 def store_busy() -> Msg:
     return Msg("wire.voice.store_busy", {})
 

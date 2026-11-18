@@ -20,6 +20,7 @@
   "wire.voice.upload_too_large": "That recording is too large. Keep it under {limit_mib} MiB.",
   "wire.voice.rate_limited_minute": "The speech provider's per-minute limit was reached. Try again in a moment.",
   "wire.voice.rate_limited_day": "The speech provider's daily limit is used up. Try again after it resets.",
+  "wire.voice.rate_limited_unknown": "The speech provider refused the request as over its limit: {detail}",
   "wire.voice.phrase.on_screen_first": "Answer the approval on screen first.",
   "wire.voice.phrase.voice_off": "Voice is off.",
   "wire.voice.phrase.switched": "Voice is now on this conversation.",
