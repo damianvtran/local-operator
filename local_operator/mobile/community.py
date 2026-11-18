@@ -29,6 +29,8 @@ Refusal bodies are the daemon's ``{"error", "code"}`` shape with the community
 facts beside them (``category``/``reference``, ``retry_after``/``scope``,
 ``guidelines_version``, ``idempotency_key``); ``error`` repeats the code —
 relay web localizes by code, and the hub's English ``message`` is never echoed.
+No refusal answers 401 here: that status means a dead relay cookie to relay
+web, so ``community_signin_required`` is 409 on this door (:func:`_relay_status`).
 """
 
 from __future__ import annotations
@@ -140,6 +142,7 @@ def _handler(op: MemberOperation, gate: Callable[[Request], Response | None]):
             )
         except CommunityError as error:
             code_status, wire = refusal(error)
+            code_status = _relay_status(code_status)
             headers = None
             retry_after = wire.get("retry_after")
             if code_status == 429 and isinstance(retry_after, int):
@@ -149,6 +152,30 @@ def _handler(op: MemberOperation, gate: Callable[[Request], Response | None]):
 
     handle.__name__ = f"api_community_{op.name}"
     return handle
+
+
+#: What a refusal that the desktop door answers with 401 becomes on the relay.
+_RELAY_SIGNIN_STATUS = 409
+
+
+def _relay_status(status: int) -> int:
+    """The relay door's status for one refusal: never 401.
+
+    WHY. On the relay, 401 belongs to the daemon's own gate. Relay web reads
+    ANY 401 as "the paired-device cookie is dead": it wipes the local drafts
+    and reloads into the login page (PR #4214 review R1-M1). A Radient sign-in
+    state (``community_signin_required``: no pinned OAuth row, or a 401 that
+    survived a forced refresh) is not that. It is a precondition on THIS
+    computer's account, so it answers 409, as ``account_mismatch`` and
+    ``community_destination_refused`` do, and relay web branches on ``code``.
+
+    The remap is by status, not by code, so a refusal type added later with
+    401 cannot reopen the hole. The desktop door keeps 401: the desktop
+    renderer branches on ``code`` and owns no cookie to drop (the precedent is
+    ``bridge_signin_required`` in ``desktop_team_bridge.py``).
+    """
+
+    return _RELAY_SIGNIN_STATUS if status == 401 else status
 
 
 def _starlette_path(path: str) -> str:

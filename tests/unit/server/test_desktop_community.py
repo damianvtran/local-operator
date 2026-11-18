@@ -297,3 +297,42 @@ async def test_the_capability_key_follows_the_switch(monkeypatch) -> None:
     assert "community" not in feature_flags()
     monkeypatch.setenv(COMMUNITY_ENV, "1")
     assert feature_flags()["community"] == 1
+
+
+async def test_the_real_app_marks_every_community_answer_no_store(
+    test_app_client, monkeypatch
+) -> None:
+    """R1-m1: RFC §7.2 relies on the app's ``managed_desktop_boundary`` no-store.
+
+    The ``rig`` above mounts a bare FastAPI, so this goes through the REAL
+    ``server.app.app`` (its middleware stack and route order): dark, served
+    and refused answers all carry ``Cache-Control: no-store``.
+    """
+
+    token = "synthetic-desktop-token"
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    hub = FakeHub()
+    store = FakeStore()
+    monkeypatch.setattr(
+        routes,
+        "_client",
+        lambda _config, expected: make_client(hub, store, expected_account_id=expected),
+    )
+    auth = {"Authorization": "Bearer " + token}
+
+    monkeypatch.delenv(COMMUNITY_ENV, raising=False)
+    dark = await test_app_client.get(BASE, headers=auth)
+    assert dark.status_code == 404, dark.text
+    assert dark.headers["cache-control"] == "no-store"
+
+    monkeypatch.setenv(COMMUNITY_ENV, "1")
+    served = await test_app_client.get(BASE, headers=auth)
+    assert served.status_code == 200, served.text
+    assert served.headers["cache-control"] == "no-store"
+    assert hub.sent[-1].path == "/community/v1/communities"
+
+    store.rows.clear()
+    refused = await test_app_client.get(BASE, headers=auth)
+    assert refused.status_code == 401  # the desktop door keeps 401 (R1-M1 is relay-only)
+    assert refused.json()["detail"] == {"code": "community_signin_required"}
+    assert refused.headers["cache-control"] == "no-store"

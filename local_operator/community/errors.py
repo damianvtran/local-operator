@@ -9,10 +9,23 @@ server's text is English, may change, and an upstream echo is how a body or an
 internal detail would leak through a local route.
 
 The mapping follows ``docs/community-api.yaml`` (agent-server
-feat/community-registry): 401 Unauthorized, 403 Forbidden, 404 NotFound (one
-body for unknown/draft/hidden/unjoined), 409 Conflict (GuidelinesChanged or an
-a state precondition), 413 PayloadTooLarge, 422 Refused, 429 RateLimited,
-503 ModerationUnavailable, 500 Unavailable.
+feat/community-registry @ 54a4245a): 401 Unauthorized, 403 Forbidden, 404
+NotFound (one body for unknown/draft/hidden/unjoined), 409 Conflict
+(GuidelinesChanged ``{code, message, guidelines_version}`` or a state
+precondition), 413 PayloadTooLarge, 422 Refused, 429 RateLimited, 503
+ModerationUnavailable, 503 AuthenticationUnavailable and 500 Unavailable.
+
+Two contract states have no code of their own, so they land on the generic
+refusal of their status rather than on a guess from the hub's English text:
+- a member's join of a ``read_only`` community is 409 ``{message: community
+  is read-only}`` with no ``code``, so it is :class:`CommunityConflict`. The
+  surface already knows the state from the listing/bootstrap ``state`` field;
+- 503 AuthenticationUnavailable (the hub could not introspect the token, so it
+  failed closed) is :class:`CommunityUnavailable`: retry later. It is NOT a
+  sign-in state, because the token may be fine.
+
+A reused Idempotency-Key is never a 409: the hub replays the first attempt's
+stored outcome whatever the new body.
 
 IMAGES UNAVAILABLE is not yet a named response in that contract. The RFC keeps
 images disabled until their gates pass (canon §7; probation is "no images"),

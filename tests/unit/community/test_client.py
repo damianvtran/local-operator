@@ -300,9 +300,13 @@ async def test_moderation_unavailable_and_images_unavailable_are_distinct(hub: F
         (403, {"message": "no seat"}, CommunityForbidden),
         (404, {"message": "community not found"}, CommunityNotFound),
         (409, {"message": "channel locked"}, CommunityConflict),
+        # Contract @ 54a4245a: a member's join of a read_only community has no code.
+        (409, {"message": "community is read-only"}, CommunityConflict),
         (413, {"message": "too big"}, CommunityPayloadTooLarge),
         (500, {"message": "community membership is unavailable"}, CommunityUnavailable),
         (503, {"message": "down"}, CommunityUnavailable),
+        # 503 AuthenticationUnavailable: introspection failed closed; retry, not sign-in.
+        (503, {"message": "authentication is temporarily unavailable"}, CommunityUnavailable),
         (418, None, CommunityInvalidResponse),
     ],
 )

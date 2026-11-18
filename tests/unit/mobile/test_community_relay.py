@@ -147,3 +147,90 @@ def test_rejected_and_oversized_bodies_are_never_echoed(rig) -> None:
         client.get(BASE + "/local-operator/channels", params={"filter": "staff"}).status_code == 422
     )
     assert hub.sent == []
+
+
+def test_signin_required_is_never_a_401_on_the_relay(rig, monkeypatch) -> None:
+    """R1-M1: relay web reads ANY 401 as a dead relay cookie (wipes drafts, reloads).
+
+    A signed-out Radient account over a LIVE relay session must answer 409 with
+    the code, so relay web branches on ``community_signin_required`` instead.
+    """
+
+    client, hub, _ = rig
+    _login(client)
+    signed_out = FakeStore(rows=[])
+    monkeypatch.setattr(
+        relay,
+        "_client",
+        lambda expected: make_client(hub, signed_out, expected_account_id=expected),
+    )
+    response = client.get(BASE)
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "community_signin_required",
+        "code": "community_signin_required",
+    }
+    assert hub.sent == []
+    # The relay gate's own 401 is untouched: the session cookie is still good.
+    assert client.get("/api/sessions").status_code != 401
+
+
+def _every_refusal() -> list:
+    """One instance of EVERY ``CommunityError`` type, plus a bare 401 base."""
+
+    from local_operator.community import errors
+
+    special = {
+        errors.CommunityGuidelinesChanged: lambda: errors.CommunityGuidelinesChanged("v2"),
+        errors.CommunityRefused: lambda: errors.CommunityRefused("spam", "ref_1"),
+        errors.CommunityRateLimited: lambda: errors.CommunityRateLimited(5, "sender"),
+        errors.CommunityModerationUnavailable: lambda: errors.CommunityModerationUnavailable(30),
+    }
+    kinds = [getattr(errors, name) for name in errors.__all__]
+    made = [special[k]() if k in special else k() for k in kinds]
+    # A type added later with 401 is covered by the status rule, not the list.
+    made.append(errors.CommunityError("future_signin_state", http_status=401))
+    return made
+
+
+_BODIES = {
+    "join": {"guidelines_version": "v1", "accept_guidelines": True},
+    "submit": {"text": "x"},
+    "edit": {"text": "x"},
+    "react": {"emoji": "+1"},
+}
+
+
+def test_no_relay_route_answers_401_for_any_refusal(rig, monkeypatch) -> None:
+    """The sweep behind R1-M1: every member route x every refusal type, never 401."""
+
+    from local_operator.community import errors, member_ops
+
+    client, hub, _ = rig
+    _login(client)
+    refusals = _every_refusal()
+    # Every exported refusal type is in the table (so a new one cannot skip it).
+    assert {type(e) for e in refusals} >= {getattr(errors, n) for n in errors.__all__}
+    current: list[errors.CommunityError] = []
+
+    async def refuse(*_args, **_kwargs):
+        raise current[0]
+
+    monkeypatch.setattr(member_ops, "run", refuse)
+    params = {
+        "community_id": "local-operator",
+        "conversation_id": "conv_general",
+        "idempotency_key": KEY,
+        "message_id": "msg_1",
+    }
+    checked = 0
+    for op in MEMBER_OPERATIONS:
+        path = relay.PREFIX + op.path.format(**params)
+        for error in refusals:
+            current[:] = [error]
+            response = client.request(op.method, path, json=_BODIES.get(op.name))
+            assert response.status_code != 401, (op.name, error.code)
+            assert response.json()["code"] == error.code, (op.name, error.code)
+            checked += 1
+    assert checked == len(MEMBER_OPERATIONS) * len(refusals)
+    assert hub.sent == []
