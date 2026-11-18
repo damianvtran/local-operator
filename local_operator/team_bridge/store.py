@@ -1502,6 +1502,7 @@ _DELIVERY_HOLD_CODES = frozenset(
         "ack_tuple_mismatch",
         "attachments_malformed",
         "attachments_unbound",
+        "files_unbound",
         "body_invalid",
         "body_unavailable",
         "bounce_receipt_missing",
@@ -1654,6 +1655,45 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         # nothing judged the message, so the sender is told screening is
         # unavailable -- never that a human is reviewing it.
         "screening_model_unavailable",
+        # SPINE CODES (holds trace 2026-11-18). Before this they fell through to
+        # ``awaiting_review``: during the 19:13-19:46Z hub outage every
+        # ``conversation_failed`` was published as a review hold and members
+        # saw "Held for review" for a transient exception nobody was looking
+        # at. Each below is written BEFORE any verdict exists, by a failure of
+        # this machine or of the hub's answer, and the row is re-driven on the
+        # loop's retry backoff (``connector.loop.retry_due_holds``):
+        #
+        # an unexpected exception in the conversation spine, and the retry
+        # pass's own catch-all and default;
+        "conversation_failed",
+        "retry_failed",
+        "hold",
+        # the body read failed or the hub's answer could not be validated for
+        # this build (``conversation.py``: "keep it retryable");
+        "body_unavailable",
+        "body_hash_mismatch",
+        "mismatched_id",
+        "sender_malformed",
+        "attachments_malformed",
+        "envelope_missing",
+        "bridge_meta_invalid",
+        "display_context_invalid",
+        # a verdict that lost the image or file set it screened: held and
+        # RE-SCREENED, so nothing has judged those bytes yet;
+        "attachments_unbound",
+        "files_unbound",
+        # a dead connector's claim waiting out its lease, and its re-drive;
+        "stale_claim",
+        "stale_claim_retry",
+        # this machine's own store or identity read failing for the moment
+        # (``owner_changed`` and ``stale_generation`` are already above);
+        "state_unreadable",
+        "not_enrolled",
+        "owner_mismatch",
+        # A8: another live owner holds the privacy stage (bounded retry), or the
+        # privacy authority could not be read consistently this pass.
+        "privacy_pending",
+        "privacy_control_unavailable",
     }
 )
 
@@ -1668,8 +1708,48 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
 #: a refusal with the committed verdict (``screening._resolve_write_once_conflict``);
 #: what remains under this code is a conflict that could not be resolved that
 #: way, which is still a delivery problem on this machine, not a review.
+#:
+#: Also here (holds trace 2026-11-18), each a delivery-side wait that clears
+#: without anyone reviewing the content:
+#:
+#: * the hub ACK/admission families, written after the verdict;
+#: * a body reservation the store refused or could not prove for an ADMITTED
+#:   message ("the message stays pending");
+#: * the producer fences and owner-setup waits, the same kind of wait as
+#:   ``bridge_off``: the recipient's own designation, consent, credential or
+#:   chief-of-staff session must be in place before delivery, and the owner is
+#:   not judging the message;
+#: * another spine or session already holding the delivery claim.
+#:
+#: WHAT STAYS ``awaiting_review`` (the default arm, never listed): the owner-
+#: review codes (``hold_release.REVIEW_HOLD_CODES``, ``work_scope_hold``) and
+#: the TERMINAL fail-closed holds no retry can clear — content this build can
+#: never screen (``size_exceeded``, ``invalid_content*``, ``body_invalid``,
+#: ``envelope_malformed``/``_unbound``), damaged proof or schema, identity and
+#: ACK-binding anomalies, a local quarantine, and the settled A8 privacy holds
+#: (a completed privacy stage is reused, never re-run). Only the owner can move
+#: those, and both other classes tell a reader the delay is TRANSIENT
+#: (``tool._DELAYED_HOLD_CLASSES``), which for them would be false.
 _HOLD_CLASS_DELIVERY_PENDING = frozenset(
-    {"delivery_failed", "bridge_off", "phase_refused", "write_once_conflict"}
+    {
+        "delivery_failed",
+        "bridge_off",
+        "phase_refused",
+        "write_once_conflict",
+        "ack_recovery",
+        "ack_refused",
+        "ack_not_confirmed",
+        "envelope_refused",
+        "receipt_unavailable",
+        "reservation_refused",
+        "invalid_body_reservation",
+        "credential_changed",
+        "consent_revoked",
+        "no_designation",
+        "open_chief_of_staff",
+        "badge_only",
+        "claimed_elsewhere",
+    }
 )
 
 #: Screening category → the ONE coarse class that may leave this machine.
