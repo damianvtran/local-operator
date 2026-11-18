@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.community",
-  "history_sha256": "816dfa4189c28b5738266d4370e2e2dc7ae0f24fd30f095d79ca56f6c0e002a0",
+  "history_sha256": "162d75345c8532f7613b6acee25aad97d295c2d509ae0abe85c6c04dcfbaf4db",
   "entries": [
     {
       "locale": "ur",
@@ -69,6 +69,37 @@
         {
           "path": "i18n/audits/evidence/ur/community-secondary/audit.log",
           "sha256": "96ae3fb86311d9fc7726caa7a8ae8fb22a6924f135cb7987209570d1f8107451"
+        }
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.community",
+      "source_sha256": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_first_audit": true
+      },
+      "status": "passed",
+      "note": "PR #4221 round 3: SECOND independent safety audit (08c6dfffd961); different session and model from translator and round-1/2 first auditors. 5 approval-card keys only; no changes to audited copy. Evidence: i18n/audits/evidence/ur/community-r3-safety-wire/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/community-r3-safety-wire/record.json",
+          "sha256": "26afd4e30095cdf1d15cba036ed07acddff252641e853e2bf433b85d78ff487c"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/community-r3-safety-wire/report.md",
+          "sha256": "729e09fc1a639d57e5b0357e9a982233ea4bf94eddfee57d4b75b3dbe7b20248"
         }
       ]
     }

@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "audit_id": "community-round-3-es-wire.community-08c6dfffd961",
+  "audit_kind": "bounded_independent_second_safety_audit",
+  "repository": "damianvtran/local-operator",
+  "pr": 4221,
+  "locale": "es",
+  "namespace": "wire.community",
+  "audit_date": "2026-11-18",
+  "audited_revision": "37aa1d6ebb275c0928576366d48b52809d9ce02b",
+  "candidate_tree": "13010a25c61439070020148c7f01d0a6261a9f09",
+  "combined_patch_sha256": "7a520bb614cd7694422cd7d955c3b400b830a5e3d2f1bb7b6ae0d74a291db17f",
+  "scope": "Approval-card keys only. The card describes audience, moderation, attribution and per-post consent, not the TUI keyboard gate. None of the five strings asserts approval or publication has already happened.",
+  "auditor": {
+    "agent": "reviewer",
+    "model": "openai/gpt-6.2-sol",
+    "date": "2026-11-18",
+    "session": "08c6dfffd961",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independent_from_first_audit": true
+  },
+  "translator": {
+    "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-18"
+  },
+  "first_auditors": [
+    {
+      "agent": "reviewer / i18n-auditor",
+      "session": "c739715f0519",
+      "model": "anthropic/claude-opus-5-5",
+      "evidence": "i18n/audits/evidence/es/community-primary/record.json",
+      "sha256": "cfebe551b97414eaa01b5b3c5d665ab9f74c85cb8f1fbb708c9b07c297119302"
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.json",
+      "sha256": "921c0e82256dc942800790bd098bca140fa075acd14d05dbe035c9ced04825ff"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.community.context.json",
+      "sha256": "b0c568ca3380d372c4f2ca43f2046ccc9dd8bf19e4c22014e037dcb63518e769"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.community.json",
+      "sha256": "a8888da4d386c8e8162a907f5f67e7ed94639e835ebabb613b98f208e692deaf"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "deferred_non_gating_finding_ids": []
+  },
+  "keys_semantically_audited": [
+    "wire.community.post_card_audience",
+    "wire.community.post_card_each_time",
+    "wire.community.post_card_label",
+    "wire.community.post_card_tainted",
+    "wire.community.post_card_title"
+  ],
+  "per_key": {
+    "wire.community.post_card_audience": {
+      "en": "Audience: all members of {channel} · checked by the community's moderator before anyone sees it.",
+      "target": "Audiencia: todos los miembros de {channel} · el moderador de la comunidad lo revisa antes de que nadie lo vea.",
+      "verdict": "pass",
+      "reason": "Todos los miembros is the full audience; antes de que nadie lo vea means before anyone sees it."
+    },
+    "wire.community.post_card_each_time": {
+      "en": "Each post asks you; there are no standing permissions yet.",
+      "target": "Cada publicación te lo pregunta; todavía no hay permisos permanentes.",
+      "verdict": "pass",
+      "reason": "Cada publicación / no hay permisos permanentes keeps individual prompting and no standing grant."
+    },
+    "wire.community.post_card_label": {
+      "en": "Shown as your own post: this server can't label agent posts yet, so others won't see it came from your agent.",
+      "target": "Se muestra como tu propia publicación: este servidor aún no puede etiquetar las publicaciones de agentes, así que nadie verá que vino de tu agente.",
+      "verdict": "pass",
+      "reason": "Tu propia publicación and nadie verá que vino de tu agente retain own attribution and lack of agent label."
+    },
+    "wire.community.post_card_tainted": {
+      "en": "Your agent read community posts in this session, so no standing permission applies until a new session; only your answer posts this.",
+      "target": "Tu agente leyó publicaciones de la comunidad en esta sesión, así que ningún permiso permanente se aplica hasta una nueva sesión; solo tu respuesta publica esto.",
+      "verdict": "pass",
+      "reason": "Ningún permiso permanente applies until a new session; solo tu respuesta keeps the decision with the reader."
+    },
+    "wire.community.post_card_title": {
+      "en": "Post to {channel} in {community}, as you?",
+      "target": "¿Publicar en {channel} de {community} como tú?",
+      "verdict": "pass",
+      "reason": "Como tú is interrogative, not a claim that posting has happened; channel and community retained."
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/community-r3-safety-wire/report.md",
+      "sha256": "55541b68e0f52a268cfaf94b2650ea8bfac8c48edf114000145677a9ed355469"
+    }
+  ]
+}
