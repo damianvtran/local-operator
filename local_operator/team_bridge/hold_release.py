@@ -7,7 +7,8 @@ release, and the owner heard only a count after 60 minutes. A genuine relay
 silently parked or bounced. B4b lets the RECEIVING person decide, per message,
 for exactly one kind of decision: the screener said the message bids for new
 work and nothing else. Everything here is behind ``team_bridge.hold_release``
-(default OFF, B4b DESIGN §8.1 slice S1).
+(default ON since slice S3a, 2026-11-18; a real ``false`` restores the
+pre-B4b reject — see ``settings.DEFAULT_HOLD_RELEASE``).
 
 WHAT IS RELEASABLE, AND WHY IT IS SO NARROW (DECISIONS Amendment 1, D2/D4):
 
@@ -258,14 +259,22 @@ def converts(categories: Sequence[str]) -> bool:
 
 
 def enabled(config_dir: Path | str) -> bool:
-    """The setting, read fresh from disk; a torn or absent read is OFF."""
+    """``team_bridge.hold_release``: ON unless the file says a real ``false``.
+
+    Default ON since slice S3a (see ``DEFAULT_HOLD_RELEASE``): a torn or absent
+    read takes the default, like ``review_enabled``, because what it opens is a
+    hold the person decides — never an admit.
+    """
 
     from local_operator.config import read_config_values
-    from local_operator.team_bridge.settings import TeamBridgeSettings
+    from local_operator.team_bridge.settings import (
+        DEFAULT_HOLD_RELEASE,
+        TeamBridgeSettings,
+    )
 
     values = read_config_values(Path(config_dir))
     if values is None:
-        return False
+        return DEFAULT_HOLD_RELEASE
     return TeamBridgeSettings.from_values(values).hold_release
 
 

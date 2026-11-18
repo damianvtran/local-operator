@@ -184,18 +184,33 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: category is surfaced to the receiving person per message, with Deliver and
 #: Discard, instead of sitting cached forever behind a count-only alert.
 #:
-#: OFF BY DEFAULT (B4b DESIGN §8.1 slice S1). With it off, screening, the
-#: connector and every notice are byte-identical to the build before B4b; the
-#: desktop routes still exist so QA can drive them, and they refuse every
-#: write with ``hold_release_off``. Turning it on by default is slice S3a,
-#: which waits for the S2 UI and for B5's receiver-adherence results.
+#: ON BY DEFAULT (slice S3a, operator ask relayed 2026-11-18). The screening
+#: templates (v2-v5) define ``new_work_request`` as a bid to start, build,
+#: schedule, spend on or DECIDE new work, so a teammate's agent asking the
+#: operator to decide on access, spend or a prod change was answered with a hub
+#: REJECT: the sender was refused a decision that was never the screener's to
+#: make. An operator-decision request must be HELD for the person, not
+#: rejected. With this on, such a bounce becomes a ``work_scope_hold`` and the
+#: per-message Deliver/Discard notice reaches the designated session's inbox.
+#: The narrowing that made the conversion safe is unchanged and lives in code,
+#: not here: ONLY exactly ``("new_work_request",)`` from a preferred, allowlisted
+#: screener converts (``hold_release.converts``/``preferred_answer``);
+#: injection, social engineering, ``out_of_scope_work``,
+#: ``personal_info_request`` and every multi-category answer still reject.
 #:
-#: Read from the config file like ``hold_alert_after_minutes`` and for the same
-#: reason has NO ``/settings`` registry row: a row would change
-#: ``wire.settings`` copy and un-ship every locale's audited ledger row. Only a
-#: real ``true`` turns it on; anything else (absent, ``null``, a string) reads
-#: OFF, because a release path must never open on a value nobody wrote.
-DEFAULT_HOLD_RELEASE = False
+#: ``false`` restores the pre-B4b behaviour exactly (the bounce is a reject;
+#: the desktop routes refuse every write with ``hold_release_off``). Like
+#: ``review_held``, only a real ``false`` turns it off; absent/garbled reads ON,
+#: because the outcome it opens is a HOLD a person controls, never an admit:
+#: nothing is delivered without the operator's signed Deliver.
+#:
+#: Still read from the config file with NO ``/settings`` registry row, like
+#: ``hold_alert_after_minutes``: a row adds ``wire.settings`` copy, and measured
+#: on 2026-11-18 that drops ``i18n/data/shipped.json`` to ``["en"]`` until all
+#: seven locales are translated and independently audited. The off switch is
+#: documented in the Team Bridge guide (``hold_release: false`` under
+#: ``values:`` > ``team_bridge:``); the row is a separately-translated change.
+DEFAULT_HOLD_RELEASE = True
 
 #: ``team_bridge.review_held`` — the owner-review EXIT for a cached screening
 #: ANSWER hold (``hold_release.REVIEW_HOLD_CODES``: ``model_hold``,
@@ -721,7 +736,7 @@ class TeamBridgeSettings:
     default_enrollment: Mapping[str, str] = field(default_factory=dict)
     #: Minutes a held conversation message ages before the owner is told; 0 = off.
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
-    #: B4b owner release (``hold_release.py``); OFF unless a real ``true``.
+    #: B4b owner release (``hold_release.py``); ON unless a real ``false``.
     hold_release: bool = DEFAULT_HOLD_RELEASE
     #: The stored "Screening model" preference as a ``(provider, model_id)``
     #: pair, or ``None`` for "no preference" (the shipped default). Shape-parsed
@@ -790,8 +805,9 @@ class TeamBridgeSettings:
             hold_alert_after_minutes=_hold_alert_after_minutes(
                 get(HOLD_ALERT_AFTER_PATH, DEFAULT_HOLD_ALERT_AFTER_MINUTES)
             ),
-            # ``is True``: a release path opens on an explicit boolean only.
-            hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is True,
+            # ``is not False``: only an explicit ``false`` closes it (S3a). The
+            # path it opens is a person-controlled hold, never an admit.
+            hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is not False,
             screening_model=_screening_model(
                 get(SCREENING_MODEL_PATH, DEFAULT_TEAM_BRIDGE_SCREENING_MODEL)
             ),

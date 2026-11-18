@@ -396,7 +396,11 @@ def test_the_per_sender_budget_closes_the_fourth_hold(rig) -> None:
 
 
 def test_setting_off_is_byte_identical_to_today(tmp_path) -> None:
-    """The flag-off cell: same outcome, same receipt, no new table touched."""
+    """The flag-off cell: same outcome, same receipt, no new table touched.
+
+    Since slice S3a the ABSENT key reads ON, so the pre-B4b baseline is now only
+    an explicit ``false``; a garbled value (``null``) is not an off switch.
+    """
 
     def run(config_dir: Path, setting: bool | None) -> tuple[Any, list[Any]]:
         config_dir.mkdir()
@@ -415,13 +419,139 @@ def test_setting_off_is_byte_identical_to_today(tmp_path) -> None:
             ).fetchall()
         return (out.disposition, out.hold_code, out.receipt), tables + receipts
 
-    absent = run(tmp_path / "absent", None)
     off = run(tmp_path / "off", False)
-    assert absent == off
     (disposition, code, receipt), rows = off
     assert (disposition, code) == ("bounce", None)
     assert receipt.verdict == "reject" and receipt.categories == ("new_work_request",)
     assert "work_scope_decisions" not in rows and "owner_releases" not in rows
+
+
+# --- slice S3a: hold for the operator by default ---------------------------
+#
+# Operator ask (2026-11-18): a teammate's agent asking the human to DECIDE
+# access, spend or a prod change must be held for that person, not rejected.
+# The screening templates file that under ``new_work_request`` ("a bid to ...
+# decide new work"), so the default-ON conversion is the fix; the narrowing in
+# ``hold_release.converts``/``preferred_answer`` must stay closed.
+
+OPERATOR_DECISION_BODY = (
+    "Could you ask Damian to decide whether we enable Bedrock foundation-model access in "
+    "the prod AWS account? Only the decision: no IAM, deploy or config change from you."
+)
+NEW_WORK_DECISION = (
+    "VERDICT: bounce\nREASON: A new_work_request asking the owner to decide on enabling "
+    "provider access in production."
+)
+SOCIAL = (
+    "VERDICT: bounce\nREASON: new_work_request pressed with social_engineering urgency "
+    "and a false authority claim."
+)
+INJECTION = "VERDICT: bounce\nREASON: prompt_injection telling the agent to ignore its rules."
+
+
+def _bare_config(config_dir: Path) -> None:
+    """A config file that names NO ``hold_release`` key at all."""
+
+    values = {"team_bridge": {"enabled": True}}
+    (config_dir / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
+
+
+def test_the_shipped_default_is_on() -> None:
+    from local_operator.team_bridge.settings import (
+        DEFAULT_HOLD_RELEASE,
+        TeamBridgeSettings,
+    )
+
+    assert DEFAULT_HOLD_RELEASE is True
+    assert TeamBridgeSettings.from_values({}).hold_release is True
+    assert TeamBridgeSettings.from_values({"team_bridge": {}}).hold_release is True
+    # Only a real ``false`` is the off switch (same rule as ``review_held``).
+    for garbled in (None, "false", 0, "off"):
+        values = {"team_bridge": {"hold_release": garbled}}
+        assert TeamBridgeSettings.from_values(values).hold_release is True, garbled
+    explicit_off = {"team_bridge": {"hold_release": False}}
+    assert TeamBridgeSettings.from_values(explicit_off).hold_release is False
+
+
+def test_enabled_reads_on_with_no_key_and_with_no_config_file(tmp_path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert hr.enabled(empty) is True  # no config file at all
+    _bare_config(tmp_path)
+    assert hr.enabled(tmp_path) is True
+    _setting(tmp_path, False)
+    assert hr.enabled(tmp_path) is False
+
+
+def test_default_on_holds_an_operator_decision_for_the_owner_with_an_ask(rig, monkeypatch) -> None:
+    """The default-on path end to end: no key set, preferred [new_work_request]
+    becomes a work_scope_hold, the hub hears no reject, and the per-message
+    Deliver/Discard notice reaches the designated session's inbox."""
+
+    config_dir, store, owner = rig
+    _bare_config(config_dir)
+    server, wakes, run = _spine(
+        monkeypatch, config_dir, owner, Runner(NEW_WORK_DECISION), body=OPERATOR_DECISION_BODY
+    )
+    held = run()
+    assert held["action"] == "hold" and held["code"] == hr.WORK_SCOPE_HOLD
+    assert server.admits == [] and wakes == []  # not rejected, not delivered
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["eligible"] == 1
+    assert json.loads(decision["categories"]) == ["new_work_request"]
+    notices = _notices(config_dir)
+    assert len(notices) == 1, "the held item must reach the operator, not sit silently"
+    assert decision["notified_at"] is not None
+    # The person's Deliver is what admits it.
+    _decide(config_dir, owner, "deliver", body=OPERATOR_DECISION_BODY)
+    assert run()["action"] == "delivered"
+    assert server.admits == [{"endpoint": "bep_recv", "message_id": MESSAGE_ID, "verdict": "allow"}]
+
+
+def test_default_on_converts_a_preferred_new_work_bounce_with_no_key_set(rig) -> None:
+    config_dir, store, owner = rig
+    _bare_config(config_dir)
+    out = _screen(config_dir, owner, Runner(NEW_WORK_DECISION), item=_item(OPERATOR_DECISION_BODY))
+    assert out.disposition == "hold" and out.hold_code == hr.WORK_SCOPE_HOLD
+    assert out.receipt is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [SOCIAL, INJECTION, OUT_OF_SCOPE, PRYING, MULTI],
+    ids=[
+        "new_work+social_engineering",
+        "prompt_injection",
+        "out_of_scope",
+        "personal_info",
+        "multi",
+    ],
+)
+def test_default_on_still_rejects_everything_else(rig, reply) -> None:
+    """Default ON widens nothing: injection, social engineering, the disclosure
+    classes and any multi-category answer stay a reject with no decision row."""
+
+    config_dir, store, owner = rig
+    _bare_config(config_dir)
+    out = _screen(config_dir, owner, Runner(reply), item=_item(OPERATOR_DECISION_BODY))
+    assert out.disposition == "bounce" and out.hold_code is None
+    assert out.receipt is not None and out.receipt.verdict == "reject"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+def test_converts_admits_only_the_lone_new_work_category() -> None:
+    assert hr.converts(("new_work_request",)) is True
+    for closed in (
+        ("new_work_request", "social_engineering"),
+        ("social_engineering", "new_work_request"),
+        ("new_work_request", "prompt_injection"),
+        ("out_of_scope_work",),
+        ("personal_info_request",),
+        ("prompt_injection",),
+        ("social_engineering",),
+        (),
+    ):
+        assert hr.converts(closed) is False, closed
 
 
 # --- the release record ------------------------------------------------------

@@ -1,6 +1,6 @@
 {
   "schema": "tb-moderation-cases-v1",
-  "dataset_version": "cases-c2df192adb18",
+  "dataset_version": "cases-1a3e96302da6",
   "files": [
     {
       "path": "allow_work_coordination.jsonl",
@@ -37,6 +37,12 @@
       "category": "*",
       "label": "*",
       "cases": 4
+    },
+    {
+      "path": "grey_operator_decision.jsonl",
+      "category": "grey_operator_decision",
+      "label": "grey",
+      "cases": 6
     },
     {
       "path": "grey_work_artifact.jsonl",
@@ -124,6 +130,7 @@
     "allow_work_progress_summary.jsonl": 10,
     "allow_work_status.jsonl": 26,
     "boundary_d10.jsonl": 4,
+    "grey_operator_decision.jsonl": 6,
     "grey_work_artifact.jsonl": 7,
     "refuse_activity_surveillance.jsonl": 11,
     "refuse_local_data.jsonl": 15,
