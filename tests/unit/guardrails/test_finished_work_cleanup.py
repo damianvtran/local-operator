@@ -24,6 +24,7 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -37,6 +38,7 @@ from local_operator.harness.message_types import (
     PEER_MESSAGE_MESSAGE_TYPE,
 )
 from local_operator.harness.types import CustomMessage
+from local_operator.session.runtime import registry
 
 ME = "aaaaaaaaaaa1"  # the cleaning session
 DONE = "bbbbbbbbbbb2"  # the ended session that made the tree / rig
@@ -44,6 +46,7 @@ LIVE = "ccccccccccc3"  # a session still running
 #: The real scan, kept before the ``home`` fixture stubs it (section 4 restores it).
 _REAL_LIVE_CWD_INSIDE = prov._live_cwd_inside
 _REAL_CWD_HOLDERS = prov.cwd_holders
+_REAL_RUNNING_OWNERS = prov._running_owners
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -203,6 +206,71 @@ async def test_interrupted_finished_tree_skips_unavailable_judge(
     assert str(wt) not in _git("worktree", "list", "--porcelain", cwd=repo)
     if shared_link:
         assert (repo / "node_modules" / "cache.js").read_text() == "generated\n"
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_finished_proof_keeps_state_flags_separate_from_ledger_owner(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+) -> None:
+    wt = _branch_tree(home, repo, "ledger-owner")
+    _git("merge", "--ff-only", "fix/ledger-owner", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    if interrupted:
+        (wt / "a.txt").unlink()
+    real = os.path.realpath(wt)
+    identity = prov.cleanup_identity(real)
+    assert identity is not None
+    assert prov.worktree_creators(real, strict=True) == {DONE}
+    # Isolate process discovery but exercise the real ledger lookup and caller exclusion.
+    monkeypatch.setattr(
+        registry,
+        "scan",
+        lambda *a, **kw: [(SimpleNamespace(session_id=DONE, cwd=str(home)), "live")],
+    )
+    calls: list[tuple[object, ...]] = []
+    read_state = prov.worktree_state
+
+    def state(
+        path: str,
+        *,
+        facts: dict[str, bool],
+        own: bool = False,
+        session_id: str = "",
+        hidden_blocks: bool = False,
+        interrupted_cleanup: bool = False,
+    ) -> str:
+        assert path == real
+        calls.append(("state", own, session_id, hidden_blocks, interrupted_cleanup))
+        return read_state(
+            path,
+            facts=facts,
+            own=own,
+            session_id=session_id,
+            hidden_blocks=hidden_blocks,
+            interrupted_cleanup=interrupted_cleanup,
+        )
+
+    def owners(path: str, session_id: str, *, strict: bool = False) -> tuple[str, ...]:
+        assert path == real
+        calls.append(("owners", session_id, strict))
+        return _REAL_RUNNING_OWNERS(path, session_id, strict=strict)
+
+    monkeypatch.setattr(prov, "worktree_state", state)
+    monkeypatch.setattr(prov, "_running_owners", owners)
+    state_call = ("state", False, "", True, interrupted)
+    unrelated = prov.finished_foreign_worktree(
+        real, ME, interrupted_cleanup=interrupted, identity=identity
+    )
+    assert not unrelated.safe and unrelated.reasons == ("owner-running",)
+    assert calls == [state_call, ("owners", ME, True)]
+
+    calls.clear()
+    owner = prov.finished_foreign_worktree(
+        real, DONE, interrupted_cleanup=interrupted, identity=identity
+    )
+    assert owner.safe, owner.reasons
+    assert owner.state == ("deletions-only" if interrupted else "clean")
+    assert calls == [state_call, ("owners", DONE, True), ("owners", DONE, False), state_call]
 
 
 @pytest.mark.asyncio

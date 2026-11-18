@@ -3639,9 +3639,10 @@ def finished_foreign_worktree(
     # Strict on hidden pids (review M1, PR #4161): a ``safe`` answer here
     # ranks ``--force`` and ``rm -rf`` LOW, and neither refuses untracked
     # content the way a plain ``git worktree remove`` does.
-    strict = {"interrupted_cleanup": True} if interrupted_cleanup else {}
     states = ("clean", "deletions-only") if interrupted_cleanup else ("clean",)
-    state = worktree_state(real, facts=facts, hidden_blocks=True, **strict)
+    state = worktree_state(
+        real, facts=facts, hidden_blocks=True, interrupted_cleanup=interrupted_cleanup
+    )
     if state in ("not-linked", "dirty", "locked", "stale-initializing", "busy"):
         return no(f"state-{state}", state)
     if state not in states:
@@ -3761,9 +3762,9 @@ def finished_foreign_worktree(
     global _cwd_inventory_cache
     _cwd_inventory_cache = None
     again: dict[str, bool] = {}
-    if worktree_state(real, facts=again, hidden_blocks=True, **strict) not in states or (
-        not interrupted_cleanup and again.get("ignored", True)
-    ):
+    if worktree_state(
+        real, facts=again, hidden_blocks=True, interrupted_cleanup=interrupted_cleanup
+    ) not in states or (not interrupted_cleanup and again.get("ignored", True)):
         return unknown("state-moved", state)
     if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
         return unknown("head-moved", state)
