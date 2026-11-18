@@ -4403,6 +4403,108 @@ def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex |
     return None
 
 
+# ---------------------------------------------------------------------------
+# POC: the index build in a spawned worker PROCESS (docs/design/transcript-index-off-process.md)
+# ---------------------------------------------------------------------------
+#
+# WHY. Every refresh this module runs inside ``lop serve`` -- a cold
+# ``_scan_full``, an incremental re-derive from the resume window, and the
+# hydration of a persisted snapshot -- is pure-Python work that holds the GIL on
+# a worker thread, so the serving loop's every step stretches while it runs
+# ("Yielding to other opens" only softens that for young paint holds, capped at
+# ``_YIELD_BUDGET_S``). A spawned process has its own interpreter and GIL: the
+# loop's only cost is pickling two strings and unpickling a small receipt.
+#
+# CONTRACT. The worker calls the SAME ``refresh_index`` (so the invalidation
+# ladder, the publish lock, the crash-safe store and the naming merge are all
+# unchanged -- they were already cross-process, because session runtimes
+# publish through them too) and then publishes the read-model companion, and
+# returns only a receipt. ``LOP_INDEX_SCAN_PROCESS`` selects:
+#   0 / unset  -- base behaviour (``asyncio.to_thread``), the default;
+#   1          -- build in the worker, then hydrate the publication in serve
+#                 (keeps every ``fresh_resident`` consumer working; pays one
+#                 GIL-held decode of the published snapshot in serve);
+#   2          -- build in the worker, NO hydration: serve answers from the
+#                 companion only. A measurement arm for the target
+#                 architecture, not a shippable contract (``fresh_resident``
+#                 consumers then see ``None``).
+# SPAWN, NEVER FORK: serve is multi-threaded (loop, executors, watchdog), and a
+# forked child of a threaded parent can inherit a lock held mid-operation.
+
+_SCAN_PROCESS_ENV = "LOP_INDEX_SCAN_PROCESS"
+#: Worker processes. Two keeps a cold scan of one journal from queueing every
+#: other session's small append refresh behind it; each worker is a separate
+#: interpreter (~60-90 MB idle), so this is also the memory ceiling's multiplier.
+_SCAN_WORKERS = 2
+#: Recycle a worker after this many builds: a large scan's peak heap is
+#: returned to the OS when the process exits, which a long-lived serve thread
+#: never does (pymalloc arenas fragment).
+_SCAN_TASKS_PER_CHILD = 16
+_SCAN_POOL: Any = None
+_SCAN_POOL_LOCK = threading.Lock()
+
+
+def _scan_process_mode() -> int:
+    raw = os.environ.get(_SCAN_PROCESS_ENV, "").strip()
+    return int(raw) if raw in ("1", "2") else 0
+
+
+def _scan_pool() -> Any:
+    """The lazily created spawn-context pool (loop thread; one per process)."""
+    global _SCAN_POOL
+    with _SCAN_POOL_LOCK:
+        if _SCAN_POOL is None:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+
+            _SCAN_POOL = ProcessPoolExecutor(
+                max_workers=_SCAN_WORKERS,
+                mp_context=multiprocessing.get_context("spawn"),
+                max_tasks_per_child=_SCAN_TASKS_PER_CHILD,
+            )
+        return _SCAN_POOL
+
+
+def _drop_scan_pool(*, wait: bool = False) -> None:
+    """Forget a broken pool so the next refresh builds a fresh one.
+
+    ``wait`` joins the pool's management thread (test teardown); a broken pool
+    on the serving loop is abandoned without waiting.
+    """
+    global _SCAN_POOL
+    with _SCAN_POOL_LOCK:
+        pool, _SCAN_POOL = _SCAN_POOL, None
+    if pool is not None:
+        pool.shutdown(wait=wait, cancel_futures=True)
+
+
+def _refresh_in_worker(config_dir: str, session_id: str) -> dict[str, Any] | None:
+    """Worker-process entry: build + publish, return only a small receipt."""
+    started = time.process_time()
+    index = refresh_index(config_dir, session_id)
+    if index is None:
+        return None
+    token = None
+    try:
+        from local_operator.session import index_read_model
+
+        token = index_read_model.publish(config_dir, session_id, index)
+    except Exception:  # noqa: BLE001 - the companion is an optimisation
+        logger.debug("worker companion publish failed", exc_info=True)
+    return {
+        "sig": dict(index.sig),
+        "rows": index.scan.rows,
+        "token": token,
+        "cpu_ms": round((time.process_time() - started) * 1000, 1),
+        "pid": os.getpid(),
+    }
+
+
+def _hydrate_published(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
+    """Serve-side read of what the worker published, memoised like a refresh."""
+    return _read_indexed(config_dir, session_id, remember=True)[1]
+
+
 def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Task[Any], bool]":
     """Start (or join) the background refresh for one session.
 
@@ -4428,7 +4530,9 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
         if entry_loop is loop:
             _IN_FLIGHT.pop(key, None)
 
-    hold = _defer_for_paint(config_dir, session_id)
+    process_mode = _scan_process_mode()
+    # A worker process takes no GIL from the paint, so it has nothing to defer.
+    hold = None if process_mode else _defer_for_paint(config_dir, session_id)
     if hold is not None:
         _DEFERRED.add(key)
 
@@ -4452,6 +4556,22 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
             # route's ``a.wire.frame kind=snapshot`` row says whether the scan
             # started before or after the first frame was written.
             open_trace.mark("index.refresh_start", session=session_id, deferred=hold is not None)
+        if process_mode:
+            try:
+                receipt = await loop.run_in_executor(
+                    _scan_pool(), _refresh_in_worker, str(config_dir), session_id
+                )
+            except Exception as exc:
+                from concurrent.futures.process import BrokenProcessPool
+
+                if isinstance(exc, BrokenProcessPool):
+                    _drop_scan_pool()
+                raise
+            if open_trace.enabled():
+                open_trace.mark("index.worker_done", session=session_id, **(receipt or {}))
+            if receipt is None or process_mode == 2:
+                return None
+            return await asyncio.to_thread(_hydrate_published, config_dir, session_id)
         # Set in THIS task's own context, which ``to_thread`` copies into the
         # worker: only this refresh yields, and ``refresh_index``'s signature
         # (which tests and callers substitute) stays two-argument.
@@ -4708,6 +4828,8 @@ def _reset_for_tests() -> None:
     _PAINT_HOLD_SINCE.clear()
     _PAINT_RELEASED.clear()
     _DEFERRED.clear()
+    # A worker pool outlives no test: its processes would hold the tmp roots.
+    _drop_scan_pool(wait=True)
     # The read model's own in-process state is keyed by the same roots, so a
     # suite that re-creates a tmp_path must not inherit a memo or a remembered
     # publication failure from the previous one.
