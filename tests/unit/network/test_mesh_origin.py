@@ -578,7 +578,8 @@ def test_s2_a_compressed_transcript_refuses_the_downgrade(
 def test_s2_archive_names_match_the_compression_module() -> None:
     from local_operator.session import compression
 
-    assert set(origin.TRANSCRIPT_ARCHIVE_NAMES) == set(compression.ARCHIVE_FILENAMES)
+    # Identity, not equality: the names are imported from their owner, never respelled.
+    assert origin.TRANSCRIPT_ARCHIVE_NAMES is compression.ARCHIVE_FILENAMES
 
 
 # ---------------------------------------------------------------------------

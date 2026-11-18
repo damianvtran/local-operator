@@ -57,6 +57,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from local_operator.session.compression import ARCHIVE_FILENAMES
+
 logger = logging.getLogger(__name__)
 
 #: ``provider_payload`` key on a transcript row (prompt or steer). Invisible to the
@@ -381,9 +383,16 @@ def read_jsonl_rows(raw: bytes) -> list[Any]:
     return rows
 
 
-#: The transcript's ARCHIVE forms (``session.compression.ARCHIVE_FILENAMES``),
-#: spelled here so this module stays import-light; a test pins the two together.
-TRANSCRIPT_ARCHIVE_NAMES: tuple[str, ...] = ("transcript.jsonl.zst", "transcript.jsonl.gz")
+#: The transcript's ARCHIVE forms, imported from the module that owns them rather
+#: than spelled here. A local spelling put the literal transcript name into a
+#: ``network/`` module, which ``test_relay_e2e.test_the_relay_writes_no_session_state``
+#: forbids outside the move's own modules; importing it is also the only spelling
+#: that cannot drift. The import is cheap and safe for the relay process:
+#: ``session.compression`` imports only the stdlib at module scope (its
+#: ``local_operator`` imports are all function-local), measured at ~3 ms over an
+#: already-imported ``network.origin``. Only the NAME list is used here — nothing
+#: in this module decompresses (see :func:`downgrade_stamps`).
+TRANSCRIPT_ARCHIVE_NAMES: tuple[str, ...] = ARCHIVE_FILENAMES
 
 
 class ImportStampsRefused(ValueError):
@@ -522,7 +531,7 @@ def downgrade_stamps(directory: Path) -> int:
     session whose stamps were not lowered (fail-closed). Returns the number of
     lines rewritten.
 
-    A transcript ARCHIVE (``transcript.jsonl.gz``/``.zst``, any depth) raises
+    A transcript ARCHIVE (any name in :data:`TRANSCRIPT_ARCHIVE_NAMES`, any depth) raises
     :class:`ImportStampsRefused` before anything is rewritten (security review
     S-2): readers resolve the archive when the plain file is absent
     (``compression.transcript_source``), so skipping it would land its stamps
