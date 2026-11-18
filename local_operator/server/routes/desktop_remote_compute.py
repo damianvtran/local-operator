@@ -33,10 +33,20 @@ The client binds neither, so there is nothing here to remember to redact; the
 filter is defence in depth.
 
 THE FLAG IS READ PER REQUEST, from the app's config root. ``is_enabled`` reads
-``config.yml`` on every call precisely so a live toggle reaches a running daemon,
-and with the flag off the read answers ``{"enabled": false}`` and NO upstream
-call is made — the point of the switch is that nothing about the user's work
-leaves the device.
+``config.yml`` on every call precisely so a live toggle reaches a running daemon.
+WITH THE FLAG OFF, NOTHING ABOUT THE USER'S WORK LEAVES THE DEVICE — for the two
+reads that would ask Radient on their own initiative: the summary answers
+``{"enabled": false}`` and the runs listing answers ``{"runs": [], "server":
+"disabled"}``, both with no upstream call.
+
+THE WRITES, AND THE PER-RUN READ, STAY REACHABLE WITH THE FLAG OFF, on purpose
+and for the reason ``remote_compute/cli.py`` documents for ``--remote-cancel``:
+the switch stops this device from STARTING work, and a run that is already
+running is still spending the operator's money. Turning the feature off must not
+take away the two controls that stop it, so ``cancel`` and ``delete`` keep
+answering; the per-run read keeps answering too, because it is how the panel
+paints a row it already shows and how a deep link resolves. ``create`` is
+refused locally (403 ``not_configured``), before any request is composed.
 """
 
 from __future__ import annotations
@@ -66,17 +76,21 @@ from local_operator.remote_compute.api import (
 )
 from local_operator.remote_compute.client import (
     RemoteComputeClient,
+    check_idempotency_key,
     is_terminal,
     new_idempotency_key,
     without_secrets,
 )
 from local_operator.remote_compute.defaults import run_defaults
 from local_operator.remote_compute.errors import (
+    ATTESTATION_CODE_PREFIX,
+    REFUSAL_CODES,
     CapacityUnavailable,
     Conflict,
     IdempotencyConflict,
     InsufficientCredit,
     InvalidApiOverride,
+    InvalidIdempotencyKey,
     InvalidRequest,
     NetworkMismatch,
     PreviewNotEnabled,
@@ -126,12 +140,28 @@ TIER_NOT_AVAILABLE_MESSAGE = (
 TIER_CLOUD_RUN = "cloud_run"
 TIER_DEDICATED = "dedicated"
 
+#: The longest prompt this surface accepts, in characters.
+#:
+#: DERIVED, NOT INVENTED. The remote-compute contract documents no prompt bound of
+#: its own (``remote_compute.request.RunSpec`` checks that the prompt is non-empty
+#: and nothing more; ``client.check_idempotency_key`` bounds only the key), so the
+#: bound here is this plane's own prompt-shaped one: ``desktop_sessions.Prompt.text``
+#: carries ``max_length=200_000``, and a create body is the same kind of thing. An
+#: unbounded body would reach a proxy and come back a 413 the operator cannot act
+#: on; the 422 this answers is the same refusal the plane's other request models
+#: give.
+PROMPT_MAX_CHARS = 200_000
+
 #: The words the runs listing uses for the SERVER half of the merge. Not a
 #: refusal code: the listing answers the local records either way, and a panel
 #: that could not read the server must still render the work this device sent.
 SERVER_OK = "ok"
 SERVER_SIGNED_OUT = "signed-out"
 SERVER_UNAVAILABLE = "unavailable"
+#: The switch is off, so there is no server half and no request was made. Its own
+#: word rather than ``unavailable``: a renderer that painted a retry over it would
+#: offer to re-read a host the user has told this device to leave alone.
+SERVER_DISABLED = "disabled"
 
 #: The codes for refusals this surface names that no server code covers.
 #:
@@ -148,6 +178,13 @@ CODE_RUN_IDENTITY_MISMATCH = "run_identity_mismatch"
 CODE_INVALID_API_OVERRIDE = "invalid_api_override"
 CODE_INVALID_REQUEST = "invalid_request"
 CODE_CAPACITY_UNAVAILABLE = "capacity_unavailable"
+#: The contract's own spelling for "no such run", preserved rather than replaced
+#: by a surface code: a renderer branching on ``error.code`` alone must be able to
+#: tell a run that is gone from a library failure, and ``not_found`` is the word
+#: the server itself sends.
+CODE_RUN_NOT_FOUND = "not_found"
+#: Also the contract's spelling, for a key this client refuses before sending.
+CODE_INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
 CODE_FAILED = "remote_compute_failed"
 
 #: The status each refusal answers when the library carries no HTTP status of its
@@ -164,6 +201,7 @@ _STATUS_BY_CLASS: tuple[tuple[type[BaseException], int], ...] = (
     (Conflict, 409),
     (CapacityUnavailable, 503),
     (InvalidRequest, 400),
+    (InvalidIdempotencyKey, 400),
     (Unreachable, 502),
     (InvalidApiOverride, 409),
     (UnreadableEnvelope, 502),
@@ -181,7 +219,9 @@ _CODE_BY_CLASS: tuple[tuple[type[BaseException], str], ...] = (
     (RunIdentityMismatch, CODE_RUN_IDENTITY_MISMATCH),
     (InvalidApiOverride, CODE_INVALID_API_OVERRIDE),
     (InvalidRequest, CODE_INVALID_REQUEST),
+    (InvalidIdempotencyKey, CODE_INVALID_IDEMPOTENCY_KEY),
     (CapacityUnavailable, CODE_CAPACITY_UNAVAILABLE),
+    (RunNotFound, CODE_RUN_NOT_FOUND),
 )
 
 #: The status a MESH refusal answers, by the refusal's own code.
@@ -243,7 +283,7 @@ def refusal_from(failure: BaseException) -> ClientRefusal:
         # the remedy beside the message.
         return ClientRefusal(409, failure.reason, refusal_message(failure))
     if isinstance(failure, RemoteComputeError):
-        code = failure.code or _class_code(failure)
+        code = _contract_code(failure) or _class_code(failure)
         retry_after = failure.retry_after
         return ClientRefusal(
             status_for(failure), code, refusal_message(failure), retry_after=retry_after
@@ -270,11 +310,39 @@ def status_for(failure: RemoteComputeError) -> int:
 
 
 def _class_code(failure: RemoteComputeError) -> str:
-    """This surface's own code for a failure the server did not name one for."""
+    """This surface's own code for a failure the server did not name one for.
+
+    ``RunNotFound``'s entry is why this table is not only "codes we invented": a
+    per-run read that comes back 404 with NO code still answers the contract's
+    ``not_found``, so a renderer that branches on ``error.code`` alone can tell
+    "this run is gone" from a generic library failure without also reading the
+    status (QA round 1, Q1).
+    """
     for error_type, code in _CODE_BY_CLASS:
         if isinstance(failure, error_type):
             return code
     return CODE_FAILED
+
+
+def _contract_code(failure: RemoteComputeError) -> str | None:
+    """The server's own code, only when the contract's closed set names it.
+
+    ``errors.refusal_code`` already drops an unknown string on the way in, so this
+    is the second gate on the way OUT: a ``RemoteComputeError`` composed in-process
+    (this surface mints several) could still carry an arbitrary ``code``, and a
+    renderer keying on ``error.code`` must only ever see a member of the contract's
+    vocabulary. An unattributable code falls through to :func:`_class_code`, which
+    answers the surface's own word for the failure's CLASS — ``not_found`` for a
+    404, never the arbitrary string — and the STATUS stays exactly what it was,
+    because the status is a fact about the answer and the code is what this surface
+    can say about it (QA round 1, Q1).
+    """
+    code = failure.code
+    if code is None:
+        return None
+    if code in REFUSAL_CODES or code.startswith(ATTESTATION_CODE_PREFIX):
+        return code
+    return None
 
 
 def _answer(refusal: ClientRefusal) -> JSONResponse:
@@ -322,19 +390,28 @@ class RunSubmission(BaseModel):
 
     ``directory`` IS A PATH ON THIS MACHINE, and the whole point of the field: the
     route reads the repository and HEAD from it (``remote_compute.repo``) so the
-    operator never retypes a URL and a commit. ``network_id`` is optional because
+    operator never retypes a URL and a commit. It is resolved the way this plane's
+    other caller-supplied directory is (``Path(cwd).expanduser().resolve()``,
+    ``server/utils/desktop_sessions.resolve_working_directory``): a renderer that
+    sends ``~/work/repo`` means the operator's home, and handing the raw string to
+    ``detect_repo`` reported a perfectly good repository as "not a git repository
+    with an origin remote". ``network_id`` is optional because
     :func:`resolve_network` answers the device's one network when the caller names
     none, and refuses — never guesses — when there are several.
+
+    ``idempotency_key`` IS THE CALLER'S, when it has one. See :func:`create_run`
+    for why the key must be suppliable and not only returned.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    directory: str = Field(min_length=1)
-    prompt: str = Field(min_length=1)
+    directory: str = Field(min_length=1, max_length=4096)
+    prompt: str = Field(min_length=1, max_length=PROMPT_MAX_CHARS)
     tier: Literal["cloud_run", "dedicated"]
     size: Literal["s", "m", "l"] | None = None
     max_hours: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
     network_id: str | None = None
+    idempotency_key: str | None = None
 
 
 @contextlib.asynccontextmanager
@@ -471,8 +548,24 @@ async def list_runs(
     a run's present status, and a record row is appended only for an id the server
     did not return — including one marked ``deleted``, which is kept on purpose so a
     panel can say a run was deleted instead of silently losing the row.
+
+    EVERY ROW CARRIES ``id``, whichever half it came from: the server's run object
+    names it ``id`` and a record names it ``run_id``, and a renderer that had to try
+    both keys on every row of every panel is the work :func:`_record_row` does once,
+    here.
+
+    THE FLAG OFF ANSWERS AN EMPTY LISTING WITH NO UPSTREAM CALL (``server:
+    "disabled"``), like the summary read: the listing is the read that would ask
+    Radient what this device has been doing, and the switch exists so that nothing
+    about the user's work leaves the device while it is off.
     """
     root = _config_dir(request, manager)
+    if not is_enabled(root):
+        # NO UPSTREAM CALL, by design — and no local rows either: an empty listing
+        # with its own word for why is one state a panel paints, while records
+        # shown under a switch the user turned off would look like the switch
+        # failed.
+        return {"runs": [], "server": SERVER_DISABLED}
     server_state = SERVER_OK
     server_runs: list[dict[str, Any]] = []
     credential_id = await _pin(auth)
@@ -494,7 +587,7 @@ async def list_runs(
     for record in records.load(root):
         if record.run_id in seen:
             continue
-        merged.append({**record.to_json(), "source": "record"})
+        merged.append(_record_row(record))
     return {"runs": merged, "server": server_state}
 
 
@@ -508,20 +601,31 @@ async def get_run(
 ) -> Any:
     """One run, refreshed into the local record, with the record as the offline answer.
 
-    ONLY AN UNREACHABLE SERVER FALLS BACK. A refusal that means something (no such
-    run, another network's run, a dead sign-in) is the answer: reporting a local copy
-    over it would tell the operator a run is where it is not.
+    ONLY WHAT THE PANEL CANNOT DO BETTER FALLS BACK. A refusal that means something
+    (no such run, another network's run, a run that already finished) is the answer:
+    reporting a local copy over it would tell the operator a run is where it is not.
+    ``Unreachable`` — and an unusable sign-in, which is the same thing from the
+    panel's point of view — answers the record row when this device has one, because
+    a device whose grant cannot be refreshed right now still LISTED the run in
+    ``/runs`` and an offline laptop must be able to open the row it shows.
     """
     root = _config_dir(request, manager)
-    credential_id = _require_pin(await _pin(auth))
+    credential_id = await _pin(auth)
+    if credential_id is None:
+        # READ LAZILY, in both fallbacks: a run the server answers needs no local
+        # read, and the record file is the one thing here that grows with use.
+        record = _recorded(root, identifier)
+        if record is None:
+            raise _no_credential()
+        return {"run": _record_row(record)}
     async with _runs(root, credential_id) as runs:
         try:
             run = await runs.get_run(identifier)
         except Unreachable:
-            record = next((row for row in runs.local_runs() if row.run_id == identifier), None)
+            record = _recorded(root, identifier)
             if record is None:
                 raise
-            return {"run": {**record.to_json(), "source": "record"}}
+            return {"run": _record_row(record)}
     return {"run": {**without_secrets(run), "source": "server"}}
 
 
@@ -542,9 +646,9 @@ async def create_run(
     than letting the far end fail minutes later:
 
     1. the preview switch — off means no request is built at all;
-    2. the sign-in — the run is billed to one account, so there must be one;
-    3. the tier — this build starts Cloud runs, and Dedicated answers
+    2. the tier — this build starts Cloud runs, and Dedicated answers
        ``tier_not_available`` instead of being sent to an endpoint it does not have;
+    3. the sign-in — the run is billed to one account, so there must be one;
     4. the network — ``resolve_network`` issues the binding a request can only be
        built from, so a device in no network (or in two) is told that before any
        work is addressed to a host;
@@ -554,12 +658,19 @@ async def create_run(
        far end must be told which model to run, resolved through the same ladder a
        local exec uses.
 
-    THE IDEMPOTENCY KEY IS MINTED HERE, one per request, and returned with the run:
-    a renderer cannot choose it (one it could choose is one it could reuse for
-    different work, which is the conflict the header exists to prevent), and it is
-    the value a supervised retry of this exact submission must send. It is not
-    secret — it names a request, not a credential — and the log line pairs it with
-    the run id so a submission can be reconciled against the server's own record.
+    THE IDEMPOTENCY KEY IS THE CALLER'S WHEN IT SENDS ONE, and minted here (once per
+    request) when it does not. The key exists for the retry, and the retry that
+    matters is the LOST RESPONSE: a renderer whose POST timed out never received the
+    key the first attempt minted, so a surface that only returned one turned every
+    proxy timeout into a second run, a second pod and a second charge. A body that
+    carries ``idempotency_key`` replays the same run instead. Reusing a key for
+    DIFFERENT work is not a hole this opens: the server answers it ``409
+    idempotency_conflict``, which is the conflict the header exists to detect. The
+    key is validated by the library's own ``check_idempotency_key`` before a request
+    is composed (a 400 ``invalid_idempotency_key``), is not secret — it names a
+    request, not a credential — and is RETURNED either way, so a retry can also
+    start from the response. The log line pairs it with the run id so a submission
+    can be reconciled against the server's own record.
     """
     root = _config_dir(request, manager)
     if not is_enabled(root):
@@ -568,7 +679,11 @@ async def create_run(
         raise ClientRefusal(400, "tier_not_available", TIER_NOT_AVAILABLE_MESSAGE)
     credential_id = _require_pin(await _pin(auth))
     binding = await asyncio.to_thread(resolve_network, body.network_id, root)
-    repository = await asyncio.to_thread(repository_for, body.directory)
+    # RESOLVED, not taken raw: see ``RunSubmission.directory``. A ``~`` the caller
+    # meant as the operator's home reached ``detect_repo`` as a literal folder name
+    # and came back "not a git repository".
+    directory = Path(body.directory).expanduser().resolve()
+    repository = await asyncio.to_thread(repository_for, directory)
     try:
         hosting, model = await asyncio.to_thread(_hosting_model, manager)
     except ValueError as failure:
@@ -585,7 +700,15 @@ async def create_run(
         max_hours=body.max_hours,
     )
     payload = RunCreateRequest(binding=binding, body=spec.to_body())
-    key = new_idempotency_key()
+    # THE LIBRARY'S OWN RULE, applied to a key this surface was HANDED: the client
+    # checks the key it is given too, but it does so after the run sequence has
+    # begun, and a refusal there is a 400 under a class this surface would have
+    # reported as a generic 502.
+    key = (
+        check_idempotency_key(body.idempotency_key)
+        if body.idempotency_key is not None
+        else new_idempotency_key()
+    )
     async with _runs(root, credential_id) as runs:
         submitted = await runs.create_run(
             payload,
@@ -762,15 +885,51 @@ def _require_pin(credential_id: int | None) -> int:
     """
     if credential_id is not None:
         return credential_id
+    raise _no_credential()
+
+
+def _no_credential() -> ClientRefusal:
+    """The same refusal as a value, for a route that may keep going without one.
+
+    The per-run read answers its local record when the sign-in is unusable, and
+    raises this only when there is no record either — so it needs the refusal to
+    RAISE at one branch rather than to return from a pin it never resolved.
+    """
     failure = desktop_radient._failure(  # noqa: SLF001 — the plane's one refusal shape
         409, "radient_no_credential", desktop_radient.NO_CREDENTIAL_MESSAGE
     )
     detail = failure.detail if isinstance(failure.detail, dict) else {}
-    raise ClientRefusal(
+    return ClientRefusal(
         failure.status_code,
         str(detail.get("code") or "radient_no_credential"),
         str(detail.get("text") or desktop_radient.NO_CREDENTIAL_MESSAGE),
     )
+
+
+def _recorded(root: Path, identifier: str) -> records.RunRecord | None:
+    """This device's own record for ``identifier``, or ``None``.
+
+    Read through ``records.load`` directly rather than through a ``RemoteRuns``:
+    the offline answer must be available to a request that could not even resolve
+    a credential, and building a client to read a local file would be the long way
+    round to the same list the listing uses.
+    """
+    return next((row for row in records.load(root) if row.run_id == identifier), None)
+
+
+def _record_row(record: records.RunRecord) -> dict[str, Any]:
+    """One recorded run as a row of this surface's vocabulary.
+
+    ``run_id`` BECOMES ``id``, and is then DROPPED. The server names a run ``id``;
+    a record names it ``run_id`` because the record is the library's own on-disk
+    shape, which this route does not rewrite. One array holding both vocabularies
+    made every renderer try ``id or run_id`` on every row — and a row that failed
+    both rendered as a nameless run with no error. Nothing reads ``run_id`` here:
+    the CLI reads the record's own JSON, not this route's rows.
+    """
+    row = {**record.to_json(), "source": "record"}
+    row["id"] = row.pop("run_id")
+    return row
 
 
 def _networks(root: Path) -> list[dict[str, Any]]:
@@ -828,7 +987,21 @@ async def _capacity(root: Path, credential_id: int) -> tuple[list[dict[str, Any]
                 return [], False
             logger.info("remote compute: capacity read failed (%s)", type(failure).__name__)
             return [], True
-    return rows, any(row.get("ready") is True for row in rows)
+    tiers = [_capacity_row(row) for row in rows]
+    return tiers, any(row.get("ready") is True for row in tiers)
+
+
+def _capacity_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One capacity row, narrowed to the three fields this surface publishes.
+
+    CAPACITY IS THE ONE SERVER-SHAPED BODY THIS MODULE ANSWERS, so it is filtered
+    rather than passed through (``without_secrets`` covers the run bodies): a row
+    the deployment grows a field on — a rate, an internal pool name — would otherwise
+    be republished the moment it appears, without anyone deciding it should be. The
+    three keys are the contract's own (``{tier, ready, detail}``), and a row missing
+    one simply omits it, which is what the renderer already handles.
+    """
+    return {key: row[key] for key in ("tier", "ready", "detail") if key in row}
 
 
 async def _active_runs(root: Path, credential_id: int) -> list[dict[str, Any]]:

@@ -3,9 +3,16 @@
 WHAT IS PINNED HERE, one test per property the GUI's brief depends on:
 
 * **the flag is a consent gate, not a hint** — with ``remote_compute.enabled``
-  off the read answers ``{"enabled": false}`` and NOT ONE upstream request is
-  made, measured by the fake Radient's own call log rather than by a mock's
-  ``assert_not_called``;
+  off the summary read answers ``{"enabled": false}``, the listing answers
+  ``{"runs": [], "server": "disabled"}`` and NOT ONE upstream request is made
+  (measured by the fake Radient's own call log rather than by a mock's
+  ``assert_not_called``), while cancel and delete stay reachable;
+* **a retry after a lost response replays** — a create body may carry its own
+  ``idempotency_key``, two posts under one key put the same header and body on
+  the wire and get the same run id back, and a key the contract refuses is a 400
+  before any request;
+* **one identifier vocabulary** — every row of ``runs[]``, and both arms of the
+  detail read, carry ``id`` and not the record's ``run_id``;
 * **the account states are the plane's own three** — ``signed-out`` is a real
   empty ``AuthStore``, ``expired`` is ``desktop_radient``'s own
   ``_credential_refusal(grant_invalid)``, and a transient unrefreshable row still
@@ -54,6 +61,7 @@ from local_operator.network import store as network_store
 from local_operator.network import types as network_types
 from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import records
+from local_operator.remote_compute.errors import RunNotFound
 from local_operator.server.routes import desktop_radient, desktop_remote_compute
 
 #: THE GATE'S PLACEHOLDER TOKEN, spelled as a word the way the neighbouring
@@ -358,6 +366,44 @@ async def test_a_create_with_the_flag_off_is_refused_before_any_request(api: Api
 
 
 @pytest.mark.asyncio
+async def test_the_flag_off_answers_an_empty_listing_and_calls_nothing(api: Api) -> None:
+    """The listing is gated like the summary: off is a consent switch, not a hint."""
+    api.configure(enabled=False)
+    _record(api, RUN_ID)
+
+    answer = await api.client.get("/v1/desktop/remote-compute/runs")
+
+    assert answer.status_code == 200, answer.text
+    # ``disabled`` rather than ``unavailable``: there is no host to retry, and its
+    # own word is what keeps a panel from painting a retry over the user's choice.
+    assert answer.json() == {"runs": [], "server": "disabled"}
+    assert api.radient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_delete_stay_reachable_with_the_flag_off(api: Api) -> None:
+    """Stopping work the switch does not own: a live run still spends money.
+
+    The CLI documents the same intent for ``--remote-cancel``, and the module
+    docstring states it once for this surface.
+    """
+    api.configure(enabled=False)
+    _record(api, RUN_ID)
+    api.radient.add("POST", f"/v1/remote-compute/runs/{RUN_ID}/cancel", status=204)
+    api.radient.add("DELETE", f"/v1/remote-compute/runs/{RUN_ID}", status=204)
+
+    cancelled = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/cancel")
+    deleted = await api.client.delete(f"/v1/desktop/remote-compute/runs/{RUN_ID}")
+
+    assert cancelled.status_code == 200, cancelled.text
+    assert deleted.status_code == 200, deleted.text
+    assert api.radient.paths() == [
+        ("POST", f"/v1/remote-compute/runs/{RUN_ID}/cancel"),
+        ("DELETE", f"/v1/remote-compute/runs/{RUN_ID}"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_an_empty_store_reads_signed_out(api: Api) -> None:
     """A real, empty ``AuthStore``: the state is decided by rows, not by a stub."""
     api.configure()
@@ -468,6 +514,38 @@ async def test_the_read_answers_the_contract_shape(
     assert body["pricing"] is None
     assert [run["id"] for run in body["active"]] == [RUN_ID]
     assert body["active"][0]["hold_usd"] == 5.09
+    assert body["offered"] is True
+
+
+@pytest.mark.asyncio
+async def test_capacity_rows_publish_only_the_three_contract_fields(api: Api) -> None:
+    """Capacity is the one server-shaped body here, so it is narrowed explicitly."""
+    api.configure()
+    api.radient.add(
+        "GET",
+        "/v1/remote-compute/capacity",
+        payload={
+            "msg": "ok",
+            "result": {
+                "tiers": [
+                    {
+                        "tier": "cloud_run",
+                        "ready": True,
+                        "detail": {},
+                        "hourly_usd": 9.5,
+                        "pool": "internal-pool",
+                    }
+                ]
+            },
+        },
+    )
+    # The summary also reads the live runs; stubbed empty so the only thing this
+    # cell measures is the shape of the capacity rows.
+    api.radient.add("GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": []}})
+
+    body = (await api.client.get("/v1/desktop/remote-compute")).json()
+
+    assert body["capacity"] == [{"tier": "cloud_run", "ready": True, "detail": {}}]
     assert body["offered"] is True
 
 
@@ -602,7 +680,10 @@ async def test_the_listing_merges_server_rows_and_local_records(api: Api) -> Non
     body = (await api.client.get("/v1/desktop/remote-compute/runs")).json()
 
     assert body["server"] == "ok"
-    by_id = {row.get("id") or row.get("run_id"): row for row in body["runs"]}
+    # ONE vocabulary: every row names its run ``id``, whichever half it came from.
+    assert all("id" in row for row in body["runs"])
+    assert all("run_id" not in row for row in body["runs"])
+    by_id = {row["id"]: row for row in body["runs"]}
     assert by_id[RUN_ID]["source"] == "server"
     assert by_id[OTHER_RUN_ID]["source"] == "record"
     # The record's own vocabulary travels: its repo and its (scrubbed) summary.
@@ -621,7 +702,7 @@ async def test_an_unreachable_server_still_lists_the_local_records(api: Api) -> 
     body = (await api.client.get("/v1/desktop/remote-compute/runs")).json()
 
     assert body["server"] == "unavailable"
-    assert [row["run_id"] for row in body["runs"]] == [RUN_ID]
+    assert [row["id"] for row in body["runs"]] == [RUN_ID]
     assert body["runs"][0]["source"] == "record"
 
 
@@ -635,7 +716,7 @@ async def test_a_signed_out_server_still_lists_the_local_records(api: Api) -> No
     body = (await api.client.get("/v1/desktop/remote-compute/runs")).json()
 
     assert body["server"] == "signed-out"
-    assert [row["run_id"] for row in body["runs"]] == [RUN_ID]
+    assert [row["id"] for row in body["runs"]] == [RUN_ID]
 
 
 @pytest.mark.asyncio
@@ -660,7 +741,42 @@ async def test_the_detail_read_falls_back_to_the_record_only_when_offline(api: A
     body = (await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}")).json()
 
     assert body["run"]["source"] == "record"
-    assert body["run"]["run_id"] == RUN_ID
+    assert body["run"]["id"] == RUN_ID
+    assert "run_id" not in body["run"]
+
+
+@pytest.mark.asyncio
+async def test_a_signed_out_detail_read_still_serves_the_record(api: Api) -> None:
+    """An unusable sign-in is the unreachable case from the panel's point of view.
+
+    The listing answers this device its rows, so the detail read must be able to
+    open them: an offline laptop that lists a run it cannot open is the bug.
+    """
+    api.configure()
+    _record(api, RUN_ID)
+    api.sign_out()
+
+    body = (await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}")).json()
+
+    assert body["run"]["id"] == RUN_ID
+    assert body["run"]["source"] == "record"
+    # Nothing was asked of Radient: there is no credential to ask with.
+    assert api.radient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_signed_out_detail_read_with_no_record_keeps_the_sign_in_refusal(
+    api: Api,
+) -> None:
+    """No record to fall back to, so the refusal is the answer (not a 404)."""
+    api.configure()
+    api.sign_out()
+
+    answer = await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}")
+
+    assert answer.status_code == 409, answer.text
+    assert answer.json()["error"]["code"] == "radient_no_credential"
+    assert api.radient.calls == []
 
 
 @pytest.mark.asyncio
@@ -679,6 +795,39 @@ async def test_a_refused_detail_read_is_not_papered_over_with_the_record(api: Ap
 
     assert answer.status_code == 404
     assert answer.json()["error"]["code"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_a_codeless_404_still_answers_the_contracts_not_found(api: Api) -> None:
+    """A renderer keying on ``error.code`` alone must see ``not_found`` here too.
+
+    QA round 1, Q1: the status was right and the code was ``remote_compute_failed``,
+    so "this run is gone" and "the library broke" were the same word.
+    """
+    api.configure()
+    api.radient.add(
+        "GET", f"/v1/remote-compute/runs/{RUN_ID}", status=404, payload={"error": "gone"}
+    )
+
+    answer = await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}")
+
+    assert answer.status_code == 404
+    assert answer.json()["error"]["code"] == "not_found"
+
+
+def test_a_code_outside_the_contract_gets_the_surfaces_own_code_and_its_status() -> None:
+    """The other half of Q1: an unknown code never reaches a renderer verbatim.
+
+    The status stays exactly as the answer carried it, and the code is one of this
+    surface's own words rather than the string the server sent.
+    """
+    failure = RunNotFound("gone", code="made_up_code", status=404)
+
+    refusal = desktop_remote_compute.refusal_from(failure)
+
+    assert refusal.status == 404
+    assert refusal.code == "not_found"
+    assert "made_up_code" not in refusal.message
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +888,107 @@ async def test_create_submits_the_repository_and_records_the_run(api: Api) -> No
     recorded = records.load(api.root)
     assert [row.run_id for row in recorded] == [RUN_ID]
     assert recorded[0].network_id == NET_ID
+
+
+@pytest.mark.asyncio
+async def test_a_supplied_idempotency_key_replays_the_same_run(api: Api) -> None:
+    """The retry that matters is a LOST RESPONSE: the renderer still holds the key.
+
+    Two byte-identical posts under one caller-chosen key: the same key on the wire
+    twice, the same body, and the same run id back — a replay (200), not a second
+    run (201).
+    """
+    api.configure()
+    directory = _repository(api.root)
+    _network(api.root)
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=201,
+        payload={"msg": "submitted", "result": {"run": _run(status="pending")}},
+    )
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=200,
+        payload={"msg": "replayed", "result": {"run": _run(status="pending")}},
+    )
+    body = {
+        "directory": str(directory),
+        "prompt": "fix the failing test",
+        "tier": "cloud_run",
+        "idempotency_key": "renderer-retry-0001",
+    }
+
+    first = await api.client.post("/v1/desktop/remote-compute/runs", json=body)
+    second = await api.client.post("/v1/desktop/remote-compute/runs", json=body)
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["replayed"] is False
+    assert second.json()["replayed"] is True
+    assert first.json()["run"]["id"] == second.json()["run"]["id"] == RUN_ID
+    assert first.json()["idempotency_key"] == "renderer-retry-0001"
+    assert second.json()["idempotency_key"] == "renderer-retry-0001"
+    # The pair that makes the second request a replay: same header, same body.
+    sent = [
+        (call.headers["Idempotency-Key"], json.loads(call.content)) for call in api.radient.calls
+    ]
+    assert [key for key, _ in sent] == ["renderer-retry-0001", "renderer-retry-0001"]
+    assert sent[0][1] == sent[1][1]
+    # One local row, folded, not one per attempt.
+    assert [row.run_id for row in records.load(api.root)] == [RUN_ID]
+
+
+@pytest.mark.asyncio
+async def test_an_absent_idempotency_key_is_minted_per_request(api: Api) -> None:
+    """A caller that does not name a key still gets one — and a fresh one each time."""
+    api.configure()
+    directory = _repository(api.root)
+    _network(api.root)
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=201,
+        payload={"msg": "submitted", "result": {"run": _run(status="pending")}},
+    )
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=201,
+        payload={"msg": "submitted", "result": {"run": _run(OTHER_RUN_ID, status="pending")}},
+    )
+    body = {"directory": str(directory), "prompt": "p", "tier": "cloud_run"}
+
+    first = await api.client.post("/v1/desktop/remote-compute/runs", json=body)
+    second = await api.client.post("/v1/desktop/remote-compute/runs", json=body)
+
+    keys = [first.json()["idempotency_key"], second.json()["idempotency_key"]]
+    assert all(keys)
+    assert keys[0] != keys[1]
+    assert [call.headers["Idempotency-Key"] for call in api.radient.calls] == keys
+
+
+@pytest.mark.asyncio
+async def test_a_key_the_contract_refuses_is_a_400_before_any_request(api: Api) -> None:
+    """The library's own ``check_idempotency_key``, not a second copy of its rule."""
+    api.configure()
+    directory = _repository(api.root)
+    _network(api.root)
+
+    answer = await api.client.post(
+        "/v1/desktop/remote-compute/runs",
+        json={
+            "directory": str(directory),
+            "prompt": "p",
+            "tier": "cloud_run",
+            "idempotency_key": "not a header\nvalue",
+        },
+    )
+
+    assert answer.status_code == 400, answer.text
+    assert answer.json()["error"]["code"] == "invalid_idempotency_key"
+    assert api.radient.calls == []
 
 
 @pytest.mark.asyncio
@@ -1018,6 +1268,57 @@ async def test_an_unknown_body_key_is_a_422(api: Api) -> None:
     assert api.radient.calls == []
 
 
+@pytest.mark.asyncio
+async def test_an_oversize_prompt_or_directory_is_a_422(api: Api) -> None:
+    """The plane's own bounds, refused before a body reaches a proxy and comes back 413."""
+    api.configure()
+    directory = _repository(api.root)
+    _network(api.root)
+
+    long_prompt = await api.client.post(
+        "/v1/desktop/remote-compute/runs",
+        json={
+            "directory": str(directory),
+            "prompt": "x" * (desktop_remote_compute.PROMPT_MAX_CHARS + 1),
+            "tier": "cloud_run",
+        },
+    )
+    long_directory = await api.client.post(
+        "/v1/desktop/remote-compute/runs",
+        json={"directory": "d" * 4097, "prompt": "p", "tier": "cloud_run"},
+    )
+
+    assert long_prompt.status_code == 422, long_prompt.text
+    assert long_directory.status_code == 422, long_directory.text
+    assert api.radient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_directory_is_expanded_before_the_repository_read(api: Api) -> None:
+    """``~/work`` means the operator's home, as every other cwd field here does.
+
+    Taken raw, ``Path("~/work")`` is not a directory, so ``detect_repo`` reported a
+    perfectly good repository as "not a git repository with an origin remote".
+    """
+    api.configure()
+    _repository(api.root)
+    _network(api.root)
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=201,
+        payload={"msg": "submitted", "result": {"run": _run(status="pending")}},
+    )
+
+    answer = await api.client.post(
+        "/v1/desktop/remote-compute/runs",
+        json={"directory": "~/work", "prompt": "p", "tier": "cloud_run"},
+    )
+
+    assert answer.status_code == 201, answer.text
+    assert api.radient.last_body()["repo_url"] == ORIGIN
+
+
 # ---------------------------------------------------------------------------
 # Cancel and delete
 # ---------------------------------------------------------------------------
@@ -1163,6 +1464,10 @@ async def test_every_route_is_behind_the_desktop_gate(api: Api) -> None:
         ("get", "/v1/desktop/remote-compute"),
         ("get", "/v1/desktop/remote-compute/runs"),
         ("get", f"/v1/desktop/remote-compute/runs/{RUN_ID}"),
+        # The create route is listed too: the router-level dependency covers it,
+        # but a route that stopped inheriting it would be a hole in the surface
+        # rather than in this list.
+        ("post", "/v1/desktop/remote-compute/runs"),
         ("post", f"/v1/desktop/remote-compute/runs/{RUN_ID}/cancel"),
         ("delete", f"/v1/desktop/remote-compute/runs/{RUN_ID}"),
     ]
