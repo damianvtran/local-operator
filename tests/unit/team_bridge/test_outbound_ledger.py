@@ -9,6 +9,7 @@ files use.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import re
 import sqlite3
@@ -325,3 +326,62 @@ async def test_a_down_ledger_fails_open_the_message_goes_out_unchanged(tmp_path:
     sent = [c["text"] for c in client.calls if c["method"] == "conversation_send"]
     assert sent == ["still sent"]  # no ref line, no failure
     assert "ref" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_dm_send_leaves_no_ledger_row(tmp_path: Path) -> None:
+    """CancelledError is not an ``Exception``: a row left with no message id would
+    still count this session as a recent poster and route a stranger's answer to it."""
+
+    class Cancelled(DmClient):
+        async def conversation_send(self, *args: Any, **kwargs: Any) -> Any:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_bridge(
+            _runtime(Cancelled([_member()]), tmp_path),
+            {"op": "dm", "endpoint_id": PEER_ENDPOINT, "body": "interrupted"},
+        )
+    assert _rows(tmp_path) == []
+
+
+def _enrolled_channel(tmp_path: Path) -> None:
+    owner = _owner()
+    (tmp_path / "config.yml").write_text("values:\n  team_bridge:\n    enabled: true\n")
+    Store(tmp_path).commit_enrollment(
+        owner, OwnerReceipt("bridge_consent_v1", owner.endpoint_id), cos_session_id="sess_1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_channel_post_leaves_no_ledger_row(tmp_path: Path) -> None:
+    _enrolled_channel(tmp_path)
+
+    class Cancelled(RecordingClient):
+        async def conversation_send(self, *args: Any, **kwargs: Any) -> Any:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_bridge(
+            _runtime(Cancelled(), tmp_path),
+            {"op": "channel_post", "channel_id": CONV, "body": "interrupted"},
+        )
+    assert _rows(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_a_channel_post_receipt_does_not_promise_the_designated_session_in_a_dm(
+    tmp_path: Path,
+) -> None:
+    """``channel_post`` cannot tell a DM from a room, and a DM may route back to the
+    poster, so the notice says "may" and states the DM rule."""
+
+    _enrolled_channel(tmp_path)
+    out = await execute_bridge(
+        _runtime(RecordingClient(), tmp_path, "sess_task"),
+        {"op": "channel_post", "channel_id": CONV, "body": "q?"},
+    )
+    assert out["ok"], out
+    assert "replies may go to session sess_1, not to you" in out["content"]
+    assert "in a DM, only the one session that posted there" in out["content"]
+    assert "replies go to session" not in out["content"]

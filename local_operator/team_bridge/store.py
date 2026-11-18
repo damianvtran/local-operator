@@ -3787,10 +3787,19 @@ class Store:
                     return None
                 if self._live_generation(conn, owner) != owner.enrollment_generation:
                     return None
+                # "Delivered to this session" is the SERVING session, the same
+                # predicate the pending lookup uses: a row routed to another
+                # session was never this one's delivery, and a row routed TO it
+                # was. Old-shape files (no column) fall back to the designation.
+                serving = (
+                    "COALESCE(routed_session, designated_session)"
+                    if self._has_routed_session_column(conn)
+                    else "designated_session"
+                )
                 row = conn.execute(
                     "SELECT MAX(conversation_seq) FROM body_reservations "
                     "WHERE owner_key = ? AND conversation_id = ? AND conversation_seq < ? "
-                    "AND designated_session = ?",
+                    f"AND {serving} = ?",
                     (_owner_key(owner), conversation_id, before_seq, session_id),
                 ).fetchone()
         except (StoreRefused, sqlite3.Error, OSError):

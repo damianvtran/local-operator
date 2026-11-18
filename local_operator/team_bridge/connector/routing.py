@@ -39,7 +39,7 @@ import contextvars
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 #: How long after posting into a DM a session still counts as "the one that is
 #: waiting on the answer". An ESTIMATE, not a measurement: the only data is two
@@ -62,6 +62,7 @@ DESIGNATED_AMBIGUOUS = "ambiguous"
 DESIGNATED_NOT_LIVE = "not_live"
 DESIGNATED_NO_POSTER = "no_poster"
 DESIGNATED_IS_ASKER = "designated_asked"
+DESIGNATED_OLD_BUILD = "designated_old_build"
 
 
 @dataclass(frozen=True)
@@ -86,12 +87,15 @@ def decide_route(
     thread_root_id: str | None,
     ledger: tuple[str | None, dict[str, float]] | None,
     live_capable: frozenset[str],
+    designated_unroutable: bool = False,
 ) -> RouteDecision:
     """The ONE routing decision. Pure: no clock, no I/O, no message text.
 
     ``ledger`` is :func:`reply_guard.routing_facts` already narrowed to the
     window (``None`` = the ledger could not be read). ``live_capable`` is the set
     of sessions that are live AND advertise the routed-inbox capability.
+    ``designated_unroutable`` is True while the designated session is live on a
+    build without that capability (it would claim a row routed away from it).
     """
 
     if kind != "dm":
@@ -109,7 +113,9 @@ def decide_route(
     if thread_root_id and thread_session:
         # A ledger hit decides on its own and has no window: the thread is the
         # sender saying which of our messages this answers.
-        return _pick(thread_session, ROUTED_THREAD, designated_session, live_capable)
+        return _pick(
+            thread_session, ROUTED_THREAD, designated_session, live_capable, designated_unroutable
+        )
 
     if not posters:
         return RouteDecision(None, DESIGNATED_NO_POSTER)
@@ -117,16 +123,22 @@ def decide_route(
         ordered = tuple(sorted(posters.items(), key=lambda item: item[1], reverse=True))
         return RouteDecision(None, DESIGNATED_AMBIGUOUS, candidates=ordered)
     (only,) = posters
-    return _pick(only, ROUTED_SOLE_POSTER, designated_session, live_capable)
+    return _pick(only, ROUTED_SOLE_POSTER, designated_session, live_capable, designated_unroutable)
 
 
 def _pick(
-    session_id: str, reason: str, designated_session: str, live_capable: frozenset[str]
+    session_id: str,
+    reason: str,
+    designated_session: str,
+    live_capable: frozenset[str],
+    designated_unroutable: bool,
 ) -> RouteDecision:
     if session_id == designated_session:
         return RouteDecision(None, DESIGNATED_IS_ASKER)
     if session_id not in live_capable:
         return RouteDecision(None, DESIGNATED_NOT_LIVE)
+    if designated_unroutable:
+        return RouteDecision(None, DESIGNATED_OLD_BUILD)
     return RouteDecision(session_id, reason)
 
 
@@ -193,10 +205,55 @@ class RoutePlan:
 
     target: str | None
     reason: str
-    #: Routed: the ref of the target's newest ask in this DM (display only).
+    #: Routed: the ref of the row the route was decided from (display only).
     ask_ref: str | None = None
+    #: Routed because the sender replied IN THREAD under a message this session
+    #: posted (no window, may have other posters), not by the sole-poster rule.
+    via_thread: bool = False
     #: Designated + ambiguous: ``(session_id, minutes_ago, ref or None)``, newest first.
     candidates: tuple[tuple[str, int, str | None], ...] = ()
+
+
+def route_display(
+    config_dir: Path,
+    *,
+    endpoint_id: str,
+    conversation_id: str,
+    target: str,
+    thread_root_id: str | None,
+    posted_at: float | None,
+) -> tuple[str | None, bool]:
+    """``(ref, via_thread)`` for a card that says why ``target`` was woken. Display only.
+
+    A thread route's ref is the one on the very message the sender answered; a
+    sole-poster route's is the one on the row its "N min ago" came from. Both
+    come from the ledger by message id / timestamp, never from message text, and
+    a reply (which carries no ref) yields None rather than borrowing another's.
+    The replay path passes ``posted_at=None``: it has no time to pair a ref with, so
+    only a thread hit carries one.
+    """
+
+    from .. import reply_guard
+
+    if thread_root_id:
+        hit = reply_guard.lookup_authorship(
+            config_dir,
+            endpoint_id=endpoint_id,
+            conversation_id=conversation_id,
+            message_ids=[thread_root_id],
+        ).get(thread_root_id)
+        if hit is not None and hit[0] == target:
+            return hit[1], True
+    if posted_at is None:
+        return None, False
+    ref = reply_guard.post_ref_at(
+        config_dir,
+        endpoint_id=endpoint_id,
+        conversation_id=conversation_id,
+        session_id=target,
+        created_at=posted_at,
+    )
+    return ref, False
 
 
 def plan_route(
@@ -232,8 +289,10 @@ def plan_route(
             since=window_start(moment),
         )
     candidates_pool: frozenset[str] = frozenset()
+    blocked = False
     if ledger is not None and (ledger[0] or ledger[1]):
         candidates_pool = live_capable_sessions(None)
+        blocked = designated_blocks_routing(None, designated_session)
     decision = decide_route(
         kind=kind,
         sender_class=sender_class,
@@ -243,32 +302,37 @@ def plan_route(
         thread_root_id=thread_root_id,
         ledger=ledger,
         live_capable=candidates_pool,
+        designated_unroutable=blocked,
     )
     if decision.target is not None and not ROUTED_BUDGET.has_room(decision.target, moment):
         return RoutePlan(None, DESIGNATED_OVER_BUDGET)
     if decision.target is not None:
-        return RoutePlan(
-            decision.target,
-            decision.reason,
-            ask_ref=reply_guard.latest_ask_ref(
-                config_dir,
-                endpoint_id=endpoint_id,
-                conversation_id=conversation_id,
-                session_id=decision.target,
-            ),
+        assert ledger is not None
+        ref, via_thread = route_display(
+            config_dir,
+            endpoint_id=endpoint_id,
+            conversation_id=conversation_id,
+            target=decision.target,
+            thread_root_id=thread_root_id,
+            posted_at=ledger[1].get(decision.target),
         )
+        return RoutePlan(decision.target, decision.reason, ask_ref=ref, via_thread=via_thread)
+    # The designated session's own posts are not "other sessions": it knows what
+    # it posted, and listing its id would read as a stranger.
     listed = tuple(
         (
             session_id,
             max(0, int((moment - at) // 60)),
-            reply_guard.latest_ask_ref(
+            reply_guard.post_ref_at(
                 config_dir,
                 endpoint_id=endpoint_id,
                 conversation_id=conversation_id,
                 session_id=session_id,
+                created_at=at,
             ),
         )
         for session_id, at in decision.candidates
+        if session_id != designated_session
     )
     return RoutePlan(None, decision.reason, candidates=listed)
 
@@ -278,9 +342,9 @@ def plan_route(
 #: One scan per connector iteration. A scan is ~0.3-0.7 ms with a handful of
 #: records (measured 2026-11-18), but a burst of messages in one iteration would
 #: repeat it per message for no new information.
-_ITERATION_CACHE: contextvars.ContextVar[dict[str, frozenset[str]] | None] = contextvars.ContextVar(
-    "team_bridge_routing_liveness", default=None
-)
+_ITERATION_CACHE: contextvars.ContextVar[
+    dict[str, tuple[frozenset[str], frozenset[str]]] | None
+] = contextvars.ContextVar("team_bridge_routing_liveness", default=None)
 
 
 @contextlib.contextmanager
@@ -294,39 +358,84 @@ def iteration_scope() -> Iterator[None]:
         _ITERATION_CACHE.reset(token)
 
 
-def live_capable_sessions(root: Path | None, *, fresh: bool = False) -> frozenset[str]:
-    """Session ids that are LIVE and advertise ``team-bridge-routed-inbox-v1``.
+def _live_records(root: Path | None) -> list[Any]:
+    """The registry's LIVE records. ``reap=False`` keeps the scan a pure read.
 
     NOT ``bulk_resume.live_session_ids``: that one reaps stale records as it
     scans and counts a "wedged" session (pid alive, loop not answering) as live,
-    and a wedged session cannot read a routed row. ``reap=False`` keeps this a
-    pure read. Any failure is an EMPTY set, which routes nothing.
+    and a wedged session cannot read a routed row. Any failure is an empty list,
+    which routes nothing.
+    """
+
+    from local_operator.session.runtime import registry
+
+    try:
+        return [
+            record
+            for record, state in registry.scan(root, reap=False)
+            if state == "live" and getattr(record, "session_id", None)
+        ]
+    except Exception:  # noqa: BLE001 — a liveness read is a filter, never a gate
+        return []
+
+
+def _is_capable(record: Any) -> bool:
+    from local_operator.session.runtime.types import TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY
+
+    return TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY in (getattr(record, "capabilities", None) or ())
+
+
+def _live_and_capable(root: Path | None, *, fresh: bool) -> tuple[frozenset[str], frozenset[str]]:
+    cache = _ITERATION_CACHE.get()
+    key = str(root)
+    if cache is not None and not fresh and key in cache:
+        return cache[key]
+    records = _live_records(root)
+    found = (
+        frozenset(str(r.session_id) for r in records),
+        frozenset(str(r.session_id) for r in records if _is_capable(r)),
+    )
+    if cache is not None:
+        cache[key] = found
+    return found
+
+
+def live_capable_sessions(root: Path | None, *, fresh: bool = False) -> frozenset[str]:
+    """Session ids that are LIVE and advertise ``team-bridge-routed-inbox-v1``.
 
     ``fresh`` skips the per-iteration cache: the pre-delivery recheck must see
     the registry as it is now, not as it was when the iteration began.
     """
 
-    from local_operator.session.runtime import registry
-    from local_operator.session.runtime.types import TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY
+    return _live_and_capable(root, fresh=fresh)[1]
 
-    cache = _ITERATION_CACHE.get()
-    key = str(root)
-    if cache is not None and not fresh and key in cache:
-        return cache[key]
-    try:
-        scanned = registry.scan(root, reap=False)
-        found = frozenset(
-            str(record.session_id)
-            for record, state in scanned
-            if state == "live"
-            and getattr(record, "session_id", None)
-            and TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY in (getattr(record, "capabilities", None) or ())
-        )
-    except Exception:  # noqa: BLE001 — a liveness read is a filter, never a gate
-        found = frozenset()
-    if cache is not None:
-        cache[key] = found
-    return found
+
+def designated_blocks_routing(root: Path | None, designated_session: str) -> bool:
+    """True when the DESIGNATED session is live on a build without the capability.
+
+    An old designated build reads ``designated_session = me`` and never learned
+    the routed column, so it would claim a row routed away from it and serve a
+    stranger's reply to the wrong session. While it is the one running, routing
+    waits. A designated session that is not live is no obstacle: it reads
+    nothing until it starts again, and a build that new has the capability.
+    """
+
+    live, capable = _live_and_capable(root, fresh=False)
+    return designated_session in live and designated_session not in capable
+
+
+def live_capable_record(root: Path | None, session_id: str) -> Any | None:
+    """The registry record of ``session_id`` NOW, if live and capable (never cached).
+
+    The pre-delivery recheck hands this record to the delivery primitive, so it
+    dials THAT process: with no record the primitive cold-resumes a dead session
+    that has durable history, which is exactly what routing must never do.
+    """
+
+    for record in _live_records(root):
+        if str(record.session_id) == session_id and _is_capable(record):
+            return record
+    return None
 
 
 def window_start(now: float | None = None) -> float:
@@ -345,11 +454,13 @@ __all__ = [
     "RoutePlan",
     "RoutedWakeBudget",
     "plan_route",
+    "route_display",
     "DESIGNATED_AMBIGUOUS",
     "DESIGNATED_DEFAULT",
     "DESIGNATED_IS_ASKER",
     "DESIGNATED_NOT_DM",
     "DESIGNATED_NOT_LIVE",
+    "DESIGNATED_OLD_BUILD",
     "DESIGNATED_NO_LEDGER",
     "DESIGNATED_NO_POSTER",
     "DESIGNATED_SENDER",
@@ -358,7 +469,9 @@ __all__ = [
     "ROUTED_THREAD",
     "RouteDecision",
     "decide_route",
+    "designated_blocks_routing",
     "iteration_scope",
+    "live_capable_record",
     "live_capable_sessions",
     "window_start",
 ]

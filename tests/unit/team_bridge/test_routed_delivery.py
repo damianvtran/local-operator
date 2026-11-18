@@ -63,6 +63,7 @@ def _setup(
     live: frozenset[str] = frozenset({ASKER, OTHER, DESIGNATED}),
     gone: frozenset[str] = frozenset(),
     thread_root: str | None = None,
+    old_designated: bool = False,
 ):
     owner = _owner("b", 2)
     config_dir = tmp_path / "b"
@@ -96,10 +97,21 @@ def _setup(
 
     monkeypatch.setattr(conversation_mod, "deliver_wake", fake_deliver)
     monkeypatch.setattr(routing, "live_capable_sessions", lambda root, fresh=False: live)
+    monkeypatch.setattr(
+        routing, "designated_blocks_routing", lambda root, designated: old_designated
+    )
     return owner, config_dir, store, calls
 
 
-def _asked(config_dir: Path, session: str, *, ago_s: float, owner: Any, message_id: str) -> None:
+def _asked(
+    config_dir: Path,
+    session: str,
+    *,
+    ago_s: float,
+    owner: Any,
+    message_id: str,
+    ask: bool = True,
+) -> None:
     record = reply_guard.record_outbound(
         config_dir,
         endpoint_id=owner.endpoint_id,
@@ -107,7 +119,7 @@ def _asked(config_dir: Path, session: str, *, ago_s: float, owner: Any, message_
         session_id=session,
         client_ref=f"c-{message_id}",
         kind="dm",
-        ask=True,
+        ask=ask,
         now=time.time() - ago_s,
     )
     reply_guard.confirm_outbound(config_dir, record, message_id=message_id, seq=1)
@@ -129,7 +141,8 @@ def test_a_reply_to_a_dm_reaches_the_session_that_asked(tmp_path, monkeypatch) -
     assert out["handled"][0]["session"] == ASKER
     assert [(c["session"], c["live_only"]) for c in calls] == [(ASKER, True)]
     card = calls[0]["payload"]
-    assert "routed to you (your ask, ref " in card
+    assert "routed to you (ref " in card
+    assert "you posted in this DM recently and no other session of yours did" in card
     # The row is reserved for the asker; the designated session is blind to it.
     assert _reservation(store, owner)["routed_session"] == ASKER
     assert store.pending_body_reservation_for(owner, DESIGNATED) is None
@@ -147,10 +160,12 @@ def test_two_askers_go_to_the_designated_session_with_candidates_listed(
 
     assert [(c["session"], c["live_only"]) for c in calls] == [(DESIGNATED, False)]
     card = calls[0]["payload"]
-    assert "other sessions of yours messaged this person" in card
-    assert f"session {OTHER}" in card and "asked 2 min ago" in card
-    assert f"session {ASKER}" in card and "asked 10 min ago" in card
+    assert "other sessions of yours posted in this DM recently" in card
+    assert f"session {OTHER}" in card and "posted 2 min ago" in card
+    assert f"session {ASKER}" in card and "posted 10 min ago" in card
     assert "Read channel_history" in card
+    assert "ask your owner before answering" in card
+    assert "this person" not in card
     assert _reservation(store, owner)["routed_session"] is None
 
 
@@ -323,3 +338,229 @@ def test_the_sweep_leaves_a_row_a_live_turn_has_claimed(tmp_path, monkeypatch) -
 
 def test_the_rig_module_is_the_one_the_neighbours_use() -> None:
     assert rig.CONVERSATION_ID == CONVERSATION_ID
+
+
+# -- card wording and data (review remediation) ----------------------------------------
+
+
+def test_the_designated_session_is_never_listed_as_another_session(tmp_path, monkeypatch) -> None:
+    owner, config_dir, _store, calls = _setup(tmp_path, monkeypatch)
+    _asked(config_dir, DESIGNATED, ago_s=300, owner=owner, message_id="bcmsg_ask00001")
+    _asked(config_dir, OTHER, ago_s=0, owner=owner, message_id="bcmsg_ask00002")
+
+    _run(owner, config_dir)
+
+    card = calls[0]["payload"]
+    assert f"session {OTHER}, posted just now" in card or f"session {OTHER} (ref" in card
+    assert "posted just now" in card and "<1 min" not in card
+    assert f"session {DESIGNATED}" not in card
+
+
+def test_the_ref_and_the_time_come_from_the_same_row(tmp_path, monkeypatch) -> None:
+    """An ask 25 min ago, then a plain reply 3 min ago: the time is the reply's and the
+    reply carries no ref, so the card shows none rather than the older ask's."""
+
+    owner, config_dir, _store, calls = _setup(tmp_path, monkeypatch)
+    _asked(config_dir, ASKER, ago_s=25 * 60, owner=owner, message_id="bcmsg_ask00001")
+    older = reply_guard.lookup_authorship(
+        config_dir,
+        endpoint_id=owner.endpoint_id,
+        conversation_id=CONVERSATION_ID,
+        message_ids=["bcmsg_ask00001"],
+    )["bcmsg_ask00001"][1]
+    assert older
+    _asked(config_dir, ASKER, ago_s=180, owner=owner, message_id="bcmsg_rep00001", ask=False)
+
+    _run(owner, config_dir)
+
+    card = calls[0]["payload"]
+    assert card.count("routed to you") == 1 and older not in card
+    assert "routed to you (ref" not in card
+
+
+def test_a_thread_reply_says_so_and_names_the_ref_of_the_message_it_answers(
+    tmp_path, monkeypatch
+) -> None:
+    """The thread route has no window and wins with two posters, so "no other session
+    of yours did" would be false; the sentence is its own."""
+
+    root = rig.THREAD_ROOT
+    owner, config_dir, store, calls = _setup(tmp_path, monkeypatch, thread_root=root)
+    _asked(config_dir, ASKER, ago_s=600, owner=owner, message_id=root)
+    _asked(config_dir, OTHER, ago_s=30, owner=owner, message_id="bcmsg_ask00002")
+    asked_ref = reply_guard.lookup_authorship(
+        config_dir,
+        endpoint_id=owner.endpoint_id,
+        conversation_id=CONVERSATION_ID,
+        message_ids=[root],
+    )[root][1]
+
+    _run(owner, config_dir)
+
+    assert [c["session"] for c in calls] == [ASKER]
+    card = calls[0]["payload"]
+    assert f"routed to you (ref {asked_ref})" in card
+    assert "replied in a thread under a message you posted" in card
+    assert "no other session of yours did" not in card
+    assert _reservation(store, owner)["routed_session"] == ASKER
+
+
+def test_a_routed_card_does_not_contradict_itself_and_says_how_to_bind_the_reply(
+    tmp_path, monkeypatch
+) -> None:
+    owner, config_dir, _store, calls = _setup(tmp_path, monkeypatch)
+    _asked(config_dir, ASKER, ago_s=95, owner=owner, message_id="bcmsg_ask00001")
+
+    _run(owner, config_dir)
+
+    card = calls[0]["payload"]
+    assert "Answer it here" not in card
+    assert "expect: reply if it answers what you posted; otherwise no_reply" in card
+    assert "expect: weigh relevance" not in card
+    assert "in_reply_to_message_id = this message_id" in card
+    assert "this person" not in card
+
+
+def test_an_ordinary_card_keeps_its_reply_line_unchanged(tmp_path, monkeypatch) -> None:
+    owner, _config_dir, _store, calls = _setup(tmp_path, monkeypatch)
+
+    _run(owner, _config_dir)
+
+    card = calls[0]["payload"]
+    assert "if you reply: bridge channel_post with channel_id = this conversation_id; " in card
+    assert "in_reply_to_message_id" not in card
+
+
+def test_an_old_designated_build_keeps_the_reply_with_the_designated_session(
+    tmp_path, monkeypatch
+) -> None:
+    """The live designated session does not advertise the capability, so it would claim a
+    row routed away from it: the decision waits for a build that knows the column."""
+
+    owner, config_dir, store, calls = _setup(tmp_path, monkeypatch, old_designated=True)
+    _asked(config_dir, ASKER, ago_s=40, owner=owner, message_id="bcmsg_ask00001")
+
+    _run(owner, config_dir)
+
+    assert [(c["session"], c["live_only"]) for c in calls] == [(DESIGNATED, False)]
+    assert _reservation(store, owner)["routed_session"] is None
+
+
+def test_a_row_the_routed_session_claimed_meanwhile_does_not_wake_the_designated_one(
+    tmp_path, monkeypatch
+) -> None:
+    """The recheck says gone, but the compare-and-set loses: a live turn holds the row.
+    The designated session cannot read that body, so it is not woken for it."""
+
+    owner, config_dir, store, calls = _setup(tmp_path, monkeypatch, gone=frozenset({ASKER}))
+    _asked(config_dir, ASKER, ago_s=40, owner=owner, message_id="bcmsg_ask00001")
+    from local_operator.team_bridge.store import Store
+
+    monkeypatch.setattr(Store, "unroute_reservation", lambda self, owner, **kw: False)
+
+    _run(owner, config_dir)
+
+    assert [(c["session"], c["live_only"]) for c in calls] == [(ASKER, True)]
+    assert _reservation(store, owner)["routed_session"] == ASKER
+
+
+def test_a_recovery_card_goes_to_the_routed_session(tmp_path, monkeypatch) -> None:
+    """A retry after an image admit takes the ``recovery`` branch, which used to hand the
+    card to the designated session even for a row reserved for another one."""
+
+    import asyncio
+    import sqlite3
+
+    from tests.unit.team_bridge import test_attachments as att
+
+    hub = att.Hub([att._png(), att._png((0, 0, 255))])
+    owner, ref, _screened, _cards = att._connector_rig(
+        monkeypatch, tmp_path, hub, verdict="deliver"
+    )
+    sessions: list[tuple[str, bool]] = []
+    first = {"done": False}
+
+    async def deliver(owner: Any, payload: str, *, session_id: str, **kwargs: Any) -> str:
+        if not first["done"]:
+            first["done"] = True
+            raise RuntimeError("session closed mid-wake")
+        sessions.append((session_id, "routed to you" in payload))
+        return "delivered"
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", deliver)
+    held = asyncio.run(att._deliver(owner, ref, tmp_path, hub))
+    assert held["action"] == "hold"
+    with sqlite3.connect(tmp_path / "team_bridge" / "state.sqlite3") as conn:
+        conn.execute("UPDATE body_reservations SET routed_session = ?", (ASKER,))
+    att._prior_receipt(monkeypatch, "allow", hub.body)
+
+    out = asyncio.run(att._deliver(owner, ref, tmp_path, hub))
+
+    assert out["action"] == "delivered" and out["recovered"] == "images_admitted"
+    assert sessions == [(ASKER, True)]
+
+
+# -- the wake seam: a routed delivery only ever dials ------------------------------------------
+
+
+def test_a_routed_wake_dials_the_scanned_record_and_never_resolves_the_id(
+    tmp_path, monkeypatch
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from local_operator.mobile import peer_send
+    from local_operator.team_bridge.connector import wake as wake_mod
+
+    record = SimpleNamespace(pid=1, session_id=ASKER, started=True)
+    monkeypatch.setattr(routing, "live_capable_record", lambda root, session_id: record)
+    seen: list[Any] = []
+
+    async def outcome(rec: Any, **kwargs: Any) -> Any:
+        seen.append(rec)
+        return SimpleNamespace(state=peer_send.DELIVERY_DELIVERED, detail="ok")
+
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", outcome)
+    # A session with no durable history would otherwise take the cold-engage path.
+    monkeypatch.setattr(peer_send, "session_has_durable_history", lambda session_id: False)
+
+    asyncio.run(
+        wake_mod.deliver_wake(
+            _owner("b", 2), "card", session_id=ASKER, config_dir=tmp_path, live_only=True
+        )
+    )
+
+    assert seen == [record]  # the exact record the recheck scanned, never ``None``
+
+
+def test_a_routed_wake_whose_dial_fails_falls_back_instead_of_holding(
+    tmp_path, monkeypatch
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from local_operator.mobile import peer_send
+    from local_operator.team_bridge.connector import wake as wake_mod
+
+    record = SimpleNamespace(pid=1, session_id=ASKER, started=True)
+    monkeypatch.setattr(routing, "live_capable_record", lambda root, session_id: record)
+
+    async def failed(rec: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(state=peer_send.DELIVERY_FAILED, detail="dial refused")
+
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", failed)
+
+    with pytest.raises(RoutedSessionGone):
+        asyncio.run(
+            wake_mod.deliver_wake(
+                _owner("b", 2), "card", session_id=ASKER, config_dir=tmp_path, live_only=True
+            )
+        )
+    # And a target that is no longer in the registry never reaches the primitive at all.
+    monkeypatch.setattr(routing, "live_capable_record", lambda root, session_id: None)
+    with pytest.raises(RoutedSessionGone):
+        asyncio.run(
+            wake_mod.deliver_wake(
+                _owner("b", 2), "card", session_id=ASKER, config_dir=tmp_path, live_only=True
+            )
+        )

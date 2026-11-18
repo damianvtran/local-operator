@@ -809,6 +809,30 @@ def test_reclaim_never_touches_a_row_a_live_turn_has_claimed(tmp_path) -> None:
     assert _row(store)["routed_session"] == ROUTED
 
 
+def test_reclaim_takes_back_a_row_whose_claim_lease_expired(tmp_path) -> None:
+    """A routed session that died MID-claim must not strand the message: the reader's own
+    eligibility rule treats an expired lease as unclaimed, and so does the reclaim."""
+
+    store = _store(tmp_path)
+    assert _reserve_routed(store)
+    now = time.time() - 100  # the lease has lapsed in real time too
+    assert store.claim_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=MESSAGE_ID,
+        claim_token="pt:a",
+        turn_token="tt:a",
+        now=now,
+        ttl=5,
+    )
+    # Inside the lease the claim holds (the existing negative control)...
+    assert store.reclaim_routed(_owner(), older_than=time.time() + 1, now=now + 1) == 0
+    # ...and once it lapses the row is the designated session's again.
+    assert store.reclaim_routed(_owner(), older_than=time.time() + 1, now=now + 60) == 1
+    assert _row(store)["routed_session"] is None
+    assert _pending(store, "sess_cos") is not None
+
+
 def test_an_old_shape_store_without_the_column_opens_and_reads_as_unrouted(tmp_path) -> None:
     """A store file written before this column existed: every reader falls back to
     the designated-only predicate, and the first writer adds the column."""

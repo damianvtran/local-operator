@@ -141,9 +141,15 @@ def _metadata(**over: Any) -> conv.ConversationCardMetadata:
 
 
 def test_the_card_names_how_many_messages_it_missed_only_when_some_were() -> None:
-    assert "since your last delivery" not in conv.build_conversation_card(_metadata())
+    assert "since the last one you were shown" not in conv.build_conversation_card(_metadata())
     line = conv.build_conversation_card(_metadata(since_last_delivery=3))
-    assert "3 messages since your last delivery" in line and "channel_history" in line
+    assert "3 messages since the last one you were shown" in line and "channel_history" in line
+    assert "your last delivery" not in line  # internal jargon
+
+
+def test_one_missed_message_is_singular() -> None:
+    line = conv.build_conversation_card(_metadata(since_last_delivery=1))
+    assert "1 message since the last one you were shown" in line and "1 messages" not in line
 
 
 def test_a_merged_card_carries_the_gap_before_the_burst() -> None:
@@ -152,7 +158,12 @@ def test_a_merged_card_carries_the_gap_before_the_burst() -> None:
     assert merge_metadata([first, second]).since_last_delivery == 4
 
 
-def _store_with_deliveries(tmp_path: Path, seqs: list[int], session: str = "sess_d") -> Store:
+def _store_with_deliveries(
+    tmp_path: Path,
+    seqs: list[int],
+    session: str = "sess_d",
+    routed: dict[int, str] | None = None,
+) -> Store:
     owner = _owner()
     (tmp_path / "config.yml").write_text("values:\n  team_bridge:\n    enabled: true\n")
     store = Store(tmp_path)
@@ -172,6 +183,7 @@ def _store_with_deliveries(tmp_path: Path, seqs: list[int], session: str = "sess
             consent_version="bridge_consent_v1",
             designated_session=session,
             now=1,
+            routed_session=(routed or {}).get(seq),
         )
     return store
 
@@ -203,4 +215,50 @@ def test_no_gap_without_an_earlier_delivery_or_when_consecutive(tmp_path: Path) 
     _store_with_deliveries(tmp2, [8])
     assert (
         conv._messages_since_last_delivery(_owner(), ref, session_id="sess_d", config_dir=tmp2) == 0
+    )
+
+
+def test_a_message_routed_to_another_session_is_a_gap_for_the_designated_one(
+    tmp_path: Path,
+) -> None:
+    """Seqs 6 and 7 went to sess_t, so the designated session was never shown them:
+    its card for seq 8 must say so. Read as ``designated_session = me`` the previous
+    delivery was seq 7 and the line stayed silent about a conversation that moved."""
+
+    store = _store_with_deliveries(tmp_path, [5, 6, 7], routed={6: "sess_t", 7: "sess_t"})
+    assert (
+        store.previous_delivery_seq(
+            _owner(), conversation_id=DM_ID, before_seq=8, session_id="sess_d"
+        )
+        == 5
+    )
+    ref = ConversationFeedRef(DM_ID, M4, 8, False)
+    assert (
+        conv._messages_since_last_delivery(_owner(), ref, session_id="sess_d", config_dir=tmp_path)
+        == 2
+    )
+
+
+def test_a_routed_session_counts_from_the_row_routed_to_it(tmp_path: Path) -> None:
+    """Seq 6 was routed to sess_t, seq 7 is sess_t's own post, seq 8 is news, 9 is new:
+    its previous delivery is 6, its own post is subtracted by the ledger's seq column,
+    and a row routed to nobody else's session never resets that."""
+
+    store = _store_with_deliveries(tmp_path, [5, 6, 9], routed={6: "sess_t", 9: "sess_t"})
+    _post(tmp_path, "sess_t", M2, 7)
+    assert (
+        store.previous_delivery_seq(
+            _owner(), conversation_id=DM_ID, before_seq=9, session_id="sess_t"
+        )
+        == 6
+    )
+    ref = ConversationFeedRef(DM_ID, M4, 9, False)
+    assert (
+        conv._messages_since_last_delivery(_owner(), ref, session_id="sess_t", config_dir=tmp_path)
+        == 1
+    )
+    # The designated session's own count is unaffected by sess_t's post at seq 7.
+    assert (
+        conv._messages_since_last_delivery(_owner(), ref, session_id="sess_d", config_dir=tmp_path)
+        == 3
     )

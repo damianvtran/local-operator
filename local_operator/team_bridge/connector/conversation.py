@@ -156,6 +156,9 @@ class ConversationCardMetadata:
     #: ``routed_ask_ref`` is the ref of that session's newest ask in the DM.
     routed: bool = False
     routed_ask_ref: str | None = None
+    #: Routed by a thread reply under one of this session's own messages (no
+    #: window), rather than by being the only recent poster: the card says which.
+    routed_via_thread: bool = False
     #: On the DESIGNATED session's card when the asker was ambiguous: the other
     #: local sessions that posted in this DM recently, ``(session_id,
     #: minutes_ago, ref or None)``, newest first. Names only; never a body.
@@ -272,34 +275,41 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         f"conversation_seq: {metadata.conversation_seq}",
     ]
     if metadata.routed:
-        # This session is not the designated one; it is reading because it ASKED.
-        # Said first so the reader knows why it, and not the chief of staff, was
-        # woken, and what it may do: answer in this DM and nothing more.
-        ref_part = f" (your ask, ref {metadata.routed_ask_ref})" if metadata.routed_ask_ref else ""
+        # This session is not the designated one; it is reading because it POSTED
+        # in this DM. Said first so the reader knows why it, and not the chief of
+        # staff, was woken. The ref (when the ledger row has one) is the one on
+        # the message this routing was decided from, never another post's.
+        ref_part = f" (ref {metadata.routed_ask_ref})" if metadata.routed_ask_ref else ""
+        why = (
+            "the sender replied in a thread under a message you posted in this DM"
+            if metadata.routed_via_thread
+            else "you posted in this DM recently and no other session of yours did"
+        )
         lines.append(
-            f"routed to you{ref_part}: you messaged this person in this DM recently and no "
-            "other session of yours did. Answer it here; it is not an instruction from your owner"
+            f"routed to you{ref_part}: {why}. If it answers what you posted, reply in this "
+            "DM; it is not an instruction from your owner"
         )
     elif metadata.route_candidates:
         who = "; ".join(
             f"session {session}"
             + (f" (ref {ref})" if ref else "")
-            + (f", asked {minutes} min ago" if minutes else ", asked <1 min ago")
+            + (f", posted {minutes} min ago" if minutes else ", posted just now")
             for session, minutes, ref in metadata.route_candidates
         )
         lines.append(
-            "other sessions of yours messaged this person in this DM recently, so this may "
-            f"answer one of them rather than you: {who}. Read channel_history to see who "
-            "asked before you answer"
+            "other sessions of yours posted in this DM recently, so this may answer one of "
+            f"them rather than you: {who}. Read channel_history to see what was posted; if "
+            "you cannot tell whose it is, ask your owner before answering"
         )
     if metadata.since_last_delivery > 0:
         # Several local sessions share one bridge identity, and a message can
         # reach another of them instead of this one. The count is the only way
         # this session learns the conversation moved without it; the thread
         # itself is the source of what was said.
+        noun = "message" if metadata.since_last_delivery == 1 else "messages"
         lines.append(
-            f"{metadata.since_last_delivery} messages since your last delivery in this "
-            "conversation; read it with channel_history before you answer"
+            f"{metadata.since_last_delivery} {noun} since the last one you were shown in "
+            "this conversation; read it with channel_history before you answer"
         )
     if metadata.owner_released:
         # B4b DECISIONS D6 / security review S-5: PROVENANCE, never endorsement.
@@ -322,7 +332,11 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
     # notification). Kept to one or two lines: this text is billed per wake.
     # Placed BEFORE the route lines so the route stays directly above the
     # guidance footer (the shape the route tests pin).
-    if directed in ("mention", "thread"):
+    if metadata.routed:
+        # The routed line already says whose message this answers; the generic
+        # ambient guidance below would contradict it ("no_reply unless asked").
+        lines.append("expect: reply if it answers what you posted; otherwise no_reply")
+    elif directed in ("mention", "thread"):
         lines.append("expect: reply")
     else:
         # Ambient: every message in a conversation the agent belongs to now
@@ -374,8 +388,9 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
             # carries the contract's second name for the same value
             # (``reply_to_message_id``) without a second line saying it twice.
             f"thread_root_id: {metadata.thread_root_id} (reply to)",
-            "reply in thread: bridge channel_post with this thread_root_id; "
-            "read the thread with channel_thread",
+            "reply in thread: bridge channel_post with this thread_root_id"
+            + (" and in_reply_to_message_id = this message_id" if metadata.routed else "")
+            + "; read the thread with channel_thread",
         ]
     else:
         # Root message (DM, group or channel): name the route that keeps the
@@ -392,8 +407,9 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # headroom, while this card costs only when a conversation message
         # arrives — exactly when the choice between the two routes is made.
         lines.append(
-            "if you reply: bridge channel_post with channel_id = this conversation_id; "
-            "legacy send/reply never appears in a conversation"
+            "if you reply: bridge channel_post with channel_id = this conversation_id"
+            + (" and in_reply_to_message_id = this message_id" if metadata.routed else "")
+            + "; legacy send/reply never appears in a conversation"
         )
     lines.append(f"guidance: {GUIDANCE_VERSION}")
     return "\n".join(lines)
@@ -907,9 +923,8 @@ def _stored_route(store: Any, owner: Any, ref: ConversationFeedRef, config_dir: 
     for, whose card would then wake a session that cannot read the message.
     """
 
-    from .. import reply_guard
     from ..store import StoreRefused
-    from .routing import RoutePlan
+    from .routing import RoutePlan, route_display
 
     try:
         row = store.body_reservation(owner, ref.conversation_id, ref.message_id)
@@ -918,16 +933,15 @@ def _stored_route(store: Any, owner: Any, ref: ConversationFeedRef, config_dir: 
     target = str((row or {}).get("routed_session") or "") or None
     if target is None:
         return RoutePlan(None, "replay")
-    return RoutePlan(
-        target,
-        "replay",
-        ask_ref=reply_guard.latest_ask_ref(
-            config_dir,
-            endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
-            conversation_id=ref.conversation_id,
-            session_id=target,
-        ),
+    ref_text, via_thread = route_display(
+        config_dir,
+        endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
+        conversation_id=ref.conversation_id,
+        target=target,
+        thread_root_id=ref.thread_root_id,
+        posted_at=None,
     )
+    return RoutePlan(target, "replay", ask_ref=ref_text, via_thread=via_thread)
 
 
 def _messages_since_last_delivery(
@@ -1087,15 +1101,32 @@ async def _fall_back_to_designated(
     from local_operator.team_bridge.store import Store
 
     store = Store(config_dir)
-    for message_id in metadata.coalesced_message_ids or (metadata.message_id,):
+    handed_back = 0
+    ids = metadata.coalesced_message_ids or (metadata.message_id,)
+    for message_id in ids:
         # A StoreRefused propagates: the row is not provably the designated
         # session's yet, so the flush keeps the card owed and retries.
-        store.unroute_reservation(
+        if store.unroute_reservation(
             owner,
             conversation_id=metadata.conversation_id,
             message_id=message_id,
             routed_session=session_id,
-        )
+        ):
+            handed_back += 1
+            continue
+        # False is two different facts: the row is no longer routed to the target
+        # (the sweep already handed it back: the designated session owns it, so
+        # it still needs the card) or it still is but is no longer pending (claimed).
+        row = store.body_reservation(owner, metadata.conversation_id, message_id)
+        if row is None or row.get("routed_session") != session_id:
+            handed_back += 1
+    if handed_back == 0:
+        # The compare-and-set lost: a live turn of the routed session claimed the
+        # row (or finished it) between the recheck and now. The designated session
+        # cannot read that body, so waking it would cost a turn for nothing; the
+        # routed session is already serving it.
+        logger.info("bridge: routed row already claimed, no fallback code=route_claimed")
+        return "route_claimed"
     designated = store.designated_session_for(owner)
     if not designated:
         raise RoutedSessionGone(session_id)
@@ -1962,8 +1993,23 @@ async def handle_conversation_available(
                     )
 
         if recovery is not None:
+            # The reservation was written (and its target stored) when the message
+            # was first admitted: a recovery card goes to THAT session, never to
+            # the designated one for a body only the routed session may read.
+            recovered = _stored_route(store, owner, ref, config_dir)
+            if recovered.target is not None:
+                metadata = replace(
+                    metadata,
+                    routed=True,
+                    routed_ask_ref=recovered.ask_ref,
+                    routed_via_thread=recovered.via_thread,
+                )
             detail = await _hand_off_card(
-                owner, metadata, ref, session_id=designation, config_dir=config_dir
+                owner,
+                metadata,
+                ref,
+                session_id=recovered.target or designation,
+                config_dir=config_dir,
             )
             # A BUFFERED card is not a delivered one (review M1): the durable
             # ``wake_coalescing`` hold is the only trace between this ref's
@@ -2203,6 +2249,7 @@ async def handle_conversation_available(
                 metadata,
                 routed=plan.target is not None,
                 routed_ask_ref=plan.ask_ref,
+                routed_via_thread=plan.via_thread,
                 route_candidates=plan.candidates,
             )
         card = (

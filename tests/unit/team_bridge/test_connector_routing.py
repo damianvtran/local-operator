@@ -24,6 +24,7 @@ from local_operator.team_bridge.connector.routing import (
     DESIGNATED_NO_POSTER,
     DESIGNATED_NOT_DM,
     DESIGNATED_NOT_LIVE,
+    DESIGNATED_OLD_BUILD,
     DESIGNATED_SENDER,
     POSTER_WINDOW_S,
     ROUTED_SOLE_POSTER,
@@ -60,6 +61,7 @@ def _route(
     tmp: Path,
     *,
     live: frozenset[str] = frozenset({BILL, B, DESIGNATED}),
+    designated_unroutable: bool = False,
     kind: str | None = "dm",
     sender_class: str | None = "agent",
     sender: str = PEER,
@@ -85,6 +87,7 @@ def _route(
         thread_root_id=thread_root,
         ledger=ledger,
         live_capable=live,
+        designated_unroutable=designated_unroutable,
     )
 
 
@@ -285,3 +288,59 @@ def test_an_unreadable_registry_is_an_empty_set(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(registry, "scan", boom)
     assert routing.live_capable_sessions(None) == frozenset()
+
+
+# -- a designated session on an old build ---------------------------------------------
+
+
+def test_an_old_designated_build_blocks_routing_for_every_route(tmp_path: Path) -> None:
+    """An old build reads ``designated_session = me`` and would claim a row routed
+    away from it, serving a stranger's reply to the wrong session."""
+
+    _post(tmp_path, BILL, NOW - 40, message_id="bcmsg_ask00001")
+    decision = _route(tmp_path, designated_unroutable=True)
+    assert (decision.target, decision.reason) == (None, DESIGNATED_OLD_BUILD)
+
+    _post(tmp_path, BILL, NOW - 10, message_id="bcmsg_root0001")
+    threaded = _route(tmp_path, thread_root="bcmsg_root0001", designated_unroutable=True)
+    assert (threaded.target, threaded.reason) == (None, DESIGNATED_OLD_BUILD)
+
+    # Negative control: the same facts route when the designated build is new.
+    assert _route(tmp_path, designated_unroutable=False).target == BILL
+
+
+def test_only_a_live_designated_session_without_the_capability_blocks_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import (
+        TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY as CAP,
+    )
+
+    def run(rows: list[tuple[Any, str]]) -> bool:
+        monkeypatch.setattr(registry, "scan", lambda *a, **k: rows)
+        return routing.designated_blocks_routing(None, DESIGNATED)
+
+    assert run([(_record(DESIGNATED, []), "live")]) is True
+    assert run([(_record(DESIGNATED, [CAP]), "live")]) is False
+    # Not live (stopped, wedged, unknown): it reads nothing, so it is no obstacle.
+    assert run([(_record(DESIGNATED, []), "wedged")]) is False
+    assert run([(_record(B, [CAP]), "live")]) is False
+    assert run([]) is False
+
+
+def test_the_registry_record_for_the_recheck_is_live_capable_and_never_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import (
+        TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY as CAP,
+    )
+
+    rows = [(_record(B, [CAP]), "live"), (_record(BILL, []), "live")]
+    monkeypatch.setattr(registry, "scan", lambda *a, **k: rows)
+    with routing.iteration_scope():
+        assert routing.live_capable_record(None, B) is rows[0][0]
+        assert routing.live_capable_record(None, BILL) is None
+        rows.clear()  # the session died after the iteration's scan
+        assert routing.live_capable_record(None, B) is None

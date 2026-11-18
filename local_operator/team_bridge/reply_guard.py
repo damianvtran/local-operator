@@ -1027,25 +1027,44 @@ def routing_facts(
     return thread_session, posters
 
 
-def latest_ask_ref(
-    config_dir: Path | str, *, endpoint_id: str, conversation_id: str, session_id: str
+def post_ref_at(
+    config_dir: Path | str,
+    *,
+    endpoint_id: str,
+    conversation_id: str,
+    session_id: str,
+    created_at: float | None = None,
 ) -> str | None:
-    """The ref of ``session_id``'s newest ask in this conversation, or None. Display only."""
+    """The ref carried by ONE of ``session_id``'s ledger rows, or None. Display only.
+
+    With ``created_at`` it is the row written at exactly that time (the one the
+    routing facts took the "N min ago" from), so a card never pairs one post's
+    age with another post's ref; without it, the session's newest row. A reply
+    carries no ref, and then the answer is None: omitting the ref is honest,
+    borrowing an older ask's is not.
+    """
 
     conn = _connect_ledger_readonly(config_dir)
     if conn is None:
         return None
     try:
-        row = conn.execute(
-            "SELECT ref FROM outbound_posts WHERE endpoint_id = ? AND conversation_id = ? "
-            "AND session_id = ? AND ref IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1",
-            (endpoint_id, conversation_id, session_id),
-        ).fetchone()
+        if created_at is None:
+            row = conn.execute(
+                "SELECT ref FROM outbound_posts WHERE endpoint_id = ? AND conversation_id = ? "
+                "AND session_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                (endpoint_id, conversation_id, session_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT ref FROM outbound_posts WHERE endpoint_id = ? AND conversation_id = ? "
+                "AND session_id = ? AND created_at = ? ORDER BY id DESC LIMIT 1",
+                (endpoint_id, conversation_id, session_id, created_at),
+            ).fetchone()
     except sqlite3.Error:
         return None
     finally:
         conn.close()
-    return str(row["ref"]) if row is not None else None
+    return str(row["ref"]) if row is not None and row["ref"] else None
 
 
 def discard_outbound(config_dir: Path | str, record: OutboundRecord | None) -> None:
@@ -1084,9 +1103,9 @@ __all__ = [
     "discard_outbound",
     "guard_path",
     "key_path",
-    "latest_ask_ref",
     "lookup_authorship",
     "own_posts_between",
+    "post_ref_at",
     "record_outbound",
     "record_trigger",
     "release",

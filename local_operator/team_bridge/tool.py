@@ -1560,6 +1560,13 @@ async def _direct_message(
                     "delivery_uncertain" if file_batch and file_batch.uncertain else "post_failed"
                 ),
             )
+        except BaseException:
+            # Cancellation (CancelledError is not an ``Exception``): the send never
+            # confirmed, and a ledger row with no message id would still count this
+            # session as a recent poster and route a stranger's answer to it.
+            if not (file_batch and file_batch.uncertain):
+                reply_guard.discard_outbound(runtime.config_dir, ledger)
+            raise
         landed = True
         reply_guard.confirm_outbound(
             runtime.config_dir,
@@ -1822,9 +1829,13 @@ def _note_reply_destination(
             "what comes back"
         )
         return
+    # ``channel_post`` does not know the conversation's kind (it addresses by id),
+    # and a post to a DM is routed like a ``dm`` one: so it says "may", and names
+    # the DM rule, instead of promising the designated session.
     receipt["content"] += (
-        f"; replies go to session {designated}, not to you: read channel_history "
-        "to see what comes back"
+        f"; replies may go to session {designated}, not to you (in a DM, only the one "
+        f"session that posted there in the last {int(POSTER_WINDOW_S // 60)} minutes and is "
+        "still running gets them): read channel_history to see what comes back"
     )
 
 
@@ -3124,6 +3135,11 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                         else "post_failed"
                     ),
                 )
+            except BaseException:
+                # Cancellation: see the DM send above.
+                if not (file_batch and file_batch.uncertain):
+                    reply_guard.discard_outbound(runtime.config_dir, ledger)
+                raise
             landed = True
             reply_guard.confirm_outbound(
                 runtime.config_dir,
