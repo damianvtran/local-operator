@@ -489,6 +489,10 @@ def _runtime_env(
         # on a fresh conversation from a sibling that finished hours ago.
         "LOP_MOBILE_CHILD_FAST",
         "LOP_MODEL_SELECTION_OVERRIDE",
+        # Serve-only: the transcript-index worker pool must exist once, in serve
+        # (``transcript_index.host_scan_pool``). A runtime inheriting the flag
+        # would spawn its own idle pool (PR #4219 review R1-1).
+        "LOP_INDEX_SCAN_PROCESS",
     ):
         env.pop(key, None)
     if initial_model is not None:

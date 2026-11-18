@@ -688,6 +688,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     from local_operator.team_bridge.http_pool import bind_hub_pool, unbind_hub_pool
 
     bind_hub_pool()
+    # THIS process, and only this one, may own the transcript-index worker pool
+    # (``LOP_INDEX_SCAN_PROCESS``, default off). Session runtimes call the same
+    # ``start_refresh`` and must keep the thread path (PR #4219 review R1-1).
+    from local_operator.session import transcript_index as _transcript_index
+
+    _transcript_index.host_scan_pool()
     yield
     if remote_attention_task is not None:
         remote_attention_task.cancel()
@@ -711,6 +717,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cancel_prewarm()
         except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
             logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
+        # Abandon, never join, the index worker pool: interpreter exit would
+        # otherwise wait out an in-flight cold scan (~7-8.5 s on an anchor
+        # journal) before serve could stop (PR #4219 review R1-4).
+        try:
+            _transcript_index.shutdown_scan_pool()
+        except Exception:  # noqa: BLE001 — teardown never raises
+            logger.debug("index worker pool shutdown failed", exc_info=True)
         if temporary_sweeper_started:
             try:
                 from local_operator.session.cleanup import stop_temporary_sweeper

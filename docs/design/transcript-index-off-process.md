@@ -35,7 +35,7 @@ is **GIL contention from transcript-index work running inside `lop serve`**:
 ### The anchor journal, measured
 
 `439818272d84/transcript.jsonl` is now **808 MB and 137,555 rows**. The figures
-below come from row heads only (`scratchpad/shape.py`, no content read out). Its
+below come from row heads only (`d4c94fe751cf/scratchpad/shape.py`, no content read out). Its
 persisted index snapshot is **84.2 MB**
 (`cache/transcript_index/439818272d84.snap.*.snapshot`).
 
@@ -142,7 +142,7 @@ dependencies are not free-threading-ready. Revisit later.
 
 ## Measurements (question 3)
 
-**Fixture.** `scratchpad/rig/gen.py` is synthetic lorem text in the anchor's byte
+**Fixture.** `d4c94fe751cf/scratchpad/rig/gen.py` is synthetic lorem text in the anchor's byte
 mix at 1/10 scale. The big session is **70.0 MB / 9,850 rows**, with 54% bookkeeping
 + compaction bytes, 33.5 MB of bookkeeping rows at ~52 KB each, and 17
 compactions at ~800 KB. There are two busy sessions of 34.2 MB each and one
@@ -151,7 +151,7 @@ small session of 1.2 MB. Cold full scan: 594–606 ms CPU, 1.0 s wall at load 22
 
 ### Mechanism: in-process loop lag, 3 cold builds at once
 
-`scratchpad/rig/loopbench.py` runs a 1 ms asyncio ticker on the loop that
+`d4c94fe751cf/scratchpad/rig/loopbench.py` runs a 1 ms asyncio ticker on the loop that
 calls `start_refresh` for all three (70 + 34 + 34 MB). It runs in a fresh process
 per run, four runs per arm, interleaved. The ticker's own lag is the loop-lag
 measure. "serve CPU" is `process_time` of the serving process (loop plus threads,
@@ -167,11 +167,11 @@ excluding the worker). The figures are medians over 4 runs. Load 21.7–32.1, sw
 | (a)+(d2) worker, no hydration (`=2`) | cold spawn | 4,021 ms | 88 ms | 13.5 ms | 23.2 ms | 86 / 140 ms | 226 |
 
 The thread ranges are the cold-start and warm medians: the base arm has no pool,
-so its two halves differ only by order. Raw rows are in `scratchpad/rig/lb2.jsonl`.
+so its two halves differ only by order. Raw rows are in `d4c94fe751cf/scratchpad/rig/lb2.jsonl`.
 
 ### Real path: isolated `lop serve` over HTTP
 
-`scratchpad/rig/drive.py` boots a fresh `lop serve` per cell (`env -i`, scratch
+`d4c94fe751cf/scratchpad/rig/drive.py` boots a fresh `lop serve` per cell (`env -i`, scratch
 `HOME` and config, `LOP_OPEN_TRACE`, standby disabled, port 18761) and reaps it
 by exact process group (no leftovers in any cell). For each cell:
 
@@ -247,13 +247,24 @@ publishes.** Ship it in three steps:
    to a per-process spawn pool. Changes needed to make it production:
    * Enable it by an explicit call in serve's startup (`server/app.py`), not by an
      environment variable. Runtimes inherit serve's environment, and a pool per
-     runtime is N×2 interpreters.
+     runtime is N×2 interpreters. The POC already gates on both: the env var
+     selects the mode only in a process that called `host_scan_pool()` (serve's
+     lifespan), and `_runtime_env` scrubs `LOP_INDEX_SCAN_PROCESS` from every
+     runtime (review R1-1).
+   * Drop the pool at serve's lifespan shutdown without joining it
+     (`shutdown_scan_pool()`: `wait=False`, `cancel_futures=True`). Otherwise
+     interpreter exit waits out an in-flight anchor cold scan (~7–8.5 s) before
+     serve can stop. Done in the POC (R1-4).
    * Single-flight across loops: share a `concurrent.futures.Future` per
      `(root, session)` that any loop awaits through `asyncio.wrap_future`. This
      closes the relay page-loop duplicate (`relay.py:11381–11400`).
    * Take a per-session build flock in the worker, then re-check the signature
      after acquiring it, so a runtime and serve never scan the same bytes
-     concurrently. The second caller gets an exact HIT.
+     concurrently. The second caller gets an exact HIT. **Delivered by #4224**,
+     which adds the per-session `<sid>.build.lock` inside
+     `transcript_index.refresh_index`. The worker calls that same
+     `refresh_index`, so it inherits the lock; this PR deliberately adds no
+     second lock around the call.
    * Drop `_defer_for_paint` and the yield machinery for worker builds; the POC
      already bypasses the deferral.
    * The synchronous `peer_cycle_display` callers (`:463, 729, 821`) take a
@@ -284,8 +295,15 @@ the runtime, and the remainder would move cost onto the agent's turn.
 * The journal remains the authority, and the JSON head remains the commit point.
   The companion is still derived and disposable.
 * A worker failure is one failed refresh: `_FAILURES`, a logged warning, and the
-  previous state is served. A `BrokenProcessPool` drops the pool, and the next
-  refresh respawns it. The POC tests both paths.
+  previous state is served. A `BrokenProcessPool` drops the pool that broke
+  (never a replacement another refresh created meanwhile), and the next refresh
+  respawns it. The POC tests both paths.
+* A companion publish failure in the worker (`OSError`, `ValueError`,
+  `sqlite3.Error`, the classes the thread path memoises) returns in the receipt,
+  and serve records it with `index_read_model.remember_failure`. Serve passes
+  its memoised failed source into each dispatch, and the worker skips the
+  publish while the journal is unchanged. The memo therefore lives in serve and
+  survives worker recycling, as on the thread path.
 
 ## Rollout and the risks to watch
 

@@ -4442,15 +4442,36 @@ _SCAN_WORKERS = 2
 _SCAN_TASKS_PER_CHILD = 16
 _SCAN_POOL: Any = None
 _SCAN_POOL_LOCK = threading.Lock()
+#: Whether THIS process may own the worker pool. Only ``lop serve`` sets it
+#: (``host_scan_pool`` from the server lifespan). Session runtimes reach
+#: ``start_refresh`` too (the journal-order emitter in ``runtime/serving.py``),
+#: and they inherit serve's environment, so an env-only gate gave every runtime
+#: its own idle pool of spawned interpreters (~25 runtimes x 2 x 60-90 MB, PR
+#: #4219 review R1-1). The env var still selects the mode; this flag decides
+#: whether the process is allowed to act on it. ``_runtime_env`` also scrubs the
+#: variable, so neither gate alone is load-bearing.
+_SCAN_POOL_HOST = False
+
+
+def host_scan_pool() -> None:
+    """Mark this process as the pool's owner (serve lifespan startup only)."""
+    global _SCAN_POOL_HOST
+    _SCAN_POOL_HOST = True
 
 
 def _scan_process_mode() -> int:
+    if not _SCAN_POOL_HOST:
+        return 0
     raw = os.environ.get(_SCAN_PROCESS_ENV, "").strip()
     return int(raw) if raw in ("1", "2") else 0
 
 
 def _scan_pool() -> Any:
-    """The lazily created spawn-context pool (loop thread; one per process)."""
+    """The lazily created spawn-context pool (one per serve process).
+
+    Reached from any loop thread in serve (the server loop, and the relay page
+    loop's thread via ``network/relay.py``); the lock makes creation single.
+    """
     global _SCAN_POOL
     with _SCAN_POOL_LOCK:
         if _SCAN_POOL is None:
@@ -4465,36 +4486,71 @@ def _scan_pool() -> Any:
         return _SCAN_POOL
 
 
-def _drop_scan_pool(*, wait: bool = False) -> None:
-    """Forget a broken pool so the next refresh builds a fresh one.
+def _drop_scan_pool(*, wait: bool = False, only: Any = None) -> None:
+    """Forget the pool so the next refresh builds a fresh one.
 
-    ``wait`` joins the pool's management thread (test teardown); a broken pool
-    on the serving loop is abandoned without waiting.
+    ``only`` names the pool that broke: every in-flight future of a broken pool
+    raises ``BrokenProcessPool``, and a later handler must not shut down a
+    healthy replacement another refresh created in between (its pending futures
+    would be cancelled; review R1-2). ``wait`` joins the pool's management
+    thread (test teardown); a broken pool on the serving loop, and the pool at
+    serve shutdown, are abandoned without waiting so an anchor-sized cold scan
+    (~7-8.5 s) cannot delay a serve stop (R1-4).
     """
     global _SCAN_POOL
     with _SCAN_POOL_LOCK:
+        if only is not None and _SCAN_POOL is not only:
+            return
         pool, _SCAN_POOL = _SCAN_POOL, None
     if pool is not None:
         pool.shutdown(wait=wait, cancel_futures=True)
 
 
-def _refresh_in_worker(config_dir: str, session_id: str) -> dict[str, Any] | None:
-    """Worker-process entry: build + publish, return only a small receipt."""
+def shutdown_scan_pool() -> None:
+    """Serve lifespan teardown: abandon the pool without joining running scans."""
+    global _SCAN_POOL_HOST
+    _SCAN_POOL_HOST = False
+    _drop_scan_pool(wait=False)
+
+
+def _refresh_in_worker(
+    config_dir: str, session_id: str, failed_source: Any = None
+) -> dict[str, Any] | None:
+    """Worker-process entry: build + publish, return only a small receipt.
+
+    THE NEGATIVE MEMO STAYS IN SERVE (R1-3). ``index_read_model``'s ``_FAILED``
+    memo stops a doomed companion build from re-running on every refresh; a
+    worker's copy would be per-process and lost on recycle. So serve passes the
+    source it already remembers as failed, the worker skips the publish when the
+    build derives from that same source, and a fresh failure travels back in
+    the receipt for serve to ``remember_failure``.
+    """
+    import sqlite3
+
+    from local_operator.session import index_read_model
+
     started = time.process_time()
     index = refresh_index(config_dir, session_id)
     if index is None:
         return None
+    source = index_read_model.source_of(index)
     token = None
-    try:
-        from local_operator.session import index_read_model
-
-        token = index_read_model.publish(config_dir, session_id, index)
-    except Exception:  # noqa: BLE001 - the companion is an optimisation
-        logger.debug("worker companion publish failed", exc_info=True)
+    publish_failed = False
+    if failed_source is None or tuple(failed_source) != source:
+        try:
+            token = index_read_model.publish(config_dir, session_id, index)
+        except (OSError, ValueError, sqlite3.Error):
+            # The same failure classes the thread path memoises (``run_build``).
+            publish_failed = True
+            logger.debug("worker companion publish failed", exc_info=True)
+        except Exception:  # noqa: BLE001 - the companion is an optimisation
+            logger.debug("worker companion publish failed", exc_info=True)
     return {
         "sig": dict(index.sig),
         "rows": index.scan.rows,
         "token": token,
+        "source": source,
+        "publish_failed": publish_failed,
         "cpu_ms": round((time.process_time() - started) * 1000, 1),
         "pid": os.getpid(),
     }
@@ -4557,16 +4613,25 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
             # started before or after the first frame was written.
             open_trace.mark("index.refresh_start", session=session_id, deferred=hold is not None)
         if process_mode:
+            from local_operator.session import index_read_model
+
+            pool = _scan_pool()
             try:
                 receipt = await loop.run_in_executor(
-                    _scan_pool(), _refresh_in_worker, str(config_dir), session_id
+                    pool,
+                    _refresh_in_worker,
+                    str(config_dir),
+                    session_id,
+                    index_read_model._FAILED.get((str(config_dir), session_id)),
                 )
             except Exception as exc:
                 from concurrent.futures.process import BrokenProcessPool
 
                 if isinstance(exc, BrokenProcessPool):
-                    _drop_scan_pool()
+                    _drop_scan_pool(only=pool)
                 raise
+            if receipt is not None and receipt.get("publish_failed"):
+                index_read_model.remember_failure(config_dir, session_id, receipt["source"])
             if open_trace.enabled():
                 open_trace.mark("index.worker_done", session=session_id, **(receipt or {}))
             if receipt is None or process_mode == 2:
@@ -4830,6 +4895,8 @@ def _reset_for_tests() -> None:
     _DEFERRED.clear()
     # A worker pool outlives no test: its processes would hold the tmp roots.
     _drop_scan_pool(wait=True)
+    global _SCAN_POOL_HOST
+    _SCAN_POOL_HOST = False
     # The read model's own in-process state is keyed by the same roots, so a
     # suite that re-creates a tmp_path must not inherit a memo or a remembered
     # publication failure from the previous one.
