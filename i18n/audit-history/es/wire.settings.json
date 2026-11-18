@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "82e7b52d5a1dc17ebcd688478993ecacbf659e0083dc64f2daefbbf719a11cd3",
+  "history_sha256": "47aadb3a106dd198db2f21e481f2ab6836ac46c4a5bded4b11e970f7fce8486e",
   "entries": [
     {
       "locale": "es",
@@ -1193,6 +1193,40 @@
       "evidence": "i18n/audits/evidence/es/wire.settings/m4135b/record.json",
       "round": "m4135b",
       "keys_audited": 883
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "es `wire.settings` PR #4245 delta audit (696a18338..a69e0e74b, new move-transfer keys): PASS, 0 BLOCKER/0 MAJOR, 0 minor deferred. Other keys byte-identical to the last passed copy. No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/mt1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/record.json",
+          "sha256": "ada43d5edc011c19ce2342760342bc3ef4e971edc185a03edba2db13bab54555"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/report.md",
+          "sha256": "6db32fdf1382f72d0df854e280b6444c86ba149debac55bce1cb46245a2b8518"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mt1/audit.log",
+          "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
+        }
+      ]
     }
   ]
 }

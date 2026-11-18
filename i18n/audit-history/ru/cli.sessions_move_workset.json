@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "cli.sessions_move_workset",
-  "history_sha256": "855fa73fd0ed81d6cc5978ecc806a6f2c37101c30c57c10e44c22c8784e9b20e",
+  "history_sha256": "f1be664fed2238c116e20dcc56caccd2030001985b91f3a3ef46819c782ab989",
   "entries": [
     {
       "locale": "ru",
@@ -69,6 +69,40 @@
         {
           "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/mw-secondary/audit.log",
           "sha256": "e6d642c523c7c08ff220aceca52eee60f36354a0734f53a2eb7ee107d4d97722"
+        }
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ru `cli.sessions_move_workset` PR #4245 delta audit (696a18338..a69e0e74b, new move-transfer keys): PASS, 0 BLOCKER/0 MAJOR, 1 minor deferred. Other keys byte-identical to the last passed copy. No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/ru/cli.sessions_move_workset/mt1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/mt1/record.json",
+          "sha256": "bacc350a3f18b9f1a0cbeb308ffd1b077fa6362bb6979a2c51196909f6afa297"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/mt1/report.md",
+          "sha256": "a5936ef7dd238a7b29818f8bceaff24d07573a4dc2522058b09ec3b55a82d962"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.sessions_move_workset/mt1/audit.log",
+          "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
         }
       ]
     }

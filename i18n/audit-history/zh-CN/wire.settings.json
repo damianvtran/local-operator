@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "ebd278ae89584820a89d1acd47369e13bab3ab3345ccc9976ca005c62bc70803",
+  "history_sha256": "6c1092fc1bf00b30faa35ac2c5a88a0d61a4d2002bf837fa2f6c8dfec00ebb67",
   "entries": [
     {
       "locale": "zh-CN",
@@ -1197,6 +1197,40 @@
       "evidence": "i18n/audits/evidence/zh-CN/wire.settings/m4135b/record.json",
       "round": "m4135b",
       "keys_audited": 883
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN `wire.settings` PR #4245 delta audit (696a18338..a69e0e74b, new move-transfer keys): PASS, 0 BLOCKER/0 MAJOR, 2 minor deferred. Other keys byte-identical to the last passed copy. No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/record.json",
+          "sha256": "75379e7695ab8a5b0d4459024faaa4b31ad4cc2675972bbd63deaaea39519fd5"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/report.md",
+          "sha256": "46aff1debfc1abd0d01c6becdab0b2aac34f2863ebd53f35c79cb9b0b83cddc2"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/audit.log",
+          "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
+        }
+      ]
     }
   ]
 }

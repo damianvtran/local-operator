@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "cli.sessions_move_workset",
-  "history_sha256": "39d83248e709533f4a146689dc780464ce88a58f9a6e5bcf248dedd7cff3a2b9",
+  "history_sha256": "d1252d6e67ac45c33ca9b82abc864f32afa7442b475582fcf5d145ade1942e7b",
   "entries": [
     {
       "locale": "zh-CN",
@@ -69,6 +69,40 @@
         {
           "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mw-secondary/audit.log",
           "sha256": "4592b355ce33faab3bf09c50b35af3329f5cfc93aa9daa6b4bfd76a08762cfb6"
+        }
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN `cli.sessions_move_workset` PR #4245 delta audit (696a18338..a69e0e74b, new move-transfer keys): PASS, 0 BLOCKER/0 MAJOR, 0 minor deferred. Other keys byte-identical to the last passed copy. No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/record.json",
+          "sha256": "75379e7695ab8a5b0d4459024faaa4b31ad4cc2675972bbd63deaaea39519fd5"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/report.md",
+          "sha256": "46aff1debfc1abd0d01c6becdab0b2aac34f2863ebd53f35c79cb9b0b83cddc2"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/audit.log",
+          "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
         }
       ]
     }

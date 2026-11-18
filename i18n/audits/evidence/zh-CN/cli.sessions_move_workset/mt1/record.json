@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "audit_id": "mt1",
+  "audit_round": 1,
+  "locale": "zh-CN",
+  "audit_date": "2026-11-18",
+  "audited_head": "a69e0e74bd4980cd9e598aec61597c09b256ad7d",
+  "base": "696a18338",
+  "auditor": {
+    "agent": "i18n auditor (lopdev task 482db48afe47)",
+    "session": "482db48afe47",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator": true,
+    "fallback_used": false
+  },
+  "translator": {
+    "agent": "coder",
+    "sessions": [
+      "1768f308a175",
+      "04a689e5090b",
+      "b57675c8318a",
+      "b7523be856f2",
+      "b404dd5868ee"
+    ],
+    "model": "anthropic/claude-opus-5-5",
+    "source": "lopdev manager brief 2026-11-18"
+  },
+  "input_hashes": {
+    "cli.sessions_move_workset": {
+      "en": "6ba71eab00d799d4ff17af1841bb319a15ec0e9c9d684656144c1b1799ab6050",
+      "target": "6f2c1a4af67273dd3d1efd2bd967f4a6017a8b44e1e283a9bdc211d65da01bc1"
+    },
+    "wire.settings": {
+      "en": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+      "target": "77cb65f4075ae063a6ec88991a7f1d4b5fba428911bfa1093022273f6c9b4087"
+    }
+  },
+  "verdict": {
+    "cli.sessions_move_workset": {
+      "status": "passed",
+      "major": 0,
+      "minor": 0,
+      "recorded": true
+    },
+    "wire.settings": {
+      "status": "passed",
+      "major": 0,
+      "minor": 2,
+      "recorded": true
+    }
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "46aff1debfc1abd0d01c6becdab0b2aac34f2863ebd53f35c79cb9b0b83cddc2"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
+    }
+  ]
+}
