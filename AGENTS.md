@@ -1378,13 +1378,14 @@ changes the `version =` line fails unless its title starts with
 `chore(release):`. Dependency and metadata edits to `pyproject.toml` are
 unaffected — the guard reads the version line, not the file.
 
-It makes the violation loud; it does not make it impossible. `main`'s ruleset
-requires one approving review and one required status check, `CI Gate` (plus
-`Merge gate (full suite)` once that context is added — see "Who may merge: two
-tiers"), and admins hold a configured bypass, so an `--admin` merge lands over a
-red guard. Treat a failing `version-bump-guard` as a stop signal rather than an
-obstacle to route around:
-the job is the reviewer's missing memory, not a lock.
+It blocks the merge, even an `--admin` one. `main` carries two rulesets (see
+"Who may merge: two tiers"): ruleset 3622629 requires one approving review,
+and the admin bypass covers only that rule; ruleset 26808267 requires two
+status checks, `CI Gate` and `Merge gate (full suite)`, and has no bypass
+actors. `CI Gate` fails closed on a red `version-bump-guard`, so a red guard
+turns `CI Gate` red and the ruleset refuses the merge. Treat a failing guard as
+a finding to fix, not an obstacle to route around: drop the bump, or retitle a
+genuine release PR `chore(release):`.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
@@ -1393,9 +1394,11 @@ bump runs seven checks, not the matrix: `changes`, `version-bump-guard` and
 artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
 triggers, a push to `release-next`/`release-next-*`, the runbook's bump
 branch). Every other `ci.yml` job reports skipping. The second required check,
-`Merge gate (full suite)`, is deliberately not armed on a bump PR — no
-`ready-to-merge` label is added, and a version-only diff classifies the matrix
-out anyway — so neither a missing nor a skipped gate is a defect here. The classifier keys on
+`Merge gate (full suite)`, is still required on a bump PR — the ruleset refuses
+even an `--admin` merge without it — so arm it with `make merge-gate PR=<n>`;
+its suite jobs report skipped on the version-only diff, so the gate runs no
+suite and its wall time is the runner queue (about 13 min on #4165, about
+86 min on #4199). The classifier keys on
 the diff but the Release Gate keys on the branch name, so a bump pushed from
 any other branch shows only the two `ci.yml` checks: the artifact gate never
 ran, which is a reason to use the mandated branch, not a green. That is the
@@ -1635,13 +1638,20 @@ operator action on pypi.org; agents never delete releases or files.
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
 
-   **Expect seven checks on this PR, not a matrix.** A version-only
+   **Expect seven checks on this PR, not a matrix — then arm the merge
+   gate.** A version-only
    `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
    `changes`, `version-bump-guard` and `CI Gate` run and every other job reports
    skipping — the whole job set would be gating code this PR does not touch.
-   The other required check, `Merge gate (full suite)`, is not armed on a bump
-   PR at all (no `ready-to-merge` label, and the version-only diff would
-   classify the matrix out anyway), so seven is the complete list.
+   The other required check, `Merge gate (full suite)`, is not automatic but
+   is still required: once the seven are green, run `make merge-gate PR=<n>`.
+   The gate classifies the version-only diff as a release bump, its suite jobs
+   (`test`, `tui-e2e`, `coverage-report`) report skipped, and the gate runs no
+   suite, so its wall time is the runner queue (about 13 min on #4165, about
+   86 min on #4199). The PR ends with the seven plus a green
+   `Merge gate (full suite)`. An `--admin` merge before the gate is refused
+   by the ruleset (`Required status check "Merge gate (full suite)" is
+   expected`; measured on bump PR #4199, 2026-11-18).
    The other four come from `.github/workflows/release-gate.yml`, which fires
    on the push to `release-next` (its triggers also include `release-next-*`,
    pushes to `main`, and `workflow_dispatch`): `Release invariants` (the
@@ -2302,9 +2312,11 @@ Warnings that still hold, each of which has already cost a release:
   and has silently consumed the number you are about to use. That is exactly
   how 0.50.1 and 0.50.2 were burned — each consumed by a PR's own bump, neither
   ever built, tagged or published, and the next owner had to skip both. The
-  `version-bump-guard` CI job now catches this on the PR, but it does **not**
-  block an `--admin` merge, because `main`'s ruleset configures no required
-  status checks and admins hold a bypass. The pre-tag check is the backstop.
+  `version-bump-guard` CI job now catches this on the PR and, through the
+  required `CI Gate` (ruleset 26808267, no bypass actors), blocks even an
+  `--admin` merge; the admin bypass covers only the review rule. The pre-tag
+  check is the backstop for a bump that slipped in before the guard or under a
+  `chore(release):` title.
 - **A shard failure on your branch alone is not evidence your diff caused it.**
   CI shards the unit suite with `scripts/shard_tests.py` — a
   longest-processing-time-first (LPT) partition of
@@ -2937,10 +2949,11 @@ tool and is unavailable here — GitHub restricts it to org-owned public
 repositories and Enterprise Cloud private ones, and this repository is
 user-owned (`repository.mergeQueue` is null; `enableMergeQueue` does not exist).
 The second context has to be in the ruleset for the block to bite:
-`gh api repos/damianvtran/local-operator/rulesets/3622629` shows
-`required_status_checks` carrying `CI Gate` alone, and
-`Merge gate (full suite)` is added with a `PUT` on that ruleset — until it is
-there, the gate is a comment rather than a lock. Add it **after** the workflow
+`gh api repos/damianvtran/local-operator/rules/branches/main` shows
+`required_status_checks` (ruleset 26808267) carrying both `CI Gate` and
+`Merge gate (full suite)`; ruleset 3622629 holds only the review and
+non-fast-forward rules. Without the second context the gate is a comment
+rather than a lock. Add it **after** the workflow
 that reports it has merged, and never before: a required context that nothing
 reports sits in "Expected" and blocks every PR in the fleet.
 

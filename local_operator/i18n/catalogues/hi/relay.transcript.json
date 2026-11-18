@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "प्रश्न",
   "relay.transcript.label.messages": "संदेश",
   "relay.transcript.composer.queued": "{count, plural, one {# कतार में} other {# कतार में}}",
-  "relay.transcript.session.unread_refused": "अपठित स्थिति पढ़ी नहीं जा सकी — कुछ भी साफ़ नहीं किया गया। फिर कोशिश करें।"
+  "relay.transcript.session.unread_refused": "अपठित स्थिति पढ़ी नहीं जा सकी — कुछ भी साफ़ नहीं किया गया। फिर कोशिश करें।",
+  "relay.transcript.message.show_more": "और दिखाएँ",
+  "relay.transcript.message.show_less": "कम दिखाएँ",
+  "relay.transcript.message.show_more_label": "और दिखाएँ — आपका संदेश",
+  "relay.transcript.message.show_less_label": "कम दिखाएँ — आपका संदेश"
 }

@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "سوال",
   "relay.transcript.label.messages": "پیغامات",
   "relay.transcript.composer.queued": "{count, plural, one {# قطار میں} other {# قطار میں}}",
-  "relay.transcript.session.unread_refused": "ناپڑھے پیغامات کی حالت پڑھی نہیں جا سکی — کچھ صاف نہیں کیا گیا۔ دوبارہ کوشش کریں۔"
+  "relay.transcript.session.unread_refused": "ناپڑھے پیغامات کی حالت پڑھی نہیں جا سکی — کچھ صاف نہیں کیا گیا۔ دوبارہ کوشش کریں۔",
+  "relay.transcript.message.show_more": "مزید دکھائیں",
+  "relay.transcript.message.show_less": "کم دکھائیں",
+  "relay.transcript.message.show_more_label": "مزید دکھائیں — آپ کا پیغام",
+  "relay.transcript.message.show_less_label": "کم دکھائیں — آپ کا پیغام"
 }
