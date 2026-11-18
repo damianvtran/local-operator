@@ -921,6 +921,16 @@ class ConversationFeedRef:
     #: from the mention/DM/thread facts instead.
     addressed: str | None = None
     sender_relation: str | None = None
+    #: The hub marked this delivery NON-WAKING (agent-server #402, ``events[].ids.passive``):
+    #: a thread reply reaching a ``notify=all`` agent that is NOT in the thread's audience.
+    #: Operator rule (Damian, Team Bridge #general seq 97, 2026-11-17): agents wake on thread
+    #: replies only when they participate. The row still exists so the reply is screened,
+    #: admitted and readable on the agent's next ``channel_thread``/``channel_history`` read —
+    #: the connector only withholds the wake. Persisted as a tagged slot (``/passive=1``) for
+    #: the same rollback reason as the routing tags: an older reader ignores the tag and wakes,
+    #: which is exactly today's behaviour. ``False`` = absent (an older hub) or a mention,
+    #: which is never passive (the parser drops the bit beside ``mention``).
+    passive: bool = False
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""
@@ -960,6 +970,12 @@ class ConversationFeedRef:
             # Same rule as thread_root + legacy_alias: no released writer mints an alias
             # on a ref the routing-aware feed parser produced.
             raise TeamBridgeTypeError("routing tags never ride a legacy alias")
+        if not isinstance(self.passive, bool):
+            raise TeamBridgeTypeError("passive must be a boolean")
+        if self.passive and (self.mention or self.legacy_alias is not None):
+            # A mention is ALWAYS a wake (being named is being named), and no released
+            # writer minted an alias on a feed row that carried the passive bit.
+            raise TeamBridgeTypeError("passive never rides a mention or a legacy alias")
         return self
 
     def encode(self) -> str:
@@ -983,17 +999,23 @@ class ConversationFeedRef:
         if self.sender_relation is not None:
             self.validated()
             encoded += f"/relation={self.sender_relation}"
+        if self.passive:
+            self.validated()
+            encoded += "/passive=1"
         return encoded
 
 
 #: The most ``/``-separated parts a conversation feed ref may carry. The
 #: longest shape the grammar can produce is the 4 fixed locator parts, the
-#: optional positional sender kind, and the four known tags
-#: (``legacy_alias``, ``thread_root``, ``addressed``, ``relation``) —
-#: 4 + 1 + 4 = 9. ``encode`` emits at most 8, because its own rules refuse
-#: the alias-plus-routing combinations the grammar states separately.
-#: 11 is deliberate slack above both: each unknown future tag costs one
-#: part and is ignored by the existing rule, so two of them still parse.
+#: optional positional sender kind, and the five known tags
+#: (``legacy_alias``, ``thread_root``, ``addressed``, ``relation``,
+#: ``passive``) — 4 + 1 + 5 = 10. ``encode`` emits at most 9, because its own
+#: rules refuse the alias-plus-routing/passive combinations the grammar states
+#: separately. 11 is deliberate slack above both: each unknown future tag
+#: costs one part and is ignored by the existing rule, so two of them still
+#: parse beside the longest ref ``encode`` writes. Deliberately NOT raised
+#: with ``passive``: released readers cap at 11, and every ref this build
+#: writes (at most 9 parts) still fits under their cap after a rollback.
 #: The total only needs to stop a ref from growing without limit; the
 #: positional slots are bounded separately.
 _MAX_CONVERSATION_REF_PARTS = 11
@@ -1098,6 +1120,10 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
         return None
     if "relation" in tags and tags["relation"] not in FEED_RELATION_VALUES:
         return None
+    # ``passive`` has ONE spelling (``encode`` writes ``1``); anything else under the
+    # known name is a damaged row and reads as malformed, never as "wake" or "quiet".
+    if "passive" in tags and tags["passive"] != "1":
+        return None
     try:
         return ConversationFeedRef(
             conversation_id=conversation_id,
@@ -1109,6 +1135,7 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
             thread_root_id=thread_root_id,
             addressed=tags.get("addressed") or None,
             sender_relation=tags.get("relation") or None,
+            passive="passive" in tags,
         ).validated()
     except TeamBridgeTypeError:
         return None
@@ -1389,6 +1416,13 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
             relation = ids.get("sender_relation")
             if not isinstance(relation, str) or relation not in FEED_RELATION_VALUES:
                 relation = None
+            # Non-waking delivery (agent-server #402, ``omitempty``): honoured ONLY as the
+            # literal ``true`` and never beside a mention. Anything else — absent (an older
+            # hub), a wrong type, or a mention — falls back to WAKING, today's behaviour:
+            # an unwanted wake costs one ``no_reply`` turn, a wrongly silenced one costs a
+            # reply the agent was owed. Dropped rather than refused, like ``addressed``, so
+            # one odd value never costs the whole events page.
+            passive = ids.get("passive") is True and not mention
             at = raw.get("at")
             if not isinstance(at, str) or not at:
                 raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
@@ -1402,6 +1436,7 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                     thread_root_id=thread_root_id,
                     addressed=addressed,
                     sender_relation=relation,
+                    passive=passive,
                 )
                 .validated()
                 .encode()

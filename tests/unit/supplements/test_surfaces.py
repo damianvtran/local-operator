@@ -485,6 +485,64 @@ def test_the_relay_file_route_refuses_a_relative_path_without_a_live_record(
     assert response.headers["cache-control"] == "no-store"
 
 
+def _checkpoint_row(cwd: str) -> dict[str, Any]:
+    """The frontend checkpoint an ended desktop/TUI session left: its cwd rides ``state``."""
+    return {
+        "id": "1" * 32,
+        "ts": 1791000000.0,
+        "type": "custom",
+        "payload": {
+            "custom_type": "frontend_state_checkpoint_v1",
+            "details": {"state": {"cwd": cwd}},
+        },
+    }
+
+
+def _png_row(png: Path, relative: str) -> dict[str, Any]:
+    """The pin's file record: cwd-relative path plus the fingerprint it was written with."""
+    info = png.stat()
+    return _row(
+        files=[
+            {
+                "path": relative,
+                "name": png.name,
+                "kind": "image",
+                "size_bytes": info.st_size,
+                "mtime": info.st_mtime,
+                "why": "pinned by bash",
+            }
+        ]
+    )
+
+
+def test_the_relay_file_route_serves_an_ended_sessions_pin_from_its_durable_cwd(
+    tmp_path, monkeypatch
+) -> None:
+    """An ended session has no live record, but its frontend checkpoint recorded the cwd:
+    a delivered PNG that still matches the row's size and mtime is served (it was a 409)."""
+    cfg = _relay_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    work = tmp_path / "Work"
+    (work / "shots").mkdir(parents=True)
+    png = work / "shots" / "after.png"
+    png.write_bytes(b"\x89PNG\r\n-after")
+    _journal(cfg, RELAY_SESSION, [_checkpoint_row(str(work)), _png_row(png, "shots/after.png")])
+    client, _daemon = _daemon_relay()
+    response = client.get(f"/api/sessions/{RELAY_SESSION}/supplements/{RELAY_JOB}/file?i=0")
+    assert response.status_code == 200
+    assert response.content == b"\x89PNG\r\n-after"
+    assert response.headers["content-type"] == "image/png"
+    assert "content-disposition" not in response.headers, "images render inline"
+    assert response.headers["cache-control"] == "no-store"
+
+    # The same recorded cwd refuses a file that was rewritten after the pin.
+    png.write_bytes(b"\x89PNG\r\n-overwritten-later")
+    assert (
+        client.get(f"/api/sessions/{RELAY_SESSION}/supplements/{RELAY_JOB}/file?i=0").status_code
+        == 409
+    )
+
+
 def test_the_relay_file_route_serves_a_home_relative_path_without_a_live_record(
     tmp_path, monkeypatch
 ) -> None:

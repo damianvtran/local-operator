@@ -852,14 +852,18 @@ async def _resolve_named_recipient(
 
     scope_id = str(getattr(runtime, "tenant_id", "") or "")
     try:
-        directory = await runtime.client.directory_cached(runtime.tenant_id)
+        directory, fetched = await runtime.client.directory_cached_read(runtime.tenant_id)
         allowlist = await runtime.client.allowlist(tenant_id=runtime.tenant_id)
-        if _name_misses(requested, members_from_allowlist(directory, allowlist)):
-            # The directory is cached (``directory_cached``): a name the cached
-            # answer cannot deliver to may be a teammate who joined or turned
-            # their bridge on since, so re-read it ONCE before the recorded
-            # resolution below decides — one forced read per miss, never more.
-            directory = await runtime.client.directory_cached(runtime.tenant_id, refresh=True)
+        if not fetched and _name_misses(requested, members_from_allowlist(directory, allowlist)):
+            # The directory is cached (``directory_cached_read``): a name the
+            # CACHED answer cannot deliver to may be a teammate who joined or
+            # turned their bridge on since, so re-read it ONCE before the
+            # recorded resolution below decides. A copy this call just fetched
+            # is already that fresh, so a miss on it is believed without a
+            # second read (a cold cache costs one directory GET, not two).
+            directory, _ = await runtime.client.directory_cached_read(
+                runtime.tenant_id, refresh=True
+            )
     except Exception as failure:
         try:
             record_resolution(
@@ -1176,11 +1180,13 @@ async def _resolve_dm_target(
     # The directory is cached per account and tenant (``directory_cached``); a
     # ``not_reachable`` answer from the cached copy may be a teammate who joined,
     # enrolled or came back since, so it is re-read ONCE before it is believed.
-    # Any other refusal (a conflict, self-target) is not about freshness.
+    # A copy this call just fetched is already that fresh, so its answer stands
+    # without a second read. Any other refusal (a conflict, self-target) is not
+    # about freshness.
     resolved: tuple[dict[str, str] | None, str, dict[str, Any] | None] = (None, "", None)
     for refresh in (False, True):
         try:
-            directory = await runtime.client.directory_cached(
+            directory, fetched = await runtime.client.directory_cached_read(
                 runtime.tenant_id, expected_account_id=runtime.owner.account_id, refresh=refresh
             )
         except Exception as failure:
@@ -1202,7 +1208,7 @@ async def _resolve_dm_target(
             paired_from_to=paired_from_to,
         )
         refusal = resolved[2]
-        if refusal is None or refusal.get("code") != "not_reachable":
+        if fetched or refusal is None or refusal.get("code") != "not_reachable":
             break
     return resolved
 

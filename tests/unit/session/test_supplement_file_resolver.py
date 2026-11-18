@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,14 @@ from local_operator.session.media import (
 JOB = "3f9c1a7e5b20"
 
 
-def _session(cfg: Path, files: list[str], *, version_rows: int = 1) -> Path:
+def _session(
+    cfg: Path,
+    files: list[str],
+    *,
+    version_rows: int = 1,
+    records: list[dict[str, Any]] | None = None,
+) -> Path:
+    """A journal with a supplement row; ``records`` replaces the bare ``{"path"}`` entries."""
     directory = cfg / "sessions" / "ab12cd34ef56"
     directory.mkdir(parents=True)
     rows = []
@@ -38,7 +47,11 @@ def _session(cfg: Path, files: list[str], *, version_rows: int = 1) -> Path:
             "version": version,
             "state": "done",
             # Older versions name a decoy, so "newest version wins" is observable.
-            "files": [{"path": p} for p in files] if version == version_rows else [],
+            "files": (
+                (records if records is not None else [{"path": p} for p in files])
+                if version == version_rows
+                else []
+            ),
         }
         rows.append(
             {
@@ -128,6 +141,98 @@ def test_path_escaping_every_root_is_missing(cfg: Path, tmp_path: Path) -> None:
     outside.write_text("not under cwd, home or the pad")
     directory = _session(cfg, ["../outside.txt"])
     assert resolve_supplement_file(directory, JOB, 0, cwd=str(work)) == SUPPLEMENT_MISSING
+
+
+def _fingerprinted(path: Path, *, relative: str) -> dict[str, Any]:
+    """The row's file record as the Highlight pin wrote it: path plus size and mtime."""
+    info = path.stat()
+    return {"path": relative, "size_bytes": info.st_size, "mtime": info.st_mtime}
+
+
+@pytest.fixture()
+def ended_project(cfg: Path, tmp_path: Path) -> Path:
+    """The durable cwd of an ended session: a work dir under ``~`` holding a PNG."""
+    work = tmp_path / "home" / "proj"
+    (work / "out").mkdir(parents=True)
+    (work / "out" / "shot.png").write_bytes(b"\x89PNG-bytes")
+    return work
+
+
+def test_durable_cwd_serves_a_file_that_still_matches_the_row(
+    cfg: Path, ended_project: Path
+) -> None:
+    record = _fingerprinted(ended_project / "out" / "shot.png", relative="out/shot.png")
+    directory = _session(cfg, [], records=[record])
+    resolved = resolve_supplement_file(directory, JOB, 0, cwd="", fallback_cwd=str(ended_project))
+    assert isinstance(resolved, SessionMedia)
+    assert resolved.data == b"\x89PNG-bytes" and resolved.mime == "image/png"
+
+
+@pytest.mark.parametrize("field", ["size_bytes", "mtime"])
+def test_durable_cwd_refuses_a_file_that_changed_since_the_pin(
+    cfg: Path, ended_project: Path, field: str
+) -> None:
+    """A file that is not provably the one the agent delivered is never served from a guess."""
+    record = _fingerprinted(ended_project / "out" / "shot.png", relative="out/shot.png")
+    record[field] += 1
+    directory = _session(cfg, [], records=[record])
+    assert (
+        resolve_supplement_file(directory, JOB, 0, cwd="", fallback_cwd=str(ended_project))
+        == SUPPLEMENT_NO_CWD
+    )
+
+
+@pytest.mark.parametrize(
+    "extra", [{}, {"size_bytes": 10}, {"mtime": 1.0}, {"size_bytes": True, "mtime": 1.0}]
+)
+def test_durable_cwd_needs_the_whole_fingerprint(
+    cfg: Path, ended_project: Path, extra: dict[str, Any]
+) -> None:
+    directory = _session(cfg, [], records=[{"path": "out/shot.png", **extra}])
+    assert (
+        resolve_supplement_file(directory, JOB, 0, cwd="", fallback_cwd=str(ended_project))
+        == SUPPLEMENT_NO_CWD
+    )
+
+
+def test_a_live_cwd_still_wins_and_needs_no_fingerprint(cfg: Path, ended_project: Path) -> None:
+    directory = _session(cfg, ["out/shot.png"])
+    resolved = resolve_supplement_file(
+        directory, JOB, 0, cwd=str(ended_project), fallback_cwd="/nonexistent"
+    )
+    assert isinstance(resolved, SessionMedia) and resolved.data == b"\x89PNG-bytes"
+
+
+def test_durable_cwd_does_not_widen_the_roots(cfg: Path, tmp_path: Path) -> None:
+    """A recorded cwd of ``/`` only joins the path: ``~`` and the pad stay the roots."""
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"png")
+    hosts = Path("/etc/hosts")
+    for relative, target in (
+        (os.path.relpath(outside, "/"), outside),
+        ("etc/hosts", hosts),
+        ("../etc/hosts", hosts),
+    ):
+        record = _fingerprinted(target, relative=relative)
+        directory = _session(cfg, [], records=[record])
+        assert (
+            resolve_supplement_file(directory, JOB, 0, cwd="", fallback_cwd="/")
+            == SUPPLEMENT_MISSING
+        ), relative
+        shutil.rmtree(directory)
+
+
+@pytest.mark.parametrize("name", [".env", ".ssh/id_rsa.png", ".aws/credentials.json"])
+def test_durable_cwd_keeps_the_denylist(cfg: Path, tmp_path: Path, name: str) -> None:
+    work = tmp_path / "home" / "proj"
+    (work / name).parent.mkdir(parents=True, exist_ok=True)
+    (work / name).write_bytes(b"secret")
+    record = _fingerprinted(work / name, relative=name)
+    directory = _session(cfg, [], records=[record])
+    assert (
+        resolve_supplement_file(directory, JOB, 0, cwd="", fallback_cwd=str(work))
+        == SUPPLEMENT_MISSING
+    )
 
 
 @pytest.fixture(autouse=True)

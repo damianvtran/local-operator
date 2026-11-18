@@ -1,0 +1,23 @@
+{
+  "locale": "hi",
+  "namespace": "mobile.doctor",
+  "source_sha256": "bf2cc180fd8bc8a7f5445eb4c4a5708fbb7915e6271fefe69f04c425babbcfef",
+  "translator": {
+    "agent": "coder subagent of PR #4193 (commit ce4f2e4e5; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-17"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n auditor, lopdev team member (`task` subagent), session c47ffb8607fc; did not write the translations; edited no catalogue value",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-17",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "PR #4193 audit a3 PASSED: 4 new keys mobile.doctor.watches.{ok,near,at_limit,unknown}, 0 blocker / 0 major / 0 minor / 0 nit. Translator and auditor share model family anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/hi/mobile.doctor/a3/record.json",
+  "evidence": "i18n/audits/evidence/hi/mobile.doctor/a3/record.json",
+  "round": "a3",
+  "keys_audited": 4
+}

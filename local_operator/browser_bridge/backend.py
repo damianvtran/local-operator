@@ -698,13 +698,36 @@ def format_error(
         # app's host never runs on a node.
         if host == HOST_EXTENSION and _on_headless_node():
             return node_approval_steps(origin, url)
-        return (
+        steps = (
             f"site {origin or '(unknown origin)'} is not allowed yet. Call browser "
             f"action='request_access' url={url} to raise the approval prompt, then NOTIFY "
             f"THE USER (via the ask tool or a message) to approve it in {approval} — the "
             "popup badge alone is not reliably seen — and only then "
             f"action='await_access' url={url} to wait for the decision."
         )
+        # A desktop app that opens the approved page in its own browser on
+        # Allow advertises it with ``opens_on_approval``. Without this sentence
+        # agents asked "approve, then sign in" and the operator, after Allow,
+        # had no tab to sign in to — a second round trip per site (operator
+        # report, 2026-11-17). Gated on the flag, never on the host alone: an
+        # older app sends no flag and opens nothing, so the text stays exactly
+        # what that app actually does. ``opened_tab`` means that page is ALREADY
+        # open from an earlier Allow whose allow-once grant lapsed before the
+        # agent's `open`: asking for a fresh sign-in there would send the
+        # operator to redo work they finished (UX round 1, U1).
+        if host == HOST_UI and error.data.get("opened_tab") is True:
+            steps += (
+                " The page from an earlier approval is still open in the app's Browser: "
+                "ask the user to approve again; the page they already used comes back, "
+                "so there is no need to sign in again."
+            )
+        elif host == HOST_UI and error.data.get("opens_on_approval") is True:
+            steps += (
+                " Approving opens this page in the app's Browser. If the site needs a "
+                "sign-in, ask once: approve, sign in on the page that opens in the "
+                "app's Browser, then reply here."
+            )
+        return steps
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):
         return (
             f"the browser tab crashed while {action or 'the action'} was running. "
