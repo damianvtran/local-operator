@@ -2118,12 +2118,26 @@ def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, 
     subcommand of this one group. 2 keeps a usage error distinct from the 1 the
     sibling ``install`` group returns for its own, which this deliberately mirrors.
     """
-    from local_operator.cli import main
+    import argparse
+
+    from local_operator.cli import build_cli_parser, main
+
+    # The synopsis is a hand-written string in ``main``; derive the expected verb
+    # list from the parser itself so adding a verb (``heavy`` did) fails here only
+    # when the synopsis forgot it, not every time the group grows.
+    def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
+        return next(
+            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+        )
+
+    services = _subparsers(build_cli_parser()).choices["services"]
+    verbs = ", ".join(_subparsers(services).choices)
 
     monkeypatch.setattr("sys.argv", ["lop", "services"])
     assert main() == 2
     err = capsys.readouterr().err
-    assert err.strip() == "usage: lop services {status, restart, reclaim}"
+    assert "heavy" in verbs, "the derivation must still see the verb this PR added"
+    assert err.strip() == f"usage: lop services {{{verbs}}}"
     assert "{credential,config,agents" not in err, "the whole program's verb list"
 
 
