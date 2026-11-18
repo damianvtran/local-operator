@@ -27,8 +27,8 @@ from local_operator.guardrails.preview import preview_tool_call
 
 SID = "aaaaaaaaaaaa"
 SP = "$LOCAL_OPERATOR_SCRATCHPAD"
-#: PR #4116's fail-closed fresh scope: a scratch-template ``mktemp -d`` in a
-#: straight-line errexit script (review round 2 Q1 rows).
+#: PR #4116 proves freshness for an inline scratch-template cleanup in a
+#: straight-line errexit script, not through functions or traps.
 _HDR = "set -euo pipefail"
 _MK = f'tmp=$(mktemp -d "{SP}/t.XXXXXXXX")'
 _CLEAN = 'cleanup(){ rm -rf "$tmp"; }'
@@ -150,7 +150,7 @@ ROWS: list[tuple[str, str, Risk]] = [
     ("r4-trap-reset", "f(){ rm -rf ~; }; trap - EXIT", Risk.LOW),
     # R6: a loop body can call a definition made later in it.
     ("r6-loop-carried", "for i in 1 2; do f; f(){ rm -rf ~; }; done", Risk.CRITICAL),
-    # Review round 2 (security N1/N2/N5/N6, QA Q1) on 2553e392. Unless noted
+    # Review round 2 (security N1/N2/N5/N6) on 2553e392. Unless noted
     # "guard", every row below ranked LOW there.
     # N1: a nesting counter missed ``then if``/``do while`` and read a case
     # pattern ``b)`` or ``a\)`` as a closer, so a conditional redefinition
@@ -205,23 +205,25 @@ ROWS: list[tuple[str, str, Risk]] = [
     ("n5-alias-trailing-blank", "f(){ rm -rf ~; }\nalias s='sudo ' g=f\ns g", Risk.CRITICAL),
     ("n5-alias-cycle", "f(){ rm -rf ~; }\nalias g=h h=g\ng", Risk.LOW),  # guard: runs no f
     ("n5-alias-chain-pad", f'f(){{ rm -rf "{SP}/x"; }}\nalias g=f\nalias h=g\nh', Risk.LOW),
-    # Q1: the fail-closed scratch mktemp cleanup through a function stays LOW
-    # (main LOW, 2553e392 CRITICAL/HIGH), as its inline form is LOW.
-    ("q1-trap-cleanup", f"{_HDR}\n{_MK}\n{_CLEAN}\ntrap cleanup EXIT", Risk.LOW),
-    ("q1-direct-call", f"{_HDR}\n{_MK}\n{_CLEAN}\ncleanup", Risk.LOW),
-    # Bash scopes dynamically: defined first, the body sees the later value.
-    ("q1-defined-before-trap", f"{_HDR}\n{_CLEAN}\n{_MK}\ntrap cleanup EXIT", Risk.LOW),
-    ("q1-defined-before-call", f"{_HDR}\n{_CLEAN}\n{_MK}\ncleanup", Risk.LOW),
+    # N7/N8: no template freshness exception for function calls or traps.
+    # The checkpoint must consult the judge for an unproved template target,
+    # while #4116's original inline cleanup stays LOW.
+    ("inline-template-cleanup", f'{_HDR}\n{_MK}\nrm -rf "$tmp"', Risk.LOW),
+    ("q1-trap-cleanup", f"{_HDR}\n{_MK}\n{_CLEAN}\ntrap cleanup EXIT", Risk.HIGH),
+    ("q1-direct-call", f"{_HDR}\n{_MK}\n{_CLEAN}\ncleanup", Risk.HIGH),
+    ("q1-defined-before-trap", f"{_HDR}\n{_CLEAN}\n{_MK}\ntrap cleanup EXIT", Risk.HIGH),
+    ("q1-defined-before-call", f"{_HDR}\n{_CLEAN}\n{_MK}\ncleanup", Risk.HIGH),
     # Guards: none of these may reach LOW.
     (
         "q1-body-reassigns",
         f'{_HDR}\n{_MK}\ncleanup(){{ tmp=$HOME; rm -rf "$tmp"; }}\ntrap cleanup EXIT',
         Risk.CRITICAL,
     ),
+    # Without a template proof, the climb is unresolved, not a pinned target.
     (
         "q1-body-climbs",
         f'{_HDR}\n{_MK}\ncleanup(){{ rm -rf "$tmp/.."; }}\ntrap cleanup EXIT',
-        Risk.CRITICAL,
+        Risk.HIGH,
     ),
     (
         "q1-body-printf-v",
@@ -309,6 +311,8 @@ def test_function_body_ranks(ctx: CallContext, command: str, expected: Risk) -> 
         command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=SID
     )
     assert verdict.risk == expected
+    # A resolver crash also ranks HIGH, but is not the conservative path we test.
+    assert not any(reason.startswith("resolver error:") for reason in verdict.reasons)
 
 
 @pytest.mark.asyncio

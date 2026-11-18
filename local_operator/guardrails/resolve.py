@@ -1066,70 +1066,13 @@ def _date_format_contained(fmt: str) -> bool:
     return True
 
 
-#: ``name(){ …`` / ``name() {`` opening a one-function definition segment
-#: (identifier names only) for ``_fresh_errexit_scope``'s function form.
-_SCOPE_FUNCTION_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{(?:\s(.*))?", re.DOTALL)
-#: Words a function body in a fresh scope may not contain: each can assign,
-#: unset, rebind or re-read a variable, change cwd, or run text as code, so a
-#: body holding one could change what ``$tmp`` means when it runs.
-_SCOPE_BODY_FORBIDDEN = frozenset(
-    {
-        "local",
-        "declare",
-        "typeset",
-        "export",
-        "readonly",
-        "unset",
-        "read",
-        "mapfile",
-        "readarray",
-        "getopts",
-        "printf",
-        "let",
-        "eval",
-        "source",
-        ".",
-        "cd",
-        "pushd",
-        "popd",
-        "shift",
-        "alias",
-        "shopt",
-        "exec",
-        "command",
-        "builtin",
-    }
-)
-_SCOPE_VAR_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
-
-
-def _fresh_errexit_scope(command: str, *, functions: bool = False) -> bool:
+def _fresh_errexit_scope(command: str) -> bool:
     """Recognize only a straight-line, top-level errexit shell, with for lists.
 
     `set -e` is NOT effective inside an if/while test, an AND/OR list, a
     negated command or a pipeline. Refuse those shapes rather than pretending
     a failed substitution cannot leave an empty ROOT. This is a containment
     proof, not a general shell-success interpreter.
-
-    ``functions`` (the function-body pass only, review round 2 Q1, PR #4188):
-    also accept the canonical own-scratch cleanup, ``tmp=$(mktemp -d
-    "$PAD/t.XXXXXXXX")`` + ``cleanup(){ rm -rf "$tmp"; }`` + ``trap cleanup
-    EXIT`` (or a direct ``cleanup`` call). Walking that body made the
-    command CRITICAL where main, which never walked it, said LOW. Accepted:
-
-    * a top-level ``name(){ …; }`` whose body passes the same statement
-      checks plus ``_SCOPE_BODY_FORBIDDEN`` and holds no assignment, so the
-      body cannot change the variable it deletes;
-    * ``trap name EXIT`` for a name defined above (no other trap form);
-    * the name used ONLY as its definition, that trap, or a bare one-word
-      call, so it cannot shadow ``mktemp``/``rm`` or take arguments.
-
-    An EXIT trap fires wherever the script stops, with the variables of that
-    moment, not just at the end the walker models; so after the trap no
-    segment may name (other than as ``$name``) a variable the trapped body
-    reads. Above all a later ``tmp=$(mktemp …)`` that fails would leave
-    ``tmp`` empty when the trap runs. The main pass never takes this form:
-    a definition there still ends the proof, as #4116 had it.
     """
     parsed = lex(command)
     if parsed.open or any(parsed.bodies) or not parsed.segments:
@@ -1156,8 +1099,9 @@ def _fresh_errexit_scope(command: str, *, functions: bool = False) -> bool:
         "break",
         "continue",
     }
-
-    def statement_ok(text: str, banned: set[str] | frozenset[str], body: bool = False) -> bool:
+    for text, _, op in parsed.segments[1:]:
+        if op not in ("", ";", "\n"):
+            return False
         words, redirects = scan(text)
         if any(op not in (">", ">|", ">>") for op, _ in redirects):
             return False
@@ -1165,77 +1109,14 @@ def _fresh_errexit_scope(command: str, *, functions: bool = False) -> bool:
             if word.broken:
                 return False
             if all(p.kind in ("bare", "sq", "dq") for p in word.parts):
-                if "".join(p.text for p in word.parts) in banned:
+                if "".join(p.text for p in word.parts) in forbidden:
                     return False
             for part in word.parts:
                 if part.kind == "bare" and (
-                    part.text in banned or any(c in part.text for c in "(){}!&|\\")
+                    part.text in forbidden or any(c in part.text for c in "(){}!&|\\")
                 ):
                     return False
-                if (
-                    body
-                    and part.kind == "bare"
-                    and (_ASSIGN_RE.match(part.text) or _APPEND_RE.match(part.text))
-                ):
-                    return False
-        return True
-
-    segments = parsed.segments[1:]
-    body_refs: dict[str, set[str]] = {}
-    expected_uses: dict[str, int] = {}
-    trapped_refs: set[str] = set()
-    index = 0
-    while index < len(segments):
-        text, _, op = segments[index]
-        if op not in ("", ";", "\n"):
-            return False
-        if trapped_refs and any(
-            re.search(rf"(?<![\w$]){name}(?!\w)", text) for name in trapped_refs
-        ):
-            # ``tmp=…``/``read tmp``/``for tmp in`` after the trap: the trap
-            # may fire with that value, which the walker never models.
-            return False
-        header = _SCOPE_FUNCTION_RE.fullmatch(text.strip()) if functions else None
-        if header is not None:
-            name, first = header.group(1), header.group(2) or ""
-            body = [first]
-            close = index + 1
-            while close < len(segments) and segments[close][0].strip() != "}":
-                body.append(segments[close][0])
-                if segments[close][2] not in (";", "\n"):
-                    return False
-                close += 1
-            if close >= len(segments) or segments[close][2] not in ("", ";", "\n"):
-                return False
-            if not all(
-                statement_ok(stmt, forbidden | _SCOPE_BODY_FORBIDDEN, body=True)
-                for stmt in body
-                if stmt.strip()
-            ):
-                return False
-            body_refs[name] = {ref for stmt in body for ref in _SCOPE_VAR_REF_RE.findall(stmt)}
-            expected_uses[name] = expected_uses.get(name, 0) + 1
-            index = close + 1
-            continue
-        words = text.split()
-        if functions and len(words) == 3 and words[0] == "trap" and words[2] == "EXIT":
-            if words[1] not in body_refs:
-                return False
-            trapped_refs |= body_refs[words[1]]
-            expected_uses[words[1]] += 1
-            index += 1
-            continue
-        if words and len(words) == 1 and words[0] in body_refs:
-            expected_uses[words[0]] += 1  # a bare call, walked as if inline
-        if not statement_ok(text, forbidden):
-            return False
-        index += 1
-    # Each name only as definition, trap or bare call: never shadowing a
-    # program the proof trusts (``mktemp(){ …; }``) nor called with arguments.
-    return all(
-        len(re.findall(rf"(?<!\w){re.escape(name)}(?!\w)", command)) == uses
-        for name, uses in expected_uses.items()
-    )
+    return True
 
 
 def _is_mktemp(body: str) -> bool:
@@ -3683,10 +3564,10 @@ def credential_path(value: str, home: str) -> str | None:
 #   A loop's calls see EVERY later definition (N6); ``if``/``while``/``until``
 #   are definition lead words (N2); alias chains, an alias shadowing a
 #   function and a trailing-blank alias are followed (N5).
-# * The function pass accepts #4116's fresh scope with one-line cleanup
-#   functions and ``trap NAME EXIT`` (``_fresh_errexit_scope(functions=…)``,
-#   Q1); the main pass keeps #4116's rule, and passes union, so only rows
-#   whose main pass was already LOW can come out LOW.
+#
+# #4116 proves freshness only in its original inline scope. Template-based
+# function and EXIT-trap cleanup gets no freshness exception: the main pass
+# can miss function bodies, so the function walker must rank them itself.
 #
 # Known over-approximation (fail-closed, documented): a function defined
 # inside ``( … )`` or ``$( … )`` stays registered after that subshell ends.
@@ -4226,9 +4107,7 @@ class _Walker:
             # Bash startup files and imported functions can shadow builtins or
             # mktemp before the first visible segment. PATH inspection cannot
             # prove executable identity in such a shell.
-            self.fresh_scope = _fresh_errexit_scope(
-                command, functions=self.functions is not None
-            ) and not any(
+            self.fresh_scope = _fresh_errexit_scope(command) and not any(
                 value and (key in ("BASH_ENV", "ENV") or key.startswith("BASH_FUNC_"))
                 for key, value in self.state.env.items()
             )
@@ -4436,16 +4315,6 @@ class _Walker:
             self._call_candidates(name, depth)
             return True
         self._opaque_function_call(raw_words, head, depth)
-        if (
-            self.fresh_scope
-            and [w.text for w in head] == ["trap", head[1].text if len(head) > 1 else "", "EXIT"]
-            and not any(w.opaque for w in head)
-            and head[1].text in self.functions
-        ):
-            # Q1: ``_fresh_errexit_scope`` admitted exactly this trap form;
-            # registering it runs nothing now, so it must not end the proof
-            # as an unknown program would.
-            return True
         return False
 
     def _alias_targets(self, head: list[Expanded]) -> list[str]:
@@ -4558,17 +4427,7 @@ class _Walker:
                 return True  # ignore/reset the signal: runs nothing.
             if not _NAME_WORD_RE.fullmatch(action):
                 return False
-            if action in self.functions and self.fresh_scope:
-                # Q1 (review round 2): in a proved fresh scope the trap's run
-                # is walked here only as "it may fire from now on"; its own
-                # ``rm`` must not end the proof for the segments after it,
-                # which run BEFORE it does. ``_fresh_errexit_scope`` proved
-                # the body changes no variable, so isolating loses nothing.
-                snap = self._save()
-                self._call_candidates(action, depth)
-                self.fresh_scope = True
-                self._restore(snap)
-            elif action in self.functions:
+            if action in self.functions:
                 self._call_candidates(action, depth)
             # An EXIT trap runs the definition current when the shell ends,
             # which may be a later one: ``_run_trapped_functions``.
