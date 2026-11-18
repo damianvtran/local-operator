@@ -133,10 +133,24 @@ async def _assert_completion_candidates(monkeypatch, session, expected: bool) ->
     Only unrelated host/focus/mock gates and composition are replaced, so a
     loud positive control proves silence was not the test host's global veto.
     Neither a desktop subscriber nor a cloud sender is started.
+
+    The worker is built through its REAL constructor: the per-device push
+    preferences and the live-device list are injected (one live device carrying
+    the shipped absent-defaults) rather than left to the machine's registry, so
+    a negative here is the ROW's answer — gates 1 and 2, which this file exists
+    to pin — and never "this host has no phone". ``completions_scope: all``
+    follows the mobile harness (``tests/unit/mobile/test_push_worker.py``):
+    these subjects are the notify flag, not ADR 0009's origin routing.
     """
+    from local_operator.mobile.push_devices import PREFERENCE_DEFAULTS
     from local_operator.mobile.push_worker import PushWorker
     from local_operator.server.utils.desktop_feed import DesktopFeed
     from local_operator.session.attention import conversation_identity
+
+    device = "device-test"
+
+    def never_sends(body, *, idempotency_key: str):
+        raise AssertionError("the candidate gate must never reach the transport")
 
     store = AttentionStore()
     identity = conversation_identity(session.transcript.directory)
@@ -157,9 +171,14 @@ async def _assert_completion_candidates(monkeypatch, session, expected: bool) ->
         "local_operator.server.utils.desktop_feed.notification_payload", lambda *a, **kw: {}
     )
 
-    worker = object.__new__(PushWorker)
-    worker.store = store
-    worker.config_dir = session.transcript.directory.parent
+    worker = PushWorker(
+        store=store,
+        transport=never_sends,
+        config_dir=session.transcript.directory.parent,
+        computer="synthetic-test-host",
+        live_devices=lambda: [device],
+        preferences=lambda: {device: dict(PREFERENCE_DEFAULTS, completions_scope="all")},
+    )
     assert worker._is_candidate(identity) is expected
 
     feed = DesktopFeed(worker.config_dir)
