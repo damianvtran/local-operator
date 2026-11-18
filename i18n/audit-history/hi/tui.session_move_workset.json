@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "tui.session_move_workset",
-  "history_sha256": "fed847b737ee4ec81afe4c597323afc7543f19d053e8ef695cf0b754c6279cab",
+  "history_sha256": "76bb8c90b1cca82004946829cb7ca536a03acc5f91ea0984567cdc9ff2240c38",
   "entries": [
     {
       "locale": "hi",
@@ -69,6 +69,40 @@
         {
           "path": "i18n/audits/evidence/hi/cli.sessions_move_workset/mw2/audit.log",
           "sha256": "9280dfc40718826d9851c1c49fef2b6bf74e7e75743d81ffb0610a94b7d6a26c"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.session_move_workset",
+      "source_sha256": "966bc7111580843e30b5f6e845a7bc46f7f7fb6cfc52c51c130b56ea92bc933a",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5; deepseek/deepseek-flash (round-2 delta, provider fallback)",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "task (lopdev lane move-working-set) / SECOND independent safety i18n-auditor 1946542ef662 [hi]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit of hi `tui.session_move_workset` (all 11 keys) at c5bc58961: PASS, 0 BLOCKER/0 MAJOR; 2 non-gating finding(s) [S-hi-1, S-ALL-1] proposed for deferral, no wording changed. First audit: 482db48afe47 (mw1/mw2). Agent-independent only: auditor shares anthropic/claude-opus-5-5 with the first auditor and translators. No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/hi/cli.sessions_move_workset/mw-secondary/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/cli.sessions_move_workset/mw-secondary/record.json",
+          "sha256": "f973ea58c399df5bf70062c7dfaaa6ee1ff46d17c0f6faab65f321aa6878889d"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.sessions_move_workset/mw-secondary/report.md",
+          "sha256": "52a4772d24d9bebcbcc508f055434c28c27c15c86d4bc83c182021bb07b41a41"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/cli.sessions_move_workset/mw-secondary/audit.log",
+          "sha256": "6ac81542f0c8b2eb178237d4a3350c8970246e095ec20f18589ea97fbbc6e4c9"
         }
       ]
     }

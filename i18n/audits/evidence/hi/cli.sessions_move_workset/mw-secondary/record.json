@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "audit_id": "mw-secondary-hi",
+  "audit_kind": "second independent safety semantic audit (full namespaces)",
+  "locale": "hi",
+  "namespaces": [
+    "cli.sessions_move_workset",
+    "tui.session_move_workset"
+  ],
+  "audit_date": "2026-11-18",
+  "audited_head": "c5bc5896186cad939fa813d321c525f78ad4e8cf",
+  "key_count": {
+    "cli.sessions_move_workset": 65,
+    "tui.session_move_workset": 11
+  },
+  "auditor": {
+    "agent": "task (lopdev lane move-working-set) / SECOND independent safety i18n-auditor 1946542ef662",
+    "session": "1946542ef662",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "model_independent": false,
+    "independence": "No authorship or remediation of any audited catalogue/context bytes; a different agent/session from every translator (dc12534ff2ca, 8966047148fb, ddcac83c68a5, d84367798211) and from the first auditor 482db48afe47. SAME MODEL (anthropic/claude-opus-5-5) as translators dc12534ff2ca/8966047148fb/ddcac83c68a5 and the first auditor: agent-independent only, NOT model-independent."
+  },
+  "translator": {
+    "agent": "coder",
+    "sessions": [
+      "dc12534ff2ca",
+      "8966047148fb",
+      "ddcac83c68a5",
+      "d84367798211"
+    ],
+    "models": "anthropic/claude-opus-5-5; deepseek/deepseek-flash (round-2 delta, provider fallback)",
+    "source": "lopdev manager brief 2026-11-18 + last audit-history receipt"
+  },
+  "first_auditor": {
+    "session": "482db48afe47",
+    "model": "anthropic/claude-opus-5-5",
+    "evidence": [
+      "i18n/audits/evidence/hi/cli.sessions_move_workset/mw1/record.json",
+      "i18n/audits/evidence/hi/cli.sessions_move_workset/mw2/record.json"
+    ]
+  },
+  "input_hashes": {
+    "en:cli.sessions_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_move_workset.json",
+      "sha256": "cede2b5900e0a1884b33b2a525a25aac1db76e39962e7b7fe0d8b50a49cac4dd"
+    },
+    "context:cli.sessions_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/cli.sessions_move_workset.context.json",
+      "sha256": "3319039021cfb5d67440dee390a42986af6a6f7c8be57d4de6e3d3dc56f21bce"
+    },
+    "target:cli.sessions_move_workset": {
+      "path": "local_operator/i18n/catalogues/hi/cli.sessions_move_workset.json",
+      "sha256": "2279517b85d27307d2e8efd8c7d42e88fd2734167b588e508b5c6eb811b093c9"
+    },
+    "en:tui.session_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move_workset.json",
+      "sha256": "966bc7111580843e30b5f6e845a7bc46f7f7fb6cfc52c51c130b56ea92bc933a"
+    },
+    "context:tui.session_move_workset": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move_workset.context.json",
+      "sha256": "4110dcee6c6db14e948c2f9e58cd34303263501ae151275ef102939ffb3628ef"
+    },
+    "target:tui.session_move_workset": {
+      "path": "local_operator/i18n/catalogues/hi/tui.session_move_workset.json",
+      "sha256": "b3bf08112dabd6bbd429937f26fe1c15eac328a6d7d0674ec9530a440936eb5d"
+    }
+  },
+  "source_sha256_matches_last_receipt": {
+    "cli.sessions_move_workset": true,
+    "tui.session_move_workset": true
+  },
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "findings": [
+      {
+        "id": "S-hi-1",
+        "severity": "nit",
+        "keys": "tui.session_move_workset.title_sends vs cli.sessions_move_workset.prompt_sends",
+        "problem": "The TUI title uses '{device} पर भेजें' and the CLI prompt uses '{device} को भेजें' for the same action. Both are grammatical, but they are inconsistent.",
+        "fix": "use '{device} को भेजें' in title_sends"
+      },
+      {
+        "id": "S-hi-2",
+        "severity": "nit",
+        "keys": "cli.sessions_move_workset.brings_summary, receipt_not_transferred",
+        "problem": "CLDR hi 'one' covers 0, so count 0 renders singular ('0 worktree … पर ही है'). That is CLDR-correct and acceptable; recorded only because it was exercised.",
+        "fix": "none"
+      },
+      {
+        "id": "S-ALL-1",
+        "severity": "nit",
+        "keys": "tui.session_move_workset.checkbox_without",
+        "problem": "en 'I understand ANY working files stay on {source}' is shown when the files could not be listed; the translation says 'the working files stay', presupposing files exist. What the box commits the user to (whatever exists stays on {source}) is intact.",
+        "fix": "मुझे पता है कि जो भी वर्किंग फ़ाइलें हैं वे {source} पर ही रहेंगी"
+      }
+    ]
+  },
+  "not_claimed": [
+    "native-speaker review",
+    "rendered frame / RTL paint proof",
+    "model independence"
+  ]
+}
