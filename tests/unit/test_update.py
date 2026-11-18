@@ -1762,6 +1762,9 @@ def test_rolling_receipt_measures_the_runtime_census_within_its_namespaces(
     assert runtimes["known_old_busy"] == 1, "the live busy session on the old generation"
     assert runtimes["known_old_idle"] == 1, "the pre-heartbeat runtime, deduped from the mobile row"
     assert runtimes["unknown"] == 0
+    # Idle old-generation runtimes leave on their own soft refresh, so the
+    # receipt calls them retiring; the busy one is not (update-parity item 4).
+    assert runtimes["retiring"] == 1
 
 
 def test_rolling_receipt_names_each_unreadable_runtime_namespace(
@@ -1794,6 +1797,7 @@ def test_rolling_receipt_names_each_unreadable_runtime_namespace(
 
     assert rolling["runtimes"]["measured"] is False
     assert rolling["runtimes"]["known_old_busy"] is None
+    assert rolling["runtimes"]["retiring"] is None, "an unmeasured census claims no retiring"
     reason = rolling["central_services_incomplete_reason"]
     assert "runtime census unreadable" in reason
     assert "run/mobile" in reason, "the reason names the namespace to look at"
