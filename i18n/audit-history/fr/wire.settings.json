@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "eb5e94316b6cc4fd77bff75895311b455ea3504c11ee02f0e095129b840f4df8",
+  "history_sha256": "43fa2acf1180dbb5bd473c5af84fcf6c7b847606b3e460ef8553c20a0e4d8f3c",
   "entries": [
     {
       "locale": "fr",
@@ -1225,6 +1225,40 @@
         {
           "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mt1/audit.log",
           "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "task (lopdev) / SECOND independent safety i18n-auditor 1946542ef662 [fr]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit of the PR #4245 delta in fr `wire.settings` (6 keys vs 696a18338) at 4ba2f4218: PASS, 0 BLOCKER/0 MAJOR; 0 non-gating finding(s) [none] proposed for deferral, no wording changed. Other keys carried by prior receipts. First audit 482db48afe47 (mt1). Agent-independent only (same model as translators/first auditor). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/fr/cli.sessions_move_workset/mt-secondary/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mt-secondary/record.json",
+          "sha256": "93b5aacdcce5cbefa2a81546bc1f787050f3942e0a1b7a1025befa20266600a8"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mt-secondary/report.md",
+          "sha256": "41a4930041d378e6a6b3df3eacb6ebf8af14a50b0baf5392d80b003aa74a9722"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.sessions_move_workset/mt-secondary/audit.log",
+          "sha256": "eb339bfcee4fe457aa1169b99e255f6c3003b79791c00860402f78b469d4c5c9"
         }
       ]
     }

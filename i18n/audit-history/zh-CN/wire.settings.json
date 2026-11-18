@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "6c1092fc1bf00b30faa35ac2c5a88a0d61a4d2002bf837fa2f6c8dfec00ebb67",
+  "history_sha256": "f7a80208d31bc5a93a914319d8be69844eb7e95688c16fda7ddf8a2460c619da",
   "entries": [
     {
       "locale": "zh-CN",
@@ -1229,6 +1229,40 @@
         {
           "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt1/audit.log",
           "sha256": "8f2ab672fbda99e087119c83fddee61dd56d2e99e6181b33aa967b0c880ad0d6"
+        }
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "562655dc455f9a7dd09cf27ed53608be9795989669c97e070d071a9c57dacda1",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "task (lopdev) / SECOND independent safety i18n-auditor 1946542ef662 [zh-CN]",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit of the PR #4245 delta in zh-CN `wire.settings` (6 keys vs 696a18338) at 4ba2f4218: PASS, 0 BLOCKER/0 MAJOR; 1 non-gating finding(s) [T-zh-CN-1] proposed for deferral, no wording changed. Other keys carried by prior receipts. First audit 482db48afe47 (mt1). Agent-independent only (same model as translators/first auditor). No native review, no rendered frame. Fallback: none. Evidence: i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt-secondary/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt-secondary/record.json",
+          "sha256": "720a76508fe05c9a2e8e3cb617b0f9651e29f9786b95669acf1a386ba32c388d"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt-secondary/report.md",
+          "sha256": "9349074b8806d5eca2f09544a1779e7c10feccc6a1457edec2760678551c23d1"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mt-secondary/audit.log",
+          "sha256": "cb03e30f494d4fb1209d12406bf0dbd8c0745afb1001f4caafecf3dcf4cbef1f"
         }
       ]
     }
