@@ -1962,13 +1962,39 @@ def _directory_binds_avatar(
 #: can detect — a member REMOVED, an agent renamed while its old name is still
 #: matched — is corrected within two minutes. Anything a miss CAN detect (a new
 #: teammate, a new endpoint, a bridge turned on) is refreshed immediately by the
-#: caller's one forced re-read, so the TTL is not what bounds a join.
+#: caller's one forced re-read, so the TTL is not what bounds a join — but that
+#: re-read only has a stale answer to correct (``DirectoryAnswer.from_cache``).
 DIRECTORY_CACHE_TTL_S = 120.0
 #: Bound on distinct (hub, account, tenant) entries held at once.
 DIRECTORY_CACHE_MAX_ENTRIES = 64
 #: Process-wide on purpose: the tool and the desktop routes build a fresh
 #: client per call, so a per-instance cache would never be hit. Memory only.
 _DIRECTORY_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+
+
+class DirectoryAnswer(dict[str, Any]):
+    """A directory payload that says whether the CACHE served it.
+
+    WHY the origin rides on the value. A resolution that MISSES on an answer
+    re-reads the directory once, and that re-read only corrects one thing: an
+    answer the cache held, which can be up to ``DIRECTORY_CACHE_TTL_S`` old. An
+    answer the wire just produced is already the server's latest, so re-reading
+    it is the redundant GET the cache exists to remove (incident 2026-11-17).
+    Keeping the origin on the ANSWER, not in client state, is what makes that
+    judgement race-free: one session's ``BridgeRuntime`` holds one client and
+    can resolve two names at once, and each resolution then reads the origin of
+    the answer IT got rather than of whichever read finished last.
+
+    A ``dict`` subclass, so every reader is unchanged: ``payload.get("members")``,
+    ``isinstance(payload, dict)``, equality against a plain payload in tests and
+    ``copy.deepcopy`` (which keeps the class and the attribute) all still work.
+    """
+
+    def __init__(self, payload: Mapping[str, Any], *, from_cache: bool) -> None:
+        super().__init__(payload)
+        #: True when the cache answered (possibly ``DIRECTORY_CACHE_TTL_S`` old);
+        #: False when this call's own request produced it.
+        self.from_cache = from_cache
 
 
 class TeamBridgeClient:
@@ -2688,10 +2714,12 @@ class TeamBridgeClient:
         the cache, so :meth:`_send`'s own guard still refuses it.
 
         FRESHNESS is the caller's lever, not the TTL's: a resolution that MISSES
-        on a cached answer (an unknown name, an endpoint id, a bridge that reads
+        on a CACHED answer (an unknown name, an endpoint id, a bridge that reads
         as off) calls again with ``refresh=True`` exactly once, which re-reads
         and re-primes the entry — so a newly joined teammate is found on the
-        first try, and only a miss pays for a read.
+        first try, and only a miss pays for a read. The answer says which it was
+        (``DirectoryAnswer.from_cache``), so a merge that misses on an answer
+        this call just read does not pay for the same members twice.
 
         Callers get a deep copy; the cached payload is never handed out to be
         mutated.
@@ -2700,25 +2728,26 @@ class TeamBridgeClient:
         access = await self.current_access()
         account = str(getattr(access, "account_id", "") or "")
         if not account or (expected_account_id is not None and expected_account_id != account):
-            return await self.directory(
+            answer = await self.directory(
                 tenant_id, access=access, expected_account_id=expected_account_id
             )
+            return DirectoryAnswer(answer, from_cache=False) if isinstance(answer, dict) else answer
         key = (self.base_url, account, str(tenant_id))
         now = time.monotonic()
         hit = _DIRECTORY_CACHE.get(key)
         if not refresh and hit is not None and hit[0] > now:
-            return copy.deepcopy(hit[1])
-        payload = await self.directory(
+            return DirectoryAnswer(copy.deepcopy(hit[1]), from_cache=True)
+        answer = await self.directory(
             tenant_id, access=access, expected_account_id=expected_account_id
         )
-        if isinstance(payload, dict):
+        if isinstance(answer, dict):
             if len(_DIRECTORY_CACHE) >= DIRECTORY_CACHE_MAX_ENTRIES:
                 # Account/tenant pairs on one machine are a handful; the bound
                 # only stops an unexpected key churn from growing the process.
                 _DIRECTORY_CACHE.clear()
-            _DIRECTORY_CACHE[key] = (time.monotonic() + DIRECTORY_CACHE_TTL_S, payload)
-            return copy.deepcopy(payload)
-        return payload
+            _DIRECTORY_CACHE[key] = (time.monotonic() + DIRECTORY_CACHE_TTL_S, answer)
+            return DirectoryAnswer(copy.deepcopy(answer), from_cache=False)
+        return answer
 
     async def tenant_state(
         self, tenant_id: str, *, access: OAuthAccess | None = None
