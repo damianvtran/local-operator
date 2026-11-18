@@ -2336,9 +2336,7 @@ def _ask_answer_stamp(
 
     # One stamping + log seam (``_stamp_ask_answer``, incident a-48e3's
     # ``%r``-quoted line) for every wire answer, attested or not.
-    return _stamp_ask_answer(
-        authority, op=op, ask_id=ask_id, minted=minted, attested=attested
-    )
+    return _stamp_ask_answer(authority, op=op, ask_id=ask_id, minted=minted, attested=attested)
 
 
 def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:

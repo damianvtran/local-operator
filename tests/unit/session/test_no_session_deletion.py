@@ -2286,6 +2286,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "stale asks/<session_id>.json FILE, swept from the same directory scan",
     ),
+    # -- the app-signature attest listener (asks/app_attest.py) ---------------
+    # Both unlinks target ``socket_path(attest_dir, session_id)``, i.e.
+    # ``<config>/run/attest/<sid>.sock`` — a unix SOCKET file in a 0700 leaf
+    # outside ``sessions/``; unlink refuses directories. ``consume``'s
+    # ``.remove`` is ``deque.remove`` on in-memory pending rows, no filesystem.
+    (
+        "local_operator/asks/app_attest.py::AttestService.start",
+        "<path>.unlink",
+        "stale run/attest/<sid>.sock SOCKET removed before bind; never under sessions/",
+    ),
+    (
+        "local_operator/asks/app_attest.py::AttestService.close",
+        "<path>.unlink",
+        "own run/attest/<sid>.sock SOCKET, only when (st_dev, st_ino) still match our bind",
+    ),
+    (
+        "local_operator/asks/app_attest.py::AttestationTable.consume",
+        "<path>.remove",
+        "deque.remove of an in-memory pending attestation row; touches no filesystem path",
+    ),
     (
         "local_operator/skills/index.py::SkillIndex._persist_cache",
         "os.replace",
