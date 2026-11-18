@@ -206,3 +206,98 @@ def test_git_is_never_asked_to_prompt_for_credentials(checkout: Path) -> None:
         patch.setattr(repo_module.subprocess, "run", spy)
         detect_repo(checkout, refresh=True)
     assert seen and all(env.get("GIT_TERMINAL_PROMPT") == "0" for env in seen)
+
+
+# ---------------------------------------------------------------------------
+# The environment git is given, and the scrubber under a malformed URL
+# ---------------------------------------------------------------------------
+
+
+def test_an_inherited_git_dir_does_not_answer_for_another_repository(
+    checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shell's exported ``GIT_DIR`` must not redirect what detection reads.
+
+    Reproduced before the fix: with ``GIT_DIR`` pointing at another repository,
+    ``git -C <checkout>`` answered THAT repository's origin URL and its pushed
+    state, so a run could be submitted — under the operator's identity — as code
+    from a different checkout. Plausible in practice: an exported ``GIT_DIR`` in
+    the shell that then started the panel.
+    """
+    other = tmp_path / "other"
+    other.mkdir()
+    _git("init", "--quiet", "--initial-branch=main", cwd=other)
+    _git("remote", "add", "origin", "https://example.invalid/other/other.git", cwd=other)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    detected = detect_repo(checkout)
+    assert detected.url == HTTPS_ORIGIN
+    assert detected.directory == checkout
+
+
+def test_only_the_two_read_only_git_variables_reach_git(
+    checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every inherited ``GIT_*`` is dropped, not just the repository pointers.
+
+    The named-variable alternative leaves the next such variable (a config
+    override, a credential helper, an index path) to be discovered the same way
+    ``GIT_DIR`` was, so the rule is "none of them".
+    """
+    monkeypatch.setenv("GIT_DIR", "/nowhere/.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    seen: list[dict[str, str]] = []
+    real = subprocess.run
+
+    def spy(*arguments: object, **keywords: object) -> subprocess.CompletedProcess[str]:
+        environment = keywords.get("env")
+        if isinstance(environment, dict):
+            seen.append(environment)
+        return real(*arguments, **keywords)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(repo_module.subprocess, "run", spy)
+        detect_repo(checkout)
+    assert seen
+    for environment in seen:
+        assert sorted(key for key in environment if key.startswith("GIT_")) == [
+            "GIT_OPTIONAL_LOCKS",
+            "GIT_TERMINAL_PROMPT",
+        ]
+        assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+
+
+def test_the_scrubber_survives_a_port_urllib_refuses() -> None:
+    """An out-of-range port is a typed refusal's detail, never a ``ValueError``.
+
+    ``urlsplit().port`` raises for it, and the refusal path reads the port — so a
+    ``git remote set-url`` typo escaped ``detect_repo``, which promises
+    ``RepoRef | UnusableRepo``. The fallback keeps the netloc (userinfo removed),
+    which is what shows the operator the value they typed.
+    """
+    assert (
+        repo_module.scrub_url("https://user:hunter2-dummy@example.invalid:99999999/r.git")
+        == "https://example.invalid:99999999/r.git"
+    )
+    assert repo_module.scrub_url("https://example.invalid/r.git") == "https://example.invalid/r.git"
+    assert (
+        repo_module.scrub_url("https://user:hunter2-dummy@example.invalid/r.git")
+        == "https://example.invalid/r.git"
+    )
+
+
+def test_an_origin_with_a_bad_port_and_credentials_is_refused_without_raising(
+    checkout: Path,
+) -> None:
+    _git(
+        "remote",
+        "set-url",
+        "origin",
+        "ssh://user:hunter2-dummy@example.invalid:99999999/team/repo.git",
+        cwd=checkout,
+    )
+    with pytest.raises(UnusableRepo) as caught:
+        detect_repo(checkout)
+    assert caught.value.reason == repo_module.REASON_NOT_HTTPS
+    assert "hunter2-dummy" not in caught.value.detail
+    assert caught.value.detail == "ssh://example.invalid:99999999/team/repo.git"

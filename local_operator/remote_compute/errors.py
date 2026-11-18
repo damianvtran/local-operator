@@ -414,8 +414,16 @@ _IDEMPOTENCY_CONFLICT_HINTS: tuple[str, ...] = (
 
 
 def _sentence(status: int) -> str:
-    """The fixed sentence an error carries; the status is the only variable part."""
-    return f"Radient refused the remote-compute request (HTTP {status})."
+    """The fixed sentence an error carries; the status is the only variable part.
+
+    THE WORDING IS DELIBERATELY THE GENERIC ONE it has always been: an unlisted
+    status says the request failed and nothing more, because this module does not
+    know why it did. A refusal the contract names has a CODE and a CLASS for the
+    why (see :data:`ERROR_BY_CODE`), and a surface that needs copy picks its key
+    from those; the sentence here reaches logs and tracebacks, where changing it
+    is a needless churn for anything scanning them.
+    """
+    return f"Radient remote-compute request failed (HTTP {status})."
 
 
 def refusal_code(body: object) -> str | None:
@@ -472,6 +480,22 @@ def refusal_message(body: object) -> str | None:
     return None
 
 
+#: The largest ``Retry-After`` this client will honour, in seconds.
+#:
+#: NO SERVER-SIDE BOUND IS DOCUMENTED, so this is not sized from a distribution
+#: of observed headers: ``agent-server``'s ``docs/REMOTE_COMPUTE_CLIENT.md``
+#: mentions retries ("retry shortly", `lop remote retry`) and never names a
+#: value. The bound that IS sent is the middlewares' token-bucket refill
+#: interval (``retryAfterSeconds`` in ``agent_write_ratelimit.go`` and
+#: ``artifact_read_ratelimit.go``, mirrored into ``Retry-After`` by
+#: ``bridge_limiter.go``), and the largest bucket configured there is the hourly
+#: write limiter, whose own tests assert ``Retry-After: 3600``. Twice that is the
+#: cap below: every value the server really sends passes through unclamped, while
+#: a corrupt or hostile header — a 400-digit delta, a date in the year 9999 — is
+#: bounded at a delay a surface can act on instead of one it cannot.
+RETRY_AFTER_MAX_S = 7200.0
+
+
 def retry_after_seconds(value: str | None, *, now: datetime.datetime | None = None) -> float | None:
     """``Retry-After`` as seconds from now, or ``None`` when it is not usable.
 
@@ -482,6 +506,13 @@ def retry_after_seconds(value: str | None, *, now: datetime.datetime | None = No
     than a negative delay, because "negative seconds from now" is a number no
     caller can sleep on. Anything unparsable is ``None``: an unreadable header is
     the absence of a hint, not a zero-second one.
+
+    BOTH BRANCHES ARE CAPPED AT :data:`RETRY_AFTER_MAX_S`, and the cap is applied
+    to the INTEGER rather than to the converted float: a delta of 400 nines is a
+    legal header whose value overflows ``float()``, and an ``OverflowError``
+    raised here would escape as a non-``RemoteComputeError`` out of
+    ``client._failed`` — a header alone turning a typed refusal into a crash.
+    Compared as an ``int`` it clamps to the cap instead.
     """
     if value is None:
         return None
@@ -489,7 +520,7 @@ def retry_after_seconds(value: str | None, *, now: datetime.datetime | None = No
     if not raw:
         return None
     if raw.isdigit():
-        return float(int(raw))
+        return float(min(int(raw), RETRY_AFTER_MAX_S))
     try:
         parsed = email.utils.parsedate_to_datetime(raw)
     except (TypeError, ValueError):
@@ -501,7 +532,7 @@ def retry_after_seconds(value: str | None, *, now: datetime.datetime | None = No
     current = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=datetime.timezone.utc)
-    return max(0.0, (parsed - current).total_seconds())
+    return min(max(0.0, (parsed - current).total_seconds()), RETRY_AFTER_MAX_S)
 
 
 def refusal_for(
@@ -526,6 +557,14 @@ def refusal_for(
 
     ``retry_after`` is carried, never applied: this module knows no policy for
     how long a caller should wait, and the one caller that sleeps owns it.
+
+    THE RETURN TYPE IS A UNION, and one member is not a ``RemoteComputeError``:
+    a 401, or a code that names an expired login, answers
+    :class:`~local_operator.tunnels.errors.LoginRequired`, which carries none of
+    ``code``/``status``/``retry_after`` (it is shared with the tunnels path, which
+    has no use for them). A caller that needs those fields must narrow with
+    ``isinstance(error, RemoteComputeError)`` — a ``getattr`` default read would
+    silently answer ``None`` for a real refusal that omitted the field.
     """
     if status == 401:
         return LoginRequired(
@@ -590,6 +629,7 @@ __all__ = [
     "InvalidRequest",
     "NetworkMismatch",
     "PreviewNotEnabled",
+    "RETRY_AFTER_MAX_S",
     "RemoteComputeError",
     "RunBusy",
     "RunIdentityMismatch",

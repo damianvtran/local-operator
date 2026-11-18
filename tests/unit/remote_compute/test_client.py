@@ -51,6 +51,7 @@ from local_operator.remote_compute.client import (
 )
 from local_operator.remote_compute.config import ENV_VAR
 from local_operator.remote_compute.errors import (
+    RETRY_AFTER_MAX_S,
     CapacityUnavailable,
     Conflict,
     IdempotencyConflict,
@@ -1203,3 +1204,26 @@ async def test_an_empty_status_filter_is_refused_before_it_is_sent(credential: i
         with pytest.raises(ValueError):
             await client.list_runs(status="  ")
     assert origin.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "header",
+    [
+        # A legal 400-digit delta: converted straight to float it raised
+        # OverflowError at parse time, i.e. a header alone escaped as a
+        # non-RemoteComputeError from inside _request.
+        "9" * 400,
+        # The other unbounded branch: an HTTP-date ~8000 years out.
+        "Fri, 31 Dec 9999 23:59:59 GMT",
+    ],
+)
+async def test_a_hostile_retry_after_is_capped_on_the_error(
+    credential: int, request_for: Any, header: str
+) -> None:
+    origin = _Origin(httpx.Response(429, headers={"Retry-After": header}, json={"msg": "busy"}))
+    client, http = _client(origin, credential)
+    async with http:
+        with pytest.raises(CapacityUnavailable) as caught:
+            await client.create_run(request_for(), idempotency_key="k")
+    assert caught.value.retry_after == RETRY_AFTER_MAX_S

@@ -20,6 +20,7 @@ from local_operator.remote_compute.errors import (
     ERROR_BY_STATUS,
     LOGIN_REQUIRED,
     REFUSAL_CODES,
+    RETRY_AFTER_MAX_S,
     CapacityUnavailable,
     Conflict,
     IdempotencyConflict,
@@ -236,3 +237,51 @@ def test_the_status_table_names_only_statuses_the_contract_has() -> None:
     """A row for a status the contract never sends would be dead code."""
     assert set(ERROR_BY_STATUS) <= {400, 401, 402, 403, 404, 409, 429, 503}
     assert ERROR_BY_STATUS[409] is Conflict
+
+
+# ---------------------------------------------------------------------------
+# The Retry-After cap: both shapes, one bound, and nothing that can raise
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # A legal but enormous delta: `int()` handles it, `float(int(...))` would
+        # raise OverflowError out of the refusal path, so the cap is applied to
+        # the integer.
+        ("9" * 400, RETRY_AFTER_MAX_S),
+        # Above the cap but an ordinary number: clamped, not raised.
+        ("7201", RETRY_AFTER_MAX_S),
+        # The largest the server really sends (the hourly bucket) passes through.
+        ("3600", 3600.0),
+        # An HTTP-date far in the future is the second unbounded branch.
+        ("Fri, 31 Dec 9999 23:59:59 GMT", RETRY_AFTER_MAX_S),
+        # Negative and non-numeric deltas are not deltas at all.
+        ("-5", None),
+        ("-99999999999999999999", None),
+        ("garbage", None),
+        ("1e9", None),
+    ],
+)
+def test_retry_after_is_bounded_and_never_raises(value: str, expected: float | None) -> None:
+    assert retry_after_seconds(value) == expected
+
+
+def test_an_unlisted_status_keeps_the_generic_failure_sentence() -> None:
+    """The generic wording is stable: nothing keyed replaces it.
+
+    A status the contract does not name has no code to pick copy by, so its
+    sentence is the one logs and tracebacks have always carried. Changing it
+    breaks anything scanning them for no user-visible gain.
+    """
+    error = refusal_for(418)
+    assert isinstance(error, RemoteComputeError)
+    assert str(error) == "Radient remote-compute request failed (HTTP 418)."
+
+
+def test_the_retry_after_the_server_really_sends_is_carried_uncapped() -> None:
+    """The cap must not clamp a value the server can legitimately send."""
+    error = refusal_for(429, retry_after=retry_after_seconds("3600"))
+    assert isinstance(error, RemoteComputeError)
+    assert error.retry_after == 3600.0

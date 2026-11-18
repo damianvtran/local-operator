@@ -123,7 +123,7 @@ def _https_origin(root: Path) -> str:
     raw = output.strip()
     parts = urllib.parse.urlsplit(raw)
     if parts.scheme != "https" or "@" in parts.netloc or not parts.netloc:
-        raise UnusableRepo(REASON_NOT_HTTPS, detail=_scrubbed(raw))
+        raise UnusableRepo(REASON_NOT_HTTPS, detail=scrub_url(raw))
     return raw
 
 
@@ -162,6 +162,28 @@ def _containing_refs(root: Path, sha: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in output.splitlines() if line.strip())
 
 
+def _git_environment() -> dict[str, str]:
+    """The environment every git read here runs with: no ``GIT_*`` at all.
+
+    ``git -C <directory>`` IS NOT AUTHORITATIVE while the parent shell carries a
+    repository-location variable: with ``GIT_DIR`` or ``GIT_WORK_TREE`` exported
+    (a shell that then started the panel), git answers about THAT repository and
+    this module reads another checkout's origin URL and another commit's pushed
+    state — a run submitted, under the operator's identity, as the wrong code.
+    Dropping every inherited ``GIT_*`` rather than a named list is the same rule
+    ``guardrails/provenance._git_proc`` settled on, and it also takes the
+    inherited credential helpers and config overrides with it.
+
+    The two variables added back are the read-only ones: no prompt (a panel has no
+    terminal to answer one, and a hang there is indistinguishable from a slow
+    network) and no index refresh writes (``git status``-class reads must not
+    touch the repository they are inspecting).
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    return environment
+
+
 def _git(directory: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS) -> tuple[int, str]:
     """Run one git command in ``directory``; ``(returncode, stdout)``.
 
@@ -169,15 +191,13 @@ def _git(directory: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS)
     its output with a newline — a trailing one in a path or a SHA is the kind of
     defect that only shows up as "the repository is not a repository".
 
-    NO SHELL, and ``GIT_TERMINAL_PROMPT=0`` so a fetch that wants credentials
-    fails instead of waiting on a terminal nobody is watching — a panel has no
-    stdin to answer a prompt with, and a hang there is indistinguishable from a
-    slow network. A missing ``git`` binary is reported as ``(127, "")``: the
-    caller's ordinary refusal path then says the directory is not a repository,
-    which is what an install without git can honestly say.
+    NO SHELL, and :func:`_git_environment` for the environment, so a fetch that
+    wants credentials fails instead of waiting on a terminal and an inherited
+    ``GIT_DIR`` cannot point the answer at another repository. A missing ``git``
+    binary is reported as ``(127, "")``: the caller's ordinary refusal path then
+    says the directory is not a repository, which is what an install without git
+    can honestly say.
     """
-    environment = dict(os.environ)
-    environment["GIT_TERMINAL_PROMPT"] = "0"
     try:
         completed = subprocess.run(
             ["git", "-C", str(directory), *arguments],
@@ -185,30 +205,52 @@ def _git(directory: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS)
             text=True,
             timeout=timeout,
             check=False,
-            env=environment,
+            env=_git_environment(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return 127, ""
     return completed.returncode, completed.stdout.strip()
 
 
-def _scrubbed(url: str) -> str:
-    """A URL safe to carry in a refusal: ``scheme://host/path``, never userinfo.
+def scrub_url(url: str) -> str:
+    """A URL safe to store or carry in a refusal: ``scheme://host/path``, no userinfo.
 
-    The refusal's ``detail`` reaches a log and a panel, so the userinfo segment —
-    where a mistaken ``https://user:token@…`` puts a credential — is dropped
-    rather than shown. The host and path stay, because they are what the operator
-    needs in order to find the remote they configured wrongly.
+    The URL reaches a log, a panel and — via :func:`record_submission` — this
+    device's run record, so the userinfo segment, where a mistaken
+    ``https://user:token@…`` puts a credential, is dropped rather than kept. The
+    host and path stay, because they are what the operator needs in order to find
+    the remote they configured wrongly.
+
+    THIS NEVER RAISES. ``urlsplit().port`` raises ``ValueError`` for an
+    out-of-range port (``https://example.com:99999999/r.git``, one keystroke away
+    from a real one in ``git remote set-url``), and both callers promise a typed
+    answer: ``detect_repo`` returns ``RepoRef | UnusableRepo`` and
+    ``record_submission`` returns a record. So a malformed port falls back to the
+    netloc with its userinfo removed, which still shows the operator the value
+    they typed.
     """
     parts = urllib.parse.urlsplit(url)
     if not parts.scheme:
         return re.sub(r"^[^/@]*@", "", url)
+    try:
+        port = parts.port
+    except ValueError:
+        return f"{parts.scheme}://{_without_userinfo(parts.netloc)}{parts.path}"
     host = parts.hostname or ""
-    if parts.port is not None:
-        host = f"{host}:{parts.port}"
+    if port is not None:
+        host = f"{host}:{port}"
     if not host:
         return f"{parts.scheme}://"
     return f"{parts.scheme}://{host}{parts.path}"
+
+
+def _without_userinfo(netloc: str) -> str:
+    """``netloc`` minus any ``user:password@`` prefix.
+
+    ``rpartition`` rather than ``partition``: a password may itself contain ``@``
+    and the split has to be at the LAST one, which is where the host begins.
+    """
+    return netloc.rpartition("@")[2]
 
 
 __all__ = [
@@ -220,4 +262,5 @@ __all__ = [
     "REMOTE_NAME",
     "RepoRef",
     "detect_repo",
+    "scrub_url",
 ]

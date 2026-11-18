@@ -357,13 +357,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the design's Fence 1 forbids.",
     ),
     "local_operator/remote_compute/records.py": (
-        1,
+        2,
         "``RECORD_FILENAME`` ('runs.jsonl') is this DEVICE's record of the remote runs "
         "it submitted, under <config>/remote-compute/ (the directory beside it, "
         "``RECORD_SUBDIRECTORY``) -- machine state outside the session "
         "directories, never an entry of one. It must not travel with a session: the "
         "file answers 'what did this device send, and where is it now', and a copy "
-        "would let the destination report another machine's runs as its own.",
+        "would let the destination report another machine's runs as its own. "
+        "``LOCK_FILENAME`` ('.runs.lock') is the side file the record's cross-process "
+        "flock is taken on -- beside that same file, machine-local by construction "
+        "and meaningless on another device.",
     ),
     "local_operator/remote_compute/repo.py": (
         1,

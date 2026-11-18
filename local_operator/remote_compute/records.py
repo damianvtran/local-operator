@@ -23,25 +23,38 @@ server reported and two timestamps. The summary goes through the repo's
 credential-shape scrubber before it is stored (see :func:`prompt_summary`),
 because an operator's prompt can quote a secret and this file is on disk.
 
-CONCURRENCY IS WHOLE-LINE, AND ONLY THAT. A writer appends one line (under a
-kilobyte) with ``O_APPEND``; two processes therefore interleave at line
-boundaries rather than mid-record on POSIX, and on any platform a line that
-fails to parse is skipped. Compaction (the only rewrite) is a same-directory
-temp file plus ``os.replace``, so a reader sees the old file or the new one and
-never a half-written one.
+CONCURRENCY IS WHOLE-LINE, AND SERIALISED. A writer appends one line (under a
+kilobyte) with ``O_APPEND``, so two processes interleave at line boundaries
+rather than mid-record on POSIX, and on any platform a line that fails to parse
+is skipped. Compaction (the only rewrite) is a same-directory temp file plus
+``os.replace``, so a reader sees the old file or the new one and never a
+half-written one — and BOTH the append and the fold-then-replace run under one
+exclusive lock on a side file, because an append landing between the fold and
+the replace would otherwise be in neither file (see :func:`_exclusive`).
+
+THE FILE IS OWNER-ONLY. It is created ``0600`` and re-chmodded on every append,
+and its directory ``0700``, following the transcript's rule (a record can quote
+a prompt summary, and a config directory can be relocated onto a shared path).
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+from local_operator.remote_compute.repo import scrub_url
+
+logger = logging.getLogger(__name__)
 
 #: Where the record lives, under the app's config directory.
 RECORD_SUBDIRECTORY = "remote-compute"
@@ -66,9 +79,25 @@ KEPT_RUNS = 500
 #: instead would make the store quadratic in the number of runs.
 MAX_FILE_BYTES = 512_000
 
-#: Per-process serialisation of the append. Cross-process safety comes from
-#: ``O_APPEND`` plus the fold; this lock keeps two threads of one process (a
-#: status poll beside a submit) from interleaving their own writes.
+#: Owner-only mode for the record file and its rewrite temp. A stored line can
+#: quote a prompt summary, so the same rule the transcript settled on applies
+#: (``session/transcript._TRANSCRIPT_MODE``): the file is private even though the
+#: containing directory normally is too, because a copy, a backup or a relocated
+#: ``LOCAL_OPERATOR_CONFIG_DIR`` puts it somewhere looser.
+_RECORD_MODE = 0o600
+
+#: Owner-only mode for ``<config>/remote-compute/``. ``mkdir``'s mode is masked
+#: by the umask, which is why 0700 is also what the config root is created with
+#: (``config_writer.config_write_lock``).
+_DIRECTORY_MODE = 0o700
+
+#: The side file the cross-process lock is taken on. NEVER replaced, so a lock on
+#: it keeps meaning the same file — see :func:`_exclusive`.
+LOCK_FILENAME = ".runs.lock"
+
+#: Per-process serialisation of the append. Cross-process exclusion comes from
+#: the ``flock`` in :func:`_exclusive`; this lock keeps two threads of one process
+#: (a status poll beside a submit) from racing to open the side file at all.
 _APPEND_LOCK = threading.Lock()
 
 _WHITESPACE = re.compile(r"\s+")
@@ -266,10 +295,16 @@ def record_submission(
     ``api_origin`` is recorded because a run answered by a non-production Radient
     is a different run: the panel has to be able to say where a row came from,
     and the client's base is resolved per process rather than stored globally.
+
+    ``repo_url`` IS SCRUBBED HERE, for every caller. Only ``repo.detect_repo``
+    refuses userinfo; a caller that passed a URL straight through (the CLI's
+    ``--repo``, a GUI field) would otherwise put ``https://user:token@…`` on disk.
+    The scrub lives on this side of the boundary so the file's no-credential
+    contract is a property of the file, not of each caller's diligence.
     """
     record = RunRecord(
         run_id=run_id,
-        repo_url=repo_url,
+        repo_url=scrub_url(repo_url),
         repo_sha=repo_sha,
         prompt_summary=prompt_summary(prompt),
         size=size,
@@ -334,15 +369,95 @@ def _latest(run_id: str, *, config_dir: Path | None = None) -> RunRecord | None:
     return found
 
 
+def _keep_private(fd: int) -> None:
+    """Make an open record descriptor owner-only (best-effort).
+
+    APPLIED ON EVERY OPEN FOR WRITING rather than only at creation, so a record
+    written by an older build, restored from a backup or copied out of a looser
+    parent becomes private on its next write. A filesystem that refuses ``chmod``
+    (some network mounts) must not fail the append: losing an observation is
+    worse than a wider mode, so the error is logged and swallowed.
+    """
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is None:  # Windows: POSIX modes do not apply
+        return
+    try:
+        fchmod(fd, _RECORD_MODE)
+    except OSError:
+        logger.debug("remote-compute record: could not restrict mode", exc_info=True)
+
+
+@contextlib.contextmanager
+def _exclusive(path: Path) -> Iterator[None]:
+    """Serialise the append/fold cycle against every other process.
+
+    THE LOCK IS ON A SIDE FILE, not on ``runs.jsonl``: compaction replaces the
+    record with a new inode, so a lock held on the record itself would guard the
+    file that is about to be unlinked while the next process locks its
+    replacement — two writers, no exclusion. ``.runs.lock`` is never replaced,
+    which is why ``session_lease`` locks ``RECOVERY_LOCK_NAME`` rather than the
+    lease.
+
+    IT COVERS THE WHOLE FOLD+REPLACE, and every append: an append that landed
+    between the fold and the ``os.replace`` would be in neither the old file
+    (replaced) nor the new one (folded before the line existed), and the run
+    would vanish from the panel without an error anywhere.
+
+    BLOCKING, on POSIX ``flock``: an append is a few milliseconds, so waiting for
+    the other writer is right and a timeout would turn healthy contention into a
+    lost observation. Windows has no ``flock``; there the in-process lock plus
+    ``O_APPEND`` line atomicity is what remains, which is weaker across processes
+    and is stated rather than papered over.
+    """
+    if os.name == "nt":  # pragma: no cover - no flock on this host
+        yield
+        return
+    import fcntl
+
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, _RECORD_MODE)
+    try:
+        _keep_private(fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def _append(record: RunRecord, *, config_dir: Path | None = None) -> None:
     """Append one observation, compacting first when the file has grown."""
     path = records_path(config_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=_DIRECTORY_MODE)
     line = json.dumps(record.to_json(), ensure_ascii=False, sort_keys=True) + "\n"
-    with _APPEND_LOCK:
+    with _APPEND_LOCK, _exclusive(path.parent / LOCK_FILENAME):
         _compact_if_grown(path)
-        with open(path, "ab") as handle:
-            handle.write(line.encode("utf-8"))
+        _write_line(path, line)
+
+
+def _write_line(path: Path, line: str) -> None:
+    """Append one line owner-only, after guaranteeing a line boundary.
+
+    THE NEWLINE GUARD closes a second cost of one torn write: a crash can leave a
+    final line with no ``\\n``, and the next append is then concatenated onto it,
+    so one crash loses TWO observations — the torn one and the new one. Writing a
+    single ``\\n`` first costs nothing in the ordinary case.
+
+    ``O_APPEND`` puts every write at the end of the file regardless of the read
+    offset used for that guard, so the reads below cannot move a write.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, _RECORD_MODE)
+    try:
+        _keep_private(fd)
+        size = os.lseek(fd, 0, os.SEEK_END)
+        if size:
+            os.lseek(fd, size - 1, os.SEEK_SET)
+            if os.read(fd, 1) != b"\n":
+                os.write(fd, b"\n")
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
 
 
 def _compact_if_grown(path: Path) -> None:
@@ -352,6 +467,9 @@ def _compact_if_grown(path: Path) -> None:
     so this is what keeps a long-lived install from growing a status log forever.
     A reader either sees the old file or the replaced one (``os.replace``), and
     the temp file is in the same directory so the replace is a rename.
+
+    CALLED UNDER :func:`_exclusive`, so no append can land between the fold here
+    and the replace below.
 
     The size is read with ``stat`` on every append, so the common path costs one
     syscall; the file is parsed only when it is about to be rewritten.
@@ -368,6 +486,9 @@ def _compact_if_grown(path: Path) -> None:
     )
     handle, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=".runs-", suffix=".jsonl")
     try:
+        # mkstemp is 0600 by construction; stated through the same helper as every
+        # append so the mode the file ends up with has ONE expression in this file.
+        _keep_private(handle)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(body)
             stream.flush()
