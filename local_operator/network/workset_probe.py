@@ -804,6 +804,11 @@ PROBE_ROW_FIELDS = ("remedy", "https_rewrite", "clone_check", "clone_detail", "m
 PROBE_BLOCK_FIELDS = ("destination_probe",)
 
 
+#: Fields only the restoring/probing device writes (see ``scrub_peer_block``).
+PEER_RESULT_ROW_FIELDS = ("recipes", "dest_path", "remapped", "branch_moved")
+PEER_RESULT_BLOCK_FIELDS = ("notes", "import")
+
+
 #: The only shape ``workset.scope_digest`` mints.
 _SCOPE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -844,6 +849,24 @@ def scrub_peer_block(block: dict[str, Any]) -> dict[str, Any]:
     from local_operator.network import workset
 
     strip_probe_fields(block)
+    # THE TRANSFER HALF'S RESULT FIELDS ARE ALSO THIS DEVICE'S (PR B, #4245): a row's
+    # ``recipes`` ("To recreate its dependencies, run in <cwd>: <run>"), ``dest_path``,
+    # ``remapped`` and ``branch_moved``, and the block's ``notes`` and ``import``
+    # (whose ``remedy`` is a command) are written only by the device that restored
+    # or probed — ``workset_move.arrival_receipt`` merges a restore row's fields only
+    # when the restore set them, so a peer's pre-filled value would otherwise survive
+    # onto the receipt. ``transferred: true`` is likewise only ever set locally (no
+    # block that crosses the link before a restore legitimately says so). The source's
+    # offload receipt reads the destination's answer through its own closed reducer
+    # (``workset_move.source_receipt``), not this block.
+    for row in block.get("worktrees") or []:
+        if isinstance(row, dict):
+            for name in PEER_RESULT_ROW_FIELDS:
+                row.pop(name, None)
+    for name in PEER_RESULT_BLOCK_FIELDS:
+        block.pop(name, None)
+    if block.get("transferred") is True:
+        block["transferred"] = False
     if "scope_digest" in block and not _SCOPE_DIGEST.fullmatch(str(block["scope_digest"])):
         block.pop("scope_digest")
     for item in block.get("left_behind") or []:
