@@ -181,6 +181,9 @@ def merge_metadata(items: list[Any]) -> Any:
         # B4b: one released message in the burst puts the provenance line on the
         # whole card, because the agent reads every message of the group.
         owner_released=any(getattr(item, "owner_released", False) for item in items),
+        # The gap BEFORE the burst: the oldest message's own count. Later
+        # messages in the group follow it directly, so they add nothing.
+        since_last_delivery=int(getattr(items[0], "since_last_delivery", 0) or 0),
     )
 
 

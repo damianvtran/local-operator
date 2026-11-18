@@ -3646,6 +3646,40 @@ class Store:
                 return None
             return {"conversation_id": row["conversation_id"], "message_id": row["message_id"]}
 
+    def previous_delivery_seq(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        before_seq: int,
+        session_id: str,
+    ) -> int | None:
+        """The seq of the latest earlier message reserved for ``session_id`` here.
+
+        Read-only and advisory: it feeds one card line ("N messages since your
+        last delivery"), never a decision, so a store that cannot answer returns
+        None and the line is simply absent. Scoped to this owner's live
+        generation like every other read; no body, label or id escapes.
+        """
+
+        if not session_id or owner.enrollment_generation <= 0:
+            return None
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return None
+                if self._live_generation(conn, owner) != owner.enrollment_generation:
+                    return None
+                row = conn.execute(
+                    "SELECT MAX(conversation_seq) FROM body_reservations "
+                    "WHERE owner_key = ? AND conversation_id = ? AND conversation_seq < ? "
+                    "AND designated_session = ?",
+                    (_owner_key(owner), conversation_id, before_seq, session_id),
+                ).fetchone()
+        except (StoreRefused, sqlite3.Error, OSError):
+            return None
+        return int(row[0]) if row is not None and row[0] is not None else None
+
     def conversation_of_reserved_message(self, owner: OwnerSnapshot, message_id: str) -> str | None:
         """The ``bcv_`` id an ADMITTED conversation message belongs to, or None.
 

@@ -1562,7 +1562,10 @@ async def _direct_message(
             )
         landed = True
         reply_guard.confirm_outbound(
-            runtime.config_dir, ledger, message_id=_posted_message(result)[0]
+            runtime.config_dir,
+            ledger,
+            message_id=_posted_message(result)[0],
+            seq=_posted_message(result)[1],
         )
     finally:
         if not landed:
@@ -3108,7 +3111,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 )
             landed = True
             reply_guard.confirm_outbound(
-                runtime.config_dir, ledger, message_id=_posted_message(result)[0]
+                runtime.config_dir,
+                ledger,
+                message_id=_posted_message(result)[0],
+                seq=_posted_message(result)[1],
             )
         finally:
             if not landed:
@@ -3224,6 +3230,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             )
             await _annotate_body_state(runtime, result["messages"])
             _mark_non_member_senders(result["messages"])
+            _label_own_session_posts(runtime, endpoint_id, channel_id, result["messages"])
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
@@ -3294,6 +3301,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         restored = await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
         await _annotate_body_state(runtime, thread_rows)
         _mark_non_member_senders(thread_rows)
+        _label_own_session_posts(runtime, endpoint_id, channel_id, thread_rows)
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
@@ -3698,6 +3706,50 @@ def _mark_non_member_senders(rows: list[Any]) -> None:
         row["sender_class"] = cls
         if cls == "app":
             row["sender_note"] = APP_SENDER_NOTE
+
+
+#: ``authored_by`` values on a history/thread row (model-facing, English).
+AUTHORED_BY_THIS_SESSION = "you"
+AUTHORED_BY_OTHER_SESSION = "another session of yours"
+
+
+def _label_own_session_posts(
+    runtime: "BridgeRuntime", endpoint_id: str, conversation_id: str, rows: list[Any]
+) -> None:
+    """Say which rows one of THIS agent's sessions wrote, in place.
+
+    WHY. Several local sessions share one bridge identity, so every post any of
+    them made reads as "the agent" in a history page. A session reading the DM
+    could take another session's question for its own and answer the wrong
+    thing, or take its own earlier post for someone else's. The label comes from
+    the outbound ledger, looked up by the hub's MESSAGE ID — never from the row's
+    text, so a body that spells "— ref 7KQ2M" or "you" claims nothing. A row the
+    ledger has no entry for (a post from before the ledger, an expired row, a
+    ledger that could not be read) is left unlabelled rather than guessed.
+    ``ask_ref`` carries the per-ask ref when the ledger holds one.
+    """
+
+    ids = [r["id"] for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)]
+    authored = reply_guard.lookup_authorship(
+        runtime.config_dir,
+        endpoint_id=endpoint_id,
+        conversation_id=conversation_id,
+        message_ids=ids,
+    )
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        hit = authored.get(row.get("id", ""))
+        if hit is None:
+            continue
+        session_id, ref = hit
+        row["authored_by"] = (
+            AUTHORED_BY_THIS_SESSION
+            if session_id == runtime.session_id
+            else AUTHORED_BY_OTHER_SESSION
+        )
+        if ref:
+            row["ask_ref"] = ref
 
 
 def _strip_display_names(page: Any) -> None:

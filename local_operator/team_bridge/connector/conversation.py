@@ -145,6 +145,10 @@ class ConversationCardMetadata:
     #: B4b: the screener HELD this message and the owner chose to let the agent
     #: read it (``hold_release.py``). Drives ONE provenance line; never persisted.
     owner_released: bool = False
+    #: Messages in this conversation that were NOT delivered to the receiving
+    #: session since the last one that was, other than its own posts (see
+    #: :func:`_messages_since_last_delivery`). Zero = say nothing.
+    since_last_delivery: int = 0
 
 
 def card_directed(metadata: ConversationCardMetadata) -> str:
@@ -256,6 +260,15 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         f"message_id: {metadata.message_id}",
         f"conversation_seq: {metadata.conversation_seq}",
     ]
+    if metadata.since_last_delivery > 0:
+        # Several local sessions share one bridge identity, and a message can
+        # reach another of them instead of this one. The count is the only way
+        # this session learns the conversation moved without it; the thread
+        # itself is the source of what was said.
+        lines.append(
+            f"{metadata.since_last_delivery} messages since your last delivery in this "
+            "conversation; read it with channel_history before you answer"
+        )
     if metadata.owner_released:
         # B4b DECISIONS D6 / security review S-5: PROVENANCE, never endorsement.
         # "Released by your owner" would tell a steerable agent its owner
@@ -851,6 +864,48 @@ def _record_body_reservation(
 #: and the loop's hold re-drive use (review round 2, M1′).
 
 
+def _messages_since_last_delivery(
+    owner: Any, ref: ConversationFeedRef, *, session_id: str, config_dir: Path
+) -> int:
+    """Messages between this session's previous delivery here and this one.
+
+    The hub's seq is dense per conversation, so ``seq - previous - 1`` counts
+    everything the session was not handed: other people's messages it did not
+    get, and posts by this account. This session's OWN posts are subtracted
+    (ledger rows with a confirmed seq), because "you posted a reply" is not news
+    and would make the line fire after every answer. Advisory: any failure is 0,
+    which prints nothing.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    from .. import reply_guard
+
+    try:
+        previous = Store(config_dir).previous_delivery_seq(
+            owner,
+            conversation_id=ref.conversation_id,
+            before_seq=ref.conversation_seq,
+            session_id=session_id,
+        )
+        if previous is None:
+            return 0
+        gap = ref.conversation_seq - previous - 1
+        if gap <= 0:
+            return 0
+        own = reply_guard.own_posts_between(
+            config_dir,
+            endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
+            conversation_id=ref.conversation_id,
+            session_id=session_id,
+            after_seq=previous,
+            before_seq=ref.conversation_seq,
+        )
+    except Exception:  # noqa: BLE001 — advisory line; never a reason to lose a card
+        return 0
+    return max(0, gap - own)
+
+
 async def _hand_off_card(
     owner: Any,
     metadata: ConversationCardMetadata,
@@ -911,6 +966,9 @@ async def _hand_off_card(
         # to lift an OLDER build's cool-down while builds are mixed mid-upgrade.
         directed=wake_is_addressed(metadata),
     )
+    gap = _messages_since_last_delivery(owner, ref, session_id=session_id, config_dir=config_dir)
+    if gap:
+        metadata = replace(metadata, since_last_delivery=gap)
     coalescer = active_coalescer()
     if coalescer is None:
         return await _deliver_card(owner, metadata, session_id=session_id, config_dir=config_dir)

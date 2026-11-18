@@ -231,6 +231,7 @@ CREATE TABLE IF NOT EXISTS outbound_posts (
     session_id TEXT NOT NULL,
     client_ref TEXT NOT NULL,
     message_id TEXT,
+    seq INTEGER,
     thread_root_id TEXT NOT NULL DEFAULT '',
     ref TEXT,
     kind TEXT NOT NULL,
@@ -855,20 +856,117 @@ def record_outbound(
 
 
 def confirm_outbound(
-    config_dir: Path | str, record: OutboundRecord | None, *, message_id: str
+    config_dir: Path | str,
+    record: OutboundRecord | None,
+    *,
+    message_id: str,
+    seq: int | None = None,
 ) -> None:
-    """Fill the hub's message id into a row once the send landed. Never raises."""
+    """Fill the hub's message id (and seq) into a row once the send landed. Never raises.
+
+    The seq is what lets a card say "N messages since your last delivery"
+    without counting this session's own posts as news.
+    """
 
     if record is None or not message_id:
         return
     try:
         with _connect(config_dir) as conn:
             conn.execute(
-                "UPDATE outbound_posts SET message_id = ? WHERE id = ?",
-                (message_id, record.row_id),
+                "UPDATE outbound_posts SET message_id = ?, seq = ? WHERE id = ?",
+                (
+                    message_id,
+                    seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+                    record.row_id,
+                ),
             )
     except (ReplyGuardUnavailable, sqlite3.Error, OSError):
         pass
+
+
+def _connect_ledger_readonly(config_dir: Path | str) -> sqlite3.Connection | None:
+    """A read-only handle on the guard file, or None when there is nothing to read.
+
+    A READ never creates the file, never takes the write lock and never runs the
+    additive migration: a history read on a machine that has never posted must
+    leave nothing behind. A file from before the ledger has no table, which the
+    callers treat as an empty ledger.
+    """
+
+    path = guard_path(config_dir)
+    try:
+        if not path.is_file():
+            return None
+        conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_S
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+
+
+def lookup_authorship(
+    config_dir: Path | str,
+    *,
+    endpoint_id: str,
+    conversation_id: str,
+    message_ids: Iterable[str],
+) -> dict[str, tuple[str, str | None]]:
+    """``{message_id: (session_id, ref)}`` for the messages THIS endpoint's sessions posted.
+
+    Keyed on the hub's message id, never on message text: a forged "ref" line in
+    someone's body cannot claim authorship. Fails open to an empty answer.
+    """
+
+    wanted = sorted({m for m in message_ids if isinstance(m, str) and m})
+    if not wanted:
+        return {}
+    conn = _connect_ledger_readonly(config_dir)
+    if conn is None:
+        return {}
+    found: dict[str, tuple[str, str | None]] = {}
+    try:
+        # SQLite's variable limit is 32766 on current builds; a page is <= 100.
+        marks = ",".join("?" for _ in wanted)
+        for row in conn.execute(
+            "SELECT message_id, session_id, ref FROM outbound_posts WHERE endpoint_id = ? "
+            f"AND conversation_id = ? AND message_id IN ({marks})",
+            (endpoint_id, conversation_id, *wanted),
+        ):
+            found[str(row["message_id"])] = (str(row["session_id"]), row["ref"])
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    return found
+
+
+def own_posts_between(
+    config_dir: Path | str,
+    *,
+    endpoint_id: str,
+    conversation_id: str,
+    session_id: str,
+    after_seq: int,
+    before_seq: int,
+) -> int:
+    """How many messages ``session_id`` itself posted with ``after_seq < seq < before_seq``."""
+
+    conn = _connect_ledger_readonly(config_dir)
+    if conn is None:
+        return 0
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM outbound_posts WHERE endpoint_id = ? AND conversation_id = ? "
+            "AND session_id = ? AND seq > ? AND seq < ?",
+            (endpoint_id, conversation_id, session_id, after_seq, before_seq),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
 
 
 def discard_outbound(config_dir: Path | str, record: OutboundRecord | None) -> None:
@@ -907,6 +1005,8 @@ __all__ = [
     "discard_outbound",
     "guard_path",
     "key_path",
+    "lookup_authorship",
+    "own_posts_between",
     "record_outbound",
     "record_trigger",
     "release",

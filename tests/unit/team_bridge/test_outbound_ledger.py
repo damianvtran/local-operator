@@ -91,6 +91,7 @@ def test_the_ledger_has_no_body_column_and_never_stores_message_text(tmp_path: P
         "session_id",
         "client_ref",
         "message_id",
+        "seq",
         "thread_root_id",
         "ref",
         "kind",
