@@ -23,10 +23,10 @@ from tests.unit.network.test_mesh_file_pull import (
     _in_store,
     _pad,
     _pull,
-    devices as _devices_fixture,
-    mesh as _mesh_fixture,
-    pair as _pair_fixture,
 )
+from tests.unit.network.test_mesh_file_pull import devices as _devices_fixture
+from tests.unit.network.test_mesh_file_pull import mesh as _mesh_fixture
+from tests.unit.network.test_mesh_file_pull import pair as _pair_fixture
 
 # Expose the original fixture objects without wrapping their scope or dependencies.
 devices = _devices_fixture
