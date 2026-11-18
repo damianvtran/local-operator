@@ -3151,6 +3151,8 @@ async def _retry_stranded_child_browser(
     from local_operator.session_lease import SessionLeaseHeldError
 
     browser = getattr(child, "_browser", None)
+    if browser is None:
+        return ""
     generation = getattr(browser, "terminal_cleanup_generation", "")
     if not generation:
         return ""
