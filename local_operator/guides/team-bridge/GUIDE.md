@@ -232,8 +232,8 @@ Check these in order. The receiver is not installed until all of them hold.
    lop team-bridge setup --json
    ```
 
-   It reports one of `ready`, `consent_ui_required`, `enable_in_app_required`,
-   `designation_missing` or `not_ready`. When the machine is ready it places the
+   It reports one of `ready`, `consent_ui_required`, `mesh_node_not_enrolled`,
+   `enable_in_app_required`, `designation_missing` or `not_ready`. When the machine is ready it places the
    receiver through the same `sync_connector_service` every surface uses, and
    says so; otherwise it changes nothing.
 6. **The default configuration folder** (`~/.local-operator`). The receiver is
@@ -474,6 +474,11 @@ back** and never assumes it worked:
   granted in the Local Operator app, not from a terminal — have the user open the
   app once and enable Agent messages. On a headless machine, see the limit in
   "Prerequisites".
+- `mesh_node_not_enrolled` (from `setup`): this device joined a mesh network as
+  a node and is not enrolled. Team Bridge is never set up on nodes (consent
+  cannot be proven remotely): `send` the message to the operator's
+  chief-of-staff session on their primary device instead (see
+  `guide://network` "Team Bridge does not travel").
 - `enable_in_app_required` (from `setup`): an account is enrolled but agent
   messages are not switched on for this machine. Same fix: the app, once.
 - `designation_missing` (from `setup`): enrolled, but no chief-of-staff session is

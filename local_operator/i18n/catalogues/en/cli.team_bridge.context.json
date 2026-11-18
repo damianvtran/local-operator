@@ -293,5 +293,10 @@
     "role": "lop team-bridge CLI output",
     "tone": "terse, plain English, operator-facing",
     "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. installed is a verbatim version number, usually the SAME as the running version on the line above. Shown when the receiver runs the same version number, but an update has since replaced the installed files it started from; 'the last update' means the most recent update of the app. It must restart to load the installed code. Do not say the version differs."
+  },
+  "cli.team_bridge.setup.mesh_node_relay": {
+    "role": "lop team-bridge setup CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Shown by `lop team-bridge setup` on a device that JOINED a mesh network as a node (not the operator's primary device) and is not enrolled. Agent messages is the product name of Team Bridge; keep 'Team Bridge' verbatim. Safety meaning: Team Bridge is deliberately never set up on mesh nodes because consent cannot be proven remotely, so the line must NOT suggest enabling it here or opening the app. 'send' is a tool name and stays verbatim in backticks. 'chief-of-staff session' is the operator's designated session that answers agents; use the same term as setup.designation_missing. 'session id' is the session's identifier; 'peer' is the mesh peer-device field of send, which must be left empty. 'the bridge' means Team Bridge. The chief of staff relays the message and replies."
   }
 }

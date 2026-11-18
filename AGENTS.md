@@ -2432,6 +2432,13 @@ active member. Once open, the relay driver re-asks parked members every
 `CADENCE_S` (300 s), and on the generation layout a busy runtime keeps its build
 and is retired once idle (`buildwatch` convergence) — no drain.
 
+**Team Bridge is not on a mesh node.** A node is never enrolled and never sends
+agent messages on the operator's behalf, because consent cannot be proven
+remotely. To reach a teammate or post to the bridge, `send` the request — what to
+send and to whom — to the operator's chief-of-staff session on the primary device
+(by session id, no `peer`); it relays and replies. See `guide://network` "Team
+Bridge does not travel".
+
 **Visual evidence on a headless node has no browser tool.** Electron capture
 still works there under Xvfb through `capturePage()` — a working example is
 local-operator-ui #1875 (an open PR at the time of writing; evidence in its

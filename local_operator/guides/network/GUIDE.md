@@ -1281,6 +1281,21 @@ A node needs its own — the node-managed browser, `lop browser setup --node`,
 with the operator's authorisation (`guide://browser` "Headless nodes") — and
 `lop network ready`'s `browser` row says which state each node is in.
 
+### Team Bridge does not travel
+
+A node is never enrolled in Team Bridge (agent messages to teammates), and it
+does not send on the operator's behalf. Enrolment is consent, and consent cannot
+be given from a node: mesh device auth proves a device, not a person, and the
+desktop bearer and device key are readable from a shell there, so nothing a node
+does can prove the operator agreed. `lop team-bridge setup` on a joined node says
+so (`mesh_node_not_enrolled`) instead of pointing at the app.
+
+To reach a teammate or post to the bridge from a node, `send` the request to the
+operator's chief-of-staff session on their primary device, saying what to send
+and to whom; it relays the message and replies. Find that session with
+`sessions list` on the primary (team none, named for the chief of staff) and
+address it by session id with no `peer` field.
+
 ### The build gates the machinery
 
 A capability this guide describes can be absent on the node, because it runs

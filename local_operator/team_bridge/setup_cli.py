@@ -37,6 +37,15 @@ from typing import Any
 #: app, and this command will not grant it.
 CODE_CONSENT_UI_REQUIRED = "consent_ui_required"
 
+#: Not enrolled, and this device is a JOINED mesh node rather than the operator's
+#: primary device. Team Bridge is deliberately not set up on mesh nodes (operator
+#: decision, 2026-11-18): consent cannot be proven remotely, because mesh device
+#: auth is not proof that a human is present, and the desktop bearer and device
+#: key are readable from a shell on the node. So instead of pointing at an app
+#: that should never enrol here, the command tells the session to route bridge
+#: and teammate messages through the operator's chief-of-staff session.
+CODE_MESH_NODE = "mesh_node_not_enrolled"
+
 #: Enrolment exists but there is no chief-of-staff session committed for it.
 CODE_DESIGNATION_MISSING = "designation_missing"
 
@@ -90,6 +99,11 @@ def setup(root: Path) -> dict[str, Any]:
     store = Store(root)
     owner = store.active_owner_readonly()
     if owner is None:
+        # Only the not-enrolled answer changes on a mesh node. An enrolment that
+        # already exists (a config root copied from the primary, say) keeps its
+        # usual readiness path: this command never un-enrols anything.
+        if is_joined_mesh_node(root):
+            return {"ok": False, "code": CODE_MESH_NODE}
         return {"ok": False, "code": CODE_CONSENT_UI_REQUIRED}
     session = store.designated_session_for_readonly(owner)
     if not session:
@@ -126,6 +140,41 @@ def setup(root: Path) -> dict[str, Any]:
         "service": outcome.code,
         "detail": outcome.detail,
     }
+
+
+def is_joined_mesh_node(root: Path) -> bool:
+    """Whether this device is a mesh member that JOINED, not the operator's primary.
+
+    The facts, both already on disk and both read-only here:
+
+    * membership: every active network record was created by ANOTHER device
+      (``created_by`` is this device's id for a network it created, and the
+      inviter's id for one it joined, ``network.cli``). A device with no network,
+      or one that created any of its networks, is treated as primary — the
+      operator creates the network on their own machine and pairs nodes into it;
+    * authority: a device that SIGNS for the installed operator anchor is the
+      operator's own device (:mod:`local_operator.network.mirror_authority`), even
+      if it happens to have joined someone else's network. That probe runs only
+      for a joined-only device, so a primary that created its network never
+      touches its signer here.
+
+    Any read failure answers ``False``: the fallback is the existing primary-device
+    message, which is what this command printed before the mesh-node case existed.
+    """
+
+    try:
+        from local_operator.network.store import list_networks
+
+        active = [record for record in list_networks(root) if record.trust == "active"]
+        if not active:
+            return False
+        if any(not record.created_by or record.created_by == record.self_device_id for record in active):
+            return False
+        from local_operator.network.mirror_authority import local_authority
+
+        return not local_authority(root).signs
+    except Exception:  # noqa: BLE001 — unreadable network state means "primary" here
+        return False
 
 
 def _enabled(root: Path) -> bool:
@@ -173,6 +222,8 @@ def render_lines(result: dict[str, Any]) -> list[str]:
     code = result.get("code")
     if code == CODE_CONSENT_UI_REQUIRED:
         return [text(_k.setup_consent_ui_required()), text(_k.setup_consent_ui_next())]
+    if code == CODE_MESH_NODE:
+        return [text(_k.setup_mesh_node_relay())]
     if code == CODE_ENABLE_IN_APP_REQUIRED:
         return [
             text(
