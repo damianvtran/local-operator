@@ -215,9 +215,11 @@ def run_session_move_preflight(session_id: str, to: str) -> dict[str, Any]:
     """Run ``lop sessions move <id> --to <to> --dry-run --json``: the working set, nothing moved.
 
     The answer is ``{ok, dry_run, session_id, confirmation_required, working_set}``, or
-    a refusal in the contract's shape. Blocking; the caller runs it off the loop. A
-    refusal here is NOT a reason to stop: the move itself is asked next and the owner's
-    gate is the authority, so the caller proceeds and reports whatever it answers.
+    a refusal in the contract's shape. Blocking; the caller runs it off the loop. Most
+    refusals here are not a reason to stop: the move itself is asked next and the
+    owner's gate is the authority, so the caller proceeds and reports whatever it
+    answers. The one exception is ``relay_restart_required`` (review R9): this
+    device's relay cannot run the gate at all, so the caller stops before the leave.
     """
     argv = python_argv(
         "-m",
@@ -231,6 +233,20 @@ def run_session_move_preflight(session_id: str, to: str) -> dict[str, Any]:
         "--json",
     )
     return _run_cli_json(session_id, to, argv)
+
+
+def stale_relay_message() -> str:
+    """The ``relay_restart_required`` sentence when this device's relay predates the
+    working-set gate, else "" (``mobility.stale_relay_message``).
+
+    For the path that runs NO preflight — ``/move --without-working-set`` (review M1,
+    round 3) — so it too refuses before the leave instead of after it. Same process
+    environment as the CLI child, so it reads the same relay record. Blocking (a
+    file read); the caller runs it off the loop.
+    """
+    from local_operator.network.mobility import stale_relay_message as _stale
+
+    return _stale()
 
 
 def _run_cli_json(session_id: str, to: str, argv: list[str]) -> dict[str, Any]:

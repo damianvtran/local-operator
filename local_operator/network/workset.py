@@ -973,6 +973,42 @@ def _history_exclusions(worktree: Path, *, home: Path) -> tuple[list[Excluded], 
     return found, True
 
 
+#: Every ``Recipe.run`` this build writes, by ``Recipe.kind`` — THE CLOSED SET a
+#: peer's recipe is checked against (security S11, round 3). A recipe's ``run`` is a
+#: command the consent card, the receipt and the model's arrival note all show as
+#: "recreate with: <run>", and on a recall it is the REMOTE owner that computed the
+#: block, so a hostile owner could otherwise write any command there.
+#: ``dependency_left_behind`` builds its recipes from these constants, so the table
+#: cannot drift from what an honest peer of this build sends.
+RECIPE_RUNS: dict[str, tuple[str, ...]] = {
+    "pnpm_share_primary": ("rm -rf node_modules && ln -s ../../node_modules node_modules",),
+    "pnpm": ("pnpm install --frozen-lockfile",),
+    "npm": ("npm ci",),
+    "yarn": ("yarn install --immutable", "yarn install --frozen-lockfile"),
+    "uv": ("uv venv && uv sync --frozen",),
+}
+
+#: ``uv_pip`` names the worktree's first ``requirements*.txt`` (a glob match, so the
+#: name is the only variable part); only a shell-inert name is accepted from a peer.
+_UV_PIP_RUN = re.compile(r"uv venv && uv pip install -r requirements[A-Za-z0-9._-]*\.txt")
+
+
+def trusted_recipe(raw: Any) -> dict[str, Any] | None:
+    """``raw`` (a peer's ``left_behind[].recipe``) if this build would have written
+    it, else ``None`` — the row then reads as a tree with no recipe, never a command
+    of the peer's choosing (security S11). ``cwd`` is shown as a path, not run."""
+    if not isinstance(raw, Mapping):
+        return None
+    kind = str(raw.get("kind") or "")
+    run = str(raw.get("run") or "")
+    known = run in RECIPE_RUNS.get(kind, ()) or (
+        kind == "uv_pip" and _UV_PIP_RUN.fullmatch(run) is not None
+    )
+    if not known:
+        return None
+    return {"kind": kind, "run": run, "cwd": str(raw.get("cwd") or "")}
+
+
 def dependency_left_behind(worktree: Path, primary: Path, *, home: Path) -> list[LeftBehind]:
     """Dependency trees present in ``worktree`` that never travel, with the §9 recipe."""
     shown_cwd = home_relative(worktree, home)
@@ -988,29 +1024,22 @@ def dependency_left_behind(worktree: Path, primary: Path, *, home: Path) -> list
                 and _same_bytes(worktree / "pnpm-lock.yaml", primary / "pnpm-lock.yaml")
             )
             recipe = (
-                Recipe(
-                    "pnpm_share_primary",
-                    "rm -rf node_modules && ln -s ../../node_modules node_modules",
-                    shown_cwd,
-                )
+                Recipe("pnpm_share_primary", RECIPE_RUNS["pnpm_share_primary"][0], shown_cwd)
                 if shares
-                else Recipe("pnpm", "pnpm install --frozen-lockfile", shown_cwd)
+                else Recipe("pnpm", RECIPE_RUNS["pnpm"][0], shown_cwd)
             )
         elif (worktree / "package-lock.json").is_file():
-            recipe = Recipe("npm", "npm ci", shown_cwd)
+            recipe = Recipe("npm", RECIPE_RUNS["npm"][0], shown_cwd)
         elif (worktree / "yarn.lock").is_file():
-            run = (
-                "yarn install --immutable"
-                if (worktree / ".yarnrc.yml").is_file()
-                else "yarn install --frozen-lockfile"
-            )
+            berry, classic = RECIPE_RUNS["yarn"]
+            run = berry if (worktree / ".yarnrc.yml").is_file() else classic
             recipe = Recipe("yarn", run, shown_cwd)
         out.append(LeftBehind(home_relative(node_modules, home), "dependency_tree", recipe))
     venv = worktree / ".venv"
     if venv.exists():
         recipe = None
         if (worktree / "uv.lock").is_file():
-            recipe = Recipe("uv", "uv venv && uv sync --frozen", shown_cwd)
+            recipe = Recipe("uv", RECIPE_RUNS["uv"][0], shown_cwd)
         else:
             requirements = sorted(worktree.glob("requirements*.txt"))
             if requirements:

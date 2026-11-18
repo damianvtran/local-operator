@@ -790,6 +790,66 @@ def audit_summary(frame: Mapping[str, Any], answer: Mapping[str, Any] | None) ->
 # ---------------------------------------------------------------------------
 
 
+#: The per-row fields ``apply_probe`` writes, and the block field. THIS DEVICE OWNS
+#: THEM (security S11, round 3): on a recall the block is the REMOTE owner's manifest,
+#: and a field the probe only ever ADDED let a hostile owner pre-fill ``remedy`` with
+#: any command and have the consent card tell the user to paste it.
+PROBE_ROW_FIELDS = ("remedy", "https_rewrite", "clone_check", "clone_detail", "missing_tools")
+PROBE_BLOCK_FIELDS = ("destination_probe",)
+
+
+#: The only shape ``workset.scope_digest`` mints.
+_SCOPE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def strip_probe_fields(block: dict[str, Any]) -> dict[str, Any]:
+    """Drop every probe-owned field from ``block`` in place (and return it).
+
+    ``clone_check`` is put back to the unprobed default every manifest row carries
+    (``workset.WorktreeFacts.to_dict``), so a row the answer does not name still reads
+    ``pending_destination`` rather than losing the field."""
+    for row in block.get("worktrees") or []:
+        if isinstance(row, dict):
+            for name in PROBE_ROW_FIELDS:
+                row.pop(name, None)
+            row["clone_check"] = "pending_destination"
+    for name in PROBE_BLOCK_FIELDS:
+        block.pop(name, None)
+    return block
+
+
+def scrub_peer_block(block: dict[str, Any]) -> dict[str, Any]:
+    """Make a working-set block a PEER sent safe to render here, in place.
+
+    Called where a block crosses the link into this device (the recall preflight,
+    a peer's refusal, the owner's arrival block). The audit behind it (security S11,
+    round 3): the only fields any surface renders as an instruction or a command are
+    the probe's ``remedy`` / ``https_rewrite`` (rebuilt here by ``apply_probe``),
+    ``left_behind[].recipe.run`` ("recreate with: <run>" on the consent card, the
+    receipt and the model's arrival note) and ``scope_digest``, which the CLI prints
+    inside "re-run with --confirm-working-set <digest>". The first are stripped; a
+    recipe survives only when it is one this build writes (``workset.trusted_recipe``);
+    a digest only in the ``sha256:<64 hex>`` shape ``workset.scope_digest`` mints —
+    dropping it fails closed, since the owner refuses a move confirming "". Everything
+    else is shown as data — paths, branch and device names pass through ``clean`` on
+    every text surface, and enum fields (``state``, ``reason``, ``why``, ``consent``)
+    render through closed tables.
+    """
+    from local_operator.network import workset
+
+    strip_probe_fields(block)
+    if "scope_digest" in block and not _SCOPE_DIGEST.fullmatch(str(block["scope_digest"])):
+        block.pop("scope_digest")
+    for item in block.get("left_behind") or []:
+        if isinstance(item, dict) and "recipe" in item:
+            recipe = workset.trusted_recipe(item.get("recipe"))
+            if recipe is None:
+                item.pop("recipe", None)
+            else:
+                item["recipe"] = recipe
+    return block
+
+
 def apply_probe(
     block: dict[str, Any], answer: Mapping[str, Any] | None, *, device_id: str = ""
 ) -> dict[str, Any]:
@@ -808,7 +868,12 @@ def apply_probe(
     rebuilt HERE from the URL this device sent and ``device_id`` (the destination's
     mesh id — never its self-chosen name, security S10), so a hostile destination cannot write a command, markup or a terminal
     escape onto the consent screen.
+
+    NOR DOES THE OWNER (security S11, round 3): on a recall ``block`` came from the
+    remote owner, so every probe-owned field is dropped FIRST — before the
+    ``answer is None`` return too — and only what is rebuilt below survives.
     """
+    strip_probe_fields(block)
     rows = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
     if answer is None:
         for row in rows:
@@ -939,6 +1004,8 @@ __all__ = [
     "probe_request",
     "rate_limited",
     "run_probe",
+    "scrub_peer_block",
     "session_uses_team_bridge",
+    "strip_probe_fields",
     "team_bridge_enrolled",
 ]

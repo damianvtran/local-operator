@@ -371,6 +371,7 @@ from local_operator.tui.session_move import (
     parse_move_to,
     run_session_move,
     run_session_move_preflight,
+    stale_relay_message,
 )
 from local_operator.tui.session_navigation import SessionNavigation
 from local_operator.tui.session_presentation import (
@@ -37552,11 +37553,24 @@ class OperatorApp(App[None]):
                 # the user's explicit approval, so the preflight runs while the
                 # check row is still up and a non-empty manifest pushes the card.
                 # Cancelled → nothing left, nothing moved. A failed preflight is
-                # not a stop: the move is asked next and the owner's gate refuses
-                # an unconfirmed working set by itself. ``--keep`` is not gated
-                # (the source keeps everything); its receipt says what it lacks.
+                # not a stop — the move is asked next and the owner's gate refuses
+                # an unconfirmed working set by itself — EXCEPT a stale relay
+                # (``relay_restart_required``, below), which cannot run the gate.
+                # ``--keep`` is not gated (the source keeps everything); its
+                # receipt says what it lacks.
                 confirm_digest = ""
                 without_working_set = bool(request.without_working_set)
+                if not request.keep and without_working_set:
+                    # NO PREFLIGHT ON THIS PATH, SO ASK THE RELAY DIRECTLY (review
+                    # M1, round 3): ``request_move`` refuses a stale relay for
+                    # ``--without-working-set`` too, and without this check that
+                    # refusal arrived only after the user had been moved off the
+                    # conversation. Same sentence, same stop-before-the-leave as R9.
+                    stale = await asyncio.to_thread(stale_relay_message)
+                    if stale:
+                        drop_checking()
+                        self._system_notice(stale, "warning")
+                        return
                 if not request.keep and not without_working_set:
                     preflight = await asyncio.to_thread(
                         run_session_move_preflight, target_id, request.to

@@ -2103,6 +2103,61 @@ async def test_a_stale_relay_stops_the_move_before_the_leave(
         assert reopened == [], reopened
 
 
+@pytest.mark.parametrize("stale", [True, False], ids=["stale_relay", "current_relay"])
+@pytest.mark.asyncio
+async def test_a_stale_relay_stops_a_move_without_the_working_set_before_the_leave(
+    monkeypatch: pytest.MonkeyPatch, stale: bool
+) -> None:
+    """M1 (review round 3): ``--without-working-set`` runs no preflight, so the R9 stop
+    never fired on it — the user was moved off the conversation and only then shown
+    ``request_move``'s "restart the relay" refusal. The relay is now asked first on
+    that path too; a current relay still moves (the negative control)."""
+    from local_operator.network import mobility
+
+    moved: list[dict[str, Any]] = []
+    left: list[bool] = []
+    preflights: list[str] = []
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        moved.append({"session_id": session_id, "to": to, **kwargs})
+        return {"ok": True, "session_id": session_id}
+
+    def no_preflight(session_id: str, to: str) -> dict[str, Any]:
+        preflights.append(session_id)
+        return {"ok": True}
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_leave() -> None:
+        left.append(True)
+
+    message = mobility.RELAY_RESTART_MESSAGE if stale else ""
+    monkeypatch.setattr("local_operator.tui.app.stale_relay_message", lambda: message)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move_preflight", no_preflight)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        monkeypatch.setattr(app, "_leave_for_move", fake_leave)
+        app._run_slash_command("/move --to pixel-8 --without-working-set")
+        for _ in range(60):
+            await pilot.pause()
+            if moved or any("restart" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert preflights == [], "--without-working-set must not run the preflight"
+        if stale:
+            assert "restart it with `lop network restart`" in shown, shown
+            assert moved == [], moved
+            assert left == [], "the conversation was left before the refusal"
+        else:
+            assert len(moved) == 1 and moved[0]["without_working_set"] is True, moved
+            assert left == [True], left
+
+
 @pytest.mark.asyncio
 async def test_an_in_progress_move_after_the_leave_says_where_the_composer_points(
     monkeypatch: pytest.MonkeyPatch,

@@ -46,6 +46,7 @@ it is called from a handler for exactly this reason.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -403,6 +404,36 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
 
 #: Spelled once; ``wire.LINK_CAPABILITIES`` carries it (review R1, round 1).
 WORKSET_MOVE_CAPABILITY = "session-move-workset-v1"  # == wire.SESSION_MOVE_WORKSET_V1
+
+#: The ``relay_restart_required`` sentence, spelled once for ``request_move`` and the
+#: TUI's pre-leave check (``stale_relay_message``) so the two cannot disagree.
+RELAY_RESTART_MESSAGE = (
+    "this device's relay is older than this lop and cannot check working files "
+    "safely, so nothing was moved; restart it with `lop network restart`, then "
+    "try again"
+)
+
+
+def _relay_serves_workset_gate(record: Any) -> bool:
+    return WORKSET_MOVE_CAPABILITY in tuple(getattr(record, "capabilities", None) or ())
+
+
+def stale_relay_message(root: Path | str | None = None) -> str:
+    """:data:`RELAY_RESTART_MESSAGE` when this device's relay predates the gate, else "".
+
+    FOR A SURFACE THAT MUST REFUSE BEFORE IT ACTS (review M1, round 3): the TUI's
+    ``/move --without-working-set`` runs no preflight, so without this read it left
+    the conversation and only then heard ``request_move``'s refusal. A local file
+    read, no network. No relay at all reads "" — ``request_move`` names that remedy
+    (``relay_unavailable``) itself, as it does on every other path.
+    """
+    from local_operator.network import store
+
+    record = store.find_own_relay(Path(root) if root is not None else None)
+    if record is None or _relay_serves_workset_gate(record):
+        return ""
+    return RELAY_RESTART_MESSAGE
+
 
 #: The subset of :data:`MOVE_REFUSAL_CODES` the working-set gate produces. A surface
 #: that holds one of these re-renders the refusal's ``working_set`` block and asks
@@ -1453,10 +1484,15 @@ class LinkTransport:
             )
         if str(detail.get("result") or "") == "refused":
             raw_ws = detail.get("working_set")
+            # A peer's refusal block is rendered too (security S11): same scrub.
+            from local_operator.network.workset_probe import scrub_peer_block
+
             raise Moved(
                 str(detail.get("code") or "refused"),
                 str(detail.get("message") or detail.get("detail") or "the move was refused"),
-                working_set=dict(raw_ws) if isinstance(raw_ws, dict) else None,
+                working_set=(
+                    scrub_peer_block(copy.deepcopy(raw_ws)) if isinstance(raw_ws, dict) else None
+                ),
             )
         return detail
 
@@ -1843,7 +1879,13 @@ def _destination_move(
         # THE OWNER'S ARRIVAL BLOCK for the working set, carried into this receipt
         # verbatim (absent when the session has none, and from an older owner).
         raw_workset = prepared.get("working_set")
-        arrival_workset = dict(raw_workset) if isinstance(raw_workset, dict) else None
+        # Scrubbed (security S11): its recipes reach the receipt and the model's
+        # arrival note as "recreate with: <run>".
+        from local_operator.network.workset_probe import scrub_peer_block
+
+        arrival_workset = (
+            scrub_peer_block(copy.deepcopy(raw_workset)) if isinstance(raw_workset, dict) else None
+        )
         # The SOURCE's reading of "was it active" (``_arrival_active``), absent from an
         # older owner — which therefore keeps today's cold arrival.
         arrival_active = bool(prepared.get("arrival_active") or False)
@@ -4444,7 +4486,13 @@ def _ask_workset_preflight(
             ) from refusal
         raise
     raw = answer.get("working_set")
-    return dict(raw) if isinstance(raw, dict) else {}
+    # THE OWNER'S BLOCK IS PEER INPUT (security S11, round 3): scrubbed of every
+    # probe-owned field and any recipe this build would not write BEFORE a surface
+    # can render it — ``_probe_destination`` returns ``unknown``/``unsupported``
+    # blocks untouched, so ``apply_probe``'s own strip is not enough on its own.
+    from local_operator.network.workset_probe import scrub_peer_block
+
+    return scrub_peer_block(copy.deepcopy(raw)) if isinstance(raw, dict) else {}
 
 
 def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str) -> dict[str, Any]:
@@ -7828,15 +7876,8 @@ def request_move(
     # relay does not gate it either).
     consenting = bool(dry_run or confirm_working_set or without_working_set)
     gated = consenting or not (keep or from_replica)
-    advertised = tuple(getattr(record, "capabilities", None) or ())
-    if gated and WORKSET_MOVE_CAPABILITY not in advertised:
-        return _relay_refusal(
-            session_id,
-            "relay_restart_required",
-            "this device's relay is older than this lop and cannot check working files "
-            "safely, so nothing was moved; restart it with `lop network restart`, then "
-            "try again",
-        )
+    if gated and not _relay_serves_workset_gate(record):
+        return _relay_refusal(session_id, "relay_restart_required", RELAY_RESTART_MESSAGE)
     action = "recover" if from_replica else ("recall" if to == "local" else "offload")
     # THE CALLER'S OWN ENVELOPE IS THE RELAY'S BOUND PLUS ITS MARGIN, and both terms
     # come from ``move_hold_s`` so the two cannot drift: a caller that gives up FIRST
