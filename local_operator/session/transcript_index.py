@@ -3718,7 +3718,11 @@ def _build_lock(path: Path, wait_s: float) -> Iterator[bool]:
                 try:
                     if _fcntl is not None:
                         _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                    else:  # pragma: no cover - Windows only
+                    # ``handle`` is only opened when ``_fcntl`` or ``locking``
+                    # is available, so with no fcntl ``locking`` is set here;
+                    # the explicit check states that for the type checker
+                    # rather than silencing it with an ignore.
+                    elif locking is not None:  # pragma: no cover - Windows only
                         handle.seek(0)
                         locking(handle.fileno(), getattr(_msvcrt, "LK_NBLCK", 2), 1)
                     break
