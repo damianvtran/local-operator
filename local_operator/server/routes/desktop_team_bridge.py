@@ -4716,33 +4716,27 @@ async def discard_hold(
 # The desktop half of the approvals flow (TEAM-BRIDGE.md §10.2–§10.4); the
 # harness logic, and the WHY of each rule, live in ``team_bridge/approvals.py``.
 #
-# DECIDE AUTHORITY NEEDS A PERSON PRESENT, and the BEARER DOES NOT PROVE IT. Every route
-# here sits behind ``require_desktop`` (the desktop bearer, plus the Origin
-# allowlist for browser-shaped callers), but the bearer is not a same-uid
-# boundary: ``agent_shell.DAEMON_BEARER_ENVS`` only keeps it out of an agent
-# shell's environment, while the desktop persists it in a 0600 file any
-# ordinary same-uid shell can read, and a native caller with no Origin is
-# admitted by design (security review round 1, S-1). So the batch decide also
-# requires an OPERATOR PRESENCE SIGNATURE over the exact selection, minted and
-# signed through ``…/requests/decide/authorize`` (the daemon raises the OS
-# Touch ID prompt, as it does for the card path's signed ``bridge_decide``) and
-# verified by ``…/requests/decide`` BEFORE any hub call. Hosts without a
-# presence-gated operator key are refused with ``operator_presence_required``.
+# ORDINARY APPROVALS NEVER RAISE AN OS PROMPT (decision a-856f, 2026-11-15).
+# Every route here sits behind ``require_desktop`` (the desktop bearer, plus
+# the Origin allowlist for browser-shaped callers); a decision is authorized by
+# that bearer and the human's explicit per-item selection, recorded in the
+# intent ledger before any hub call and audited by the hub's decision ledger.
+# Until a-856f the batch decide also required an operator presence signature
+# (a Touch ID sheet per decision, refused outright on hosts without a
+# presence-gated key). The operator ruled that a terrible experience, it
+# blocked every host without biometrics, and it never covered same-user
+# processes anyway: ``auth.db``'s hub tokens let one POST the hub's decide
+# directly (PR #4099 security round 2, S-9). The trade-off is stated in
+# ``team_bridge/approvals.py``: the bearer sits in a 0600 file a same-uid
+# process can read (S-1), so such a process can decide as auth.db already
+# lets it. ``…/requests/decide/authorize`` stays as a NON-PROMPTING
+# compatibility shim, because the shipped desktop (v0.58.x) calls it before
+# ``…/decide`` and sends its ``operator_proof`` back verbatim.
 #
-# WHAT THAT BUYS, HONESTLY (PR #4099 security round 2, B4). It binds CALLERS OF
-# THE DAEMON API, not every same-uid process: the hub tokens in ``auth.db`` let
-# such a process POST the hub's decide directly, with no gesture (S-9 — the
-# named residual; closing it needs the hub to verify an operator signature).
-# And the gesture proves PRESENCE, not informed consent: the OS sheet shows no
-# selection. ``…/authorize`` therefore allows one prompt at a time, spaces the
-# next one out after a dismissal, and publishes each prompt's selection on the
-# desktop feed (``team_bridge_authorize``) so the desktop can show what it is
-# for and flag one it did not start.
-#
-# ONE WORD PER ASK (design (c)). A signed batch word the hub has not confirmed
-# is never sent by a batch that does not name it; a selection naming the OTHER
-# word is refused whole (409 ``earlier_decision_unconfirmed``) by ``…/authorize``
-# before any prompt and by ``…/decide`` before any intent write or hub call.
+# ONE WORD PER ASK (design (c)). A batch word the hub has not confirmed is
+# never sent by a batch that does not name it; a selection naming the OTHER
+# word is refused whole (409 ``earlier_decision_unconfirmed``) by the
+# ``…/authorize`` shim and by ``…/decide`` before any intent write or hub call.
 
 #: Query names the two approvals reads accept; anything else is refused, not
 #: dropped (the inbox read's closed-table rule).
@@ -4758,43 +4752,9 @@ _DECIDE_REFUSALS: dict[str, tuple[int, str]] = {
         409,
         "this decision was made for a different account; sign in as that account and try again",
     ),
-    # QA round 2, Q3: one sentence for any count — the desktop sends single
-    # items through this route too.
-    "operator_presence_required": (
-        409,
-        "deciding from the approvals list needs operator authority with Touch ID on this "
-        "machine; answer the request on its card instead",
-    ),
-    "operator_signature_required": (
-        403,
-        "this decision needs your Touch ID confirmation; nothing was decided",
-    ),
-    "operator_signature_invalid": (
-        403,
-        "this confirmation does not match this decision; confirm it again — nothing was decided",
-    ),
-    "operator_signature_expired": (
-        403,
-        "this confirmation expired; confirm the decision again — nothing was decided",
-    ),
-    "operator_signature_unavailable": (
-        409,
-        "Touch ID did not confirm this decision; nothing was decided",
-    ),
-    "operator_challenge_limit": (
-        429,
-        "too many decisions are waiting for confirmation; wait a moment and try again",
-    ),
-    "operator_prompt_in_flight": (
-        429,
-        "a Touch ID confirmation is already waiting on this machine; answer it first — "
-        "nothing was decided",
-    ),
-    "operator_prompt_cooldown": (
-        429,
-        "Touch ID was just dismissed; wait a few seconds before confirming again — "
-        "nothing was decided",
-    ),
+    # No ``operator_presence_required`` / ``operator_signature_*`` /
+    # ``operator_prompt_*`` codes any more: nothing in this flow prompts or
+    # verifies a presence signature (decision a-856f), so no path raises them.
     "earlier_decision_unconfirmed": (
         409,
         "an earlier decision on this request has not been confirmed yet; select it again "
@@ -4870,10 +4830,12 @@ class ApprovalsSelectionIn(_Strict):
 
 
 class OperatorProofIn(_Strict):
-    """What ``…/decide/authorize`` returned, echoed verbatim to ``…/decide``.
+    """What the ``…/decide/authorize`` shim returned, echoed to ``…/decide``.
 
-    Optional in the MODEL only so its absence is the typed 403
-    ``operator_signature_required`` rather than an anonymous 422.
+    ACCEPTED AND IGNORED (decision a-856f). The shipped desktop (v0.58.x) sends
+    it back verbatim, so the shape is still grammar-checked — a strict body
+    must not start 422-ing an existing client — but nothing is verified: it
+    carries no authority and its absence is fine.
     """
 
     challenge: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -4885,8 +4847,8 @@ class ApprovalsAuthorizeIn(ApprovalsSelectionIn):
     """The ``…/decide/authorize`` body: the selection plus an optional ``client_ref``.
 
     ``client_ref`` is the caller's own correlation value, echoed on the
-    ``team_bridge_authorize`` feed frame so the desktop can tell a prompt it
-    started from one it did not (S-6). Lowercase hex, at most 32 characters:
+    ``team_bridge_authorize`` feed frame so the desktop can tell a
+    confirmation it started from one it did not (S-6). Lowercase hex, at most 32 characters:
     bounded, and incapable of carrying copy that could pass for daemon text.
     """
 
@@ -4894,7 +4856,7 @@ class ApprovalsAuthorizeIn(ApprovalsSelectionIn):
 
 
 class ApprovalsDecideIn(ApprovalsSelectionIn):
-    """The batch decide body: the same selection plus its presence proof."""
+    """The batch decide body: the selection, plus the shim's ignored proof."""
 
     operator_proof: OperatorProofIn | None = None
 
@@ -5053,31 +5015,34 @@ async def list_requests(
     )
 
 
+#: ``expires_s`` the ``…/authorize`` shim reports. The shipped desktop reads it
+#: to time out its confirm step; 30 was the retired challenge lifetime, kept so
+#: that client behaves exactly as before. Nothing expires server-side.
+_AUTHORIZE_SHIM_EXPIRES_S = 30
+
+
 @router.post("/v1/desktop/team-bridge/requests/decide/authorize", response_model=CRUDResponse[Any])
 async def authorize_decision(
     request: Request, config_manager: ConfigManager = Depends(get_config_manager)
 ) -> CRUDResponse[Any]:
-    """Confirm a selection with the operator's presence: mint, prompt, sign.
+    """COMPATIBILITY SHIM: answer at once, never prompt (decision a-856f).
 
-    Same body as ``…/decide`` minus the proof. Refusals before any prompt:
-    a malformed selection (422), the account fence, ``bridge_off``, and
-    ``operator_presence_required`` on a host whose operator key is not
-    presence-gated. Otherwise the daemon mints a single-use 30 s challenge bound
-    to the selection digest and signs it with the operator key — THIS RAISES
-    THE OS TOUCH ID PROMPT and blocks (off the event loop) until the person
-    answers; a dismissed prompt is ``operator_signature_unavailable``.
+    The shipped desktop (v0.58.x) calls this before ``…/decide`` and echoes
+    its ``operator_proof`` back. It used to mint a challenge and raise the OS
+    Touch ID sheet; ordinary approvals no longer prompt, so it now only runs
+    the checks that are not about presence and returns the same response
+    shape: ``{operator_proof: {challenge, sig, key_id}, selection_digest,
+    expires_s}``. The proof is an UNSIGNED placeholder (``key_id`` is
+    ``unsigned``) that ``…/decide`` ignores — it carries no authority. No
+    signer, keychain or OS call is made, and no hub call either.
 
-    Returns ``{operator_proof: {challenge, sig, key_id}, selection_digest,
-    expires_s}``. The desktop sends ``operator_proof`` unchanged with the SAME
-    selection to ``…/decide`` within ``expires_s``. No hub call is made here.
-
-    Also refused BEFORE any mint or prompt (S-6, design (b)/(c)):
-    ``earlier_decision_unconfirmed`` (409, ``details.items`` names each item and
-    its unconfirmed word); ``operator_prompt_in_flight`` (429, another prompt is
-    up); ``operator_prompt_cooldown`` (429, ``details.retry_after_s`` and a
-    ``Retry-After`` header, after a dismissal). Each prompt is published on the
-    desktop feed as ``team_bridge_authorize`` — ``prompting``, then ``signed``,
-    ``dismissed`` or ``refused`` — with the optional ``client_ref`` echoed.
+    Refusals: a malformed selection (422), the account fence, ``bridge_off``,
+    and ``earlier_decision_unconfirmed`` (409, ``details.items``) — the same
+    whole-batch refusal ``…/decide`` would give, surfaced at the step the old
+    client expects it. On success one ``team_bridge_authorize`` frame is
+    published in the ``signed`` state (no ``prompting`` frame: nothing is
+    shown to wait on), with the optional ``client_ref`` echoed, so the desktop
+    still names what the confirmation was for.
     """
 
     import secrets
@@ -5087,78 +5052,34 @@ async def authorize_decision(
     body, selection = await _selection_body(request, ApprovalsAuthorizeIn)
     _wire, context = await _decide_context(config_manager, body.expected_account_id)
     config_dir = Path(config_manager.config_dir)
+    conflicts = approvals.conflicting_selection(config_dir, context.owner, selection)
+    if conflicts:
+        _raise_decide("earlier_decision_unconfirmed", {"items": conflicts})
     feed = getattr(request.app.state, "desktop_feed", None)
-    try:
-        approvals.presence_anchor()
-        conflicts = approvals.conflicting_selection(config_dir, context.owner, selection)
-        if conflicts:
-            raise approvals.PresenceRefused("earlier_decision_unconfirmed", {"items": conflicts})
-        approvals.PROMPT_GATE.acquire()
-    except approvals.PresenceRefused as refusal:
-        _raise_decide(refusal.code, refusal.details)
-
-    # The gate is held from here: every path below releases it exactly once.
-    gate = approvals.PROMPT_GATE
-    frame = {
-        "authorize_id": secrets.token_hex(8),
-        "client_ref": body.client_ref,
-        "state": "prompting",
-        "items": approvals.prompt_items(config_dir, selection),
-    }
-
-    def publish(state: str) -> None:
-        # No feed means no subscriber (the desktop creates it on connect).
-        if feed is not None:
-            feed.publish_team_bridge_authorize({**frame, "state": state})
-
-    try:
-        digest = approvals.selection_digest(
-            account_id=body.expected_account_id,
-            tenant_id=context.tenant_id,
-            selection=selection,
+    if feed is not None:  # no feed means no subscriber (the desktop creates it)
+        feed.publish_team_bridge_authorize(
+            {
+                "authorize_id": secrets.token_hex(8),
+                "client_ref": body.client_ref,
+                "state": "signed",
+                "items": approvals.prompt_items(config_dir, selection),
+            }
         )
-        challenge = approvals.mint_challenge(
-            account_id=body.expected_account_id, tenant_id=context.tenant_id, digest=digest
-        )
-    except approvals.PresenceRefused as refusal:
-        gate.release("refused")  # nothing was prompted: no frame, no cool-down
-        _raise_decide(refusal.code, refusal.details)
-    except BaseException:
-        gate.release("refused")
-        raise
-    publish("prompting")
-    loop = asyncio.get_running_loop()
-
-    def sign_then_release() -> dict[str, str]:
-        # THE GATE IS RELEASED BY THE SIGNING THREAD, not by the request: a
-        # cancelled request (the caller hung up) cannot stop a sheet that is
-        # already up, so freeing the slot on cancellation would let a second
-        # prompt open beside it. The final frame is handed back to the loop
-        # (the feed's queues are loop-bound).
-        outcome = "refused"
-        try:
-            signed = approvals.sign_selection(config_dir, challenge=challenge, digest=digest)
-            outcome = "signed"
-            return signed
-        except approvals.PresenceRefused:
-            outcome = "dismissed"
-            raise
-        finally:
-            gate.release(outcome)
-            try:
-                loop.call_soon_threadsafe(publish, outcome)
-            except RuntimeError:  # the loop is gone (shutdown): no subscriber left
-                pass
-
-    try:
-        signature = await asyncio.to_thread(sign_then_release)
-    except approvals.PresenceRefused as refusal:
-        _raise_decide(refusal.code, refusal.details)
     return reply(
         {
-            "operator_proof": {"challenge": challenge, **signature},
-            "selection_digest": digest,
-            "expires_s": int(approvals.CHALLENGE_TTL_S),
+            # Shaped to pass ``OperatorProofIn`` when echoed: 64-hex challenge,
+            # hex ``sig``, non-empty ``key_id``. Deliberately not a signature.
+            "operator_proof": {
+                "challenge": secrets.token_hex(32),
+                "sig": "00",
+                "key_id": "unsigned",
+            },
+            "selection_digest": approvals.selection_digest(
+                account_id=body.expected_account_id,
+                tenant_id=context.tenant_id,
+                selection=selection,
+            ),
+            "expires_s": _AUTHORIZE_SHIM_EXPIRES_S,
         }
     )
 
@@ -5167,39 +5088,30 @@ async def authorize_decision(
 async def decide_requests(
     request: Request, config_manager: ConfigManager = Depends(get_config_manager)
 ) -> CRUDResponse[Any]:
-    """Decide the human's EXPLICIT, presence-confirmed selection (≤50).
+    """Decide the human's EXPLICIT selection (≤50). Never prompts (a-856f).
 
-    Refused WHOLE with zero hub calls: a malformed body, more than 50 items, a
-    duplicate id (422 ``invalid_request``); the account fence; ``bridge_off``;
-    ``operator_presence_required`` (409); and a missing, spent, expired,
-    mismatched or unverifiable ``operator_proof`` (403
-    ``operator_signature_*``). Otherwise each item gets ``{message_id,
-    decision, sent, ask_settled, status | error}``; only items whose local ask
-    and owner binding verify are sent, in ONE hub batch call carrying exactly
-    the signed pairs. A selection naming the other word than an unconfirmed
-    earlier batch decision is refused whole: 409 ``earlier_decision_unconfirmed``.
+    Authorized by the desktop bearer (``require_desktop``) and the explicit
+    per-item selection; ``operator_proof`` is accepted for the shipped desktop
+    and ignored. Refused WHOLE with zero hub calls: a malformed body, more
+    than 50 items, a duplicate id (422 ``invalid_request``); the account
+    fence; ``bridge_off``; and a selection naming the other word than an
+    unconfirmed earlier batch decision (409 ``earlier_decision_unconfirmed``).
+    Otherwise each item gets ``{message_id, decision, sent, ask_settled,
+    status | error}``; only items whose local ask and owner binding verify are
+    recorded in the intent ledger and sent, in ONE hub batch call carrying
+    exactly the selected pairs.
     """
+
+    import secrets
 
     from local_operator.team_bridge import approvals
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
 
     body, selection = await _selection_body(request, ApprovalsDecideIn)
     wire, context = await _decide_context(config_manager, body.expected_account_id)
-    proof = body.operator_proof.model_dump() if body.operator_proof is not None else None
-    try:
-        approvals.verify_selection_proof(
-            proof,
-            account_id=body.expected_account_id,
-            tenant_id=context.tenant_id,
-            selection=selection,
-        )
-    except approvals.PresenceRefused as refusal:
-        _raise_decide(refusal.code)
-    assert proof is not None  # verify_selection_proof refuses a missing proof
     # One word per ask (design (c)): a selection naming the other word than an
-    # unconfirmed signed batch is refused WHOLE — before any intent write and
-    # with zero hub calls — even under a valid proof (a proof minted before the
-    # earlier batch failed, or a caller that skipped ``…/authorize``'s check).
+    # unconfirmed batch is refused WHOLE — before any intent write and with
+    # zero hub calls — whether or not the caller went through ``…/authorize``.
     conflicts = approvals.conflicting_selection(
         Path(config_manager.config_dir), context.owner, selection
     )
@@ -5213,7 +5125,10 @@ async def decide_requests(
             owner=context.owner,
             access=context.access,
             expected_account_id=body.expected_account_id,
-            batch_ref=f"{approvals.BATCH_INTENT_PREFIX}{proof['challenge'][:16]}",
+            # The batch's intent-ledger tag. It was the challenge prefix while
+            # a proof existed; a daemon-minted token keeps it unique per batch
+            # and out of the caller's hands.
+            batch_ref=f"{approvals.BATCH_INTENT_PREFIX}{secrets.token_hex(8)}",
         )
     except BridgeSignInRequired as exc:
         _raise_sign_in(exc)
