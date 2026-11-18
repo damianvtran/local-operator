@@ -714,6 +714,37 @@ def test_lop_resolves_to_this_build_when_the_path_has_none(tmp_path, monkeypatch
     assert builtin.own_launcher_path_injection(shim_root, parent_path=str(elsewhere)) == {}
 
 
+@pytest.mark.parametrize("which", ["target", "staged"])
+def test_a_directory_at_the_shim_names_is_never_touched(tmp_path, monkeypatch, which) -> None:
+    """A real directory at ``bin/lop`` or the staged temp name is left alone.
+
+    The shim root is the session scratchpad, inside ``sessions/<id>/``: the
+    session-deletion guard allow-lists the shim's unlink/replace only because
+    neither can reach a directory. With one in the way, injection is skipped and
+    the directory and its contents survive untouched.
+    """
+    import sys
+
+    scripts = tmp_path / "venv" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "lop").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(scripts / "python"))
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    shim_root = tmp_path / "scratch"
+    name = "lop" if which == "target" else f".lop.{os.getpid()}.tmp"
+    blocker = shim_root / "bin" / name
+    blocker.mkdir(parents=True)
+    (blocker / "keep.txt").write_text("user data", encoding="utf-8")
+
+    assert builtin.own_launcher_path_injection(shim_root, parent_path=str(empty)) == {}
+    assert blocker.is_dir() and not blocker.is_symlink()
+    assert (blocker / "keep.txt").read_text(encoding="utf-8") == "user data"
+    assert sorted(os.listdir(shim_root / "bin")) == [name]
+
+
 def test_the_launcher_shim_never_shadows_the_users_python(tmp_path, monkeypatch) -> None:
     """R-1's user-visible harm, asserted directly on PATH resolution.
 
@@ -744,6 +775,104 @@ def test_the_launcher_shim_never_shadows_the_users_python(tmp_path, monkeypatch)
 
     assert shutil.which("python3", path=injected["PATH"]) == str(user_bin / "python3")
     assert shutil.which("lop", path=injected["PATH"]) is not None
+
+
+# ---------------------------------------------------------------------------
+# The lop shim follows `current`, not the generation it was made in (node2)
+# ---------------------------------------------------------------------------
+
+
+def _generation_layout(tmp_path: Path, monkeypatch, *stamps: str) -> tuple[Path, dict[str, Path]]:
+    """A fake ``~/.local/share/lop`` with one generation per stamp, ``current`` -> the last.
+
+    Returns the stable root and each stamp's ``bin/lop`` launcher, with
+    ``sys.executable`` pointed at the LAST generation's interpreter — the shape a
+    session started from that generation has.
+    """
+    import sys
+
+    from local_operator import update
+
+    stable = tmp_path / "lop"
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(stable))
+    launchers: dict[str, Path] = {}
+    for stamp in stamps:
+        scripts = stable / "generations" / stamp / "tools" / "local-operator" / "bin"
+        scripts.mkdir(parents=True)
+        (scripts / "lop").write_text(f"#!/bin/sh\necho {stamp}\n", encoding="utf-8")
+        (scripts / "lop").chmod(0o755)
+        launchers[stamp] = scripts / "lop"
+    (stable / "current").symlink_to(stable / "generations" / stamps[-1])
+    monkeypatch.setattr(sys, "executable", str(launchers[stamps[-1]].parent / "python"))
+    return stable, launchers
+
+
+def _shim_lop(tmp_path: Path) -> Path:
+    empty = tmp_path / "empty"
+    empty.mkdir(exist_ok=True)
+    shim_root = tmp_path / "scratch"
+    shim_root.mkdir(exist_ok=True)
+    injected = builtin.own_launcher_path_injection(shim_root, parent_path=str(empty))
+    return Path(injected["PATH"].split(os.pathsep)[0]) / "lop"
+
+
+def test_a_generation_launcher_is_linked_through_current(tmp_path, monkeypatch) -> None:
+    """The shim names ``current/…``, so a later ``lop update`` flip is followed."""
+    stable, _ = _generation_layout(tmp_path, monkeypatch, "20261101T000000Z-aaaa")
+    shim = _shim_lop(tmp_path)
+    assert os.readlink(shim) == str(stable / "current" / "tools" / "local-operator" / "bin" / "lop")
+    assert os.access(str(shim), os.X_OK)
+
+
+def test_a_shim_left_on_an_older_generation_is_repaired(tmp_path, monkeypatch) -> None:
+    """The pre-fix link (concrete older generation) is replaced, not kept forever."""
+    stable, launchers = _generation_layout(
+        tmp_path, monkeypatch, "20261101T000000Z-aaaa", "20261102T000000Z-bbbb"
+    )
+    bin_dir = tmp_path / "scratch" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "lop").symlink_to(launchers["20261101T000000Z-aaaa"])
+
+    shim = _shim_lop(tmp_path)
+    assert os.readlink(shim) == str(stable / "current" / "tools" / "local-operator" / "bin" / "lop")
+    assert shim.resolve() == launchers["20261102T000000Z-bbbb"].resolve()
+    assert sorted(os.listdir(bin_dir)) == ["lop"]
+
+
+def test_a_dangling_shim_is_repaired(tmp_path, monkeypatch) -> None:
+    """A link into a pruned generation (the node2 failure: `lop` not found) is relinked."""
+    stable, _ = _generation_layout(tmp_path, monkeypatch, "20261102T000000Z-bbbb")
+    bin_dir = tmp_path / "scratch" / "bin"
+    bin_dir.mkdir(parents=True)
+    pruned = stable / "generations" / "20261101T000000Z-aaaa" / "tools" / "local-operator"
+    pruned = pruned / "bin" / "lop"
+    (bin_dir / "lop").symlink_to(pruned)
+    assert not (bin_dir / "lop").exists()
+
+    shim = _shim_lop(tmp_path)
+    assert shim.exists()
+    assert os.readlink(shim) == str(stable / "current" / "tools" / "local-operator" / "bin" / "lop")
+
+
+def test_a_dev_venv_launcher_is_linked_directly_and_left_alone(tmp_path, monkeypatch) -> None:
+    """Outside the generation tree nothing changes: a direct link, created once."""
+    import sys
+
+    from local_operator import update
+
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(tmp_path / "lop"))
+    scripts = tmp_path / "repo" / ".venv" / "bin"
+    scripts.mkdir(parents=True)
+    (scripts / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "lop").chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(scripts / "python"))
+
+    shim = _shim_lop(tmp_path)
+    assert os.readlink(shim) == str(scripts / "lop")
+    before = os.lstat(shim)
+    _shim_lop(tmp_path)
+    after = os.lstat(shim)
+    assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
 
 
 # ---------------------------------------------------------------------------

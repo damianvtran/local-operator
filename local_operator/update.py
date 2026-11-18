@@ -2477,9 +2477,23 @@ def generation_in_argv(argv: str) -> Path | None:
     fields = argv.split(None, 1)
     if not fields:
         return None
-    candidate = Path(fields[0])
+    return generation_containing(Path(fields[0]))
+
+
+def generation_containing(path: Path) -> Path | None:
+    """The generation root ``path`` lies under, spelled as an ANCESTOR of ``path``.
+
+    The path-level half of :func:`generation_in_argv`, with the same lexical-file /
+    resolved-ancestors rule (see there for why both halves are load-bearing). The
+    answer is one of ``path``'s own (unresolved) ancestors, so a caller can
+    ``path.relative_to(answer)`` to re-anchor the same file under
+    :func:`pointer_path` — which is what the bash tool's ``lop`` shim does so its
+    link follows ``lop update`` instead of pinning the generation it was made in.
+
+    ``None`` for a path not under ``generations_dir()`` and for that directory itself.
+    """
     generations = generations_dir().resolve()
-    for parent in candidate.parents:
+    for parent in path.parents:
         if parent.parent.resolve() == generations:
             return parent
     return None
