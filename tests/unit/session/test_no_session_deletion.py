@@ -4761,6 +4761,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<config>/remote-compute/ directory; unlink refuses directories, and the record "
         "rows are not session state.",
     ),
+    (
+        "local_operator/remote_compute/results.py::extract",
+        "os.replace",
+        "Renames this call's OWN mkdtemp staging directory onto the results destination. "
+        "The source is a directory this call created (mkdtemp, 0700, this call's random "
+        "suffix); the destination is refused unless it is ABSENT immediately before the "
+        "rename, and a results destination is <config>/remote-compute/results/<run id> or "
+        "an operator-supplied dest_dir — nothing here derives a path from a session id. "
+        "The one thing os.replace could still overwrite is an EMPTY directory appearing in "
+        "that check-then-rename window, and copying into sessions/ goes through "
+        "restore_session, not this path.",
+    ),
+    (
+        "local_operator/remote_compute/results.py::extract",
+        "shutil.rmtree",
+        "Removes ONLY the staging directory this call created, on the refusal path, by the "
+        "exact path it captured from mkdtemp - a name that did not exist before this call "
+        "and carries its random suffix. No session directory can carry that name, so this "
+        "can never remove one.",
+    ),
 )
 
 
