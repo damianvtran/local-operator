@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.session_move_workset",
+  "history_sha256": "524e43edac9887776403e9af37809c8ac14fe56560c84069a2e3c66fe8d138e5",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.session_move_workset",
+      "source_sha256": "3642654e8391378afe0454ceaa2b31fb416302ebad3c43463fd4d49d2c2e59a8",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN `tui.session_move_workset` full audit at ca98f3789: PASS, 0 BLOCKER/0 MAJOR unresolved, 2 minor/1 nit deferred (group-wide). Earlier rounds' MAJORs fixed and re-verified (see report). Auditor shares the translator's model (different agent). No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mw1/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mw1/record.json",
+          "sha256": "4a8bb6e428036eefc766589f17a96b3ea54d094def4d98902d89ba39bd8209be"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mw1/report.md",
+          "sha256": "109b44c6bdb6aa03dee017d57fc74a9c943d4e4a66a7857865e90ee0483bb353"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.sessions_move_workset/mw1/audit.log",
+          "sha256": "dca225b29f51ee3d74fda00dfd94bce3ed34bc4f9cd7b8b867a69a42c8fbc3ca"
+        }
+      ]
+    }
+  ]
+}
