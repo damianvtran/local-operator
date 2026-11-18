@@ -52,7 +52,10 @@ async def rig(tmp_path, monkeypatch):
     app.include_router(routes.router)
     # The production 422 handler, not a lookalike: the scrubbing under test is
     # the app's (`server/app.py` `desktop_validation_error`).
-    app.add_exception_handler(RequestValidationError, desktop_validation_error)
+    app.add_exception_handler(
+        RequestValidationError,
+        desktop_validation_error,  # pyright: ignore[reportArgumentType]
+    )
     app.dependency_overrides[routes.get_config_manager] = lambda: SimpleNamespace(
         config_dir=tmp_path
     )

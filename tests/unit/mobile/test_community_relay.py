@@ -17,6 +17,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from local_operator.community import COMMUNITY_ENV
+from local_operator.community.errors import CommunityError
 from local_operator.community.member_ops import MEMBER_OPERATIONS
 from local_operator.mobile import community as relay
 from local_operator.mobile.daemon import MobileDaemon, build_app
@@ -53,7 +54,7 @@ def test_the_gate_comes_first(rig) -> None:
 def test_the_relay_route_set_is_exactly_the_member_allowlist(rig) -> None:
     _, _, app = rig
     mounted = sorted(
-        (sorted(r.methods - {"HEAD"})[0], r.path)
+        (sorted((r.methods or set()) - {"HEAD"})[0], r.path)
         for r in app.routes
         if isinstance(r, Route) and r.path.startswith(relay.PREFIX)
     )
@@ -175,7 +176,7 @@ def test_signin_required_is_never_a_401_on_the_relay(rig, monkeypatch) -> None:
     assert client.get("/api/sessions").status_code != 401
 
 
-def _every_refusal() -> list:
+def _every_refusal() -> list[CommunityError]:
     """One instance of EVERY ``CommunityError`` type, plus a bare 401 base."""
 
     from local_operator.community import errors
