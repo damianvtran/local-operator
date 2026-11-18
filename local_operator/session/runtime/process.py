@@ -5311,6 +5311,10 @@ async def _run_owner_prompt(
     # field, so a pre-stamp row replays exactly as it did.
     parameters = inspect.signature(run).parameters
     fields: dict[str, Any] = {}
+    if "_file_admission" in parameters:
+        from local_operator.session.file_provenance import CONTINUATION
+
+        fields["_file_admission"] = CONTINUATION
     if "wait_for_turn" in parameters:
         # The BOOT drain must not wait (the socket is not listening yet; see
         # ``ServingSessionHandle.prompt``). The live pass also opts out:
@@ -5377,6 +5381,10 @@ async def _run_owner_prompt(
         # prompt arm above does — probed for the same reason: a handle one
         # version behind has no such keyword and must not be handed one.
         steer_fields: dict[str, Any] = {}
+        if "_file_admission" in inspect.signature(steer).parameters:
+            from local_operator.session.file_provenance import CONTINUATION
+
+            steer_fields["_file_admission"] = CONTINUATION
         if "harness_injected" in inspect.signature(steer).parameters:
             steer_fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
         if "owner_typed" in inspect.signature(steer).parameters and (

@@ -469,7 +469,7 @@ async def test_a_bare_settings_slash_listing_is_not_published_as_applied() -> No
     async def listing(*_args: Any, **_kwargs: Any) -> SlashResult:
         return SlashResult(kind="notice", text="models: test/model")
 
-    async def passthrough(result: Any, *_args: Any) -> Any:
+    async def passthrough(result: Any, *_args: Any, **_kwargs: Any) -> Any:
         return result
 
     handle._slash_result = listing  # type: ignore[method-assign]

@@ -634,6 +634,28 @@ def _question_prose(question: Any) -> str:
 REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
 
 
+def _file_admission_for(
+    locality: str | None, capabilities: Iterable[str] | None, operation: str
+) -> Any:
+    """The native file-provenance admission for an in-process admission path.
+
+    ``valid_admission(None)`` is False (R1, PR #4108): a caller that names no
+    admission never mints a ``user`` proof. Paths that admit a turn without the
+    control server's dispatch (headless exec, an action receipt the runtime
+    completes for an old viewer) build theirs here from the SAME connection facts
+    ``RuntimeServer._dispatch`` would weigh, so a relayed/unknown locality, or a
+    remote caller lacking ``operation``, is refused exactly as on the wire.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.file_provenance import user_admission
+
+    return user_admission(
+        SimpleNamespace(locality=locality, capabilities=frozenset(capabilities or ())),
+        operation,
+    )
+
+
 #: The sender stamp naming the SURFACE a spooled owner line was typed on (ADR
 #: 0009), read back by ``session.spooled_input_surface`` so a prompt spooled
 #: across a runtime swap keeps its notification routing. An in-process caller
@@ -695,6 +717,8 @@ class _PromptCommand:
     documents: list["DocumentContent"] | None = None
     #: False for a prompt from a remote connection (see ``prompt``).
     owner_typed: bool = True
+    # Frozen before queue/spool; never serialized into inbox/receipt JSON.
+    _file_capture: Any = None
     #: ADR 0009: the connection's surface, decided by the control server, or
     #: ``None`` for an in-process caller (``Session.prompt`` then stamps ``tui``).
     input_surface: str | None = None
@@ -4338,6 +4362,7 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         wait_for_turn: bool = True,
         owner_typed: bool = True,
+        _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
@@ -4502,6 +4527,11 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW: an idle handover that QUEUES instead of refusing.
         #
         # This arm is the 2026-09-19 incident's repair. The idle rung leaves in
@@ -4529,7 +4559,7 @@ class ServingSessionHandle(SessionHandle):
                 # window's own phrase would claim "the one it loaded is gone
                 # from disk", which is false for a superseded tree (the
                 # D10/MAJOR-2 class).
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise self._retiring_refusal()
             try:
                 receipt = await self._spool_for_successor(
@@ -4541,11 +4571,14 @@ class ServingSessionHandle(SessionHandle):
                     command_id=command_id,
                     harness_injected=harness_injected,
                 )
-            finally:
-                # Rejected on both outcomes, for the reason the refusal below
-                # rejects: this command is not in the transcript, so the
-                # identity must not be spent. A retry that re-spools is
-                # deduplicated by whoever drains it against the durable index.
+            except BaseException:
+                # No durable spool owns the message on failure/cancellation: release
+                # the frozen ticket too, just as an ordinary admission refusal does.
+                self._refuse_admitted(command_id)
+                raise
+            else:
+                # The successor's drain needs the frozen ticket, but not this
+                # process's reservation: its durable index deduplicates retries.
                 self._command_reservations.reject(command_id)
             return receipt
         if self._retiring_cause:
@@ -4592,17 +4625,17 @@ class ServingSessionHandle(SessionHandle):
                         command_id=command_id,
                         harness_injected=harness_injected,
                     )
-                finally:
-                    # Rejected on BOTH outcomes, and for the same reason the
-                    # refusal below rejects: this command is not in the
-                    # transcript, so the identity must not be spent. A retry
-                    # that re-spools is deduplicated by the successor instead
-                    # (``process._drain_inbox_into`` consults the durable index
-                    # with this same id), which is the only place the answer is
-                    # authoritative — this process is leaving.
+                except BaseException:
+                    # A failed/cancelled spool has no successor-owned message to
+                    # consume the ticket. Keep neither it nor the reservation.
+                    self._refuse_admitted(command_id)
+                    raise
+                else:
+                    # Preserve only the ticket for the successor's drain. Its
+                    # durable index, not this leaving process, deduplicates retries.
                     self._command_reservations.reject(command_id)
                 return receipt
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise self._retiring_refusal()
         if not wait_for_turn and (
             getattr(self._session, "is_streaming", False) or self._prompt_queue
@@ -4634,10 +4667,10 @@ class ServingSessionHandle(SessionHandle):
             # join the turn running now, they do not queue behind other input.
             from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
 
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise TurnInFlight(TURN_IN_FLIGHT)
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
-            self._command_reservations.reject(command_id)
+            self._refuse_admitted(command_id)
             raise RuntimeError(
                 f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
             )
@@ -4657,6 +4690,7 @@ class ServingSessionHandle(SessionHandle):
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
             owner_typed=owner_typed,
+            _file_capture=file_capture,
             input_surface=input_surface,
         )
         position = len(self._prompt_queue) + 1
@@ -5058,7 +5092,12 @@ class ServingSessionHandle(SessionHandle):
         self._last_prompt_failure = ""
         try:
             await self.prompt(
-                text, command_id=str(uuid.uuid4()), wait_complete=True, owner_typed=owner_typed
+                text,
+                command_id=str(uuid.uuid4()),
+                wait_complete=True,
+                owner_typed=owner_typed,
+                # Headless exec runs in the owner's own process: a local admission.
+                _file_admission=_file_admission_for("local", (), "prompt"),
             )
             return True
         except RuntimeError:
@@ -5585,6 +5624,8 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "_file_capture" in parameters:
+                        fields["_file_capture"] = command._file_capture
                     if "owner_typed" in parameters and not command.owner_typed:
                         fields["owner_typed"] = False
                     if "input_surface" in parameters and command.input_surface is not None:
@@ -5681,6 +5722,7 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
@@ -5748,6 +5790,7 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    _file_admission=_file_admission,
                     input_surface=input_surface,
                 )
             )
@@ -5827,6 +5870,7 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        _file_admission: Any = None,
         input_surface: str | None = None,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
@@ -5843,6 +5887,11 @@ class ServingSessionHandle(SessionHandle):
         """
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted", False
+        from local_operator.session.file_provenance import admitted_ticket
+
+        file_capture = admitted_ticket(
+            self._session, text, command_id, _file_admission, harness_injected
+        )
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
         # by construction (the window only opens when ``may_refresh`` reports
@@ -5857,7 +5906,7 @@ class ServingSessionHandle(SessionHandle):
         # carriage instead (see that block).
         if self._updating:
             if carries_attachments:
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise self._retiring_refusal()
             try:
                 receipt = await self._spool_for_successor(
@@ -5918,7 +5967,7 @@ class ServingSessionHandle(SessionHandle):
                 # Nowhere durable to put the message, so it is refused rather than
                 # queued — and the producer identity stays retryable, which is what
                 # lets the same id be admitted once the spool can be written.
-                self._command_reservations.reject(command_id)
+                self._refuse_admitted(command_id)
                 raise
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
@@ -5956,6 +6005,8 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        if "_file_capture" in parameters:
+            fields["_file_capture"] = file_capture
         if "input_surface" in parameters and input_surface is not None:
             fields["input_surface"] = input_surface
         try:
@@ -9151,7 +9202,9 @@ class ServingSessionHandle(SessionHandle):
                 code=("applied" if ok else (str(data_code) if data_code else "failed")),
                 message=str(result.text or ""),
             )
-        result = await self._complete_unconsumed_action(result, images, consumers)
+        result = await self._complete_unconsumed_action(
+            result, images, consumers, locality=locality, capabilities=capabilities
+        )
         return result.model_dump(mode="json")
 
     async def _complete_unconsumed_action(
@@ -9159,6 +9212,9 @@ class ServingSessionHandle(SessionHandle):
         result: Any,
         images: list[dict[str, str]] | None,
         consumers: Iterable[str] | None,
+        *,
+        locality: str | None = None,
+        capabilities: frozenset[str] | None = None,
     ) -> Any:
         """Run an attach receipt's request here when the client will not.
 
@@ -9224,9 +9280,18 @@ class ServingSessionHandle(SessionHandle):
             # note the echo) and it returns on its first step. ``prompt``
             # emphatically CAN park — see below.
             if self._session.is_streaming:
-                await self.steer(request, images=images, command_id=str(uuid.uuid4()))
+                await self.steer(
+                    request,
+                    images=images,
+                    command_id=str(uuid.uuid4()),
+                    _file_admission=_file_admission_for(locality, capabilities, "steer"),
+                )
             else:
-                await self._admit_without_waiting_for_the_turn(request, images)
+                await self._admit_without_waiting_for_the_turn(
+                    request,
+                    images,
+                    _file_admission=_file_admission_for(locality, capabilities, "prompt"),
+                )
         except Exception as exc:  # noqa: BLE001 — the attach happened; say what did not
             # The attach ALREADY landed and stays; only the turn failed to
             # start (session closing, queue full, a rejected prompt). Reporting
@@ -9242,8 +9307,26 @@ class ServingSessionHandle(SessionHandle):
             )
         return result
 
+    def _refuse_admitted(self, command_id: str) -> None:
+        """Release a refused command's reservation AND its frozen file ticket.
+
+        ``admitted_ticket`` freezes the ticket into ``OwnerProvenance.admissions``
+        before the update-window/queue checks; a refusal raised after it would
+        otherwise keep that ticket for the runtime's life (R3, PR #4108). Only
+        RAISING refusals call this: a spooled command keeps its ticket, because
+        the spool's drain takes it back by command id (``CONTINUATION``).
+        """
+        self._command_reservations.reject(command_id)
+        take = getattr(self._session, "_take_file_continuation", None)
+        if callable(take):
+            take(command_id)
+
     async def _admit_without_waiting_for_the_turn(
-        self, request: str, images: list[dict[str, str]] | None
+        self,
+        request: str,
+        images: list[dict[str, str]] | None,
+        *,
+        _file_admission: Any = None,
     ) -> None:
         """Admit ``request`` as a turn, reporting only the IMMEDIATE refusals.
 
@@ -9292,7 +9375,12 @@ class ServingSessionHandle(SessionHandle):
         # attachments.
         blocks = await _image_blocks_async(images)
         task = asyncio.ensure_future(
-            self.prompt(request, images=blocks, command_id=str(uuid.uuid4()))
+            self.prompt(
+                request,
+                images=blocks,
+                command_id=str(uuid.uuid4()),
+                _file_admission=_file_admission,
+            )
         )
         # One turn is enough today — nothing before ``prompt``'s first suspension
         # point yields — but a couple of extra turns costs nothing and keeps this

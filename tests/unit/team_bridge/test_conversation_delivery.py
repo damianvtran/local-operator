@@ -1439,6 +1439,31 @@ def test_invalid_body_provenance_never_admits_or_wakes(tmp_path, monkeypatch, ki
     assert server.view_calls == server.history_calls == []
 
 
+def test_an_integration_post_is_screened_and_carded_as_an_app(tmp_path, monkeypatch):
+    """Team Integrations: ``sender_kind=integration`` is not malformed provenance.
+
+    It still passes through screening (one screen call, before any wake), and the
+    card names the sender as an ``app`` — never ``human``/``agent`` — so a model
+    cannot read an alert post as a member's or its owner's instruction.
+    """
+
+    owner = _owner("a", 1)
+    _enroll(tmp_path, owner, "sess_a")
+    server = FakeServer(active={"bep_a": True}, notify={"bep_a": "all"})
+    screen_calls: list[str] = []
+    transcripts, _ = _wire_rig(
+        monkeypatch, server, {"a": (owner, tmp_path)}, screen_calls=screen_calls
+    )
+    response = server.body_response()
+    response.update(sender_kind="integration", sender_label="Datadog prod")
+    monkeypatch.setattr(server, "body_response", lambda: response)
+    assert _run(owner, tmp_path)["handled"][0]["action"] == "delivered"
+    assert screen_calls == ["bep_a"]
+    card = transcripts["sess_a"][0]["payload"]
+    assert "Datadog prod (app, same tenant)" in card
+    assert "(human" not in card and "(agent" not in card
+
+
 def test_names_come_from_the_authorized_body_not_the_feed(tmp_path, monkeypatch):
     owner = _owner("a", 1)
     _enroll(tmp_path, owner, "sess_a")

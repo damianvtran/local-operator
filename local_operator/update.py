@@ -8385,6 +8385,13 @@ def background_refresh_lines() -> list[str]:
                     f"(log: {latest})"
                 )
             elif unit == "serve":
+                # A move can land INSIDE a retry attempt, and the worker writes
+                # its result only after its next pre-check sleep (120 s observed,
+                # up to 480 s). Until then status printed "serve … current" and
+                # "pending" together (#4175 QA Q1). The same proven-``[]`` read
+                # that clears a failed row clears this one; ``None`` keeps it.
+                if _serve_since_moved():
+                    continue
                 # The operator's words for fix B's state: the update did not
                 # give up, a bounded retry is still asking serve to move.
                 lines.append(f"serve move: pending, retrying in the background ({latest})")
@@ -9418,6 +9425,48 @@ def wake_children_deferral(count: int | None) -> str:
     )
 
 
+def kill_mode_deferral(unit: str, kill_mode: str, recovery: str) -> str:
+    """Why a unit that keeps children was left, when its LOADED KillMode forbids a restart.
+
+    Shared by the update report and ``lop services status`` (#4175 QA Q2): a
+    wakes unit still on ``KillMode=control-group`` does NOT move when its
+    conversations end, it needs its unit rewritten first. Status used to give
+    the census sentence ("moves when they end") for it, which contradicted the
+    report and named a recovery that never arrives. ``""`` (the manager did
+    not answer) reads as ``unknown``, the same refusal the restart takes.
+    """
+    return (
+        f"restarting {unit} under KillMode={kill_mode or 'unknown'} would stop the "
+        f"conversations it started — run `{recovery}` to rewrite the unit, then `lop "
+        "services restart`"
+    )
+
+
+def wakes_unit_kill_mode() -> str | None:
+    """The wakes unit's LOADED ``KillMode`` as the restart gate reads it, or ``None``.
+
+    ``None`` means the KillMode gate does not apply: not Linux, no unit file,
+    or a unit this home cannot address (a redirected ``HOME``). That is the
+    same set of cases where :func:`_systemd_restart_if_build_moved` never
+    reaches its KillMode check, so status and report take the same branch.
+    ``""`` means the unit is ours but the manager gave no answer, which the
+    gate refuses as ``unknown``. Never raises: a status row is a report.
+    """
+    try:
+        from local_operator import supervisors
+
+        if not sys.platform.startswith("linux"):
+            return None
+        if not supervisors.systemd_unit_path(_WAKES_UNIT).exists():
+            return None
+        if not supervisors.systemd_unit_is_addressable(_WAKES_UNIT):
+            return None
+        return _systemd_show(supervisors.systemctl_user, _WAKES_UNIT).get("KillMode", "")
+    except Exception:  # noqa: BLE001 — a status row must not fail the command
+        logger.debug("wakes unit KillMode read failed", exc_info=True)
+        return None
+
+
 #: Unit → census of the conversations its main process would stop on SIGTERM.
 #: Only units whose stop handler forwards the signal belong here (see the
 #: KILLMODE block above :data:`_LINUX_RESTART_UNITS`).
@@ -9635,12 +9684,7 @@ def _systemd_restart_if_build_moved(
             return launchd.PlistRefresh(
                 name=name,
                 kind="stale",
-                detail=(
-                    f"left on {stale.name}: restarting {unit} under "
-                    f"KillMode={kill_mode or 'unknown'} would stop the conversations it "
-                    f"started — run `{recovery}` to rewrite the unit, then `lop services "
-                    "restart`"
-                ),
+                detail=f"left on {stale.name}: {kill_mode_deferral(unit, kill_mode, recovery)}",
             )
         if child_census is not None:
             # Read-only and taken LAST, right before the restart, so the window in
