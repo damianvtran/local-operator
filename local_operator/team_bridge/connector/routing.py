@@ -130,6 +130,149 @@ def _pick(
     return RouteDecision(session_id, reason)
 
 
+# -- budgets -------------------------------------------------------------------
+
+#: A routed destination is woken at most once per this many seconds: the
+#: coalescer's per-destination gate for routed groups (the ordinary window is
+#: 3 s, which is too short for a session a stranger can keep waking). An
+#: ESTIMATE: screening already bounds inbound volume (settings.py: peak 40
+#: screening units an hour, ~16 distinct messages), and 10 s is comfortably
+#: above one agent turn. Measure with ``wake_diagnostics`` per-destination
+#: counts once those exist.
+ROUTED_WAKE_MIN_INTERVAL_S = 10.0
+
+#: Routed wakes a NON-designated session may take per hour. An ESTIMATE for the
+#: same reason; the designated session is not budgeted here (it always was the
+#: destination). Over budget the message goes to the designated session: it is
+#: kept, never held or dropped. In memory only: a restart resets it, which at
+#: worst grants one more hour's allowance.
+ROUTED_WAKES_PER_HOUR = 20
+
+#: A routed row nobody picked up is handed back to the designated session after
+#: this long. An ESTIMATE: it only has to exceed a busy session's turn, because
+#: a row a live turn has CLAIMED is never reclaimed.
+ROUTED_RECLAIM_AFTER_S = 15 * 60.0
+
+#: How often the loop looks for rows to reclaim (the sweep is an indexed read
+#: first and a write only when something is due).
+ROUTED_SWEEP_EVERY_S = 60.0
+
+
+class RoutedWakeBudget:
+    """Sliding one-hour count of routed wakes per destination session."""
+
+    def __init__(self, per_hour: int = ROUTED_WAKES_PER_HOUR) -> None:
+        self.per_hour = per_hour
+        self._wakes: dict[str, list[float]] = {}
+
+    def _recent(self, session_id: str, now: float) -> list[float]:
+        kept = [t for t in self._wakes.get(session_id, []) if t > now - 3600.0]
+        self._wakes[session_id] = kept
+        return kept
+
+    def has_room(self, session_id: str, now: float | None = None) -> bool:
+        moment = time.time() if now is None else now
+        return len(self._recent(session_id, moment)) < self.per_hour
+
+    def charge(self, session_id: str, now: float | None = None) -> None:
+        moment = time.time() if now is None else now
+        self._recent(session_id, moment).append(moment)
+
+
+#: The connector process's budget (one connector per config dir holds the lock).
+ROUTED_BUDGET = RoutedWakeBudget()
+DESIGNATED_OVER_BUDGET = "over_budget"
+
+
+# -- the plan the wire-in acts on -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoutePlan:
+    """A :class:`RouteDecision` with what the cards need to say about it."""
+
+    target: str | None
+    reason: str
+    #: Routed: the ref of the target's newest ask in this DM (display only).
+    ask_ref: str | None = None
+    #: Designated + ambiguous: ``(session_id, minutes_ago, ref or None)``, newest first.
+    candidates: tuple[tuple[str, int, str | None], ...] = ()
+
+
+def plan_route(
+    *,
+    config_dir: Path,
+    endpoint_id: str,
+    own_account_id: str,
+    designated_session: str,
+    conversation_id: str,
+    kind: str | None,
+    sender_class: str | None,
+    sender_account_id: str,
+    thread_root_id: str | None,
+    now: float | None = None,
+) -> RoutePlan:
+    """Gather the facts and decide. Every failure is the designated session.
+
+    The ledger is read only when the cheap checks pass (a group, channel or own
+    account never touches it), and liveness only when a session was actually
+    picked.
+    """
+
+    from .. import reply_guard
+
+    moment = time.time() if now is None else now
+    ledger: tuple[str | None, dict[str, float]] | None = None
+    if kind == "dm" and sender_class in ("human", "agent"):
+        ledger = reply_guard.routing_facts(
+            config_dir,
+            endpoint_id=endpoint_id,
+            conversation_id=conversation_id,
+            thread_root_id=thread_root_id,
+            since=window_start(moment),
+        )
+    candidates_pool: frozenset[str] = frozenset()
+    if ledger is not None and (ledger[0] or ledger[1]):
+        candidates_pool = live_capable_sessions(None)
+    decision = decide_route(
+        kind=kind,
+        sender_class=sender_class,
+        sender_account_id=sender_account_id,
+        own_account_id=own_account_id,
+        designated_session=designated_session,
+        thread_root_id=thread_root_id,
+        ledger=ledger,
+        live_capable=candidates_pool,
+    )
+    if decision.target is not None and not ROUTED_BUDGET.has_room(decision.target, moment):
+        return RoutePlan(None, DESIGNATED_OVER_BUDGET)
+    if decision.target is not None:
+        return RoutePlan(
+            decision.target,
+            decision.reason,
+            ask_ref=reply_guard.latest_ask_ref(
+                config_dir,
+                endpoint_id=endpoint_id,
+                conversation_id=conversation_id,
+                session_id=decision.target,
+            ),
+        )
+    listed = tuple(
+        (
+            session_id,
+            max(0, int((moment - at) // 60)),
+            reply_guard.latest_ask_ref(
+                config_dir,
+                endpoint_id=endpoint_id,
+                conversation_id=conversation_id,
+                session_id=session_id,
+            ),
+        )
+        for session_id, at in decision.candidates
+    )
+    return RoutePlan(None, decision.reason, candidates=listed)
+
+
 # -- liveness ----------------------------------------------------------------
 
 #: One scan per connector iteration. A scan is ~0.3-0.7 ms with a handful of
@@ -193,6 +336,15 @@ def window_start(now: float | None = None) -> float:
 
 
 __all__ = [
+    "DESIGNATED_OVER_BUDGET",
+    "ROUTED_BUDGET",
+    "ROUTED_RECLAIM_AFTER_S",
+    "ROUTED_SWEEP_EVERY_S",
+    "ROUTED_WAKES_PER_HOUR",
+    "ROUTED_WAKE_MIN_INTERVAL_S",
+    "RoutePlan",
+    "RoutedWakeBudget",
+    "plan_route",
     "DESIGNATED_AMBIGUOUS",
     "DESIGNATED_DEFAULT",
     "DESIGNATED_IS_ASKER",

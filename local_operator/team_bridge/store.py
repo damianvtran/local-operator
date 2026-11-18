@@ -3600,6 +3600,19 @@ class Store:
         """
 
         moment = time.time() if now is None else float(now)
+        # The loop calls this every minute: look first, with a read-only handle
+        # that creates and migrates nothing, and take the write lock only when a
+        # row is actually due. A store with no routed column has none.
+        with self._connect_readonly() as probe:
+            if probe is None or not self._has_routed_session_column(probe):
+                return 0
+            due = probe.execute(
+                "SELECT 1 FROM body_reservations WHERE owner_key = ? "
+                "AND routed_session IS NOT NULL AND created_at <= ? LIMIT 1",
+                (_owner_key(owner), float(older_than)),
+            ).fetchone()
+            if due is None:
+                return 0
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
@@ -3620,6 +3633,37 @@ class Store:
                 ),
             )
             return int(cursor.rowcount)
+
+    def unroute_reservation(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        conversation_id: str,
+        message_id: str,
+        routed_session: str,
+    ) -> bool:
+        """Take ONE row back from ``routed_session`` while nobody has claimed it.
+
+        The connector's own undo: it routed a message, then found just before
+        the wake that the target was gone. Compare-and-set on both the named
+        session and an unclaimed state, so it can never strip a row a live turn
+        holds or one routed elsewhere in the meantime. True when the row is the
+        designated session's again.
+        """
+
+        self._reservation_field("routed_session", routed_session, _SESSION_TOKEN)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_routed_session_column(conn)
+            cursor = conn.execute(
+                "UPDATE body_reservations SET routed_session = NULL, updated_at = ? "
+                "WHERE owner_key = ? AND conversation_id = ? AND message_id = ? "
+                "AND routed_session = ? AND state = 'pending'",
+                (time.time(), _owner_key(owner), conversation_id, message_id, routed_session),
+            )
+            return cursor.rowcount == 1
 
     def body_reservation(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str

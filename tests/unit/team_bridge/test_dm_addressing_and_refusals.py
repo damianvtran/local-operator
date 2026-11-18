@@ -1028,8 +1028,8 @@ async def test_a_non_designated_sender_is_told_where_replies_go(tmp_path: Any) -
     out = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
 
     assert out["ok"] is True, out
-    assert "replies go to session s_designated, not to you" in out["content"], out
-    assert "channel_history" in out["content"]
+    assert "otherwise it goes to session s_designated" in out["content"], out
+    assert "the last 30 minutes" in out["content"] and "channel_history" in out["content"]
 
 
 @pytest.mark.asyncio
@@ -1040,4 +1040,4 @@ async def test_the_designated_sender_gets_no_destination_notice(tmp_path: Any) -
     out = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
 
     assert out["ok"] is True, out
-    assert "replies go to" not in out["content"], out
+    assert "channel_history" not in out["content"] and "goes to session" not in out["content"], out

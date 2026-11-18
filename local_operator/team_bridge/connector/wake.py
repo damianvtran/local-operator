@@ -848,6 +848,10 @@ def _confirmed_screen_result(stored: Mapping[str, Any]) -> Any:
     return ScreenResult(disposition="deliver", receipt=receipt)
 
 
+class RoutedSessionGone(Exception):
+    """``live_only`` delivery found its target no longer live. Nothing was sent."""
+
+
 async def deliver_wake(
     owner: Any,
     payload: str,
@@ -856,8 +860,17 @@ async def deliver_wake(
     config_dir: Path,
     bridge_meta: dict[str, Any] | None = None,
     sender_display: dict[str, Any] | None = None,
+    live_only: bool = False,
 ) -> str:
     """SEAM: hand the wake to the designated CoS session (lazy heavy import).
+
+    ``live_only`` is for a ROUTED target (a session that is not the designated
+    one): it is checked against the registry NOW, not as it was when the
+    decision was made, because this function otherwise passes ``record=None``
+    and a dead session with history would be cold-resumed. Resuming a task
+    session on a stranger's message is exactly what routing must never do, so a
+    target that is no longer live raises :class:`RoutedSessionGone` BEFORE
+    anything is delivered and the caller falls back to the designated session.
 
     Live target: the shipped ``deliver_peer_message`` with ``wake=True``.
     Cold target (no runtime): ``engage_runtime`` with a ``PeerMessageErrand``
@@ -873,6 +886,11 @@ async def deliver_wake(
         session_has_durable_history,
     )
 
+    if live_only:
+        from .routing import live_capable_sessions
+
+        if session_id not in live_capable_sessions(None, fresh=True):
+            raise RoutedSessionGone(session_id)
     sender = {"account_id": owner.account_id, "source": TEAM_BRIDGE_MESSAGE_TYPE}
     if sender_display:
         # D1: the human card must be able to NAME the member. This dict is all

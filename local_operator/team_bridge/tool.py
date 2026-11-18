@@ -1586,7 +1586,7 @@ async def _direct_message(
     if file_batch:
         receipt["file_ids"] = list(file_batch.staged)
     attachment_warning = _annotate_attachments(receipt, staged_images)
-    _note_reply_destination(runtime, receipt)
+    _note_reply_destination(runtime, receipt, dm=True)
     # The target's membership state is the server's admission answer: an
     # ``invited`` agent will not be woken until its owner accepts, and the
     # sender must know that rather than assume delivery.
@@ -1788,17 +1788,24 @@ def _posted_message(result: Any) -> tuple[str, int | None]:
     )
 
 
-def _note_reply_destination(runtime: "BridgeRuntime", receipt: dict[str, Any]) -> None:
+def _note_reply_destination(
+    runtime: "BridgeRuntime", receipt: dict[str, Any], *, dm: bool = False
+) -> None:
     """Tell a non-designated sender where the answer to this post will land.
 
-    Replies to a conversation post are delivered to the DESIGNATED session, not
-    to the session that posted (the sender may be a task session the owner never
-    sees again). Without this line a task session waits for an answer that was
-    handed to someone else, and the designated session answers a question it did
-    not ask. Silent when the sender IS the designated session, and when the
-    designation cannot be read (store-less runtime, unreadable store): a notice
-    must never fail a send that already landed.
+    Replies to a conversation post are delivered to the DESIGNATED session by
+    default, not to the session that posted (the sender may be a task session
+    the owner never sees again). In a DM the connector may route the answer back
+    to the asker, but only while it is the one local session that posted there
+    recently and is still running, so the line says both. Without it a task
+    session waits for an answer that was handed to someone else, and the
+    designated session answers a question it did not ask. Silent when the
+    sender IS the designated session, and when the designation cannot be read
+    (store-less runtime, unreadable store): a notice must never fail a send that
+    already landed.
     """
+
+    from .connector.routing import POSTER_WINDOW_S
     from .store import Store, StoreRefused
 
     try:
@@ -1806,6 +1813,14 @@ def _note_reply_destination(runtime: "BridgeRuntime", receipt: dict[str, Any]) -
     except (StoreRefused, OSError, UnicodeDecodeError, AttributeError):
         return
     if not designated or designated == runtime.session_id:
+        return
+    if dm:
+        receipt["content"] += (
+            "; a reply reaches this session only while it is the one session of yours that "
+            f"posted in this DM in the last {int(POSTER_WINDOW_S // 60)} minutes and is still "
+            f"running, otherwise it goes to session {designated}: read channel_history to see "
+            "what comes back"
+        )
         return
     receipt["content"] += (
         f"; replies go to session {designated}, not to you: read channel_history "

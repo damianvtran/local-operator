@@ -1027,6 +1027,27 @@ def routing_facts(
     return thread_session, posters
 
 
+def latest_ask_ref(
+    config_dir: Path | str, *, endpoint_id: str, conversation_id: str, session_id: str
+) -> str | None:
+    """The ref of ``session_id``'s newest ask in this conversation, or None. Display only."""
+
+    conn = _connect_ledger_readonly(config_dir)
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT ref FROM outbound_posts WHERE endpoint_id = ? AND conversation_id = ? "
+            "AND session_id = ? AND ref IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1",
+            (endpoint_id, conversation_id, session_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    return str(row["ref"]) if row is not None else None
+
+
 def discard_outbound(config_dir: Path | str, record: OutboundRecord | None) -> None:
     """Delete the row of a send the hub did not take. Never raises."""
 
@@ -1063,6 +1084,7 @@ __all__ = [
     "discard_outbound",
     "guard_path",
     "key_path",
+    "latest_ask_ref",
     "lookup_authorship",
     "own_posts_between",
     "record_outbound",

@@ -837,7 +837,20 @@ def test_an_old_shape_store_without_the_column_opens_and_reads_as_unrouted(tmp_p
         ]
 
     # The first WRITER adds the column and the route works from then on.
-    assert store.reclaim_routed(_owner(), older_than=0) == 0
+    assert store.record_body_reservation(  # a new-build writer, for a second message
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id="bcmsg_abcdef02",
+        conversation_seq=4,
+        mention=False,
+        body_sha256=DIGEST,
+        screening_fingerprint=FINGERPRINT,
+        policy_epoch=3,
+        consent_version="bridge_consent_v1",
+        designated_session="sess_cos",
+        now=time.time(),
+        routed_session=ROUTED,
+    )
     with sqlite3.connect(state_db_path(tmp_path)) as conn:
         assert "routed_session" in [
             r[1] for r in conn.execute("PRAGMA table_info(body_reservations)")
