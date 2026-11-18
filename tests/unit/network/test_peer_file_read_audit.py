@@ -17,16 +17,21 @@ from typing import Any
 import pytest
 
 from local_operator.network import audit, files, store
-from tests.unit.network.test_mesh_file_pull import (  # noqa: F401 — fixture dependencies
+from tests.unit.network.test_mesh_file_pull import (
     SESSION,
     Devices,
     _in_store,
     _pad,
     _pull,
-    devices,
-    mesh,
-    pair,
+    devices as _devices_fixture,
+    mesh as _mesh_fixture,
+    pair as _pair_fixture,
 )
+
+# Expose the original fixture objects without wrapping their scope or dependencies.
+devices = _devices_fixture
+mesh = _mesh_fixture
+pair = _pair_fixture
 
 
 def _admissions(root: Path) -> list[dict[str, Any]]:
@@ -546,9 +551,9 @@ def test_required_ack_tracks_exact_row_through_healthy_rotation(
 
     def unlink(named: Path, *args: Any, **kwargs: Any) -> None:
         if named == path:
-            assert archive_synced and archive_published == archive_synced, (
-                "retired prior live copy before COMPLETE archive and directory fsync"
-            )
+            assert (
+                archive_synced and archive_published == archive_synced
+            ), "retired prior live copy before COMPLETE archive and directory fsync"
         real_unlink(named, *args, **kwargs)
 
     monkeypatch.setattr(os, "fsync", fsync)

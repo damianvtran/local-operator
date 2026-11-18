@@ -1104,7 +1104,8 @@ class AuditLog:
         #: durable events, NOT by the frame rate, and ``syncs``
         #: counts completed live-file durability cycles for ``DURABLE_EVENTS``
         #: and rotation. Each cycle now also persists directory names; archive
-        #: publication has its own file/directory fsync before live retirement. ``scripts/mesh_audit_probe.py`` reads both; a
+        #: publication has its own file/directory fsync before live retirement.
+        #: ``scripts/mesh_audit_probe.py`` reads both; a
         #: bound with no instrument behind it is a claim nobody can check.
         self.write_calls = 0
         self.syncs = 0
@@ -1396,7 +1397,8 @@ class AuditLog:
                 self._sync_directories()
                 self.syncs += 1
                 if self._required_path == self._path and self._required_identity == (
-                    synced.st_dev, synced.st_ino
+                    synced.st_dev,
+                    synced.st_ino,
                 ):
                     self._required_durable = True
             except OSError as exc:
