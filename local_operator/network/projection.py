@@ -1354,11 +1354,22 @@ def remote_owner_for(
 
 
 class RemoteStreamRefusal(ConnectionError):
-    """An explicit mesh rejection, not an ambiguous missing owner ack."""
+    """An explicit mesh rejection, not an ambiguous missing owner ack.
+
+    This is not a failed dial: dropping its code made an answered runtime refusal
+    look like an unreachable device. It remains a ConnectionError so existing
+    bind teardown runs, while callers that report the result keep the real code.
+    """
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+# #4057 mobile readers and #4060 pilot reporting must recognize ONE refusal:
+# retaining the reviewed pilot spelling as an alias preserves both callers'
+# isinstance checks, including errors raised by mobile's reply-error hook.
+RemoteStreamRefused = RemoteStreamRefusal
 
 
 class RemoteSessionClient(AttachClient):
@@ -1428,6 +1439,7 @@ class RemoteSessionClient(AttachClient):
                 "device cannot be reached from here."
             )
         self._session_id = session_id
+        self.received_after_welcome = False
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in capabilities
@@ -1554,13 +1566,16 @@ class RemoteSessionClient(AttachClient):
             raise ConnectionError("the local relay did not answer") from exc
         except ValueError as exc:
             raise ConnectionError("the local relay sent a malformed frame") from exc
-        if not isinstance(opening, dict):
-            raise ConnectionError("the local relay sent a malformed frame")
-        if opening.get("op") != "ack":
-            raise RemoteStreamRefusal(
-                str(opening.get("code") or "not_authorised"),
-                str(opening.get("message") or "the relay refused to open that stream"),
-            )
+        if not isinstance(opening, dict) or opening.get("op") != "ack":
+            failure = opening if isinstance(opening, dict) else {}
+            message = str(failure.get("message") or "the relay refused to open that stream")
+            if not isinstance(opening, dict):
+                raise ConnectionError(message)
+            # A received codeless refusal is the owner's deliberately opaque
+            # permission answer. The local relay now labels silence explicitly,
+            # so defaulting THIS answer to not_authorised does not turn a dead
+            # transport into a phone permission error (#4057 / #4060 M1).
+            raise RemoteStreamRefused(str(failure.get("code") or "not_authorised"), message)
         raw_detail = opening.get("detail")
         detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
         self._stream_id = str(detail.get("stream") or "")
@@ -1572,7 +1587,16 @@ class RemoteSessionClient(AttachClient):
         try:
             first = await asyncio.wait_for(reader.readline(), timeout=ACK_TIMEOUT_S)
         except TimeoutError as exc:
-            raise ConnectionError("the remote owner did not send its state") from exc
+            # Admission already consumed the runtime's welcome on the owner.
+            # Its forwarding hop now being silent is not evidence of a busy
+            # runtime, even though the local attach's welcome timeout is.
+            from local_operator.mobile.attach_client import (
+                RemoteStreamUnresponsiveError,
+            )
+
+            raise RemoteStreamUnresponsiveError(
+                "the session's state did not arrive after the connection was accepted"
+            ) from exc
         except ValueError as exc:
             raise ConnectionError(OVERSIZED_FRAME_REASON) from exc
         if not first:

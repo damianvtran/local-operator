@@ -231,3 +231,88 @@ async def test_spawn_owned_session_attaches_the_follower(
             maybe = dispose()
             if asyncio.iscoroutine(maybe):
                 await maybe
+
+
+async def _journal(directory: Path, *, with_supplement: bool) -> str:
+    """A finished one-turn journal, optionally with the turn's Highlight rows.
+
+    Returns the answer's message id (the supplement's anchor). Two versions of
+    the job are written so the newest-wins read is observable.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+    from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message(role="user", content=[TextContent(text="draw it")]))
+    answer = Message(role="assistant", content=[TextContent(text="Here are the shots.")])
+    await transcript.append_message(answer)
+    if with_supplement:
+        for version, state in ((1, "decided"), (2, "done")):
+            await transcript.append_custom(
+                SUPPLEMENT_CUSTOM_TYPE,
+                {
+                    "anchor": answer.id,
+                    "job": "3f9c1a7e5b20",
+                    "version": version,
+                    "state": state,
+                    "files": [
+                        {
+                            "path": "out/shot.png",
+                            "name": "shot.png",
+                            "kind": "image",
+                            "size_bytes": 10,
+                            "mtime": 1.0,
+                        }
+                    ],
+                },
+            )
+    return answer.id
+
+
+async def _attached_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, with_supplement: bool
+) -> tuple[SessionProjection, str]:
+    """``subscribe()`` on a handle over a journal this process did not run live."""
+    from tests.unit.supplements.test_runner_generator import _make_session
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    directory = tmp_path / "config" / "sessions" / "aabbcc001122"
+    anchor = await _journal(directory, with_supplement=with_supplement)
+    session = _make_session(directory, tmp_path)
+    handle = serving.ServingSessionHandle(
+        session, asyncio.get_running_loop(), install_gates=False, cwd=str(tmp_path)
+    )
+    unsubscribe = handle.subscribe(lambda: None)
+    try:
+        return handle._fold.projection, anchor
+    finally:
+        unsubscribe()
+        await handle.dispose()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_owner_seeds_the_journalled_highlight_into_its_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The relay serves the owner's LIVE projection; ``fold_history`` reads messages
+    only, so without the seed every Highlight journalled before this process
+    started (a pinned PNG) is gone from the phone after a resume or restart."""
+    projection, anchor = await _attached_projection(tmp_path, monkeypatch, with_supplement=True)
+    assert [entry.id for entry in projection.transcript if entry.kind == "assistant"] == [anchor]
+    held = projection.supplements
+    assert set(held) == {anchor}
+    assert held[anchor]["version"] == 2 and held[anchor]["state"] == "done"
+    assert held[anchor]["files"][0]["name"] == "shot.png"
+    assert projection.to_json()["supplements"][anchor]["job"] == "3f9c1a7e5b20"
+
+
+@pytest.mark.asyncio
+async def test_a_journal_without_highlights_leaves_the_projection_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary session: nothing seeded, no ``supplements`` key on the wire."""
+    projection, _ = await _attached_projection(tmp_path, monkeypatch, with_supplement=False)
+    assert projection.supplements == {}
+    assert "supplements" not in projection.to_json()

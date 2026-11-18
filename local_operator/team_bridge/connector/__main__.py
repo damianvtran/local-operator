@@ -44,6 +44,7 @@ import os
 import signal
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -401,6 +402,16 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
         else None
     )
     auth_store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
+    # A chief-of-staff rename reaches the hub as soon as it lands locally, not
+    # at the next fresh status read (identity_publisher's module doc). Started
+    # only once the singleton is ours, so one process per machine publishes.
+    from local_operator.team_bridge.connector import identity_publisher as _identity
+
+    identity_stop = stop if stop is not None else asyncio.Event()
+    identity_task = asyncio.create_task(
+        _identity.run(config_dir, base_url=base_url, stop=identity_stop),
+        name="bridge-identity-publisher",
+    )
     try:
         while owner is not None:
             # A fresh client per owner: it pins ``credential_id``, so a
@@ -429,11 +440,17 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
                 stop=stop,
             )
     finally:
-        if keeper is not None:
-            keeper.cancel()
-        auth_store.close()
-        _runtime.clear_own_record(config_dir)
-        lock.release()
+        identity_task.cancel()
+        try:
+            # The next lock holder must not race an old publisher unwinding.
+            with suppress(asyncio.CancelledError):
+                await identity_task
+        finally:
+            if keeper is not None:
+                keeper.cancel()
+            auth_store.close()
+            _runtime.clear_own_record(config_dir)
+            lock.release()
     return 0
 
 

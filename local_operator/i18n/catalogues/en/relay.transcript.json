@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "Ask",
   "relay.transcript.label.messages": "Messages",
   "relay.transcript.composer.queued": "{count, plural, one {# queued} other {# queued}}",
-  "relay.transcript.session.unread_refused": "Could not read what is unread — nothing was cleared. Try again."
+  "relay.transcript.session.unread_refused": "Could not read what is unread — nothing was cleared. Try again.",
+  "relay.transcript.message.show_more": "Show more",
+  "relay.transcript.message.show_less": "Show less",
+  "relay.transcript.message.show_more_label": "Show more of your message",
+  "relay.transcript.message.show_less_label": "Show less of your message"
 }

@@ -280,6 +280,21 @@ def test_a_world_readable_record_is_tightened_on_its_next_append(root: Path) -> 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_a_wider_directory_is_tightened_on_the_next_append(root: Path) -> None:
+    """``mkdir(mode=...)`` applies at CREATION only, and the umask masks it.
+
+    A directory an older build made, or one under a hand-made
+    ``LOCAL_OPERATOR_CONFIG_DIR``, would otherwise keep a wider mode while the
+    module promises an owner-only record AND directory. What a wider directory
+    exposes is filenames, and the fix costs one ``chmod`` per append.
+    """
+    directory = records.records_path(root).parent
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o755)
+    _record(root)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
 def test_a_torn_final_line_does_not_swallow_the_next_append(root: Path) -> None:
     """One crash must cost one observation, not two.
 
@@ -389,3 +404,27 @@ def test_the_stored_repo_url_carries_no_credentials(root: Path) -> None:
     raw = records.records_path(root).read_text(encoding="utf-8")
     assert "hunter2-dummy" not in raw
     assert "user" not in json.loads(raw.splitlines()[0])["repo_url"]
+
+
+def test_the_stored_repo_url_drops_a_password_that_contains_a_slash(root: Path) -> None:
+    """M1 through the store: the escaped shape used to reach the file unchanged.
+
+    ``urlsplit`` ended the authority at the ``/``, so the netloc carried no ``@``
+    for the old rule to strip and the host — plus a chunk of the password — sat
+    in the path. A caller that passes a ``--repo``-style URL straight to the
+    record gets the store's own scrub, so the file's no-credential contract is
+    what is asserted here rather than the scrubber's return value.
+    """
+    userinfo = "user" + ":" + "pa/ss"
+    stored = records.record_submission(
+        run_id="run_escaped",
+        repo_url="https://" + userinfo + "@github.com/o/r.git",
+        repo_sha="0" * 40,
+        prompt="fix the flaky test",
+        size="m",
+        api_origin="https://api.example.invalid",
+        config_dir=root,
+    )
+    assert stored.repo_url == "https://github.com/o/r.git"
+    raw = records.records_path(root).read_text(encoding="utf-8")
+    assert "pa/ss" not in raw
