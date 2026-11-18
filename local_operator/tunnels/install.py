@@ -901,7 +901,13 @@ def _revive_allowed() -> bool:
         return False
 
 
-def install() -> None:
+def install() -> str:
+    """Install (or re-assert) the connector service; return a note for the CLI.
+
+    The note is ``""`` unless the already-installed connector's RUNNING build
+    had to be restarted or could not be confirmed (see the skip branch below);
+    the caller prints it beside its own success sentence.
+    """
     kind = supervisors.supervisor()
     if kind is None:
         raise ValueError(NO_SUPERVISOR_ERROR)
@@ -939,12 +945,30 @@ def install() -> None:
         # label), and the shared reload for anything else — including a label
         # launchd has forgotten, which is what registers it.
         reload_needed = True
-        if (
-            current
-            and launchd.job_running(label=LABEL, path=path, run=_launchctl)
-            and gateway_answers()
-        ):
-            reload_needed = False
+        pid = launchd.job_pid(label=LABEL, path=path, run=_launchctl) if current else None
+        if current and pid is not None and gateway_answers():
+            # ANSWERING IS NOT "ON THIS BUILD" (field finding, 2026-11-18): an
+            # upgraded machine kept a connector started days earlier on the old
+            # code while this install reported success; only `lop tunnel
+            # restart` moved it. A PROVEN stale build is restarted here.
+            #
+            # AN UNPROVEN BUILD IS NOT BOUNCED, unlike mobile: restarting the
+            # connector drops remote access for seconds and can land in states
+            # that do not recover by themselves (LOGIN_REQUIRED, a suspended
+            # lease — see `launchd.PlistRefresh`), so a restart reasoned from a
+            # probe that could not read the build is the operator's call. The
+            # note says so instead of the old silent "current".
+            build = launchd.check_running_build_on_install(
+                label=LABEL,
+                path=path,
+                pid=pid,
+                recovery="lop tunnel restart",
+                run=_launchctl,
+                restart_when_unproven=False,
+            )
+            if build.kind == "failed":
+                raise ValueError(build.step())
+            return build.step()
         elif current and launchd.kickstart(label=LABEL, path=path, run=_launchctl):
             reload_needed = False
         if reload_needed:
@@ -969,6 +993,11 @@ def install() -> None:
         path.chmod(0o600)
         _run(["systemctl", "--user", "daemon-reload"])
         _run(["systemctl", "--user", "enable", "--now", path.name])
+        from local_operator import update
+
+        return update.systemd_install_build_line(
+            name="tunnel", unit=path.name, recovery="lop tunnel restart"
+        )
     else:  # schtasks
         xml = render_task_xml()
         # The record first: it is what `uninstall` and a future diff read, and it
@@ -984,6 +1013,7 @@ def install() -> None:
                 "the tunnel task was registered but could not be started: "
                 f"{((started.stderr or started.stdout) or '').strip()[:200]}"
             )
+    return ""
 
 
 def action(name: str) -> None:

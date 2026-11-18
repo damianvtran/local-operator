@@ -1,0 +1,7 @@
+{
+  "cli.daemon_build.install_restarted": "service en cours redémarré sur la nouvelle version (il exécutait encore {generation})",
+  "cli.daemon_build.install_restarted_unconfirmed": "service en cours redémarré, car sa version n’a pas pu être confirmée comme à jour",
+  "cli.daemon_build.install_restart_failed": "impossible de redémarrer le service en cours sur la nouvelle version ; lancez `{command}` pour le faire passer dessus",
+  "cli.daemon_build.install_unconfirmed": "impossible de confirmer que le service en cours utilise la nouvelle version ; lancez `{command}` s’il se comporte encore comme l’ancienne",
+  "cli.daemon_build.status_stale": "exécute une version plus ancienne ({generation}) ; lancez `{command}` pour le redémarrer sur la nouvelle version"
+}

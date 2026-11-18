@@ -497,3 +497,57 @@ def test_r1_4_a_later_manual_move_clears_a_failed_serve_retry_row(
     # ``lop services restart`` moved serve and wrote no run record.
     monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: [])
     assert [line for line in update.background_refresh_lines() if "serve" in line] == []
+
+
+def test_the_daemon_status_line_names_only_a_proven_stale_daemon_of_that_name() -> None:
+    """`lop mobile status` / `lop tunnel status` reuse the census (2026-11-18).
+
+    The field finding: both daemons sat on the old build after an upgrade and
+    neither status said so. The line is the census filtered to ONE name, so it
+    cannot disagree with `lop services status`; a name the census did not prove
+    stale prints nothing.
+    """
+    rows = [
+        services.StaleDaemon(
+            name="tunnel", pid=1206, generation="20261113T090000Z-old", reason="run x"
+        )
+    ]
+
+    line = services.stale_daemon_status_line("tunnel", "lop tunnel restart", daemons=rows)
+
+    assert "20261113T090000Z-old" in line
+    assert "lop tunnel restart" in line
+    assert services.stale_daemon_status_line("mobile", "lop mobile restart", daemons=rows) == ""
+    assert services.stale_daemon_status_line("tunnel", "lop tunnel restart", daemons=[]) == ""
+
+
+def test_the_install_build_line_reuses_the_mover_and_speaks_only_for_a_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linux installers' line is #4175's mover unchanged, never killing children."""
+    from local_operator import launchd
+
+    seen: list[dict[str, object]] = []
+
+    def mover(**kwargs: object) -> launchd.PlistRefresh:
+        seen.append(kwargs)
+        return launchd.PlistRefresh(name="tunnel", kind="restarted", detail="g-old")
+
+    monkeypatch.setattr(update, "_systemd_restart_if_build_moved", mover)
+    line = update.systemd_install_build_line(
+        name="tunnel", unit="lop-tunnel.service", recovery="lop tunnel restart"
+    )
+    assert line == "tunnel daemon: restarted onto the new build (was on g-old)"
+    assert seen[0]["keeps_children"] is False
+
+    monkeypatch.setattr(
+        update,
+        "_systemd_restart_if_build_moved",
+        lambda **kwargs: launchd.PlistRefresh(name="tunnel", kind="current"),
+    )
+    assert (
+        update.systemd_install_build_line(
+            name="tunnel", unit="lop-tunnel.service", recovery="lop tunnel restart"
+        )
+        == ""
+    )

@@ -2139,7 +2139,30 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             reload_needed = True
             if current and _serving(port):
                 reload_needed = False
-                steps.append("LaunchAgent already current and serving; left it loaded")
+                # "CURRENT AND SERVING" IS NOT "ON THIS BUILD" (field finding,
+                # 2026-11-18): after 0.96.5 → 0.106.7 this branch said "already
+                # current" over a daemon started days earlier, and the phone
+                # kept talking to old code until `lop mobile restart`. The plist
+                # names the stable shim, so it is identical across builds; only
+                # the running pid can say which build it loaded.
+                #
+                # UNPROVEN BUILD → RESTART, mirroring the update child
+                # (`update.mobile_refresh_command`: every answer except a proven
+                # "current" bounces). A phone reconnects on its own after the
+                # few-second bounce, and the operator asked for an install.
+                build = launchd.check_running_build_on_install(
+                    label=LABEL,
+                    path=plist_path(),
+                    pid=launchd.job_pid(label=LABEL, path=plist_path(), run=_launchctl),
+                    recovery="lop mobile restart",
+                    run=_launchctl,
+                    restart_when_unproven=True,
+                )
+                if build.kind == "failed":
+                    return {"ok": False, "steps": steps, "error": build.step()}
+                steps.append(
+                    build.step() or "LaunchAgent already current and serving; left it loaded"
+                )
             elif current and launchd.kickstart(label=LABEL, path=plist_path(), run=_launchctl):
                 reload_needed = False
                 steps.append("restarted the loaded LaunchAgent (its file was already current)")
@@ -2215,6 +2238,13 @@ def _install_systemd(port: int, *, dry_run: bool, steps: list[str]) -> tuple[boo
     if loaded.returncode:
         return False, supervisors.translate_systemctl_error(loaded.stderr)
     steps.append(f"enabled the systemd user service ({SYSTEMD_UNIT})")
+    from local_operator import update
+
+    moved = update.systemd_install_build_line(
+        name="mobile", unit=SYSTEMD_UNIT, recovery="lop mobile restart"
+    )
+    if moved:
+        steps.append(moved)
     return True, ""
 
 

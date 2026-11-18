@@ -9469,6 +9469,23 @@ def _main_pid(fields: Mapping[str, str]) -> int | None:
     return pid if pid > 0 else None
 
 
+def systemd_install_build_line(*, name: str, unit: str, recovery: str) -> str:
+    """The Linux installers' build check after ``enable --now``: a line, or ``""``.
+
+    THE SAME TRAP AS THE MACOS "ALREADY CURRENT" BRANCH (field finding,
+    2026-11-18): ``systemctl --user enable --now`` does not restart a unit that
+    is already running, and the unit file names the stable shim, so a re-install
+    after an upgrade left the old build serving. This is
+    :func:`_systemd_restart_if_build_moved` reused unchanged — it restarts only
+    on PROOF of staleness and declines silently otherwise — with its own
+    summary/warning sentence as the install step.
+    """
+    moved = _systemd_restart_if_build_moved(
+        name=name, unit=unit, recovery=recovery, keeps_children=False
+    )
+    return moved.summary() or moved.warning()
+
+
 def _systemd_restart_if_build_moved(
     *,
     name: str,

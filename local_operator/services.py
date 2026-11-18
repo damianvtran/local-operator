@@ -2333,6 +2333,27 @@ def stale_daemon_lines(daemons: Sequence[StaleDaemon] | None = None) -> list[str
     ]
 
 
+def stale_daemon_status_line(
+    name: str, command: str, *, daemons: Sequence[StaleDaemon] | None = None
+) -> str:
+    """One daemon's "running an older build" status line, or ``""``.
+
+    For ``lop mobile status`` / ``lop tunnel status`` (field finding,
+    2026-11-18: an upgraded machine kept both on the old build and neither
+    status said so). :func:`stale_background_daemons` filtered to ``name`` — one
+    census, so this cannot disagree with ``lop services status`` — and, like it,
+    silent unless the staleness is PROVEN.
+    """
+    rows = stale_background_daemons() if daemons is None else daemons
+    found = next((d for d in rows if d.name == name), None)
+    if found is None:
+        return ""
+    from local_operator.i18n.keys import cli_daemon_build as _k
+    from local_operator.i18n.text import tr
+
+    return tr("cli.daemon_build")(_k.status_stale(generation=found.generation, command=command))
+
+
 # ---------------------------------------------------------------------------
 # A MISSED SERVE MOVE IS RETRIED, NOT ABANDONED (2026-11-17, fix B)
 #

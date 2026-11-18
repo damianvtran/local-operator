@@ -145,7 +145,12 @@ def _stamp(seconds: Any) -> str:
 
 
 def _status_text(
-    payload: dict[str, Any], record: dict[str, Any], source: str, *, stopped: bool = False
+    payload: dict[str, Any],
+    record: dict[str, Any],
+    source: str,
+    *,
+    stopped: bool = False,
+    stale_build: str = "",
 ) -> str:
     """`lop tunnel status`, human form: the connector leads, then the login.
 
@@ -204,6 +209,12 @@ def _status_text(
             else ""
         )
         lines.append(f"Transport: {transport}{overlap}")
+    if stale_build:
+        # A connector on an OLD BUILD answers like a current one; after an
+        # upgrade that is what kept remote access on old code (2026-11-18).
+        # Already keyed copy, from `services.stale_daemon_status_line`; printed
+        # bare so this English-labelled block adds no untranslated word.
+        lines.append(stale_build)
     login = payload["login"]
     if login["state"] == "login_required":
         if stopped:
@@ -470,6 +481,15 @@ async def _adopt_conflicting_create(api: RadientTunnels, pending: dict[str, Any]
     return matches[0]
 
 
+def _mobile_build_is_stale() -> bool:
+    """Whether the supervised mobile daemon is PROVEN to run an older build."""
+    from local_operator import update
+    from local_operator.mobile import install as mobile_install
+
+    pid = mobile_install._supervised_pid()
+    return pid is not None and update.generation_staleness_of_process(pid) is True
+
+
 def _prepare_mobile(value: dict[str, Any]) -> None:
     from local_operator.mobile import install as mobile_install
 
@@ -479,7 +499,16 @@ def _prepare_mobile(value: dict[str, Any]) -> None:
     )
     if mobile is None:
         return
-    if mobile_install.health(mobile["port"]) and mobile_install.gate_closed(mobile["port"]):
+    if (
+        mobile_install.health(mobile["port"])
+        and mobile_install.gate_closed(mobile["port"])
+        # A HEALTHY MOBILE DAEMON ON AN OLD BUILD is not "prepared" (field
+        # finding, 2026-11-18: the phone kept old code after an upgrade). A
+        # proven-stale one goes through `install`, whose skip branch restarts it
+        # onto the new build; an unproven one is left to `lop mobile install`,
+        # so a tunnel restart does not also bounce the phone's relay on a guess.
+        and not _mobile_build_is_stale()
+    ):
         return
     result = mobile_install.install(port=mobile["port"])
     if not result.get("ok"):
@@ -742,7 +771,17 @@ async def dispatch(args: argparse.Namespace) -> str:
         )
         if getattr(args, "json", False):
             return json.dumps(payload, allow_nan=False)
-        return _status_text(payload, record, source, stopped=bool(value.get("stopped")))
+        from local_operator.services import stale_daemon_status_line
+
+        return _status_text(
+            payload,
+            record,
+            source,
+            stopped=bool(value.get("stopped")),
+            stale_build=await asyncio.to_thread(
+                stale_daemon_status_line, "tunnel", "lop tunnel restart"
+            ),
+        )
     if action == "stop":
         value["stopped"] = True
         config.save(value)
@@ -809,14 +848,18 @@ async def dispatch(args: argparse.Namespace) -> str:
             value["mobile_password"] = os.environ["LOP_MOBILE_PASSWORD"]
         value["stopped"] = False
         config.save(value)
+        # The install's note: a connector that was restarted onto the new build,
+        # or whose running build could not be confirmed (it used to be silent).
+        note = ""
         if action == "install":
-            await asyncio.to_thread(install.install)
+            note = await asyncio.to_thread(install.install)
         else:
             await asyncio.to_thread(install.action, action)
-        return (
+        started = (
             "Tunnel service started. Run lop tunnel status, then open your harness URL "
             "and log in with Radient."
         )
+        return f"{note}\n{started}" if note else started
     raise ValueError(
         "Use lop tunnel --help to create, configure, start, stop, or revoke remote access."
     )
