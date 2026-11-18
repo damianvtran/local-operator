@@ -59,6 +59,15 @@ class FakeSyscalls:
     Like the kernel, re-adding a watch on an inode already watched returns its
     existing wd (counted in ``readded``, not ``added``); a directory removed
     and recreated under the same name is a new inode and gets a new wd.
+
+    Identity is ``(path, st_ino)`` only while the inode lives: a filesystem
+    may hand a freed inode NUMBER straight to the next ``mkdir`` (the likely
+    cause of this test's CI flake; ext4 can), yet the kernel's mark died with
+    the old inode object,
+    so the recreated directory still gets a new wd. ``watch_died`` models that
+    death — the kernel dropping the watch whether or not its IN_IGNORED ever
+    reaches the reader — and ``pinned_inodes`` forces the reuse for one path
+    so a test does not depend on what the filesystem happens to do.
     """
 
     def __init__(self, fail_after: int | None = None) -> None:
@@ -67,6 +76,7 @@ class FakeSyscalls:
         self.removed: list[int] = []
         self.closed: list[int] = []
         self.fail_after = fail_after
+        self.pinned_inodes: dict[str, int] = {}
         self.read_fd, self.write_fd = os.pipe()
         self._wds: dict[tuple[str, int | None], int] = {}
 
@@ -77,7 +87,7 @@ class FakeSyscalls:
         if self.fail_after is not None and len(self.added) >= self.fail_after:
             raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), path)
         try:
-            inode: int | None = os.stat(path).st_ino
+            inode: int | None = self.pinned_inodes.get(path) or os.stat(path).st_ino
         except OSError:
             inode = None
         existing = self._wds.get((path, inode))
@@ -87,6 +97,11 @@ class FakeSyscalls:
         self.added.append((path, mask))
         self._wds[(path, inode)] = len(self.added)
         return len(self.added)  # wd 1 is sessions/, then one per session
+
+    def watch_died(self, path: Path) -> None:
+        """The inode at ``path`` was deleted: the kernel freed its watch."""
+        for key in [key for key in self._wds if key[0] == str(path)]:
+            del self._wds[key]
 
     def wd_of(self, path: Path) -> int:
         return [p for p, _ in self.added].index(str(path)) + 1
@@ -329,14 +344,19 @@ def test_an_overflow_rescans_and_watches_sessions_whose_create_was_lost(tmp_path
         index._stop_observer()
 
 
+@pytest.mark.parametrize("reused_inode", [False, True], ids=["new-inode", "reused-inode"])
 def test_an_overflow_rewatches_a_session_recreated_after_its_removal_was_lost(
-    tmp_path, fake
+    tmp_path, fake, reused_inode
 ) -> None:
     """Review R2-m2: the overflow ate a session's IN_DELETE and IN_IGNORED.
 
     The map still holds the old directory's dead wd when the same id is
     recreated. The rescan must re-arm it (new inode, new wd), forget the dead
     wd, queue the session, and route the new wd's events to it.
+
+    ``reused-inode`` pins the case that flaked on CI: the recreated directory
+    got the freed inode number back, and a fake that ignored the watch's death
+    handed back the dead wd, so the rescan saw nothing change.
     """
     import shutil
 
@@ -349,8 +369,11 @@ def test_an_overflow_rewatches_a_session_recreated_after_its_removal_was_lost(
     try:
         name = SESSIONS[0]
         old_wd = fake.wd_of(sessions / name)
+        if reused_inode:
+            fake.pinned_inodes[str(sessions / name)] = (sessions / name).stat().st_ino
         shutil.rmtree(sessions / name)
-        (sessions / name).mkdir()  # same id, new inode; no event reaches the reader
+        fake.watch_died(sessions / name)
+        (sessions / name).mkdir()  # same id, new inode object; no event reaches the reader
         fake.feed(_event(-1, session_watch.IN_Q_OVERFLOW))
         assert woke.wait(2.0)
         assert _until(lambda: dirty == [name])
