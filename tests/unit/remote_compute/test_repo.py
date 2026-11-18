@@ -352,3 +352,71 @@ def test_the_scrubber_keeps_the_brackets_that_make_ipv6_a_host() -> None:
         repo_module.scrub_url("https://user:pass@[::1]:8443/o/r.git")
         == "https://[::1]:8443/o/r.git"
     )
+
+
+def _origin_with_password(password: str, *, host: str = "github.com", path: str = "o/r.git") -> str:
+    """One https origin carrying ``password`` as its userinfo.
+
+    ASSEMBLED FROM PIECES so no credential-shaped literal is written in this
+    file: the password is never a real one, and it exists only to carry a URL
+    delimiter — which is what moved the host out of the netloc.
+    """
+    userinfo = "user" + ":" + password
+    return "https://" + userinfo + "@" + host + "/" + path
+
+
+def test_the_scrubber_removes_a_password_that_contains_a_url_delimiter() -> None:
+    """M1: a netloc-only rule returns this URL byte-identical, host and all.
+
+    ``urlsplit`` ends the authority at the first ``/``, ``?`` or ``#``, so the
+    userinfo lands in the path and the netloc looks clean. The parse succeeds,
+    the rebuilt URL was the input, and ``record_submission`` wrote the whole
+    credential to ``runs.jsonl``. The rule the scrubber applies now: an ``@`` at
+    or after the authority boundary is userinfo unless the authority can be a
+    ``host[:port]``, and everything up to the LAST ``@`` goes — last, because a
+    password may itself contain one.
+    """
+    passwords = ("pa/ss", "pa?ss", "pa#ss", "pa/ss@word", "pa?ss#w/ord@x")
+    for password in passwords:
+        origin = _origin_with_password(password)
+        scrubbed = repo_module.scrub_url(origin)
+        assert scrubbed == "https://github.com/o/r.git", (origin, scrubbed)
+        assert password not in scrubbed
+        assert "@" not in scrubbed
+
+
+def test_the_scrubber_keeps_an_at_sign_that_belongs_to_the_path() -> None:
+    """The strictness has a floor: a host-shaped authority means the ``@`` is a path.
+
+    ``https://github.com/o/r@v1.git`` is a legitimate origin, and a rule that
+    refused every ``@`` after the authority would strip it to ``v1.git``. The
+    discriminator is the authority's shape, not the presence of an ``@``.
+    """
+    for origin, expected in (
+        ("https://github.com/o/r@v1.git", "https://github.com/o/r@v1.git"),
+        ("https://github.com:8443/o/r@v1.git", "https://github.com:8443/o/r@v1.git"),
+        (
+            _origin_with_password("pass", path="o/r@v1.git"),
+            "https://github.com/o/r@v1.git",
+        ),
+        (
+            _origin_with_password("pass", host="example.invalid:99999999", path="o/r@v1.git"),
+            "https://example.invalid:99999999/o/r@v1.git",
+        ),
+    ):
+        assert repo_module.scrub_url(origin) == expected, origin
+
+
+def test_an_origin_whose_password_contains_a_delimiter_is_refused(checkout: Path) -> None:
+    """The detection serves the REFUSAL too: this URL is sent, not only recorded.
+
+    ``_https_origin`` refuses an ``@`` in the netloc, and the escaped shape
+    leaves the netloc clean — so accepting it would put a credential in the run
+    body, which the far end and every proxy in between would see.
+    """
+    _git("remote", "set-url", "origin", _origin_with_password("pa/ss"), cwd=checkout)
+    with pytest.raises(UnusableRepo) as caught:
+        detect_repo(checkout)
+    assert caught.value.reason == repo_module.REASON_NOT_HTTPS
+    assert caught.value.detail == "https://github.com/o/r.git"
+    assert "pa/ss" not in caught.value.detail
