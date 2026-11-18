@@ -6302,6 +6302,40 @@ SETTINGS: tuple[Setting, ...] = (
         ),
         synonyms=("stt", "speech to text", "voice", "audio"),
     ),
+    # -- speech provider (the ONE provider hearing and speaking use) -----------
+    # Unset (``None``) means no provider chosen yet, the tri-state shape
+    # ``display.nerd_icons`` uses: the "not chosen" choice writes nothing and
+    # ``write_setting`` deletes the key. The values are literals here
+    # (``settings_io`` stays off ``local_operator.voice``'s import path);
+    # tests/unit/voice/test_speech_provider.py pins them against
+    # ``voice.provider.PROVIDERS``. OpenAI and Groq are deliberately absent.
+    Setting(
+        key="speech.provider",
+        path=("speech", "provider"),
+        section="speech",
+        label=_t(_wv.provider_label()),
+        kind=Kind.ENUM,
+        default=None,
+        help=_t(_wv.provider_help()),
+        choices=(
+            Choice(
+                None,
+                _t(_wv.provider_choice_none_label()),
+                _t(_wv.provider_choice_none_description()),
+            ),
+            Choice(
+                "radient",
+                _t(_wv.provider_choice_radient_label()),
+                _t(_wv.provider_choice_radient_description()),
+            ),
+            Choice(
+                "elevenlabs",
+                _t(_wv.provider_choice_elevenlabs_label()),
+                _t(_wv.provider_choice_elevenlabs_description()),
+            ),
+        ),
+        synonyms=("tts", "stt", "audio", "text to speech", "speech to text"),
+    ),
     # -- voice mode (docs/design/qwen-voice.md) -------------------------------
     # Literals, not imports: this module stays off ``local_operator.voice``'s
     # import path, and ``_consumer_defaults()`` in tests/unit/test_settings_io.py

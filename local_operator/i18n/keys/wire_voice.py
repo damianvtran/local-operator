@@ -73,6 +73,42 @@ def phrase_voice_off() -> Msg:
     return Msg("wire.voice.phrase.voice_off", {})
 
 
+def provider_choice_elevenlabs_description() -> Msg:
+    return Msg("wire.voice.provider.choice.elevenlabs.description", {})
+
+
+def provider_choice_elevenlabs_label() -> Msg:
+    return Msg("wire.voice.provider.choice.elevenlabs.label", {})
+
+
+def provider_choice_none_description() -> Msg:
+    return Msg("wire.voice.provider.choice.none.description", {})
+
+
+def provider_choice_none_label() -> Msg:
+    return Msg("wire.voice.provider.choice.none.label", {})
+
+
+def provider_choice_radient_description() -> Msg:
+    return Msg("wire.voice.provider.choice.radient.description", {})
+
+
+def provider_choice_radient_label() -> Msg:
+    return Msg("wire.voice.provider.choice.radient.label", {})
+
+
+def provider_help() -> Msg:
+    return Msg("wire.voice.provider.help", {})
+
+
+def provider_label() -> Msg:
+    return Msg("wire.voice.provider.label", {})
+
+
+def provider_unset() -> Msg:
+    return Msg("wire.voice.provider_unset", {})
+
+
 def rate_limited_day() -> Msg:
     return Msg("wire.voice.rate_limited_day", {})
 

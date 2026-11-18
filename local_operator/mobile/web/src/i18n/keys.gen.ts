@@ -2237,6 +2237,15 @@ export type MessageParams = {
   "wire.voice.phrase.switched": undefined;
   "wire.voice.phrase.truncated": undefined;
   "wire.voice.phrase.voice_off": undefined;
+  "wire.voice.provider.choice.elevenlabs.description": undefined;
+  "wire.voice.provider.choice.elevenlabs.label": undefined;
+  "wire.voice.provider.choice.none.description": undefined;
+  "wire.voice.provider.choice.none.label": undefined;
+  "wire.voice.provider.choice.radient.description": undefined;
+  "wire.voice.provider.choice.radient.label": undefined;
+  "wire.voice.provider.help": undefined;
+  "wire.voice.provider.label": undefined;
+  "wire.voice.provider_unset": undefined;
   "wire.voice.rate_limited_day": undefined;
   "wire.voice.rate_limited_minute": undefined;
   "wire.voice.store_busy": undefined;

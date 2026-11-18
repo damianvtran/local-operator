@@ -566,6 +566,11 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.voice import speakable as voice_speakable
 
     consumers["voice.max_spoken_chars"] = voice_speakable.DEFAULT_MAX_SPOKEN_CHARS
+    # The chosen speech provider: the reader's own "nothing valid chosen" answer
+    # (``voice.provider``), asked of an empty directory.
+    from local_operator.voice import provider as voice_provider
+
+    consumers["speech.provider"] = voice_provider.configured_provider(Path("/nonexistent"))
     return consumers
 
 

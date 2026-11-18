@@ -134,5 +134,54 @@
     "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
     "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
     "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.help": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.choice.none.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.choice.none.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.choice.radient.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.choice.radient.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider.choice.elevenlabs.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.provider.choice.elevenlabs.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.provider_unset": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
   }
 }

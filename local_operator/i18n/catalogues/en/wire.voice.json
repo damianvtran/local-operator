@@ -25,5 +25,14 @@
   "wire.voice.phrase.switched": "Voice is now on this conversation.",
   "wire.voice.phrase.failed": "I didn't catch that.",
   "wire.voice.phrase.still_working": "Still working on it.",
-  "wire.voice.phrase.truncated": "That's where I'll stop — the rest is on screen."
+  "wire.voice.phrase.truncated": "That's where I'll stop — the rest is on screen.",
+  "wire.voice.provider.label": "speech provider",
+  "wire.voice.provider.help": "Who hears you and speaks for you, for hands-free voice and the Speak button. Radient is billed to your Radient credit; ElevenLabs uses your own key. Only the one you pick is used, and if it cannot serve a request it says why instead of switching.",
+  "wire.voice.provider.choice.none.label": "not chosen",
+  "wire.voice.provider.choice.none.description": "No provider picked yet. Hands-free voice stays off until you pick one.",
+  "wire.voice.provider.choice.radient.label": "Radient",
+  "wire.voice.provider.choice.radient.description": "Radient's cloud speech, billed to your Radient credit.",
+  "wire.voice.provider.choice.elevenlabs.label": "ElevenLabs",
+  "wire.voice.provider.choice.elevenlabs.description": "Your own ElevenLabs API key. ElevenLabs bills you directly.",
+  "wire.voice.provider_unset": "Choose a speech provider first: Radient or your own ElevenLabs key. Voice mode uses only the one you pick."
 }
