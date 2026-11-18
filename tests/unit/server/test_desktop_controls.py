@@ -619,14 +619,18 @@ async def test_the_cors_echo_follows_the_admitted_set(tmp_path: Path, monkeypatc
     app.middleware("http")(desktop_origin_cors)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
-        # NO token, no claim: a standalone server keeps its historical wildcard
-        # CORS, so existing embedders are untouched. The latch is cleared
+        # NO token, no claim: the standalone posture. The latch is cleared
         # explicitly because it is module-global and a claim made by another
         # test in this worker would otherwise leave this daemon governed.
         monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN", raising=False)
         monkeypatch.setattr(desktop_module, "_CLAIMED", None)
+        # NO token, no claim used to echo every origin here. A standalone daemon
+        # now grants only "null" (the packaged renderer's pre-attach /health
+        # read) and its own origin; a foreign page gets no grant.
         hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
-        assert hostile.headers.get("access-control-allow-origin") == "http://evil.example"
+        assert "access-control-allow-origin" not in hostile.headers
+        renderer = await client.get("/health", headers={"Origin": "null"})
+        assert renderer.headers.get("access-control-allow-origin") == "null"
 
         # A token WITHOUT a list: the app-managed default, and the state the
         # PACKAGED app runs in. Its renderer is loaded with
