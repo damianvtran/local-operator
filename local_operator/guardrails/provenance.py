@@ -2296,14 +2296,17 @@ def worktree_state(
     )
     if ignored is None:
         return "unknown"
-    if any(ln and not ln.startswith("!! ") for ln in ignored.splitlines()):
+    lines = ignored.splitlines()
+    if facts is not None and any(ln.startswith(("D  ", " D ")) for ln in lines):
+        facts["tracked_deletions"] = True
+    if any(ln and not ln.startswith("!! ") for ln in lines):
         return "dirty"  # a tracked change or an untracked (``??``) entry
     if facts is not None:
         # For ``finished_foreign_worktree``, which may not rest on basenames
         # (``.venv/private-backup.json`` passes ``_regenerable``): ANY ignored
         # entry, read from this same status call rather than a second one.
-        facts["ignored"] = any(ln.startswith("!! ") for ln in ignored.splitlines())
-    for line in ignored.splitlines():
+        facts["ignored"] = any(ln.startswith("!! ") for ln in lines)
+    for line in lines:
         if not line.startswith("!! "):
             continue
         entry = line[3:].strip().strip('"').rstrip("/")

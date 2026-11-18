@@ -1354,11 +1354,9 @@ def _rank(
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
-    if exact_cleanup and target.worktree_remove:
-        if _finished_route_barred(path, prot):
-            return RankedTarget(
-                target, Risk.HIGH, "protected location; cleanup is not permitted", cleanup_hold=True
-            )
+    forced_cleanup = exact_cleanup and target.worktree_remove and target.forced
+    barred_cleanup = forced_cleanup and _finished_route_barred(path, prot)
+    if forced_cleanup and not barred_cleanup:
         strict = _exact_linked_cleanup(target, path, prot, session_id, foreign)
         if strict is not None:
             return strict
@@ -1406,11 +1404,15 @@ def _rank(
         # A hidden pid with no evidence is ignored for the PLAIN removal only
         # (git itself still refuses untracked content); ``--force`` keeps the
         # strict rule (review M1, PR #4161).
+        plain_payload: dict[str, bool] | None = (
+            {} if exact_cleanup and not target.forced else None
+        )
         state = worktree_state(
             path,
             own=own is not None and (relation == "" or not target.forced),
             session_id=session_id,
             hidden_blocks=target.forced,
+            facts=plain_payload,
         )
         # Never a bare "busy" (operator directive 2026-11-14): the reason names
         # each holder (pid, command, session) or why the inventory failed.
@@ -1443,6 +1445,25 @@ def _rank(
                     Risk.CRITICAL,
                     f"branch {activity.branch} has open {activity.pr_ref}; "
                     f"finish or close it first ({facts})",
+                )
+            if barred_cleanup:
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    f"a git repository root; linked worktree state: {state_text}; {facts}; "
+                    "protected location; cleanup is not permitted",
+                    cleanup_hold=True,
+                )
+            # Plain removal keeps the branch ref and follows the established
+            # ownership/status policy. A checkout with tracked deletions needs
+            # a separate verified recovery decision; plain Git cannot remove it.
+            if plain_payload and plain_payload.get("tracked_deletions"):
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    "linked worktree state: tracked deletions remain; only preview can verify "
+                    "a planned literal --force removal",
+                    cleanup_hold=True,
                 )
             idle = activity.pr_state == "none" and not activity.owners_running
             # OWN + CLEAN does not need the forge (operator escalation
@@ -1558,6 +1579,10 @@ def _rank(
             # ranking applies, but the state stays in whatever reason it gives.
             worktree_note = f"linked worktree state: {state_text}; {facts}"
             notes.append(worktree_note)
+    if barred_cleanup:
+        return RankedTarget(
+            target, Risk.HIGH, "protected location; cleanup is not permitted", cleanup_hold=True
+        )
     scratch_facts: list[str] = []
     if not target.worktree_remove and target.op == "delete" and not target.selected:
         reached = _reached_worktrees(
@@ -2242,10 +2267,6 @@ def _exact_linked_cleanup(
         prov.cleanup_identity(path) != identity
     ):
         return hold(changed)
-    if state == "deletions-only" and not target.forced:
-        return hold(
-            "tracked deletions remain; only preview can verify a planned literal --force removal"
-        )
     return RankedTarget(target, Risk.LOW, f"{reason}; verified removal payload ({state})")
 
 

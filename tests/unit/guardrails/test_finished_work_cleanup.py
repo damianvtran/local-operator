@@ -174,6 +174,32 @@ async def _check(home: Path, command: str, judge: _Judge, operator: Any = None) 
 
 
 @pytest.mark.asyncio
+async def test_plain_own_checkout_without_origin_keeps_legacy_checkpoint(
+    home: Path, repo: Path
+) -> None:
+    wt = _branch_tree(home, repo, "plain-local")
+    _record(home, wt, creator=ME)
+    _git("remote", "remove", "origin", cwd=repo)
+    command = f"git -C {repo} worktree remove -- {wt}"
+    args = {"command": command}
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", args, context, settings=GuardSettings())
+    judge = _Judge()
+    result = await _check(home, command, judge)
+    assert report.builtin_effect == BUILTIN_PASS, report.render()
+    assert not result.blocked and not judge.prompts, result
+
+    # Ordinary uncommitted edits still use the legacy judge path.
+    (wt / "a.txt").write_text("uncommitted\n")
+    report = preview_tool_call("bash", args, context, settings=GuardSettings())
+    result = await _check(home, command, judge)
+    assert result.blocked and len(judge.prompts) == 1, result
+    assert report.builtin_effect != BUILTIN_PASS, report.render()
+    assert "linked worktree state: dirty" in report.render()
+    assert (wt / "a.txt").read_text() == "uncommitted\n"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("creator", [ME, DONE])
 @pytest.mark.parametrize("shared_link", [False, True])
 async def test_interrupted_finished_tree_skips_unavailable_judge(
