@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tunnel.transient",
+  "history_sha256": "249909114275cfcb0955f9444e2e8ffab06caa7f60f19c887cae5160ac5ccc16",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tunnel.transient",
+      "source_sha256": "c81440be948cc54547ccc299ff7e6299315ff87237778bbdd2d97b0f5dc41136",
+      "translator": {
+        "agent": "coder subagent (lopdev team), author of PR #4168 commit 336d916a; session id not recorded in the PR body",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team) acting as independent i18n auditor, session b6352a27c6b4; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a1: independent i18n audit b6352a27c6b4 (anthropic/claude-opus-5-5, no fallback) of coder-drafted copy: PASSED, 0 blocker/major. Report: https://github.com/damianvtran/local-operator/pull/4168#issuecomment-6953828752. Target sha256 at append: 6e30b283f8717cc801879bff1efb65f05b653045115922df9877078219a9e201.",
+      "round": "a1",
+      "keys_audited": 3
+    }
+  ]
+}

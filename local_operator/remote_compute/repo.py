@@ -121,8 +121,22 @@ def _https_origin(root: Path) -> str:
     if code != 0 or not output:
         raise UnusableRepo(REASON_NO_REMOTE, detail=str(root))
     raw = output.strip()
-    parts = urllib.parse.urlsplit(raw)
-    if parts.scheme != "https" or "@" in parts.netloc or not parts.netloc:
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except ValueError:
+        # An origin ``urlsplit`` cannot parse is exactly the credential shape this
+        # function exists to refuse (a bracket in the userinfo, say), so it is
+        # refused rather than crashed on: the caller promises a typed answer.
+        raise UnusableRepo(REASON_NOT_HTTPS, detail=scrub_url(raw))
+    if (
+        parts.scheme != "https"
+        or "@" in parts.netloc
+        or not parts.netloc
+        # The netloc test misses the M1 shape — a password containing ``/`` lands
+        # in the PATH and leaves a clean netloc — and this URL is SENT in the run
+        # body as well as stored, so the scrubber's own detection decides it here.
+        or _without_escaped_userinfo(raw) is not None
+    ):
         raise UnusableRepo(REASON_NOT_HTTPS, detail=scrub_url(raw))
     return raw
 
@@ -212,6 +226,100 @@ def _git(directory: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS)
     return completed.returncode, completed.stdout.strip()
 
 
+#: What a URL ``urlsplit`` cannot parse is scrubbed to. A placeholder rather than
+#: a substring of the input: the parse failed because the userinfo boundary is
+#: unknowable, so no part of the string can be proven credential-free.
+UNPARSEABLE_URL = "<unparseable remote URL>"
+
+#: ``scheme://``, where a URL's authority starts. A string without it has no
+#: authority to mis-slice; that is the scp-like shape (``git@host:path``), which
+#: :func:`scrub_url`'s no-scheme fallback already handles.
+_SCHEME_AND_AUTHORITY = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+#: A port: digits and nothing else. A ``:`` followed by anything else in the
+#: authority is the userinfo separator of a password whose ``@`` was sliced off.
+_PORT = re.compile(r"[0-9]+")
+
+
+def _is_host_and_port(authority: str) -> bool:
+    """Whether ``authority`` is the ``host[:port]`` a real URL begins with.
+
+    THE DISCRIMINATOR for :func:`_without_escaped_userinfo`: an authority that
+    IS a host means an ``@`` further along the URL is in the path, where a
+    legitimate ``/o/r@v1.git`` puts one; an authority that cannot be a host means
+    the ``@`` is the userinfo boundary ``urlsplit`` should have used. Bracketed
+    IPv6 is kept as a host with its brackets, and an empty authority is never a
+    host.
+    """
+    if not authority:
+        return False
+    if authority.startswith("["):
+        close = authority.find("]")
+        if close == -1:
+            return False
+        host, remainder = authority[1:close], authority[close + 1 :]
+        if not host:
+            return False
+        return remainder == "" or (remainder.startswith(":") and _is_port(remainder[1:]))
+    host, separator, port = authority.partition(":")
+    if not host or any(character in host for character in "[]@ "):
+        return False
+    if not separator:
+        return True
+    return _is_port(port)
+
+
+def _is_port(text: str) -> bool:
+    """Whether ``text`` is a port — digits only, and the empty port is not one."""
+    return _PORT.fullmatch(text) is not None
+
+
+def _without_escaped_userinfo(url: str) -> str | None:
+    """``url`` with a credential ``urlsplit`` mis-sliced removed, else ``None``.
+
+    THE MIS-SLICE. ``urlsplit`` ends the authority at the first ``/``, ``?`` or
+    ``#``, so a password such as ``pa/ss`` leaves the netloc ``user:pa`` and
+    puts the host and the rest of the credential in the path. The HOST is then
+    inside the path and the credential is split across both halves, so a
+    netloc-only scrub returns the URL byte-identical and ``record_submission``
+    writes it to ``runs.jsonl``. A ``?`` or ``#`` in a password does the same.
+
+    THE RULE, and why it is this one. An ``@`` at or after the authority
+    boundary is an escaped userinfo only when the authority CANNOT be a
+    ``host[:port]`` — a ``:`` whose suffix is empty or not a number, or
+    characters no host carries. A host-shaped authority means the ``@`` is in
+    the path, which is where ``https://github.com/o/r@v1.git`` legitimately puts
+    one; stripping on every ``@`` after the boundary would mangle that URL and
+    every URL like it. When the authority fails the test, everything up to and
+    including the LAST ``@`` is dropped — last, because a password may itself
+    contain one — and the host and path the operator needs are what survives.
+
+    RESIDUAL, stated rather than closed: a password whose first chunk before
+    the ``/`` is all digits (``user:12/34``) makes the escaped prefix
+    indistinguishable from a ``host:port``, and the URL is left intact like
+    ``https://github.com:8443/o/r@v1.git``, which is legitimate.
+    """
+    match = _SCHEME_AND_AUTHORITY.match(url)
+    if match is None:
+        return None
+    tail = url[match.end() :]
+    boundary = len(tail)
+    for marker in "/?#":
+        position = tail.find(marker)
+        if position != -1:
+            boundary = min(boundary, position)
+    authority = tail[:boundary]
+    if "@" in authority:
+        # The ordinary shape: ``urlsplit`` puts this userinfo in the netloc and
+        # :func:`scrub_url` keeps the netloc minus it.
+        return None
+    if "@" not in url[match.end() :]:
+        return None
+    if _is_host_and_port(authority):
+        return None
+    return f"{match.group(0)}{url[url.rfind('@') + 1 :]}"
+
+
 def scrub_url(url: str) -> str:
     """A URL safe to store or carry in a refusal: ``scheme://host/path``, no userinfo.
 
@@ -221,15 +329,39 @@ def scrub_url(url: str) -> str:
     host and path stay, because they are what the operator needs in order to find
     the remote they configured wrongly.
 
-    THIS NEVER RAISES. ``urlsplit().port`` raises ``ValueError`` for an
-    out-of-range port (``https://example.com:99999999/r.git``, one keystroke away
-    from a real one in ``git remote set-url``), and both callers promise a typed
-    answer: ``detect_repo`` returns ``RepoRef | UnusableRepo`` and
-    ``record_submission`` returns a record. So a malformed port falls back to the
-    netloc with its userinfo removed, which still shows the operator the value
-    they typed.
+    THIS NEVER RAISES, and it never returns the raw string. ``urlsplit`` itself
+    raises ``ValueError`` for two reachable shapes — an unbalanced bracket
+    (``https://[::1/r.git``) and a bracket anywhere in the netloc, including
+    inside the userinfo (``https://user:pw[0]@github.com/o/r.git``, which fails
+    urllib's bracketed-host check on the host that follows) — and ``.port``
+    raises for an out-of-range one (``https://example.com:99999999/r.git``, one
+    keystroke away from a real one in ``git remote set-url``). Both callers
+    promise a typed answer: ``detect_repo`` returns ``RepoRef | UnusableRepo``
+    and ``record_submission`` returns a record.
+
+    A URL whose userinfo ``urlsplit`` MIS-SLICES — a password containing ``/``,
+    ``?`` or ``#`` puts the host in the path and the two halves of the credential
+    on either side of it — is detected and stripped by
+    :func:`_without_escaped_userinfo` before the parse, because the netloc alone
+    is clean there and the netloc-only rule returns such a URL byte-identical.
+    An ``@`` in a PATH is preserved: the test is whether the authority can be a
+    ``host[:port]``, not whether the URL contains an ``@`` at all.
+
+    A URL that ``urlsplit`` REJECTS answers :data:`UNPARSEABLE_URL`, not part of
+    the input: the failure is that its userinfo boundary could not be found, so
+    the substring fallback used elsewhere here (everything before the first
+    ``@``) can leave a later ``@`` — and with it part of a password — in place.
+    A malformed PORT parses fine up to the netloc, so that case keeps the netloc
+    with its userinfo removed, which still shows the operator the value they
+    typed.
     """
-    parts = urllib.parse.urlsplit(url)
+    escaped = _without_escaped_userinfo(url)
+    if escaped is not None:
+        url = escaped
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return UNPARSEABLE_URL
     if not parts.scheme:
         return re.sub(r"^[^/@]*@", "", url)
     try:
@@ -237,6 +369,10 @@ def scrub_url(url: str) -> str:
     except ValueError:
         return f"{parts.scheme}://{_without_userinfo(parts.netloc)}{parts.path}"
     host = parts.hostname or ""
+    if ":" in host:
+        # ``hostname`` strips the brackets that make an IPv6 literal a host at
+        # all, so rebuilding without them produces a URL that no longer parses.
+        host = f"[{host}]"
     if port is not None:
         host = f"{host}:{port}"
     if not host:

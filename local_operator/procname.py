@@ -469,6 +469,9 @@ LABEL_BROKER = "{brand} [secret broker] store={digest}"
 LABEL_INSTALL = "{brand} [install] pip"
 LABEL_MOBILE_RESTART = "{brand} [mobile restart]"
 LABEL_DAEMONS_REFRESH = "{brand} [daemons] refresh"
+#: The bounded serve move retry worker (``update.schedule_serve_move_retry``):
+#: named so a ``ps`` reader can tell it is the update still nudging serve.
+LABEL_SERVE_MOVE_RETRY = "{brand} [serve] move retry"
 LABEL_OPEN_BROWSER = "{brand} [open] browser"
 
 

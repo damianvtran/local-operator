@@ -321,6 +321,119 @@ def check_files(pid: int | None, running: bool) -> dict[str, Any]:
     return _check("files", PASS, _t(summary), ratio=round(ratio, 3), **files)
 
 
+# --- file watches (Linux inotify) -------------------------------------------------
+
+#: Same threshold as open files: warn at 80 %, fail at the limit.
+WATCHES_WARN_RATIO = 0.8
+_INOTIFY_LIMITS = Path("/proc/sys/fs/inotify")
+
+
+def inotify_usage(proc: Path = Path("/proc")) -> dict[str, Any] | None:
+    """This user's inotify watches and instances against the kernel's limits.
+
+    WHY THE WHOLE USER, NOT THE DAEMON. ``fs.inotify.max_user_watches`` is a
+    per-UID budget, and the process that spent it is rarely the one that fails:
+    on node2 (2026-11-17) ``lop serve`` held 126,757 of 126,814 watches and it
+    was systemd that reported "No space left on device". So this sums every
+    inotify fd of this user's processes and names the biggest holder — the
+    answer to "who do I restart". Linux only (``None`` elsewhere, or when the
+    limits cannot be read).
+
+    COST. One ``readlink`` per open fd of this user's processes, and one
+    ``fdinfo`` read per inotify fd (one line per watch): measured 435 ms on
+    node2 at ~156k watches over 46 processes, and it runs off the event loop
+    with the doctor's other probes. Another user's processes are skipped
+    unread, so nothing here needs privileges.
+    """
+    try:
+        limit = int((_INOTIFY_LIMITS / "max_user_watches").read_text().strip())
+        instance_limit = int((_INOTIFY_LIMITS / "max_user_instances").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    # A terminating guard, not a conditional expression: scripts/xplat_probe.py
+    # only reads this shape as POSIX-gated, and None is the documented non-Linux answer.
+    if not hasattr(os, "getuid"):
+        return None
+    uid = os.getuid()
+    watches = instances = 0
+    top_pid: int | None = None
+    top_watches = 0
+    # Ranked separately: when max_user_instances is the bottleneck, the process
+    # to restart is the one holding the most inotify FDS, which can be a
+    # different process from the biggest watch holder (watchdog opens one
+    # instance per scheduled path, each with a handful of watches).
+    top_instance_pid: int | None = None
+    top_instances = 0
+    try:
+        pids = [name for name in os.listdir(proc) if name.isdigit()]
+    except OSError:
+        return None
+    for pid in pids:
+        base = proc / pid
+        try:
+            if base.stat().st_uid != uid:
+                continue
+            fds = os.listdir(base / "fd")
+        except OSError:
+            continue  # exited, or not ours to read
+        held = owned = 0
+        for fd in fds:
+            try:
+                if os.readlink(base / "fd" / fd) != "anon_inode:inotify":
+                    continue
+                # fdinfo is "pos:/flags:/mnt_id:/ino:" then one "inotify wd:…"
+                # line per watch, so counting line starts counts watches.
+                held += (base / "fdinfo" / fd).read_bytes().count(b"\ninotify")
+                owned += 1
+            except OSError:
+                continue
+        watches += held
+        instances += owned
+        if held > top_watches:
+            top_pid, top_watches = int(pid), held
+        if owned > top_instances:
+            top_instance_pid, top_instances = int(pid), owned
+    return {
+        "watches": watches,
+        "limit": limit,
+        "instances": instances,
+        "instance_limit": instance_limit,
+        "top_pid": top_pid,
+        "top_watches": top_watches,
+        "top_instance_pid": top_instance_pid,
+        "top_instances": top_instances,
+    }
+
+
+def check_watches(proc: Path = Path("/proc")) -> dict[str, Any]:
+    usage = inotify_usage(proc)
+    if usage is None:
+        return _check("watches", WARN, _t(_md.watches_unknown()))
+    limit, instance_limit = usage["limit"], usage["instance_limit"]
+    watch_ratio = usage["watches"] / limit if limit else 1.0
+    instance_ratio = usage["instances"] / instance_limit if instance_limit else 1.0
+    ratio = max(watch_ratio, instance_ratio)
+    args = {
+        "watches": str(usage["watches"]),
+        "limit": str(limit),
+        "instances": str(usage["instances"]),
+        "instance_limit": str(instance_limit),
+    }
+    if ratio >= WATCHES_WARN_RATIO:
+        at_limit = usage["watches"] >= limit or usage["instances"] >= instance_limit
+        # Name the holder of whichever budget is the bottleneck. With either
+        # count > 0 its top holder is set, so "?" only survives a zero limit
+        # (no key without the process clause exists; adding one needs copy).
+        top = usage["top_instance_pid"] if instance_ratio > watch_ratio else usage["top_pid"]
+        pid = str(top or "?")
+        summary = (
+            _md.watches_at_limit(pid=pid, **args) if at_limit else _md.watches_near(pid=pid, **args)
+        )
+        status = FAIL if at_limit else WARN
+        return _check("watches", status, _t(summary), ratio=round(ratio, 3), **usage)
+    return _check("watches", PASS, _t(_md.watches_ok(**args)), ratio=round(ratio, 3), **usage)
+
+
 # --- logs ------------------------------------------------------------------------
 
 
@@ -687,10 +800,13 @@ async def collect(
     daemon, pid = await asyncio.to_thread(check_daemon, chosen)
     alive = daemon["data"]["state"] in ("running", "not answering")
     files = await asyncio.to_thread(check_files, pid, alive)
+    # Linux only: inotify is the one watch API with a per-user budget that a
+    # long-lived process can exhaust for everyone else (see inotify_usage).
+    watches = [await asyncio.to_thread(check_watches)] if sys.platform.startswith("linux") else []
     logs = await asyncio.to_thread(check_logs)
     login = await asyncio.to_thread(check_login)
     tunnel = await check_tunnel(remote=remote)
-    checks = [versions, daemon, files, logs, *tunnel, login]
+    checks = [versions, daemon, files, *watches, logs, *tunnel, login]
     statuses = {c["status"] for c in checks}
     overall = FAIL if FAIL in statuses else WARN if WARN in statuses else PASS
     report = {

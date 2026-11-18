@@ -35,6 +35,29 @@ local-operator config instructions
 - `agents/<id>/agent.yml`: persistent agent profiles
 - `sessions/`: ephemeral transcripts
 
+## Reading this build's source
+
+`lop` runs from an installed GENERATION, not from a checkout: the repo tree is
+the dev copy and lags whatever you just ran. Resolve the build first, then read
+its files:
+
+```sh
+lop --version                       # e.g. v0.106.7, the build to read
+readlink ~/.local/share/lop/current # -> .../generations/<stamp>-<version>
+```
+
+The package root sits under that generation:
+
+```
+~/.local/share/lop/generations/<stamp>-<version>/tools/local-operator/lib/python<major.minor>/site-packages/local_operator/
+```
+
+`<stamp>` is the build time (`20261117T160453Z` shaped) and the interpreter
+directory follows the build's own Python (3.12 on this host). Read the pointer
+with `readlink` rather than guessing a directory name — a machine with several
+installs has several generations, and only one of them is the code answering
+`lop --version`.
+
 ## Custom instructions (the system prompt)
 
 Standing user preferences — commit conventions, review gates, where projects live, how to address the user — go in one file:

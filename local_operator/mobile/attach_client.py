@@ -207,6 +207,20 @@ def is_bind_failed_reason(reason: str) -> bool:
     return reason == BIND_FAILED_REASON or reason.startswith(_BIND_FAILED_CAUSE_PREFIX)
 
 
+def bind_failed_cause(reason: str) -> str:
+    """Return only the canonical announcement's already-sanitized cause.
+
+    A one-shot CLI needs its own retry wording; parsing arbitrary exception prose
+    there would confuse unrelated disconnects with an announced bind failure.
+    Keep this inverse beside the formatter, without changing other surfaces' copy.
+    """
+    if not reason.startswith(_BIND_FAILED_CAUSE_PREFIX):
+        return ""
+    return reason[len(_BIND_FAILED_CAUSE_PREFIX) :].removesuffix(
+        "; the session is alive — reconnect to retry"
+    )
+
+
 def bind_failed_reason(message: object) -> str:
     """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
 
@@ -391,6 +405,16 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     #: The owner holds a live connection; an unacknowledged request is worth
     #: resending. Read through ``getattr`` by ``server/routes/desktop_sessions.py``.
     owner_alive = True
+
+
+class RemoteStreamUnresponsiveError(ConnectionError):
+    """An admitted remote stream stopped answering, not proof of runtime load.
+
+    The owner relay reads the runtime's welcome before acknowledging the stream.
+    Losing its forwarded welcome (or hearing nothing after it) therefore cannot
+    inherit the local socket's owner_alive/busy inference. Keep the connection
+    observation typed so callers do not claim that no session was ever reached.
+    """
 
 
 class OwnerWelcomeTimeout(ConnectionError):
@@ -1181,6 +1205,10 @@ class AttachClient:
         #: supplies no callback still gets the line in the log rather than no line
         #: anywhere.
         self._on_operator_prompt = on_operator_prompt
+        # Observation only, not authority: a welcome can be the last bytes on
+        # a half-dead mesh pipe. Sync-timeout copy needs a subsequent runtime
+        # frame before claiming that the far loop is alive but busy.
+        self.received_after_welcome = False
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         #: Fired when a ``move_pending`` frame arrives: the owner is about to
@@ -1318,6 +1346,7 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        self.received_after_welcome = False
         # THE CAPABILITY IS RESOLVED PER DIAL, from the pid in the record being
         # dialled, because "may I loosen this session's gate" is a property of
         # the pairing (this process, that runtime) and not of this client. A
@@ -1556,6 +1585,8 @@ class AttachClient:
                 except ValueError:
                     continue
                 op = frame.get("op")
+                if isinstance(op, str) and op:
+                    self.received_after_welcome = True
                 if op in ("projection", "welcome"):
                     try:
                         # pid=0 record: the attach screen keys nothing on the

@@ -50,8 +50,10 @@ from __future__ import annotations
 import logging
 import os
 import signal
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -118,27 +120,82 @@ def owner_of(env_text: str) -> str:
     return ""
 
 
-def owned_pids(config_dir: Path, *, owner: str) -> list[tuple[int, str, str]]:
+def owned_pids(
+    config_dir: Path | None,
+    *,
+    owner: str = "",
+    any_owner: bool = False,
+    run: Callable[[Sequence[str], float], str] | None = None,
+) -> list[tuple[int, str, str]]:
     """(pid, session-id, environment-text) candidates, for inventory and tests.
 
     Signals nothing; ``sweep`` re-identifies every pid at signal time.
+
+    ``any_owner=True`` selects exactly what ``sweep(any_owner=True)`` would
+    signal — so "what would a supervisor stop end?" is answered by the SAME
+    selection, not a second reading of the marker (update-parity R1-1: the
+    Linux update refuses to restart the wakes unit while this is non-empty).
+    ``config_dir=None`` widens the census to every config root: the caller that
+    uses it cannot know which root the installed unit serves, and over-counting
+    only defers a restart while under-counting would end a conversation.
+    ``run`` is the census's command runner (``reclaim``'s seam), passed through
+    so :func:`count_owned` can tell an unreadable process table from an empty one.
     """
     from local_operator.session.runtime import reclaim
 
     found: list[tuple[int, str, str]] = []
-    if not owner:
+    if not owner and not any_owner:
         return found
-    for observed_row in reclaim.runtime_processes():
-        row = reclaim.process_row(observed_row.pid)
+    seam: dict[str, Any] = {} if run is None else {"run": run}
+    for observed_row in reclaim.runtime_processes(**seam):
+        row = reclaim.process_row(observed_row.pid, **seam)
         if row is None:
             continue
         env = row.command
-        if owner_of(env) != owner or reclaim.config_root_of(env) != str(config_dir):
+        observed_owner = owner_of(env)
+        if not observed_owner or (owner and observed_owner != owner):
+            continue
+        if config_dir is not None and reclaim.config_root_of(env) != str(config_dir):
             continue
         session_id = reclaim.session_id_of(env)
         if session_id:
             found.append((row.pid, session_id, env))
     return found
+
+
+def count_owned(config_dir: Path | None = None) -> int | None:
+    """How many runtimes a wake supervisor's stop would SIGTERM, or ``None``.
+
+    WHY (update-parity R1-1, 2026-11-17): ``KillMode=process`` keeps systemd's
+    own signal off a wake runtime, but the supervisor FORWARDS its stop —
+    ``supervisor.py`` calls ``sweep(any_owner=True)`` on SIGTERM — so restarting
+    the wakes unit ends every wake-started conversation whatever the KillMode.
+    An updater may restart that unit only when this answers ``0``.
+
+    ``None`` when the process table could not be read at all. ``reclaim``'s
+    runner answers ``""`` on ANY failure, and a census built on that would read
+    "no runtimes" — the one answer that licenses a restart — so an empty table
+    is treated as unreadable: a successful ``ps -eo`` always lists at least
+    ``ps`` itself and its parent. Never raises.
+    """
+    from local_operator.session.runtime import reclaim
+
+    read_table: list[bool] = []
+
+    def run(command: Sequence[str], timeout_s: float) -> str:
+        output = reclaim._run_command(command, timeout_s)
+        if "-eo" in command:
+            read_table.append(bool(output.strip()))
+        return output
+
+    try:
+        found = owned_pids(config_dir, any_owner=True, run=run)
+    except Exception:  # noqa: BLE001 — a census is a gate's input; unknown is not zero
+        logger.debug("wake-owned runtime census failed", exc_info=True)
+        return None
+    if not read_table or not all(read_table):
+        return None
+    return len(found)
 
 
 def sweep(

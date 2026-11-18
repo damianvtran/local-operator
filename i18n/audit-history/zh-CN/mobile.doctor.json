@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "mobile.doctor",
-  "history_sha256": "d98e79916c208e69072fcf7b6b71f92ac978bd15da3d2180a2725651494c22b3",
+  "history_sha256": "2e2be01b23393f4de2901bff08999f9ba59440a4b4638a00235b5eda2dfd7cd3",
   "entries": [
     {
       "locale": "zh-CN",
@@ -72,6 +72,29 @@
       "evidence": "i18n/audits/evidence/zh-CN/mobile.doctor/a3/record.json",
       "round": "a3",
       "keys_audited": 23
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "mobile.doctor",
+      "source_sha256": "bf2cc180fd8bc8a7f5445eb4c4a5708fbb7915e6271fefe69f04c425babbcfef",
+      "translator": {
+        "agent": "coder subagent of PR #4193 (commit ce4f2e4e5; wrote the English source and all 7 translations)",
+        "model": "not reported in the commit; served model of the coder child unverified",
+        "date": "2026-11-17"
+      },
+      "auditor": {
+        "agent": "copy-reviewer acting as independent i18n auditor, lopdev team member (`task` subagent), session c47ffb8607fc; did not write the translations; corrected the values listed in findings",
+        "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4193 audit a4 PASSED: 4 new keys mobile.doctor.watches.{ok,near,at_limit,unknown}, 0 blocker / 0 major / 1 minor / 0 nit. ZH-W1 minor, corrected by the auditor: removed spaces between Chinese and {placeholder} runs. Translator and auditor share model family anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/zh-CN/mobile.doctor/a4/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/mobile.doctor/a4/record.json",
+      "round": "a4",
+      "keys_audited": 4
     }
   ]
 }

@@ -8,10 +8,11 @@ stream OPENED and none refused: the link was up, the runtime was alive and
 loaded, and it missed the viewer's first-sync window. Two defects made that
 read as a dead device:
 
-1. **Classification.** The runtime's three "alive but did not answer" outcomes
+1. **Classification.** The runtime's busy or explicit-refusal outcomes
    (``RuntimeUnresponsiveError``, a ``bind_failed`` announcement, and
    ``OwnerAckTimeout``) are ``ConnectionError``s, so the pilot's dial-refusal
-   rung claimed them and pointed at ``network doctor``.
+   rung claimed them and pointed at ``network doctor``. A delivered bind refusal
+   now keeps its cause rather than pretending it was a measured busy timeout.
 2. **The window.** ``bind_runtime()`` took the TUI's 15 s foreground envelope,
    so the verb's own 120 s bind budget (``PILOT_BIND_TIMEOUT_S``) never reached
    the sync wait: a runtime that would have answered at 16 s lost the message.
@@ -184,7 +185,7 @@ def test_a_runtime_that_syncs_after_the_tui_envelope_is_served_inside_the_pilots
 
 
 @pytest.mark.parametrize("verb", ["send", "steer", "peek"])
-def test_a_bind_failed_announcement_is_busy_not_a_dial_that_produced_no_session(
+def test_a_bind_failed_announcement_keeps_the_runtime_refusal_without_calling_it_load(
     verb: str, runtime: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """These acts prepare a view; only ``--send --mailbox`` bypasses that gate.
@@ -202,7 +203,12 @@ def test_a_bind_failed_announcement_is_busy_not_a_dial_that_produced_no_session(
     assert payload["code"] == "session_unreachable", payload
     assert "produced no session" not in payload["message"], payload
     assert "doctor" not in payload["message"], payload
-    assert "too busy" in payload["message"], payload
+    assert "the frontend bind could not complete (test)" in payload["message"], payload
+    assert "Re-run the command" in payload["message"], payload
+    assert "reconnect" not in payload["message"], payload
+    assert "owner could not prepare this view" not in payload["message"], payload
+    assert "too busy" not in payload["message"], payload
+    assert "within 1s" not in payload["message"], payload
 
 
 @pytest.mark.parametrize(
@@ -220,7 +226,7 @@ def test_a_bind_failed_announcement_is_busy_not_a_dial_that_produced_no_session(
 def test_only_the_canonical_bind_announcement_keeps_its_typed_disposition(
     reason: str, announced_bind: bool
 ) -> None:
-    """Cause retention must not turn death, retirement or arbitrary prose into busy."""
+    """Only a canonical bind announcement keeps the explicit-refusal type."""
     error = attached_mod._sync_disconnect_error(reason)
     assert isinstance(error, attached_mod.RuntimeBindFailedError) is announced_bind
     assert isinstance(error, ConnectionError)
@@ -301,3 +307,20 @@ def test_the_pilot_hands_its_own_bind_budget_to_the_viewer(
     assert deadline is not None
     expected = net_cli.PILOT_BIND_TIMEOUT_S - net_cli._PILOT_BIND_SLACK_S
     assert before + expected - 1.0 <= deadline <= time.monotonic() + expected
+
+
+def test_a_bare_timeout_keeps_the_doctor_rung(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A deadline alone is not evidence that the runtime answered."""
+
+    class _TimeoutViewer(_FakeViewer):
+        async def bind_runtime(self, *, deadline: float | None = None) -> None:
+            raise TimeoutError("the transport stayed silent")
+
+    _patch(monkeypatch, _TimeoutViewer(), _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
+    payload = _payload(capsys.readouterr().out)
+    assert payload["code"] == "session_unreachable", payload
+    assert "doctor" in payload["message"], payload
+    assert "too busy" not in payload["message"], payload

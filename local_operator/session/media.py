@@ -311,6 +311,7 @@ def resolve_supplement_file(
     index: int,
     *,
     cwd: str,
+    fallback_cwd: str = "",
 ) -> SessionMedia | str:
     """``row["files"][index]`` of supplement ``job`` as bytes, or a refusal token.
 
@@ -327,6 +328,16 @@ def resolve_supplement_file(
     of silent wrong-directory this codebase refuses. Locally that comes from the
     daemon's session table; on the mesh owner, from its OWN registry record, never
     from the viewer (nothing the viewer sends is a path).
+
+    ``fallback_cwd`` is the DURABLE record's cwd for a session with no live runtime
+    (an ended session's frontend checkpoint, or its marker/wake index). It is a
+    recollection, not a vouched root, so it only JOINS a cwd-relative path and only
+    when the resolved file still matches the row's recorded ``size_bytes`` and
+    ``mtime`` exactly (a row without that fingerprint stays ``no-cwd``): a file that
+    changed since the Highlight was pinned, or a directory that is no longer the
+    one the agent worked in, is refused rather than served. It is never an allowed
+    root and never the denylist's cwd, so a recorded cwd such as ``/`` cannot widen
+    reads beyond ``~`` and the session's scratchpad.
 
     The SAME function answers a mesh viewer on the owner (see the scope note above
     this function): there is no remote-only branch to drift.
@@ -371,13 +382,27 @@ def resolve_supplement_file(
 
     home = str(Path.home())
     expanded = os.path.expanduser(raw)
+    must_match: tuple[int, float] | None = None
     if not os.path.isabs(expanded):
-        if not cwd:
-            # No live record: a cwd-relative path has no root we can
-            # vouch for, and resolving it against a guess is the class
-            # of silent wrong-directory this codebase refuses.
-            return SUPPLEMENT_NO_CWD
-        expanded = os.path.join(cwd, expanded)
+        if cwd:
+            expanded = os.path.join(cwd, expanded)
+        else:
+            # No live record: a cwd-relative path has no root we can vouch for, and
+            # resolving it against a guess is the class of silent wrong-directory
+            # this codebase refuses. The durable cwd may stand in only when the
+            # file it names is provably the one the row recorded (see the
+            # docstring), so a wrong directory cannot serve a look-alike.
+            size, mtime = recorded.get("size_bytes"), recorded.get("mtime")
+            if (
+                not fallback_cwd
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or isinstance(mtime, bool)
+                or not isinstance(mtime, (int, float))
+            ):
+                return SUPPLEMENT_NO_CWD
+            must_match = (size, float(mtime))
+            expanded = os.path.join(fallback_cwd, expanded)
     resolved_path = Path(os.path.realpath(expanded))
     # The row's own session scratchpad is a root beside cwd/home (a relocated config
     # dir may sit outside ``~``), mirroring the prefilter that admitted the path.
@@ -410,6 +435,8 @@ def resolve_supplement_file(
         # bytes already read into a 404 if the file were unlinked in between (the
         # local route never did that), and the bytes-backed media never re-checks it.
         before = resolved_path.stat()
+        if must_match is not None and (before.st_size, before.st_mtime) != must_match:
+            return SUPPLEMENT_NO_CWD
         if before.st_size > SUPPLEMENT_FILE_MAX_BYTES:
             return SUPPLEMENT_TOO_LARGE
         fingerprint = (before.st_ino, before.st_size, before.st_mtime_ns)

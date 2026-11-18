@@ -1,0 +1,5 @@
+{
+  "tunnel.transient.authorization_unavailable.label": "Radient yêu cầu giảm tần suất",
+  "tunnel.transient.authorization_unavailable.relay": "Radient đã yêu cầu máy tính này giãn các lần kiểm tra ủy quyền chuyển tiếp, thường là vì có nhiều yêu cầu cùng lúc từ mạng này. Thông tin đăng nhập và máy tính này không có vấn đề gì; nó sẽ tự ủy quyền lại khi Radient trả lời trở lại.",
+  "tunnel.transient.authorization_unavailable.terminal": "Radient đã trả lời bước kiểm tra ủy quyền của trình kết nối bằng HTTP 429 hoặc 408 (yêu cầu giảm tần suất), nên không phải lỗi của thông tin đăng nhập, thanh toán hay máy tính này. Trình kết nối vẫn phục vụ điện thoại tối đa 10 phút sau lần kiểm tra thành công gần nhất, chờ đúng khoảng thời gian Radient yêu cầu trước khi kiểm tra lại và tự ủy quyền lại; không cần chạy lệnh nào trên máy."
+}

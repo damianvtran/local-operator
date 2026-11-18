@@ -32,9 +32,10 @@ half-written one — and BOTH the append and the fold-then-replace run under one
 exclusive lock on a side file, because an append landing between the fold and
 the replace would otherwise be in neither file (see :func:`_exclusive`).
 
-THE FILE IS OWNER-ONLY. It is created ``0600`` and re-chmodded on every append,
-and its directory ``0700``, following the transcript's rule (a record can quote
-a prompt summary, and a config directory can be relocated onto a shared path).
+THE FILE IS OWNER-ONLY. It is created ``0600`` and re-chmodded on every append
+(and so is its directory, ``0700``, which a ``mkdir`` mode alone would only set
+at creation), following the transcript's rule (a record can quote a prompt
+summary, and a config directory can be relocated onto a shared path).
 """
 
 from __future__ import annotations
@@ -387,6 +388,24 @@ def _keep_private(fd: int) -> None:
         logger.debug("remote-compute record: could not restrict mode", exc_info=True)
 
 
+def _keep_directory_private(directory: Path) -> None:
+    """Make the record's directory owner-only (best-effort).
+
+    ``mkdir(mode=...)`` only applies at CREATION and is then masked by the umask,
+    so a directory an older build made, one restored from a backup, or one under a
+    hand-made ``LOCAL_OPERATOR_CONFIG_DIR`` would keep a wider mode while the
+    module promises an owner-only record AND directory. Applied on every append,
+    with the same swallowed-error rule as :func:`_keep_private`: a filesystem that
+    refuses ``chmod`` must not cost an observation.
+    """
+    if os.name == "nt":  # Windows: POSIX modes do not apply
+        return
+    try:
+        directory.chmod(_DIRECTORY_MODE)
+    except OSError:
+        logger.debug("remote-compute record: could not restrict directory mode", exc_info=True)
+
+
 @contextlib.contextmanager
 def _exclusive(path: Path) -> Iterator[None]:
     """Serialise the append/fold cycle against every other process.
@@ -408,6 +427,13 @@ def _exclusive(path: Path) -> Iterator[None]:
     lost observation. Windows has no ``flock``; there the in-process lock plus
     ``O_APPEND`` line atomicity is what remains, which is weaker across processes
     and is stated rather than papered over.
+
+    NO TIMEOUT MEANS A WEDGED HOLDER IS WAITED ON INDEFINITELY, which is bounded
+    only by the other writer's progress (a ``SIGSTOP``ped process, a hung mount).
+    That is acceptable here because no event loop is on this stack: every async
+    record write in :mod:`local_operator.remote_compute.api` hands the whole write
+    to a thread, so the wait blocks that worker rather than every task on the
+    loop.
     """
     if os.name == "nt":  # pragma: no cover - no flock on this host
         yield
@@ -430,6 +456,7 @@ def _append(record: RunRecord, *, config_dir: Path | None = None) -> None:
     """Append one observation, compacting first when the file has grown."""
     path = records_path(config_dir)
     path.parent.mkdir(parents=True, exist_ok=True, mode=_DIRECTORY_MODE)
+    _keep_directory_private(path.parent)
     line = json.dumps(record.to_json(), ensure_ascii=False, sort_keys=True) + "\n"
     with _APPEND_LOCK, _exclusive(path.parent / LOCK_FILENAME):
         _compact_if_grown(path)

@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "Question",
   "relay.transcript.label.messages": "Messages",
   "relay.transcript.composer.queued": "{count, plural, one {# en attente} many {# en attente} other {# en attente}}",
-  "relay.transcript.session.unread_refused": "Impossible de lire les messages non lus — rien n’a été effacé. Réessayez."
+  "relay.transcript.session.unread_refused": "Impossible de lire les messages non lus — rien n’a été effacé. Réessayez.",
+  "relay.transcript.message.show_more": "Afficher plus",
+  "relay.transcript.message.show_less": "Afficher moins",
+  "relay.transcript.message.show_more_label": "Afficher plus de votre message",
+  "relay.transcript.message.show_less_label": "Afficher moins de votre message"
 }

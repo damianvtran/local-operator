@@ -267,7 +267,7 @@
         }
       ],
       "references": {
-        "harness/bridge_copy.py": 91
+        "harness/bridge_copy.py": 95
       }
     },
     "wire.notification_sound": {

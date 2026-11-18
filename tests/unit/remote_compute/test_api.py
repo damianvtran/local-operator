@@ -12,8 +12,13 @@ future file that needs them makes the move once for all three.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+import threading
+import time
 from collections.abc import Iterator
-from contextlib import closing
+from contextlib import closing, suppress
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +44,7 @@ from local_operator.remote_compute.errors import (
     Conflict,
     InvalidRequest,
 )
-from local_operator.remote_compute.repo import RepoRef
+from local_operator.remote_compute.repo import UNPARSEABLE_URL, RepoRef
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -231,6 +236,136 @@ async def test_a_record_that_cannot_be_written_does_not_fail_the_submission(
         submitted = await library.create_run(request_for(), idempotency_key="k")
     assert submitted.record is None
     assert submitted.run["id"] == "run_1"
+
+
+@pytest.mark.asyncio
+async def test_a_repo_url_the_scrubber_cannot_parse_still_submits_and_records(
+    credential: int, request_for: Any, isolated_roots: Path
+) -> None:
+    """A1's repro through the real path, where the run already exists.
+
+    ``create_run`` reaches the scrubber from ``record_submission`` only AFTER the
+    server has answered 201. A scrubber that raised there told the operator the
+    submission failed, with no run id to cancel, for a run the far end had
+    already created; the recorded URL is now the placeholder instead.
+    """
+    origin = _Origin(httpx.Response(201, json=_created(network_id=request_for.network_id)))
+    library, http = _library(origin, credential, isolated_roots)
+    async with http:
+        submitted = await library.create_run(
+            request_for(),
+            idempotency_key="k",
+            recorded_from=RunSubmitMetadata(repo_url="https://[::1/r.git", repo_sha=SHA),
+        )
+    assert submitted.run["id"] == "run_1"
+    assert submitted.record is not None
+    assert submitted.record.repo_url == UNPARSEABLE_URL
+    stored = records.records_path(isolated_roots).read_text(encoding="utf-8")
+    assert "[::1" not in stored
+
+
+@pytest.mark.asyncio
+async def test_any_failure_from_the_record_does_not_fail_the_submission(
+    credential: int,
+    request_for: Any,
+    isolated_roots: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard is wider than ``OSError``, and the message is never logged.
+
+    What the record stores is caller-supplied, so a URL the scrubber refuses is
+    the same failure class as a full disk — and the message of whatever is raised
+    can quote that content, which is the thing the scrub exists to keep out of
+    reach. So the exception's TYPE is logged and nothing else.
+    """
+
+    def boom(*arguments: object, **keywords: object) -> None:
+        raise ValueError("https://[::1/r.git")
+
+    monkeypatch.setattr(records, "record_submission", boom)
+    origin = _Origin(httpx.Response(201, json=_created(network_id=request_for.network_id)))
+    library, http = _library(origin, credential, isolated_roots)
+    with caplog.at_level(logging.WARNING, logger="local_operator.remote_compute.api"):
+        async with http:
+            submitted = await library.create_run(request_for(), idempotency_key="k")
+    assert submitted.record is None
+    assert submitted.run["id"] == "run_1"
+    logged = [entry.getMessage() for entry in caplog.records]
+    assert any("ValueError" in message for message in logged)
+    assert all("[::1" not in message for message in logged)
+
+
+#: How long the record lock is held in the N1 test below. Sized from the tick
+#: beat it is measured against: at ``_TICK_S`` a held window of this length
+#: offers ~30 ticks, so the count asserted is a third of the observed
+#: opportunity rather than a tuned threshold.
+_HELD_S = 0.3
+_TICK_S = 0.01
+_MIN_TICKS = 10
+
+
+@pytest.mark.asyncio
+async def test_a_held_record_lock_does_not_stop_the_event_loop(
+    credential: int, request_for: Any, isolated_roots: Path
+) -> None:
+    """N1: the record write is a THREAD, so a wedged lock holder cannot freeze the loop.
+
+    ``records._exclusive`` waits on ``flock`` with no timeout by design — a
+    timeout would turn healthy contention into a lost observation — and that is
+    only acceptable while no event loop is on the stack. ``create_run`` hands the
+    whole write to ``asyncio.to_thread`` for exactly that reason, and this test
+    holds the lock from a second descriptor to prove the loop keeps ticking while
+    the writer waits for it.
+
+    THE HOLDER IS RELEASED FROM A THREAD, not from the loop, so a regression to an
+    on-loop write fails the tick count instead of deadlocking the suite.
+    """
+    if os.name == "nt":  # pragma: no cover - no flock on this host
+        pytest.skip("records serialises with flock, which Windows does not have")
+    import fcntl
+
+    lock_path = records.records_path(isolated_roots).parent / records.LOCK_FILENAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+
+    def release_after_the_held_window() -> None:
+        time.sleep(_HELD_S)
+
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+
+    ticks: list[float] = []
+
+    async def tick() -> None:
+        while True:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(_TICK_S)
+
+    origin = _Origin(httpx.Response(201, json=_created(network_id=request_for.network_id)))
+    library, http = _library(origin, credential, isolated_roots)
+    ticking = asyncio.create_task(tick())
+    releaser = threading.Thread(target=release_after_the_held_window, daemon=True)
+    releaser.start()
+    started = time.monotonic()
+    try:
+        async with http:
+            submitted = await asyncio.wait_for(
+                library.create_run(request_for(), idempotency_key="k"), timeout=_HELD_S * 20
+            )
+    finally:
+        ticking.cancel()
+        with suppress(asyncio.CancelledError):
+            await ticking
+        releaser.join(timeout=5)
+    elapsed = time.monotonic() - started
+    # The window has to have existed for the tick count to mean anything: the
+    # submission cannot have finished before the lock was released.
+    assert elapsed >= _HELD_S / 2, f"the record write was not held ({elapsed:.2f}s)"
+    assert len(ticks) >= _MIN_TICKS, f"the event loop stopped ticking ({len(ticks)} ticks)"
+    assert submitted.record is not None
+    assert [row.run_id for row in library.local_runs()] == ["run_1"]
 
 
 def test_the_defaults_are_the_documented_constants() -> None:

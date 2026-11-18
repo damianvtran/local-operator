@@ -1440,8 +1440,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    async def bind_runtime(self) -> None:
+    async def bind_runtime(self, *, deadline: float | None = None) -> None:
         """Bind this viewer before an explicitly requested runtime operation.
+
+        ``deadline`` is the caller's absolute monotonic bound. Omission keeps
+        the short foreground envelope; the pilot supplies its existing budget.
 
         Declared because the desktop ROUTES call it as a HARD access on every
         path that mutates runtime state (``desktop_lifecycle.py`` /mcp,

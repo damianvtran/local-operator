@@ -226,6 +226,17 @@ def _running_receiver(root: Path) -> dict[str, Any] | None:
         return None
 
 
+def _jam(root: Path) -> dict[str, Any] | None:
+    """The live receiver's persistence jam (``connector.jam``), or ``None``."""
+
+    from local_operator.team_bridge.connector.jam import read_jam
+
+    try:
+        return read_jam(root)
+    except Exception:  # noqa: BLE001 — a status field never fails the command
+        return None
+
+
 def _supervised_receiver(state: str) -> tuple[bool, int | None]:
     """``(held, pid)``: whether a receiver PROCESS runs under the service manager.
 
@@ -351,6 +362,7 @@ def _status(root: Path, *, as_json: bool) -> int:
     screening = read_screening_status(root)
     woke_nobody = _woke_nobody(root)
     running = _running_receiver(root)
+    jam = _jam(root)
     held, held_pid = _supervised_receiver(state)
     restart_needed, restart_reason = _restart_verdict(running, held=held, held_pid=held_pid)
     log = install.log_path(root)
@@ -391,6 +403,12 @@ def _status(root: Path, *, as_json: bool) -> int:
                     # that never recorded itself (see _restart_verdict).
                     "restart_needed": restart_needed,
                     "restart_reason": restart_reason,
+                    # A live receiver whose pulls keep failing to persist with
+                    # the SAME closed store code (``connector.jam``): the
+                    # 2026-11-17 jam, a distinct state from "not admitted".
+                    # ``None`` = not jammed. A machine key for the same i18n
+                    # reason as ``woke_nobody``.
+                    "jammed": jam,
                 }
             )
         )

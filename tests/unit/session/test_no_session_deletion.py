@@ -282,6 +282,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes the fixed team_bridge/connector_runtime.json FILE on exit; never a session path",
     ),
+    # The receiver's jam report and the stale-restart kick marker (PR #4174):
+    # disposable config-dir sidecars beside the runtime record, same pattern.
+    # ``JamTracker._path`` is ``jam_path(config_dir)`` =
+    # ``<config_dir>/team_bridge/connector-jam.json``; ``_write_marker`` writes
+    # ``marker_path(config_dir)`` = ``<config_dir>/team_bridge/connector-restart.json``.
+    # Each temp sibling is that fixed name plus ``.{pid}.tmp``. Every literal
+    # component is a module constant and no caller input reaches either path,
+    # so none can be a session directory or a transcript.
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._clear",
+        "<path>.unlink",
+        "Removes the fixed team_bridge/connector-jam.json FILE on recovery; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ jam report",
+    ),
+    (
+        "local_operator/team_bridge/connector/jam.py::JamTracker._write",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the jam report; never a session path",
+    ),
+    (
+        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
+        "os.replace",
+        "Atomic swap of this pid's .tmp FILE onto the config dir's team_bridge/ restart marker",
+    ),
+    (
+        "local_operator/team_bridge/connector/stale_restart.py::_write_marker",
+        "<path>.unlink",
+        "Clears only that write's own .{pid}.tmp FILE beside the restart marker; never sessions/",
+    ),
     # The reply guard's per-install digest key (#3377, review round 1 S-3) is
     # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
     # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with

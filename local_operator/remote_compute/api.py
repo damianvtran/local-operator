@@ -21,14 +21,20 @@ to disagree about which runs exist. One write path, one file: see
 THE RECORD IS BEST-EFFORT AND NEVER FAILS A CALL. A run that was submitted is
 submitted even if this disk is full; losing the row is a cosmetic loss, while
 raising out of a successful create would tell the operator their work did not
-start. So the record write is guarded, and the write's own failure is swallowed
-with the reason stated here rather than in a bare ``except``.
+start. So the record write is guarded, and ANY exception from it is swallowed
+with the reason stated here rather than in a bare ``except`` — its TYPE is
+logged and its message is not, because the message can quote the record content
+being written (a URL the scrubber refused, say) and this module's whole job is
+to keep that content out of reach. The write also runs on a thread, because the
+record's own lock is a blocking ``flock`` (see :func:`records._exclusive`) and a
+wedged holder must not stall an event loop this library is shared by.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -47,6 +53,8 @@ from local_operator.remote_compute.defaults import RunDefaults, run_defaults
 from local_operator.remote_compute.errors import RemoteComputeError
 from local_operator.remote_compute.repo import RepoRef, detect_repo
 from local_operator.remote_compute.request import RunCreateRequest, RunSpec
+
+logger = logging.getLogger(__name__)
 
 #: The follower's idle wait, floor and ceiling.
 #:
@@ -139,7 +147,9 @@ class RemoteRuns:
         prompt only as free text that must be summarised.
         """
         created = await self.client.create_run(request, idempotency_key=idempotency_key)
-        record = self._record_submission(created, request=request, metadata=recorded_from)
+        record = await asyncio.to_thread(
+            self._record_submission, created, request=request, metadata=recorded_from
+        )
         return SubmittedRun(created=created, record=record)
 
     def _record_submission(
@@ -166,10 +176,15 @@ class RemoteRuns:
                 status=_optional(created.run.get("status")),
                 config_dir=self.config_dir,
             )
-        except OSError:
+        except Exception as failure:
             # See the module docstring: the run is submitted either way, so a
             # record that cannot be written is reported by its absence, not by
-            # failing a create that already happened at the far end.
+            # failing a create that already happened at the far end. MORE THAN
+            # ``OSError`` reaches here: the stored values are caller-supplied, so
+            # a repository URL ``records``' scrubber rejects is this same class
+            # (a run the far end created, reported to the operator as a failed
+            # submission, with no id to cancel).
+            logger.warning("remote-compute: local record not written (%s)", type(failure).__name__)
             return None
 
     # -- reads --------------------------------------------------------------
@@ -179,7 +194,7 @@ class RemoteRuns:
     ) -> dict[str, Any]:
         """One run by id, refreshing the local record's status if it is recorded."""
         run = await self.client.get_run(identifier, expected_network=expected_network)
-        self._record_status(run)
+        await asyncio.to_thread(self._record_status, run)
         return run
 
     async def list_runs(
@@ -294,7 +309,7 @@ class RemoteRuns:
         """Cancel a run and refresh its recorded status from the answer."""
         run = await self.client.cancel_run(identifier)
         if run:
-            self._record_status(run)
+            await asyncio.to_thread(self._record_status, run)
         return run
 
     async def delete_run(self, identifier: str) -> dict[str, Any]:
@@ -305,7 +320,7 @@ class RemoteRuns:
         """
         run = await self.client.delete_run(identifier)
         try:
-            records.mark_deleted(identifier, config_dir=self.config_dir)
+            await asyncio.to_thread(records.mark_deleted, identifier, config_dir=self.config_dir)
         except OSError:
             # Same reasoning as the submit path: the server's delete succeeded,
             # and a record that cannot be updated does not undo it.

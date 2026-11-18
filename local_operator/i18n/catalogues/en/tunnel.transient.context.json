@@ -1,0 +1,17 @@
+{
+  "tunnel.transient.authorization_unavailable.label": {
+    "role": "Short reason label",
+    "tone": "Terse phrase",
+    "note": "Label for reason code authorization_unavailable: Radient answered HTTP 429 (rate limited, e.g. its edge firewall's per-network limit) or 408. Shown after 'Last connector exit:' and in status rows. Must not suggest the login or billing is at fault."
+  },
+  "tunnel.transient.authorization_unavailable.relay": {
+    "role": "Phone-facing 503 body detail",
+    "tone": "Reassuring, factual",
+    "note": "Shown on the phone only after the computer has kept serving for 10 minutes on its last successful check and Radient is still asking it to slow down. Names no command (the phone cannot run one) and must not tell the reader to sign in or check billing."
+  },
+  "tunnel.transient.authorization_unavailable.terminal": {
+    "role": "lop tunnel status / desktop connector detail",
+    "tone": "Reassuring, factual",
+    "note": "The connector's authorization check got HTTP 429 or 408 from Radient. Self-clearing; must not suggest signing in again. HTTP, 429, 408 and the 10-minute grace stay exact."
+  }
+}
