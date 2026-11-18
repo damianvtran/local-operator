@@ -913,7 +913,31 @@ _LEGACY_CONTROL_PATHS = frozenset(
 #: OAuth access token — they read and publish organization content through the
 #: hub as the signed-in PERSON — so they cannot sit at a weaker posture than the
 #: agent routes that spend the same credential.
-_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams")
+#:
+#: ``/v1/chat`` is the family that STARTS AN AGENT TURN. ``POST /v1/chat`` and
+#: its agent-scoped and ``/async`` siblings call ``create_operator`` and then
+#: ``handle_user_input``, and a server-built session runs its tools unattended
+#: — that is the contract the desktop app's authenticated chat relies on, so
+#: the approval default is NOT the thing to change. What must hold instead is
+#: that only the bearer holder reaches those routes: a turn is immediate
+#: execution, the same reason ``/v1/schedules`` (delayed execution) is here.
+#: Gated by prefix so every current and future ``/v1/chat*`` route is covered
+#: the day it exists, on every method (HEAD included, see the matchers).
+#:
+#: ``/v1/sse/jobs`` and ``/v1/sse/messages`` stream those turns' output —
+#: conversation content, tool output — keyed by an id the caller got from a
+#: gated route. Gating them keeps the stream at the posture of the turn that
+#: produced it. ``/v1/sse/capabilities`` (transport negotiation, no content)
+#: deliberately stays open and is not covered by either prefix.
+_LEGACY_GATED_PREFIXES = (
+    "/v1/agents",
+    "/v1/chat",
+    "/v1/jobs",
+    "/v1/schedules",
+    "/v1/sse/jobs",
+    "/v1/sse/messages",
+    "/v1/teams",
+)
 
 #: The ONLY routes under :data:`_LEGACY_GATED_PREFIXES` left open in managed
 #: mode, each with the reason it is safe. Keyed ``"METHOD /path/template"`` using
@@ -928,8 +952,15 @@ _LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams"
 #: gated the moment it exists, and an omission fails a test instead of shipping
 #: a bypass.
 #:
-#: Currently EMPTY, and the emptiness is load-bearing: no legacy route today has
-#: a justification for staying open.
+#: ONE entry today, and it is a recorded compatibility hold rather than a claim
+#: of safety: ``POST /v1/chat/agents/{agent_id}/edit``. The desktop canvas's
+#: inline edit calls it straight from the renderer (``file://``, Origin
+#: ``"null"``) with a plain ``fetch`` that carries no bearer, so gating it would
+#: break that feature for every managed install. It invokes the model only
+#: (``executor.invoke_model``; no tool executes and no file is written), which
+#: is why it is the one route of the family that can wait. Remove this entry in
+#: the change that moves the UI's edit call onto the bearer-carrying desktop
+#: transport — the coverage tests then hold the route gated.
 #:
 #: It previously held the two agent-scoped schedules routes, excused as "paired
 #: with the ungated /v1/schedules/{schedule_id}; gate the surface as one
@@ -945,7 +976,13 @@ _LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams"
 #: Before adding a key here, check the route against the router rather than
 #: against the shape of the URL: a path that LOOKS like the counterpart of
 #: something ungated may be the only way in.
-_LEGACY_GATE_EXCEPTIONS: dict[str, str] = {}
+_LEGACY_GATE_EXCEPTIONS: dict[str, str] = {
+    "POST /v1/chat/agents/{agent_id}/edit": (
+        "model-only edit suggestion (no tool execution, no file write); the "
+        "desktop canvas inline edit calls it from the renderer without the "
+        "bearer, so gating it waits for that client to carry one"
+    ),
+}
 
 
 def _iter_routes(routes: Iterable[Any]) -> Iterator[tuple[str, frozenset[str]]]:
