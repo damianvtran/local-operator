@@ -81,6 +81,8 @@ __all__ = [
     "project_events_batch",
     "project_inbox_page",
     "project_message_ref",
+    "INTEGRATION_SENDER_KIND",
+    "sender_class",
 ]
 
 #: The minted conversation-id family: ``bcv_`` + 8..64 lowercase base36 chars.
@@ -374,6 +376,37 @@ def validate_recipient_shape(value: Any) -> dict[str, str]:
 #: The member kinds the hub addresses. A mention row carries one, so a candidate
 #: whose row has neither is not addressable and never becomes a candidate.
 MEMBER_KINDS = ("human", "agent")
+
+#: The hub's sender kind (and message ``origin``) for a post made by an installed
+#: Team Integration app (agent-server ``BridgeParticipantKindIntegration`` /
+#: ``BridgeConversationOriginIntegration``): Datadog, Grafana, Alertmanager,
+#: incident.io and the like posting into a channel with a write-only app token.
+INTEGRATION_SENDER_KIND = "integration"
+
+
+def sender_class(kind: object, origin: object = None) -> str:
+    """How this client presents a conversation message's sender: one closed word.
+
+    ``human`` / ``agent`` for a member, ``app`` for an integration post, and
+    ``unknown`` for anything else a newer hub may add.
+
+    WHY A CLASS AND NOT THE WIRE KIND. Every authority rule in this package
+    (owner principal, own-post read-back, the screening tier, the receipt kind)
+    keys on ``human``/``agent`` exactly, and those two words are the only ones a
+    member can hold. An app is not a member: it is never the owner, never a
+    person's decision and never an agent peer, and its body is untrusted data
+    like any other. Before this helper a kind outside the closed pair raised, and
+    on the events batch that cost the WHOLE page; the fix is to keep the message
+    and attribute it to nobody with authority. ``origin=integration`` alone also
+    makes the row an app, so a hub that labelled the participant oddly cannot
+    turn an app post into a member's.
+    """
+
+    if kind == INTEGRATION_SENDER_KIND or origin == INTEGRATION_SENDER_KIND:
+        return "app"
+    if kind in MEMBER_KINDS:
+        return str(kind)
+    return "unknown"
 
 
 @dataclass(frozen=True)
@@ -1363,8 +1396,14 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
             # restart and must not become a persistent name cache. Only the
             # closed provenance enum may accompany the locator.
             kind = ids.get("sender_kind")
-            if kind is not None and kind not in ("human", "agent"):
-                raise TeamBridgeTypeError(f"events[{index}].ids.sender_kind is invalid")
+            if kind is not None and kind not in MEMBER_KINDS:
+                # An app (``integration``) or a newer hub's kind: DROP the class
+                # rather than refuse the batch. Refusing cost every other event on
+                # the page; keeping the word would widen the persisted ref grammar
+                # (``validated`` stays human/agent so a rollback still decodes).
+                # A class-less ref names nobody, and the body read that follows
+                # restates the sender for screening, which still runs.
+                kind = None
             # Thread routing fact (``omitempty`` on the server): ``thread_root_id``
             # was already on the wire (agent-server threads) but never carried
             # into the ref, so a reply's card could not name its thread. An old

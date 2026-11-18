@@ -387,13 +387,23 @@ def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
     # char account used to pass here and then hold ``envelope_malformed``
     # downstream (round 1 S-5).
     from ..screening import _ENVELOPE_LABEL_MAX
+    from ..types import INTEGRATION_SENDER_KIND, MEMBER_KINDS
 
     if (
         not isinstance(account, str)
         or len(account) > _ENVELOPE_LABEL_MAX
-        or kind not in ("", "human", "agent")
+        or kind not in ("", *MEMBER_KINDS, INTEGRATION_SENDER_KIND)
     ):
         raise ValueError("invalid classification sender")
+    if kind == INTEGRATION_SENDER_KIND:
+        # An app post (Team Integrations): screen it with NO member class rather
+        # than hold it as malformed. The class is what the owner and tier rules
+        # key on, so an empty class can never be the owner or a person's line;
+        # the account stays the charged attribution (the app's own ``iap_`` id).
+        # Any OTHER unstated word still holds as ``sender_malformed``: on this
+        # per-message lane a kind the client was not built for is a contract
+        # change, and holding one message costs nothing else on the page.
+        kind = ""
     return {
         "account_id": account,
         "kind": kind if account else "",
@@ -684,8 +694,14 @@ def _card_metadata(
             raise ValueError("invalid conversation display field")
         labels.append(value)
     name, sender, kind = labels
-    if kind not in ("", "human", "agent"):
+    from ..types import INTEGRATION_SENDER_KIND, MEMBER_KINDS, sender_class
+
+    if kind not in ("", *MEMBER_KINDS, INTEGRATION_SENDER_KIND):
         raise ValueError("invalid conversation sender kind")
+    # The card names the sender's CLASS, never the raw wire kind: an app post
+    # reads "(app, same tenant)", so it can never be taken for a member. Only
+    # ``human``/``agent`` ever reach the receipt (its own closed check below).
+    kind = sender_class(kind) if kind else ""
     # The two routing facts the card needs come from THIS read, never from the
     # durable ref: a value of the wrong shape is a malformed row (refused like
     # every other display field), an absent one is an older server.
