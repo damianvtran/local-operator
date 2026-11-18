@@ -100,6 +100,18 @@ while the state is unusable
 identical short answer to that unrecorded question within 10 s can be skipped
 (review round 3, S-10 — a narrow, pre-existing asymmetry, deferred).
 
+THE OUTBOUND LEDGER (``outbound_posts``). One row per ``dm``/``channel_post`` a
+SESSION of this endpoint sent: which local session, which conversation, the
+hub's message id once known, and a short random ``ref`` for asks. It answers
+"which of my sessions posted this?" for the routing and the authorship labels,
+and nothing else. Same file and same rules as the rest: additive only, fail
+open (a ledger that cannot be read never stops a post), disposable, and NO body
+column — message text never enters this file. A row is written BEFORE the send,
+its ``message_id`` filled after, and deleted when the send fails, so a failed
+send is never a poster. It is pruned on write to 14 days and 2000 rows per
+endpoint. ``posts`` is a different table with a 24 h life and feeds the run
+warning; the ledger deliberately leaves it alone.
+
 ROWS AN OLDER BUILD WROTE never count towards the run warning (review round 3,
 QA Q5): only rows with ``tracked = 1`` (written by this build) are counted, so
 the first post after an upgrade does not warn "Posted 140 messages".
@@ -159,6 +171,19 @@ HUMAN_TRIGGER_TTL_S = 600.0
 #: retained, so a day bounds the table while covering any real monologue.
 _RETAIN_S = 86_400.0
 
+#: The outbound ledger's life: 14 days or 2000 rows per endpoint, whichever
+#: bites first. A thread-root match has no window of its own, so this is how
+#: long a reply into an old thread still finds the session that started it.
+OUTBOUND_RETAIN_S = 14 * 86_400.0
+OUTBOUND_MAX_ROWS = 2000
+#: A per-ask reference: 5 Crockford base32 characters (no I, L, O, U), so two
+#: asks in one conversation are told apart by eye and by a model quoting one.
+#: Random from ``secrets``, never derived from the text or the session, and
+#: DISPLAY ONLY: nothing reads a ref back out of inbound text.
+REF_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+REF_LENGTH = 5
+_REF_ATTEMPTS = 16
+
 _BUSY_TIMEOUT_S = 5.0
 _KEY_BYTES = 32
 
@@ -198,6 +223,25 @@ CREATE TABLE IF NOT EXISTS agent_run_notices (
     level INTEGER NOT NULL,
     PRIMARY KEY (endpoint_id, conversation_id)
 )""",
+    """
+CREATE TABLE IF NOT EXISTS outbound_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    client_ref TEXT NOT NULL,
+    message_id TEXT,
+    thread_root_id TEXT NOT NULL DEFAULT '',
+    ref TEXT,
+    kind TEXT NOT NULL,
+    created_at REAL NOT NULL
+)""",
+    """
+CREATE INDEX IF NOT EXISTS outbound_by_conversation
+    ON outbound_posts (endpoint_id, conversation_id, created_at)""",
+    """
+CREATE INDEX IF NOT EXISTS outbound_by_message
+    ON outbound_posts (endpoint_id, conversation_id, message_id)""",
     """
 CREATE TABLE IF NOT EXISTS runs (
     endpoint_id TEXT NOT NULL,
@@ -720,23 +764,150 @@ def release(
         pass
 
 
+@dataclass(frozen=True)
+class OutboundRecord:
+    """One ledger row this send owns: confirm it on success, discard on failure.
+
+    ``ref`` is set only for an ask (module docstring); ``suffix`` is what the
+    tool appends to the outgoing text. Empty when there is no ref.
+    """
+
+    row_id: int
+    ref: str | None = None
+
+    @property
+    def suffix(self) -> str:
+        return f"\n— ref {self.ref}" if self.ref else ""
+
+
+def _mint_ref(conn: sqlite3.Connection, endpoint_id: str, conversation_id: str) -> str | None:
+    """A ref no ledger row of this conversation already carries, or None.
+
+    Unique per conversation rather than globally: the reader sees one
+    conversation at a time, and a 14-day, 2000-row ledger would make a global
+    check cost more than the 33M-value space is worth. ``None`` after
+    ``_REF_ATTEMPTS`` collisions means "send without a ref" — a ref is a
+    convenience and never a reason to fail a send.
+    """
+
+    for _ in range(_REF_ATTEMPTS):
+        candidate = "".join(secrets.choice(REF_ALPHABET) for _ in range(REF_LENGTH))
+        taken = conn.execute(
+            "SELECT 1 FROM outbound_posts WHERE endpoint_id = ? AND conversation_id = ? "
+            "AND ref = ? LIMIT 1",
+            (endpoint_id, conversation_id, candidate),
+        ).fetchone()
+        if taken is None:
+            return candidate
+    return None
+
+
+def record_outbound(
+    config_dir: Path | str,
+    *,
+    endpoint_id: str,
+    conversation_id: str,
+    session_id: str,
+    client_ref: str,
+    kind: str,
+    thread_root_id: str = "",
+    ask: bool = False,
+    now: float | None = None,
+) -> OutboundRecord | None:
+    """Write the ledger row for a send about to go out. Never raises; None = no row.
+
+    Fail open (module docstring): a guard file that cannot be written means the
+    post goes out with no ledger row and no ref, never that it is refused.
+    ``ask`` mints the ``ref``; pruning rides this write.
+    """
+
+    now = time.time() if now is None else now
+    try:
+        with _connect(config_dir) as conn:
+            ref = _mint_ref(conn, endpoint_id, conversation_id) if ask else None
+            cursor = conn.execute(
+                "INSERT INTO outbound_posts (endpoint_id, conversation_id, session_id, "
+                "client_ref, thread_root_id, ref, kind, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    endpoint_id,
+                    conversation_id,
+                    session_id,
+                    client_ref,
+                    thread_root_id.strip(),
+                    ref,
+                    kind,
+                    now,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM outbound_posts WHERE endpoint_id = ? AND created_at <= ?",
+                (endpoint_id, now - OUTBOUND_RETAIN_S),
+            )
+            conn.execute(
+                "DELETE FROM outbound_posts WHERE endpoint_id = ? AND id NOT IN "
+                "(SELECT id FROM outbound_posts WHERE endpoint_id = ? ORDER BY id DESC LIMIT ?)",
+                (endpoint_id, endpoint_id, OUTBOUND_MAX_ROWS),
+            )
+            return OutboundRecord(row_id=int(cursor.lastrowid or 0), ref=ref)
+    except (ReplyGuardUnavailable, sqlite3.Error, OSError, OverflowError):
+        return None
+
+
+def confirm_outbound(
+    config_dir: Path | str, record: OutboundRecord | None, *, message_id: str
+) -> None:
+    """Fill the hub's message id into a row once the send landed. Never raises."""
+
+    if record is None or not message_id:
+        return
+    try:
+        with _connect(config_dir) as conn:
+            conn.execute(
+                "UPDATE outbound_posts SET message_id = ? WHERE id = ?",
+                (message_id, record.row_id),
+            )
+    except (ReplyGuardUnavailable, sqlite3.Error, OSError):
+        pass
+
+
+def discard_outbound(config_dir: Path | str, record: OutboundRecord | None) -> None:
+    """Delete the row of a send the hub did not take. Never raises."""
+
+    if record is None:
+        return
+    try:
+        with _connect(config_dir) as conn:
+            conn.execute("DELETE FROM outbound_posts WHERE id = ?", (record.row_id,))
+    except (ReplyGuardUnavailable, sqlite3.Error, OSError):
+        pass
+
+
 __all__ = [
     "AGENT_RUN_COUNT_MAX",
     "AGENT_RUN_WARN_EVERY",
     "AGENT_RUN_WARN_FIRST",
     "DUPLICATE_WINDOW_S",
     "HUMAN_TRIGGER_TTL_S",
+    "OUTBOUND_MAX_ROWS",
+    "OUTBOUND_RETAIN_S",
+    "REF_ALPHABET",
+    "REF_LENGTH",
     "RUN_WARN_EVERY",
     "RUN_WARN_FIRST",
     "RUN_WARN_SECOND",
     "TRIGGER_TTL_S",
+    "OutboundRecord",
     "ReplyGuardUnavailable",
     "Reservation",
     "Skipped",
     "agent_run_warning",
     "body_hash",
+    "confirm_outbound",
+    "discard_outbound",
     "guard_path",
     "key_path",
+    "record_outbound",
     "record_trigger",
     "release",
     "reserve_post",

@@ -52,6 +52,7 @@ from local_operator.team_bridge.client import (
 from local_operator.team_bridge.store import OwnerSnapshot
 from local_operator.team_bridge.tool import BridgeRuntime, _failure_text, execute_bridge
 from local_operator.team_bridge.types import SEND_RECIPIENT_DESCRIPTION
+from tests.unit.team_bridge.ref_text import without_ref
 
 TENANT = "ten_1"
 PEER = "acc_peer"
@@ -727,7 +728,7 @@ async def test_an_advisory_fault_after_a_delivered_dm_is_never_a_failure(
     assert sent["ok"] is True and "warning" not in sent and not sent.get("skipped"), sent
     assert sent["destination_type"] == "conversation_dm"
     sends = [call for call in client.calls if call["method"] == "conversation_send"]
-    assert [call["text"] for call in sends] == ["landed"]
+    assert [without_ref(call["text"]) for call in sends] == ["landed"]
 
 
 def refused_code(outcome: dict[str, Any]) -> str:

@@ -1511,12 +1511,23 @@ async def _direct_message(
             guard_busy = failure.transient
         if isinstance(slot, reply_guard.Skipped):
             return slot.as_result(conversation_id)
+        client_ref = str(uuid.uuid4())
+        ledger, outgoing_text = _begin_outbound(
+            runtime,
+            endpoint_id,
+            conversation_id,
+            kind="dm",
+            client_ref=client_ref,
+            text=text,
+            thread_root_id=thread_root_id,
+            in_reply_to=params.in_reply_to_message_id,
+        )
         try:
             sender = file_batch.send if file_batch else runtime.client.conversation_send
             result = await sender(
                 conversation_id,
-                client_ref=str(uuid.uuid4()),
-                text=text,
+                client_ref=client_ref,
+                text=outgoing_text,
                 tenant_id=runtime.tenant_id,
                 actor_endpoint_id=endpoint_id,
                 origin_session_id=runtime.session_id,
@@ -1525,7 +1536,8 @@ async def _direct_message(
                 **agent_attachments.send_kwargs(staged_images),
             )
         except Exception as failure:
-            # The hub did not take it: the slot goes back (``reply_guard.release``).
+            # The hub did not take it: the slot goes back (``reply_guard.release``)
+            # and so does the ledger row, so a failed send is never a poster.
             if slot is not None and not (file_batch and file_batch.uncertain):
                 reply_guard.release(
                     runtime.config_dir,
@@ -1533,6 +1545,8 @@ async def _direct_message(
                     endpoint_id=endpoint_id,
                     conversation_id=conversation_id,
                 )
+            if not (file_batch and file_batch.uncertain):
+                reply_guard.discard_outbound(runtime.config_dir, ledger)
             return _error(
                 (
                     agent_files.UNCERTAIN_MESSAGE
@@ -1547,6 +1561,9 @@ async def _direct_message(
                 ),
             )
         landed = True
+        reply_guard.confirm_outbound(
+            runtime.config_dir, ledger, message_id=_posted_message(result)[0]
+        )
     finally:
         if not landed:
             if file_batch:
@@ -1556,7 +1573,11 @@ async def _direct_message(
                     runtime, conversation_id, endpoint_id, staged_images
                 )
     receipt = _post_receipt(
-        conversation_id, result, thread_root_id=thread_root_id, lead=f"direct message to {label} in"
+        conversation_id,
+        result,
+        thread_root_id=thread_root_id,
+        lead=f"direct message to {label} in",
+        ref=ledger.ref if ledger is not None and ledger.ref else "",
     )
     receipt["destination_type"] = "conversation_dm"
     if file_batch:
@@ -1789,6 +1810,42 @@ def _note_reply_destination(runtime: "BridgeRuntime", receipt: dict[str, Any]) -
     )
 
 
+def _begin_outbound(
+    runtime: "BridgeRuntime",
+    endpoint_id: str,
+    conversation_id: str,
+    *,
+    kind: str,
+    client_ref: str,
+    text: str,
+    thread_root_id: str,
+    in_reply_to: str,
+) -> tuple[reply_guard.OutboundRecord | None, str]:
+    """Write the ledger row for a send and return the text to put on the wire.
+
+    An ASK is a ``dm`` or ``channel_post`` with text and no
+    ``in_reply_to_message_id`` — the tool has no "expects a reply" flag, and an
+    answer to a delivered message is not a new question. Only an ask is given a
+    ``ref`` line. Everything here is best effort (the ledger fails open): when
+    no row could be written the text goes out unchanged, because a reference is
+    never worth a lost message. The line is appended HERE, after the secret scan
+    and the duplicate hash, which both saw the caller's own text.
+    """
+
+    ask = bool(text.strip()) and not in_reply_to.strip()
+    record = reply_guard.record_outbound(
+        runtime.config_dir,
+        endpoint_id=endpoint_id,
+        conversation_id=conversation_id,
+        session_id=runtime.session_id,
+        client_ref=client_ref,
+        kind=kind,
+        thread_root_id=thread_root_id,
+        ask=ask,
+    )
+    return record, (text + record.suffix if record is not None else text)
+
+
 def _post_receipt(
     conversation_id: str,
     result: Any,
@@ -1796,6 +1853,7 @@ def _post_receipt(
     thread_root_id: str = "",
     lead: str = "posted to",
     mention_account_id: str = "",
+    ref: str = "",
 ) -> dict[str, Any]:
     """The ONE success receipt for a conversation write (channel_post, dm).
 
@@ -1830,6 +1888,10 @@ def _post_receipt(
         content += f" at seq {seq}"
     if mention_account_id:
         content += f" (mentioning {mention_account_id})"
+    if ref:
+        # Display only: the line was appended to the text the recipient sees,
+        # and the sender is told so it can name this ask later.
+        content += f"; ref {ref} appended to your message"
     receipt: dict[str, Any] = {
         "ok": True,
         "state": "sent",
@@ -1844,6 +1906,8 @@ def _post_receipt(
     }
     if mention_account_id:
         receipt["resolved_account_id"] = mention_account_id
+    if ref:
+        receipt["ref"] = ref
     return receipt
 
 
@@ -2974,6 +3038,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
         client_ref = str(uuid.uuid4())
+        # The ledger row and the ask's ref are decided HERE, not in
+        # ``pre_http_guard``: the text is fixed before the client calls the
+        # guard. The duplicate hash is taken from ``params.body`` there, so the
+        # appended ref cannot change it; a duplicate the guard then skips
+        # discards the row below like any send that did not land.
+        ledger, outgoing_text = _begin_outbound(
+            runtime,
+            endpoint_id,
+            channel_id,
+            kind="channel_post",
+            client_ref=client_ref,
+            text=params.body,
+            thread_root_id=thread_root_id,
+            in_reply_to=params.in_reply_to_message_id,
+        )
         # Staged ids are released on every exit that does not land the send,
         # cancellation included (CancelledError is not an ``Exception``).
         landed = False
@@ -2983,7 +3062,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 result = await sender(
                     channel_id,
                     client_ref=client_ref,
-                    text=params.body,
+                    text=outgoing_text,
                     tenant_id=runtime.tenant_id,
                     actor_endpoint_id=endpoint_id,
                     origin_session_id=runtime.session_id,
@@ -2995,6 +3074,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             except DispatchRefused as failure:
                 if file_batch and file_batch.uncertain:
                     return _error(agent_files.UNCERTAIN_MESSAGE, code="delivery_uncertain")
+                reply_guard.discard_outbound(runtime.config_dir, ledger)
                 if slot is not None and not (file_batch and file_batch.uncertain):
                     reply_guard.release(
                         runtime.config_dir,
@@ -3005,6 +3085,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return failure.result
             except Exception as failure:
                 # The hub did not take it: the slot goes back (``reply_guard.release``).
+                if not (file_batch and file_batch.uncertain):
+                    reply_guard.discard_outbound(runtime.config_dir, ledger)
                 if slot is not None and not (file_batch and file_batch.uncertain):
                     reply_guard.release(
                         runtime.config_dir,
@@ -3025,6 +3107,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                     ),
                 )
             landed = True
+            reply_guard.confirm_outbound(
+                runtime.config_dir, ledger, message_id=_posted_message(result)[0]
+            )
         finally:
             if not landed:
                 if file_batch:
@@ -3043,6 +3128,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             result,
             thread_root_id=thread_root_id,
             mention_account_id=recipient_account_id,
+            ref=ledger.ref if ledger is not None and ledger.ref else "",
         )
         if file_batch:
             receipt["file_ids"] = list(file_batch.staged)
