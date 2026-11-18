@@ -4195,6 +4195,10 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: Owner-only live file capture/binding. Unlike analytics this is awaited:
+    #: metadata freezes adjacent to real producer completion, before arbitrary
+    #: hooks or delayed event delivery. Handles never enter Message/wire JSON.
+    file_provenance: Callable[[str, Any, Any], Awaitable[None]] | None = None
     #: Durably bind a NESTED (``eval`` -> ``tool('write'|'edit')``) archived
     #: full diff to this session as ``(outer_call_id, call_id, tool_name,
     #: descriptor)``; returns ``True`` only once the binding is written. AWAITED

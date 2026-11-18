@@ -9196,6 +9196,10 @@ class RuntimeServer:
                 # the operator's own devices can still answer with their
                 # capability. Local attaches keep the default.
                 fields["owner_typed"] = False
+            if "_file_admission" in parameters:
+                from local_operator.session.file_provenance import user_admission
+
+                fields["_file_admission"] = user_admission(authority, op)
             if authority.input_surface and "input_surface" in parameters:
                 # ADR 0009: the origin is derived from the AUTHENTICATED
                 # connection, probed like ``owner_typed``; a handle without the
@@ -9243,6 +9247,10 @@ class RuntimeServer:
             if authority.locality != "local" and "owner_typed" in parameters:
                 # Same rule as the prompt op above.
                 fields["owner_typed"] = False
+            if "_file_admission" in parameters:
+                from local_operator.session.file_provenance import user_admission
+
+                fields["_file_admission"] = user_admission(authority, op)
             if authority.input_surface and "input_surface" in parameters:
                 # Same rule as the prompt op above: a phone steer into a
                 # desk-started run makes that run mobile-origin.
