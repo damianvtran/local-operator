@@ -83,6 +83,20 @@ and `lop tunnel setup --json`, not mesh admission.
    `--device <device id>` with the id the joining device reports in
    `lop network identity show --json`; any other device redeeming it is refused
    and the invite is burned. That is the form to use after a compromise.
+   To pair **without any credential sharing**, pass `--no-credential-offers`:
+   the owner never enumerates its logins for that ceremony (not even literal-MCP
+   adoption runs at mint), the joining device is sent an explicitly EMPTY share
+   list (`No credentials were offered.`), and during this pairing no credential
+   is granted and no `broker_credential` capability is admitted (not even the
+   one the `admin` role normally carries). It governs this pairing only: a
+   later, explicit signed remote onboarding or credential grant to that
+   member is a separate operator act outside the policy. The policy is saved with the invite
+   on the owner and enforced from there; a token whose copy of the policy was
+   edited (added, dropped or changed) is refused and burned, and so is a joining
+   device whose lop predates the flag — update it and mint a fresh invite. It is
+   independent of `--role`: a `read` invite still offers by default, so **use
+   `--role read --no-credential-offers` for read-only rigs** (QA, demos, test
+   devices) that must never receive a login.
 4. On the other device, **the human** runs it in a terminal:
    `lop network join @<token-file>` (or with the token itself).
    The joining device prints the inviter, the network, the offered role, its
