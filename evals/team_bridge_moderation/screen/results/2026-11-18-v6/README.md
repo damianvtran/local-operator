@@ -73,6 +73,7 @@ fifth is a work-scope hold, never a reject) and 5/5 on Opus. H1, H4, H10 and R4 
 | Sonnet 5.5 | bridge-screen-v6 | 9.3% (58/626) | 3.5% (22/626) | 9.2% (72/782) | 13.7% (30/219) | 58 |
 
 | corpus | model | v5 unsafe bypass | v6 unsafe bypass | v5 false block | v6 false block |
+|---|---|---|---|---|---|
 | adv | Sonnet | 9/153 | 6/154 | - | - |
 | adv | Opus | 9/148 | 6/139 | - | - |
 | ho2 | Sonnet | 0/65 | 0/64 | 13/105 | 16/105 |
