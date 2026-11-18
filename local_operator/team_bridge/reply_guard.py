@@ -969,6 +969,64 @@ def own_posts_between(
         conn.close()
 
 
+def routing_facts(
+    config_dir: Path | str,
+    *,
+    endpoint_id: str,
+    conversation_id: str,
+    thread_root_id: str | None,
+    since: float,
+) -> tuple[str | None, dict[str, float]] | None:
+    """What the ledger says about WHO of this endpoint's sessions spoke in one DM.
+
+    Returns ``(thread_session, posters)``: the session that posted
+    ``thread_root_id`` in THIS conversation (``None`` when no row matches — a
+    root from another conversation or one the ledger never saw matches nothing,
+    by the ``conversation_id`` in the query), and ``{session_id: latest post
+    time}`` for every session that posted at or after ``since``. ``None`` means
+    the ledger could not be read, which the router treats as "do not route".
+    An absent file or table is an empty ledger, not a failure.
+
+    Rows are the sessions' own sends, written before the hub ever saw them, so
+    nothing an inbound sender controls selects a row: only the hub's message id
+    of a thread root they name, which has to be a message one of OUR sessions
+    posted in this very conversation to match.
+    """
+
+    path = guard_path(config_dir)
+    if not path.is_file():
+        return None, {}
+    conn = _connect_ledger_readonly(config_dir)
+    if conn is None:
+        return None
+    try:
+        thread_session: str | None = None
+        if thread_root_id:
+            row = conn.execute(
+                "SELECT session_id FROM outbound_posts WHERE endpoint_id = ? "
+                "AND conversation_id = ? AND message_id = ? LIMIT 1",
+                (endpoint_id, conversation_id, thread_root_id),
+            ).fetchone()
+            thread_session = str(row["session_id"]) if row is not None else None
+        posters = {
+            str(r["session_id"]): float(r["last"])
+            for r in conn.execute(
+                "SELECT session_id, MAX(created_at) AS last FROM outbound_posts "
+                "WHERE endpoint_id = ? AND conversation_id = ? AND created_at >= ? "
+                "GROUP BY session_id",
+                (endpoint_id, conversation_id, since),
+            )
+        }
+    except sqlite3.OperationalError:
+        # A guard file from before the ledger: no table, so nobody has posted.
+        return None, {}
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    return thread_session, posters
+
+
 def discard_outbound(config_dir: Path | str, record: OutboundRecord | None) -> None:
     """Delete the row of a send the hub did not take. Never raises."""
 
@@ -1011,5 +1069,6 @@ __all__ = [
     "record_trigger",
     "release",
     "reserve_post",
+    "routing_facts",
     "unavailable_warning",
 ]
