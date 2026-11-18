@@ -46,6 +46,10 @@ _REASONS = {
     "primary_absent": _ws.reason_primary_absent,
     "restore_failed": _ws.reason_restore_failed,
     "snapshot_failed": _ws.reason_snapshot_failed,
+    # The destination's own policy (security review #4245 S1, S2, S8).
+    "restore_path_refused": _ws.reason_restore_path_refused,
+    "url_refused": _ws.reason_url_refused,
+    "destination_declined": _ws.reason_destination_declined,
 }
 
 #: Engine reason codes that share one sentence: the user-facing distinction is "the
@@ -411,6 +415,16 @@ def _transferred_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
                 )
             )
         )
+        moved = row.get("branch_moved")
+        if isinstance(moved, (list, tuple)) and len(moved) == 3:
+            # S3: an existing branch that moved is always said, from -> to.
+            lines.append(
+                _t(
+                    _ws.receipt_branch_moved(
+                        branch=str(moved[0]), old=str(moved[1])[:12], new=str(moved[2])[:12]
+                    )
+                )
+            )
         for recipe in (row.get("recipes") or [])[:_LIST_LIMIT]:
             if isinstance(recipe, dict) and recipe.get("run"):
                 lines.append(

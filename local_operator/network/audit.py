@@ -831,8 +831,10 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # metadata only — ids, sizes, one home-relative path, reason codes — never
     # bytes or file contents. ``serve`` is the required row written before the
     # first byte of each artifact (and before each resumed serve) leaves.
+    # ``kind``: ``span`` (bytes served from ``offset``) or ``prefix`` (the sha256 of the
+    # first ``offset`` bytes, answered for a resume; security review #4245 S4).
     "session.workset.serve": frozenset(
-        {"peer", "to_device", "lease_epoch", "artifact", "bytes", "offset", "path"}
+        {"peer", "to_device", "lease_epoch", "artifact", "bytes", "offset", "path", "kind"}
     ),
     "session.workset.restore": frozenset({"peer", "state", "worktrees"}),
     "session.workset.departed": frozenset({"peer", "marked"}),

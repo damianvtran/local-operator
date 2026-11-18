@@ -74,6 +74,10 @@ WORKSET_TRANSFER_MIN_VERSION = 2
 #: Config key for the per-move cap (``mesh.move.working_set_max_bytes``; AGENTS.md
 #: "Adding a configuration key"). The default is ``DEFAULT_CAP_BYTES``.
 CAP_CONFIG_PATH = ("mesh", "move", "working_set_max_bytes")
+#: Config key for the destination's restore roots (``mesh.move.working_set_roots``;
+#: security review #4245 S1). Mirrored by ``workset_transfer.DEFAULT_RESTORE_ROOTS``.
+RESTORE_ROOTS_CONFIG_PATH = ("mesh", "move", "working_set_roots")
+DEFAULT_RESTORE_ROOTS: tuple[str, ...] = ("~",)
 
 #: The states a worktree row may carry (§3.4). PR A computes only the first and last;
 #: the transfer half adds the middle three.
@@ -451,6 +455,31 @@ def transfer_binding(
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def restore_roots(root: Path | None = None) -> tuple[str, ...]:
+    """``mesh.move.working_set_roots``: where on THIS device a moved repository may land.
+
+    Security review #4245 S1: the destination's own allowlist of ``~``-relative roots
+    (default ``("~",)``, i.e. anywhere the path rules in
+    ``workset_transfer.primary_path_refusal`` allow). An absent key is the default.
+    A PRESENT value is taken as written, and an unreadable one is the empty tuple,
+    which refuses every restore: an allowlist that cannot be read must narrow, never
+    widen (unlike the cap, where a typo must not turn every move into a refusal).
+    """
+    from local_operator.network import store
+
+    try:
+        value = store.read_config(RESTORE_ROOTS_CONFIG_PATH, None, root)
+    except Exception:  # noqa: BLE001 — unreadable: refuse rather than widen
+        return ()
+    if value is None:
+        return DEFAULT_RESTORE_ROOTS
+    if isinstance(value, str):
+        value = [part.strip() for part in value.split(",")]
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in value if str(item).strip())
 
 
 def cap_bytes(root: Path | None = None) -> int:

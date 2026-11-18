@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "ایسا ریموٹ پتا استعمال کیا گیا جس تک یہ ڈیوائس پہنچ سکتی ہے: {detail}",
   "cli.sessions_move_workset.reason.primary_absent": "منزل پر اس repository کی کوئی کاپی نہیں ہے اور وہ اسے clone نہیں کر سکی",
   "cli.sessions_move_workset.reason.restore_failed": "فائلیں آ گئیں، لیکن ابھی بحال نہیں ہو سکیں",
-  "cli.sessions_move_workset.reason.snapshot_failed": "ماخذ پر اس کی حالت محفوظ نہیں ہو سکی (خالی branch یا bare repository)"
+  "cli.sessions_move_workset.reason.snapshot_failed": "ماخذ پر اس کی حالت محفوظ نہیں ہو سکی (خالی branch یا bare repository)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "یہ ڈیوائس اس راستے پر ریپوزٹری قبول نہیں کرتی (دیکھیں mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.url_refused": "اس کا ریموٹ کوئی عوامی HTTPS یا SSH پتا نہیں جس سے یہ ڈیوائس کلون کرے",
+  "cli.sessions_move_workset.reason.destination_declined": "منزل والی ڈیوائس نے اسے مسترد کر دیا",
+  "cli.sessions_move_workset.receipt_branch_moved": "موجودہ برانچ {branch} کو {old} سے {new} تک آگے بڑھایا گیا، جیسا اس ڈیوائس نے اسے چھوڑا تھا۔"
 }

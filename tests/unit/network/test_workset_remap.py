@@ -23,6 +23,7 @@ from tests.unit.network.workset_git_fixtures import (  # noqa: F401
     git,
     git_env,
     make_rig,
+    serve_origin_as_https,
     transfer,
     write,
 )
@@ -251,9 +252,12 @@ def test_remote_urls_compare_across_transports() -> None:
     )
 
 
-def test_absent_primary_is_cloned_then_restored(tmp_path: Path) -> None:
+def test_absent_primary_is_cloned_then_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     rig = make_rig(tmp_path, clone_dest=False)
-    res = wt.clone_primary(str(rig.origin), "~/proj", home=rig.dst_home, pack_bytes=0)
+    url = serve_origin_as_https(monkeypatch, rig.origin, rig.src_primary)
+    res = wt.clone_primary(url, "~/proj", home=rig.dst_home, pack_bytes=0)
     assert (res.state, res.cloned) == ("present", True)
     assert not list(rig.dst_home.glob(".lop-clone-*"))
     _, _, report = _move(rig, tmp_path)
@@ -263,9 +267,10 @@ def test_absent_primary_is_cloned_then_restored(tmp_path: Path) -> None:
 
 def test_clone_refused_without_free_space(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rig = make_rig(tmp_path, clone_dest=False)
+    url = serve_origin_as_https(monkeypatch, rig.origin, rig.src_primary)
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(wt.shutil, "disk_usage", lambda _p: usage(10, 10, 0))
     with pytest.raises(wt.MoveWorksetError) as info:
-        wt.clone_primary(str(rig.origin), "~/proj", home=rig.dst_home, pack_bytes=1)
+        wt.clone_primary(url, "~/proj", home=rig.dst_home, pack_bytes=1)
     assert info.value.reason == "insufficient_space"
     assert not (rig.dst_home / "proj").exists()

@@ -353,5 +353,25 @@
     "role": "reason clause: the source could not snapshot a worktree",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "lower-case clause, no final period; 'bare' is git's term."
+  },
+  "cli.sessions_move_workset.reason.restore_path_refused": {
+    "role": "reason clause: the destination's path policy refused where the repository would land",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; mesh.move.working_set_roots is a settings key, keep verbatim."
+  },
+  "cli.sessions_move_workset.reason.url_refused": {
+    "role": "reason clause: the destination refused to clone from the repository's remote address",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "lower-case clause, no final period; HTTPS and SSH stay as written."
+  },
+  "cli.sessions_move_workset.reason.destination_declined": {
+    "role": "reason clause: the destination declined a worktree without saying why (it keeps the detail itself)",
+    "tone": "plain, factual, calm",
+    "note": "lower-case clause, no final period."
+  },
+  "cli.sessions_move_workset.receipt_branch_moved": {
+    "role": "CLI receipt row: a recall advanced an existing local branch to the arrived commit",
+    "tone": "plain, factual, calm",
+    "note": "{branch} is a git branch name; {old} and {new} are abbreviated commit ids, verbatim."
   }
 }

@@ -885,5 +885,7 @@
   "wire.settings.mesh_moves.title": "Di chuyển phiên",
   "wire.settings.mesh_moves.description": "Những gì một cuộc hội thoại được chuyển sang thiết bị khác mang theo. Được đọc ở mỗi lần di chuyển, nên thay đổi áp dụng cho lần tiếp theo.",
   "wire.settings.mesh_move_working_set_max_bytes.label": "Giới hạn tệp làm việc mỗi lần di chuyển (byte)",
-  "wire.settings.mesh_move_working_set_max_bytes.help": "Lượng dữ liệu tệp làm việc tối đa (các commit được đóng gói cùng tệp đã staged, chưa staged và chưa theo dõi) mà một lần di chuyển gửi tới hoặc nhận từ thiết bị khác. Vượt quá, lần di chuyển bị từ chối và không có gì thay đổi. Mặc định 256 MiB."
+  "wire.settings.mesh_move_working_set_max_bytes.help": "Lượng dữ liệu tệp làm việc tối đa (các commit được đóng gói cùng tệp đã staged, chưa staged và chưa theo dõi) mà một lần di chuyển gửi tới hoặc nhận từ thiết bị khác. Vượt quá, lần di chuyển bị từ chối và không có gì thay đổi. Mặc định 256 MiB.",
+  "wire.settings.mesh_move_working_set_roots.label": "Thư mục có thể nhận kho mã được di chuyển",
+  "wire.settings.mesh_move_working_set_roots.help": "Nơi trên thiết bị này mà việc di chuyển phiên có thể tạo hoặc khôi phục một kho mã: các thư mục trong thư mục chính của bạn, viết bằng ~ và cách nhau bằng dấu phẩy (ví dụ ~/code, ~/work). Không bao giờ dùng thư mục ẩn và thư mục hệ thống. Mặc định ~ (bất kỳ nơi nào khác trong thư mục chính)."
 }

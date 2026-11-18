@@ -885,5 +885,7 @@
   "wire.settings.mesh_moves.title": "Movimientos de sesión",
   "wire.settings.mesh_moves.description": "Lo que una conversación movida a otro dispositivo lleva consigo. Se lee en cada movimiento, así que un cambio se aplica al siguiente.",
   "wire.settings.mesh_move_working_set_max_bytes.label": "Límite de archivos de trabajo por movimiento (bytes)",
-  "wire.settings.mesh_move_working_set_max_bytes.help": "La cantidad máxima de datos de archivos de trabajo (commits empaquetados más archivos preparados, sin preparar y sin seguimiento) que un movimiento envía a otro dispositivo o acepta de él. Si se supera, el movimiento se rechaza y nada cambia. Valor predeterminado: 256 MiB."
+  "wire.settings.mesh_move_working_set_max_bytes.help": "La cantidad máxima de datos de archivos de trabajo (commits empaquetados más archivos preparados, sin preparar y sin seguimiento) que un movimiento envía a otro dispositivo o acepta de él. Si se supera, el movimiento se rechaza y nada cambia. Valor predeterminado: 256 MiB.",
+  "wire.settings.mesh_move_working_set_roots.label": "Carpetas que pueden recibir repositorios movidos",
+  "wire.settings.mesh_move_working_set_roots.help": "Dónde, en este dispositivo, un movimiento de sesión puede crear o restaurar un repositorio: carpetas dentro de tu carpeta personal, escritas con ~ y separadas por comas (por ejemplo ~/code, ~/work). Nunca se usan carpetas ocultas ni carpetas del sistema. Valor predeterminado ~ (cualquier otro lugar de tu carpeta personal)."
 }

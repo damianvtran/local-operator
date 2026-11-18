@@ -3261,7 +3261,11 @@ def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path
     # longer exists. Contained by construction (``workset_move.incoming_staging``).
     from local_operator.network import workset_move
 
-    workset_move.discard_incoming(server.root, Path(staging).name)
+    # ``home``: a primary THIS move cloned for the working set is removed too (security
+    # review #4245 S1c) — only one whose marker names this session and lease.
+    workset_move.discard_incoming(
+        server.root, Path(staging).name, home=workset_move.home_of(server)
+    )
     _audit(server, AUDIT_ROLLED_BACK, session_id, "")
 
 
@@ -7115,6 +7119,14 @@ def sweep_staging(root: Path, *, max_age_s: float = STAGING_MAX_AGE_S) -> list[s
         if not child.is_dir():
             continue
         if (child / "ready.json").is_file():
+            continue
+        # Review R5: ``<sid>.workset/`` (the verified working-set artifacts and their
+        # ``pending.json``) is kept exactly as long as its ``<sid>/`` is: a session
+        # copy kept for adoption must not be promoted without its working files.
+        if (
+            child.name.endswith(".workset")
+            and (root_staging / child.name.removesuffix(".workset") / "ready.json").is_file()
+        ):
             continue
         try:
             if child.stat().st_mtime >= cutoff:

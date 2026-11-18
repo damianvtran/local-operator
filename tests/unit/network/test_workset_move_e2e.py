@@ -37,6 +37,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a 
     devices,
 )
 from tests.unit.network.test_relay_e2e import _pair_settled
+from tests.unit.network.workset_git_fixtures import serve_origin_as_https
 from tests.unit.network.workset_rig import GIT_ENV, Rig, git, make_rig, point_session_at
 
 
@@ -274,7 +275,10 @@ def test_a_destination_without_the_repository_clones_it_with_its_own_credentials
     pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, tmp_path: Path
 ) -> None:
     """W1's clone path: B has no ``~/proj`` at all, so it clones the origin itself
-    (its own credentials, never the owner's) and the worktree lands registered there."""
+    (its own credentials, never the owner's) and the worktree lands registered there.
+    The origin is an https address (S2: a local path is never cloned), served from the
+    rig's bare repository through the engine's test seam."""
+    url = serve_origin_as_https(monkeypatch, rig.origin, rig.primary)
     empty_home = tmp_path / "empty-bhome"
     empty_home.mkdir()
     _server_a, server_b, _host, _port = pair
@@ -288,7 +292,7 @@ def test_a_destination_without_the_repository_clones_it_with_its_own_credentials
     assert row["state"] == "restored", moved["working_set"]
     landed = empty_home / "proj" / ".worktrees" / "feat"
     assert git(landed, "log", "-1", "--format=%s") == "unpushed work"
-    assert git(empty_home / "proj", "remote", "get-url", "origin") == str(rig.origin)
+    assert git(empty_home / "proj", "remote", "get-url", "origin") == url
     assert str(landed) in git(empty_home / "proj", "worktree", "list")
 
 
@@ -313,3 +317,72 @@ def test_an_offload_to_an_older_destination_is_shown_as_staying(
     assert moved["ok"] is True, moved
     assert moved["working_set"]["transferred"] is False
     assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+
+
+def test_a_refused_move_removes_the_clone_it_made_and_nothing_else(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, tmp_path: Path
+) -> None:
+    """Security review #4245 S1(c) / review N3, over the real two-relay path: B clones
+    the absent ``~/proj`` in W1, then refuses the move on its own cap. Before, the
+    rollback swept only ``staging/`` and the fresh clone stayed in B's home. Now the
+    clone THIS move made (its marker names the session and lease) goes with it, while
+    a repository B already had at another path is untouched."""
+    serve_origin_as_https(monkeypatch, rig.origin, rig.primary)
+    empty_home = tmp_path / "empty-bhome"
+    empty_home.mkdir()
+    own = empty_home / "mine"
+    git(empty_home, "init", "-q", str(own))
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, empty_home)
+    block = _confirmed(server_b, monkeypatch)
+    cloned: list[Path] = []
+    real_clone = workset_move_engine().clone_primary
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        got = real_clone(*args, **kwargs)
+        cloned.append(Path(got.path))
+        # From here on B's own cap is 1 byte, so the plan that follows the clone is
+        # refused (the owner's manifest-time cap already passed).
+        monkeypatch.setattr(workset, "cap_bytes", lambda root=None: 1)
+        return got
+
+    monkeypatch.setattr(workset_move_engine(), "clone_primary", spy)
+
+    refused = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert refused["ok"] is False and refused["code"] == "working_set_over_cap", refused
+    assert cloned == [empty_home / "proj"]  # the clone really happened first
+    assert not (empty_home / "proj").exists()
+    assert (own / ".git").is_dir()
+    assert not workset_move.incoming_staging(server_b.root, SESSION).exists()
+
+
+def workset_move_engine() -> Any:
+    from local_operator.network import workset_transfer
+
+    return workset_transfer
+
+
+def test_dirty_bytes_crossing_a_size_bucket_after_consent_still_carry_the_files(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """Reviewer R11 on #4241: the scope digest binds ``carries_files`` but NO size. An
+    active session keeps editing between the confirm and the send (a queued or
+    ``--wait`` move), and growing its dirty bytes several powers of two must not turn
+    the confirmed move into ``working_set_changed``; the cap bounds the size instead."""
+    _setup(pair, monkeypatch, rig, bhome)
+    _server_a, server_b, _host, _port = pair
+    block = _confirmed(server_b, monkeypatch)
+    before = int(block["totals"]["bytes"])
+    # The session keeps working: an untracked file 64x the confirmed payload.
+    (rig.feat / "grown.txt").write_text("x" * max(before, 1024) * 64, encoding="utf-8")
+    again = _confirmed(server_b, monkeypatch)
+    assert int(again["totals"]["bytes"]) > 32 * max(before, 1)
+    assert again["scope_digest"] == block["scope_digest"]
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is True, moved["working_set"]
+    landed = bhome / "proj" / ".worktrees" / "feat"
+    assert (landed / "grown.txt").stat().st_size == (rig.feat / "grown.txt").stat().st_size

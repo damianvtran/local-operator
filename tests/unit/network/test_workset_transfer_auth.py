@@ -64,6 +64,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
     built = make_rig(tmp_path / "ws")
     monkeypatch.setenv("HOME", str(built.home))
     workset_move._SERVE_CURSOR.clear()
+    workset_move._PREFIX_QUERIES.clear()
     return built
 
 
@@ -239,8 +240,11 @@ def _artifact_bytes(server: _Server, digest: str) -> bytes:
 
 
 def test_a_part_with_a_corrupted_prefix_is_discarded_and_refetched(
-    staged: tuple[_Server, str], tmp_path: Path
+    staged: tuple[_Server, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Resume prefixes are span-aligned (security review #4245 S4); a 25-byte span
+    # lets this small artifact exercise a 50-byte resume.
+    monkeypatch.setattr(workset_move, "_RESUME_ALIGN", 25)
     server, digest = staged
     good = _artifact_bytes(server, digest)
     into = tmp_path / "into"
@@ -265,8 +269,9 @@ def test_a_part_with_a_corrupted_prefix_is_discarded_and_refetched(
 
 
 def test_a_part_with_a_good_prefix_resumes_where_it_stopped(
-    staged: tuple[_Server, str], tmp_path: Path
+    staged: tuple[_Server, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(workset_move, "_RESUME_ALIGN", 25)
     server, digest = staged
     good = _artifact_bytes(server, digest)
     into = tmp_path / "into"
@@ -285,5 +290,84 @@ def test_a_part_with_a_good_prefix_resumes_where_it_stopped(
 
     assert landed.read_bytes() == good
     assert [f["offset"] for f in transport.frames if "offset" in f][0] == 50
-    # The resumed serve was audited before its first byte (offset 50).
-    assert [r["detail"]["offset"] for r in _serve_rows(server.root)] == [50]
+    # The resume was audited before its first byte: the prefix answer itself is the
+    # audited serve (S4), and the span that continues it rides that row.
+    rows = _serve_rows(server.root)
+    assert [(r["detail"]["offset"], r["detail"]["kind"]) for r in rows] == [(50, "prefix")]
+
+
+# --------------------------------------------------------------------------------------
+# Security review #4245, S4 and S5: the resume oracle and repeated plans are bounded.
+# --------------------------------------------------------------------------------------
+
+
+def test_a_resume_prefix_is_aligned_audited_before_answering_and_bounded(
+    staged: tuple[_Server, str], spans: list[tuple[int, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4: before, ``prefix`` answered the sha256 of ANY leading length with no audit
+    row, a byte-at-a-time content oracle. Now: a span-aligned length only, the answer
+    is itself an audited serve (row first), and at most two per artifact."""
+    server, digest = staged
+    monkeypatch.setattr(workset_move, "_RESUME_ALIGN", 25)
+
+    unaligned = _fetch(server, digest=digest, prefix=10)
+    assert unaligned["result"] == "refused" and unaligned["code"] == "bad_request", unaligned
+    assert _serve_rows(server.root) == []
+
+    first = _fetch(server, digest=digest, prefix=25)
+    assert first["result"] == "prefix" and first["prefix"] == 25, first
+    rows = _serve_rows(server.root)
+    assert [(r["detail"]["offset"], r["detail"]["kind"]) for r in rows] == [(25, "prefix")]
+
+    assert _fetch(server, digest=digest, prefix=50)["result"] == "prefix"
+    third = _fetch(server, digest=digest, prefix=25)
+    assert third["result"] == "refused" and "prefix_sha256" not in third, third
+    assert len(_serve_rows(server.root)) == 2
+
+
+def test_a_prefix_is_not_answered_when_its_audit_cannot_be_written(
+    staged: tuple[_Server, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, digest = staged
+    monkeypatch.setattr(workset_move, "_RESUME_ALIGN", 25)
+    monkeypatch.setattr(server.audit, "sync", lambda: None)
+    answer = _fetch(server, digest=digest, prefix=25)
+    assert answer["result"] == "refused" and answer["code"] == "audit_unavailable", answer
+    assert "prefix_sha256" not in answer
+
+
+def _plan_again(server: _Server, have: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    return workset_move.serve_plan(
+        server,  # type: ignore[arg-type]
+        _Link(DEST),  # type: ignore[arg-type]
+        {"session_id": SID, "lease_epoch": EPOCH, "have": have or {}},
+    )
+
+
+def _staged_files(server: _Server) -> list[str]:
+    out = workset_move.outgoing_dir(server.root, SID)
+    return sorted(p.name for p in out.iterdir() if p.name != "journal.json")
+
+
+def test_one_move_answers_one_plan_and_one_replan(staged: tuple[_Server, str]) -> None:
+    """S5: every plan stages bundles on the owner's disk; a destination re-planning
+    with permutations of ``have`` could fill it. One plan + W5's one re-plan."""
+    server, digest = staged
+    again = _plan_again(server)
+    assert again["result"] == "planned", again
+    third = _plan_again(server)
+    assert third["result"] == "refused" and third["code"] == "plan_limit", third
+    # The re-plan with the same inputs reuses the staged artifact; nothing extra stays.
+    hexdigest = digest.removeprefix("sha256:")
+    assert _staged_files(server) == [hexdigest, f"{hexdigest}.json"]
+
+
+def test_an_over_cap_plan_deletes_the_bundles_it_staged(staged: tuple[_Server, str]) -> None:
+    server, _digest = staged
+    journal_path = workset_move.outgoing_dir(server.root, SID) / "journal.json"
+    journal = json.loads(journal_path.read_text())
+    journal["cap_bytes"] = 1
+    journal_path.write_text(json.dumps(journal))
+    answer = _plan_again(server)
+    assert answer["result"] == "refused" and answer["code"] == "working_set_over_cap", answer
+    assert _staged_files(server) == []

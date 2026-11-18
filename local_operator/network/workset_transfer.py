@@ -42,7 +42,13 @@ THE INVARIANTS, each with the check that holds it:
   destination home with no symlinked, aliased or traversing component
   (``contained_path``). The single in-place exception is a recall onto a
   worktree this device's own trusted journal (``mark_departed``) records, and
-  whose state is re-measured unchanged since departure.
+  whose state is re-measured unchanged since departure. Branches follow the same
+  rule (security review #4245 S3): an existing branch is advanced only when that
+  journal recorded it at its current tip, and the receipt says from -> to;
+  otherwise the work lands on ``<branch>-moved-<device>``.
+* **The destination decides where.** Paths and URLs come from the source's offer;
+  ``primary_path_refusal``, ``worktree_target`` and ``clone_url_refusal`` are the
+  destination's own policy over them (security review #4245 S1, S2).
 
 All git runs with routing variables stripped (an inherited ``GIT_DIR`` or
 ``GIT_INDEX_FILE`` must never redirect a write), a fixed ``lop-move`` identity,
@@ -65,6 +71,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -93,8 +100,62 @@ SCAN_MAX_BLOB_BYTES: Final = 1 << 20
 #: W1's bounded origin fetch (design §4 W1: "bounded, 120 s").
 FETCH_TIMEOUT_S: Final = 120.0
 
-#: W1 clone free-space rule (design §4 W1): ``pack_bytes x 2 + 1 GiB``.
+#: W1 clone free-space rule (design §4 W1): ``pack_bytes x 2 + 1 GiB``. The same
+#: 1 GiB is the floor a RUNNING clone must leave free (security review #4245, S6):
+#: ``pack_bytes`` is the sender's claim, so the pre-check alone bounds nothing.
 CLONE_HEADROOM_BYTES: Final = 1 << 30
+#: The W1 clone's wall-clock bound (security review #4245, S2: the clone had none).
+#: NOT a tuned number — there is no measured clone-time distribution for this path —
+#: but a liveness bound, set far above any clone a move should wait for, so a remote
+#: that stalls or trickles cannot hold a prepared move open indefinitely.
+CLONE_TIMEOUT_S: Final = 1800.0
+#: What a restore's checkout must leave free on the filesystem it writes to (S6/R4):
+#: a margin, not a measured figure, so the checkout itself can never take the disk to
+#: zero; the size it is added to is measured from the objects (``checkout_bytes``).
+CHECKOUT_RESERVE_BYTES: Final = 256 << 20
+_CLONE_POLL_S: Final = 0.5
+#: Every network git call the DESTINATION makes for a source-named URL (security
+#: review #4245, S2). Allowlist first (``protocol.allow=never``, then https/ssh only),
+#: so ``file://``, a local path, ``ext::`` and any ``<helper>::`` transport are refused
+#: by git itself even if the URL check were bypassed; redirects off so an https host
+#: cannot bounce the request onto an internal one; hooks off for the clone's checkout.
+_CLONE_HARDENING: Final = (
+    "protocol.allow=never",
+    "protocol.https.allow=always",
+    "protocol.ssh.allow=always",
+    "protocol.file.allow=never",
+    "protocol.ext.allow=never",
+    "http.followRedirects=false",
+    "core.hooksPath=/dev/null",
+)
+#: TEST SEAM ONLY (the same pattern as ``workset_probe._EXTRA_CONFIG``): extra
+#: ``-c key=value`` pairs appended AFTER the hardening, so a unit test can map an
+#: ``https://git.test/...`` URL onto a local bare repository. Empty in production;
+#: never set from a frame.
+_CLONE_TEST_CONFIG: tuple[str, ...] = ()
+#: Markers this device writes into repositories it creates on ARRIVAL (security review
+#: #4245 S1c, review R2): ``<git-dir>/lop-cloned.json`` on a primary W1 cloned, and
+#: ``<worktree git-dir>/lop-arrived.json`` on a worktree ``restore`` published. They
+#: name the session and move, so a rollback removes only a clone THIS move made and a
+#: retry recognises its own earlier work instead of reporting a conflict or a duplicate.
+CLONE_MARKER: Final = "lop-cloned.json"
+ARRIVED_MARKER: Final = "lop-arrived.json"
+#: Where an arrival fetches the bundle's snapshot refs (review N1). NOT ``REF_ROOT``:
+#: on a recall this device's own departure refs for the same session live there and
+#: are the restore point ``discard_outgoing`` promises to keep.
+ARRIVE_ROOT: Final = "refs/lop/arrive"
+#: The destination's restore policy (security review #4245, S1). Default roots: the
+#: whole home, narrowed by ``mesh.move.working_set_roots``.
+DEFAULT_RESTORE_ROOTS: Final = ("~",)
+#: First components a primary may never land under (the platform's app and config
+#: roots that hold no repositories of the user's own) ...
+_RESTORE_DENY_TOP: Final = frozenset({"library", "applications"})
+#: ... and components refused at ANY depth: login-time code runs from these.
+_RESTORE_DENY_ANY: Final = frozenset({"autostart", "launchagents", "launchdaemons", "systemd"})
+_SAFE_NAME_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+#: Dependency recipe inputs (security review #4245, S7): only these lockfile names
+#: become part of a printed command, and the name is shell-quoted as well.
+_REQUIREMENTS_RE: Final = re.compile(r"^requirements[A-Za-z0-9._-]{0,64}\.txt$")
 
 _ROUTING_VARS: Final = frozenset(
     {
@@ -785,13 +846,24 @@ def verify_or_replan(
     raise MoveWorksetError("bundle_unverifiable", "re-plan with have=[] failed verify")
 
 
-def compute_have(primary: Path, tips: Sequence[str], *, remote: str | None = None) -> list[str]:
+def compute_have(
+    primary: Path, tips: Sequence[str], *, remote: str | None = None, session_id: str = ""
+) -> list[str]:
     """W1: the subset of ``tips`` the destination primary holds, after a bounded fetch.
 
     The fetch uses the destination user's own credentials (helpers kept) and is
     best effort: offline just means a smaller ``have`` and a bigger bundle.
+
+    Security review #4245 S8: ``have`` is an answer the SOURCE reads, so a tip counts
+    only when it is reachable from the matching remote's tracking refs (what that
+    remote already published) or from this session's own move refs — never from the
+    user's other local branches, which would make it an oracle for which commits this
+    device holds. Without ``remote``, any remote-tracking ref counts.
     """
     root = Path(primary)
+    scopes = [f"refs/remotes/{remote}" if remote else "refs/remotes"]
+    if session_id and _SESSION_ID_RE.match(session_id):
+        scopes += [f"{REF_ROOT}/{session_id}", f"{ARRIVE_ROOT}/{session_id}"]
     if remote:
         try:
             _git(
@@ -806,7 +878,23 @@ def compute_have(primary: Path, tips: Sequence[str], *, remote: str | None = Non
             )
         except subprocess.TimeoutExpired:
             pass
-    return [t for t in dict.fromkeys(tips) if _HEX_RE.match(t) and _is_commit(root, t)]
+    out: list[str] = []
+    for tip in list(dict.fromkeys(tips))[:64]:
+        if not _HEX_RE.match(tip) or not _is_commit(root, tip):
+            continue
+        contained = _git(
+            root,
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--contains",
+            tip,
+            *scopes,
+            check=False,
+        ).stdout.strip()
+        if contained:
+            out.append(tip)
+    return out
 
 
 # ------------------------------------------------------------- paths and remap
@@ -870,6 +958,103 @@ def _make_dirs(home: Path, target: Path) -> None:
 def remap(home_rel: str, *, home: Path) -> Path:
     """The destination path for a home-relative source path (§7.1), containment-checked."""
     return contained_path(home, home_rel)
+
+
+def _root_prefix(root: str) -> str | None:
+    """A ``mesh.move.working_set_roots`` entry as a ``~``-relative prefix, or ``None``.
+
+    Only ``~`` or ``~/a/b`` forms with plain components count; anything else (an
+    absolute path, ``..``, an empty component) is ignored, which NARROWS the policy:
+    a typo in an allowlist must never widen it.
+    """
+    text = str(root or "").strip().rstrip("/")
+    if text == "~":
+        return "~"
+    if not text.startswith("~/"):
+        return None
+    parts = text[2:].split("/")
+    if any(p in ("", ".", "..") or "\x00" in p or "\\" in p for p in parts):
+        return None
+    return text
+
+
+def primary_path_refusal(
+    home: Path, home_rel: str, *, roots: Sequence[str], forbid: Sequence[Path | str] = ()
+) -> str:
+    """Security review #4245 S1(b): ``""`` when a repository may live at ``home_rel``
+    on THIS device, else a short local-only detail.
+
+    WHY ON THE DESTINATION. The paths come from the source's offer, and under the
+    hostile-source threat (a paired member holding ``move``) the source chooses them:
+    the round-1 repro cloned a repository whose only file was ``config`` into
+    ``~/.config/git`` and got code execution on the victim's next ``git status``.
+    ``contained_path`` keeps a path under home; this decides WHERE under home, and the
+    destination applies it whatever the offer says:
+
+    * every component is a plain name — none starts with ``.`` (so ``~/.config``,
+      ``~/.local``, ``~/.ssh``, ``~/.gnupg``, ``~/.cache`` and the lop config dir under
+      a dot directory are all out), none is a login-time code directory
+      (``autostart``, ``LaunchAgents``, ``systemd``...), and the first is not
+      ``Library``/``Applications``;
+    * it lies under one of ``roots`` (``mesh.move.working_set_roots``, default ``~``);
+    * it is not inside any ``forbid`` path (this device's config root);
+    * every EXISTING parent is a real directory owned by this user (a directory
+      someone else controls could be swapped under the restore).
+
+    A separate receive permission (a grant distinct from ``move``) was considered
+    (security review S1 part 1) and deliberately NOT added here: whether receiving
+    files needs its own capability is the security lead's decision. This policy holds
+    either way.
+    """
+    if not isinstance(home_rel, str) or not home_rel.startswith("~/"):
+        return "not home-relative"
+    parts = home_rel[2:].split("/")
+    if any(not p or p.startswith(".") for p in parts):
+        return "hidden or empty component"
+    if parts[0].casefold() in _RESTORE_DENY_TOP or any(
+        p.casefold() in _RESTORE_DENY_ANY for p in parts
+    ):
+        return "system directory"
+    prefixes = [p for p in (_root_prefix(r) for r in roots) if p]
+    if not any(p == "~" or home_rel == p or home_rel.startswith(p + "/") for p in prefixes):
+        return "outside mesh.move.working_set_roots"
+    try:
+        target = contained_path(home, home_rel)
+    except ContainmentError as exc:
+        return exc.detail
+    for other in forbid:
+        base = os.path.realpath(other)
+        if str(target) == base or str(target).startswith(base.rstrip("/") + "/"):
+            return "inside the lop config directory"
+    getuid = getattr(os, "getuid", None)
+    current = Path(os.path.realpath(home))
+    for part in parts[:-1]:
+        current = current / part
+        if not os.path.lexists(current):
+            break
+        st = os.lstat(current)
+        if not stat.S_ISDIR(st.st_mode) or (getuid is not None and st.st_uid != getuid()):
+            return "a parent is not a directory owned by this user"
+    return ""
+
+
+def worktree_target(primary_rel: str, path_rel: str, *, session_id: str, n: int) -> str:
+    """Security review #4245 S1(a): where a linked worktree may be created on arrival.
+
+    Only ``<primary>/.worktrees/<name>`` — the source's path when it already has that
+    shape, else the same layout with the source path's last component as ``<name>``
+    (``moved-<sid8>-<n>`` when that is not a plain name). A sibling worktree such as
+    ``~/proj-feat`` therefore lands at ``~/proj/.worktrees/proj-feat``, reported as a
+    remap; the one other accepted target, a path git ALREADY registers as a linked
+    worktree of the primary here (a recall), is checked by ``restore`` itself.
+    """
+    prefix = primary_rel.rstrip("/") + "/.worktrees/"
+    if path_rel.startswith(prefix):
+        name = path_rel[len(prefix) :]
+        if "/" not in name and _SAFE_NAME_RE.match(name):
+            return path_rel
+    base = path_rel.rstrip("/").rpartition("/")[2]
+    return prefix + (base if _SAFE_NAME_RE.match(base) else f"moved-{session_id[:8]}-{n}")
 
 
 def conflict_path(target_rel: str, device: str, now: float | None = None) -> str:
@@ -975,16 +1160,101 @@ def _rename_noreplace(src: Path, dst: Path) -> None:
     os.rename(src, dst)
 
 
+def clone_url_refusal(url: str) -> str:
+    """``""`` when the destination may clone ``url`` (security review #4245 S2), else
+    ``"url_refused"``. The same policy #4241's probe applies, reused rather than
+    restated: ``workset_probe.classify_url`` (https, ssh and scp forms only; never
+    ``file://``, a local path, ``<helper>::`` or an option-shaped URL) and
+    ``workset_probe.host_policy`` (every address the host resolves to must be public,
+    or the host is one this device's operator named), checked BEFORE any git runs.
+    """
+    from local_operator.network import workset_probe
+
+    if workset_probe.classify_url(url) is None or not workset_probe.host_policy(url)[0]:
+        return "url_refused"
+    return ""
+
+
+def _run_clone(
+    staging: Path, url: str, dest: Path, *, timeout: float, pin: Sequence[str] = ()
+) -> None:
+    """The hardened W1 clone: allowlisted protocols, ``--`` before the URL, no stdin,
+    no controlling terminal (ssh/askpass cannot prompt), a wall-clock bound, and a
+    free-space floor watched WHILE it runs (S6: a clone's size is not known up
+    front). Credential helpers stay on: the URL passed ``clone_url_refusal``, and it
+    is the destination's own access to a public host that authenticates.
+    """
+    argv = ["git", "-c", "core.quotepath=false", *pin]
+    for pair in (*_CLONE_HARDENING, *_CLONE_TEST_CONFIG):
+        argv += ["-c", pair]
+    argv += ["-C", str(staging), "clone", "--quiet", "--no-tags", "--", url, str(dest)]
+    extra = {"SSH_ASKPASS_REQUIRE": "never"}
+    if not os.environ.get("GIT_SSH_COMMAND"):
+        extra["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(
+            argv,
+            env=_environment(extra),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                try:
+                    proc.wait(timeout=_CLONE_POLL_S)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if time.monotonic() > deadline:
+                    raise MoveWorksetError("clone_failed", "timeout")
+                if shutil.disk_usage(staging).free < CLONE_HEADROOM_BYTES:
+                    raise MoveWorksetError("insufficient_space", "the clone outgrew free space")
+        except BaseException:
+            # The clone runs in its own session: kill its whole group (git, its
+            # remote helper, ssh) by that exact id, then reap.
+            try:
+                os.killpg(proc.pid, 9)
+            except OSError:
+                pass
+            proc.wait()
+            raise
+        if proc.returncode != 0:
+            err.seek(0)
+            detail = err.read(4000).decode("utf-8", "replace").strip()[:400]
+            raise MoveWorksetError("clone_failed", detail)
+
+
 def clone_primary(
-    remote_url: str, home_rel: str, *, home: Path, pack_bytes: int, timeout: float | None = None
+    remote_url: str,
+    home_rel: str,
+    *,
+    home: Path,
+    pack_bytes: int,
+    timeout: float = CLONE_TIMEOUT_S,
+    session_id: str = "",
+    lease_epoch: str = "",
 ) -> PrimaryResolution:
     """W1 / manager Q1: clone the absent primary from its origin, no-clobber.
 
-    Only for a primary the user confirmed in the manifest. Free space must hold
-    ``pack_bytes x 2 + 1 GiB``; the clone lands in a sibling staging directory
-    and is renamed into a path that must still not exist. The destination's
-    own credentials authenticate it.
+    Only for a primary the user confirmed in the manifest, and only after the caller
+    applied ``primary_path_refusal``. ``remote_url`` must pass ``clone_url_refusal``
+    (re-checked here, so no caller can skip it). Free space must hold ``pack_bytes x
+    2 + 1 GiB`` up front and keep 1 GiB free while the clone runs; the clone lands in
+    a sibling staging directory and is renamed into a path that must still not exist.
+    The destination's own credentials authenticate it. With ``session_id`` the clone
+    is marked (``CLONE_MARKER``) so a rollback of THIS move can remove it
+    (``remove_own_clone``) and nothing else.
     """
+    from local_operator.network import workset_probe
+
+    if clone_url_refusal(remote_url):
+        raise MoveWorksetError("url_refused", "not an allowed public https/ssh remote")
+    # The vetted addresses, pinned for an https clone (``http.curloptResolve``), so git
+    # connects to what the policy checked rather than to a second DNS answer.
+    _allowed, pin = workset_probe.host_policy(remote_url)
     target = contained_path(home, home_rel)
     if os.path.lexists(target):
         return resolve_primary(remote_url, home_rel, home=home)
@@ -995,30 +1265,60 @@ def clone_primary(
     staging = Path(tempfile.mkdtemp(prefix=".lop-clone-", dir=target.parent))
     try:
         dest = staging / target.name
-        try:
-            _git(
-                staging,
-                "clone",
-                "--quiet",
-                "--no-tags",
-                remote_url,
-                str(dest),
-                timeout=timeout,
-                credentials=True,
+        _run_clone(staging, remote_url, dest, timeout=timeout, pin=pin)
+        if session_id:
+            # Marked BEFORE the publish, so a published clone always carries it.
+            _write_json_atomic(
+                dest / ".git" / CLONE_MARKER,
+                {"session_id": session_id, "lease_epoch": lease_epoch, "path": home_rel},
             )
-        except subprocess.TimeoutExpired as exc:
-            raise MoveWorksetError("clone_failed", "timeout") from exc
-        except MoveWorksetError as exc:
-            raise MoveWorksetError("clone_failed", exc.detail) from exc
         _rename_noreplace(dest, target)
     finally:
         # Only the staging directory this call created; after a successful
         # publish it is empty, after a failure it holds the partial clone.
         shutil.rmtree(staging, ignore_errors=True)
     res = resolve_primary(remote_url, home_rel, home=home)
-    return PrimaryResolution(
-        res.state, res.path, res.remote, res.reason, cloned=res.state == "present"
-    )
+    # ``cloned`` = this call PUBLISHED a tree (whatever it resolves as), so the caller
+    # journals it for the rollback even in the unlikely case it is not ``present``.
+    return PrimaryResolution(res.state, res.path, res.remote, res.reason, cloned=True)
+
+
+def _clone_marker(target: Path) -> dict[str, Any] | None:
+    git_dir = target / ".git"
+    marker = git_dir / CLONE_MARKER
+    if target.is_symlink() or git_dir.is_symlink() or marker.is_symlink():
+        return None
+    try:
+        data = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def remove_own_clone(home: Path, home_rel: str, *, session_id: str, lease_epoch: str) -> bool:
+    """Rollback half of S1(c): remove a primary ONLY if this move's W1 cloned it.
+
+    The marker must name this session AND this lease epoch AND this path: a clone an
+    earlier, committed move made (a different epoch) or any tree without the marker
+    is never touched. Returns whether it removed the tree.
+    """
+    try:
+        target = contained_path(home, home_rel)
+    except ContainmentError:
+        return False
+    if not target.is_dir() or target.is_symlink():
+        return False
+    data = _clone_marker(target)
+    if not data or not session_id or not lease_epoch:
+        return False
+    if (data.get("session_id"), data.get("lease_epoch"), data.get("path")) != (
+        session_id,
+        lease_epoch,
+        home_rel,
+    ):
+        return False
+    shutil.rmtree(target)
+    return True
 
 
 # ----------------------------------------------------------------------- restore
@@ -1070,6 +1370,9 @@ class RestoreReport:
     reason: str = ""
     remapped: tuple[str, str] | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: ``(branch, from, to)`` when restore fast-forwarded an EXISTING branch (only a
+    #: recall the departure journal records; security review #4245 S3).
+    branch_moved: tuple[str, str, str] | None = None
 
 
 def _worktrees_of(primary: Path) -> dict[str, str | None]:
@@ -1099,13 +1402,36 @@ def _state(root: Path, excludes: Sequence[str]) -> tuple[str, str, str] | None:
     return head, idx, wt
 
 
-def _choose_branch(
-    primary: Path, branch: str, head: str, device: str, *, own: Path | None = None
-) -> str:
-    """§5.2 branch rule: create; reuse if equal; fast-forward only; else ``-moved-<device>``.
+@dataclass(frozen=True)
+class _BranchPick:
+    """A branch decision not yet applied: ``action`` is ``create`` | ``reuse`` | ``ff``;
+    ``current`` is the ref's value before (``""`` for ``create``)."""
 
-    Never moves a branch checked out in another worktree (``own`` — the tree
-    being updated in place — does not count as "another").
+    name: str
+    action: str
+    current: str
+
+
+def _pick_branch(
+    primary: Path,
+    branch: str,
+    head: str,
+    device: str,
+    *,
+    own: Path | None = None,
+    recall_at: str | None = None,
+) -> _BranchPick:
+    """§5.2 branch rule, decided WITHOUT touching any ref (review N2: the caller applies
+    it only where a failure can be undone): create; reuse if equal; else
+    ``-moved-<device>``.
+
+    A fast-forward of an existing branch happens ONLY when ``recall_at`` — the tip
+    this device's own trusted departure journal recorded for that branch — equals
+    the branch's current value (security review #4245 S3). Before, any existing
+    branch that was an ancestor was advanced to the sender's commit, so a peer
+    holding ``move`` could silently move ``main`` in a repository whose remote it
+    could guess, ready for the user's next push. Never moves a branch checked out in
+    another worktree (``own`` — the tree being updated in place — does not count).
     """
     checked_out = {
         ref
@@ -1120,19 +1446,72 @@ def _choose_branch(
             raise MoveWorksetError("invalid_branch", name)
         cur = _git(primary, "rev-parse", "--verify", "-q", ref, check=False).stdout.strip()
         if not cur:
-            _git(primary, "branch", "--no-track", name, head)
-            return name
+            return _BranchPick(name, "create", "")
         if ref in checked_out:
             continue
         if cur == head:
-            return name
+            return _BranchPick(name, "reuse", cur)
         if (
             name == branch
+            and recall_at
+            and cur == recall_at
             and _git(primary, "merge-base", "--is-ancestor", cur, head, check=False).returncode == 0
         ):
-            _git(primary, "update-ref", ref, head, cur)
-            return name
+            return _BranchPick(name, "ff", cur)
     raise MoveWorksetError("branch_unavailable", branch)
+
+
+def _apply_branch(primary: Path, pick: _BranchPick, head: str) -> None:
+    ref = f"refs/heads/{pick.name}"
+    if pick.action == "create":
+        _git(primary, "branch", "--no-track", pick.name, head)
+    elif pick.action == "ff":
+        _git(primary, "update-ref", ref, head, pick.current)
+
+
+def _undo_branch(primary: Path, pick: _BranchPick, head: str) -> None:
+    """Reverse ``_apply_branch`` — compare-and-swap, so a ref someone else moved since
+    is left alone."""
+    ref = f"refs/heads/{pick.name}"
+    if pick.action == "create":
+        _git(primary, "update-ref", "-d", ref, head, check=False)
+    elif pick.action == "ff":
+        _git(primary, "update-ref", ref, pick.current, head, check=False)
+
+
+def _choose_branch(
+    primary: Path,
+    branch: str,
+    head: str,
+    device: str,
+    *,
+    own: Path | None = None,
+    recall_at: str | None = None,
+) -> _BranchPick:
+    """``_pick_branch`` and apply it at once (the in-place update, whose own failure
+    handling restores the index before this runs)."""
+    pick = _pick_branch(primary, branch, head, device, own=own, recall_at=recall_at)
+    _apply_branch(primary, pick, head)
+    return pick
+
+
+def _departed_branch_tip(config: Path | None, session_id: str, branch: str) -> str | None:
+    """The tip this device's TRUSTED departure journal recorded for ``branch`` (S3)."""
+    if config is None:
+        return None
+    path = Path(config) / "network" / "workset-departed" / f"{session_id}.json"
+    try:
+        if path.is_symlink():
+            return None
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("session_id") != session_id:
+        return None
+    for entry in record.get("worktrees") or []:
+        if isinstance(entry, dict) and entry.get("branch") == branch and entry.get("head"):
+            return str(entry["head"])
+    return None
 
 
 def _set_upstream(primary: Path, branch: str | None, remote: str | None, merge: str | None) -> None:
@@ -1174,8 +1553,14 @@ def _marker_ok(target: Path, session_id: str) -> bool:
 
 
 def _update_in_place(
-    target: Path, primary: Path, from_tree: str, plan: RestorePlan, restore_index: str
-) -> str:
+    target: Path,
+    primary: Path,
+    from_tree: str,
+    plan: RestorePlan,
+    restore_index: str,
+    *,
+    recall_at: str | None = None,
+) -> _BranchPick | None:
     """Switch an unchanged tree from ``from_tree`` to the snapshot, keeping the index split.
 
     index := from_tree (matches the files) → two-tree ``read-tree -m -u`` to the
@@ -1194,15 +1579,94 @@ def _update_in_place(
     except MoveWorksetError:
         _git(target, "read-tree", restore_index, check=False)
         raise
-    branch = None
+    pick = None
     if plan.branch:
-        branch = _choose_branch(primary, plan.branch, plan.head, plan.src_device, own=target)
-        _git(target, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        pick = _choose_branch(
+            primary, plan.branch, plan.head, plan.src_device, own=target, recall_at=recall_at
+        )
+        _git(target, "symbolic-ref", "HEAD", f"refs/heads/{pick.name}")
     else:
         _git(target, "update-ref", "--no-deref", "HEAD", plan.head)
     _git(target, "read-tree", plan.index)
     _git(target, "update-index", "-q", "--refresh", check=False)
-    return branch or ""
+    return pick
+
+
+def _arrived_marker(tree: Path) -> dict[str, Any] | None:
+    proc = _git(tree, "rev-parse", "--absolute-git-dir", check=False)
+    if proc.returncode != 0:
+        return None
+    marker = Path(proc.stdout.strip()) / ARRIVED_MARKER
+    try:
+        if marker.is_symlink():
+            return None
+        data = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _own_prior_restore(
+    primary: Path, plan: RestorePlan, home: Path
+) -> tuple[str, str | None] | None:
+    """Review R2: ``(dest_rel, branch_ref)`` of a worktree an EARLIER run of this same
+    restore already published (its ``ARRIVED_MARKER`` names the session, ``n`` and
+    bundle), so a retry reports it instead of landing a second copy beside it."""
+    for path, ref in _worktrees_of(primary).items():
+        if os.path.realpath(path) == os.path.realpath(primary):
+            continue
+        data = _arrived_marker(Path(path))
+        if not data:
+            continue
+        if (data.get("session_id"), data.get("n"), data.get("bundle")) != (
+            plan.session_id,
+            plan.n,
+            plan.bundle_digest,
+        ):
+            continue
+        rel = home_relative(path, home=home)
+        if rel:
+            return rel, ref
+    return None
+
+
+def checkout_bytes(repo: Path, tree_ish: str) -> int:
+    """Bytes ``checkout-index`` would write for ``tree_ish`` (the sum of its blob
+    sizes, from the objects themselves — never a size the sender claims). Security
+    review #4245 S6 / review R4: a few-KB delta bundle can still check out GBs."""
+    total = 0
+    out = _git(repo, "ls-tree", "-r", "-l", "-z", tree_ish).stdout
+    for entry in out.split("\0"):
+        meta = entry.partition("\t")[0].split()
+        if len(meta) == 4 and meta[1] == "blob" and meta[3].isdigit():
+            total += int(meta[3])
+    return total
+
+
+def measure_checkout(primary: Path, bundle: Path, ref: str, scratch: Path) -> int:
+    """``checkout_bytes`` of ``ref`` inside ``bundle``, measured BEFORE ``ready`` without
+    writing into the user's repository: a throwaway bare repository under ``scratch``
+    (the move's own staging, removed on rollback) borrows ``primary``'s objects as an
+    alternate, so a thin bundle's prerequisites resolve, and is deleted afterwards."""
+    probe = Path(tempfile.mkdtemp(prefix=".measure-", dir=_private_dir(Path(scratch))))
+    try:
+        _git(probe, "init", "--quiet", "--bare")
+        common = Path(_out(primary, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        (probe / "objects" / "info" / "alternates").write_text(str(common / "objects") + "\n")
+        _git(probe, "fetch", "--no-tags", "--quiet", str(bundle), f"+{ref}:refs/measure")
+        return checkout_bytes(probe, "refs/measure")
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
+def _registered_linked(
+    home: Path, rel: str, registered: dict[str, str | None], primary: Path
+) -> bool:
+    try:
+        real = os.path.realpath(contained_path(home, rel))
+    except ContainmentError:
+        return False
+    return real in registered and real != os.path.realpath(primary)
 
 
 def restore(
@@ -1212,20 +1676,27 @@ def restore(
     home: Path,
     config: Path | None = None,
     now: float | None = None,
+    roots: Sequence[str] = DEFAULT_RESTORE_ROOTS,
 ) -> RestoreReport:
     """Restore one worktree from a verified bundle on the destination (§5.2, §7).
 
-    Target choice (§7.3): the remapped source path; the source's primary
-    checkout lands as ``<primary>/.worktrees/moved-<sid8>`` unless W1 cloned
-    the primary for it. If the target exists: a registered worktree already in
+    Target choice (§7.3, plus security review #4245 S1): the primary must pass
+    ``primary_path_refusal`` (``roots`` = ``mesh.move.working_set_roots``), else
+    ``left_behind``/``restore_path_refused``. A linked worktree restores at the source
+    path only when that is ``<primary>/.worktrees/<name>`` or a path git already
+    registers as a linked worktree of the primary here; any other source path is
+    remapped to ``<primary>/.worktrees/<basename>`` (``worktree_target``). The
+    source's primary checkout lands as ``<primary>/.worktrees/moved-<sid8>`` unless W1
+    cloned the primary for it. If the target exists: a registered worktree already in
     the snapshot state → ``idempotent``; a tree this device's TRUSTED JOURNAL
-    (``config``) recorded as departed, carrying the marker, and re-measured
-    unchanged since → updated ``in_place`` (recall, §10); anything else →
-    ``beside`` at ``conflict_path``. Never overwrites, never refuses.
+    (``config``) recorded as departed, carrying the marker, and re-measured unchanged
+    since → updated ``in_place`` (recall, §10); anything else → ``beside`` at
+    ``conflict_path`` under ``.worktrees``. Never overwrites, never refuses.
 
     A new tree is built at ``<parent>/.lop-restore-*/<name>`` and published by
     a no-replace rename, then ``git worktree repair`` points the admin entry at
-    its final path, so ``git worktree list`` on the primary shows it.
+    its final path, so ``git worktree list`` on the primary shows it. It carries
+    ``ARRIVED_MARKER`` so a retry recognises it (R2).
 
     Returns a report rather than raising for per-worktree outcomes; unexpected
     git failures raise ``MoveWorksetError`` and leave the verified artifact for
@@ -1241,41 +1712,55 @@ def restore(
     if _sha256_file(bundle) != hexdigest:
         return RestoreReport("pending_restore", plan.path, reason="artifact_corrupt")
 
+    if primary_path_refusal(home, plan.primary, roots=roots, forbid=[config] if config else []):
+        return RestoreReport("left_behind", plan.path, reason="restore_path_refused")
     res = resolve_primary(plan.remote_url, plan.primary, home=home)
     if res.state != "present" or res.path is None:
         state = "pending_restore" if res.state == "absent" else "left_behind"
         return RestoreReport(state, plan.path, reason=res.reason)
     primary = res.path
-    prefix = f"{REF_ROOT}/{plan.session_id}"
-    # Forced: on a recall the same session id's departure refs already exist
-    # here and are superseded; the journal, not these refs, holds the
-    # departure state the in-place check trusts.
-    _git(primary, "fetch", "--no-tags", "--quiet", str(bundle), f"+{prefix}/*:{prefix}/*")
-    got_index = _out(
-        primary, "rev-parse", "--verify", snapshot_ref(plan.session_id, plan.n, "index")
-    )
-    got_wt = _out(
-        primary, "rev-parse", "--verify", snapshot_ref(plan.session_id, plan.n, "worktree")
-    )
+    # Into the ARRIVAL namespace (review N1), forced: a retry of the same move
+    # re-fetches the same refs, and this device's own departure refs under
+    # ``REF_ROOT`` stay the restore point they are documented to be.
+    src_prefix = f"{REF_ROOT}/{plan.session_id}"
+    arrive = f"{ARRIVE_ROOT}/{plan.session_id}"
+    _git(primary, "fetch", "--no-tags", "--quiet", str(bundle), f"+{src_prefix}/*:{arrive}/*")
+    got_index = _out(primary, "rev-parse", "--verify", f"{arrive}/{plan.n}/index")
+    got_wt = _out(primary, "rev-parse", "--verify", f"{arrive}/{plan.n}/worktree")
     got_head = _out(primary, "rev-parse", "--verify", f"{got_index}^1")
     if (got_head, got_index, got_wt) != (plan.head, plan.index, plan.worktree):
         return RestoreReport("pending_restore", plan.path, reason="snapshot_mismatch")
     want_idx_tree = _out(primary, "rev-parse", f"{plan.index}^{{tree}}")
     want_wt_tree = _out(primary, "rev-parse", f"{plan.worktree}^{{tree}}")
+    recall_at = _departed_branch_tip(config, plan.session_id, plan.branch) if plan.branch else None
 
     if plan.is_primary and plan.fresh_clone:
+        if _state(primary, ()) == (plan.head, want_idx_tree, want_wt_tree):
+            marker = _clone_marker(primary) or {}
+            if marker.get("session_id") == plan.session_id:
+                # R2: an earlier run of this restore already switched the clone.
+                ref = _git(primary, "symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
+                return _report(plan, plan.primary, "idempotent", ref or None)
         if _out(primary, "status", "--porcelain", "--untracked-files=all"):
             return RestoreReport("left_behind", plan.path, reason="destination_conflict")
         clean = _out(primary, "rev-parse", "HEAD^{tree}")
-        branch = _update_in_place(primary, primary, clean, plan, clean)
-        _set_upstream(primary, branch, res.remote, plan.upstream_merge)
-        return RestoreReport(
-            "restored", plan.path, dest_path=plan.primary, branch=branch or None, mode="in_place"
+        pick = _update_in_place(primary, primary, clean, plan, clean, recall_at=recall_at)
+        _set_upstream(primary, pick.name if pick else None, res.remote, plan.upstream_merge)
+        return _report(
+            plan, plan.primary, "in_place", f"refs/heads/{pick.name}" if pick else None, pick
         )
 
-    target_rel = plan.path
+    prior = _own_prior_restore(primary, plan, home)
+    if prior is not None:
+        return _report(plan, prior[0], "idempotent", prior[1])
+
+    registered = _worktrees_of(primary)
     if plan.is_primary:
         target_rel = f"{plan.primary}/.worktrees/moved-{plan.session_id[:8]}"
+    elif _registered_linked(home, plan.path, registered, primary):
+        target_rel = plan.path
+    else:
+        target_rel = worktree_target(plan.primary, plan.path, session_id=plan.session_id, n=plan.n)
     try:
         target = contained_path(home, target_rel)
     except ContainmentError as exc:
@@ -1283,7 +1768,6 @@ def restore(
 
     mode = "new"
     if os.path.lexists(target):
-        registered = _worktrees_of(primary)
         real = os.path.realpath(target)
         if real in registered and _state(target, ()) == (plan.head, want_idx_tree, want_wt_tree):
             return _report(plan, target_rel, "idempotent", registered[real])
@@ -1296,18 +1780,30 @@ def restore(
             == (entry.get("head"), entry.get("index_tree"), entry.get("worktree_tree"))
         ):
             try:
-                branch = _update_in_place(
-                    target, primary, str(entry["worktree_tree"]), plan, str(entry["index_tree"])
+                pick = _update_in_place(
+                    target,
+                    primary,
+                    str(entry["worktree_tree"]),
+                    plan,
+                    str(entry["index_tree"]),
+                    recall_at=recall_at,
                 )
             except MoveWorksetError:
                 pass  # e.g. an untracked file in the way: land beside instead
             else:
-                _set_upstream(primary, branch, res.remote, plan.upstream_merge)
+                _set_upstream(primary, pick.name if pick else None, res.remote, plan.upstream_merge)
                 return _report(
-                    plan, target_rel, "in_place", f"refs/heads/{branch}" if branch else None
+                    plan,
+                    target_rel,
+                    "in_place",
+                    f"refs/heads/{pick.name}" if pick else None,
+                    pick,
                 )
         mode = "beside"
-        base = conflict_path(target_rel, plan.src_device, now)
+        # Beside stays inside ``<primary>/.worktrees`` too (S1a): a registered sibling
+        # worktree's conflict copy is not placed next to it at an arbitrary path.
+        beside_rel = worktree_target(plan.primary, target_rel, session_id=plan.session_id, n=plan.n)
+        base = conflict_path(beside_rel, plan.src_device, now)
         for i in range(100):
             candidate = base if i == 0 else f"{base}-{i}"
             target = contained_path(home, candidate)
@@ -1317,16 +1813,29 @@ def restore(
         else:
             return RestoreReport("left_behind", plan.path, reason="destination_conflict")
 
-    branch = (
-        _choose_branch(primary, plan.branch, plan.head, plan.src_device) if plan.branch else None
+    # S6 / R4: the checkout's real size against the free space where it is written.
+    need = checkout_bytes(primary, plan.worktree)
+    probe_dir = next((p for p in (target, *target.parents) if p.is_dir()), Path(home))
+    if shutil.disk_usage(probe_dir).free < need + CHECKOUT_RESERVE_BYTES:
+        return RestoreReport("pending_restore", plan.path, reason="insufficient_space")
+
+    # Decide the branch now, apply it only inside the try (review N2), so a failed
+    # ``worktree add`` leaves no branch created or moved behind it.
+    pick = (
+        _pick_branch(primary, plan.branch, plan.head, plan.src_device, recall_at=recall_at)
+        if plan.branch
+        else None
     )
     _make_dirs(home, target)
     staging = Path(tempfile.mkdtemp(prefix=".lop-restore-", dir=target.parent))
     staged = staging / target.name
     published = False
+    applied = False
     try:
-        if branch:
-            _git(primary, "worktree", "add", "--no-checkout", "--quiet", str(staged), branch)
+        if pick is not None:
+            _apply_branch(primary, pick, plan.head)
+            applied = True
+            _git(primary, "worktree", "add", "--no-checkout", "--quiet", str(staged), pick.name)
         else:
             _git(
                 primary,
@@ -1345,6 +1854,10 @@ def restore(
         _git(staged, "checkout-index", "-a", "-f")
         _git(staged, "read-tree", plan.index)
         _git(staged, "update-index", "-q", "--refresh", check=False)
+        _write_json_atomic(
+            Path(_out(staged, "rev-parse", "--absolute-git-dir")) / ARRIVED_MARKER,
+            {"session_id": plan.session_id, "n": plan.n, "bundle": plan.bundle_digest},
+        )
         _rename_noreplace(staged, target)
         published = True
         _git(primary, "worktree", "repair", str(target))
@@ -1352,12 +1865,15 @@ def restore(
         return RestoreReport("pending_restore", plan.path, reason="destination_conflict")
     finally:
         if not published:
-            # Only what this call created: its own staging worktree entry.
+            # Only what this call created: its own staging worktree entry, and the
+            # branch it created or advanced for it.
             _git(primary, "worktree", "remove", "--force", str(staged), check=False)
             _git(primary, "worktree", "prune", check=False)
+            if applied and pick is not None:
+                _undo_branch(primary, pick, plan.head)
         shutil.rmtree(staging, ignore_errors=True) if not published else _rmdir_quiet(staging)
-    _set_upstream(primary, branch, res.remote, plan.upstream_merge)
-    return _report(plan, target_rel, mode, f"refs/heads/{branch}" if branch else None)
+    _set_upstream(primary, pick.name if pick else None, res.remote, plan.upstream_merge)
+    return _report(plan, target_rel, mode, f"refs/heads/{pick.name}" if pick else None, pick)
 
 
 def _rmdir_quiet(path: Path) -> None:
@@ -1367,11 +1883,25 @@ def _rmdir_quiet(path: Path) -> None:
         pass
 
 
-def _report(plan: RestorePlan, dest_rel: str, mode: str, branch_ref: str | None) -> RestoreReport:
+def _report(
+    plan: RestorePlan,
+    dest_rel: str,
+    mode: str,
+    branch_ref: str | None,
+    pick: _BranchPick | None = None,
+) -> RestoreReport:
     branch = branch_ref.removeprefix("refs/heads/") if branch_ref else None
     remapped = (plan.path, dest_rel) if dest_rel != plan.path else None
+    # S3: an existing branch that moved is stated, from → to, never implied.
+    moved = (pick.name, pick.current, plan.head) if pick and pick.action == "ff" else None
     return RestoreReport(
-        "restored", plan.path, dest_path=dest_rel, branch=branch, mode=mode, remapped=remapped
+        "restored",
+        plan.path,
+        dest_path=dest_rel,
+        branch=branch,
+        mode=mode,
+        remapped=remapped,
+        branch_moved=moved,
     )
 
 
@@ -1425,10 +1955,16 @@ def recipes_for(worktree: Path, primary: Path, *, home: Path | None = None) -> l
     if (wt / "uv.lock").is_file():
         add("uv", "uv venv && uv sync --frozen")
     else:
-        reqs = sorted(p.name for p in wt.glob("requirements*.txt") if p.is_file())
+        reqs = sorted(
+            p.name
+            for p in wt.glob("requirements*.txt")
+            if p.is_file() and _REQUIREMENTS_RE.match(p.name)
+        )
         if reqs:
             pick = "requirements.txt" if "requirements.txt" in reqs else reqs[0]
-            add("uv_pip", f"uv venv && uv pip install -r {pick}")
+            # S7: the name comes from the restored (source-controlled) tree and is
+            # printed as a command the user may paste: known names only, quoted.
+            add("uv_pip", f"uv venv && uv pip install -r {shlex.quote(pick)}")
     if not out and ((wt / "Cargo.lock").is_file() or (wt / "go.sum").is_file()):
         add("none", "")
     return out
@@ -1511,21 +2047,27 @@ __all__ = [
     "RestorePlan",
     "RestoreReport",
     "SnapshotRefs",
+    "checkout_bytes",
     "clone_primary",
+    "clone_url_refusal",
     "compute_have",
     "conflict_path",
     "contained_path",
     "history_check",
     "home_relative",
     "mark_departed",
+    "measure_checkout",
     "normalize_remote_url",
+    "primary_path_refusal",
     "read_bundle_header",
     "recipes_for",
     "remap",
+    "remove_own_clone",
     "restore",
     "snapshot",
     "snapshot_ref",
     "stage_bundle",
     "verify_bundle",
     "verify_or_replan",
+    "worktree_target",
 ]

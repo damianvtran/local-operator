@@ -58,6 +58,7 @@ def test_a_carried_working_set_says_where_each_worktree_is() -> None:
 
 def test_a_move_that_did_not_carry_keeps_the_pr_a_sentence() -> None:
     block = {"transferred": False, "consent": "confirmed", "worktrees": [{"state": "left_behind"}]}
-    assert workset_text.receipt_lines(block, source="laptop") == [
-        "Working files were not transferred: 1 worktree stays on laptop."
-    ]
+    lines = workset_text.receipt_lines(block, source="laptop")
+    # The headline is PR A's; #4241's receipt then LISTS what stayed (its QA Q-2).
+    assert lines[0] == "Working files were not transferred: 1 worktree stays on laptop."
+    assert len(lines) == 2 and "stays on laptop" in lines[1]

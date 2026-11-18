@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "Использован удалённый адрес, доступный этому устройству: {detail}",
   "cli.sessions_move_workset.reason.primary_absent": "на устройстве назначения нет копии этого репозитория, и его не удалось клонировать",
   "cli.sessions_move_workset.reason.restore_failed": "файлы получены, но пока не могут быть восстановлены",
-  "cli.sessions_move_workset.reason.snapshot_failed": "его состояние не удалось зафиксировать на источнике (пустая ветка или bare-репозиторий)"
+  "cli.sessions_move_workset.reason.snapshot_failed": "его состояние не удалось зафиксировать на источнике (пустая ветка или bare-репозиторий)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "это устройство не принимает репозиторий по этому пути (см. mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.url_refused": "его удалённый адрес не является публичным адресом HTTPS или SSH, из которого это устройство клонирует",
+  "cli.sessions_move_workset.reason.destination_declined": "устройство назначения отклонило его",
+  "cli.sessions_move_workset.receipt_branch_moved": "Существующая ветка {branch} продвинута с {old} до {new}, как её оставило это устройство."
 }

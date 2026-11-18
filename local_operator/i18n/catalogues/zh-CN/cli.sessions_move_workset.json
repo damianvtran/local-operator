@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "已使用本设备可访问的远程地址：{detail}",
   "cli.sessions_move_workset.reason.primary_absent": "目标设备上没有此仓库的副本，也无法克隆它",
   "cli.sessions_move_workset.reason.restore_failed": "文件已到达，但暂时无法恢复",
-  "cli.sessions_move_workset.reason.snapshot_failed": "无法在源设备上记录其状态（空分支或 bare 仓库）"
+  "cli.sessions_move_workset.reason.snapshot_failed": "无法在源设备上记录其状态（空分支或 bare 仓库）",
+  "cli.sessions_move_workset.reason.restore_path_refused": "本设备不接受在该路径放置仓库（参见 mesh.move.working_set_roots）",
+  "cli.sessions_move_workset.reason.url_refused": "它的远程地址不是本设备会从中克隆的公共 HTTPS 或 SSH 地址",
+  "cli.sessions_move_workset.reason.destination_declined": "目标设备拒绝了它",
+  "cli.sessions_move_workset.receipt_branch_moved": "已将现有分支 {branch} 从 {old} 前移到 {new}，即本设备离开时的位置。"
 }

@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "Une adresse distante joignable par cet appareil a été utilisée : {detail}",
   "cli.sessions_move_workset.reason.primary_absent": "la destination n’a pas de copie de ce dépôt et n’a pas pu le cloner",
   "cli.sessions_move_workset.reason.restore_failed": "les fichiers sont arrivés mais n’ont pas encore pu être restaurés",
-  "cli.sessions_move_workset.reason.snapshot_failed": "son état n’a pas pu être capturé sur la source (une branche vide ou un dépôt bare)"
+  "cli.sessions_move_workset.reason.snapshot_failed": "son état n’a pas pu être capturé sur la source (une branche vide ou un dépôt bare)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "cet appareil n’accepte pas de dépôt à cet emplacement (voir mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.url_refused": "son dépôt distant n’est pas une adresse HTTPS ou SSH publique que cet appareil accepte de cloner",
+  "cli.sessions_move_workset.reason.destination_declined": "l’appareil de destination l’a refusé",
+  "cli.sessions_move_workset.receipt_branch_moved": "La branche existante {branch} a été avancée de {old} à {new}, là où cet appareil l’avait laissée."
 }

@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "Đã dùng một địa chỉ remote mà thiết bị này truy cập được: {detail}",
   "cli.sessions_move_workset.reason.primary_absent": "thiết bị đích không có bản sao của repository này và không thể clone nó",
   "cli.sessions_move_workset.reason.restore_failed": "các tệp đã đến nhưng chưa thể khôi phục",
-  "cli.sessions_move_workset.reason.snapshot_failed": "không thể ghi lại trạng thái của nó trên nguồn (nhánh trống hoặc repository bare)"
+  "cli.sessions_move_workset.reason.snapshot_failed": "không thể ghi lại trạng thái của nó trên nguồn (nhánh trống hoặc repository bare)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "thiết bị này không nhận kho mã tại đường dẫn đó (xem mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.url_refused": "remote của nó không phải địa chỉ HTTPS hoặc SSH công khai mà thiết bị này sẽ clone",
+  "cli.sessions_move_workset.reason.destination_declined": "thiết bị đích đã từ chối nó",
+  "cli.sessions_move_workset.receipt_branch_moved": "Đã đưa nhánh hiện có {branch} tiến từ {old} lên {new}, đúng như thiết bị này đã để lại."
 }

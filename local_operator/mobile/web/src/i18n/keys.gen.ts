@@ -1514,6 +1514,8 @@ export type MessageParams = {
   "wire.settings.memory_guard.title": undefined;
   "wire.settings.mesh_move_working_set_max_bytes.help": undefined;
   "wire.settings.mesh_move_working_set_max_bytes.label": undefined;
+  "wire.settings.mesh_move_working_set_roots.help": undefined;
+  "wire.settings.mesh_move_working_set_roots.label": undefined;
   "wire.settings.mesh_moves.description": undefined;
   "wire.settings.mesh_moves.title": undefined;
   "wire.settings.mesh_updates.description": undefined;

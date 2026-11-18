@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "Se usó una dirección remota a la que este dispositivo puede llegar: {detail}",
   "cli.sessions_move_workset.reason.primary_absent": "el destino no tiene una copia de este repositorio y no pudo clonarlo",
   "cli.sessions_move_workset.reason.restore_failed": "los archivos llegaron, pero aún no se pudieron restaurar",
-  "cli.sessions_move_workset.reason.snapshot_failed": "no se pudo capturar su estado en el origen (una rama vacía o un repositorio bare)"
+  "cli.sessions_move_workset.reason.snapshot_failed": "no se pudo capturar su estado en el origen (una rama vacía o un repositorio bare)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "este dispositivo no acepta un repositorio en esa ruta (consulta mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.url_refused": "su remoto no es una dirección HTTPS o SSH pública desde la que este dispositivo clone",
+  "cli.sessions_move_workset.reason.destination_declined": "el dispositivo de destino lo rechazó",
+  "cli.sessions_move_workset.receipt_branch_moved": "La rama existente {branch} avanzó de {old} a {new}, donde este dispositivo la había dejado."
 }

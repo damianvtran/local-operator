@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "Used a remote address this device can reach: {detail}",
   "cli.sessions_move_workset.reason.primary_absent": "the destination has no copy of this repository and could not clone it",
   "cli.sessions_move_workset.reason.restore_failed": "the files arrived but could not be restored yet",
-  "cli.sessions_move_workset.reason.snapshot_failed": "its state could not be captured on the source (an empty branch or a bare repository)"
+  "cli.sessions_move_workset.reason.snapshot_failed": "its state could not be captured on the source (an empty branch or a bare repository)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "this device does not accept a repository at that path (see mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.url_refused": "its remote is not a public HTTPS or SSH address this device will clone from",
+  "cli.sessions_move_workset.reason.destination_declined": "the destination declined it",
+  "cli.sessions_move_workset.receipt_branch_moved": "Moved the existing branch {branch} forward from {old} to {new}, as this device had left it."
 }

@@ -169,6 +169,10 @@ def reason_destination_conflict() -> Msg:
     return Msg("cli.sessions_move_workset.reason.destination_conflict", {})
 
 
+def reason_destination_declined() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.destination_declined", {})
+
+
 def reason_history_secret() -> Msg:
     return Msg("cli.sessions_move_workset.reason.history_secret", {})
 
@@ -209,6 +213,10 @@ def reason_restore_failed() -> Msg:
     return Msg("cli.sessions_move_workset.reason.restore_failed", {})
 
 
+def reason_restore_path_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.restore_path_refused", {})
+
+
 def reason_snapshot_failed() -> Msg:
     return Msg("cli.sessions_move_workset.reason.snapshot_failed", {})
 
@@ -227,6 +235,17 @@ def reason_unsafe_path() -> Msg:
 
 def reason_unsupported_by_peer() -> Msg:
     return Msg("cli.sessions_move_workset.reason.unsupported_by_peer", {})
+
+
+def reason_url_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.url_refused", {})
+
+
+def receipt_branch_moved(*, branch: str, old: str, new: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.receipt_branch_moved",
+        {"branch": branch, "old": old, "new": new},
+    )
 
 
 def receipt_keep(*, device: str, source: str) -> Msg:

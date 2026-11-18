@@ -5667,6 +5667,23 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=17_179_869_184,
         help=_t(_ws.mesh_move_working_set_max_bytes_help()),
     ),
+    # WHERE a move may create or restore a repository on THIS device (security review
+    # #4245 S1): the destination's own allowlist of ``~``-relative roots, applied to
+    # every path a source's offer names, on top of the fixed path rules (no hidden or
+    # system directories) in ``workset_transfer.primary_path_refusal``. Open list (the
+    # user's own folders). Clearing it restores the default, which ``workset.
+    # restore_roots`` falls back to for an absent key; an entry that is not ``~`` or
+    # ``~/...`` is ignored there, so a typo narrows the policy and never widens it.
+    Setting(
+        key="mesh.move.working_set_roots",
+        path=("mesh", "move", "working_set_roots"),
+        section="mesh_moves",
+        label=_t(_ws.mesh_move_working_set_roots_label()),
+        kind=Kind.LIST,
+        default=["~"],
+        help=_t(_ws.mesh_move_working_set_roots_help()),
+        empty_unsets=True,
+    ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
     # is held only until a handshake resolves, so this bounds neither `max_links`

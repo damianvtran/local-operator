@@ -72,5 +72,9 @@
   "cli.sessions_move_workset.receipt_rewrite": "ऐसा रिमोट पता इस्तेमाल किया गया जिस तक यह डिवाइस पहुँच सकता है: {detail}",
   "cli.sessions_move_workset.reason.primary_absent": "गंतव्य पर इस repository की कोई कॉपी नहीं है और वह इसे clone नहीं कर सका",
   "cli.sessions_move_workset.reason.restore_failed": "फ़ाइलें आ गईं, पर अभी रीस्टोर नहीं हो सकीं",
-  "cli.sessions_move_workset.reason.snapshot_failed": "स्रोत पर इसकी स्थिति कैप्चर नहीं हो सकी (खाली branch या bare repository)"
+  "cli.sessions_move_workset.reason.snapshot_failed": "स्रोत पर इसकी स्थिति कैप्चर नहीं हो सकी (खाली branch या bare repository)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "यह डिवाइस उस पाथ पर रिपॉज़िटरी स्वीकार नहीं करता (देखें mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.url_refused": "इसका रिमोट कोई सार्वजनिक HTTPS या SSH पता नहीं है जिससे यह डिवाइस क्लोन करे",
+  "cli.sessions_move_workset.reason.destination_declined": "गंतव्य डिवाइस ने इसे अस्वीकार कर दिया",
+  "cli.sessions_move_workset.receipt_branch_moved": "मौजूदा ब्रांच {branch} को {old} से {new} तक आगे बढ़ाया गया, जहाँ इस डिवाइस ने उसे छोड़ा था।"
 }

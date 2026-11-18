@@ -137,6 +137,9 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.network.workset import (
         DEFAULT_CAP_BYTES as WORKSET_DEFAULT_CAP_BYTES,
     )
+    from local_operator.network.workset import (
+        DEFAULT_RESTORE_ROOTS as WORKSET_DEFAULT_RESTORE_ROOTS,
+    )
     from local_operator.notifications import sound as notification_sound
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
@@ -353,6 +356,8 @@ def _consumer_defaults() -> dict[str, object]:
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         # Read at every move by ``workset.cap_bytes``, which falls back to exactly this.
         "mesh.move.working_set_max_bytes": WORKSET_DEFAULT_CAP_BYTES,
+        # Read at every arrival by ``workset.restore_roots``: an absent key is exactly this.
+        "mesh.move.working_set_roots": list(WORKSET_DEFAULT_RESTORE_ROOTS),
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
         "tunnel.auto_setup_after_login": AUTO_SETUP_DEFAULT,
         # ADR 0008: the reader's own default, which is also what a desk report

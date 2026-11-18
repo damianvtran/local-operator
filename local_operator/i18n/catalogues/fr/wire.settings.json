@@ -885,5 +885,7 @@
   "wire.settings.mesh_moves.title": "Déplacements de session",
   "wire.settings.mesh_moves.description": "Ce qu’une conversation déplacée vers un autre appareil emporte avec elle. Lu à chaque déplacement : une modification s’applique au suivant.",
   "wire.settings.mesh_move_working_set_max_bytes.label": "Plafond des fichiers de travail par déplacement (octets)",
-  "wire.settings.mesh_move_working_set_max_bytes.help": "Le volume maximal de fichiers de travail (commits empaquetés plus fichiers indexés, non indexés et non suivis) qu’un déplacement envoie à un autre appareil ou en accepte. Au-delà, le déplacement est refusé et rien ne change. Par défaut : 256 Mio."
+  "wire.settings.mesh_move_working_set_max_bytes.help": "Le volume maximal de fichiers de travail (commits empaquetés plus fichiers indexés, non indexés et non suivis) qu’un déplacement envoie à un autre appareil ou en accepte. Au-delà, le déplacement est refusé et rien ne change. Par défaut : 256 Mio.",
+  "wire.settings.mesh_move_working_set_roots.label": "Dossiers pouvant recevoir des dépôts déplacés",
+  "wire.settings.mesh_move_working_set_roots.help": "Où, sur cet appareil, un déplacement de session peut créer ou restaurer un dépôt : des dossiers de votre répertoire personnel, écrits avec ~ et séparés par des virgules (par exemple ~/code, ~/work). Les dossiers cachés et les dossiers système ne sont jamais utilisés. Par défaut ~ (partout ailleurs dans votre répertoire personnel)."
 }

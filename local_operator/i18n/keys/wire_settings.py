@@ -1461,6 +1461,14 @@ def mesh_move_working_set_max_bytes_label() -> Msg:
     return Msg("wire.settings.mesh_move_working_set_max_bytes.label", {})
 
 
+def mesh_move_working_set_roots_help() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_roots.help", {})
+
+
+def mesh_move_working_set_roots_label() -> Msg:
+    return Msg("wire.settings.mesh_move_working_set_roots.label", {})
+
+
 def mesh_moves_description() -> Msg:
     return Msg("wire.settings.mesh_moves.description", {})
 

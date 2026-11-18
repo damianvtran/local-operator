@@ -360,10 +360,16 @@ def test_a_mistyped_digest_says_it_does_not_match(
 
 
 def test_a_scripted_refusal_speaks_once_and_names_the_keeper(
-    staged: tuple[Devices, Rig], capsys: pytest.CaptureFixture[str]
+    staged: tuple[Devices, Rig],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """U4: a non-tty refusal printed the owner's English sentence ("on this device",
-    the wrong machine on a recall) and then the keyed summary."""
+    the wrong machine on a recall) and then the keyed summary. The destination here
+    speaks the pre-transfer protocol, so the files STAY and the keeper is named."""
+    from local_operator.network import workset
+
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
     code = _run([])
 
     err = capsys.readouterr().err

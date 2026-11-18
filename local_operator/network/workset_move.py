@@ -88,6 +88,29 @@ _SHA: Final = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 #: relay restart that forgot the cursor) is a NEW serve and is audited first.
 _SERVE_CURSOR: dict[tuple[str, str, str, str], int] = {}
 _SERVE_LOCK = threading.Lock()
+#: S8: the decline reasons the SOURCE may learn. Both are decided by this device's
+#: policy from the offer alone (path rules, URL rules), not by what exists here;
+#: every state-dependent reason (absent, conflict, unsafe component...) is sent as
+#: ``destination_declined`` and kept precisely in this device's ``pending.json``.
+_COARSE_DECLINE: Final = frozenset({"restore_path_refused", "url_refused"})
+#: Rows of an offer this device considers (the owner's manifest never comes close;
+#: the same bound as the probe's ``MAX_PROBE_ROWS``).
+MAX_OFFER_ROWS: Final = 64
+#: ``staging/<sid>.workset/cloned.json``: the primaries THIS move cloned (S1c).
+CLONED_JOURNAL: Final = "cloned.json"
+#: Security review #4245 S4: the ``prefix`` resume check is a byte-granular content
+#: oracle unless bounded. A prefix must be a whole number of these (the destination
+#: truncates its ``.part`` down to one before asking), it is audited like a span, and
+#: each (session, lease, device, artifact) gets at most ``_MAX_PREFIX_QUERIES``. The
+#: alignment is the span size itself, so a resume loses at most one span. A module
+#: value so a test can align a small artifact; never set from a frame.
+_RESUME_ALIGN: int = 512 * 1024
+_MAX_PREFIX_QUERIES: Final = 2
+_PREFIX_QUERIES: dict[tuple[str, str, str, str], int] = {}
+#: S5: plans one prepared move answers — the first, plus the single ``have=[]`` re-plan
+#: W5 needs. Each plan stages bundles on THIS device's disk; more would let the
+#: destination fill it with permutations of ``have``.
+_MAX_PLANS: Final = 2
 
 
 class WorksetTransferRefused(Exception):
@@ -356,7 +379,7 @@ def source_prepare(
         # The session's cwd in ``~/`` form, so the destination can point the arrived
         # session at the RESTORED tree (the promote's cwd mapping runs before the
         # restore exists). Empty when it is outside this device's home.
-        "cwd": engine.home_relative(cwd, home=home) or "" if cwd else "",
+        "cwd": (engine.home_relative(cwd, home=home) or "") if cwd else "",
         "binding": binding,
         "worktrees": offer_rows,
         "left_behind": left,
@@ -442,6 +465,15 @@ def serve_plan(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) ->
     journal, refusal = _authorised_journal(server, link, frame, session_id)
     if refusal is not None or journal is None:
         return refusal or _refused("refused", "no working set", session_id)
+    plans_so_far = int(journal.get("plans") or 0)
+    if plans_so_far >= _MAX_PLANS:
+        return _refused(
+            "plan_limit",
+            "this move already planned its working files and re-planned them once",
+            session_id,
+        )
+    journal["plans"] = plans_so_far + 1
+    _write_json(outgoing_dir(server.root, session_id) / "journal.json", journal)
     have_value = frame.get("have")
     raw_have: Mapping[str, Any] = have_value if isinstance(have_value, Mapping) else {}
     out = outgoing_dir(server.root, session_id)
@@ -502,6 +534,7 @@ def serve_plan(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) ->
     if cap and total > cap:
         journal["artifacts"] = {}
         _write_json(out / "journal.json", journal)
+        _prune_artifacts(out, keep=())
         return _refused(
             "working_set_over_cap",
             f"the working files are {total} bytes once bundled, over this device's "
@@ -511,12 +544,37 @@ def serve_plan(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) ->
     journal["artifacts"] = artifacts
     journal["plan_left_behind"] = left
     _write_json(out / "journal.json", journal)
+    # A re-plan supersedes the earlier artifact of the worktree it re-bundled.
+    _prune_artifacts(
+        out, keep=[str(a["digest"]).removeprefix("sha256:") for a in artifacts.values()]
+    )
     return {
         "result": "planned",
         "session_id": session_id,
         "artifacts": reply_artifacts,
         "left_behind": left,
     }
+
+
+def _prune_artifacts(out: Path, *, keep: Sequence[str]) -> None:
+    """S5: unlink staged artifacts (and their sidecars) the current plan does not name.
+
+    Only ``<64 hex>`` and ``<64 hex>.json`` regular files directly in this move's own
+    ``workset-out/<sid>/`` — never the journal, never a symlink's target.
+    """
+    wanted = set(keep)
+    try:
+        children = list(out.iterdir())
+    except OSError:
+        return
+    for child in children:
+        stem = child.name.removesuffix(".json")
+        if not _HEX64.match(stem) or stem in wanted or child.is_symlink():
+            continue
+        try:
+            child.unlink()
+        except OSError:
+            logger.debug("workset: could not prune %s", child, exc_info=True)
 
 
 # --------------------------------------------------------- owner: W3 audit, W4 fetch
@@ -532,6 +590,7 @@ def _audit_workset_serve(
     size: int,
     offset: int,
     path: str,
+    kind: str = "span",
 ) -> bool:
     """Write ONE durable ``session.workset.serve`` row; ``True`` only if it is on disk.
 
@@ -570,6 +629,7 @@ def _audit_workset_serve(
                         "bytes": int(size),
                         "offset": int(offset),
                         "path": path[:512],
+                        "kind": kind,
                     },
                 )
             )
@@ -631,9 +691,52 @@ def serve_fetch(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) -
         return _refused("unknown_item", "that artifact is no longer staged here", session_id)
     try:
         with os.fdopen(fd, "rb", closefd=True) as handle:
+            epoch = str(journal.get("lease_epoch") or "")
+            key = (session_id, epoch, str(link.device_id), digest)
+            row_path = next(
+                (
+                    str(r.get("path") or "")
+                    for r in journal.get("worktrees") or []
+                    if str(r.get("n")) == staged[digest]
+                ),
+                "",
+            )
             if prefix_len is not None:
                 if prefix_len > size:
                     return _refused("bad_request", "prefix is longer than the artifact", session_id)
+                # S4: only a span-aligned prefix, a bounded number of times, and the
+                # answer is a SERVE — audited before it is computed, like any span.
+                if prefix_len == 0 or prefix_len % _RESUME_ALIGN:
+                    return _refused(
+                        "bad_request", "a resume prefix must be a whole number of spans", session_id
+                    )
+                with _SERVE_LOCK:
+                    asked = _PREFIX_QUERIES.get(key, 0)
+                    if asked >= _MAX_PREFIX_QUERIES:
+                        return _refused(
+                            "bad_request", "this artifact was already resumed enough", session_id
+                        )
+                    _PREFIX_QUERIES[key] = asked + 1
+                if not _audit_workset_serve(
+                    server,
+                    session_id=session_id,
+                    to_device=str(link.device_id),
+                    lease_epoch=epoch,
+                    digest=digest,
+                    size=size,
+                    offset=prefix_len,
+                    path=row_path,
+                    kind="prefix",
+                ):
+                    return _refused(
+                        "audit_unavailable",
+                        "this device could not record the transfer in its audit log, so "
+                        "no working file was sent",
+                        session_id,
+                    )
+                with _SERVE_LOCK:
+                    # The audited prefix row covers the resume that follows it.
+                    _SERVE_CURSOR[key] = prefix_len
                 h = hashlib.sha256()
                 remaining = prefix_len
                 while remaining:
@@ -652,19 +755,9 @@ def serve_fetch(server: RelayServer, link: PeerLink, frame: Mapping[str, Any]) -
                 }
             if offset > size:
                 return _refused("bad_request", "offset is past the end of the artifact", session_id)
-            epoch = str(journal.get("lease_epoch") or "")
-            key = (session_id, epoch, str(link.device_id), digest)
             with _SERVE_LOCK:
                 continuing = offset > 0 and _SERVE_CURSOR.get(key) == offset
             if not continuing:
-                row_path = next(
-                    (
-                        str(r.get("path") or "")
-                        for r in journal.get("worktrees") or []
-                        if str(r.get("n")) == staged[digest]
-                    ),
-                    "",
-                )
                 if not _audit_workset_serve(
                     server,
                     session_id=session_id,
@@ -827,10 +920,20 @@ def _fetch_artifact(
     }
     offset = 0
     if part.is_file() and not part.is_symlink():
-        have = part.stat().st_size
-        if 0 < have <= expected_bytes:
+        # S4: the owner answers only a span-aligned prefix, so drop the partial span.
+        have = min(part.stat().st_size, expected_bytes)
+        have -= have % _RESUME_ALIGN
+        if have > 0:
+            pfd = os.open(part, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.ftruncate(pfd, have)
+            finally:
+                os.close(pfd)
             local = _sha256(part)
-            answer = _ask(transport, {**base, "prefix": have})
+            try:
+                answer = _ask(transport, {**base, "prefix": have})
+            except WorksetTransferRefused:
+                answer = {}  # an owner that will not confirm: start over at 0
             if str(answer.get("prefix_sha256") or "") == local:
                 offset = have
         if offset == 0:
@@ -916,50 +1019,74 @@ def destination_transfer(
     failed session copy: nothing committed, ``changed: False``). Writes
     ``staging/<sid>.workset/pending.json`` with one restore plan per artifact, for the
     restore that runs after ``done``.
+
+    THE DESTINATION DECIDES (security review #4245). Every path and URL below comes
+    from the source's offer, and a source holding ``move`` may be hostile, so before
+    anything is cloned or fetched this device applies its OWN policy:
+
+    * S1 — a repository lands only where ``engine.primary_path_refusal`` allows
+      (plain components, no config/autostart roots, under
+      ``mesh.move.working_set_roots``); a worktree only under ``<primary>/.worktrees``
+      (``engine.restore``). Refused → ``left_behind`` ``restore_path_refused``.
+    * S2 — a clone URL must pass ``engine.clone_url_refusal``; the https form of an
+      ssh remote is derived HERE (an offered rewrite is used only if it equals that).
+    * S1c — a clone this move makes is journaled in ``cloned.json`` as soon as it
+      exists, so the rollback (``discard_incoming``) removes it, and only it.
+    * S8 — what goes back to the source is coarse (``_COARSE_DECLINE``); the precise
+      reason stays in this device's ``pending.json``.
+    * S6/R3/R4 — the cap and free space are checked on the first plan AND after a
+      re-plan, and the checkout's measured size is checked against the home
+      filesystem before ``ready``.
     """
     from local_operator.network import workset
+    from local_operator.network import workset_probe
     from local_operator.network import workset_transfer as engine
 
     home = home_of(server)
     into = _private_dir(incoming_staging(server.root, session_id))
-    rows = [r for r in offer.get("worktrees") or [] if isinstance(r, Mapping)]
+    roots = workset.restore_roots(Path(server.root))
+    forbid = [Path(server.root)]
+    rows = [r for r in offer.get("worktrees") or [] if isinstance(r, Mapping)][:MAX_OFFER_ROWS]
     rewrite_notes: list[str] = []
     have: dict[str, list[str]] = {}
     decline: dict[str, str] = {}
+    local_reason: dict[str, str] = {}
     primaries: dict[str, dict[str, Any]] = {}
     for row in rows:
         n = str(row.get("n"))
         remote_url = str(row.get("remote_url") or "")
         repo_rel = str(row.get("repo") or "")
         use_url = remote_url
-        res = engine.resolve_primary(use_url, repo_rel, home=home) if use_url else None
+        res = None
         cloned = False
+        if engine.primary_path_refusal(home, repo_rel, roots=roots, forbid=forbid):
+            res = engine.PrimaryResolution("unsafe", None, reason="restore_path_refused")
+        elif remote_url:
+            res = engine.resolve_primary(use_url, repo_rel, home=home)
         if res is not None and res.state == "absent":
-            # THE HTTPS REWRITE (the destination probe's offer, design §4 W1): an ssh
-            # remote this device has no key for is cloned over its https form instead,
-            # with THIS device's own credentials. Tried in order — the original URL,
-            # then the rewrite — so a destination that can use ssh keeps it. The
-            # rewrite is repo-local by construction (it is the fresh clone's origin;
-            # a checkout the user already had is never re-pointed) and is named in
-            # the receipt's notes. ``https_rewrite.url`` on the row is the probe's
-            # offer when an owner forwards it; else this device derives the same form.
-            from local_operator.network import workset_probe
-
-            offered = row.get("https_rewrite")
-            alt = (
-                str(offered.get("url") or "")
-                if isinstance(offered, Mapping)
-                else workset_probe.https_rewrite(remote_url)
-            )
+            # THE HTTPS REWRITE (design §4 W1): an ssh remote this device has no key for
+            # is cloned over its https form instead, with THIS device's own
+            # credentials. Tried in order — the original URL, then the rewrite — so a
+            # destination that can use ssh keeps it. The rewrite is DERIVED HERE from
+            # ``remote_url`` (``workset_probe.https_rewrite``: same host, ssh/scp forms
+            # only); the offer's ``https_rewrite.url`` is ignored, so the source cannot
+            # name a second URL of its choosing (S2). Repo-local by construction (the
+            # fresh clone's origin) and named in the receipt's notes.
+            alt = workset_probe.https_rewrite(remote_url)
             candidates = [remote_url] + ([alt] if alt and alt != remote_url else [])
-            res = engine.PrimaryResolution("absent", None, reason="destination_cannot_clone")
-            for candidate in candidates:
+            allowed = [c for c in candidates if not engine.clone_url_refusal(c)]
+            res = engine.PrimaryResolution(
+                "absent", None, reason="destination_cannot_clone" if allowed else "url_refused"
+            )
+            for candidate in allowed:
                 try:
                     got = engine.clone_primary(
                         candidate,
                         repo_rel,
                         home=home,
                         pack_bytes=int(row.get("pack_bytes") or 0),
+                        session_id=session_id,
+                        lease_epoch=lease_epoch,
                     )
                 except engine.MoveWorksetError as exc:
                     if exc.reason == "insufficient_space":
@@ -969,6 +1096,8 @@ def destination_transfer(
                             f"({exc.detail}), so nothing was moved",
                         ) from exc
                     continue
+                if got.cloned:
+                    _journal_clone(into, repo_rel, session_id, lease_epoch)
                 if got.state == "present":
                     res, use_url, cloned = got, candidate, True
                     if candidate != remote_url:
@@ -976,32 +1105,22 @@ def destination_transfer(
                     break
         primaries[n] = {"res": res, "url": use_url, "cloned": cloned}
         if res is not None and res.state == "present" and res.path is not None:
-            tips = [str(t) for t in row.get("tips") or [] if _SHA.match(str(t))]
-            have[n] = engine.compute_have(res.path, tips, remote=res.remote)
+            tips = [str(t) for t in row.get("tips") or [] if _SHA.match(str(t))][:64]
+            have[n] = engine.compute_have(res.path, tips, remote=res.remote, session_id=session_id)
         else:
-            decline[n] = (res.reason if res is not None else "") or "destination_cannot_clone"
+            reason = (res.reason if res is not None else "") or "destination_cannot_clone"
+            local_reason[n] = reason
+            decline[n] = reason if reason in _COARSE_DECLINE else "destination_declined"
     planned = _plan(transport, session_id, lease_epoch, have, decline)
     artifacts = {
         str(a.get("n")): a for a in planned.get("artifacts") or [] if isinstance(a, Mapping)
     }
     left = [dict(r) for r in planned.get("left_behind") or [] if isinstance(r, Mapping)]
-    total = sum(int(a.get("bytes") or 0) for a in artifacts.values())
-    cap = workset.cap_bytes(Path(server.root))
-    if total > cap:
-        raise WorksetTransferRefused(
-            "working_set_over_cap",
-            f"the working files are {total} bytes, over this device's cap of {cap} "
-            "(mesh.move.working_set_max_bytes), so nothing was moved",
-        )
-    free = shutil.disk_usage(into).free
-    if total * FREE_SPACE_FACTOR > free:
-        raise WorksetTransferRefused(
-            "insufficient_space",
-            f"this device has {free} bytes free and the working files need about "
-            f"{total * FREE_SPACE_FACTOR}, so nothing was moved",
-        )
+    _check_room(server, into, artifacts)
     plans: list[dict[str, Any]] = []
     mapping: list[tuple[str, list[str]]] = []
+    checkout_total = 0
+    replanned = False
     for row in rows:
         n = str(row.get("n"))
         art = artifacts.get(n)
@@ -1024,10 +1143,23 @@ def destination_transfer(
         )
         if res is not None and res.state == "present" and res.path is not None:
             if not engine.verify_bundle(res.path, fetched):
-                # W5: re-plan ONCE with ``have=[]`` for this worktree; a second failure
-                # rolls the whole move back (nothing committed anywhere).
-                replanned = _plan(transport, session_id, lease_epoch, {**have, n: []}, decline)
-                again = {str(a.get("n")): a for a in replanned.get("artifacts") or []}.get(n)
+                # W5: re-plan ONCE (for the whole move, which is all the owner allows,
+                # S5) with ``have=[]`` for this worktree; a second failure rolls the
+                # whole move back (nothing committed anywhere).
+                if replanned:
+                    raise WorksetTransferRefused(
+                        "working_set_transfer_failed",
+                        f"the bundle for {row.get('path')} did not verify here",
+                    )
+                replanned = True
+                again_plan = _plan(transport, session_id, lease_epoch, {**have, n: []}, decline)
+                replanned_artifacts = {
+                    str(a.get("n")): a
+                    for a in again_plan.get("artifacts") or []
+                    if isinstance(a, Mapping)
+                }
+                merged = {**artifacts, **replanned_artifacts}
+                again = replanned_artifacts.get(n)
                 if not again:
                     raise WorksetTransferRefused(
                         "working_set_transfer_failed", "the re-plan carried nothing"
@@ -1037,6 +1169,9 @@ def destination_transfer(
                     raise WorksetTransferRefused(
                         "working_set_transfer_failed", "the owner named a malformed artifact"
                     )
+                # R3: the full bundle is bigger; this device's cap and free space are
+                # checked again before a byte of it is fetched.
+                _check_room(server, into, merged)
                 fetched = _fetch_artifact(
                     transport,
                     session_id=session_id,
@@ -1052,10 +1187,23 @@ def destination_transfer(
                     )
                 # Every other worktree's artifact is unchanged by a re-plan (the
                 # staged directory is the cache), so their digests still hold.
-                artifacts = {
-                    **artifacts,
-                    **{str(a.get("n")): a for a in replanned.get("artifacts") or []},
-                }
+                artifacts = merged
+            # S6/R4: what the checkout will WRITE, measured from the bundle's own
+            # objects (not a number the source sent).
+            worktree_sha = str(row.get("worktree") or "")
+            if _SHA.match(worktree_sha):
+                try:
+                    checkout_total += engine.measure_checkout(
+                        res.path,
+                        fetched,
+                        engine.snapshot_ref(session_id, int(row.get("n") or 0), "worktree"),
+                        into,
+                    )
+                except engine.MoveWorksetError as exc:
+                    raise WorksetTransferRefused(
+                        "working_set_transfer_failed",
+                        f"the bundle for {row.get('path')} could not be read here",
+                    ) from exc
         mapping.append((str(row.get("path")), [digest]))
         plans.append(
             {
@@ -1075,6 +1223,28 @@ def destination_transfer(
                 "fresh_clone": bool(info.get("cloned")),
             }
         )
+    free_home = shutil.disk_usage(home).free
+    if checkout_total + engine.CHECKOUT_RESERVE_BYTES > free_home:
+        raise WorksetTransferRefused(
+            "insufficient_space",
+            f"this device has {free_home} bytes free where the files are restored and "
+            f"they need about {checkout_total + engine.CHECKOUT_RESERVE_BYTES}, so nothing "
+            "was moved",
+        )
+    # S8: the owner was told only a coarse reason; this device keeps the precise one.
+    # Every declined row is recorded here even if the owner's reply omitted it.
+    by_n = {str(r.get("n")): r for r in rows}
+    for item in left:
+        n = str(item.get("n"))
+        if n in local_reason:
+            item["reason"] = local_reason[n]
+            item.setdefault("path", by_n.get(n, {}).get("path"))
+    listed = {str(item.get("n")) for item in left}
+    for n, reason in local_reason.items():
+        if n not in listed:
+            left.append(
+                {"n": int(n) if n.isdigit() else n, "path": by_n[n].get("path"), "reason": reason}
+            )
     digest_all = workset_digest(mapping)
     _write_json(
         into / "pending.json",
@@ -1094,8 +1264,63 @@ def destination_transfer(
     return digest_all
 
 
-def discard_incoming(root: Path | str, session_id: str) -> None:
-    """The destination rollback's half: remove ``staging/<sid>.workset/``."""
+def _check_room(server: Any, into: Path, artifacts: Mapping[str, Mapping[str, Any]]) -> None:
+    """The destination's own cap and staging free space for ``artifacts`` (W1/W5, R3)."""
+    from local_operator.network import workset
+
+    total = sum(int(a.get("bytes") or 0) for a in artifacts.values())
+    cap = workset.cap_bytes(Path(server.root))
+    if total > cap:
+        raise WorksetTransferRefused(
+            "working_set_over_cap",
+            f"the working files are {total} bytes, over this device's cap of {cap} "
+            "(mesh.move.working_set_max_bytes), so nothing was moved",
+        )
+    free = shutil.disk_usage(into).free
+    if total * FREE_SPACE_FACTOR > free:
+        raise WorksetTransferRefused(
+            "insufficient_space",
+            f"this device has {free} bytes free and the working files need about "
+            f"{total * FREE_SPACE_FACTOR}, so nothing was moved",
+        )
+
+
+def _journal_clone(into: Path, repo_rel: str, session_id: str, lease_epoch: str) -> None:
+    """S1c: record a clone THIS move made, the moment it exists, for the rollback."""
+    path = into / CLONED_JOURNAL
+    record = _read_json(path) or {}
+    clones = [c for c in record.get("clones") or [] if isinstance(c, dict)]
+    clones.append({"path": repo_rel, "session_id": session_id, "lease_epoch": lease_epoch})
+    _write_json(path, {"clones": clones})
+
+
+def discard_incoming(root: Path | str, session_id: str, *, home: Path | None = None) -> None:
+    """The destination rollback's half: remove ``staging/<sid>.workset/``.
+
+    With ``home``, first remove every primary THIS move cloned (``cloned.json``; S1c):
+    a refused or rolled-back move must not leave a fresh repository behind it. Each one
+    is removed only if its own marker still names this session and lease
+    (``engine.remove_own_clone``); anything else stays.
+    """
+    if home is not None:
+        from local_operator.network import workset_transfer as engine
+
+        try:
+            record = _read_json(incoming_staging(root, session_id) / CLONED_JOURNAL) or {}
+        except ValueError:
+            record = {}
+        for clone in record.get("clones") or []:
+            if not isinstance(clone, dict):
+                continue
+            try:
+                engine.remove_own_clone(
+                    home,
+                    str(clone.get("path") or ""),
+                    session_id=str(clone.get("session_id") or ""),
+                    lease_epoch=str(clone.get("lease_epoch") or ""),
+                )
+            except OSError:
+                logger.warning("workset: could not remove the clone this move made", exc_info=True)
     try:
         _remove_tree(incoming_staging(root, session_id))
     except ValueError:
@@ -1136,7 +1361,10 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
     pending = _read_json(directory / "pending.json")
     if pending is None:
         return None
+    from local_operator.network import workset
+
     home = home_of(server)
+    roots = workset.restore_roots(Path(server.root))
     restored: dict[str, Any] = dict(pending.get("restored") or {})
     for raw in pending.get("plans") or []:
         key = str(raw.get("n"))
@@ -1144,7 +1372,9 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
             continue
         plan = engine.RestorePlan(**raw)
         try:
-            report = engine.restore(directory, plan, home=home, config=Path(server.root))
+            report = engine.restore(
+                directory, plan, home=home, config=Path(server.root), roots=roots
+            )
         except engine.MoveWorksetError as exc:
             report = engine.RestoreReport("pending_restore", plan.path, reason=exc.reason)
         except Exception as exc:  # noqa: BLE001 — a restore failure is reported, not raised
@@ -1209,23 +1439,35 @@ def _retarget_cwd(
 
     if not cwd_rel.startswith("~/"):
         return
-    for row in rows:
-        src, dest = str(row.get("path") or ""), str(row.get("dest_path") or "")
-        if row.get("state") != "restored" or not src.startswith("~/") or not dest:
-            continue
-        if cwd_rel != src and not cwd_rel.startswith(src.rstrip("/") + "/"):
-            continue
-        try:
-            target = engine.contained_path(home, dest + cwd_rel[len(src) :])
-            if not target.is_dir():
-                target = engine.contained_path(home, dest)
-            marker_path = Path(server.root) / "sessions" / session_id / carry.DESKTOP_MARKER_NAME
-            marker = _read_json(marker_path) or {}
-            marker["cwd"] = str(target)
-            carry._write_marker(marker_path, marker)  # noqa: SLF001 — the one marker writer
-        except Exception:  # noqa: BLE001 — advice for the next open, never a failure
-            logger.debug("workset: could not retarget %s's cwd", session_id, exc_info=True)
+    # Review R1: the DEEPEST restored tree containing the cwd wins. Rows come in plan
+    # order (sorted by path), so a primary ``~/proj`` precedes its own
+    # ``~/proj/.worktrees/feat``; taking the first match sent a session working in
+    # ``feat`` to the primary's restored copy instead.
+    matches = [
+        row
+        for row in rows
+        if row.get("state") == "restored"
+        and str(row.get("path") or "").startswith("~/")
+        and row.get("dest_path")
+        and (
+            cwd_rel == str(row.get("path"))
+            or cwd_rel.startswith(str(row.get("path")).rstrip("/") + "/")
+        )
+    ]
+    if not matches:
         return
+    row = max(matches, key=lambda r: len(str(r.get("path"))))
+    src, dest = str(row.get("path") or ""), str(row.get("dest_path") or "")
+    try:
+        target = engine.contained_path(home, dest + cwd_rel[len(src) :])
+        if not target.is_dir():
+            target = engine.contained_path(home, dest)
+        marker_path = Path(server.root) / "sessions" / session_id / carry.DESKTOP_MARKER_NAME
+        marker = _read_json(marker_path) or {}
+        marker["cwd"] = str(target)
+        carry._write_marker(marker_path, marker)  # noqa: SLF001 — the one marker writer
+    except Exception:  # noqa: BLE001 — advice for the next open, never a failure
+        logger.debug("workset: could not retarget %s's cwd", session_id, exc_info=True)
 
 
 def arrival_receipt(
@@ -1254,7 +1496,7 @@ def arrival_receipt(
             row.pop("reason", None)
             if hit.get("reason"):
                 row["reason"] = str(hit["reason"])
-            for key in ("dest_path", "branch", "mode", "recipes"):
+            for key in ("dest_path", "branch", "mode", "recipes", "branch_moved"):
                 if hit.get(key):
                     row[key] = hit[key]
         elif str(row.get("path")) in left:

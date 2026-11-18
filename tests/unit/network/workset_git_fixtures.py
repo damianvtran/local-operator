@@ -125,6 +125,31 @@ def make_rig(tmp_path: Path, *, dirty: bool = True, clone_dest: bool = True, bul
     return Rig(origin, src_home, dst_home, primary, dst_primary, wt)
 
 
+#: The https address the clone tests use. ``.test`` never resolves (RFC 2606); the
+#: tests name it as an operator-allowed host and ``serve_origin_as_https`` maps it onto
+#: the rig's local bare origin through the engine's test seam.
+TEST_REMOTE = "https://git.test/proj.git"
+
+
+def serve_origin_as_https(monkeypatch: pytest.MonkeyPatch, origin: Path, source: Path) -> str:
+    """Make the bare ``origin`` clonable as :data:`TEST_REMOTE` (the W1 clone refuses
+    local paths and ``file://`` since security review #4245 S2), and point the source
+    checkout's ``origin`` at that address so both devices name the same remote."""
+    from local_operator.network import workset_probe
+    from local_operator.network import workset_transfer as wt
+
+    # ``git.test`` never resolves, so the shared host policy refuses it unless it is a
+    # host this device's operator named, which is what the probe tests do too.
+    monkeypatch.setattr(workset_probe, "_ALLOWED_HOSTS", ("git.test",))
+    monkeypatch.setattr(
+        wt,
+        "_CLONE_TEST_CONFIG",
+        ("protocol.file.allow=always", f"url.{origin}.insteadOf={TEST_REMOTE}"),
+    )
+    git(source, "remote", "set-url", "origin", TEST_REMOTE)
+    return TEST_REMOTE
+
+
 def facts(worktree: Path) -> dict[str, str]:
     """The §14 round-trip observables of a worktree."""
     return {

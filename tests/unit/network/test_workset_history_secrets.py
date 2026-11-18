@@ -143,3 +143,25 @@ def test_v1_has_no_history_secret_override() -> None:
         assert not any(
             "include" in name or "secret" in name for name in inspect.signature(fn).parameters
         )
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    ["*.cfg -diff\n", "*.cfg binary\n", "*.cfg diff=hide\n", "*.cfg filter=hide\n"],
+)
+def test_attributes_cannot_hide_a_secret_from_the_outgoing_scan(
+    tmp_path: Path, attributes: str
+) -> None:
+    """#4241 S4 found ``.gitattributes -diff`` hid content from a diff-based scan. The
+    outgoing-object scan here reads RAW blobs (``cat-file --batch``: no textconv, no
+    attributes, no filters), so marking the file binary, giving it a textconv driver
+    that prints nothing, or a clean filter, still withholds the secret it carries."""
+    rig = make_rig(tmp_path, dirty=False)
+    git(rig.worktree, "config", "diff.hide.textconv", "true")
+    git(rig.worktree, "config", "filter.hide.clean", "cat")
+    _commit(
+        rig.worktree,
+        {".gitattributes": attributes, "settings.cfg": f"token = {AWS_KEY_ID}\n"},
+    )
+    check = _check(rig)
+    assert ("settings.cfg", "history_secret_content") in _whys(check)
