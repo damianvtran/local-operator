@@ -9,7 +9,7 @@ import {
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
-import { documentOrigin, withSurfaceOriginGate } from "./surface-origin";
+import { withSurfaceOriginGate } from "./surface-origin";
 import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
@@ -26,7 +26,7 @@ import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
-import { DEFAULT_PORT, forgetAdmittedOrigin, getLocal, isRedactedToken, retainAdmittedOrigin, touchSurface } from "./state";
+import { DEFAULT_PORT, forgetAdmittedOrigin, getLocal, isRedactedToken, touchSurface } from "./state";
 import { pairFromManagedPolicy } from "./managed-pairing";
 import { reconcileCommandTab, retitle } from "./tab-groups";
 import { reclaimRemovedTab } from "./tab-lifecycle";
@@ -943,18 +943,6 @@ chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
       if (token) send({ event: "tab_closed", tab: token });
     })
     .catch((error) => console.warn("tab replace reclaim failed", error));
-});
-
-// A top-frame commit ends whatever allow-once admission the tab held for any
-// OTHER origin (state.ts `retainAdmittedOrigin`): "allow once" covers the
-// document the user approved, so a page that navigates away and back on its
-// own needs the normal grant again. Top-level registration so a commit wakes a
-// sleeping worker; optional like the permissions listeners above, for hosts
-// without the API.
-chrome.webNavigation?.onCommitted?.addListener((details) => {
-  if (details.frameId !== 0) return;
-  void retainAdmittedOrigin(details.tabId, documentOrigin(details.url))
-    .catch((error) => console.warn("admitted-origin commit update failed", error));
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {

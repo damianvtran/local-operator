@@ -221,7 +221,7 @@ export async function withSurfaceOriginGate<T>(
   );
   const afterHref = after.url ?? "";
   if (documentOrigin(afterHref) !== documentOrigin(gatedHref)) {
-    // Fresh surface: the top-frame commit listener may have dropped an
+    // Fresh surface: a revoke while the handler ran may have dropped an
     // admission the copy read before the handler still lists.
     const current = (await getSurfaces())[surfaceToken(surface)] ?? { ...surface, admittedOrigins: [] };
     await assertDocumentAdmitted(current, afterHref, requestId, "", false);

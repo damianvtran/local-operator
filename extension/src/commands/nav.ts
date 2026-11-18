@@ -82,15 +82,7 @@ async function navigate(tabId: number, url: URL, requestId: string, admission: O
       throw new BridgeCommandError("origin_denied", "site permission was denied", { origin: url.origin });
     }
   }
-  // A once grant spent at command entry admits the destination for this tab
-  // NOW, not only if Fetch interception later sees the document request: a
-  // load the interceptor never pauses (e.g. one a service worker serves) would
-  // otherwise leave the page the user just allowed unreadable, and with the
-  // grant already spent the agent's next read would raise a SECOND prompt.
-  // Recorded before navigating so the top-frame commit (which keeps only the
-  // committed origin, state.ts `retainAdmittedOrigin`) retains it.
-  if (admission.viaOnceGrant) await noteAdmittedOrigin(tabId, url.origin);
-  return withOriginGate(
+  const landed = await withOriginGate(
     tabId,
     requestId,
     async () => {
@@ -105,6 +97,33 @@ async function navigate(tabId: number, url: URL, requestId: string, admission: O
     },
     [url.origin],
   );
+  // A once grant spent at command entry admits the destination for this tab,
+  // not only if Fetch interception saw the document request: a load the
+  // interceptor never pauses (e.g. one a service worker serves) would
+  // otherwise leave the page the user just allowed unreadable, and with the
+  // grant already spent the agent's next read would raise a SECOND prompt.
+  // Recorded only when the tab actually LANDED on the requested origin: a
+  // redirect elsewhere admits neither the requested origin (the user never
+  // saw it load) nor the redirect target (the user never approved it).
+  // Recorded after the navigation, so no admission exists while it is in
+  // flight. The admission then lasts for the surface: allow-once covers the
+  // site the user approved for this tab, so an SSO/OAuth round trip, a
+  // payment hand-off or link-out-and-Back returns to a readable page with no
+  // second prompt; a later saved Deny or a revoke still ends it
+  // (surface-origin.ts `explicitlyDenied`, state.ts `forgetAdmittedOrigin`).
+  if (admission.viaOnceGrant && landedOrigin(landed.url) === url.origin) {
+    await noteAdmittedOrigin(tabId, url.origin);
+  }
+  return landed;
+}
+
+/** Origin of the URL the tab reports after a navigation, "" if unparseable. */
+function landedOrigin(href: string): string {
+  try {
+    return new URL(href).origin;
+  } catch {
+    return "";
+  }
 }
 
 /**

@@ -40,7 +40,9 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
   // `intercept`: whether a navigation emits Fetch.requestPaused for its
   // document (false = a load the interceptor never sees, e.g. one a service
   // worker serves). `onCdp` lets a test move the tab mid-command.
-  const page = { tabUrl, docUrl, intercept: true, onCdp: null };
+  // `redirectTo`: where a navigation actually lands (a server redirect the
+  // interceptor does not see), instead of the requested URL.
+  const page = { tabUrl, docUrl, intercept: true, onCdp: null, redirectTo: null };
   const calls = { scripts: 0, cdp: [], tabsGet: 0 };
   const event = () => {
     const listeners = new Set();
@@ -76,6 +78,7 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
         calls.cdp.push(method);
         page.onCdp?.(method);
         if (method === "Page.captureScreenshot") return { data: "PNGDATA" };
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
         return {};
       },
       onEvent: cdpEvents, onDetach: { addListener: () => {} },
@@ -111,11 +114,12 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
             cdpEvents.fire({ tabId }, "Fetch.requestPaused", { requestId: "doc-1", request: { url } });
             for (let i = 0; i < 20; i++) await tick();
           }
-          page.tabUrl = url;
-          page.docUrl = url;
-          nav.onCommitted.fire({ tabId, frameId: 0, url });
+          const landed = page.redirectTo ?? url;
+          page.tabUrl = landed;
+          page.docUrl = landed;
+          nav.onCommitted.fire({ tabId, frameId: 0, url: landed });
           for (let i = 0; i < 20; i++) await tick();
-          nav.onCompleted.fire({ tabId, frameId: 0, url });
+          nav.onCompleted.fire({ tabId, frameId: 0, url: landed });
         }, 0);
         return {};
       },
@@ -380,6 +384,102 @@ test("logs keeps console output an unapproved page wrote out of an approved page
   } finally { worker.chromeState.restore(); }
 });
 
+// Round 2 log-tag fixes (m1, m2, m3/Q4, Q3/n1). `logWorker` resumes a surface
+// on `tabUrl` (which arms capture) and returns CDP event helpers.
+async function logWorker(tabUrl, { runtimeAlreadyOn = false, replayOrigin = null } = {}) {
+  const worker = await loadWorker({ surfaces: { [TOKEN]: surface() }, origins: approvedOnly, tabUrl });
+  const fire = (method, params) => worker.chromeState.cdpEvents.fire({ tabId: 42 }, method, params);
+  const context = (id, origin, frameId = "main", isDefault = true) => fire("Runtime.executionContextCreated", {
+    context: { id, origin, auxData: { isDefault, frameId } },
+  });
+  const say = (id, text) => fire("Runtime.consoleAPICalled", {
+    type: "log", executionContextId: id, args: [{ type: "string", value: text }],
+  });
+  // V8 semantics: Runtime.enable replays executionContextCreated only when
+  // the domain was off; a repeat enable returns without replay.
+  let runtimeOn = runtimeAlreadyOn;
+  worker.chromeState.page.onCdp = (method) => {
+    if (method === "Runtime.disable") runtimeOn = false;
+    if (method === "Runtime.enable" && !runtimeOn) {
+      runtimeOn = true;
+      if (replayOrigin) context(1, replayOrigin);
+    }
+  };
+  const resumed = await worker.request("open", { tab: TOKEN, url: tabUrl });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.error));
+  const texts = async () => {
+    const response = await worker.request("logs", { tab: TOKEN });
+    assert.equal(response.ok, true, JSON.stringify(response.error));
+    return response.result.entries.map((entry) => entry.text);
+  };
+  return { worker, fire, context, say, texts };
+}
+
+test("Log.entryAdded is labelled by the MAIN frame's context, not an iframe's that came first (m1)", async () => {
+  const { worker, fire, context, texts } = await logWorker(`${APPROVED}/docs`);
+  try {
+    // The page moves to the unapproved site; a script-less main document
+    // embeds an approved-origin iframe whose context is created first.
+    fire("Runtime.executionContextsCleared", {});
+    context(5, APPROVED, "child-frame");
+    fire("Log.entryAdded", { entry: { level: "error", text: "B-NETWORK-SECRET" } });
+    context(6, OTHER, "main");
+    assert.deepEqual(await texts(), [], "the unapproved page's browser messages are not returned");
+  } finally { worker.chromeState.restore(); }
+});
+
+test("console output from a context the capture does not know is never returned (m2)", async () => {
+  const { worker, fire, context, say, texts } = await logWorker(`${APPROVED}/docs`);
+  try {
+    fire("Runtime.executionContextsCleared", {});
+    context(3, APPROVED);
+    say(3, "A-OWN");
+    say(99, "UNKNOWN-CONTEXT-SECRET");
+    assert.deepEqual(await texts(), ["A-OWN"]);
+  } finally { worker.chromeState.restore(); }
+});
+
+test("an iframe's console output on an approved page is returned, tagged with the top page (Q3/n1)", async () => {
+  const { worker, fire, context, say, texts } = await logWorker(`${APPROVED}/docs`);
+  try {
+    fire("Runtime.executionContextsCleared", {});
+    context(1, APPROVED, "main");
+    context(2, OTHER, "widget-frame");
+    say(1, "A-MAIN");
+    say(2, "C-IFRAME");
+    // The same iframe under an UNAPPROVED top page stays hidden with it.
+    fire("Runtime.executionContextsCleared", {});
+    context(3, OTHER, "main");
+    context(4, APPROVED, "widget-frame");
+    say(4, "IFRAME-UNDER-B-SECRET");
+    assert.deepEqual(await texts(), ["A-MAIN", "C-IFRAME"]);
+  } finally { worker.chromeState.restore(); }
+});
+
+test("re-arming capture on a session whose Runtime was already on replays contexts, so logs return (m3/Q4)", async () => {
+  const { worker, say, texts } = await logWorker(`${APPROVED}/docs`, { runtimeAlreadyOn: true, replayOrigin: APPROVED });
+  try {
+    const cdp = worker.chromeState.calls.cdp;
+    assert.ok(cdp.indexOf("Runtime.disable") > -1 && cdp.indexOf("Runtime.disable") < cdp.indexOf("Runtime.enable"),
+      `Runtime.disable must precede Runtime.enable: ${cdp.join(",")}`);
+    say(1, "A-AFTER-RESUME");
+    assert.deepEqual(await texts(), ["A-AFTER-RESUME"]);
+  } finally { worker.chromeState.restore(); }
+});
+
+test("an opaque or non-web origin is never recorded as an admission (Q5)", async () => {
+  const chromeState = installChrome({ surfaces: { [TOKEN]: surface() }, tabUrl: "about:blank" });
+  try {
+    const statePath = join(bundleDir, "state.mjs");
+    await build({ entryPoints: ["src/state.ts"], bundle: true, platform: "node", format: "esm", outfile: statePath });
+    const { noteAdmittedOrigin } = await import(pathToFileURL(statePath) + `?q5=${++loads}`);
+    for (const origin of ["null", "", "about:blank", "about:"]) await noteAdmittedOrigin(42, origin);
+    assert.equal(chromeState.surfaces()[TOKEN].admittedOrigins, undefined);
+    await noteAdmittedOrigin(42, OTHER);
+    assert.deepEqual(chromeState.surfaces()[TOKEN].admittedOrigins, [OTHER], "a web origin is still recorded");
+  } finally { chromeState.restore(); }
+});
+
 for (const intercept of [false, true]) {
   const label = intercept ? "with Fetch interception (S12 control)" : "without Fetch interception (S11)";
   test(`goto on an allow-once grant keeps the page readable ${label} (Q1)`, async () => {
@@ -401,28 +501,60 @@ for (const intercept of [false, true]) {
   });
 }
 
-test("an allow-once admission ends when the tab commits another origin (R3)", async () => {
+// Round 2 M1: an allow-once admission lasts for the surface, so a round trip
+// off the site and back (SSO/OAuth, payment hand-off, link out + Back) never
+// raises a second approval for the site the user just allowed.
+const IDP = "https://idp.example";
+for (const idpApproved of [true, false]) {
+  test(`allow-once A -> ${idpApproved ? "approved" : "unapproved"} SSO provider -> back to A stays readable with no second request (M1)`, async () => {
+    const worker = await loadWorker({
+      surfaces: { [TOKEN]: surface() },
+      origins: idpApproved ? { ...approvedOnly, [IDP]: "allow" } : approvedOnly,
+      tabUrl: `${APPROVED}/docs`, session: onceFor(OTHER),
+    });
+    try {
+      const moved = await worker.request("goto", { tab: TOKEN, url: `${OTHER}/app`, requester });
+      assert.equal(moved.ok, true, JSON.stringify(moved.error));
+      await settleTicks();
+      const { page, nav } = worker.chromeState;
+      // "Sign in with ..." takes the tab to the provider; it bounces back
+      // after the click's interception window has closed.
+      page.tabUrl = page.docUrl = `${IDP}/authorize?client=a`;
+      nav.onCommitted.fire({ tabId: 42, frameId: 0, url: page.tabUrl });
+      await settleTicks();
+      if (idpApproved) {
+        const atIdp = await worker.request("read", { tab: TOKEN, requester });
+        assert.equal(atIdp.ok, true, JSON.stringify(atIdp.error));
+      }
+      page.tabUrl = page.docUrl = `${OTHER}/callback?code=x`;
+      nav.onCommitted.fire({ tabId: 42, frameId: 0, url: page.tabUrl });
+      await settleTicks();
+      const read = await worker.request("read", { tab: TOKEN, requester });
+      assert.equal(read.ok, true, `back on the allowed site must stay readable: ${JSON.stringify(read.error)}`);
+      assert.equal(read.result.text, `${SECRET} @ ${OTHER}`);
+      assert.deepEqual(worker.chromeState.surfaces()[TOKEN].admittedOrigins, [OTHER]);
+      const session = worker.chromeState.session();
+      assert.deepEqual(session.get("accessQueue") ?? [], [], "no second access request was raised");
+      assert.equal(session.get("pendingOrigin"), undefined);
+    } finally { worker.chromeState.restore(); }
+  });
+}
+
+test("a goto on an allow-once grant that redirects elsewhere admits neither origin (M1)", async () => {
   const worker = await loadWorker({
     surfaces: { [TOKEN]: surface() }, origins: approvedOnly, tabUrl: `${APPROVED}/docs`, session: onceFor(OTHER),
   });
+  // A load the interceptor never pauses, redirected server-side to C.
+  worker.chromeState.page.intercept = false;
+  worker.chromeState.page.redirectTo = `${IDP}/landing`;
   try {
-    const moved = await worker.request("goto", { tab: TOKEN, url: `${OTHER}/landing`, requester });
-    assert.equal(moved.ok, true, JSON.stringify(moved.error));
+    await worker.request("goto", { tab: TOKEN, url: `${OTHER}/landing`, requester });
     await settleTicks();
-    // The page leaves on its own and later comes back.
-    const { page, nav } = worker.chromeState;
-    page.tabUrl = page.docUrl = `${APPROVED}/next`;
-    nav.onCommitted.fire({ tabId: 42, frameId: 0, url: page.tabUrl });
-    await settleTicks();
-    // A subframe commit is not a document change for the tab.
-    nav.onCommitted.fire({ tabId: 42, frameId: 7, url: `${OTHER}/frame` });
-    page.tabUrl = page.docUrl = `${OTHER}/again`;
-    nav.onCommitted.fire({ tabId: 42, frameId: 0, url: page.tabUrl });
-    await settleTicks();
+    assert.equal(worker.chromeState.surfaces()[TOKEN].admittedOrigins, undefined, "neither A nor C is admitted");
     const read = await worker.request("read", { tab: TOKEN, requester });
-    assert.equal(read.ok, false, `returning needs the normal grant again, got ${JSON.stringify(read.result)}`);
+    assert.equal(read.ok, false, `the redirect target was never approved, got ${JSON.stringify(read.result)}`);
     assert.equal(read.error.code, "origin_not_allowed");
-    assert.equal(worker.chromeState.surfaces()[TOKEN].admittedOrigins, undefined);
+    assert.equal(worker.chromeState.calls.scripts, 0);
   } finally { worker.chromeState.restore(); }
 });
 

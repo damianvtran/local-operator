@@ -26,6 +26,8 @@ export async function logs(params: Record<string, unknown>): Promise<Record<stri
   // Only entries captured on a page this tab may expose NOW: the buffer spans
   // navigations, and an unapproved site the tab visited on its own must not
   // reach the agent through its console output (log-capture.ts ORIGIN TAGS).
+  // Output from iframes is judged by the TOP page it ran under, like
+  // read/snapshot: an approved page's embedded widgets still log here.
   // One admission check per distinct origin, not per entry.
   const admitted = new Set<string>();
   for (const origin of loggedOrigins(surface.tabId)) {

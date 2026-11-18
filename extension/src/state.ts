@@ -39,7 +39,11 @@ export interface StoredSurface {
   // navigation that used it, so the persistent grant set never names these
   // origins; without this record every later read of the page the user just
   // approved would be refused (surface-origin.ts). Bounded and per-surface:
-  // it dies with the tab, like the approval it records.
+  // it dies with the tab, like the approval it records. It deliberately
+  // survives the tab leaving and returning (SSO/OAuth round trips, payment
+  // hand-offs, link out + Back): the user allowed the site for this tab, and a
+  // second prompt for it mid-flow is the friction allow-once must not cause.
+  // A saved Deny outranks it and a revoke removes it.
   admittedOrigins?: string[];
 }
 
@@ -216,10 +220,10 @@ export function putSurface(surface: StoredSurface): Promise<void> {
     const token = surfaceToken(surface);
     // Callers write back a copy they read BEFORE a navigation (goto/open bump
     // the epoch after `navigate`), while the navigation itself added or
-    // dropped admitted origins (noteAdmittedOrigin / retainAdmittedOrigin /
-    // forgetAdmittedOrigin). The STORED list is therefore the authority for an
-    // existing surface: a stale copy must neither erase an admission nor
-    // resurrect one the top-frame commit already dropped. Only a brand-new
+    // dropped admitted origins (noteAdmittedOrigin / forgetAdmittedOrigin).
+    // The STORED list is therefore the authority for an existing surface: a
+    // stale copy must neither erase an admission nor resurrect one a revoke
+    // already dropped. Only a brand-new
     // surface takes the caller's list.
     const existing = surfaces[token];
     const admitted = existing ? existing.admittedOrigins : surface.admittedOrigins;
@@ -249,6 +253,9 @@ export const MAX_ADMITTED_ORIGINS = 16;
  * recorded — the common repeat case costs one read.
  */
 export function noteAdmittedOrigin(tabId: number, origin: string): Promise<void> {
+  // An opaque or non-web origin ("null", "", about:blank's) names no site a
+  // grant could cover; recording it would only crowd out real admissions.
+  if (!isAdmissibleOrigin(origin)) return Promise.resolve();
   return withStore(async () => {
     const surfaces = await getSurfaces();
     let changed = false;
@@ -294,17 +301,8 @@ function rewriteAdmitted(
   });
 }
 
-/**
- * The top frame of `tabId` committed a document at `origin`: keep only that
- * origin's admission. An allow-once admits the document the user approved,
- * not the origin forever — once the tab leaves it, coming back (on its own or
- * by a later command) goes through the normal grant again, as a fresh goto
- * would. Keeping the committed origin is what lets the goto/open that spent
- * the grant (it records the destination BEFORE navigating) keep reading the
- * page it just reached without a second prompt.
- */
-export function retainAdmittedOrigin(tabId: number, origin: string): Promise<void> {
-  return rewriteAdmitted((surface) => surface.tabId === tabId, (admitted) => admitted === origin);
+function isAdmissibleOrigin(origin: string): boolean {
+  return origin.startsWith("https://") || origin.startsWith("http://");
 }
 
 /** A revoke names an origin the user no longer wants exposed: drop it from
