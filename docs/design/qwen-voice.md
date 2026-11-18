@@ -235,8 +235,8 @@ except where noted.
   absent `byok` means the backend predates pinning. `/voice/speech` labels the
   audio from its bytes (ElevenLabs answers MP3, Groq WAV) instead of always
   `audio/wav`. The key stays in the daemon's credential store (`/login
-  elevenlabs`); no route accepts, returns or logs one. **Known gap:** only WAV is
-  stored in the phrase cache, so an ElevenLabs phrase is paid for each time.
+  elevenlabs`); no route accepts, returns or logs one. The speech
+  request asks for MP3 (see V17), so an ElevenLabs phrase is cached as `.mp3`.
 - **V17 — One chosen provider (`speech.provider`, 2026-11-18; amends V16).** The
   pin's source is a persisted setting, not a client field: `speech.provider` is
   `radient` (billed to Radient credit) or `elevenlabs` (the user's own key), absent
@@ -255,6 +255,11 @@ except where noted.
   app. The Speak button (`/v1/tools/speech` descriptor shape, `/v1/agents/{id}/speech`)
   follows the same setting when set and keeps the whole cascade when unset; a
   request that names its own `provider` keeps the legacy pass-through unchanged.
+  **Speech format:** `/voice/speech` asks the cascade for `mp3`, never `wav`:
+  Radient's hub refuses `wav` (`400`, `SpeechRequest.ResponseFormat` `oneof`), which
+  the route surfaced as a `502`. The `Content-Type` is the sniffed container
+  (`audio/mpeg`; a Groq answer stays `audio/wav`), and the phrase cache stores the
+  rung's own container (`.mp3`, `.wav` for Groq).
 - **V14 — Binding a take to its turn.** A take binds to the turn whose stream
   carries the user `message_start` with `message.id ==` the take's
   `request_id`, for a prompt, a mid-turn steer and a tail steer, live and on

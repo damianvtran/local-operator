@@ -853,7 +853,7 @@ def real_cascades(rig: Any, monkeypatch: pytest.MonkeyPatch):
     # the real resolver needs it here (the stubbed-cascade tests need no URL).
     rig.app.state.env_config = SimpleNamespace(radient_api_base_url="https://api.radienthq.com/v1")
     legs = SimpleNamespace(
-        called=[], radient_error=None, spend=[], sign_in=None, elevenlabs_key=None
+        called=[], formats=[], radient_error=None, spend=[], sign_in=None, elevenlabs_key=None
     )
 
     def sign_in_radient() -> None:
@@ -877,11 +877,13 @@ def real_cascades(rig: Any, monkeypatch: pytest.MonkeyPatch):
 
     async def tts_radient(*_a: Any, **_k: Any) -> Any:
         legs.called.append("tts:radient")
+        legs.formats.append(_k.get("response_format"))
         raise legs.radient_error
 
     async def tts_elevenlabs(*_a: Any, **_k: Any) -> Any:
         legs.called.append("tts:elevenlabs")
-        return (_wav_bytes(), "elevenlabs", [], [])
+        legs.formats.append(_k.get("response_format"))
+        return (_mp3_bytes(), "elevenlabs", [], [])
 
     async def stt_radient(*_a: Any, **_k: Any) -> Any:
         legs.called.append("stt:radient")
@@ -898,6 +900,11 @@ def real_cascades(rig: Any, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(desktop_voice, "emit_voice_spend", lambda **kw: legs.spend.append(kw))
     yield legs
     store.close()
+
+
+def _mp3_bytes() -> bytes:
+    """A tagged MP3 head: all the sniffer (and so the response label) reads."""
+    return b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x00" * 8
 
 
 def _credit_exhausted() -> Any:
@@ -976,6 +983,82 @@ async def test_the_elevenlabs_pin_never_reaches_radient(
     real_cascades.elevenlabs_key()
     assert (await _phrase_speech(rig)).status_code == 200
     assert real_cascades.called == ["tts:elevenlabs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["radient", "elevenlabs"])
+async def test_a_pinned_speech_request_asks_the_leg_for_mp3_never_wav(
+    rig: Any, real_cascades: SimpleNamespace, provider: str
+) -> None:
+    real_cascades.sign_in()
+    real_cascades.elevenlabs_key()
+    real_cascades.radient_error = _credit_exhausted()
+    _choose(rig, provider)
+    await _enable(rig, SESSION_A)
+    await _phrase_speech(rig)
+    assert real_cascades.formats == ["mp3"]
+
+
+def _hub_refusing_wav(legs: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Radient leg that answers as the real hub does: ``wav`` is a 400, ``mp3`` is audio."""
+    from local_operator.clients._http import APIError
+    from local_operator.tts import cascade as tts_cascade
+
+    async def tts_radient(*_a: Any, **kwargs: Any) -> Any:
+        legs.called.append("tts:radient")
+        if kwargs.get("response_format") != "mp3":
+            raise APIError(
+                "[bad_request] Invalid request parameters: Key: 'SpeechRequest.ResponseFormat' "
+                "Error:Field validation for 'ResponseFormat' failed on the 'oneof' tag",
+                status_code=400,
+            )
+        return (_mp3_bytes(), "radient", [], [])
+
+    monkeypatch.setattr(tts_cascade, "_run_radient_rung", tts_radient)
+
+
+@pytest.mark.asyncio
+async def test_radient_speech_is_served_as_audio_mpeg_where_wav_was_a_400(
+    rig: Any, real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_cascades.sign_in()
+    _hub_refusing_wav(real_cascades, monkeypatch)
+    _choose(rig, "radient")
+    await _enable(rig, SESSION_A)
+    response = await _phrase_speech(rig)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.content == _mp3_bytes()
+    assert response.headers["x-voice-path"] == "provider_tts_radient"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["radient", "elevenlabs"])
+async def test_a_pinned_upstream_failure_carries_the_providers_own_sentence(
+    rig: Any, real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    from local_operator.clients._http import APIError
+
+    real_cascades.sign_in()
+    real_cascades.elevenlabs_key()
+    real_cascades.radient_error = APIError(
+        "[bad_request] Invalid request parameters: ResponseFormat", status_code=400
+    )
+    _choose(rig, provider)
+    await _enable(rig, SESSION_A)
+    real_cascades.called.clear()
+    if provider == "elevenlabs":
+        # The ElevenLabs leg is the one that fails here; the sentence is ITS own.
+        from local_operator.tts import cascade as tts_cascade
+
+        async def refused(*_a: Any, **_k: Any) -> Any:
+            raise APIError("quota_exceeded: detail from ElevenLabs", status_code=500)
+
+        monkeypatch.setattr(tts_cascade, "_run_elevenlabs_rung", refused)
+    response = await _phrase_speech(rig)
+    assert response.status_code == 502, response.text
+    text = response.json()["detail"]["text"]
+    assert ("ResponseFormat" if provider == "radient" else "detail from ElevenLabs") in text
 
 
 @pytest.mark.asyncio
@@ -1215,7 +1298,15 @@ def cascades(rig: Any, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
 
     calls = SimpleNamespace(
-        tts=[], stt=[], resolve=[], spend=[], tts_error=None, stt_error=None, text="list files"
+        tts=[],
+        stt=[],
+        resolve=[],
+        spend=[],
+        tts_error=None,
+        stt_error=None,
+        text="list files",
+        tts_audio=None,
+        tts_path=VoicePath.PROVIDER_TTS_GROQ,
     )
 
     async def synthesize(text: str, **kwargs: Any) -> TtsOutcome:
@@ -1223,15 +1314,16 @@ def cascades(rig: Any, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         if calls.tts_error is not None:
             raise calls.tts_error
         return TtsOutcome(
-            audio=_wav_bytes(), path=VoicePath.PROVIDER_TTS_GROQ, attempts=(), provider="groq"
+            audio=calls.tts_audio or _wav_bytes(),
+            path=calls.tts_path,
+            attempts=(),
+            provider="groq",
         )
 
     async def resolve(**kwargs: Any) -> VoicePathResolution:
         calls.resolve.append(kwargs)
-        rung = RungAvailability(VoicePath.PROVIDER_TTS_GROQ, True, "A Groq API key is stored.")
-        return VoicePathResolution(
-            path=VoicePath.PROVIDER_TTS_GROQ, reason="ok", rungs=(rung,), servable=True
-        )
+        rung = RungAvailability(calls.tts_path, True, "A key is stored.")
+        return VoicePathResolution(path=calls.tts_path, reason="ok", rungs=(rung,), servable=True)
 
     async def transcribe(path: Path, **kwargs: Any) -> SttOutcome:
         calls.stt.append((path.read_bytes()[:4], kwargs))
@@ -1532,7 +1624,7 @@ async def test_a_non_429_failure_keeps_the_speech_refusal_path(
 
 
 @pytest.mark.asyncio
-async def test_speech_returns_one_segment_as_wav_with_the_cascade_flags(
+async def test_speech_returns_one_segment_with_the_cascade_flags(
     rig: Any, cascades: SimpleNamespace
 ) -> None:
     await _enable(rig, SESSION_A)
@@ -1547,7 +1639,8 @@ async def test_speech_returns_one_segment_as_wav_with_the_cascade_flags(
     ((spoken, kwargs),) = cascades.tts
     assert spoken == segments[0]
     assert kwargs["include_groq"] is True
-    assert kwargs["response_format"] == "wav"
+    # Never "wav": Radient's hub refuses it, and MP3 is what every pinned rung answers.
+    assert kwargs["response_format"] == "mp3"
     assert "include_local" not in kwargs
     (record,) = cascades.spend
     assert record["channel"] == "tts" and record["unit"] == "chars"
@@ -1626,6 +1719,29 @@ async def test_a_phrase_hit_makes_no_cascade_call_and_a_miss_stores_it(
     assert second.headers["content-type"] == "audio/wav"
     assert len(cascades.tts) == 1, "a cache hit reached the cascade"
     assert len(cascades.spend) == 1, "a cache hit was billed"
+
+
+@pytest.mark.asyncio
+async def test_a_cached_mp3_phrase_is_stored_and_served_as_audio_mpeg(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    from local_operator.tts import VoicePath
+
+    cascades.tts_path = VoicePath.PROVIDER_TTS_RADIENT
+    cascades.tts_audio = _mp3_bytes()
+    await _enable(rig, SESSION_A)
+    source = {"kind": "phrase", "key": "on_screen_first"}
+    first = await _speech(rig, source)
+    assert first.status_code == 200, first.text
+    assert first.headers["content-type"] == "audio/mpeg"
+    cached = list((rig.root / "voice" / "phrase-cache").iterdir())
+    assert [path.name for path in cached] == ["provider_tts_radient-female-on_screen_first.mp3"]
+
+    second = await _speech(rig, source)
+    assert second.status_code == 200 and second.headers["x-voice-cache"] == "hit"
+    assert second.content == first.content
+    assert second.headers["content-type"] == "audio/mpeg"
+    assert len(cascades.tts) == 1, "a cache hit reached the cascade"
 
 
 @pytest.mark.asyncio

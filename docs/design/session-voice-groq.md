@@ -309,7 +309,7 @@ and plays them one by one.
   from a phrase cache (below), not a fresh request.
 - **Phrases** (Q7's closed set plus the truncation tail) go through
   `/voice/speech` with `source: {kind: "phrase", key}`, as `feat/session-voice`
-  had (`:806-808`). Their audio is cached at `<config>/voice/phrase-cache/<rung>-<voice>-<key>.wav`.
+  had (`:806-808`). Their audio is cached at `<config>/voice/phrase-cache/<rung>-<voice>-<key>.<mp3|wav>` (`.wav` for Groq, `.mp3` for the rest).
   They are fixed strings, so each one is paid once per rung and voice, not per
   turn.
 - **The spoken summary is now the lever on cost.** `voice-spoken-summary.md`

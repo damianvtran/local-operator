@@ -21,7 +21,7 @@ The frozen contract, which both repositories build against:
     POST /v1/desktop/voice/speech      body {session_id, source, segment}
         source {kind: message, message_id} | {kind: gate, request_id} |
                {kind: phrase, key}
-        200 audio/wav (X-Voice-Path, X-Voice-Spoken-Chars); 404 unknown_source |
+        200 audio/mpeg or audio/wav (X-Voice-Path, X-Voice-Spoken-Chars); 404 unknown_source |
         unknown_segment; 409 voice_not_enabled | voice_unavailable |
         voice_provider_unset; 429 voice_rate_limited
 
@@ -149,6 +149,7 @@ from local_operator.server.routes.desktop_sessions import reply
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath
 from local_operator.stt import audio as stt_audio
+from local_operator.tts import VoicePath
 from local_operator.voice import provider as speech_provider
 from local_operator.voice import segments as voice_segments
 from local_operator.voice import slot as voice_slot
@@ -215,11 +216,13 @@ _STT_PROVIDERS = {
     AudioPath.PROVIDER_STT_GROQ.value: "groq",
 }
 
-#: Every voice TTS call asks for WAV: the page decodes and schedules PCM
-#: sample-accurately (D3), and the Groq rung always answers WAV. ``TtsOutcome``
-#: carries no format, so the route fixes it rather than guessing from the rung.
-VOICE_AUDIO_FORMAT = "wav"
-VOICE_AUDIO_MIME = "audio/wav"
+#: Every voice TTS call asks for MP3, the cascade's own default. Radient's hub
+#: accepts no ``wav`` (HTTP 400 on ``SpeechRequest.ResponseFormat``), and
+#: ElevenLabs answers MP3 whatever is asked. Only the Groq rung answers WAV,
+#: and it takes no format at all. ``TtsOutcome`` carries no format, so the
+#: route fixes the request and labels the answer by sniffing its bytes.
+VOICE_AUDIO_FORMAT = "mp3"
+VOICE_AUDIO_MIME = "audio/mpeg"
 
 #: Hearing and speaking are pinned to the user's ONE chosen provider
 #: (``speech.provider``, ``voice/provider.py``): no ordering, no fallthrough.
@@ -849,12 +852,22 @@ async def voice_text(
 
 
 def _phrase_cache_file(config_dir: Path, rung: str, voice: str, key: str) -> Path:
-    """``<config>/voice/phrase-cache/<rung>-<voice>-<key>.wav``.
+    """``<config>/voice/phrase-cache/<rung>-<voice>-<key>.<mp3|wav>``.
 
-    ``key`` is always a member of :data:`PHRASES` and ``rung``/``voice`` are
-    closed vocabularies, so no caller text reaches the path.
+    The extension is the container the rung answers (:func:`_phrase_cache_format`),
+    so a cached phrase is named for what it is. ``key`` is always a member of
+    :data:`PHRASES` and ``rung``/``voice`` are closed vocabularies, so no caller
+    text reaches the path.
     """
-    return config_dir / "voice" / "phrase-cache" / f"{rung}-{voice}-{key}.wav"
+    ext, _ = _phrase_cache_format(rung)
+    return config_dir / "voice" / "phrase-cache" / f"{rung}-{voice}-{key}.{ext}"
+
+
+def _phrase_cache_format(rung: str) -> tuple[str, str]:
+    """The (extension, mime) a rung's phrase is cached as: Groq answers WAV, the rest MP3."""
+    if rung == VoicePath.PROVIDER_TTS_GROQ.value:
+        return "wav", "audio/wav"
+    return "mp3", "audio/mpeg"
 
 
 def _store_phrase(path: Path, audio: bytes) -> None:
@@ -895,9 +908,10 @@ async def voice_speech(
     closing sentence) is served from the phrase cache and costs no cascade call
     on a hit.
 
-    200 carries WAV (``audio/wav``: the cascade is asked for it, see
-    :data:`VOICE_AUDIO_FORMAT`) with ``X-Voice-Path`` (the TTS rung that served)
-    and ``X-Voice-Spoken-Chars``. A 429 is ``voice_rate_limited``.
+    200 carries the rung's audio, labelled by its sniffed bytes (the cascade is
+    asked for MP3, see :data:`VOICE_AUDIO_FORMAT`; Groq answers WAV) with
+    ``X-Voice-Path`` (the TTS rung that served) and ``X-Voice-Spoken-Chars``. A 429
+    is ``voice_rate_limited``.
     """
     from local_operator.tts import cascade as tts_cascade
     from local_operator.tts.adapters import Legacy
@@ -952,15 +966,16 @@ async def voice_speech(
                 cached = cache_file.read_bytes()
             except OSError:
                 cached = b""
-            if cached and stt_audio.sniff_audio(cached) is None:
+            cached_info = stt_audio.sniff_audio(cached) if cached else None
+            if cached and cached_info is None:
                 # A truncated or corrupt file must not be served for ever: drop
                 # it and fall through to a paid regeneration, which re-stores it.
                 cache_file.unlink(missing_ok=True)
                 cached = b""
-            if cached:
+            if cached and cached_info is not None:
                 return Response(
                     content=cached,
-                    media_type=VOICE_AUDIO_MIME,
+                    media_type=cached_info.mime_type,
                     headers=_audio_headers(resolution.path.value, len(text), cache="hit"),
                 )
 
@@ -1010,14 +1025,14 @@ async def voice_speech(
     )
     if cache_file is not None:
         info = stt_audio.sniff_audio(outcome.audio)
-        if info is not None and info.mime_type == "audio/wav":
+        if info is not None and info.mime_type == _phrase_cache_format(outcome.path.value)[1]:
             served = _phrase_cache_file(
                 config_dir, outcome.path.value, descriptor.resolved_gender(), phrase_key or ""
             )
             await asyncio.to_thread(_store_phrase, served, outcome.audio)
-    # The label follows the bytes: a Groq answer is WAV but ElevenLabs answers
+    # The label follows the bytes: a Groq answer is WAV but the others answer
     # MP3, and calling an MP3 "audio/wav" is how a page ends up decoding it as
-    # PCM. An unrecognised container keeps the contract's WAV label.
+    # PCM. An unrecognised container keeps the contract's MP3 label.
     sniffed = stt_audio.sniff_audio(outcome.audio)
     return Response(
         content=outcome.audio,
