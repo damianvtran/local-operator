@@ -90,6 +90,11 @@ from local_operator.server.models.desktop_sessions import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.retire import RETIRING_STATE_ATTR, DaemonRetiring
+from local_operator.server.utils.browser_owner_status import (
+    BrowserOwnerQuery,
+    BrowserOwnerStatus,
+    read_browser_owner_status,
+)
 from local_operator.server.utils.desktop_commands import OWNER_COMMANDS, native_action
 from local_operator.server.utils.desktop_feed import DesktopFeed
 from local_operator.server.utils.desktop_receipts import (
@@ -2851,6 +2856,14 @@ async def ack_delegated_cleanup_notice(request: Request):
     async with errors(request):
         await asyncio.to_thread(acknowledge_delegated_notice, root / SESSIONS_DIRNAME)
     return reply({"acknowledged": True})
+
+
+@router.post("/v1/desktop/browser/owner-status", response_model=CRUDResponse[BrowserOwnerStatus])
+async def browser_owner_status(request: Request, body: BrowserOwnerQuery):
+    """Read generation-fenced owner evidence, independently of the sidebar roster."""
+    return reply(
+        await asyncio.to_thread(read_browser_owner_status, store_root(request), body.session_ids)
+    )
 
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
