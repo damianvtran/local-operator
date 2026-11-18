@@ -441,7 +441,15 @@ def _source_side_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
     sent = [r for r in rows if r.get("state") in ("transferred", "restored", "pending_restore")]
     unknown = [r for r in rows if r.get("state") == "outcome_unknown"]
     left = [r for r in rows if r.get("state") == "left_behind"]
-    lines = [_t(_ws.receipt_sent(device=device, count=len(sent)))]
+    if sent:
+        lines = [_t(_ws.receipt_sent(device=device, count=len(sent)))]
+    elif unknown:
+        # Nothing confirmed received, some rows unanswered: the unknown headline alone.
+        lines = []
+    else:
+        # Review round 3, m1: with nothing sent the "received there" headline read
+        # "0 worktrees received there"; every row stayed, so say that (existing copy).
+        lines = [_t(_ws.receipt_not_transferred(count=len(left), device=source))]
     for row in sent[:_LIST_LIMIT]:
         path = str(row.get("path") or "")
         lines.append("  " + _t(_ws.receipt_sent_row(path=path, device=device)))

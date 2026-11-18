@@ -177,6 +177,129 @@ def test_g_an_offer_not_bound_to_the_approved_manifest_is_refused(tmp_path: Path
     }
 
 
+# S13/S16 (#4245 security round 3): the destination checks the offer against what
+# ITS operator confirmed, and a named destination never skips the binding.
+_CONFIRMED = "sha256:" + "1" * 64
+
+
+def _snapshot_rows(path: str) -> list[dict[str, Any]]:
+    return [
+        {"n": 0, "path": path, "repo": path, "tips": [], "head": "h", "index": "i", "worktree": "w"}
+    ]
+
+
+def _bound_offer(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    snapshots = [{k: r.get(k) for k in ("path", "head", "index", "worktree")} for r in rows]
+    binding = workset.transfer_binding(
+        _CONFIRMED, lease_epoch=EPOCH, to_device="d_me", snapshots=snapshots
+    )
+    return {"worktrees": rows, "binding": binding}
+
+
+def _recall(server: Any, offer: dict[str, Any], transport: Any) -> None:
+    workset_move.destination_transfer(
+        server,
+        transport,
+        SID,
+        lease_epoch=EPOCH,
+        offer=offer,
+        owner_device="d_src",
+        authority=workset_move.IMPORT_BY_RECALL,
+        approved_scope=_CONFIRMED,
+        self_device="d_me",
+        confirmed=workset_move.confirmed_rows(server.root, SID, _CONFIRMED),
+    )
+
+
+def test_s13_a_recall_offer_outside_the_confirmed_rows_is_refused(tmp_path: Path) -> None:
+    """The probe_g2 shape: the operator confirmed a recall listing only ``~/src/app``;
+    the owner offers ``~/src/other`` with a binding it computed itself (it knows the
+    digest and the lease). Refused before any plan, and nothing is written."""
+    server, home = _dest(tmp_path)
+    workset_move.record_confirmable(
+        server.root,
+        SID,
+        {
+            "scope_digest": _CONFIRMED,
+            "worktrees": [
+                {"path": "~/src/app", "repo": "~/src/app", "state": "planned"},
+                {"path": "~/src/kept", "repo": "~/src/kept", "state": "left_behind"},
+            ],
+        },
+    )
+    for path in ("~/src/other", "~/src/kept"):
+        transport = _PlanOnly()
+        with pytest.raises(workset_move.WorksetTransferRefused) as info:
+            _recall(server, _bound_offer(_snapshot_rows(path)), transport)
+        assert info.value.code == "working_set_transfer_failed", path
+        assert transport.frames == [], path
+    assert not (home / "src" / "other").exists()
+
+    # Control: the confirmed row itself is taken (planned against this device).
+    transport = _PlanOnly()
+    _recall(server, _bound_offer(_snapshot_rows("~/src/app")), transport)
+    assert [f.get("phase") for f in transport.frames] == ["workset_plan"]
+
+
+def test_s13_a_recall_with_no_preflight_record_carries_no_files(tmp_path: Path) -> None:
+    server, _home = _dest(tmp_path)
+    transport = _PlanOnly()
+
+    with pytest.raises(workset_move.WorksetTransferRefused):
+        _recall(server, _bound_offer(_snapshot_rows("~/src/app")), transport)
+    assert transport.frames == []
+
+
+def test_s13_the_recall_preflight_records_the_rows_the_operator_reads(tmp_path: Path) -> None:
+    from local_operator.network import mobility
+
+    owner = {
+        "scope_digest": _CONFIRMED,
+        "worktrees": [{"path": "~/src/app", "repo": "~/src/app", "state": "planned"}],
+    }
+
+    class _Relay:
+        root = tmp_path
+
+    class _Transport:
+        server = _Relay()
+
+        def ask(self, frame: dict[str, Any], **_: Any) -> dict[str, Any]:
+            return {"result": "workset", "working_set": owner}
+
+    transport: Any = _Transport()
+    mobility._ask_workset_preflight(transport, SID, "d_src", "owner")  # noqa: SLF001
+
+    assert workset_move.confirmed_rows(tmp_path, SID, _CONFIRMED) == {("~/src/app", "~/src/app")}
+    assert workset_move.confirmed_rows(tmp_path, SID, "sha256:" + "2" * 64) is None
+
+
+def test_s16_a_granted_owner_cannot_skip_the_binding(tmp_path: Path) -> None:
+    """probe_g2 G3: ``authority=grant`` with no scope digest and no binding used to
+    skip the binding check entirely; with this device named it now refuses."""
+    server, home = _dest(tmp_path)
+    for offer, scope in (
+        ({"worktrees": _snapshot_rows("~/src/third")}, ""),
+        ({"worktrees": _snapshot_rows("~/src/third")}, _CONFIRMED),
+    ):
+        transport = _PlanOnly()
+        with pytest.raises(workset_move.WorksetTransferRefused) as info:
+            workset_move.destination_transfer(
+                server,
+                transport,
+                SID,
+                lease_epoch=EPOCH,
+                offer=offer,
+                owner_device="d_src",
+                approved_scope=scope,
+                self_device="d_me",
+                **GRANT,
+            )
+        assert info.value.code == "working_set_transfer_failed"
+        assert transport.frames == []
+    assert not (home / "src").exists()
+
+
 def _arrived_pending(server: Any, authority: str) -> None:
     plan = wt.RestorePlan(
         session_id=SID,

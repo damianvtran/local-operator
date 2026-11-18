@@ -129,3 +129,51 @@ def test_the_destination_outcome_carries_rows_only() -> None:
     )
 
     assert out == {"transferred": True, "worktrees": [{"path": "~/p", "state": "transferred"}]}
+
+
+def test_the_destination_outcome_reports_its_own_declines_as_left_behind() -> None:
+    """Review round 3, B2: a planned row the destination did not take reads
+    ``left_behind`` with the journaled coarse code, never ``transferred``."""
+    from local_operator.network import workset_move
+
+    out = workset_move.destination_outcome(
+        {"worktrees": [{"path": "~/p", "state": "planned"}, {"path": "~/q", "state": "planned"}]},
+        {"~/q": "restore_path_refused"},
+    )
+
+    assert out == {
+        "transferred": True,
+        "worktrees": [
+            {"path": "~/p", "state": "transferred"},
+            {"path": "~/q", "state": "left_behind", "reason": "restore_path_refused"},
+        ],
+    }
+
+
+def test_a_source_receipt_with_nothing_sent_says_the_files_stayed() -> None:
+    """Review round 3, m1: every row came back ``left_behind`` — the headline said
+    "0 worktrees received there"; it is the stayed headline now."""
+    from local_operator.network import workset_move
+
+    answer = {
+        "transferred": True,
+        "worktrees": [
+            {
+                "path": "~/proj/.worktrees/feat",
+                "state": "left_behind",
+                "reason": "too_many_worktrees",
+            },
+            {
+                "path": "~/proj/.worktrees/other",
+                "state": "left_behind",
+                "reason": "destination_declined",
+            },
+        ],
+    }
+
+    block = workset_move.source_receipt(_planned(), answer)
+
+    text = "\n".join(workset_text.receipt_lines(block, source="A"))
+    assert "received there" not in text and "0 worktrees" not in text, text
+    assert "2 worktrees stay on A" in text, text
+    assert "~/proj/.worktrees/feat stayed on A" in text, text

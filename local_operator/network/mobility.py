@@ -2251,6 +2251,16 @@ def _destination_move(
                 # operator confirmed; on an invite the owner's arrival block's.
                 approved_scope=_approved_scope(working_set, arrival_workset, recall=not asked),
                 self_device=me,
+                # S13: on a recall, the rows this device's own preflight showed.
+                confirmed=(
+                    workset_move.confirmed_rows(
+                        server.root,
+                        session_id,
+                        _approved_scope(working_set, None, recall=True),
+                    )
+                    if not asked
+                    else None
+                ),
                 network_id=link_network_id,
             )
         except Exception as failure:  # noqa: BLE001 — every failure is the same rollback
@@ -2551,7 +2561,9 @@ def _destination_move(
             # only (path/state/reason) — ``workset_move.destination_outcome``.
             from local_operator.network import workset_move
 
-            ws_outcome = workset_move.destination_outcome(arrival_workset)
+            ws_outcome = workset_move.destination_outcome(
+                arrival_workset, workset_move.destination_left(server.root, target_id)
+            )
             if ws_outcome is not None:
                 done_frame["working_set"] = ws_outcome
         transport.ask(done_frame)
@@ -4959,7 +4971,20 @@ def _ask_workset_preflight(
     # blocks untouched, so ``apply_probe``'s own strip is not enough on its own.
     from local_operator.network.workset_probe import scrub_peer_block
 
-    return scrub_peer_block(copy.deepcopy(raw)) if isinstance(raw, dict) else {}
+    block = scrub_peer_block(copy.deepcopy(raw)) if isinstance(raw, dict) else {}
+    # S13 (#4245 security round 3): what the operator here is about to read is the
+    # only evidence of what a recall may write into this home; keep it by digest.
+    from local_operator.network import workset_move
+
+    try:
+        workset_move.record_confirmable(Path(transport.server.root), session_id, block)
+    except AttributeError:
+        # A transport without a relay behind it (a unit double) has no home to keep it.
+        pass
+    except (OSError, ValueError, workset_move.WorksetTransferRefused):
+        # Fail closed later, not here: without the record the recall carries no files.
+        logger.warning("mobility: could not record %s's preflight", session_id, exc_info=True)
+    return block
 
 
 def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str) -> dict[str, Any]:

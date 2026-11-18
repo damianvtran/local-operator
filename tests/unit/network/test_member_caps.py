@@ -442,6 +442,100 @@ def test_a_peers_rotation_does_not_undo_a_local_grant() -> None:
     )
 
 
+def test_a_rotation_carrying_a_workset_import_grant_applies() -> None:
+    """#4245 agent review round 3, B1: ``admin`` no longer holds ``workset_import``
+    (a receive-side grant), and the rotation's row check used the ADMIN set as the
+    vocabulary — so a rotator that had granted it saw its frame refused as
+    ``member_capability_unknown`` by every member and cut itself off. Rows are
+    checked against the whole vocabulary now."""
+    me, rotator = "d_" + "a" * 32, "d_" + "b" * 32
+    record = types.NetworkRecord(network_id="n_rot", name="rot", self_device_id=me, epoch=1)
+    for device, role in ((me, "admin"), (PEER, "drive"), (rotator, "admin")):
+        relay.admit(
+            record,
+            device_id=device,
+            public_key="k" + device[-4:],
+            name=device[:6],
+            role=role,
+            added_by=me,
+            persist=False,
+        )
+    theirs = types.NetworkRecord.from_json(record.to_json())
+    theirs.self_device_id = rotator
+    relay.set_member_capabilities(theirs, device_id=PEER, grant=["workset_import"])
+    frame = {
+        "epoch": 2,
+        "rotation_id": rotator,
+        "members": [row.to_json() for row in theirs.members],
+        "secret": "new-secret",
+    }
+    state = types.SecretState(network_id="n_rot", epoch=1, secret="old-secret")
+    outcome = relay.apply_epoch(record, state, frame, sender_device_id=rotator, persist=False)
+    assert outcome.applied, outcome
+    # A name outside the vocabulary is still refused.
+    frame["epoch"] = 3
+    frame["members"][1]["capabilities"] = ["no_such_capability"]
+    refused = relay.apply_epoch(record, state, frame, sender_device_id=rotator, persist=False)
+    assert not refused.applied
+
+
+def test_a_peer_table_never_brings_a_receiver_local_grant() -> None:
+    """#4245 security round 3, S15: ``workset_import`` is decided on the receiver.
+    An admin introducing a new device (a pull) or a rotation frame carrying a row
+    this device does not hold keeps every other capability, never that one."""
+    me, admin, newcomer = "d_" + "a" * 32, "d_" + "b" * 32, "d_" + "e" * 32
+    record = types.NetworkRecord(network_id="n_rot", name="rot", self_device_id=me, epoch=1)
+    for device, role in ((me, "drive"), (admin, "admin")):
+        relay.admit(
+            record,
+            device_id=device,
+            public_key="k" + device[-4:],
+            name=device[:6],
+            role=role,
+            added_by=me,
+            persist=False,
+        )
+    row = types.MemberRecord(
+        device_id=newcomer,
+        public_key="knew",
+        name="new",
+        role="drive",
+        capabilities=["list", "view", "workset_import"],
+        added_via="invite",
+    ).to_json()
+
+    changed, added = relay.adopt_members(record, [row], sender_device_id=admin, allow_new=True)
+
+    assert changed and added == [newcomer]
+    adopted = record.member(newcomer)
+    assert adopted is not None and sorted(adopted.capabilities) == ["list", "view"]
+
+    # The rotation path: a row this device does not hold, taken from the frame.
+    other = "d_" + "f" * 32
+    theirs = types.NetworkRecord.from_json(record.to_json())
+    theirs.members.append(
+        types.MemberRecord(
+            device_id=other,
+            public_key="kother",
+            name="oth",
+            role="drive",
+            capabilities=["list", "workset_import"],
+            added_via="invite",
+        )
+    )
+    frame = {
+        "epoch": 2,
+        "rotation_id": admin,
+        "members": [m.to_json() for m in theirs.members],
+        "secret": "new-secret",
+    }
+    state = types.SecretState(network_id="n_rot", epoch=1, secret="old-secret")
+    outcome = relay.apply_epoch(record, state, frame, sender_device_id=admin, persist=False)
+    assert outcome.applied, outcome
+    rotated_in = record.member(other)
+    assert rotated_in is not None and rotated_in.capabilities == ["list"]
+
+
 # ---------------------------------------------------------------------------
 # F7 — the deciding device records its own decision (the onboarding scopes)
 # ---------------------------------------------------------------------------

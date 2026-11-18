@@ -252,6 +252,59 @@ def arrived_dir(root: Path | str, session_id: str) -> Path:
     return _network(root) / "workset-in" / _sid(session_id)
 
 
+#: Confirmed recall scopes kept per session (each re-run of a preflight adds one).
+_MAX_CONFIRMABLE_SCOPES: Final = 8
+
+
+def _confirmable_path(root: Path | str, session_id: str) -> Path:
+    """Destination: ``<config>/network/workset-consent/<sid>.json``."""
+    return _network(root) / "workset-consent" / f"{_sid(session_id)}.json"
+
+
+def record_confirmable(root: Path | str, session_id: str, block: Mapping[str, Any]) -> None:
+    """Remember WHICH rows a recall preflight showed this device's operator (S13).
+
+    WHY (#4245 security round 3, S13): on a recall the authority to write into this
+    home is "the person whose home the files land in read the list and said yes" —
+    but the binding the offer carries is computed by the OWNER, which knows the
+    confirmed digest and the lease, so it can bind any rows it likes. The only
+    record of what the operator actually read is the preflight answer this device
+    received, so it is kept here, keyed by the scope digest the operator confirms,
+    and ``destination_transfer`` refuses any offered row outside it. Planned rows
+    only: nothing else is ever offered. Bounded to the newest few digests.
+    """
+    digest = str(block.get("scope_digest") or "")
+    if not digest:
+        return
+    rows = sorted(
+        {
+            (str(r.get("path") or ""), str(r.get("repo") or ""))
+            for r in block.get("worktrees") or []
+            if isinstance(r, Mapping) and r.get("state") == "planned"
+        }
+    )
+    path = _confirmable_path(root, session_id)
+    _private_dir(path.parent)
+    scopes = dict((_read_json(path) or {}).get("scopes") or {})
+    scopes.pop(digest, None)
+    scopes[digest] = [list(row) for row in rows]
+    while len(scopes) > _MAX_CONFIRMABLE_SCOPES:
+        scopes.pop(next(iter(scopes)))
+    _write_json(path, {"version": JOURNAL_VERSION, "scopes": scopes})
+
+
+def confirmed_rows(
+    root: Path | str, session_id: str, digest: str
+) -> frozenset[tuple[str, str]] | None:
+    """The ``(path, repo)`` rows the preflight for ``digest`` showed, or ``None``."""
+    scopes = (_read_json(_confirmable_path(root, session_id)) or {}).get("scopes")
+    if not digest or not isinstance(scopes, Mapping) or digest not in scopes:
+        return None
+    return frozenset(
+        (str(r[0]), str(r[1])) for r in scopes[digest] or [] if isinstance(r, list) and len(r) == 2
+    )
+
+
 def _private_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.is_symlink() or not path.is_dir():
@@ -1102,6 +1155,7 @@ def destination_transfer(
     approved_scope: str = "",
     self_device: str = "",
     network_id: str = "",
+    confirmed: frozenset[tuple[str, str]] | None = None,
 ) -> str:
     """W1–W5 on the destination. Returns the ``workset_digest`` for ``ready``.
 
@@ -1164,6 +1218,26 @@ def destination_transfer(
 
     authorised()
     all_rows = [r for r in offer.get("worktrees") or [] if isinstance(r, Mapping)]
+    offered_refusal = WorksetTransferRefused(
+        "working_set_transfer_failed",
+        "the files offered are not the ones confirmed for this move",
+    )
+    # S16 (#4245 security round 3): the production caller always names this device,
+    # and then the binding is MANDATORY — an owner that omits the scope or the
+    # binding no longer skips the check below (it was ``if approved_scope``).
+    if self_device and all_rows and not (approved_scope and offer.get("binding")):
+        raise offered_refusal
+    # S13: on a recall the binding is computed by the party it binds, so it cannot
+    # prove what this device's operator read. ``confirmed`` (``confirmed_rows``) is
+    # the preflight this device itself received for the confirmed digest; every
+    # offered row must be one of its planned rows, and with no such record a recall
+    # carries no files. On a ``grant`` the binding stays what it is: anti-replay and
+    # anti-misdirection for an honest owner the operator already chose to trust.
+    if authority == IMPORT_BY_RECALL and self_device and all_rows:
+        if confirmed is None or any(
+            (str(r.get("path") or ""), str(r.get("repo") or "")) not in confirmed for r in all_rows
+        ):
+            raise offered_refusal
     if approved_scope and self_device:
         expected = workset.transfer_binding(
             approved_scope,
@@ -1174,10 +1248,7 @@ def destination_transfer(
             ],
         )
         if str(offer.get("binding") or "") != expected:
-            raise WorksetTransferRefused(
-                "working_set_transfer_failed",
-                "the files offered are not the ones confirmed for this move",
-            )
+            raise offered_refusal
     home = home_of(server)
     into = _private_dir(incoming_staging(server.root, session_id))
     roots = workset.restore_roots(Path(server.root))
@@ -1387,9 +1458,28 @@ def destination_transfer(
             f"they need about {checkout_total + engine.CHECKOUT_RESERVE_BYTES}, so nothing "
             "was moved",
         )
+    by_n = by_n_all
+    # WHAT THE SOURCE'S RECEIPT MAY LEARN ABOUT EACH ROW THAT DID NOT TRAVEL (#4245
+    # agent review round 3, B2). Captured BEFORE the S8 override below, so a row this
+    # device declined carries the exact coarse code the owner was already sent
+    # (``decline``) and a row the owner's own plan left behind keeps the owner's own
+    # reason — never one of this device's precise, state-dependent reasons.
+    # ``destination_outcome`` reads it: without it every offered row reached the
+    # source's receipt as "Sent", including ones that never left the source.
+    source_left: dict[str, str] = {}
+    for item in left:
+        n = str(item.get("n"))
+        path = str(item.get("path") or by_n.get(n, {}).get("path") or "")
+        if path:
+            source_left[path] = (
+                decline.get(n) or str(item.get("reason") or "") or "destination_declined"
+            )
+    for n, coarse in decline.items():
+        path = str(by_n.get(n, {}).get("path") or "")
+        if path:
+            source_left.setdefault(path, coarse)
     # S8: the owner was told only a coarse reason; this device keeps the precise one.
     # Every declined row is recorded here even if the owner's reply omitted it.
-    by_n = by_n_all
     for item in left:
         n = str(item.get("n"))
         if n in local_reason:
@@ -1412,6 +1502,7 @@ def destination_transfer(
             "workset_digest": digest_all,
             "plans": plans,
             "left_behind": [*[dict(r) for r in offer.get("left_behind") or []], *left],
+            "source_left": source_left,
             "notes": rewrite_notes,
             "cwd": str(offer.get("cwd") or ""),
             "restored": {},
@@ -1724,7 +1815,24 @@ def arrival_receipt(
 OUTCOME_ROW_STATES = frozenset({"transferred", "restored", "pending_restore", "left_behind"})
 
 
-def destination_outcome(block: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def destination_left(root: Path | str, session_id: str) -> dict[str, str]:
+    """The rows of ``session_id``'s arrived working set that did NOT travel here.
+
+    ``{source path: coarse reason}`` exactly as ``destination_transfer`` journaled it
+    for the source (``source_left``): this device's declines as the coarse code the
+    owner was already told, the owner's own plan omissions with the owner's reason.
+    Empty when nothing arrived or the journal predates the field.
+    """
+    pending = _read_json(arrived_dir(root, session_id) / "pending.json")
+    raw = (pending or {}).get("source_left")
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(path): str(reason) for path, reason in raw.items() if path and reason}
+
+
+def destination_outcome(
+    block: Mapping[str, Any] | None, left: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
     """What THIS destination tells the source about the working set, on ``done``.
 
     WHY IT EXISTS: an offload's receipt is built on the SOURCE, which before this
@@ -1736,20 +1844,32 @@ def destination_outcome(block: Mapping[str, Any] | None) -> dict[str, Any] | Non
     artifacts arrived and verified against the digest the source committed on. Only
     ``path`` / ``state`` / ``reason`` per row travel — never a recipe, a destination
     path or any text the source would display as a command.
+
+    ``left`` (:func:`destination_left`) is what this device's own transfer did NOT
+    take: a planned row named there reads ``left_behind`` with that coarse code
+    instead of ``transferred`` (review round 3, B2: a declined row was reported to the
+    source as sent while its files never left the source).
     """
     if not isinstance(block, Mapping):
         return None
+    declined = left or {}
     rows: list[dict[str, Any]] = []
     for raw in block.get("worktrees") or []:
         if not isinstance(raw, Mapping):
             continue
+        path = str(raw.get("path") or "")
         state = str(raw.get("state") or "")
-        state = "transferred" if state in ("planned", "transferring") else state
+        reason = str(raw.get("reason") or "")
+        if state in ("planned", "transferring"):
+            if path in declined:
+                state, reason = "left_behind", declined[path]
+            else:
+                state = "transferred"
         if state not in OUTCOME_ROW_STATES:
             continue
-        row: dict[str, Any] = {"path": str(raw.get("path") or ""), "state": state}
-        if raw.get("reason"):
-            row["reason"] = str(raw["reason"])
+        row: dict[str, Any] = {"path": path, "state": state}
+        if reason:
+            row["reason"] = reason
         rows.append(row)
     return {"transferred": True, "worktrees": rows}
 

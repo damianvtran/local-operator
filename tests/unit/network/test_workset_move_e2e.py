@@ -470,6 +470,36 @@ def test_the_grant_makes_the_offload_carry_the_files(
     assert "unpushed work" in git(landed, "log", "-1", "--format=%s")
 
 
+def test_a_row_the_destination_declines_reads_as_stayed_on_the_source(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245 agent review round 3, B2: B declined a row (here by name, the N2
+    over-the-bound path) yet A's receipt said "Sent <path> to B" — the done-frame
+    outcome turned every planned row into ``transferred``. It now carries B's
+    decline as ``left_behind`` with the coarse code A was already told."""
+    from local_operator.network import workset_text
+
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    # In-process rig: only B's ``destination_transfer`` reads this bound.
+    monkeypatch.setattr(workset_move, "MAX_OFFER_ROWS", 0)
+
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    ws = moved["working_set"]
+    assert ws["side"] == "source" and ws["transferred"] is True, ws
+    (row,) = [r for r in ws["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "left_behind" and row["reason"] == "too_many_worktrees", ws
+    text = "\n".join(workset_text.receipt_lines(ws, source="A"))
+    assert "Sent" not in text and "received there" not in text, text
+    assert "stays on" in text and "~/proj/.worktrees/feat stayed on" in text, text
+    assert not (bhome / "proj" / ".worktrees" / "feat" / ".git").exists()
+
+
 def test_an_offload_whose_destination_answer_is_lost_says_check_there(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
 ) -> None:
@@ -482,7 +512,7 @@ def test_an_offload_whose_destination_answer_is_lost_says_check_there(
     _grant_import(server_b, server_a)
     target = server_b.identity.device_id
     sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
-    monkeypatch.setattr(workset_move, "destination_outcome", lambda block: None)
+    monkeypatch.setattr(workset_move, "destination_outcome", lambda block, left=None: None)
 
     moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
 

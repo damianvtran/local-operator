@@ -805,7 +805,7 @@ PROBE_BLOCK_FIELDS = ("destination_probe",)
 
 
 #: Fields only the restoring/probing device writes (see ``scrub_peer_block``).
-PEER_RESULT_ROW_FIELDS = ("recipes", "dest_path", "remapped", "branch_moved")
+PEER_RESULT_ROW_FIELDS = ("recipes", "dest_path", "remapped", "branch_moved", "mode")
 PEER_RESULT_BLOCK_FIELDS = ("notes", "import")
 
 

@@ -940,6 +940,8 @@ def test_a_peer_block_cannot_prefill_the_transfer_result_fields() -> None:
                 "dest_path": "/evil",
                 "remapped": ["~/p", "/evil"],
                 "branch_moved": ["main", "a", "b"],
+                # N3 (security round 3): a restore-written field, ESC byte and all.
+                "mode": "in_place\x1b[2J",
             }
         ],
     }
@@ -949,4 +951,4 @@ def test_a_peer_block_cannot_prefill_the_transfer_result_fields() -> None:
     assert out["transferred"] is False
     assert "notes" not in out and "import" not in out
     row = out["worktrees"][0]
-    assert not {"recipes", "dest_path", "remapped", "branch_moved"} & set(row), row
+    assert not {"recipes", "dest_path", "remapped", "branch_moved", "mode"} & set(row), row
