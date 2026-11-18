@@ -162,6 +162,20 @@ class RedialTracker:
             peer.last_cause = cause or peer.last_cause
             peer.next_retry_at = now + backoff_s(peer.attempts, rand=self._rand)
 
+    def kick_all(self) -> None:
+        """Make every tracked peer due NOW, without resetting its attempt count.
+
+        Called when this device's uplink comes back after a proven ``offline``
+        stretch (``relay._redial_loop``): backoff grown while there was no route
+        at all measured our network, not the peer, so waiting it out would only
+        delay the reconnect. Attempts are kept so the grace window's escalation
+        still reflects how long the peer has really been unreachable.
+        """
+        with self._lock:
+            now = self._clock()
+            for peer in self._peers.values():
+                peer.next_retry_at = min(peer.next_retry_at, now)
+
     def forget(self, device_id: str) -> None:
         with self._lock:
             self._peers.pop(device_id, None)

@@ -1,0 +1,10 @@
+{
+  "cli.network_uplink.no_connection": "اس ڈیوائس کا کوئی نیٹ ورک کنکشن نہیں ہے۔",
+  "cli.network_uplink.dual": "اس ڈیوائس کے پاس IPv4 اور IPv6 روٹس ہیں",
+  "cli.network_uplink.ipv4_only": "اس ڈیوائس کے پاس IPv4 روٹ ہے اور کوئی IPv6 روٹ نہیں",
+  "cli.network_uplink.ipv6_only": "اس ڈیوائس کے پاس IPv6 روٹ ہے اور کوئی IPv4 روٹ نہیں",
+  "cli.network_uplink.no_ipv4_for_peer": "اس ڈیوائس کے نیٹ ورک میں کوئی IPv4 روٹ نہیں؛ {peer} تک صرف IPv4 کے ذریعے پہنچا جا سکتا ہے",
+  "cli.network_uplink.no_ipv6_for_peer": "اس ڈیوائس کے نیٹ ورک میں کوئی IPv6 روٹ نہیں؛ {peer} تک صرف IPv6 کے ذریعے پہنچا جا سکتا ہے",
+  "cli.network_uplink.not_answering": "{peer} اس نیٹ ورک سے جواب نہیں دے رہا",
+  "cli.network_uplink.check_network": "اس ڈیوائس کا نیٹ ورک چیک کریں"
+}

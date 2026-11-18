@@ -647,6 +647,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # The reading for reachability rows READS the stage code only to classify it —
     # every sentence it returns is authored in one place — and the one verbatim arm
     # is the no-relay fallback's own prose row.
+    # The ``uplink`` rows (``network.uplink``) carry a detail this device composed
+    # from its own catalogue (``cli.network_uplink``) — localized prose, never a
+    # peer code — so both renderers print it as written.
+    ("local_operator/network/cli.py", "_cmd_doctor", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
+    ("local_operator/network/readiness.py", "uplink_lines", "detail"): (
+        1,
+        "uplink row detail is this device's own localized sentence, not a peer code",
+    ),
     ("local_operator/network/readiness.py", "reachability_reading", "detail"): (
         1,
         "classifier input; the returned sentences are authored here, never echoed",

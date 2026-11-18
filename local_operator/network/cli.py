@@ -10753,6 +10753,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _doctor_locally(args)
     checks = [dict(check) for check in payload.get("checks") or []]
+    # THIS DEVICE'S NETWORK FIRST (2026-11-18): see ``network.uplink``. A
+    # passive route reading taken here, on the relay's own host; prepended so
+    # the first remedy names this device when the fault is ours.
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     from local_operator.network import relay as relay_mod
 
     supervision = relay_mod.supervision_state()
@@ -10811,6 +10817,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         observed = check.get("observed")
         observed = observed if isinstance(observed, Mapping) else {}
         scoped = bool(observed.get("out_of_scope"))
+        if check.get("check") == "uplink":
+            # Composed, localized prose (``network.uplink``): printed as written,
+            # never through the dial-code gloss, with its remedies under it.
+            state = (
+                "n/a " if observed.get("not_applicable") else ("ok " if check.get("ok") else "FAIL")
+            )
+            lines.extend(readiness_mod.uplink_lines(check, state))
+            continue
         if scoped:
             # EXCLUDED FROM THE DECISION, VISIBLE IN THE READING (F9; design
             # round 1, D3): the same address reads the same way here as on
@@ -10840,6 +10854,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         lines.append(readiness_mod.NO_IDENTITY_LINE)
 
     def failure_words(check: Mapping[str, Any]) -> str:
+        if check.get("check") == "uplink":
+            return f"uplink: {check.get('detail', '') or 'failed'}"
         return (
             f"{check.get('check', '')}: "
             f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
@@ -10869,6 +10885,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "degraded": degraded,
         "payload_failures": payload_failures,
         "supervision_failures": supervision_failures,
+        "uplink": uplink_reading,
     }
     if not healthy:
         answer["code"] = "unhealthy"
@@ -10908,6 +10925,49 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                     "this device"
                 )
     return _emit(args, answer, lines)
+
+
+def _uplink_reading() -> dict[str, Any]:
+    """This device's passive uplink reading (``network.uplink``); never raises.
+
+    A module attribute lookup at call time so tests inject a scripted reading
+    with ``monkeypatch`` instead of depending on the runner's real routes.
+    """
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.read_uplink()
+    except Exception:  # noqa: BLE001 — fail-safe: an unreadable uplink claims nothing
+        return uplink_mod.unknown_reading()
+
+
+def _uplink_rows(reading: Mapping[str, Any], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``uplink`` rows, or none at all when building them fails (fail-safe)."""
+    from local_operator.network import uplink as uplink_mod
+
+    try:
+        return uplink_mod.uplink_checks(reading, checks, names=_member_names())
+    except Exception:  # noqa: BLE001 — never let the new row break the old report
+        return []
+
+
+def _member_names() -> dict[str, str]:
+    """Device id -> member name across this device's networks, for row labels.
+
+    ``doctor``'s rows carry only the id; an uplink sentence that names a peer
+    reads its name. An unreadable store labels by id, never fails the report.
+    """
+    from local_operator.network import store
+
+    names: dict[str, str] = {}
+    try:
+        for record in store.list_networks():
+            for member in record.members:
+                if member.name:
+                    names.setdefault(member.device_id, member.name)
+    except Exception:  # noqa: BLE001 — labels only
+        return {}
+    return names
 
 
 def _ready_lines(checks: list[dict[str, Any]]) -> list[str]:
@@ -10974,6 +11034,11 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
+    # THIS DEVICE'S NETWORK FIRST: the same rows, and the same reason, as
+    # ``doctor`` (see ``network.uplink``).
+    uplink_reading = _uplink_reading()
+    if checks:
+        checks = _uplink_rows(uplink_reading, checks) + checks
     # THE ROW'S OWN STATE, ON THE ROW (F8 residual): `ready --json` is the
     # drill's acceptance surface, and a reader there scans ROWS, not the
     # aggregate — a reported-but-non-gating row must not read failure-shaped
@@ -10997,7 +11062,7 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     # nothing admission-shaped or still-gating.
     failures = [_ready_failure(check) for check in readiness_mod.onboarding_failures(checks)]
     healthy = not failures and bool(payload.get("identity_present", True))
-    answer: dict[str, Any] = {**payload, "ok": healthy}
+    answer: dict[str, Any] = {**payload, "checks": checks, "ok": healthy, "uplink": uplink_reading}
     if not healthy:
         answer["code"] = "unhealthy"
         answer["message"] = "; ".join(failures) or "the device has no identity"

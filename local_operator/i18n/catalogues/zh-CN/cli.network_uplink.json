@@ -1,0 +1,10 @@
+{
+  "cli.network_uplink.no_connection": "此设备没有网络连接。",
+  "cli.network_uplink.dual": "此设备有 IPv4 和 IPv6 路由",
+  "cli.network_uplink.ipv4_only": "此设备有 IPv4 路由，没有 IPv6 路由",
+  "cli.network_uplink.ipv6_only": "此设备有 IPv6 路由，没有 IPv4 路由",
+  "cli.network_uplink.no_ipv4_for_peer": "此设备的网络没有 IPv4 路由；{peer} 只能通过 IPv4 访问",
+  "cli.network_uplink.no_ipv6_for_peer": "此设备的网络没有 IPv6 路由；{peer} 只能通过 IPv6 访问",
+  "cli.network_uplink.not_answering": "从此网络无法得到 {peer} 的响应",
+  "cli.network_uplink.check_network": "检查此设备的网络"
+}

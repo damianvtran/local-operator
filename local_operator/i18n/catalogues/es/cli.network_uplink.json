@@ -1,0 +1,10 @@
+{
+  "cli.network_uplink.no_connection": "Este dispositivo no tiene conexión de red.",
+  "cli.network_uplink.dual": "este dispositivo tiene rutas IPv4 e IPv6",
+  "cli.network_uplink.ipv4_only": "este dispositivo tiene una ruta IPv4 y ninguna ruta IPv6",
+  "cli.network_uplink.ipv6_only": "este dispositivo tiene una ruta IPv6 y ninguna ruta IPv4",
+  "cli.network_uplink.no_ipv4_for_peer": "La red de este dispositivo no tiene ruta IPv4; {peer} solo es accesible por IPv4",
+  "cli.network_uplink.no_ipv6_for_peer": "La red de este dispositivo no tiene ruta IPv6; {peer} solo es accesible por IPv6",
+  "cli.network_uplink.not_answering": "{peer} no responde desde esta red",
+  "cli.network_uplink.check_network": "revisa la red de este dispositivo"
+}

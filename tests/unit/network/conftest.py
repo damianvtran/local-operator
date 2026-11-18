@@ -324,3 +324,19 @@ def renew_nudge(_no_renew_nudge: Callable[..., None], monkeypatch: pytest.Monkey
     from local_operator.network.credentials import renew_push
 
     monkeypatch.setattr(renew_push, "on_link_up", _no_renew_nudge)
+
+
+@pytest.fixture(autouse=True)
+def _uplink_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The uplink reading is ``unknown`` unless a cell scripts one.
+
+    ``network.uplink`` reads the RUNNER's own route table, which a test cannot
+    fix: a sealed CI sandbox has no default route, a laptop on a v6-only network
+    has no IPv4 one. ``unknown`` is the fail-safe reading — no ``local_offline``,
+    no redial pause, no device ``uplink`` row — so every cell written before the
+    reading existed keeps its exact rows. Cells that exercise the reading patch
+    ``read_uplink`` (or pass a reader) themselves.
+    """
+    from local_operator.network import uplink
+
+    monkeypatch.setattr(uplink, "read_uplink", lambda *args, **kwargs: uplink.unknown_reading())
