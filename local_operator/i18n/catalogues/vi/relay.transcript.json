@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "Câu hỏi",
   "relay.transcript.label.messages": "Tin nhắn",
   "relay.transcript.composer.queued": "{count, plural, other {# đang chờ}}",
-  "relay.transcript.session.unread_refused": "Không thể đọc trạng thái chưa đọc — chưa có gì bị xóa. Hãy thử lại."
+  "relay.transcript.session.unread_refused": "Không thể đọc trạng thái chưa đọc — chưa có gì bị xóa. Hãy thử lại.",
+  "relay.transcript.message.show_more": "Xem thêm",
+  "relay.transcript.message.show_less": "Thu gọn",
+  "relay.transcript.message.show_more_label": "Xem thêm tin nhắn của bạn",
+  "relay.transcript.message.show_less_label": "Thu gọn tin nhắn của bạn"
 }

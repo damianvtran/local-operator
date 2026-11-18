@@ -131,3 +131,52 @@ def tunnel_turned_off() -> Msg:
 
 def versions_ok(*, lop: str, python: str, platform: str) -> Msg:
     return Msg("mobile.doctor.versions.ok", {"lop": lop, "python": python, "platform": platform})
+
+
+def watches_at_limit(
+    *,
+    watches: str,
+    limit: str,
+    instances: str,
+    instance_limit: str,
+    pid: str,
+) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.at_limit",
+        {
+            "watches": watches,
+            "limit": limit,
+            "instances": instances,
+            "instance_limit": instance_limit,
+            "pid": pid,
+        },
+    )
+
+
+def watches_near(*, watches: str, limit: str, instances: str, instance_limit: str, pid: str) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.near",
+        {
+            "watches": watches,
+            "limit": limit,
+            "instances": instances,
+            "instance_limit": instance_limit,
+            "pid": pid,
+        },
+    )
+
+
+def watches_ok(*, watches: str, limit: str, instances: str, instance_limit: str) -> Msg:
+    return Msg(
+        "mobile.doctor.watches.ok",
+        {
+            "watches": watches,
+            "limit": limit,
+            "instances": instances,
+            "instance_limit": instance_limit,
+        },
+    )
+
+
+def watches_unknown() -> Msg:
+    return Msg("mobile.doctor.watches.unknown", {})

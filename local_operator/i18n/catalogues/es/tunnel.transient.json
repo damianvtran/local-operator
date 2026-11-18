@@ -1,0 +1,5 @@
+{
+  "tunnel.transient.authorization_unavailable.label": "Radient pidió ir más despacio",
+  "tunnel.transient.authorization_unavailable.relay": "Radient pidió a este equipo que espaciara sus comprobaciones de autorización del relé, normalmente porque salieron muchas solicitudes de esta red a la vez. No hay ningún problema con el inicio de sesión ni con este equipo; volverá a autorizarse automáticamente en cuanto Radient vuelva a responder.",
+  "tunnel.transient.authorization_unavailable.terminal": "Radient respondió a la comprobación de autorización del conector con HTTP 429 o 408 (pide ir más despacio), así que ni el inicio de sesión, ni la facturación, ni este equipo tienen la culpa. El conector sigue atendiendo a los teléfonos hasta 10 minutos después de su última comprobación correcta, espera lo que Radient pida antes de volver a comprobar y vuelve a autorizarse automáticamente; no hace falta ningún comando local."
+}
