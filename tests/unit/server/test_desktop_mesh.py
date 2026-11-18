@@ -212,6 +212,9 @@ def test_the_two_mesh_keys_are_advertised(monkeypatch: pytest.MonkeyPatch) -> No
     features = cast(dict[str, Any], answer["features"])
     assert features["peers"] == 1
     assert features["session_transfer"] == 1
+    # The move's working-set gate (docs/design/move-working-set.md §11.1) is its OWN
+    # key: an old dialog keeps working and meets an honest refusal instead.
+    assert features["session_transfer_working_set"] == 1
 
 
 @pytest.mark.asyncio
@@ -2436,3 +2439,97 @@ def test_a_remote_row_carries_the_background_work_fact(tmp_path: Path, monkeypat
     stale = listed(projected("stale", subagents_running=3))
     assert stale["subagents_running"] is None
     assert stale["background_work"] is False
+
+
+# ---------------------------------------------------------------------------
+# The working-set gate (docs/design/move-working-set.md §11.1)
+# ---------------------------------------------------------------------------
+
+_WORKING_SET: dict[str, Any] = {
+    "version": 1,
+    "scope_digest": "sha256:" + "c" * 64,
+    "state": "preflight",
+    "carries_files": False,
+    "destination": {"device_id": PEER, "name": "peer"},
+    "totals": {"worktrees": 1, "unpushed_commits": 1, "dirty_files": 2, "bytes": 10},
+    "worktrees": [
+        {"path": "~/proj/.worktrees/feat", "repo": "~/proj", "head": "0", "state": "planned"}
+    ],
+    "excluded": [],
+    "left_behind": [],
+}
+
+
+@pytest.mark.asyncio
+async def test_the_preflight_route_returns_the_owners_manifest_and_moves_nothing(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _root = mesh_api
+    seen: list[dict[str, Any]] = []
+
+    def fake_move(session_id: str, **kwargs: Any) -> dict[str, Any]:
+        seen.append({"session_id": session_id, **kwargs})
+        return {
+            "ok": True,
+            "dry_run": True,
+            "session_id": session_id,
+            "confirmation_required": True,
+            "working_set": _WORKING_SET,
+        }
+
+    monkeypatch.setattr("local_operator.network.mobility.request_move", fake_move)
+    response = await client.post(
+        f"/v1/desktop/sessions/{MINE}/transfer/preflight", json={"to": PEER}
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result == {
+        "session_id": MINE,
+        "confirmation_required": True,
+        "working_set": _WORKING_SET,
+    }
+    assert seen[0]["dry_run"] is True and seen[0]["to"] == PEER
+
+
+@pytest.mark.asyncio
+async def test_the_transfer_forwards_consent_and_a_gate_refusal_carries_the_manifest(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _root = mesh_api
+    seen: list[dict[str, Any]] = []
+
+    def fake_move(session_id: str, **kwargs: Any) -> dict[str, Any]:
+        seen.append(kwargs)
+        return {
+            "ok": False,
+            "code": "working_set_changed",
+            "message": "the working files changed since they were confirmed",
+            "session_id": session_id,
+            "phase_reached": None,
+            "changed": False,
+            "working_set": _WORKING_SET,
+        }
+
+    monkeypatch.setattr("local_operator.network.mobility.request_move", fake_move)
+    digest = "sha256:" + "d" * 64
+    response = await client.post(
+        f"/v1/desktop/sessions/{MINE}/transfer",
+        json={"to": PEER, "confirm_working_set": digest},
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "working_set_changed"
+    assert detail["working_set"] == _WORKING_SET
+    assert seen[0]["confirm_working_set"] == digest
+    assert seen[0]["without_working_set"] is False
+
+
+@pytest.mark.asyncio
+async def test_v1_transfer_has_no_history_secret_opt_in(mesh_api) -> None:
+    """Security ruling 2026-11-18: the field does not exist; sending it is a 422."""
+    client, _root = mesh_api
+    response = await client.post(
+        f"/v1/desktop/sessions/{MINE}/transfer",
+        json={"to": PEER, "include_history_secrets": True},
+    )
+    assert response.status_code == 422, response.text
