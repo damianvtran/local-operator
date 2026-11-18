@@ -9,49 +9,60 @@ all four routes (``GET /messaging/requests``, the single and batch decide,
 but nothing called it. This module is the harness half the desktop routes in
 ``server/routes/desktop_team_bridge.py`` call; it owns no transport of its own.
 
-THE TRUST BOUNDARY — DECIDE AUTHORITY NEEDS A PERSON PRESENT, FOR CALLERS OF
-THE DAEMON API. "Answered by the human" is CLIENT-ASSERTED (TEAM-BRIDGE.md
-§10.1): the server checks the receipt's shape and binding, never that a person
-tapped. So the proof has to live HERE, and it is an OPERATOR PRESENCE
-SIGNATURE, not the desktop bearer. What it does and does not establish (PR
-#4099 security round 2, S-6/S-9 — stated, not implied):
+THE TRUST BOUNDARY — THE DESKTOP BEARER PLUS AN EXPLICIT SELECTION, NO OS
+PROMPT. "Answered by the human" is CLIENT-ASSERTED (TEAM-BRIDGE.md §10.1): the
+server checks the receipt's shape and binding, never that a person tapped. An
+ordinary approval is authorized here by the desktop bearer (``require_desktop``)
+and by the human naming every item and its word; it is audited by the durable
+intent ledger and the hub's decision ledger. It deliberately raises NO Touch ID
+or other OS prompt, and needs no biometric hardware.
 
-- WHAT IT BINDS: callers of the daemon's HTTP API. It is NOT a same-uid
-  boundary. The hub's OAuth tokens sit in ``~/.local-operator/auth.db`` (0600,
-  no keychain), which any same-uid process can read and use to POST the hub's
-  decide directly, with no gesture at all (S-9, pre-existing and equally true
-  of the card path). Closing that needs the HUB to verify an operator signature
-  on every human decision — a protocol follow-up, not a daemon change.
-- WHAT THE GESTURE PROVES: that a person was present and tapped, not that they
-  read and consented to THIS selection. The OS sheet cannot carry this
-  project's copy (``operator/keychain.py``), so it looks the same for any
-  operator signature. What makes the prompt attributable is the daemon side:
-  one prompt at a time, a cool-down after every dismissal, and the selection
-  published on the desktop feed (``team_bridge_authorize``) so the desktop can
-  show what a prompt is for — and flag one it did not start.
+WHY THE PRESENCE SIGNATURE WAS REMOVED (decision a-856f, 2026-11-15). Until
+then every batch carried an operator presence signature over the exact
+selection, minted and signed through ``…/requests/decide/authorize`` (an OS
+Touch ID sheet per decision). The operator ruled that out: "I don't want to have
+to approve every action with Touch ID that's a terrible user experience" — and a
+gate that needs biometrics also blocks every Windows, Linux or keyless Mac host.
+What the gate bought did not justify that cost:
+
+- it never covered same-user processes (PR #4099 security round 2, S-9): the
+  hub's OAuth tokens sit in ``~/.local-operator/auth.db`` (0600, no keychain),
+  and any same-uid process can POST the hub's decide directly with no gesture.
+  It bound callers of the daemon API only.
+- the gesture proved presence, never informed consent: the OS sheet cannot
+  carry this project's copy and showed no selection.
+
+THE TRADE-OFF, STATED (for security review). The bearer is NOT a same-uid
+boundary: ``agent_shell.DAEMON_BEARER_ENVS`` keeps it out of an agent shell's
+ENVIRONMENT, but the desktop persists it in a 0600 file any ordinary same-uid
+shell can read (security round 1, S-1 — measured). A same-uid process holding
+it can therefore decide a request the operator has a local ask for — exactly
+what it could already do with ``auth.db``. The residual is unchanged in kind.
+
+THE LIKELY HOLDER IS AN AGENT SHELL, not malware (PR #4208 security round 1,
+S-3). A third-party Team Bridge sender wants its own request approved and is
+motivated to plant instructions in the screened body; an agent acting on that
+message from an UNCONFINED shell can read the desktop token and call
+``…/requests/decide``, as it could already read ``auth.db`` and POST the hub's
+decide. The two files need the SAME confinement: a confined shell is denied
+both (``tools/confinement.py`` lists the desktop-token paths and
+``<config>/auth.db*``), an unconfined one reads both. Hardening one without the
+other closes nothing; a future change to either deny list must move both.
+
+Closing it for real needs the HUB to verify an operator signature on every
+human decision (a protocol follow-up). The desktop CARD answer for a Team
+Bridge request follows the same no-prompt rule (S-1 of the same review:
+``desktop_team_bridge.decide_request_from_card``). Presence signing stays for
+``site:v1:`` browser approvals and for authority-RAISING operator actions
+(``operator.sign`` — e.g. loosening a gate), which are not ordinary approvals.
 
 The mechanism:
 
-- the bearer is NOT a same-uid boundary. ``agent_shell.DAEMON_BEARER_ENVS``
-  only keeps it out of an agent shell's ENVIRONMENT; the desktop persists it
-  in a 0600 file any ordinary same-uid shell can read (security review
-  round 1, S-1 — measured). ``agent_shell`` says it itself: only a
-  presence-gated key proves a person.
-- every batch therefore carries one operator signature over a digest of the
-  EXACT selection (account, tenant, sorted ``(message_id, word)`` pairs) and a
-  daemon-minted, single-use, 30 s challenge (:func:`verify_selection_proof`),
-  verified BEFORE any hub call. The signing key is the same operator key the
-  runtime's card path verifies (``operator.verify.signed_message`` /
-  ``signature_verdict``); on an ``operator-presence`` host every signature
-  costs an OS gesture (Touch ID) — presence, not informed consent. A host whose anchor
-  is file-only or absent is refused (``operator_presence_required``): there a
-  signature proves nothing against a same-uid process, and the per-item ask
-  card stays the way to decide.
 - this module is imported ONLY by the desktop route family (behind
   ``require_desktop``). No model tool, agent loop or connector imports it; a
-  test pins that. That keeps the door narrow; it is the signature, not the
-  import graph, that puts a person in front of a daemon-API decision (and only
-  of one: see S-9 above).
+  test pins that, so no model or agent path can reach the batch decide
+  in-process; an out-of-process caller still needs the bearer (S-9 above is
+  the named residual).
 - the selection is EXPLICIT: every item names one ``message_id`` and one word
   (approve | deny). Nothing here expands "all", defaults a word, or derives a
   selection from server state — §10.2's select-and-approve is per item.
@@ -73,8 +84,8 @@ not listed, and once that answer reaches the hub it is no longer pending there.
 ONE WORD PER ASK (PR #4099 design (c); replaces round 1's implicit carriage).
 The word for an ask is fixed by the FIRST human act that records an intent,
 and an intent is sent only by an act on the surface that recorded it: a card
-grant for that ask, or a batch signature whose digest names that
-``(message_id, word)`` pair. Any later human act naming the other word is
+grant for that ask, or a batch decide that names that ``(message_id, word)``
+pair. Any later human act naming the other word is
 refused BEFORE it writes anything — ``/authorize`` and ``/decide`` answer 409
 ``earlier_decision_unconfirmed`` (:func:`conflicting_selection`) and the card
 door refuses ``decided_from_list`` (``Session.bridge_decide``). An unconfirmed
@@ -103,7 +114,7 @@ a card row (whose retry is the card's own explicit Retry). An intent left
 ``pending``/``signin`` by a lost response or a kill resolves one of two ways:
 if the hub committed it, the decision ledger settles it on the next list read
 (:func:`reconcile_with_ledger`); if not, the row stays decidable with its
-frozen word and the human selects it again (an explicit, signed re-send; the
+frozen word and the human selects it again (an explicit re-send; the
 hub answers ``request_already_decided`` for a committed one). Nothing — no
 read, poll, boundary or unrelated batch — re-sends a decision on its own.
 """
@@ -114,9 +125,6 @@ import hashlib
 import json
 import logging
 import re
-import secrets
-import threading
-import time
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -251,8 +259,10 @@ def request_rows(
     BODY is never read — it is untrusted third-party text, and the screened
     excerpt a human decides on already rides the ask card — and no screening
     rationale exists on this path to leak. Items for another tenant, items with
-    NO tenant (the projection is a fence, so absence fails closed — review S-4)
-    and items whose local ask is already answered are dropped.
+    NO tenant (the projection is a fence, so absence fails closed — review S-4),
+    items with NO local ask (screening rejected the request, or has not
+    screened it yet — gap 2) and items whose local ask is already answered are
+    dropped.
 
     ``excerpt`` (review S-2): on a DECIDABLE row only, the ask card's own
     question text — ``<sender>: <screened excerpt>`` as issued — so a batch is
@@ -283,9 +293,16 @@ def request_rows(
             continue
         request = _mapping(message.get("request"))
         ask = asks.get(message_id)
-        if ask is not None and ask.status in _ANSWERED_STATUSES:
+        # NO LOCAL ASK, NO ROW (Team Bridge inbox scope, gap 2). A request
+        # appears in Approvals only once this machine raised an ask for it,
+        # which happens only after screening admitted it. A hub request
+        # screening REJECTED (that lives in Holds, if anywhere) or has not
+        # screened YET has no ask; listing it showed the operator a row they
+        # could neither decide nor act on, and an unscreened body has no
+        # screened excerpt to show. It appears on a later read once screened.
+        if ask is None or ask.status in _ANSWERED_STATUSES:
             continue
-        decidable = ask is not None and ask.status in _DECIDABLE_STATUSES
+        decidable = ask.status in _DECIDABLE_STATUSES
         rows.append(
             {
                 "message_id": message_id,
@@ -293,7 +310,7 @@ def request_rows(
                 or _str_or_none(thread.get("id")),
                 "created_at": _str_or_none(message.get("created_at")),
                 "title": None,  # the hub serves no title; the body is never read here
-                "excerpt": (ask.text or None) if decidable and ask is not None else None,
+                "excerpt": (ask.text or None) if decidable else None,
                 "request": {
                     "state": _str_or_none(request.get("state")),
                     "expires_at": _str_or_none(request.get("expires_at")),
@@ -304,11 +321,7 @@ def request_rows(
                     "name": _clean_name(sender.get("name")),
                     "email": _str_or_none(sender.get("email")),
                 },
-                "ask": (
-                    {"session_id": ask.session_id, "ask_id": ask.ask_id, "status": ask.status}
-                    if ask is not None
-                    else None
-                ),
+                "ask": {"session_id": ask.session_id, "ask_id": ask.ask_id, "status": ask.status},
                 "decidable": decidable,
                 "unsent_decision": (unsent or {}).get(message_id) if decidable else None,
             }
@@ -408,163 +421,29 @@ class Selection:
     word: str  # "approve" | "deny"
 
 
-# -- the operator presence proof over the exact selection (review S-1) --------
+# -- no presence proof: ordinary approvals never prompt (decision a-856f) -----
 #
-# WHY THESE PRIMITIVES AND NO NEW CRYPTO. The runtime's card path already has
-# the whole mechanism: a daemon-minted single-use challenge, the operator key
-# signing ``operator.verify.signed_message(action, session_id, request_id,
-# challenge)`` (``operator.sign.sign_challenge`` — the call that raises the OS
-# presence prompt), and ``operator.verify.signature_verdict`` against the
-# root-owned anchor. The batch reuses all three verbatim. What it binds:
-#
-# * ``action`` = ``decide`` (the bridge decide class, ``harness/approval``);
-# * ``session_id`` = :data:`SIGNING_SESSION`, a fixed label no real session id
-#   can equal, because a batch spans sessions and is not one session's act;
-# * ``request_id`` = ``batch:<selection digest>`` — the digest covers the
-#   account, the tenant and the SORTED ``(message_id, word)`` pairs, so a
-#   signature over one selection cannot carry another;
-# * ``challenge`` = minted HERE, kept server-side with the digest it was minted
-#   for, popped on first use (pop-then-verify, the runtime's replay rule).
-#
-# A runtime's challenge and this one live in different stores, so a signature
-# minted for either can never be presented to the other.
-
-#: The fixed signing "session" of a batch decide (see the block above).
-SIGNING_SESSION = "team-bridge:approvals-batch"
-
-#: The signed action class: a bridge decide (both words are authority-bearing,
-#: ``harness.approval.frame_authority``).
-SIGNING_ACTION = "decide"
-
-#: The challenge lifetime. The runtime's own value and rationale
-#: (``session/runtime/server._CHALLENGE_TTL_S``, design rev. 2 §2.3: 30 s, one
-#: human gesture); expiry is checked at USE, so a slow prompt is refused and the
-#: surface asks again rather than a stale challenge being honoured.
-CHALLENGE_TTL_S = 30.0
-
-#: Unspent challenges held at once, the runtime's ``_MAX_LIVE_CHALLENGES``.
-#: Every mint here is followed by a Touch ID prompt, so what this bounds is
-#: prompts that are pending or were answered but not yet spent (review R2-3).
-#: A failed or dismissed prompt pops its challenge (S-8) and the prompt gate
-#: below allows one prompt at a time, so in practice the store holds at most a
-#: handful; expired entries are pruned first, so a real caller is never refused.
-MAX_LIVE_CHALLENGES = 64
+# This block used to hold the batch's operator presence primitives: a minted
+# single-use challenge store, a one-prompt-at-a-time gate with a dismissal
+# cool-down, ``sign_selection`` (which raised the OS Touch ID sheet) and
+# ``verify_selection_proof``. They existed only to put a presence signature on
+# every batch, and decision a-856f retired that for ordinary approvals (see the
+# module docstring for why, and for the same-uid trade-off). With nothing left
+# to sign or verify they were removed rather than left as dead authority code a
+# reader could mistake for a live gate. Presence signing for authority-RAISING
+# actions lives in ``operator.sign`` and is untouched.
 
 #: The selection-digest schema; bump if the canonical form ever changes.
 _DIGEST_VERSION = 1
 
 
-class PresenceRefused(Exception):
-    """A batch refused for want of a valid operator presence proof."""
-
-    def __init__(self, code: str, details: dict[str, Any] | None = None) -> None:
-        super().__init__(code)
-        self.code = code
-        self.details = details
-
-
-@dataclass(frozen=True)
-class _Minted:
-    digest: str
-    account_id: str
-    tenant_id: str
-    expires_at: float  # time.monotonic()
-
-
-_challenges: dict[str, _Minted] = {}
-_challenges_lock = threading.Lock()
-
-
-# -- the prompt gate: one prompt at a time, a cool-down after a dismissal ------
-#
-# WHY (PR #4099 security round 2, S-6). ``/authorize`` is reachable by any
-# bearer holder, and the bearer is readable by a same-uid shell. Without a gate
-# a steered agent could raise the contentless OS sheet repeatedly (64 back to
-# back measured) or concurrently (18 open at once measured), or time one to land
-# beside the desktop's own and harvest a tap. The gate makes a batch prompt no
-# easier to raise than a card prompt:
-#
-# * SINGLE-FLIGHT: one ``/authorize`` prompt per daemon process. A concurrent
-#   call is refused ``operator_prompt_in_flight`` before it mints or signs.
-# * COOL-DOWN: after a dismissed sheet (``operator_signature_unavailable``) the
-#   next prompt waits 10 s, doubling per consecutive dismissal to a 60 s cap;
-#   a successful signature resets it. Invariant: a dismissal is never followed
-#   by another prompt inside the window.
-#
-# THE NUMBERS ARE NOT SIZED AGAINST PROMPT DURATIONS (none were measured, and
-# none are needed): the window does not bound how long a legitimate prompt may
-# take — it only spaces out the NEXT prompt after a person said no, so a
-# dismissal cannot be answered by an immediate re-prompt. 10 s is longer than a
-# re-tap reflex; 60 s caps the wait a person who dismissed by mistake can face.
-
-#: The first cool-down after a dismissal, and its cap (seconds).
-PROMPT_COOLDOWN_FIRST_S = 10.0
-PROMPT_COOLDOWN_MAX_S = 60.0
-
-
-def _gate_clock() -> float:
-    """The gate's monotonic clock; one seam so a test can move time."""
-
-    return time.monotonic()
-
-
-class _PromptGate:
-    """Single-flight + dismissal cool-down for the batch Touch ID prompt."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._in_flight = False
-        self._next_window = PROMPT_COOLDOWN_FIRST_S
-        self._blocked_until = 0.0
-
-    def acquire(self) -> None:
-        """Admit ONE prompt or raise :class:`PresenceRefused` (nothing minted)."""
-
-        with self._lock:
-            if self._in_flight:
-                raise PresenceRefused("operator_prompt_in_flight")
-            remaining = self._blocked_until - _gate_clock()
-            if remaining > 0:
-                raise PresenceRefused(
-                    "operator_prompt_cooldown",
-                    {"retry_after_s": max(1, int(remaining + 0.999))},
-                )
-            self._in_flight = True
-
-    def release(self, outcome: str) -> None:
-        """End the prompt: ``signed`` resets, ``dismissed`` starts a cool-down.
-
-        Any other outcome (an unexpected signer error) frees the slot without
-        moving the cool-down: it says nothing about what the person chose.
-        """
-
-        with self._lock:
-            self._in_flight = False
-            if outcome == "signed":
-                self._next_window = PROMPT_COOLDOWN_FIRST_S
-                self._blocked_until = 0.0
-            elif outcome == "dismissed":
-                self._blocked_until = _gate_clock() + self._next_window
-                self._next_window = min(self._next_window * 2, PROMPT_COOLDOWN_MAX_S)
-
-
-PROMPT_GATE = _PromptGate()
-
-
-def reset_for_tests() -> None:
-    """Forget every challenge and the gate's state (process-global stores)."""
-
-    global PROMPT_GATE
-    with _challenges_lock:
-        _challenges.clear()
-    PROMPT_GATE = _PromptGate()
-
-
 def selection_digest(*, account_id: str, tenant_id: str, selection: Sequence[Selection]) -> str:
-    """SHA-256 over the canonical selection: what one signature authorises.
+    """SHA-256 over the canonical selection: a stable name for one exact batch.
 
-    Canonical JSON (sorted keys, no whitespace) with the pairs SORTED by message
-    id, so the submitted order does not change the digest but any added,
+    No longer a signing input. ``…/decide/authorize`` (the compatibility shim)
+    still returns it as ``selection_digest`` so the shipped desktop keeps its
+    response shape. Canonical JSON (sorted keys, no whitespace) with the pairs
+    SORTED by message id: the submitted order does not change it, but any added,
     dropped or flipped item does.
     """
 
@@ -578,141 +457,12 @@ def selection_digest(*, account_id: str, tenant_id: str, selection: Sequence[Sel
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def signing_request_id(digest: str) -> str:
-    """The ``request_id`` the signed message binds for one selection."""
-
-    return f"batch:{digest}"
-
-
-def presence_anchor() -> Any:
-    """This host's operator anchor, ONLY when it is presence-gated.
-
-    ``operator-presence`` is the one level at which a signature costs a human
-    gesture; ``operator-file-only`` lets any same-uid process sign, and with no
-    usable anchor there is nothing to verify against — both refuse with
-    ``operator_presence_required`` before any challenge is minted or prompt
-    raised (the per-item card path stays available there).
-    """
-
-    from local_operator import operator as operator_authority
-
-    level, loaded = operator_authority.authority_level_load()
-    if level != operator_authority.LEVEL_OPERATOR_PRESENCE or loaded.anchor is None:
-        raise PresenceRefused("operator_presence_required")
-    return loaded.anchor
-
-
-def mint_challenge(*, account_id: str, tenant_id: str, digest: str) -> str:
-    """Mint one single-use challenge bound to this selection digest."""
-
-    now = time.monotonic()
-    with _challenges_lock:
-        for key in [k for k, v in _challenges.items() if v.expires_at < now]:
-            _challenges.pop(key, None)
-        if len(_challenges) >= MAX_LIVE_CHALLENGES:
-            raise PresenceRefused("operator_challenge_limit")
-        challenge = secrets.token_hex(32)
-        _challenges[challenge] = _Minted(
-            digest=digest,
-            account_id=account_id,
-            tenant_id=tenant_id,
-            expires_at=now + CHALLENGE_TTL_S,
-        )
-    return challenge
-
-
-def sign_selection(config_root: Path, *, challenge: str, digest: str) -> dict[str, str]:
-    """Sign one minted challenge with the operator key. THIS CALL PROMPTS.
-
-    The same ``sign_challenge`` the CLI's ``lop operator sign`` and the card
-    path's ``attach_client`` call: on a presence host the OS shows its Touch ID
-    sheet and blocks until the person answers, so callers run it off the event
-    loop. A dismissed sheet or a missing key is ``operator_signature_unavailable``.
-    """
-
-    from local_operator.operator.keychain import KeyBackendError
-    from local_operator.operator.sign import sign_challenge
-
-    try:
-        signature = sign_challenge(
-            challenge=challenge,
-            purpose=SIGNING_ACTION,
-            config_root=config_root,
-            session_id=SIGNING_SESSION,
-            request_id=signing_request_id(digest),
-        )
-    except KeyBackendError:
-        # S-8: a failed prompt must not keep its challenge for 30 s, or a bearer
-        # holder could fill the store with dismissals and lock the desktop out.
-        discard_challenge(challenge)
-        raise PresenceRefused("operator_signature_unavailable") from None
-    except BaseException:
-        discard_challenge(challenge)
-        raise
-    return signature.as_json()
-
-
-def discard_challenge(challenge: str) -> None:
-    """Drop an unspent challenge (its prompt failed; it can never be presented)."""
-
-    with _challenges_lock:
-        _challenges.pop(challenge, None)
-
-
-def verify_selection_proof(
-    proof: Mapping[str, Any] | None,
-    *,
-    account_id: str,
-    tenant_id: str,
-    selection: Sequence[Selection],
-) -> None:
-    """Admit the batch only on a valid presence signature over THIS selection.
-
-    Raises :class:`PresenceRefused`: ``operator_presence_required`` (host
-    level), ``operator_signature_required`` (no proof), ``operator_signature_invalid``
-    (unknown/spent challenge, a different selection, account or tenant, or a
-    signature the anchor does not verify) or ``operator_signature_expired``.
-    The challenge is POPPED before verification, so every proof has exactly one
-    use whether it verifies or not (the runtime's replay rule).
-    """
-
-    from local_operator.operator.verify import signature_verdict
-
-    anchor = presence_anchor()
-    if not isinstance(proof, Mapping) or not proof:
-        raise PresenceRefused("operator_signature_required")
-    challenge = str(proof.get("challenge") or "")
-    with _challenges_lock:
-        minted = _challenges.pop(challenge, None)
-    if minted is None:
-        raise PresenceRefused("operator_signature_invalid")
-    if time.monotonic() > minted.expires_at:
-        raise PresenceRefused("operator_signature_expired")
-    digest = selection_digest(account_id=account_id, tenant_id=tenant_id, selection=selection)
-    if (minted.digest, minted.account_id, minted.tenant_id) != (digest, account_id, tenant_id):
-        raise PresenceRefused("operator_signature_invalid")
-    verdict = signature_verdict(
-        action=SIGNING_ACTION,
-        session_id=SIGNING_SESSION,
-        request_id=signing_request_id(digest),
-        challenge=challenge,
-        signature_hex=proof.get("sig"),
-        operator_spki=anchor.spki,
-        operator_key_id=str(proof.get("key_id") or ""),
-        operator_cert=None,
-        device_spki=None,
-        now=int(time.time()),
-    )
-    if verdict is not True:
-        raise PresenceRefused("operator_signature_invalid")
-
-
 # -- the batch, recorded before it is sent (review R1-1) ----------------------
 
 #: The ``consumption_row_id`` prefix that marks a decide-intent row as a BATCH
 #: row (defined in the shared ledger so the card door can see it too). Card
 #: rows carry the ask's response-row id instead and keep their own
-#: explicit-Retry rule; a batch row is sent only by a signed batch that names it.
+#: explicit-Retry rule; a batch row is sent only by a later batch that names it.
 BATCH_INTENT_PREFIX = BATCH_CONSUMPTION_PREFIX
 
 
@@ -752,7 +502,7 @@ def _batch_leftovers(intents: Any, owner_key: str) -> list[Any]:
 
 
 def unsent_decisions(config_dir: Path, owner: Any, asks: Mapping[str, BridgeAsk]) -> dict[str, str]:
-    """``{message_id: word}`` for asks whose signed batch word is unconfirmed.
+    """``{message_id: word}`` for asks whose batch word the hub has not confirmed.
 
     The list's ``unsent_decision`` (design (c), exit 9): the human must see that
     a row already carries a word, and that only that word can be selected.
@@ -778,8 +528,8 @@ def conflicting_selection(
 ) -> list[dict[str, str]]:
     """Selected items naming the OTHER word than an unconfirmed batch intent.
 
-    One word per ask (design (c)): ``/authorize`` refuses these BEFORE it mints
-    or prompts, and ``/decide`` refuses the WHOLE batch on them before any
+    One word per ask (design (c)): the ``/authorize`` shim refuses these too
+    (the shipped desktop calls it first), and ``/decide`` refuses the WHOLE batch on them before any
     intent write or hub call. Each entry names the item and the word that is
     still unconfirmed for it: ``{message_id, unsent_decision}``.
     """
@@ -791,43 +541,6 @@ def conflicting_selection(
         for item in selection
         if item.message_id in unsent and unsent[item.message_id] != item.word
     ]
-
-
-#: Bound on ``client_ref`` (hex), echoed on the published prompt frame.
-CLIENT_REF_MAX = 32
-
-
-def prompt_items(config_dir: Path, selection: Sequence[Selection]) -> list[dict[str, Any]]:
-    """What a batch prompt is FOR, resolved by the daemon from the LOCAL asks.
-
-    The payload of the ``team_bridge_authorize`` feed frame (S-6): each item is
-    ``{message_id, word, sender, excerpt}``. ``sender`` and ``excerpt`` come
-    from the ask card's own line (``<sender>: <screened excerpt>``, composed at
-    issuance by ``asks_bridge.bridge_request_question``), split at its first
-    ``": "`` — the caller supplies neither, so a caller cannot make a prompt
-    look like it is for something else. An item with no local ask carries
-    ``None`` for both. Never the hub body, a screening rationale or a body hash.
-    The line is bounded at issuance, and a selection is at most 50 items.
-    """
-
-    asks = bridge_asks_by_message(config_dir)
-    items: list[dict[str, Any]] = []
-    for item in selection:
-        ask = asks.get(item.message_id)
-        sender: str | None = None
-        excerpt: str | None = None
-        if ask is not None and ask.text:
-            head, sep, tail = ask.text.partition(": ")
-            sender, excerpt = (head, tail) if sep else (None, ask.text)
-        items.append(
-            {
-                "message_id": item.message_id,
-                "word": item.word,
-                "sender": sender,
-                "excerpt": excerpt,
-            }
-        )
-    return items
 
 
 async def _settle_and_cancel(config_dir: Path, ask: BridgeAsk) -> bool:
@@ -865,9 +578,10 @@ async def decide_selection(
 ) -> dict[str, list[dict[str, Any]]]:
     """Decide the human's explicit selection; per-item results in submitted order.
 
-    The CALLER has already verified the presence proof over exactly this
-    selection (:func:`verify_selection_proof`) and refused the whole batch on a
-    conflicting re-selection (:func:`conflicting_selection`). Returns
+    The CALLER (the desktop route, behind the desktop bearer) has already
+    refused the whole batch on a conflicting re-selection
+    (:func:`conflicting_selection`). No presence proof is checked: ordinary
+    approvals never prompt (decision a-856f, module docstring). Returns
     ``{"results"}``. Each result is ``{message_id, decision, sent,
     ask_settled, status|error}``: ``status`` is the hub's ``approved|denied``;
     ``error`` is a hub code, or a LOCAL refusal (``no_open_ask``,
@@ -876,15 +590,19 @@ async def decide_selection(
     an item that was never sent. ``sent`` is True for every item that went out,
     including one the hub's answer omitted (review R1-2: it may be committed).
 
-    EXACTLY the signed pairs go out (B1/B3). There is no ``recovered`` list any
-    more: an earlier unconfirmed batch word is never carried by a batch whose
-    digest does not name it (S-7/R2-1); it is re-sent only when the human
+    EXACTLY the selected pairs go out (B1/B3). There is no ``recovered`` list
+    any more: an earlier unconfirmed batch word is never carried by a batch
+    that does not name it (S-7/R2-1); it is re-sent only when the human
     selects it again, with the same word.
     """
 
     from .authority import authority_fence, scope_matches_runtime
     from .client import BridgeRefusal, BridgeSignInRequired
-    from .decide import decide_batch_from_human_selection, human_decision
+    from .decide import (
+        HUMAN_DECISION_WORDS,
+        decide_batch_from_human_selection,
+        human_decision,
+    )
     from .decide_intents import DecideIntents
 
     asks = bridge_asks_by_message(config_dir)
@@ -902,6 +620,16 @@ async def decide_selection(
             "ask_settled": False,
         }
         results[item.message_id] = result
+        # THE WORD IS CHECKED BEFORE ANYTHING IS RECORDED (PR #4208 security
+        # round 2, S-4). ``intents.record`` is first-record-wins and
+        # ``conflicting_selection`` then refuses every other word for that ask,
+        # so a recorded word outside the closed set could never be sent and
+        # would lock the request on every door of this machine. The list route
+        # already narrows the word (``Literal``); this is the backstop for any
+        # other caller (the desktop card path).
+        if item.word not in HUMAN_DECISION_WORDS:
+            result["error"] = "not_a_decision_word"
+            continue
         ask = asks.get(item.message_id)
         if ask is None:
             result["error"] = "no_open_ask"
@@ -947,7 +675,7 @@ async def decide_selection(
             # BACKSTOP ONLY. The route refuses a conflicting re-selection WHOLE
             # before it reaches here (design (c)); this arm covers a row that
             # appeared between that check and this record (a race, or a card
-            # row). The earlier word is NOT sent: only what the human signed
+            # row). The earlier word is NOT sent: only what the human selected
             # goes out, and this item goes nowhere.
             result["error"] = "earlier_decision_unconfirmed"
             continue
