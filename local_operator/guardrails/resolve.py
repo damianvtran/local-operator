@@ -38,6 +38,8 @@ import fnmatch
 import itertools
 import os
 import re
+import shutil
+import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
@@ -115,6 +117,34 @@ TEMP_MARK = "\x02"
 #: the setter invalidation below (``unset``, ``read``, arithmetic) leaves them
 #: alone rather than storing a marker where a raw path is expected.
 _RAW_PATH_VARS = frozenset({"HOME", "OLDPWD"})
+#: A symbolic fresh DIRECTORY below a pinned parent. Unlike TEMP_MARK this
+#: retains that parent in the value; it must never be anchored to cwd or /tmp.
+#: The byte alone proves NOTHING: a command can write it (``$'\x03'``, a raw
+#: U+0003), and trusting it let ``R="$PAD/q"$'\x03'`` through a planted link
+#: drop a state-root write from CRITICAL to LOW (PR #4116 review B1). Only a
+#: value of type :class:`_FreshDirValue` carries the mark; see there.
+FRESH_DIR_MARK = "\x03"
+
+
+class _FreshDirValue(str):
+    """An env value whose FRESH_DIR_MARK the walker itself minted.
+
+    Out-of-band provenance (PR #4116 review B1): command text and inherited
+    env can only ever produce plain ``str``, so they cannot forge this type.
+    Only ``_Walker._assign`` constructs it, from a ``_stored_assignment`` that
+    proved a fail-closed scratch mktemp directory. Any string operation
+    returns a plain ``str`` again, so a derived value loses the proof unless
+    the walker re-mints it. Everywhere else a ``\\x03`` byte is ordinary
+    literal text, exactly as on main, so a forged mark never changes a rank.
+    """
+
+    __slots__ = ()
+
+
+def _is_fresh_binding(value: object) -> bool:
+    return isinstance(value, _FreshDirValue) and FRESH_DIR_MARK in value
+
+
 #: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
 #: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
 #: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
@@ -579,6 +609,9 @@ class Expanded:
     vanished: bool = False
     #: The opaque part is a ``$(mktemp …)`` path: a fresh temp entry (R6).
     temp: bool = False
+    #: One proven-successful mktemp directory; assignment copies preserve the
+    #: symbolic component without claiming its random pathname already exists.
+    fresh_dir: bool = False
     #: Where each ``$NAME``/``${NAME}`` value landed in ``text`` (and in
     #: ``pattern``): ``(name, text_start, text_end, pattern_start, pattern_end,
     #: quoted)``. A ``for`` list fans a target out by rewriting exactly these
@@ -733,9 +766,16 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
         if TEMP_MARK in value:
             out.temp = True
             value = value.replace(TEMP_MARK, OPAQUE_MARK)
+        # B1: only a walker-minted binding is fresh; a plain value's \x03 is a
+        # literal byte (main's reading), never containment.
+        authentic = _is_fresh_binding(value)
+        fresh = authentic and value.count(FRESH_DIR_MARK) == 1 and OPAQUE_MARK not in value
+        if authentic:
+            out.fresh_dir = True
+            value = value.replace(FRESH_DIR_MARK, OPAQUE_MARK)
         if OPAQUE_MARK in value:
             out.opaque = True
-            out.opaque_contained = False
+            out.opaque_contained = out.opaque_contained and fresh
         return value
     dm = _BRACE_DEFAULT_RE.match(inner)
     if dm is not None and depth < 4:
@@ -936,6 +976,7 @@ def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
         opaque=exp.opaque,
         opaque_contained=exp.opaque_contained,
         temp=exp.temp,
+        fresh_dir=exp.fresh_dir,
     )
 
 
@@ -1025,13 +1066,65 @@ def _date_format_contained(fmt: str) -> bool:
     return True
 
 
+def _fresh_errexit_scope(command: str) -> bool:
+    """Recognize only a straight-line, top-level errexit shell, with for lists.
+
+    `set -e` is NOT effective inside an if/while test, an AND/OR list, a
+    negated command or a pipeline. Refuse those shapes rather than pretending
+    a failed substitution cannot leave an empty ROOT. This is a containment
+    proof, not a general shell-success interpreter.
+    """
+    parsed = lex(command)
+    if parsed.open or any(parsed.bodies) or not parsed.segments:
+        return False
+    if parsed.segments[0][0].strip() != "set -euo pipefail" or parsed.segments[0][2] not in (
+        ";",
+        "\n",
+    ):
+        return False
+    forbidden = {
+        "set",
+        "if",
+        "elif",
+        "then",
+        "else",
+        "while",
+        "until",
+        "case",
+        "function",
+        "!",
+        "trap",
+        "return",
+        "exit",
+        "break",
+        "continue",
+    }
+    for text, _, op in parsed.segments[1:]:
+        if op not in ("", ";", "\n"):
+            return False
+        words, redirects = scan(text)
+        if any(op not in (">", ">|", ">>") for op, _ in redirects):
+            return False
+        for word in words:
+            if word.broken:
+                return False
+            if all(p.kind in ("bare", "sq", "dq") for p in word.parts):
+                if "".join(p.text for p in word.parts) in forbidden:
+                    return False
+            for part in word.parts:
+                if part.kind == "bare" and (
+                    part.text in forbidden or any(c in part.text for c in "(){}!&|\\")
+                ):
+                    return False
+    return True
+
+
 def _is_mktemp(body: str) -> bool:
-    words = body.split()
-    return (
-        bool(words)
-        and os.path.basename(words[0]) == "mktemp"
-        and not any("/" in w or ".." in w for w in words[1:] if not w.startswith("-"))
-    )
+    # Only the default temp-root forms have this legacy anchor. Flags such as
+    # -p/-t/-u change the parent or remove freshness entirely; a variable-bearing
+    # template cannot be decided by looking for literal slashes in body.split().
+    # Explicit session-scratch templates have a separate fail-closed proof.
+    return body.strip() in ("mktemp", "mktemp -d", "/usr/bin/mktemp", "/usr/bin/mktemp -d")
 
 
 # ---------------------------------------------------------------------------
@@ -1554,6 +1647,16 @@ def _plain_target(exp: Expanded, op: str, program: str, state: _State) -> Target
     pattern = exp.pattern
     opaque = exp.opaque
     contained = opaque and exp.opaque_contained
+    if exp.fresh_dir:
+        # Freshness belongs to ONE whole path component, not to a prefix:
+        # `${ROOT}old` may name a pre-existing symlink beside the fresh tree.
+        tail = text.partition(OPAQUE_MARK)[2]
+        contained = (
+            contained
+            and text.count(OPAQUE_MARK) == 1
+            and text.startswith("/")
+            and (not tail or tail.startswith("/"))
+        )
     climbs = False
     unpinned = False
     if opaque and OPAQUE_MARK in text:
@@ -3435,6 +3538,8 @@ class _Walker:
         self.inherited_path = env.get("PATH")
         #: Why the last ``_inline_read_only`` refused its proof (``Target.proof_gap``).
         self.read_only_gap: str | None = None
+        self.fresh_scope = False
+        self.scratch_parent = env.get("LOCAL_OPERATOR_SCRATCHPAD", "")
         self.result = Resolution()
         #: Non-read-only programs an earlier part of THIS command runs (each
         #: reaches ``_backstop``). Any of them could plant a module in the cwd
@@ -3515,6 +3620,11 @@ class _Walker:
         self.state.cwd_later_unknown = snap.cwd_later_unknown
         self.state.oldpwd_later_unknown = snap.oldpwd_later_unknown
         self.state.oldpwd_fan = snap.oldpwd_fan
+        if not self.fresh_scope:
+            # A child shell cannot change parent variables, but CAN replace
+            # their filesystem targets. Do not restore stale freshness after
+            # an unknown writer in a substitution/subshell/pipeline.
+            self._forget_fresh_directories()
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -3567,6 +3677,14 @@ class _Walker:
                         for body, nested in zip(owned_bodies[index], lexed.nested_bodies[index])
                         if not nested
                     ]
+        if depth == 0:
+            # Bash startup files and imported functions can shadow builtins or
+            # mktemp before the first visible segment. PATH inspection cannot
+            # prove executable identity in such a shell.
+            self.fresh_scope = _fresh_errexit_scope(command) and not any(
+                value and (key in ("BASH_ENV", "ENV") or key.startswith("BASH_FUNC_"))
+                for key, value in self.state.env.items()
+            )
         pieces, owned_bodies = _fd_redirect_merge(lexed.segments, owned_bodies)
         # R7-1/R8, structural: if the text ends inside a construct the ONE
         # shared scanner tracks (quote, ``$(``, ``${``, backtick, heredoc), its
@@ -3753,10 +3871,25 @@ class _Walker:
             for var in _arith_assigned(body):
                 self._invalidate(var)
         raw_words, redirects = scan(text)
+        # Arithmetic and parameter-assignment expansion can mutate bindings even
+        # inside otherwise harmless words. We do not model their shell lvalues.
+        # Bash's legacy $[...] form has the same assignment side effects as
+        # $((...)); neither may leave a fresh-directory proof on a stale value.
+        if "((" in text or "$[" in text or re.search(r"\$\{[^}]*[:+?=-]", text):
+            self._forget_fresh_directories()
         st = self.state
         words: list[Expanded] = []
         for w in raw_words:
-            words.extend(expand_all(w, st.env, st.home))
+            expanded = expand_all(w, st.env, st.home)
+            if (
+                depth == 0
+                and self.fresh_scope
+                and len(expanded) == 1
+                and len(raw_words) == 1
+                and not redirects
+            ):
+                self._fresh_directory_assignment(w, expanded[0])
+            words.extend(expanded)
         for w in words:
             for body in w.substitutions:
                 if body.strip() and body.strip() not in _EMPTY_BODIES:
@@ -3768,9 +3901,15 @@ class _Walker:
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self.result.touched.append(_target(exp, "write", op, st))
+                    target = _target(exp, "write", op, st)
+                    self.result.touched.append(target)
                     if op in (">", ">|", ">>"):
                         self._add(exp, "append" if op == ">>" else "overwrite", op)
+                    # A prior write may plant a PATH executable or shell input.
+                    # Only writes already confined to a proved fresh directory
+                    # preserve the proof; do not bless a later mktemp after it.
+                    if not target.opaque_contained:
+                        self._forget_fresh_directories()
             elif op == "<<<":
                 # R3-1: the body is re-parsed by the consuming shell, which
                 # loses the refs span; mask a referenced credential value now.
@@ -3794,6 +3933,10 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
+            # Declarations can install namerefs, integer attributes and aliases
+            # for future assignments; ordinary assignment tracking cannot prove
+            # their effects. Invalidate all copies before accepting any binding.
+            self._forget_fresh_directories()
             nameref = any(
                 w.text.startswith("-") and "n" in w.text and not w.text.startswith("--")
                 for w in words[1:]
@@ -3820,6 +3963,8 @@ class _Walker:
             self._cd(words[1:])
             return
         if name == "set":
+            if [w.text for w in words] != ["set", "-euo", "pipefail"]:
+                self._forget_fresh_directories()
             self._set_options(words[1:])
             return
         if name == "popd":
@@ -3829,7 +3974,17 @@ class _Walker:
         if name == "for" and len(words) >= 2:
             self._for(words[1:])
             return
+        if name == "unset":
+            # An unset fresh binding must not survive in the resolver's env.
+            # Unsupported forms conservatively drop every symbolic binding.
+            for w in words[1:]:
+                if _NAME_RE.fullmatch(w.text) and not w.opaque:
+                    st.env.pop(w.text, None)
+                elif w.text not in ("-v", "--"):
+                    self._forget_fresh_directories()
+            return
         if name == "read":
+            self._forget_fresh_directories()
             for w in words[1:]:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
@@ -3885,7 +4040,48 @@ class _Walker:
         # An inline assignment of a pager/git variable can run a program even
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
-        if not read_only_argv(name, [w.text for w in args], assigned=assigned):
+        readonly = read_only_argv(name, [w.text for w in args], assigned=assigned)
+        # A move, link, arbitrary interpreter, or unmodelled writer can replace
+        # the fresh directory or its parent. Never carry containment past it.
+        # mkdir only creates directories; mktemp's substitution is walked in a
+        # child scope. No exemption is added for the unknown program itself.
+        # PR #4116 review M1: ``:``/echo/pwd/printf are bash builtins, so PATH
+        # never picks them; mkdir/mktemp ARE looked up on PATH and must pass
+        # the same root-owned identity check mktemp's provenance uses. git is
+        # deliberately absent: even read-only git runs repo-configured
+        # programs (core.fsmonitor, textconv), which could swap the fresh
+        # directory for a link. Its own redirections were already ranked
+        # above, while the proof still held; only LATER segments lose it.
+        preserves_fresh = (
+            words[0].text == name
+            and not raw_assigns
+            and st.env.get("PATH") == self.inherited_path
+            # Read-only *filesystem* classification is not a shell-state
+            # proof: printf -v/%n, let, eval and declaration builtins mutate
+            # variables. Preserve only the small forms this proof understands.
+            and (
+                name in (":", "echo", "pwd")
+                or (name in ("mkdir", "mktemp") and self._trusted_system_program(name))
+                or (
+                    name == "printf"
+                    and bool(args)
+                    and len(raw_words) == len(words)
+                    and "".join(p.text for p in raw_words[0].parts) == "printf"
+                    and len(raw_words) > 1
+                    and not args[0].text.startswith("-")
+                    and "n" not in args[0].text
+                    and all(
+                        p.kind != "sub" and "$" not in p.text and "`" not in p.text
+                        for p in raw_words[1].parts
+                    )
+                )
+            )
+        )
+        if not preserves_fresh or (
+            name == "set" and [w.text for w in args] != ["-euo", "pipefail"]
+        ):
+            self._forget_fresh_directories()
+        if not readonly:
             exempt = self._touch(name, args) | _read_inputs(name, args)
             # The program word too: after ``env``/``xargs`` peeling a path can
             # BE the program (``xargs -Q <path>``).
@@ -4129,6 +4325,109 @@ class _Walker:
                 target.critical_only = True
         return
 
+    def _forget_fresh_directories(self) -> None:
+        """Unmodelled effects end the proof, including for copied bindings."""
+        self.fresh_scope = False
+        for key, value in list(self.state.env.items()):
+            # A plain value's \x03 is literal text (B1): opaquing it would turn
+            # main's CRITICAL through a planted link into HIGH.
+            if _is_fresh_binding(value):
+                self.state.env[key] = OPAQUE_MARK
+
+    def _trusted_mktemp(self) -> bool:
+        return self._trusted_system_program("mktemp")
+
+    def _trusted_system_program(self, program: str) -> bool:
+        """Inspect, never execute, PATH's winner before granting fresh provenance.
+
+        An unchanged inherited PATH may start with a user-controlled executable.
+        Only the root-owned system mktemp, reached through root-owned unwritable
+        parents, proves the expected creator semantics. Other installations stay
+        opaque rather than running a candidate to ask whether it is trustworthy.
+        Earlier unmodelled shell/filesystem effects already end fresh_scope.
+        """
+        path = self.state.env.get("PATH")
+        if path is None:
+            return False
+        # PATH's empty/relative entries use the modeled shell cwd, not the
+        # resolver process's cwd. If it is unknown, identity is unknown too.
+        entries = path.split(os.pathsep)
+        if any(not os.path.isabs(p) for p in entries):
+            if self.state.cwd is None:
+                return False
+            entries = [p if os.path.isabs(p) else os.path.join(self.state.cwd, p) for p in entries]
+        selected = shutil.which(program, path=os.pathsep.join(entries))
+        if selected not in (f"/usr/bin/{program}", f"/bin/{program}"):
+            return False
+        selected = os.path.realpath(selected)
+        try:
+            info = os.stat(selected)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            current = selected
+            while True:
+                info = os.stat(current)
+                if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return False
+                parent = os.path.dirname(current)
+                if parent == current:
+                    return True
+                current = parent
+        except OSError:
+            return False
+
+    def _fresh_directory_assignment(self, raw: _RawWord, word: Expanded) -> None:
+        """Pin only the parent of `R=$(mktemp -d TEMPLATE)`; R stays symbolic.
+
+        The mac-proof capture wrote into its own scratch directory, but dropping
+        the template's parent made its redirections look like opaque cwd writes.
+        Never synthesize a random dirname or bless a template below an existing
+        symlink: the freshness proof begins at a fully pinned existing parent.
+        """
+        if (
+            self.state.env.get("PATH") != self.inherited_path
+            or raw.broken
+            or len(raw.parts) != 2
+            or raw.parts[0].kind != "bare"
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=", raw.parts[0].text)
+            or raw.parts[1].kind != "sub"
+        ):
+            return
+        body_words, redirects = scan(raw.parts[1].text)
+        if (
+            redirects
+            or len(body_words) != 3
+            or lex(raw.parts[1].text).segments != [(raw.parts[1].text, False, "")]
+        ):
+            return
+        args = [expand(w, self.state.env, self.state.home) for w in body_words]
+        if any(w.opaque or w.empty or w.pattern or w.substitutions for w in args):
+            return
+        if [w.text for w in args[:2]] != ["mktemp", "-d"]:
+            return
+        if not self._trusted_mktemp():
+            return
+        template = args[2].text
+        parent, leaf = os.path.split(template)
+        scratch = self.scratch_parent
+        if (
+            not scratch
+            or self.state.env.get("LOCAL_OPERATOR_SCRATCHPAD") != scratch
+            or not os.path.isabs(parent)
+            or ".." in template.split("/")
+            or not re.fullmatch(r"[A-Za-z0-9_.-]*X{6,}", leaf)
+            or not os.path.isdir(parent)
+            or os.path.realpath(parent) != parent
+            or not os.path.isdir(scratch)
+            or os.path.realpath(scratch) != scratch
+            or not (parent == scratch or parent.startswith(scratch.rstrip("/") + "/"))
+            or any(parent == p or parent.startswith(p.rstrip("/") + "/") for p in self.linked)
+        ):
+            return
+        word.text = raw.parts[0].text + parent + "/" + OPAQUE_MARK
+        word.opaque = word.opaque_contained = word.fresh_dir = True
+        word.temp = False
+
     # -- program handlers ------------------------------------------------------
     def _invalidate(self, name: str) -> None:
         """Forget ``name``'s value: a builtin or construct the walker does not
@@ -4167,7 +4466,28 @@ class _Walker:
         text_value = word.text
         append = _APPEND_RE.match(text_value)
         name = append.group(1) if append else text_value.partition("=")[0]
-        if temp and word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
+        if (
+            temp
+            and not append
+            and word.fresh_dir
+            and word.opaque_contained
+            and text_value.count(OPAQUE_MARK) == 1
+            # A literal \x03/\x02 already in the word would be read back as a
+            # second mark; keep such a value plain and opaque, as on main (B1).
+            and FRESH_DIR_MARK not in text_value
+            and TEMP_MARK not in text_value
+        ):
+            # PR #4116: a fail-closed ``$(mktemp -d "$SCRATCH/x.XXXXXXXX")``
+            # keeps its pinned parent as FRESH_DIR_MARK. This is NOT the
+            # withdrawn #4147 contained-variable proof: only a fresh mktemp
+            # directory under an existing pinned scratch parent qualifies, and
+            # every mutator below drops it again.
+            text_value = text_value.replace(OPAQUE_MARK, FRESH_DIR_MARK)
+            if append is None:
+                return Expanded(
+                    text=text_value, refs=list(word.refs), pattern=word.pattern, fresh_dir=True
+                )
+        elif temp and word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
             text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
         if append is None:
             # Same length (one marker char for another): the refs still line up.
@@ -4178,6 +4498,7 @@ class _Walker:
             word.refs
             or name in self.for_lists
             or TEMP_MARK in old
+            or _is_fresh_binding(old)
             or FOR_GLOB_MARK in old
             or TEMP_MARK in suffix
         ):
@@ -4185,10 +4506,16 @@ class _Walker:
             return Expanded(text=f"{name}=" + (CREDENTIAL_MARK if credential else OPAQUE_MARK))
         return Expanded(text=f"{name}={old}{suffix}")
 
-    def _assign(self, text: str) -> None:
+    def _assign(self, text: str, *, fresh: bool = False) -> None:
         name, _, value = text.partition("=")
         value = _tilde_value(value, self.state.home)
+        if fresh and FRESH_DIR_MARK in value:
+            # The ONLY place fresh provenance is minted (B1): ``fresh`` comes
+            # from ``_stored_assignment``'s proof, never from the text.
+            value = _FreshDirValue(value)
         self.state.env[name] = value
+        if name in ("PATH", "SHELLOPTS", "BASH_ENV", "ENV"):
+            self._forget_fresh_directories()
         if name == "HOME":
             # S7: a later ``~`` resolves against the NEW home, as bash does.
             self.state.home = value or self.state.home
@@ -5000,6 +5327,14 @@ class _Walker:
         for w in dests:
             if w.text and not w.vanished:
                 self.result.touched.append(_target(w, "write", name, st))
+                if name == "curl" and not w.text.startswith("/dev/"):
+                    # PR #4116 Q1: ``curl -o F`` truncates F exactly like
+                    # ``> F``, but as a touch alone only session-state paths
+                    # ranked, so ``-o <state>/config.yml`` was LOW while
+                    # ``printf > config.yml`` was CRITICAL. Rank it as the
+                    # same overwrite target a redirection records (``/dev/``
+                    # skipped there too), with no per-path special case.
+                    self._add(w, "overwrite", name)
         if (
             fully
             and dests
@@ -5779,7 +6114,7 @@ class _Walker:
         ``D=$S/x-$l`` inside a loop body binds D once per iteration, so a
         later ``$D`` target fans out with the loop like a direct ``$l`` one.
         """
-        self._assign(word.text)
+        self._assign(word.text, fresh=word.fresh_dir)
         name = word.text.partition("=")[0]
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
@@ -6632,6 +6967,11 @@ def _write_surface(
         return _copy_dest(args, _MV_FLAGS), _flags_known(args, _MV_FLAGS)
     if name in ("tee",):
         return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
+    if name == "curl":
+        # Name the common explicit output destination without declaring curl
+        # read-only/fully modelled: config, remote-name and many other options
+        # have additional writes. Unknown argv still reaches the backstop.
+        return _cluster_value(args, "o", "--output"), False
     if name == "sort":
         # ``sort -o FILE`` writes FILE (it may also be an input: ``sort -o x x``).
         # Never fully modelled, so its other path words reach the backstop too.

@@ -351,7 +351,11 @@ async def test_the_loops_own_turn_is_stamped_as_harness_chrome(tmp_path):
         "the loop settled on this script: a short tape does not fail the test, it "
         "answers the next call from the wrong turn"
     )
-    assert by_text.get("Ship it now") == {}, "a person's own turn is never stamped"
+    # Never the harness marker; ADR 0009's surface stamp is the only key a
+    # person's row carries (the in-process owner reads ``tui``).
+    assert by_text.get("Ship it now") == {
+        "lop_input_surface": "tui"
+    }, "a person's own turn is never stamped"
     loop_turn = LOOP_GOAL_PROMPT.format(goal="Verify the fixture goal")
     assert loop_turn in by_text, f"the loop's own turn is on the record: {list(by_text)}"
     assert by_text[loop_turn] == {"harness_injected": True}

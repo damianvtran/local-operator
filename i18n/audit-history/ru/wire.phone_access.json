@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.phone_access",
-  "history_sha256": "4b1573621c4903dd77dc23067f0d31d86e2e047a7db61d2cbe6e5c463327f1b6",
+  "history_sha256": "ce3ad9d868504c978b48270f5830633d00604b704c72e68ab55271c97572063e",
   "entries": [
     {
       "locale": "ru",
@@ -26,6 +26,29 @@
       "evidence": "i18n/audits/evidence/ru/wire.phone_access/a1/record.json",
       "round": "a1",
       "keys_audited": 4
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.phone_access",
+      "source_sha256": "1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a",
+      "translator": {
+        "agent": "coder subagent of team lopdev that authored commit 9134015c (draft values and English source in the same commit); session id not disclosed in the brief or PR #4145",
+        "model": null,
+        "date": "2026-11-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor role, independent `task` subagent of team lopdev, Local Operator session 43bcb19f888e; not the translator (the coder that authored 9134015c with the draft values) nor the English-drafting coder; did not edit any catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-17",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a2: independent i18n-auditor 43bcb19f888e (anthropic/claude-opus-5-5) of PR #4145 values at 0e4ad0a9171c: PASSED, 0 blocker/major (RU-N1 nit); whole namespace (10 keys) at new en source; 6 new away_after keys judged in full, 4 a1 keys byte-unchanged. Record i18n/audits/evidence/ru/wire.phone_access/a2/record.json",
+      "evidence": "i18n/audits/evidence/ru/wire.phone_access/a2/record.json",
+      "round": "a2",
+      "keys_audited": 10
     }
   ]
 }

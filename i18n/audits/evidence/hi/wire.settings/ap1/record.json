@@ -1,0 +1,62 @@
+{
+  "auditor": {"agent": "i18n-auditor (team lopdev, task as-au-hi)", "session": "997e6b6810af", "model": "anthropic/claude-opus-5-5", "actual_model_source": "system prompt 'Model:' line of this session", "fallback": "none observed", "independent_from_translator_session": true, "translator": "i18n-translator, job ce401ca04aa0, anthropic/claude-sonnet-5-5"},
+  "locale": "hi",
+  "namespaces": ["wire.settings"],
+  "scope_keys": ["wire.settings.updates.title", "wire.settings.updates.description", "wire.settings.update_auto_prune.label", "wire.settings.update_auto_prune.help", "wire.settings.update_auto_prune.choice.true.description", "wire.settings.update_auto_prune.choice.false.description", "wire.settings.update_keep_generations.label", "wire.settings.update_keep_generations.help"],
+  "key_count": 8,
+  "pr": "https://github.com/damianvtran/local-operator/pull/4135",
+  "commit_audited": "cc66c51cb3add48bd1e88700fa1ba743bcdb252c + uncommitted translator working tree (FINAL round)",
+  "diff_base": "cc66c51cb3add48bd1e88700fa1ba743bcdb252c",
+  "audit_date": "2026-11-16",
+  "restart_note": "Audit restarted against FINAL English per manager resume; no verdicts from the earlier partial pass carried over; no earlier record had been written.",
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/hi/wire.settings.json": "e23c48dbe9986a75ab2f9cab129ca76c572ef17be84c6199cb22c2780d956043",
+    "local_operator/i18n/catalogues/en/wire.settings.json": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "ebe0faa8bb9d26922c67493ba2ea8508f51df3897257e08dfac3b97dbad40cfe",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/hi.md": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+  },
+  "mechanical": {
+    "hashes_match_manager_final": true,
+    "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), exit 0",
+    "git_diff_stat_vs_cc66c51c": "hi/wire.settings.json | 8 ++++---- (4 insertions, 4 deletions)",
+    "values_changed_vs_draft": ["update_auto_prune.choice.false.description", "update_auto_prune.choice.true.description", "update_auto_prune.help", "update_keep_generations.help"],
+    "keys_outside_scope_changed": 0,
+    "key_set_equal_en_and_draft": true,
+    "key_count_file": 877,
+    "nfc_all_8": true,
+    "format_chars_Cf_all_8": [],
+    "backticked_commands_byte_identical": {"updates.description": ["`lop update`"], "update_auto_prune.help": ["`lop install prune`"]},
+    "icu_or_placeholders_added": false,
+    "cell_len": {"updates.title": 4, "updates.description": 59, "update_auto_prune.label": 12, "update_auto_prune.help": 60, "choice.true.description": 26, "choice.false.description": 13, "update_keep_generations.label": 20, "update_keep_generations.help": 127},
+    "labels_within_29": true,
+    "help_choice_within_soft_widths": true,
+    "sentence_case": "N/A for Devanagari (no case)"
+  },
+  "per_key": [
+    {"key": "updates.title", "text": "अपडेट", "verdict": "PASS", "note": "distinct from mesh_updates.title 'मेश अपडेट'; same word as tui.notifications update kinds."},
+    {"key": "updates.description", "text": "अपडेट पीछे छूटे पुराने इंस्टॉल का क्या करता है। अगले `lop update` से लागू होता है।", "verdict": "PASS", "note": "colloquial 'X का क्या करता है' renders 'what it does with'; next-update timing kept; command intact."},
+    {"key": "update_auto_prune.label", "text": "पुराने इंस्टॉल हटाएँ", "verdict": "PASS (see NIT hi-A3)", "cells": 12, "note": "polite imperative per style guide; 'हटाएँ' states deletion plainly, which is the safe reading of prune."},
+    {"key": "update_auto_prune.help", "text": "हर अपडेट के बाद अप्रयुक्त पुराने इंस्टॉल हटाएँ, `lop install prune` की तरह।", "verdict": "PASS", "cells": 60, "note": "unused/old/after-each-update all present. Ruling on अप्रयुक्त: correct and unambiguous (not अनुपयोगी 'useless'), standard in Hindi software UI, shorter than 'बिना इस्तेमाल वाले'; slightly formal but within the style guide."},
+    {"key": "update_auto_prune.choice.true.description", "text": "मौजूदा, चल रहे और कुछ सबसे नए रखें", "verdict": "FINDING (MINOR hi-A1)", "cells": 26, "note": "'running' -> 'चल रहे', consistent with the help's 'चल रहे सत्र'; no leftover 'in use' sense. 'कुछ सबसे नए' = newest few."},
+    {"key": "update_auto_prune.choice.false.description", "text": "सभी रखें; ख़ुद हटाएँ", "verdict": "PASS (see NIT hi-A2)", "cells": 13, "note": "neutral polite imperative replaces the first-person draft; consistent with choice.true '…रखें'. Polarity correct: nothing auto-deleted."},
+    {"key": "update_keep_generations.label", "text": "रखे जाने वाले अप्रयुक्त इंस्टॉल", "verdict": "PASS", "cells": 20, "note": "keeps 'unused'; drops nothing English has; number field supplies the count sense."},
+    {"key": "update_keep_generations.help", "text": "हर सफ़ाई में रखे जाने वाले सबसे नए अप्रयुक्त इंस्टॉल की संख्या। हमेशा रखे जाते हैं: मौजूदा और पिछला इंस्टॉल, अपडेट चला रहा इंस्टॉल, और चल रहे सत्र या सेवा द्वारा दर्ज कोई भी इंस्टॉल।", "verdict": "PASS", "cells": 127, "note": "All four always-kept classes present: current (मौजूदा), previous (पिछला), the install running the update (अपडेट चला रहा इंस्टॉल), any registered by a running session or service (…द्वारा दर्ज कोई भी इंस्टॉल); 'हमेशा' fronted, not weakened. सेवा = glossary 'service'; सत्र = style-guide 'session'. Singular पिछला disambiguates मौजूदा as 'current' here."}
+  ],
+  "findings": [
+    {"id": "hi-A1", "severity": "MINOR", "key": "update_auto_prune.choice.true.description", "text": "मौजूदा, चल रहे और कुछ सबसे नए रखें", "evidence": "मौजूदा means both 'current' and 'existing/present'; with the noun elided, 'मौजूदा … रखें' can read 'keep the existing ones', which would make the prune toggle sound like a no-op. The same concept is already 'वर्तमान इंस्टॉल' in hi cli.update_help.allow_downgrade. In keep_generations.help the pairing 'मौजूदा और पिछला इंस्टॉल' disambiguates, so only this fragment is at risk; context mostly resolves it, hence MINOR.", "fix": "वर्तमान, चल रहे और कुछ सबसे नए रखें (and optionally 'वर्तमान और पिछला इंस्टॉल' in keep_generations.help for consistency)"},
+    {"id": "hi-A2", "severity": "NIT", "key": "update_auto_prune.choice.false.description", "text": "सभी रखें; ख़ुद हटाएँ", "evidence": "ख़ुद also means 'by itself' in everyday Hindi (ख़ुद बंद हो गया); with transitive polite हटाएँ the 'you yourself' reading dominates, but 'हाथ से' mirrors 'by hand' with zero ambiguity on the OFF choice of an auto-delete toggle.", "fix": "सभी रखें; हाथ से हटाएँ"},
+    {"id": "hi-A3", "severity": "NIT", "key": "update_auto_prune.label / update_keep_generations.help", "text": "हटाएँ (label, help) vs हर सफ़ाई में (keep help)", "evidence": "English uses 'prune' for both; Hindi uses a natural verb/noun pair. Readable, but the label never names the act 'सफ़ाई' the count help refers to.", "fix": "optional: label 'पुराने इंस्टॉल की सफ़ाई' (fits 29), or keep as is"}
+  ],
+  "rulings_on_judgement_calls": {
+    "इंस्टॉल for install": "accept — matches English 'installs', settled loan, and hi cli.install_help 'इंस्टॉल जेनरेशन'.",
+    "अप्रयुक्त for unused": "accept — formal but standard and unambiguous; no finding.",
+    "choice.false 'सभी रखें; ख़ुद हटाएँ'": "accept; NIT hi-A2 for 'हाथ से'.",
+    "neutral imperative vs first-person draft": "accept — matches style guide polite imperative and the sibling choice."
+  },
+  "counts": {"blocker": 0, "major": 0, "minor": 1, "nit": 2},
+  "terminal_verdict": "CLEAN-WITH-FINDINGS",
+  "ledger_status_recommendation": "passed (no BLOCKER/MAJOR)",
+  "not_verified": ["native-speaker judgement (LLM reasoning only; auditor is not a native speaker; no native review claimed)", "rendered fit in TUI/desktop (cell counts via rich.cells.cell_len only, no screenshots)", "Devanagari font/conjunct rendering in terminals"],
+  "audit_notes_not_execution_log": "commands run: shasum -a 256 on 5 inputs; scripts/i18n/check.py --catalogues-only; git diff cc66c51c --stat; read-only python key-set/diff/NFC/Cf/backtick/cell_len checks; grep of hi catalogues for existing terms. Ledger not run (read-only brief)."
+}

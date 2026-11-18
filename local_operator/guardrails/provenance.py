@@ -66,7 +66,8 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1761,7 +1762,7 @@ def _inside(cwd: str | None, real: str) -> bool:
     return cwd is not None and (cwd == real or cwd.startswith(real + os.sep))
 
 
-def _live_cwd_inside(real: str) -> bool | None:
+def _live_cwd_inside(real: str, *, hidden_blocks: bool = False) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
     Reads :func:`_cwd_entries` (bounded, cached per process). ``None`` —
@@ -1773,9 +1774,23 @@ def _live_cwd_inside(real: str) -> bool | None:
     kernel restarted, a ``git`` that finished — must not keep the tree "busy".
     A cached miss is still reused (the TTL's documented price).
 
-    A hidden pid (cwd unreadable) might be inside, so it also answers ``None``.
-    Every caller treats ``None`` like ``True`` (``busy`` / never delete): PR
-    #3980 rounds 1-3 found no sound way to prove such a process outside a tree.
+    A hidden pid (cwd unreadable, EACCES) counts only on POSITIVE evidence:
+    its readable fds/maps are already merged into the entries by
+    :func:`_cwd_entries`, so one naming a path inside answers ``True`` above.
+    Without such evidence it no longer answers ``None`` (field report
+    2026-11-17, node-2 session d5188ee174d4, guard 0.106.6): ``(sd-pam)`` —
+    same uid, non-dumpable, up for days — made EVERY tree on the host read
+    ``busy=unknown``, so clean, merged worktrees removed with a plain ``git
+    worktree remove`` (the guide's finished-work rule, whoever created them)
+    were refused. #4024 already applied this rule to own trees; the residual
+    risk is the one documented on :func:`_unreadable_cwd_evidence`. The
+    pid's name is never consulted: a same-uid process picks its own comm.
+
+    ``hidden_blocks`` keeps the pre-#4024 refusal for a caller that DELETES
+    with no judge in the loop (``interrupted_worktree_add``'s settle): there
+    a hidden pid still answers ``None``. Every caller treats ``None`` like
+    ``True`` (``busy`` / never delete); an unreadable ``/proc`` or a failed
+    scan is ``None`` for every caller.
     """
     cached = _cwd_inventory_cache
     from_cache = cached is not None and time.monotonic() - cached[0] < _CWD_INVENTORY_TTL_S
@@ -1788,7 +1803,7 @@ def _live_cwd_inside(real: str) -> bool | None:
             return None
     if any(_inside(cwd, real) for _pid, cwd in entries):
         return True
-    if any(cwd is None for _pid, cwd in entries):
+    if hidden_blocks and any(cwd is None for _pid, cwd in entries):
         return None
     return False
 
@@ -1909,7 +1924,9 @@ def _session_pids(session_id: str) -> tuple[dict[int, str], dict[int, str]]:
     return family, others
 
 
-def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHolder, ...] | None:
+def cwd_holders(
+    real: str, session_id: str, *, hidden_blocks: bool = False
+) -> tuple[CwdHolder, ...] | None:
     """Every live process with its cwd inside ``real``, attributed; ``None`` if unknown.
 
     WHY (operator directive 2026-11-14, field case ``attr3880-ci`` on
@@ -1920,21 +1937,31 @@ def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHo
     ancestry reaches no family pid — another session's, or an orphan
     reparented to init — is foreign. ``None`` (inventory or process table
     unreadable) means ownership is unknown: the caller keeps the tree busy.
-    ``own`` is passed only after ledger ownership is proved: an unrelated
-    hidden pid then does not block cleanup, but any readable fd/maps evidence
-    inside the tree is still attributed and a foreign holder remains busy.
+    A cwd-unreadable pid is a holder only when its readable fd/maps evidence
+    lies inside the tree (merged into the entries by :func:`_cwd_entries`);
+    otherwise it is left to :func:`cwd_scan_note` for every tree, own or
+    not (field report 2026-11-17, see :func:`_live_cwd_inside`). Until then
+    only ledger-proven own trees had that rule, so ``(sd-pam)`` alone voided
+    the scan for the finished-work path and its phrase read ``busy=unknown``.
+
+    ``hidden_blocks`` restores the pre-relaxation rule (review M1, PR #4161)
+    for a caller whose LOW answer is an ``rm -rf`` (or a forced removal) with
+    no judge in the loop, e.g. :func:`finished_rig`: such a delete has none of
+    ``git worktree remove``'s own refusal of untracked content, so a hidden
+    pid with no evidence answers ``None`` (unknown, with the pids recorded in
+    the inventory error), and next to a definite holder it is listed as one
+    that "may hold the tree". Only the plain ``git worktree remove`` route
+    may leave it ``False``.
     """
     global _cwd_inventory_error
     entries = _cwd_entries(fresh=True)
     if entries is None:
         return None
-    hidden = [pid for pid, cwd in entries if cwd is None]
+    hidden = [pid for pid, cwd in entries if cwd is None] if hidden_blocks else []
     inside = [(pid, cwd) for pid, cwd in entries if _inside(cwd, real)]
-    # Preserve #3980's hidden-pid refusal for unowned trees/settle, but apply
-    # #4024's positive fd/maps evidence rule to ledger-proven own trees only.
     # Definite holders must be attributed before unrelated hidden pids are
     # reported (#3987 m1); otherwise the reason conceals the actual blocker.
-    if hidden and not own and not inside:
+    if hidden and not inside:
         _cwd_inventory_error = "cwd of pid {} unreadable (Permission denied)".format(
             ", ".join(map(str, hidden[:5])) + (", ..." if len(hidden) > 5 else "")
         )
@@ -1978,7 +2005,7 @@ def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHo
             seen += 1
         command = table.get(pid, (0, ""))[1][:_HOLDER_COMMAND_MAX]
         holders.append(CwdHolder(pid, command, owner, is_family))
-    if hidden and not own:
+    if hidden:
         definite_pids = {holder.pid for holder in holders}
         holders.extend(
             CwdHolder(pid, "?", "cwd unreadable; may hold the tree", False)
@@ -2041,7 +2068,7 @@ def _spawner_owner(session_id: str, spawner: str) -> tuple[str, bool]:
     return f"session {spawner}, another session in this harness process", False
 
 
-def busy_phrase(path: str, session_id: str = "") -> str:
+def busy_phrase(path: str, session_id: str = "", *, hidden_blocks: bool = False) -> str:
     """The judge-facing account of WHY a tree reads busy: holders, or why unknown.
 
     Never a bare "busy" (operator directive 2026-11-14): the field refusal
@@ -2049,7 +2076,9 @@ def busy_phrase(path: str, session_id: str = "") -> str:
     from another session's work.
     """
     real = os.path.realpath(path)
-    holders = cwd_holders(real, session_id)
+    # The same rule as the ``worktree_state`` call that read ``busy``, or a
+    # hidden pid that made it busy would be dropped from its own explanation.
+    holders = cwd_holders(real, session_id, hidden_blocks=hidden_blocks)
     if holders is None:
         reason = _cwd_inventory_error or "process table unreadable"
         return (
@@ -2061,9 +2090,11 @@ def busy_phrase(path: str, session_id: str = "") -> str:
     return "busy: cwd held by " + ", ".join(h.describe() for h in holders)
 
 
-def state_phrase(path: str, state: str, session_id: str = "") -> str:
+def state_phrase(
+    path: str, state: str, session_id: str = "", *, hidden_blocks: bool = False
+) -> str:
     """``state``, with the holders spelled out when it is ``busy``."""
-    return busy_phrase(path, session_id) if state == "busy" else state
+    return busy_phrase(path, session_id, hidden_blocks=hidden_blocks) if state == "busy" else state
 
 
 def _only_regenerable(directory: str) -> bool:
@@ -2106,7 +2137,12 @@ def _only_regenerable(directory: str) -> bool:
 
 
 def worktree_state(
-    path: str, *, own: bool = False, session_id: str = "", facts: dict[str, bool] | None = None
+    path: str,
+    *,
+    own: bool = False,
+    session_id: str = "",
+    facts: dict[str, bool] | None = None,
+    hidden_blocks: bool = False,
 ) -> str:
     """The removal-relevant state of a worktree path.
 
@@ -2126,7 +2162,11 @@ def worktree_state(
     cwd is inside it, or the inventory could not be read — with ``own`` and
     ``session_id``, holders from the deleting session's own family do not
     count; :func:`busy_phrase` names the holders), ``not-linked`` or
-    ``unknown``.
+    ``unknown``. ``hidden_blocks`` (review M1, PR #4161): a NOT-own tree also
+    reads ``busy`` past a cwd-unreadable pid with no evidence, for callers
+    whose LOW answer is an ``rm -rf`` or ``--force`` with no judge
+    (:func:`finished_foreign_worktree`, a reached tree); only the plain ``git
+    worktree remove`` route leaves it off. An own tree keeps #4024's rule.
 
     Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
     and sits in ``<common>/worktrees/<name>``, and that registration's
@@ -2211,10 +2251,10 @@ def worktree_state(
         # ``attr3880-ci``: the creator's eval kernel, bash child or subagent)
         # do not make it busy; any foreign holder, or an inventory or process
         # table that cannot be read (``None``), keeps it busy — fail closed.
-        holders = cwd_holders(real, session_id, own=True)
+        holders = cwd_holders(real, session_id)
         live = None if holders is None else any(not h.family for h in holders)
     else:
-        live = _live_cwd_inside(real)
+        live = _live_cwd_inside(real, hidden_blocks=hidden_blocks)
     if live is not False:
         return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
@@ -2714,6 +2754,103 @@ def _hidden_work(path: str) -> list[str]:
 #: "PR state unknown", which never ranks LOW. The ``glab mr list`` lookup shares
 #: it: measured 2026-11-09, n=3 against minervaai/go-protos, 1.12–1.32 s.
 _GH_TIMEOUT_S = 8.0
+#: The forge auth the deleting session's bash child would carry, as a zero-arg
+#: provider of ``{name: value}`` (set per guard call by ``check_tool_call``).
+#:
+#: WHY (field report 2026-11-17, lop-remote-node-2 session d5188ee174d4, guard
+#: 0.106.6): every ``gh pr list`` the guard ran read "PR state unknown (gh
+#: lookup on damianvtran/local-operator failed or timed out)" while the same
+#: query in the agent's own shell answered at once (#3963 MERGED). node-2 has
+#: no ``gh`` login of its own: it BORROWS the operator's github credential over
+#: the mesh, and ``execute_bash`` injects that (``GH_TOKEN``/``GITHUB_TOKEN``
+#: via ``network.credentials.github.lent_github_env``) plus the session
+#: credential store's ``credential_env()`` into the child only. The guard's
+#: ``gh`` ran on the harness's bare ``os.environ``, unauthenticated, exited
+#: non-zero, and every clean merged worktree lost its LOW path.
+#:
+#: Constraints: the provider is LAZY (the borrow can cost one bounded broker
+#: round trip, so only a forge lookup pays it, never every classified call);
+#: its values reach the ``gh``/``glab`` child env only — never facts, logs or
+#: the judge; a provider that raises or yields nothing leaves the bare
+#: environment, so a real failure still reads "unknown" (fail closed).
+FORGE_AUTH: ContextVar[Callable[[], Mapping[str, str]] | None] = ContextVar(
+    "guardrail_forge_auth", default=None
+)
+
+
+def bind_forge_auth(fn: Callable[[], Any]) -> Callable[[], Any]:
+    """``fn`` carrying this thread's :data:`FORGE_AUTH` into a worker thread.
+
+    ``ThreadPoolExecutor`` does not copy context variables, and the reach
+    lookups (``classify._bounded_lookups``) run ``worktree_activity`` on a
+    pool. Only this one variable is carried: copying the whole context would
+    also share ``classify``'s per-call glob memo across threads.
+    """
+    provider = FORGE_AUTH.get()
+    if provider is None:
+        return fn
+
+    def bound() -> Any:
+        token = FORGE_AUTH.set(provider)
+        try:
+            return fn()
+        finally:
+            FORGE_AUTH.reset(token)
+
+    return bound
+
+
+#: The only session-injected names a forge child gets, per forge (review m1,
+#: PR #4161). Tokens only: a stored ``GH_HOST``/``GH_CONFIG_DIR``/
+#: ``GITLAB_HOST`` would re-point the guard's lookup at another host or
+#: config, and ``GH_ENTERPRISE_TOKEN`` is for hosts the pinned ``--repo``
+#: never names. The host itself is pinned in argv (:func:`_gh_repo_arg`,
+#: :func:`_glab_repo_arg`), so a token goes only to the host it was minted for.
+_FORGE_TOKEN_NAMES = {
+    "gh": ("GH_TOKEN", "GITHUB_TOKEN"),
+    "glab": ("GITLAB_TOKEN", "GLAB_TOKEN"),
+}
+
+
+def _gh_repo_arg(repo: str) -> str:
+    """``repo`` as ``github.com/<owner>/<name>``: ``gh`` then ignores ``GH_HOST``.
+
+    :func:`_github_repo` only ever reads github.com remotes, so the host is
+    known; pinning it keeps an operator's enterprise ``GH_HOST`` from routing
+    the guard's lookup (review m1, PR #4161). An already-qualified value passes.
+    """
+    return repo if repo.count("/") >= 2 else f"github.com/{repo}"
+
+
+def _glab_repo_arg(repo: str) -> str:
+    """``repo`` as a full ``https://<host>/<path>`` URL, so ``GITLAB_HOST`` cannot move it.
+
+    :func:`_gitlab_repo` returns a bare path for gitlab.com and a URL for a
+    self-hosted host; the bare one is pinned to gitlab.com here (review m1).
+    """
+    return repo if "://" in repo else f"https://gitlab.com/{repo}"
+
+
+def _forge_cli_env(cli: str = "gh", **overrides: str) -> dict[str, str]:
+    """The environment for one ``gh``/``glab`` child: ours, plus the session's forge token.
+
+    Only :data:`_FORGE_TOKEN_NAMES` for ``cli`` are taken from the provider,
+    whatever else it returns.
+    """
+    env = dict(os.environ, **overrides)
+    provider = FORGE_AUTH.get()
+    if provider is None:
+        return env
+    try:
+        auth = provider()
+    except Exception:  # noqa: BLE001 — no auth is the old behaviour: "unknown", never a pass
+        logger.debug("guard forge auth unavailable")
+        return env
+    allowed = _FORGE_TOKEN_NAMES.get(cli, ())
+    env.update({str(k): str(v) for k, v in (auth or {}).items() if str(k) in allowed})
+    return env
+
+
 _GITHUB_URL_RE = re.compile(
     r"^(?:https?://(?:[^@/]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
@@ -2736,6 +2873,15 @@ class ForgeChange(NamedTuple):
     state: str
     #: ``YYYY-MM-DD`` of the merge/close (or last update while open); may be "".
     date: str
+    #: The change's head commit as the forge records it (GitHub ``headRefOid``,
+    #: GitLab ``sha``); "" when not read. Only :func:`finished_foreign_worktree`
+    #: reads it, to accept a squash merge whose MERGED head is this tree's HEAD.
+    head: str = ""
+    #: The branch the change targets (GitHub ``baseRefName``, GitLab
+    #: ``target_branch``); "" when not read. A merged change counts as landed
+    #: only when this is origin's default branch (review m2, PR #4161): a
+    #: stacked PR merged into another feature branch never reached it.
+    base: str = ""
 
 
 #: Rows the one history lookup asks for. A branch with more changes than this
@@ -2788,6 +2934,11 @@ class WorktreeActivity:
     #: Why git could NOT prove the branch landed, when the forge was not read
     #: either (shown after the unknown state, never ranked).
     git_unproven: str = ""
+    #: ``(head commit, base branch)`` of this branch's MERGED changes on the
+    #: page read. Never ranked on its own: only
+    #: :func:`finished_foreign_worktree` uses it, and only as the merge proof
+    #: for a tree whose HEAD equals a head merged into origin's default branch.
+    merged_heads: tuple[tuple[str, str], ...] = ()
 
     def facts(self) -> str:
         branch = self.branch or "(detached HEAD)"
@@ -2862,7 +3013,7 @@ def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
     The open-only fallback behind :func:`_gh_prs` (tests replace it).
     ``GH_PROMPT_DISABLED`` keeps gh from ever prompting inside a guard check.
     """
-    env = dict(os.environ, GH_PROMPT_DISABLED="1")
+    env = _forge_cli_env("gh", GH_PROMPT_DISABLED="1")
     try:
         proc = subprocess.run(
             [
@@ -2870,7 +3021,7 @@ def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
                 "pr",
                 "list",
                 "--repo",
-                repo,
+                _gh_repo_arg(repo),
                 "--head",
                 branch,
                 "--state",
@@ -2903,10 +3054,20 @@ def _glab_open_mrs(repo: str, branch: str) -> list[int] | None:
     unknown flag would exit non-zero and read as "unknown" on every call.
     ``GLAB_NO_PROMPT`` keeps glab from prompting inside a guard check.
     """
-    env = dict(os.environ, GLAB_NO_PROMPT="1")
+    env = _forge_cli_env("glab", GLAB_NO_PROMPT="1")
     try:
         proc = subprocess.run(
-            ["glab", "mr", "list", "--repo", repo, "--source-branch", branch, "-F", "json"],
+            [
+                "glab",
+                "mr",
+                "list",
+                "--repo",
+                _glab_repo_arg(repo),
+                "--source-branch",
+                branch,
+                "-F",
+                "json",
+            ],
             capture_output=True,
             text=True,
             timeout=_GH_TIMEOUT_S,
@@ -2939,19 +3100,19 @@ def _gh_prs(repo: str, branch: str) -> list[ForgeChange] | None:
     bound, measured 2026-11-11 at 0.47–0.55 s (n=3, ``--head release-next
     --state all --limit 10`` on damianvtran/local-operator). Tests replace it.
     """
-    env = dict(os.environ, GH_PROMPT_DISABLED="1")
+    env = _forge_cli_env("gh", GH_PROMPT_DISABLED="1")
     argv = [
         "gh",
         "pr",
         "list",
         "--repo",
-        repo,
+        _gh_repo_arg(repo),
         "--head",
         branch,
         "--state",
         "all",
         "--json",
-        "number,state,mergedAt,closedAt,updatedAt",
+        "number,state,mergedAt,closedAt,updatedAt,headRefOid,baseRefName",
         "--limit",
         str(_FORGE_HISTORY_LIMIT),
     ]
@@ -2973,7 +3134,15 @@ def _gh_prs(repo: str, branch: str) -> list[ForgeChange] | None:
                 if state == "merged"
                 else _day(r.get("closedAt")) if state == "closed" else _day(r.get("updatedAt"))
             )
-            out.append(ForgeChange(int(r["number"]), state, date))
+            out.append(
+                ForgeChange(
+                    int(r["number"]),
+                    state,
+                    date,
+                    str(r.get("headRefOid") or ""),
+                    str(r.get("baseRefName") or ""),
+                )
+            )
         return out
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -2986,13 +3155,13 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
     (checked from ``--help``), so GitLab gets the same history as GitHub.
     GitLab's open state is ``opened``; it is normalised to ``open`` here.
     """
-    env = dict(os.environ, GLAB_NO_PROMPT="1")
+    env = _forge_cli_env("glab", GLAB_NO_PROMPT="1")
     argv = [
         "glab",
         "mr",
         "list",
         "--repo",
-        repo,
+        _glab_repo_arg(repo),
         "--source-branch",
         branch,
         "--all",
@@ -3020,7 +3189,15 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
                 if state == "merged"
                 else _day(r.get("closed_at")) if state == "closed" else _day(r.get("updated_at"))
             )
-            out.append(ForgeChange(int(r["iid"]), state, date))
+            out.append(
+                ForgeChange(
+                    int(r["iid"]),
+                    state,
+                    date,
+                    str(r.get("sha") or ""),
+                    str(r.get("target_branch") or ""),
+                )
+            )
         return out
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -3142,7 +3319,16 @@ def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
             owners_running=owners,
             newest=newest,
         )
-    return WorktreeActivity(branch, "none", pr_label=label, owners_running=owners, newest=newest)
+    return WorktreeActivity(
+        branch,
+        "none",
+        pr_label=label,
+        owners_running=owners,
+        newest=newest,
+        merged_heads=tuple(
+            (c.head, c.base) for c in changes if c.state == "merged" and c.head and c.base
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -3174,7 +3360,11 @@ class FinishedForeign:
         merged = (
             "HEAD's content already in origin's default branch (merged by content)"
             if "merged-by-content" in self.reasons
-            else "merged into origin's default branch"
+            else (
+                "HEAD is the head of a MERGED PR/MR (squash merge)"
+                if "merged-by-pr" in self.reasons
+                else "merged into origin's default branch"
+            )
         )
         pr = (
             "PR state unread (forge unavailable)"
@@ -3227,8 +3417,10 @@ def finished_foreign_worktree(
        (``ls-remote --symref``: never a hardcoded ``main``, never a fetch),
        and the local ``refs/remotes/origin/<default>`` equals it, since the
        ancestry walk needs that object locally. A squash/rebase merge has no
-       ancestry and stays with the judge \u2014 a merged-PR badge proves nothing
-       about later commits;
+       ancestry: it passes when HEAD's content is already in that tip
+       (:func:`content_merged`), or when the forge lists a MERGED PR/MR whose
+       head commit IS HEAD (``merged-by-pr``). A merged badge on any other
+       head proves nothing about later commits and stays with the judge;
     4. no open PR/MR (``worktree_activity`` says ``none``; ``unknown`` fails);
     5. no running owner, VERIFIED: ``_running_owners(strict=True)`` raises on
        an unreadable ledger/registry or a tree with no ledger creator row
@@ -3249,7 +3441,10 @@ def finished_foreign_worktree(
 
     real = os.path.realpath(path)
     facts: dict[str, bool] = {}
-    state = worktree_state(real, facts=facts)
+    # Strict on hidden pids (review M1, PR #4161): a ``safe`` answer here
+    # ranks ``--force`` and ``rm -rf`` LOW, and neither refuses untracked
+    # content the way a plain ``git worktree remove`` does.
+    state = worktree_state(real, facts=facts, hidden_blocks=True)
     if state in ("not-linked", "dirty", "locked", "stale-initializing", "busy"):
         return no(f"state-{state}", state)
     if state != "clean":
@@ -3312,9 +3507,25 @@ def finished_foreign_worktree(
         # mobility-link-drop #3855 — all squash-merged, so no ancestry). HEAD's
         # CONTENT must already be in the advertised tip, which the local ref
         # was just shown to equal; a local commit after the squash fails it.
-        if not content_merged(real, head, advertised):
-            return no("not-merged", state)
-        merged_fact = "merged-by-content"
+        if content_merged(real, head, advertised):
+            merged_fact = "merged-by-content"
+        else:
+            # The forge's word, for the squash merge content cannot prove
+            # (field report 2026-11-17, node-2: main later edited a path the
+            # branch changed — routine in a busy repo — so the tree-equality
+            # proof fails though PR #3963 MERGED). Accepted ONLY when a
+            # MERGED change's recorded head IS this tree's HEAD: nothing was
+            # committed after what landed. A merged badge on an older head
+            # proves nothing about later commits, so that stays not-merged.
+            # The change must also have merged INTO ``default`` (review m2, PR
+            # #4161): a stacked PR merged into a feature branch has the same
+            # head but its content never reached origin's default branch.
+            # The open-PR, owner, clean and race checks below all still run.
+            if activity is None:
+                activity = worktree_activity(real, session_id)
+            if activity.git_merged or (head, default) not in activity.merged_heads:
+                return no("not-merged", state)
+            merged_fact = "merged-by-pr"
     if activity is None:
         activity = worktree_activity(real, session_id)
     if activity.pr_state == "open":
@@ -3344,7 +3555,9 @@ def finished_foreign_worktree(
     global _cwd_inventory_cache
     _cwd_inventory_cache = None
     again: dict[str, bool] = {}
-    if worktree_state(real, facts=again) != "clean" or again.get("ignored", True):
+    if worktree_state(real, facts=again, hidden_blocks=True) != "clean" or again.get(
+        "ignored", True
+    ):
         return unknown("state-moved", state)
     if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
         return unknown("head-moved", state)
@@ -3510,7 +3723,10 @@ def finished_rig(path: str, session_id: str) -> tuple[str | None, str]:
     nested = _nested_repository(real)
     if nested:
         return None, nested
-    holders = cwd_holders(real, session_id)
+    # ``rm -rf`` of a rig ranks LOW with no judge, and it deletes whatever a
+    # hidden process is doing in there: a hidden pid stays blocking (review
+    # M1, PR #4161; the relaxed rule is for plain ``git worktree remove``).
+    holders = cwd_holders(real, session_id, hidden_blocks=True)
     if holders is None:
         return None, "live-process scan unavailable"
     foreign_holders = [h.describe() for h in holders if not h.family]

@@ -1,0 +1,219 @@
+{
+ "round": 2,
+ "auditor": {
+  "agent": "i18n-auditor (team lopdev, task as-au-ru)",
+  "session": "ff81b03ad479",
+  "model": "anthropic/claude-opus-5-5",
+  "actual_model_source": "system prompt 'Model:' line of this session",
+  "fallback": "none observed",
+  "independent_from_translator_session": true,
+  "translator": "i18n-translator, job dd2cf1c451a7 resumed as e9fc96a46a4b, anthropic/claude-sonnet-5-5",
+  "native_speaker": false
+ },
+ "locale": "ru",
+ "namespace": "wire.settings",
+ "keys_in_scope": [
+  "wire.settings.updates.title",
+  "wire.settings.updates.description",
+  "wire.settings.update_auto_prune.label",
+  "wire.settings.update_auto_prune.help",
+  "wire.settings.update_auto_prune.choice.true.description",
+  "wire.settings.update_auto_prune.choice.false.description",
+  "wire.settings.update_keep_generations.label",
+  "wire.settings.update_keep_generations.help"
+ ],
+ "key_count": 8,
+ "pr": "https://github.com/damianvtran/local-operator/pull/4135",
+ "commit_audited": "cc66c51cb3add48bd1e88700fa1ba743bcdb252c + uncommitted working-tree translator edits (round-2 FINAL)",
+ "diff_base": "cc66c51c",
+ "audit_date": "2026-11-16",
+ "scope_round2": "Round-1 findings ru-A1..A6 and the 5 values changed since round 1; updates.title, updates.description and update_auto_prune.help are retained (byte-identical to round 1).",
+ "input_hashes_sha256": {
+  "local_operator/i18n/catalogues/ru/wire.settings.json": "b4c21f6fc4e0ba2d5f21d50cb9cbf832577ce931288d35f4b938281cf10ca433",
+  "local_operator/i18n/catalogues/en/wire.settings.json": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+  "local_operator/i18n/catalogues/en/wire.settings.context.json": "ebe0faa8bb9d26922c67493ba2ea8508f51df3897257e08dfac3b97dbad40cfe",
+  "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+  "i18n/style-guides/ru.md": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+ },
+ "mechanical": {
+  "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), exit 0",
+  "check_log": {
+   "path": "/Users/damian/.local-operator/sessions/ff81b03ad479/scratchpad/ru-check-r2.log",
+   "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+  },
+  "git_diff_stat_ru_vs_cc66c51c": "ru/wire.settings.json | 12 ++++++------ (6 insertions, 6 deletions)",
+  "ru_values_changed_vs_draft": [
+   "wire.settings.update_auto_prune.choice.false.description",
+   "wire.settings.update_auto_prune.choice.true.description",
+   "wire.settings.update_auto_prune.label",
+   "wire.settings.update_keep_generations.help",
+   "wire.settings.update_keep_generations.label",
+   "wire.settings.updates.description"
+  ],
+  "changed_outside_scope": [],
+  "values_changed_since_round1": [
+   "wire.settings.update_auto_prune.label",
+   "wire.settings.update_auto_prune.choice.true.description",
+   "wire.settings.update_auto_prune.choice.false.description",
+   "wire.settings.update_keep_generations.label",
+   "wire.settings.update_keep_generations.help"
+  ],
+  "key_sets_equal_en_and_base": true,
+  "placeholders_or_icu_added": false,
+  "nfc": true,
+  "bidi_zero_width_nbsp": "none",
+  "backticked_commands_byte_identical": {
+   "updates.description": [
+    "`lop update`"
+   ],
+   "update_auto_prune.help": [
+    "`lop install prune`"
+   ]
+  },
+  "labels_cells_vs_29": {
+   "update_auto_prune.label": 24,
+   "update_keep_generations.label": 28
+  }
+ },
+ "per_key": [
+  {
+   "key": "wire.settings.updates.title",
+   "en": "Updates",
+   "text": "Обновления",
+   "cells": 10,
+   "en_cells": 7,
+   "width_hint": "short section header",
+   "changed_since_round1": false,
+   "verdict": "PASS (retained, unchanged)",
+   "note": "Unchanged since round 1."
+  },
+  {
+   "key": "wire.settings.updates.description",
+   "en": "What an update does with the older installs it leaves behind. Takes effect at the next `lop update`.",
+   "text": "Что происходит со старыми установками после обновления. Вступает в силу при следующем `lop update`.",
+   "cells": 99,
+   "en_cells": 100,
+   "width_hint": "one or two sentences",
+   "changed_since_round1": false,
+   "verdict": "PASS (retained, unchanged)",
+   "note": "Unchanged since round 1."
+  },
+  {
+   "key": "wire.settings.update_auto_prune.label",
+   "en": "Prune old installs",
+   "text": "Удалять старые установки",
+   "cells": 24,
+   "en_cells": 18,
+   "width_hint": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
+   "changed_since_round1": true,
+   "verdict": "PASS",
+   "note": "ru-A2 adopted verbatim: «Удалять» removes the «clear old settings» reading and matches the help and the ru `lop install` help."
+  },
+  {
+   "key": "wire.settings.update_auto_prune.help",
+   "en": "After each update, delete unused old installs, like `lop install prune`.",
+   "text": "После каждого обновления удалять неиспользуемые старые установки, как `lop install prune`.",
+   "cells": 90,
+   "en_cells": 72,
+   "width_hint": "one line, about 72 cells",
+   "changed_since_round1": false,
+   "verdict": "PASS (retained, unchanged)",
+   "note": "90 cells; help is two rows, so 90 cells fits in two rows at ≥~47-cell detail width. Width part of ru-A4 accepted."
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.true.description",
+   "en": "keep current, running and the newest few",
+   "text": "хранить текущую, запущенные и новейшие",
+   "cells": 38,
+   "en_cells": 40,
+   "width_hint": "about 40 cells",
+   "changed_since_round1": true,
+   "verdict": "PASS",
+   "note": "38 cells, which fits the ~40 hint and closes ru-A4. Dropping «несколько» is accurate: the count is the other setting and may be 0, so «несколько» would overstate it. The keep verb is unified as «хранить»."
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.false.description",
+   "en": "keep every install; prune by hand",
+   "text": "хранить все установки; удалять вручную",
+   "cells": 38,
+   "en_cells": 33,
+   "width_hint": "about 40 cells",
+   "changed_since_round1": true,
+   "verdict": "PASS",
+   "note": "ru-A6 adopted («удалять вручную»); keep verb unified."
+  },
+  {
+   "key": "wire.settings.update_keep_generations.label",
+   "en": "Unused installs kept",
+   "text": "Хранить неактивных установок",
+   "cells": 28,
+   "en_cells": 20,
+   "width_hint": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
+   "changed_since_round1": true,
+   "verdict": "PASS (MINOR ru-B1)",
+   "note": "Noun restored, 28 ≤ 29 cells, and the label is understandable on its own, so ru-A1 is resolved. «неактивных» differs from the help's «неиспользуемых»; see ru-B1."
+  },
+  {
+   "key": "wire.settings.update_keep_generations.help",
+   "en": "How many of the newest unused installs each prune keeps. The current and previous installs, the one running the update, and any that a running session or service registered are always kept.",
+   "text": "Сколько новейших неиспользуемых установок хранит каждая очистка. Всегда хранятся установки: текущая, предыдущая, выполняющая обновление и все зарегистрированные запущенной сессией или службой.",
+   "cells": 192,
+   "en_cells": 189,
+   "width_hint": "one or two short sentences",
+   "changed_since_round1": true,
+   "verdict": "PASS",
+   "note": "Safety re-verified: «Всегда хранятся установки: текущая, предыдущая, выполняющая обновление и все зарегистрированные запущенной сессией или службой». All four classes are present and «Всегда» is unweakened. The colon list fixes the parse issue (ru-A5). «хранит/хранятся» is unified with the label."
+  }
+ ],
+ "round1": {
+  "record_sha256_before_overwrite": "d2dd17551b2dc4b08c8407bcf53eda4aef48b8956d57852f85bdf908f71f7b2d",
+  "target_sha256": "d10ed725bec8cee3399e424b45602a9cf2e59c4280267034b394b8b2ef110922",
+  "verdict": "BLOCKED",
+  "counts": {
+   "blocker": 0,
+   "major": 1,
+   "minor": 3,
+   "nit": 2
+  },
+  "dispositions": {
+   "ru-A1 MAJOR keep_generations.label noun dropped": "RESOLVED: the noun is restored («Хранить неактивных установок», 28 cells). The «неисп.» rejection is upheld (the style guide endorses no such abbreviation). Residual term mismatch → ru-B1 MINOR.",
+   "ru-A2 MINOR auto_prune.label Очищать": "RESOLVED: «Удалять старые установки».",
+   "ru-A3 MINOR keep verb x3": "RESOLVED: «хранить» used throughout (label, both choices, help).",
+   "ru-A4 MINOR width choice.true 50": "RESOLVED: 38 cells. The auto_prune.help 90-cell part is accepted, since help gets two rows.",
+   "ru-A5 NIT keep help list parse": "RESOLVED: restructured as «установки: текущая, предыдущая, …».",
+   "ru-A6 NIT чистить": "RESOLVED: «удалять вручную»."
+  }
+ },
+ "findings": [
+  {
+   "id": "ru-B1",
+   "severity": "MINOR",
+   "key": "wire.settings.update_keep_generations.label",
+   "text": "Хранить неактивных установок",
+   "problem": "The label says «неактивных» (inactive) where the help in the same row says «неиспользуемых» (unused). «Неактивная установка» can be read as \"not the current one\", which would also cover a non-current install a running session still uses. The help's always-kept sentence rules that reading out, and the misreading only makes a user expect to keep fewer installs than are actually kept, so nothing unsafe follows. The full term does not fit: «Хранить неиспользуемых установок» is 32 cells against 29. The translator rejected «неисп.» because the ru style guide endorses only «мин»/«сек» and says «настр.» needs a recorded decision. That rejection is a fair reading of the guide.",
+   "suggested": "Accept and record as a ru width exception in the style guide (as with earlier recorded exceptions), or record «неисп.» as an endorsed abbreviation and use «Хранить неисп. установок» (24). Non-gating."
+  }
+ ],
+ "out_of_scope_observation_non_gating": "keep_generations.help is 192 cells (English source 189). Help gets two rows, and the detail row is roughly terminal width minus padding, so at 80 columns both the English and the ru text are cut with an ellipsis; at ~100 columns they fit. This comes from the source length, not the translation (ru is +3 cells).",
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 0
+ },
+ "terminal_verdict": "CLEAN-WITH-FINDINGS",
+ "ledger_status_recommended": "passed",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "ru-B1"
+  ]
+ },
+ "not_verified": [
+  "native-speaker judgement (LLM reasoning only; no native review claimed)",
+  "rendered fit (cell counts and code reading only; no screenshots)",
+  "font rendering"
+ ],
+ "audit_notes_not_execution_log": "round-2 commands run: shasum -a 256 (ru/en/context); scripts/i18n/check.py --catalogues-only (log above); git diff cc66c51c --stat; read-only python key/NFC/code-span/cell_len checks against the round-1 record; grep of settings_view._detail_width. Ledger NOT run (read-only brief)."
+}

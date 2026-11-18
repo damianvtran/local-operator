@@ -1191,6 +1191,10 @@ def _import_transcript_outcome(
                 # written before the field (key absent) means notify=1 — its
                 # behaviour, exactly.
                 notify=bool(saved.get("notify", True)),
+                # ADR 0009: replayed verbatim; a pre-field marker reads as
+                # ``unknown`` origin and no open ask.
+                origin=str(saved.get("origin") or ""),
+                needs_user=bool(saved.get("needs_user", False)),
             )
             if kind in {"error", "retired"} and is_cut_off_cause(cause):
                 # A CUT-OFF the dying runtime could not narrate itself. Its own
@@ -1494,7 +1498,8 @@ class AttentionStore:
             "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
             "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
             "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '', "
-            "notify INTEGER NOT NULL DEFAULT 1)"
+            "notify INTEGER NOT NULL DEFAULT 1, "
+            "origin TEXT NOT NULL DEFAULT '', needs_user INTEGER NOT NULL DEFAULT 0)"
         )
         conn.execute("CREATE INDEX completion_conversation ON completions(conversation, sequence)")
         conn.execute(
@@ -1617,6 +1622,14 @@ class AttentionStore:
         # quiet.
         if "notify" not in columns:
             conn.execute("ALTER TABLE completions ADD COLUMN notify INTEGER NOT NULL DEFAULT 1")
+        # ADR 0009 routing columns, ADDITIVE and out of the probe for the same
+        # reason as ``notify``. ``origin`` ``''`` reads as ``unknown`` (routes as
+        # non-mobile, errs quiet); ``needs_user`` ``0`` is "no ask opened in the
+        # run's window", which is what every older row was.
+        if "origin" not in columns:
+            conn.execute("ALTER TABLE completions ADD COLUMN origin TEXT NOT NULL DEFAULT ''")
+        if "needs_user" not in columns:
+            conn.execute("ALTER TABLE completions ADD COLUMN needs_user INTEGER NOT NULL DEFAULT 0")
 
     def _connect_read_only(self) -> sqlite3.Connection:
         """A ``mode=ro`` connection that waits as long as the write path does.
@@ -1689,6 +1702,9 @@ class AttentionStore:
             # row (or a database no new build has written yet) — that reads
             # True, i.e. exactly how those rows behaved.
             "notify": _optional_flag(row, "notify", default=True) if row else True,
+            # ADR 0009 routing facts; tolerant reads for a pre-field database.
+            "origin": _optional_column(row, "origin") if row else "",
+            "needs_user": _optional_flag(row, "needs_user", default=False) if row else False,
             "unseen": bool(row and row["sequence"] > acknowledged),
             "revision": [row["sequence"] if row else 0, acknowledged],
         }
@@ -1764,6 +1780,8 @@ class AttentionStore:
                 "reason": "",
                 "cause": "",
                 "notify": True,
+                "origin": "",
+                "needs_user": False,
                 "unseen": False,
                 "revision": [0, 0],
             }
@@ -1819,6 +1837,9 @@ class AttentionStore:
                     "reason": _optional_column(row, "reason"),
                     "cause": _optional_column(row, "cause"),
                     "notify": _optional_flag(row, "notify", default=True),
+                    # ADR 0009 routing facts (push worker, desktop banner).
+                    "origin": _optional_column(row, "origin"),
+                    "needs_user": _optional_flag(row, "needs_user", default=False),
                     "unseen": row["sequence"] > row["acknowledged"],
                     "revision": [row["sequence"], row["acknowledged"]],
                 }
@@ -1876,6 +1897,9 @@ class AttentionStore:
                     # ``_state_many_once`` uses, because an old database simply
                     # has no column to select.
                     "notify": _optional_flag(row, "notify", default=True),
+                    # ADR 0009: per ROW, for the reason ``notify`` is (F1).
+                    "origin": _optional_column(row, "origin"),
+                    "needs_user": _optional_flag(row, "needs_user", default=False),
                 }
                 for row in conn.execute(
                     "SELECT * FROM completions WHERE sequence > ? ORDER BY sequence",
@@ -2152,6 +2176,8 @@ class AttentionStore:
         reason: str = "",
         cause: str = "",
         notify: bool = True,
+        origin: str = "",
+        needs_user: bool = False,
     ) -> dict[str, Any]:
         """Import a durable outcome idempotently, including after runtime restart.
 
@@ -2249,6 +2275,8 @@ class AttentionStore:
                 reason=reason,
                 cause=cause,
                 notify=notify,
+                origin=origin,
+                needs_user=needs_user,
             )
         )
 
@@ -2263,6 +2291,8 @@ class AttentionStore:
         reason: str,
         cause: str,
         notify: bool,
+        origin: str = "",
+        needs_user: bool = False,
     ) -> dict[str, Any]:
         """One attempt at :meth:`publish`'s transaction, on its own connection."""
         with closing(self._connect()) as conn, conn:
@@ -2281,9 +2311,18 @@ class AttentionStore:
                 if not _supersedes_provisional(existing, conversation, token, anchor):
                     raise ValueError("completion token belongs to another outcome")
                 conn.execute(
-                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=?, notify=? "
-                    "WHERE token=?",
-                    (anchor, kind, reason, cause, int(bool(notify)), token),
+                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=?, notify=?, "
+                    "origin=?, needs_user=? WHERE token=?",
+                    (
+                        anchor,
+                        kind,
+                        reason,
+                        cause,
+                        int(bool(notify)),
+                        origin,
+                        int(bool(needs_user)),
+                        token,
+                    ),
                 )
                 # Inside the SAME transaction as the UPDATE: a reader must
                 # never observe a healed row whose change the detector has not
@@ -2298,8 +2337,19 @@ class AttentionStore:
                 conn.execute(_PRUNE_SUPERSEDE_LOG, (_SUPERSEDE_LOG_RETENTION,))
             conn.execute(
                 "INSERT OR IGNORE INTO completions"
-                "(conversation,token,anchor,kind,reason,cause,notify) VALUES(?,?,?,?,?,?,?)",
-                (conversation, token, anchor, kind, reason, cause, int(bool(notify))),
+                "(conversation,token,anchor,kind,reason,cause,notify,origin,needs_user) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    conversation,
+                    token,
+                    anchor,
+                    kind,
+                    reason,
+                    cause,
+                    int(bool(notify)),
+                    origin,
+                    int(bool(needs_user)),
+                ),
             )
             if baseline_seen:
                 sequence = conn.execute(

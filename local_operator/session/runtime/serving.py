@@ -633,8 +633,19 @@ def _question_prose(question: Any) -> str:
 REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
 
 
-def _owner_sender(owner_typed: bool) -> dict[str, Any]:
-    return {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+#: The sender stamp naming the SURFACE a spooled owner line was typed on (ADR
+#: 0009), read back by ``session.spooled_input_surface`` so a prompt spooled
+#: across a runtime swap keeps its notification routing. An in-process caller
+#: (``input_surface=None``) is the owner's own TUI, which ``Session.prompt``
+#: would stamp ``tui`` live, so its line says so too; only a line from a build
+#: before the key lacks it, and that reads ``unknown``.
+INPUT_SURFACE_SENDER_KEY = "input_surface"
+
+
+def _owner_sender(owner_typed: bool, input_surface: str | None = None) -> dict[str, Any]:
+    sender: dict[str, Any] = {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+    sender[INPUT_SURFACE_SENDER_KEY] = input_surface if input_surface is not None else "tui"
+    return sender
 
 
 @dataclass
@@ -683,6 +694,9 @@ class _PromptCommand:
     documents: list["DocumentContent"] | None = None
     #: False for a prompt from a remote connection (see ``prompt``).
     owner_typed: bool = True
+    #: ADR 0009: the connection's surface, decided by the control server, or
+    #: ``None`` for an in-process caller (``Session.prompt`` then stamps ``tui``).
+    input_surface: str | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -4288,8 +4302,13 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         wait_for_turn: bool = True,
         owner_typed: bool = True,
+        input_surface: str | None = None,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``input_surface`` is the ADR 0009 origin the control server derived from
+        the authenticated connection (``mobile``/``remote``/``desktop``/``tui``/
+        ``unknown``); ``None`` leaves ``Session.prompt``'s in-process default.
 
         ``owner_typed=False`` is set by the control server for a prompt from a
         REMOTE connection (``RuntimeServer._dispatch``): it rides to
@@ -4481,7 +4500,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -4532,7 +4551,7 @@ class ServingSessionHandle(SessionHandle):
                         text,
                         mode="mailbox",
                         wake=True,
-                        sender=_owner_sender(owner_typed),
+                        sender=_owner_sender(owner_typed, input_surface),
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
@@ -4602,6 +4621,7 @@ class ServingSessionHandle(SessionHandle):
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
             owner_typed=owner_typed,
+            input_surface=input_surface,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -5531,6 +5551,8 @@ class ServingSessionHandle(SessionHandle):
                         fields["harness_injected"] = command.harness_injected
                     if "owner_typed" in parameters and not command.owner_typed:
                         fields["owner_typed"] = False
+                    if "input_surface" in parameters and command.input_surface is not None:
+                        fields["input_surface"] = command.input_surface
                     if "input_mode" in parameters:
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
@@ -5623,8 +5645,10 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        input_surface: str | None = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
+        # ``input_surface``: see ``prompt`` — the ADR 0009 origin of this steer.
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
@@ -5688,6 +5712,7 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    input_surface=input_surface,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -5766,6 +5791,7 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        input_surface: str | None = None,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -5802,7 +5828,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5846,7 +5872,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender=_owner_sender(owner_typed),
+                    sender=_owner_sender(owner_typed, input_surface),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5894,6 +5920,8 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        if "input_surface" in parameters and input_surface is not None:
+            fields["input_surface"] = input_surface
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
@@ -5921,6 +5949,26 @@ class ServingSessionHandle(SessionHandle):
         )
         self._notify()
         return "steering queued", not carries_attachments
+
+    def _admits_into_live_turn(self) -> bool:
+        """Whether a peer message can still ride the turn that is running NOW.
+
+        True only while the session is streaming a turn AND this runtime has not
+        stopped admitting: no committed exit (``begin_retire`` commits only from
+        the idle decision, so a streaming turn normally implies none — checked
+        anyway because the order is not this method's to assume) and no
+        disposal (which cancels the turn, so a message handed to it would die
+        with it). Everything else — idle, retiring at idle, disposing — keeps
+        the spool/refusal the windows were built for.
+
+        A SNAPSHOT, and that is safe in one direction only: a turn that ends
+        right after this reads True leaves the delivery parked for a boundary
+        it never reaches. ``Session._flush_parked_deliveries`` owns that tail —
+        on a leaving runtime it spools what was parked instead of dropping it.
+        """
+        if getattr(self, "_disposing", False) or getattr(self, "_exit_committed", False):
+            return False
+        return bool(getattr(self._session, "is_streaming", False))
 
     @_on_session_loop
     async def receive_peer_message(
@@ -5985,7 +6033,25 @@ class ServingSessionHandle(SessionHandle):
         # peer's wake is spooled instead of refused (see ``types.UPDATING``). The
         # window is checked as its own term because it is open BEFORE the cause
         # is latched — the announce and the latch come after it.
-        if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
+        #
+        # A LIVE TURN STILL ADMITS, and that check comes first. Both of the
+        # deferring windows above may be open while a turn is mid-flight: the
+        # build-replaced drain latches on a BUSY runtime by construction, and a
+        # checkpointed move opens the update window without sampling idleness.
+        # Spooling there held every local ``send`` (``now=True`` steers too)
+        # for a successor that only boots once the turn ends — measured on
+        # node2, 2026-11-17 10:31–11:15Z: a 0.106.5 runtime busy ~40 min after
+        # ``lop update`` answered every local send "held for the next runtime —
+        # it runs it" and delivered nothing (3 peer rows + 6 own wakes) until
+        # it rolled at idle, while mesh-relayed sends arrived. Delivering into
+        # the turn that is already running starts no NEW work, which is all
+        # invariant (i) forbids; once that turn is gone the spool is right
+        # again. See ``_admits_into_live_turn``.
+        if (
+            (self._retiring_cause or self._updating)
+            and (wake or mode != "mailbox")
+            and not self._admits_into_live_turn()
+        ):
             if self._updating or (self._draining and not self._exit_committed):
                 receipt = await self._spool_for_successor(
                     text,
@@ -7234,6 +7300,22 @@ class ServingSessionHandle(SessionHandle):
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None] | None:
+        """ADR 0009 R10: record which surface answered, before the answer lands.
+
+        Synchronous and called by the control server just ahead of the answer
+        op, so the note is in place when the answer's row reaches the run. Two
+        plain attribute writes on the session (``Session.note_answer_surface``),
+        which is why it needs no loop hop. Returns the session's undo (run by
+        the server when the answer is refused), or ``None`` from a session
+        without the capability.
+        """
+        note = getattr(self._session, "note_answer_surface", None)
+        if callable(note):
+            undo = note(ask_id, surface)
+            return cast(Callable[[], None], undo) if callable(undo) else None
+        return None
+
     @_on_session_loop
     async def ask_answer(
         self,
@@ -8320,6 +8402,17 @@ class ServingSessionHandle(SessionHandle):
                 or not state.get("unseen")
                 or not state.get("notify", True)
             ):
+                return _ANNOUNCE_SETTLED
+            # ADR 0009 §2 footnote 1: a MOBILE-origin completion or error is the
+            # phone's to announce while the phone would be told
+            # (``notifications.routing.phone_would_emit``, the predicate the push worker
+            # asks). SETTLED and no claim, like the quiet arm above: the unseen
+            # mark stays for the sidebar and inbox. When the phone would not
+            # emit, the ladder runs as before so the item is never silent on
+            # every surface.
+            from local_operator.notifications.routing import desktop_defers_to_phone
+
+            if desktop_defers_to_phone(state, root):
                 return _ANNOUNCE_SETTLED
             if desktop_delivery_present(root, kind):
                 # Rung 2. DEFERRED rather than settled (R7): this answer is a

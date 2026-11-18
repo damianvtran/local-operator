@@ -69,7 +69,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     # No forge or process lookups for synthetic trees.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     monkeypatch.setattr(prov, "_github_repo", lambda _: "")
     monkeypatch.setattr(prov, "_running_owners", lambda *a, **k: ())
     # The incident's targets, synthetic: two top-level home dirs (HIGH) and a

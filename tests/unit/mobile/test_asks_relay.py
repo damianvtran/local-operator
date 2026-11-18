@@ -744,7 +744,9 @@ def test_a_portal_body_cannot_name_the_answering_surface(monkeypatch) -> None:
     )
     # QA round 1, Q1: the cold route dials as a RELAY, so the runtime stamps
     # the phone's answer ``remote`` (``asks.surfaces``), not ``unverified``.
-    assert client.engage_kwargs == {"locality": "remote"}
+    # ADR 0009: the cold answer is the phone's input, so the dial declares the
+    # ``origin`` tag and the run it opens routes back to the phone.
+    assert client.engage_kwargs == {"locality": "remote", "origin": "mobile"}
 
 
 @pytest.mark.asyncio

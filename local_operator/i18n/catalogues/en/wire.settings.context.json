@@ -382,5 +382,53 @@
     "note": "'Unaddressed' means a message NOT addressed to the user's own agent — chatter in a room, or an agent mentioning it in passing — as opposed to a person writing to it directly. Keep the label short; the help carries the definition. No ICU arguments.",
     "role": "Settings row label",
     "tone": "concise, neutral"
+  },
+  "wire.settings.update_auto_prune.choice.false.description": {
+    "role": "description of the 'off' choice",
+    "tone": "terse fragment",
+    "width": "about 40 cells",
+    "note": "Nothing is deleted automatically; the user runs `lop install prune` themselves."
+  },
+  "wire.settings.update_auto_prune.choice.true.description": {
+    "role": "description of the 'on' choice",
+    "tone": "terse fragment",
+    "width": "about 40 cells",
+    "note": "Says what is always kept: the current install, the installs a session or service is running from ('running'), and the few newest unused ones."
+  },
+  "wire.settings.update_auto_prune.help": {
+    "role": "settings row help",
+    "tone": "plain",
+    "width": "one line, about 72 cells",
+    "note": "Keep `lop install prune` verbatim: the automatic pass follows exactly that command's rules. No ICU arguments."
+  },
+  "wire.settings.update_auto_prune.label": {
+    "role": "settings row label in the updates section",
+    "tone": "terse, Sentence case (first word capitalised) like its neighbours",
+    "width": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
+    "note": "An on/off switch: delete old unused install generations automatically after each update."
+  },
+  "wire.settings.update_keep_generations.help": {
+    "role": "settings row help",
+    "tone": "plain",
+    "width": "two rows at 80 columns: aim for <=146 display cells; the \"Always kept\" clause must come FIRST and be complete within the first 146 cells even if the rest is cut",
+    "note": "The guarantee comes first because the help row is cut to two rows on narrow terminals. \"Always kept\" lists the classes that survive every prune regardless of the number: the current install; the previous install (the one that was current before this update; the code protects it); the running installs, meaning the install executing the update and any install a session is running from; and any install a session or background service registered (recorded its install as in use). The second sentence then says the number setting also keeps that many NEWEST UNUSED installs (the setting's own value: default 2; 0 is allowed). It must read as a statement attached to the number field whose label is \"Unused installs kept\". No ICU arguments."
+  },
+  "wire.settings.update_keep_generations.label": {
+    "role": "settings row label for a number",
+    "tone": "terse, Sentence case (first word capitalised) like its neighbours",
+    "width": "short label column; painted in a 29-cell column; keep <=29 cells in every locale",
+    "note": "The number of newest UNUSED installs kept after each prune (default 2; 0 is allowed)."
+  },
+  "wire.settings.updates.description": {
+    "role": "settings section description",
+    "tone": "plain",
+    "width": "one or two sentences",
+    "note": "'installs' = install generations (whole copies of the app kept side by side). Keep `lop update` verbatim. No ICU arguments."
+  },
+  "wire.settings.updates.title": {
+    "role": "settings section title",
+    "tone": "terse",
+    "width": "short section header",
+    "note": "The section for what a local update does with older install generations on THIS device; not the mesh roll (that is 'Mesh updates')."
   }
 }

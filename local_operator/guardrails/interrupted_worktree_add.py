@@ -108,10 +108,13 @@ def _registration(tree: str) -> str | None:
 def _live_cwd_inside(tree: str) -> bool | None:
     # Reuse the guard's cwd inventory, but read it fresh: a cached inventory
     # taken before an escaped add started would miss it. None = unknown.
+    # ``hidden_blocks``: this settle deletes with no judge in the loop, so a
+    # cwd-unreadable pid keeps its #3980 meaning here ("might be inside" ->
+    # unlock only), unlike the judged removal paths that need positive evidence.
     from local_operator.guardrails import provenance
 
     provenance._cwd_inventory_cache = None
-    return provenance._live_cwd_inside(os.path.realpath(tree))
+    return provenance._live_cwd_inside(os.path.realpath(tree), hidden_blocks=True)
 
 
 def _git(admin: str, env: Mapping[str, str], *args: str) -> bool:

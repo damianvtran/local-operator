@@ -1051,6 +1051,12 @@ export type MessageParams = {
   "wire.outcome_notices.retired": undefined;
   "wire.phone_access.auto_setup.help": undefined;
   "wire.phone_access.auto_setup.label": undefined;
+  "wire.phone_access.away_after.choice.10m.label": undefined;
+  "wire.phone_access.away_after.choice.1m.label": undefined;
+  "wire.phone_access.away_after.choice.2m.label": undefined;
+  "wire.phone_access.away_after.choice.5m.label": undefined;
+  "wire.phone_access.away_after.help": undefined;
+  "wire.phone_access.away_after.label": undefined;
   "wire.phone_access.description": undefined;
   "wire.phone_access.title": undefined;
   "wire.push_alert.attention_count": { "total": number; "count": string };
@@ -1942,6 +1948,14 @@ export type MessageParams = {
   "wire.settings.tui_sidebar_visible.label": undefined;
   "wire.settings.tui_theme.help": undefined;
   "wire.settings.tui_theme.label": undefined;
+  "wire.settings.update_auto_prune.choice.false.description": undefined;
+  "wire.settings.update_auto_prune.choice.true.description": undefined;
+  "wire.settings.update_auto_prune.help": undefined;
+  "wire.settings.update_auto_prune.label": undefined;
+  "wire.settings.update_keep_generations.help": undefined;
+  "wire.settings.update_keep_generations.label": undefined;
+  "wire.settings.updates.description": undefined;
+  "wire.settings.updates.title": undefined;
   "wire.settings.wakes.description": undefined;
   "wire.settings.wakes.title": undefined;
   "wire.settings.wakes_triggers_enabled.choice.false.description": undefined;

@@ -11,10 +11,11 @@ the call's own result and starts with `BLOCKED by guardrail`. It is final for TH
 action: the same effect on the same targets, by any spelling, tool or path — never
 reword, retry or reroute it; report it. It does not taint later work: a NEW artifact
 from your own fresh work, written to your own worktree's mandated location (a repo's
-`i18n/receipts/`, say), is a different action and needs no approval; a reader
-child's `evidence` tool (create-only, content-only) is the sanctioned path for it,
-so using it is fresh work, not a reroute. Copying or importing the blocked material
-there by another route is still a reroute.
+`i18n/receipts/`, say) with your normal write tools, is a different action and needs
+no approval — that is not a reroute. A review-type child whose brief names a
+`Worktree:` also gets the create-only, content-only `evidence` tool, its sanctioned
+path because that role carries no `write`/`edit`; no other session gets it. Copying
+or importing the blocked material there by any route is still a reroute.
 
 **Exactly two exceptions** let you re-issue the IDENTICAL call — same tool,
 byte-identical arguments — ONCE. Neither bypasses anything: the guard re-checks
@@ -116,6 +117,45 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   body (`gh pr comment N --body "$(cat <<'EOF' … EOF)"`) is never read for
   delete words or targets, while a body fed to a shell (`bash <<EOF`, `| sh`)
   and the `$(…)` inside an unquoted `<<EOF` body are still walked.
+
+## Fresh directories inside your scratchpad
+
+For a top-level, straight-line bash script beginning with the exact
+`set -euo pipefail` header, the resolver can retain the parent of a bare
+`ROOT=$(mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXXXX")` assignment.
+The template's parent must already exist, be fully pinned (no symlink or `..`
+components), and be inside the inherited session scratchpad. The random
+component remains **symbolic**, not an invented existing pathname or a creation
+ledger entry. Copies such as `SRC="$ROOT/source"` and bounded literal `for`
+lists retain containment; `${ROOT}old` does not inherit freshness. Bare `mktemp`
+must resolve through PATH to the root-owned system executable under root-owned,
+non-group/world-writable parents; an inherited PATH is not itself proof. Unknown
+or shadowed executables, shell startup files and imported functions get no proof.
+Shell declarations/namerefs, variable-mutating builtins (including `printf -v`
+and `%n`), arithmetic/assignment expansions and unconfined earlier writes end
+all copied fresh bindings. Read-only filesystem classification alone cannot
+prove that a command preserves shell variables. Only `:`, `echo`, `pwd`, a
+narrow `printf`, and `mkdir`/`mktemp` passing the same system-executable check
+keep the proof; `git` (repo-configured programs) and GNU `g*` variants end it.
+Freshness is the walker's own record, never a byte in the value: a command that
+writes the internal marker (`$'\x03'`) gets ordinary literal text.
+
+This fixes a mac-proof capture case where rejecting every slash-bearing
+`mktemp` template collapsed fresh scratch writes to opaque writes at cwd.
+It does not exempt a script as a whole: protected paths, unknown interpreter
+argv and unknown writers keep their usual checks. In particular, curl's
+explicit `-o`/`--output` destination is ranked like a `>` redirection to the
+same path (state root or config is CRITICAL, scratch is LOW), but curl is not
+fully modelled or declared read-only, and containment is not carried past it.
+
+Success matters: without the supported errexit header, a failed substitution
+could leave `ROOT` empty. AND/OR lists, pipelines, negation, conditional tests,
+functions, option changes and unsupported controls therefore get no new proof.
+Reassignment/unset removes the binding, and a link, move or other unmodelled
+writer invalidates all fresh bindings before later commands. Existing default
+`$(mktemp -d)` temp-root handling is separate; flags such as `-p`, `-t` and
+`-u` never borrow its default-root assumption. Unsupported shapes remain guarded;
+do not reword an already refused action to fit this supported subset.
 
 ## Cleaning up what you made
 

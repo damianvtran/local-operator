@@ -2275,7 +2275,9 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # The isolated verified controller has UNKNOWN/PIP kind. These explicit
     # destination arguments authorize ONLY its canonical immutable protocol;
     # ordinary update/install-kind guards are not widened or overridden.
-    for name in ("root", "baseline", "artifact", "digest", "caller", "target", "tail"):
+    # `previous` (PR #4135) names the pre-flip build for the tail's prune to
+    # keep; it adds a protection only, and an older caller may omit it.
+    for name in ("root", "baseline", "artifact", "digest", "caller", "target", "tail", "previous"):
         update_parser.add_argument(f"--controller-{name}", help=argparse.SUPPRESS)
     update_parser.add_argument(
         "--no-services",

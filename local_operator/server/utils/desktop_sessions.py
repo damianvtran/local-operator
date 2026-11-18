@@ -118,6 +118,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    attach_frame_attention,
     bound_ask_snapshot_in_place,
     bound_delta_rows_in_place,
     job_trajectory_wire_value,
@@ -3740,7 +3741,9 @@ class DesktopSessionBridge:
             # the read that lands afterwards is published as the correction.
             stale, self.attention_served_stale = self.attention_served_stale, False
             if previous or stale:
-                self.publish("attention", state)
+                # The frame carries the attach projection; ``self.attention`` and
+                # the notification edge below keep the full store state (R3-2).
+                self.publish("attention", attach_frame_attention(state))
                 # THE NOTIFICATION EDGE, published AFTER the attention frame so
                 # a reader that toasts already holds the receipt state that
                 # explains the toast. The same `previous` baseline rule governs
@@ -4033,10 +4036,15 @@ class DesktopSessionBridge:
         #
         # Deep-copied either way: the worker serializes it later, and the
         # bridge's own ``attention`` is replaced by receipt reads on the loop.
-        attention = copy.deepcopy(
-            dict(getattr(reference, "attention", {}) or {})
-            if self.remote_row is not None
-            else self.attention
+        # A local read is raw ``AttentionStore.state`` and ``model_copy`` at the
+        # snapshot build skips the model validator, so the attach projection is
+        # applied here (R3-2); a peer's copy is already projected by its store.
+        attention = attach_frame_attention(
+            copy.deepcopy(
+                dict(getattr(reference, "attention", {}) or {})
+                if self.remote_row is not None
+                else self.attention
+            )
         )
         return _WireCapture(reference=reference, attention=attention)
 
