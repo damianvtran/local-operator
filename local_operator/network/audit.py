@@ -871,6 +871,10 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         # unattributable. Each independently authorized fetch is an admission,
         # not transport telemetry; ordinary frames remain unlogged/batched.
         "session_file_read_admitted",
+        # A moved session's working-set bytes leave this device only after this row
+        # is on disk (``workset_move._audit_workset_serve``, design §8.3): an egress
+        # an incident cannot reconstruct is the loss this table exists for.
+        "session.workset.serve",
         "panic_raised",
         "panic_received",
         "disconnect_initiated",

@@ -2027,6 +2027,22 @@ def _cached_served_bytes(root: Path, session_id: str, plan: str, name: str) -> i
     return stamp.served_bytes if stamp is not None else None
 
 
+def read_open_span(handle: Any, *, offset: int, limit: int, size: int) -> tuple[bytes, int, bool]:
+    """``(span, size, eof)`` of ``[offset, offset + limit)`` from an ALREADY-OPENED file.
+
+    THE ONE SHARED FRAMING PRIMITIVE (mesh-lane ruling, 2026-11-18, for the session
+    move's working-set transfer in ``workset_move``). Deliberately over an open handle
+    and a caller-measured ``size``, never a path: a caller must have authorised and
+    opened the exact file it serves (``O_NOFOLLOW``, regular, contained) before any
+    byte is read, so there is no public "serve this path" helper to misuse.
+    ``_served_span`` uses it for its regular-member branch with the size it always
+    measured (``stat`` before ``open``), so ``net_sync`` serves byte-identical spans.
+    """
+    handle.seek(offset)
+    span = handle.read(limit)
+    return span, size, offset + len(span) >= size
+
+
 def _served_span(
     path: Path,
     name: str,
@@ -2050,9 +2066,7 @@ def _served_span(
     if name != TRANSCRIPT_NAME or whole_transcript:
         size = path.stat().st_size
         with path.open("rb") as handle:
-            handle.seek(offset)
-            span = handle.read(limit)
-        return span, size, offset + len(span) >= size
+            return read_open_span(handle, offset=offset, limit=limit, size=size)
     if served_len is not None:
         # The safe region is a PREFIX of the file, so the region's bytes in
         # ``[offset, offset + limit)`` are the file's — read at the offset, not by

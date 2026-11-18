@@ -56,6 +56,20 @@ WORKSET_VERSION = 1
 #: force. Over it the move is refused ``working_set_over_cap`` naming the sizes.
 DEFAULT_CAP_BYTES = 256 * 1024 * 1024
 
+#: The working-set PROTOCOL a build speaks, carried as ``version`` on every consent
+#: frame (``mobility._consent_frame``) and on the recall's ``workset_preflight``.
+#: ``1`` = PR A (manifest + consent, nothing transferred); ``2`` = the transfer half
+#: (snapshot, ``workset_plan``/``workset_fetch``, restore). The OWNER carries files only
+#: when the destination's prepare says ``>= 2`` and the user's consent covers a manifest
+#: that said ``carries_files: true``; any older peer keeps PR A's behaviour exactly.
+#: Kept apart from ``WORKSET_VERSION`` (the block schema and a digest input) so the
+#: negotiation can move without changing every scope digest.
+WORKSET_TRANSFER_VERSION = 2
+
+#: Config key for the per-move cap (``mesh.move.working_set_max_bytes``; AGENTS.md
+#: "Adding a configuration key"). The default is ``DEFAULT_CAP_BYTES``.
+CAP_CONFIG_PATH = ("mesh", "move", "working_set_max_bytes")
+
 #: The states a worktree row may carry (§3.4). PR A computes only the first and last;
 #: the transfer half adds the middle three.
 WORKTREE_STATES = ("planned", "carried", "restored", "pending_restore", "left_behind")
@@ -405,6 +419,49 @@ def _artifact_binding(manifest: Manifest) -> dict[str, Any]:
     if not manifest.carries_files:
         return {}
     return {"carries_files": True}
+
+
+def transfer_binding(
+    scope: str, *, lease_epoch: str, to_device: str, snapshots: Iterable[Mapping[str, Any]]
+) -> str:
+    """``sha256:`` binding the CONFIRMED scope digest to one prepare (design §4 P4).
+
+    Computed by the owner right after it snapshots the planned worktrees, journaled with
+    the move, and handed to the destination in the prepare reply: the confirmed scope,
+    the lease epoch the prepare minted, the authenticated destination and the IMMUTABLE
+    snapshot commit ids (path -> head/index/worktree, in plan order). Every later
+    ``workset_plan``/``workset_fetch`` is authorised against the journal this digest
+    names, so bytes can only leave for the scope the user confirmed, to the device it
+    named, inside the move that minted the epoch.
+    """
+    rows = [
+        [str(s.get("path")), str(s.get("head")), str(s.get("index")), str(s.get("worktree"))]
+        for s in snapshots
+    ]
+    payload = {
+        "scope_digest": scope,
+        "lease_epoch": lease_epoch,
+        "to_device": to_device,
+        "snapshots": rows,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def cap_bytes(root: Path | None = None) -> int:
+    """``mesh.move.working_set_max_bytes`` or :data:`DEFAULT_CAP_BYTES`.
+
+    An unreadable or non-positive value falls back to the default rather than raising:
+    a typo in config must not turn every move into a refusal (same rule as the audit
+    log's bounds, ``audit._resolve``).
+    """
+    try:
+        from local_operator.network import store
+
+        value = int(store.read_config(CAP_CONFIG_PATH, DEFAULT_CAP_BYTES, root))
+    except Exception:  # noqa: BLE001 — a bad value is the default, never a refusal
+        return DEFAULT_CAP_BYTES
+    return value if value > 0 else DEFAULT_CAP_BYTES
 
 
 # ---------------------------------------------------------------------------

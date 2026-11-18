@@ -399,6 +399,11 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         # This device's relay predates the gate (``WORKSET_MOVE_CAPABILITY``), so a
         # dry run or a consent sent to it would run as a real, ungated move.
         "relay_restart_required",
+        # The transfer half (PR B): the destination lacks room for the artifacts (or a
+        # primary clone), or a working-set phase failed mid-transfer. Both roll the
+        # move back with nothing committed (``changed: False``).
+        "insufficient_space",
+        "working_set_transfer_failed",
     }
 )
 
@@ -1982,6 +1987,11 @@ def _destination_move(
         # The SOURCE's reading of "was it active" (``_arrival_active``), absent from an
         # older owner — which therefore keeps today's cold arrival.
         arrival_active = bool(prepared.get("arrival_active") or False)
+        # PR B: present only when the owner decided the files travel (this device's
+        # prepare said it speaks the transfer protocol AND the user's consent covered
+        # sending them). Absent from an older owner, which keeps PR A's behaviour.
+        raw_offer = prepared.get("workset_transfer")
+        workset_offer = dict(raw_offer) if isinstance(raw_offer, dict) else None
         lease_epoch = str(prepared.get("lease_epoch") or "")
         manifest_raw = prepared.get("manifest")
         manifest: dict[str, Any] = manifest_raw if isinstance(manifest_raw, dict) else {}
@@ -2150,6 +2160,48 @@ def _destination_move(
             "",
         )
 
+    # W1–W5 — THE WORKING SET (design §4, PR B), between the session copy and its
+    # content digest. A failure here is a ROLLBACK exactly like a failed session copy:
+    # nothing has committed anywhere, the owner is told (so its ``prepared`` entry does
+    # not park), both stagings are swept, and the owner still holds the conversation
+    # AND every worktree (it never deletes one). ``workset_digest`` rides ``ready``.
+    workset_digest_value = ""
+    if workset_offer is not None and not keep:
+        from local_operator.network import workset_move
+
+        try:
+            workset_digest_value = workset_move.destination_transfer(
+                server,
+                transport,
+                session_id,
+                lease_epoch=lease_epoch,
+                offer=workset_offer,
+                owner_device=owner_device,
+            )
+        except Exception as failure:  # noqa: BLE001 — every failure is the same rollback
+            if isinstance(failure, workset_move.WorksetTransferRefused):
+                ws_code, ws_cause = failure.code, failure.message
+            else:
+                logger.warning(
+                    "mobility: the working-set transfer of %s failed", session_id, exc_info=True
+                )
+                ws_code = "working_set_transfer_failed"
+                ws_cause = f"the working files could not be transferred ({type(failure).__name__})"
+            _report_destination_rollback(transport, session_id, lease_epoch, ws_code)
+            _roll_back_destination(server, session_id, staging)
+            return (
+                None,
+                _move_refusal(
+                    session_id,
+                    ws_code,
+                    f"{ws_cause}. {owner_name or owner_device} still has the conversation "
+                    "and every working file; nothing was moved.",
+                    phase_reached="prepared",
+                    changed=False,
+                ),
+                "",
+            )
+
     # THE DESTINATION'S OWN CONTENT DIGEST, computed from the bytes it actually
     # holds over the same function the owner uses (``sync.copy_content_digest``),
     # and the value the owner commits on (review round 1, M-2). Computed HERE,
@@ -2280,6 +2332,9 @@ def _destination_move(
                     # digest of its own bytes before it deletes anything.
                     "content_digest": content_digest,
                     "plan_id": str(manifest.get("plan_id") or ""),
+                    # The canonical path -> artifact-digests mapping of what THIS
+                    # device verified; the owner commits only if it equals its own.
+                    **({"workset_digest": workset_digest_value} if workset_digest_value else {}),
                 }
             )
         except Moved as refusal:
@@ -2431,6 +2486,21 @@ def _destination_move(
         )
     note("done")
     _audit(server, AUDIT_DONE, session_id, owner_device, new_session_id=target_id)
+    # RESTORE THE WORKING SET — after ``done``, before any engage (design §4 phase 4).
+    # After, because restoring before the commit would leave worktree debris on a
+    # device whose move then rolls back; safe, because the source never deletes the
+    # trees, so a failed restore loses nothing: it reports ``pending_restore`` and the
+    # relay retries on start. Before the engage, so a runtime never opens a cwd that
+    # is still being materialised.
+    if workset_digest_value:
+        from local_operator.network import workset_move
+
+        try:
+            restored_block = workset_move.restore_arrived(server, target_id)
+        except Exception:  # noqa: BLE001 — the session arrived; the files wait
+            logger.warning("mobility: restoring %s's working set failed", target_id, exc_info=True)
+            restored_block = {"state": "pending_restore", "worktrees": [], "left_behind": []}
+        arrival_workset = workset_move.arrival_receipt(arrival_workset, restored_block)
     # §6.3 STEP 17's ``--open``, AS AN OPT-IN FLAG, AND LAST ON PURPOSE. The engage
     # runs after the protocol's own final frame rather than between the commit and
     # it: ``done`` is the SOURCE's completion signal, and a runtime spawn on this
@@ -3131,6 +3201,17 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
     team_block = carry.attachment_resolution(server.root, target)
     if team_block:
         carry_block = {**(carry_block or {}), "team": team_block}
+    # THE WORKING SET'S VERIFIED STAGING FOLLOWS THE SESSION (PR B): renamed into
+    # ``network/workset-in/<id>/`` with its ``pending.json`` here, at the promote, so a
+    # reconcile that adopts a staged copy after a crash carries the files too. The
+    # restore itself runs later (after ``done``); a failure here leaves the staging for
+    # the next promote attempt or the age sweep, never a failed promote.
+    try:
+        from local_operator.network import workset_move
+
+        workset_move.promote_incoming(server.root, target_id)
+    except Exception:  # noqa: BLE001 — the session is promoted; the files wait
+        logger.warning("mobility: could not promote %s's working set", target_id, exc_info=True)
     return _PromoteOutcome(ok=True, carry=carry_block)
 
 
@@ -3175,6 +3256,12 @@ def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path
         shutil.rmtree(safe_staging)
     except OSError:
         logger.debug("mobility: could not sweep %s", staging, exc_info=True)
+    # The working set's partial staging (``<sid>.workset/``) goes with it: a refused
+    # move is done from this side, and its ``.part`` files describe a plan that no
+    # longer exists. Contained by construction (``workset_move.incoming_staging``).
+    from local_operator.network import workset_move
+
+    workset_move.discard_incoming(server.root, Path(staging).name)
     _audit(server, AUDIT_ROLLED_BACK, session_id, "")
 
 
@@ -4114,19 +4201,43 @@ def _consent_frame(working_set: Mapping[str, Any] | None) -> dict[str, Any]:
     ``confirm`` is a scope digest or ``None``; ``without`` is the explicit "leave the
     working set behind" consent (``--without-working-set``).
     """
-    from local_operator.network.workset import WORKSET_VERSION
+    from local_operator.network.workset import WORKSET_TRANSFER_VERSION
 
     raw = working_set if isinstance(working_set, Mapping) else {}
     confirm = str(raw.get("confirm") or "").strip()
     return {
-        "version": WORKSET_VERSION,
+        # THIS BUILD'S working-set protocol, re-stamped at every hop on purpose: the
+        # prepare frame a DESTINATION sends therefore says what the destination
+        # speaks, which is the one fact the owner's carry decision needs
+        # (``_peer_workset_version``). PR A sent ``1`` here.
+        "version": WORKSET_TRANSFER_VERSION,
         "confirm": confirm or None,
         "without": bool(raw.get("without") or False),
     }
 
 
+def _peer_workset_version(raw: Any) -> int:
+    """The working-set protocol version a PEER's frame states (``0`` when absent).
+
+    Read from the RAW frame, before ``_consent_frame`` re-stamps it with this build's
+    own number. ``>= workset.WORKSET_TRANSFER_VERSION`` means the peer can receive the
+    files (PR B); anything lower keeps PR A's "confirmed, files stay" behaviour.
+    """
+    if not isinstance(raw, Mapping):
+        return 0
+    try:
+        return int(raw.get("version") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _workset_manifest(
-    server: "RelayServer", session_id: str, *, to_device: str, to_name: str = ""
+    server: "RelayServer",
+    session_id: str,
+    *,
+    to_device: str,
+    to_name: str = "",
+    carries: bool = False,
 ) -> Any:
     """The owner's manifest for ``session_id`` → ``to_device``.
 
@@ -4137,18 +4248,23 @@ def _workset_manifest(
     into a ``working_set_unknown`` refusal naming the step. Logged at WARNING with the
     exception; the explicit escape is ``--without-working-set``.
     """
-    from local_operator.network import workset
+    from dataclasses import replace
+
+    from local_operator.network import workset, workset_move
 
     try:
-        return workset.compute_manifest(
+        manifest = workset.compute_manifest(
             Path(server.root),
             session_id,
             to_device=to_device,
             to_name=to_name or server._member_name(to_device),  # noqa: SLF001
+            home=workset_move.home_of(server),
+            cap=workset.cap_bytes(Path(server.root)),
             cwd_hint=_source_session_cwd(server, session_id),
             from_device=server.identity.device_id,
             from_name=str(server._own_label()),  # noqa: SLF001
         )
+        return replace(manifest, carries_files=bool(carries))
     except workset.WorksetUnknown:
         logger.warning(
             "mobility: the working-set manifest for %s could not be read",
@@ -4164,14 +4280,21 @@ def _workset_manifest(
 
 
 def _workset_block(
-    server: "RelayServer", session_id: str, *, to_device: str, to_name: str = ""
+    server: "RelayServer",
+    session_id: str,
+    *,
+    to_device: str,
+    to_name: str = "",
+    carries: bool = False,
 ) -> dict[str, Any]:
     """The manifest as a wire block for a preflight or a refusal: the §3.4 block, or
     the ``state: "unknown"`` block when it cannot be read (never an empty "all clear")."""
     from local_operator.network import workset
 
     try:
-        manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
+        manifest = _workset_manifest(
+            server, session_id, to_device=to_device, to_name=to_name, carries=carries
+        )
     except workset.WorksetUnknown as failure:
         return _workset_unknown_block(server, failure, to_device=to_device, to_name=to_name)
     return manifest.to_dict()
@@ -4295,14 +4418,42 @@ def _workset_gate(
     consent: Mapping[str, Any] | None,
     to_name: str = "",
     consent_present: bool = True,
+    transfer: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """``(refusal, arrival_block)`` for a ``move`` of ``session_id`` to ``to_device``.
+
+    The two-value form every caller that does not stage the transfer uses; see
+    :func:`_workset_gate_full` for the contract.
+    """
+    refusal, arrival, _manifest = _workset_gate_full(
+        server,
+        session_id,
+        to_device=to_device,
+        consent=consent,
+        to_name=to_name,
+        consent_present=consent_present,
+        transfer=transfer,
+    )
+    return refusal, arrival
+
+
+def _workset_gate_full(
+    server: "RelayServer",
+    session_id: str,
+    *,
+    to_device: str,
+    consent: Mapping[str, Any] | None,
+    to_name: str = "",
+    consent_present: bool = True,
+    transfer: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, Any]:
+    """``(refusal, arrival_block, manifest_to_transfer)`` for a move to ``to_device``.
 
     THE SERVER-SIDE CONSENT CHECK (design §4 P1/P3). Runs on the OWNER, which is the
     only device that can read the worktrees, with ``to_device`` the AUTHENTICATED
     destination id (the prepare link's peer, or the id an offload resolved) — the
     digest covers it, so consent shown for one device can never authorise another
-    (security lead, 2026-11-18). Both returns ``None`` → an empty working set: the
+    (security lead, 2026-11-18). ``(None, None, None)`` → an empty working set: the
     move proceeds exactly as before and its receipt carries no ``working_set`` key.
 
     PR A HAS NO TRANSFER, and the arrival block says so (``transferred: false``,
@@ -4319,42 +4470,80 @@ def _workset_gate(
     user to confirm again could never succeed — but ``working_set_unsupported``
     naming the device that must be updated. A session with no working files still
     moves, so a chat-only move to an older peer keeps working during a rollout.
+    THE CARRY DECISION (PR B). ``transfer`` says the destination speaks the transfer
+    protocol (its prepare's consent ``version`` >= ``WORKSET_TRANSFER_VERSION``). The
+    manifest is then computed with ``carries_files: true``, which is a scope-digest
+    input (``workset._artifact_binding``). The consent decides, never the build:
+
+    * consent == the carrying digest → the files are sent (third return = the
+      manifest the caller snapshots and stages);
+    * consent == the NON-carrying digest (the user saw "they stay on this device",
+      e.g. a preflight answered by an older owner path) → the move proceeds WITHOUT
+      sending them, exactly as the user agreed; consent to keep files here never
+      authorises sending them (operator, 2026-11-18);
+    * ``transfer`` false but consent == the carrying digest (an optimistic offload
+      preflight, then an older destination) → a NARROWING, so it proceeds and the
+      arrival block says ``transferred: false`` per worktree.
+
+    The over-cap refusal is live only when the files are actually sent: a cap on bytes
+    that stay here would refuse moves for nothing.
     """
+    from dataclasses import replace
+
     from local_operator.network import workset
 
     given = _consent_frame(consent)
     try:
-        manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
+        manifest = _workset_manifest(
+            server, session_id, to_device=to_device, to_name=to_name, carries=transfer
+        )
     except workset.WorksetUnknown as failure:
         unknown = _workset_unknown_block(server, failure, to_device=to_device, to_name=to_name)
         if not consent_present:
-            return _workset_outdated_peer(session_id, unknown, to_device=to_device), None
+            return _workset_outdated_peer(session_id, unknown, to_device=to_device), None, None
         if given["without"]:
             # The explicit escape: the user said "leave whatever is there behind".
             unknown["consent"] = "without"
             unknown["transferred"] = False
-            return None, unknown
+            return None, unknown, None
         label = str(unknown["destination"]["name"] or to_device)
-        return _workset_refusal(session_id, "working_set_unknown", unknown, to_label=label), None
+        refusal = _workset_refusal(session_id, "working_set_unknown", unknown, to_label=label)
+        return refusal, None, None
     if manifest.empty:
-        return None, None
+        return None, None, None
     block = manifest.to_dict()
     label = manifest.to_name or to_device
     if not consent_present:
-        return _workset_outdated_peer(session_id, block, to_device=to_device), None
+        return _workset_outdated_peer(session_id, block, to_device=to_device), None, None
     if given["without"]:
-        arrival = workset.arrival_block(manifest)
+        arrival = workset.arrival_block(replace(manifest, carries_files=False))
         arrival["consent"] = "without"
-        return None, arrival
+        return None, arrival, None
     if not given["confirm"]:
-        return _workset_refusal(session_id, "working_set_unconfirmed", block, to_label=label), None
+        refusal = _workset_refusal(session_id, "working_set_unconfirmed", block, to_label=label)
+        return refusal, None, None
     if given["confirm"] != block["scope_digest"]:
-        return _workset_refusal(session_id, "working_set_changed", block, to_label=label), None
+        other = replace(manifest, carries_files=not manifest.carries_files)
+        if given["confirm"] != workset.scope_digest(other):
+            refusal = _workset_refusal(session_id, "working_set_changed", block, to_label=label)
+            return refusal, None, None
+        # Same scope, the other carry answer: honour the narrower one (see above).
+        manifest = replace(manifest, carries_files=False)
+        block = manifest.to_dict()
     if manifest.carries_files and manifest.over_cap:
-        return _workset_refusal(session_id, "working_set_over_cap", block, to_label=label), None
+        refusal = _workset_refusal(session_id, "working_set_over_cap", block, to_label=label)
+        return refusal, None, None
+    if manifest.carries_files:
+        # The files travel: the destination rewrites each row from what it restored
+        # (``workset_move.arrival_receipt``); until then nothing has arrived.
+        arrival = dict(block)
+        arrival["consent"] = "confirmed"
+        arrival["transferred"] = False
+        arrival["state"] = "transferring"
+        return None, arrival, manifest
     arrival = workset.arrival_block(manifest)
     arrival["consent"] = "confirmed"
-    return None, arrival
+    return None, arrival, None
 
 
 def _workset_outdated_peer(
@@ -4403,7 +4592,16 @@ def _source_workset_preflight(
             "message": f"this device does not hold {session_id} any more",
             "session_id": session_id,
         }
-    block = _workset_block(server, session_id, to_device=link.device_id)
+    # The ASKER is the destination of a recall; it states its working-set protocol on
+    # the frame, so the manifest says whether the files would travel to it. An older
+    # asker sends no version and is shown "they stay" (PR A), which is what happens.
+    block = _workset_block(
+        server,
+        session_id,
+        to_device=link.device_id,
+        carries=_peer_workset_version(frame.get("working_set"))
+        >= workset.WORKSET_TRANSFER_VERSION,
+    )
     _note_team_bridge_use(server, session_id, block)
     _audit(
         server,
@@ -4553,7 +4751,13 @@ def _ask_workset_preflight(
 
     try:
         answer = transport.ask(
-            {"op": "net_session_move", "phase": "workset_preflight", "session_id": session_id}
+            {
+                "op": "net_session_move",
+                "phase": "workset_preflight",
+                "session_id": session_id,
+                # This device's protocol, so the owner can say whether files travel.
+                "working_set": {"version": workset.WORKSET_TRANSFER_VERSION},
+            }
         )
     except Moved as refusal:
         if "unknown move phase" in str(refusal.message or ""):
@@ -4617,7 +4821,14 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
                 f"{session_id} does not live on this device, so it cannot be moved FROM here",
             )
         target_device, target_name = _resolve_typed_peer(server, to)
-        block = _workset_block(server, session_id, to_device=target_device, to_name=target_name)
+        # OPTIMISTIC CARRY for an offload preflight: this owner cannot yet ask the
+        # destination which protocol it speaks before the prepare (the destination
+        # probe is separate work), so the dialog says the files travel. If the
+        # destination turns out older, the gate's narrowing rule moves the session
+        # WITHOUT them and the receipt says so per worktree — never the reverse.
+        block = _workset_block(
+            server, session_id, to_device=target_device, to_name=target_name, carries=True
+        )
         _note_team_bridge_use(server, session_id, block)
     # DESTINATION REACHABILITY, BEFORE THE CONFIRMATION (live Mac -> node2 move,
     # 2026-11-18): the destination answers for its own credentials and toolchains;
@@ -4997,6 +5208,13 @@ def _source_prepare(
     )
     # An ABSENT key is an older destination, not an unconfirmed move (review R3).
     consent_present = isinstance(frame.get("working_set"), dict)
+    # Does THIS destination receive files? Its own stated protocol, read before the
+    # consent frame above re-stamped it (``_peer_workset_version``).
+    from local_operator.network import workset as _workset_mod
+
+    workset_transfer = (
+        _peer_workset_version(frame.get("working_set")) >= _workset_mod.WORKSET_TRANSFER_VERSION
+    )
     workset_arrival: dict[str, Any] | None = None
     if not keep:
         refused_ws, workset_arrival = _workset_gate(
@@ -5005,6 +5223,7 @@ def _source_prepare(
             to_device=link.device_id,
             consent=workset_consent,
             consent_present=consent_present,
+            transfer=workset_transfer,
         )
         if refused_ws is not None:
             return refused_ws
@@ -5315,16 +5534,49 @@ def _source_prepare(
     # file) is refused before the journal is written — nothing journaled, nothing
     # deleted, the same honest "ask again" as the busy refusal above. Run even when P1
     # found nothing: a worktree the session entered during the retire's wait counts.
-    refused_ws, workset_arrival = _workset_gate(
+    refused_ws, workset_arrival, workset_manifest = _workset_gate_full(
         server,
         session_id,
         to_device=link.device_id,
         consent=workset_consent,
         consent_present=consent_present,
+        transfer=workset_transfer,
     )
     if refused_ws is not None:
         return refused_ws
     lease_epoch = new_lease_epoch()
+    # P4 — SNAPSHOT THE CONFIRMED WORKTREES (design §4, PR B). After the retire and the
+    # P3 re-check, before the journal: private refs + new objects only, never HEAD, the
+    # index or a working file. The handoff entry binds the confirmed scope, this epoch,
+    # the destination and the immutable snapshot ids (``workset.transfer_binding``);
+    # every later ``workset_plan``/``workset_fetch`` is authorised against it.
+    workset_bound: dict[str, Any] | None = None
+    workset_offer: dict[str, Any] | None = None
+    if workset_manifest is not None:
+        from local_operator.network import workset_move
+
+        try:
+            workset_bound, workset_offer = workset_move.source_prepare(
+                server,
+                session_id,
+                workset_manifest,
+                lease_epoch=lease_epoch,
+                to_device=link.device_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — refused before anything is journaled
+            logger.warning(
+                "mobility: could not snapshot %s's working set", session_id, exc_info=True
+            )
+            workset_move.discard_outgoing(server.root, session_id)
+            return {
+                "result": "refused",
+                "code": "working_set_transfer_failed",
+                "message": (
+                    f"this device could not snapshot the working files ({type(exc).__name__}), "
+                    "so nothing was moved and this device still holds the conversation"
+                ),
+                "session_id": session_id,
+            }
     manifest = sync_mod.build_manifest(
         server.root,
         session_id,
@@ -5367,6 +5619,9 @@ def _source_prepare(
             # would roll back a move that is still running.
             "instance_id": str(server.instance_id),
             "at": time.time(),
+            # THE WORKING-SET BINDING (PR B), present only when files travel: the
+            # ``workset_*`` phases and the commit trust the journal this digest names.
+            **({"working_set": workset_bound} if workset_bound else {}),
         },
     )
     progress_for(server).note(session_id, "prepared")
@@ -5394,6 +5649,10 @@ def _source_prepare(
         # ADDITIVE and absent when false: an older destination ignores it and keeps
         # today's cold arrival.
         answer["arrival_active"] = True
+    if workset_offer is not None:
+        # What the destination needs for W1–W5 (repos, snapshot ids, tips). Sent only to
+        # a destination that said it speaks the transfer protocol.
+        answer["workset_transfer"] = workset_offer
     # THE SESSION'S LINKED PROJECTS TRAVEL WITH IT (2026-11-13: a session moved to
     # lop-remote-node-2 found "no project named secret-guardrails-relax" there — the
     # project store is per-device). Additive: an older destination ignores the key.
@@ -5583,6 +5842,17 @@ def _source_commit(
             "the copy the destination holds does not match the bytes this device "
             "served, so nothing was moved and this device still holds the conversation"
         )
+    elif not _workset_ready_ok(server, session_id, entry, frame):
+        # THE WORKING SET'S OWN DIGEST (PR B): the canonical path -> artifact mapping
+        # the destination verified must equal the one this device journaled for THIS
+        # epoch, exactly as ``content_digest`` is compared for the session's bytes.
+        refusal_code = "digest_mismatch"
+        refusal_cause = "workset_content"
+        refusal_message = (
+            "the working files the destination holds do not match what this device "
+            "staged for this move, so nothing was moved and this device still holds "
+            "the conversation and every working file"
+        )
     else:
         # B-M1, AND IT IS THE POINT OF THE WHOLE COMMIT: ``prepare`` checked the
         # lease, and a process can take it in between — every way the product opens
@@ -5721,12 +5991,39 @@ def _source_commit(
         network_id=link.network_id,
     )
     _note_committed(server, session_id, to_device)
+    if isinstance(entry.get("working_set"), dict):
+        # MARK, NEVER DELETE (design §8.6): the departure journal + ``lop-moved.json``
+        # per transferred worktree. Best effort inside; a recall trusts only this
+        # device's journal, never the marker alone.
+        from local_operator.network import workset_move
+
+        workset_move.mark_departed(server, session_id, to_device)
     return {
         "result": "committed",
         "phase": "committed",
         "lease_epoch": str(entry.get("lease_epoch") or ""),
         "session_id": session_id,
     }
+
+
+def _workset_ready_ok(
+    server: "RelayServer", session_id: str, entry: Mapping[str, Any], frame: Mapping[str, Any]
+) -> bool:
+    """Does ``ready``'s ``workset_digest`` match this move's journal? (see the caller)
+
+    A move whose entry bound no working set matches only an ABSENT digest, so a
+    destination cannot smuggle a claim onto a move that sent nothing; an unreadable
+    journal is a mismatch (fail closed: the source keeps everything).
+    """
+    from local_operator.network import workset_move
+
+    try:
+        return workset_move.ready_digest_matches(
+            server.root, session_id, entry, str(frame.get("workset_digest") or "")
+        )
+    except Exception:  # noqa: BLE001 — cannot prove it, so it does not commit
+        logger.warning("mobility: could not check %s's working-set digest", session_id)
+        return False
 
 
 def _source_rollback(
@@ -5797,6 +6094,10 @@ def _source_rollback(
         cause=str(frame.get("code") or "destination_rolled_back"),
     )
     logger.info("mobility: %s released by %s's rollback", session_id, device_id)
+    # The move's own outgoing artifacts go with it (the snapshot refs stay; harmless).
+    from local_operator.network import workset_move
+
+    workset_move.discard_outgoing(server.root, session_id)
     return {"result": "cleared", "session_id": session_id}
 
 
@@ -5870,6 +6171,17 @@ def _source_done(server: "RelayServer", link: "PeerLink", frame: dict[str, Any])
     progress_for(server).note(session_id, "done")
     progress_for(server).signal(session_id, "done")
     _audit(server, AUDIT_DONE, session_id, link.device_id)
+    # The served artifacts are no longer needed once the destination says done AND no
+    # handoff of this id is in flight here (a stale ``done`` must not strand a live
+    # transfer). The departure journal and the snapshot refs are kept (design §8.6).
+    from local_operator.network import workset_move
+    from local_operator.session.placement import handoff_in_flight
+
+    try:
+        if not handoff_in_flight(server.root, session_id):
+            workset_move.discard_outgoing(server.root, session_id)
+    except Exception:  # noqa: BLE001 — housekeeping; sweep_staging ages it out
+        logger.debug("mobility: could not discard %s's served artifacts", session_id)
     return {"result": "done", "session_id": session_id}
 
 
@@ -6789,6 +7101,14 @@ def sweep_staging(root: Path, *, max_age_s: float = STAGING_MAX_AGE_S) -> list[s
             logger.debug("mobility: could not sweep %s", child, exc_info=True)
             continue
         swept.append(child.name)
+    # The owner's served working-set artifacts (``workset-out/<sid>/``) by the same age,
+    # skipping any id a handoff is still in flight for. ``<sid>.workset/`` incoming
+    # staging is a child of ``staging/`` and is already covered by the loop above.
+    from local_operator.network import workset_move
+
+    swept.extend(
+        f"workset-out/{name}" for name in workset_move.sweep_outgoing(root, max_age_s=max_age_s)
+    )
     return swept
 
 
@@ -6842,6 +7162,17 @@ def make_handler(
         if phase == "workset_probe":
             # The DESTINATION's half of the preflight; read-only for the same reason.
             return _destination_workset_probe(server, link, frame)
+        if phase in ("workset_plan", "workset_fetch"):
+            # THE WORKING-SET TRANSFER (PR B), before the reconcile: both are reads of
+            # a move THIS relay is serving right now (its own ``prepared`` entry, which
+            # the reconcile skips anyway), and ``workset_fetch`` arrives once per 512 KiB
+            # chunk — a journal recovery pass per chunk would be pure cost. Each is
+            # authorised against the current move's journal inside ``workset_move``.
+            from local_operator.network import workset_move
+
+            if phase == "workset_plan":
+                return workset_move.serve_plan(server, link, frame)
+            return workset_move.serve_fetch(server, link, frame)
         if phase == "cancel_queue":
             # THE QUEUE'S CANCEL, and it runs before the reconcile for the same
             # reason ``refused`` does: it is a durable-RECORD op and must be able
@@ -8378,6 +8709,14 @@ def recover_on_start(server: "RelayServer") -> list[dict[str, Any]]:
     except Exception:  # noqa: BLE001 — housekeeping is never worth a dead relay
         logger.debug("mobility: recovery at relay start failed", exc_info=True)
         return []
+    # A working set that arrived but did not finish restoring (``pending_restore``)
+    # is retried here — idempotent per worktree (design §4 phase 4).
+    try:
+        from local_operator.network import workset_move
+
+        workset_move.resume_pending(server)
+    except Exception:  # noqa: BLE001 — same contract as the recovery above
+        logger.debug("mobility: working-set restore retry failed", exc_info=True)
     if swept or any(str(row.get("action")) not in ("in_flight",) for row in report):
         logger.info("mobility: recovery at relay start: swept=%s %s", swept, report)
     return report
