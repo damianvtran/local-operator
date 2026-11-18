@@ -228,6 +228,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # counts only, never the token.
         "credential.held_served",
         "credential.held_lapsed",
+        # The BORROWER's own record that a dial did not get a grant (credentials/client.py
+        # ``_note_borrow_failed``): the 2026-11-17 owner_busy burst was visible only in
+        # the owner's log. Coalesced per (owner, key) per window, codes only.
+        "credential.borrow_failed",
         # The owner refreshed because a peer's report asked it to. At most one per
         # credential per five minutes, and worth having: a burst is a borrower
         # hammering a failing login.
@@ -567,6 +571,11 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "credential_id",
             "anchored",
             "policy",
+            # Owner-local display metadata (a label may intentionally be email),
+            # not another identity or candidate list. Reason is a closed scalar
+            # basis:ordinal within the winning eligible tier, never global best.
+            "account_label",
+            "ranked_reason",
         }
     ),
     # -- the refresh delegation (mesh-refresh-delegation.md §3.7f) ------------
@@ -627,6 +636,22 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "credential.held_lapsed": frozenset(
         {"credential_key", "act", "sub", "grant_id", "serves", "pending", "bound"}
+    ),
+    # `code`/`reason` are the owner's machine answer (never its sentence), `held`
+    # whether this device's held grant bridged it, `retry_after_ms` the owner's
+    # stated wait (0 = none), `repeats` the rows folded since the last one written.
+    "credential.borrow_failed": frozenset(
+        {
+            "credential_key",
+            "act",
+            "sub",
+            "provider",
+            "code",
+            "reason",
+            "held",
+            "retry_after_ms",
+            "repeats",
+        }
     ),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),

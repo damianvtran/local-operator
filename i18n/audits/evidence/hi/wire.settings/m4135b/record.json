@@ -1,0 +1,133 @@
+{
+ "round": "m4135b",
+ "locale": "hi",
+ "namespace": "wire.settings",
+ "pr": "damianvtran/local-operator#4135",
+ "auditor": {
+  "agent": "i18n-auditor (team lopdev, reviewer role, round m4135b), session 634bfc6a6ee7; independent of translator b0fe2564b811 and implementer feac6b2db7a4; did not read the m4135 records or any other session scratchpad",
+  "session": "634bfc6a6ee7",
+  "model": "anthropic/claude-opus-5-5",
+  "actual_model_source": "system prompt 'Model:' line of this session",
+  "fallback": "none observed",
+  "native_speaker": false,
+  "date": "2026-11-17"
+ },
+ "translator": {
+  "agent": "i18n-translator",
+  "session": "b0fe2564b811",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-17"
+ },
+ "audited_tree": "uncommitted merge of MERGE_HEAD a0e458d43 into HEAD a4152e090 in .worktrees/auto-prune-pr; audited bytes = input_hashes_sha256",
+ "input_hashes_sha256": {
+  "local_operator/i18n/catalogues/en/wire.settings.json": "c62db407a0b2e1944e63504b6332a3da5dcc494b6877f2ecefed3f518851b96a",
+  "local_operator/i18n/catalogues/hi/wire.settings.json": "45053e99087b281a15de70ab258776e9cb71c7f6a2b71a47f8a0d0f4f4906517",
+  "local_operator/i18n/catalogues/en/wire.settings.context.json": "de060f8b7f0b39a72bb449d4b4d3847bf43da32348e9926e329001bdf91166a7"
+ },
+ "scope": "whole namespace (883 keys): mechanical on all keys; semantic on the 8 PR #4135 keys plus main #4052 key network_credentials_github_repositories.help; 874 unchanged keys proven byte-identical to both parents by three-way comparison (not re-scored)",
+ "mechanical": {
+  "key_sets_equal_en": true,
+  "key_count": 883,
+  "placeholder_parity_all_keys": true,
+  "backtick_code_span_parity_all_keys": true,
+  "nfc_all_keys": true,
+  "bidi_or_control_chars": false,
+  "literals_verbatim": {
+   "lop install prune": true,
+   "lop update": true,
+   "lop network credential github repos --use-default": true
+  },
+  "label_cells": {
+   "wire.settings.update_auto_prune.label": 12,
+   "wire.settings.update_keep_generations.label": 20
+  },
+  "label_limit": 29,
+  "provenance": "three-way vs merge-base eb872993c: every key equals the side that changed it (HEAD a4152e090 for the PR keys, MERGE_HEAD a0e458d43 for network_credentials_github_repositories.help); no both-sides changes; all other keys byte-identical to both parents",
+  "cell_measure": "rich.cells.cell_len"
+ },
+ "per_key": [
+  {
+   "key": "wire.settings.update_auto_prune.label",
+   "owner": "PR #4135",
+   "en": "Prune old installs",
+   "text": "पुराने इंस्टॉल हटाएँ",
+   "cells": 12,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.help",
+   "owner": "PR #4135",
+   "en": "After each update, delete unused old installs, like `lop install prune`.",
+   "text": "हर अपडेट के बाद अप्रयुक्त पुराने इंस्टॉल हटाएँ, `lop install prune` की तरह।",
+   "cells": 60,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.true.description",
+   "owner": "PR #4135",
+   "en": "keep current, running and the newest few",
+   "text": "मौजूदा, चल रहे और कुछ सबसे नए रखें",
+   "cells": 26,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.false.description",
+   "owner": "PR #4135",
+   "en": "keep every install; prune by hand",
+   "text": "सभी रखें; ख़ुद हटाएँ",
+   "cells": 13,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.label",
+   "owner": "PR #4135",
+   "en": "Unused installs kept",
+   "text": "रखे जाने वाले अप्रयुक्त इंस्टॉल",
+   "cells": 20,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.help",
+   "owner": "PR #4135",
+   "en": "Always kept: current, previous and running installs, and any a session or service registered. Also keeps this many newest unused installs.",
+   "text": "हमेशा रखे जाते हैं: मौजूदा, पिछले और चल रहे इंस्टॉल, और वे भी जिन्हें किसी सत्र या सेवा ने दर्ज किया हो। साथ ही इतने सबसे नए अप्रयुक्त इंस्टॉल भी रखे जाते हैं।",
+   "cells": 110,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.updates.title",
+   "owner": "PR #4135",
+   "en": "Updates",
+   "text": "अपडेट",
+   "cells": 4,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.updates.description",
+   "owner": "PR #4135",
+   "en": "What an update does with the older installs it leaves behind. Takes effect at the next `lop update`.",
+   "text": "अपडेट पीछे छूटे पुराने इंस्टॉल का क्या करता है। अगले `lop update` से लागू होता है।",
+   "cells": 59,
+   "verdict": "PASS"
+  },
+  {
+   "key": "wire.settings.network_credentials_github_repositories.help",
+   "owner": "main #4052",
+   "en": "owner/repo entries to lend GitHub access for. When never set, use every repository the login can push to, minus opt-outs. Clearing a previously shared hand-picked list stops lending; return to automatic selection with lop network credential github repos --use-default.",
+   "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।",
+   "cells": 242,
+   "verdict": "PASS"
+  }
+ ],
+ "semantic_summary": "All 9 keys faithful. Keep help guarantee first (71 cells; whole 110). GitHub help: two states distinct, clearing stops lending (\"उधार देना रुक जाता है\"). Provenance observation (not a defect): the PR side also carries a 9th hi key vs merge-base eb872993c, wire.settings.bash_heavy_jobs_enabled.choice.true.description \"चलती\" -> \"चलते\", introduced by PR merge commit a4152e090 (not in 5c10304f3); it is masculine agreement for जॉब, consistent with every other हिंदी catalogue use (किया/मिला/पूरा जॉब), and the merged bytes carry the PR side unchanged.",
+ "findings": [],
+ "severity_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "unresolved_blocker_major": 0,
+ "result": "clean",
+ "not_claimed": "native-speaker review and rendered-frame certification"
+}

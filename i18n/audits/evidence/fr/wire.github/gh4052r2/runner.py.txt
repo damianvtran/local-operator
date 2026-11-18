@@ -1,0 +1,107 @@
+"""Round 2: only nine remediation values and directly affected compositions."""
+import os,sys,json,subprocess,hashlib,unicodedata,io,re
+from pathlib import Path
+R=Path('/Users/damian/local-operator/.worktrees/github-designation-ux-4052');os.chdir(R);sys.path.insert(0,str(R))
+from local_operator.i18n import runtime,messages
+from local_operator.i18n.display import TechnicalSpan,isolated_status_text
+from rich.console import Console
+from rich.text import Text
+S=Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD']);O=S/'audit4052r2';O.mkdir(exist_ok=True)
+BASE='2afbb818b69074d9f11b0fc1a9a6360967218476';HEAD='b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee';assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==HEAD
+sha=lambda b:hashlib.sha256(b).hexdigest();P=R/'local_operator/i18n/catalogues'
+locales=['fr','es','zh-CN','ru','vi','ur','hi'];namespaces=['wire.github','wire.settings'];helpkey='wire.settings.network_credentials_github_repositories.help'
+expected={('ru','wire.github'):{'wire.github.'+k for k in ['opt_out_step','exclude_added','include_added','wrapper_denied','share_empty']},('es','wire.github'):{'wire.github.share_empty'},('ur','wire.github'):{'wire.github.wrapper_denied'},('fr','wire.github'):{'wire.github.failure_unknown'},('ru','wire.settings'):{helpkey}}
+fixed={'repo':'octo-org/website','command':'lop network credential github repos --use-default','reason':'REASON','remedy':'REMEDY','ttl':'TTL','count':2,'failure':'','ago':'AGO','opted':''}
+retention=[];changed=[];renders=[];pseudo=[];catalogues={};oldcats={}
+for ns in namespaces:
+ for suffix in ['.json','.context.json']:
+  p=P/'en'/(ns+suffix);assert p.read_bytes()==subprocess.check_output(['git','show',f'{BASE}:{p.relative_to(R)}'])
+for l in locales:
+ for ns in namespaces:
+  p=P/l/(ns+'.json');new=json.loads(p.read_text());old=json.loads(subprocess.check_output(['git','show',f'{BASE}:{p.relative_to(R)}']));catalogues[l,ns]=new;oldcats[l,ns]=old
+  delta={k for k in new.keys()|old.keys() if new.get(k)!=old.get(k)};assert delta==expected.get((l,ns),set()),(l,ns,delta)
+  en=json.loads((P/'en'/(ns+'.json')).read_text());assert set(new)==set(old)==set(en)
+  unchanged={k:v for k,v in new.items() if k not in delta};old_unchanged={k:v for k,v in old.items() if k not in delta};assert unchanged==old_unchanged
+  digest=sha(json.dumps(unchanged,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode())
+  prior=R/'i18n/audits/evidence'/l/ns/'gh4052r1/record.json';second=R/'i18n/audits/evidence'/l/ns/'gh4052s1/record.json'
+  retention.append({'locale':l,'namespace':ns,'changed_keys':sorted(delta),'unchanged_count':len(unchanged),'unchanged_values_sha256':digest,'baseline_target_sha256':sha(subprocess.check_output(['git','show',f'{BASE}:{p.relative_to(R)}'])),'current_target_sha256':sha(p.read_bytes()),'retained_primary_record':{'path':str(prior.relative_to(R)),'sha256':sha(prior.read_bytes())},'retained_second_record':{'path':str(second.relative_to(R)),'sha256':sha(second.read_bytes())}})
+  if delta:
+   row=json.loads((R/'i18n/audit-history'/l/(ns+'.json')).read_text())['entries'][-1]
+   assert row['status']=='translated';assert row['translator']['model']=='anthropic/claude-opus-5-5';assert sha(p.read_bytes()) in row['note'];assert row['source_sha256']==sha((P/'en'/(ns+'.json')).read_bytes())
+  for k in sorted(delta):
+   value=new[k];assert runtime.message_arguments(value)==runtime.message_arguments(old[k])==runtime.message_arguments(en[k]);assert unicodedata.normalize('NFC',value)==value
+   assert not any(ord(c) in {0x061c,0x200e,0x200f} or unicodedata.bidirectional(c) in {'LRE','RLE','LRO','RLO','PDF','LRI','RLI','FSI','PDI'} for c in value)
+   args=runtime.message_arguments(value);params={n:fixed[n] for n,_ in args}
+   if 'ttl' in params:params['ttl']=runtime.render_message(catalogues[l,'wire.github']['wire.github.ttl'],{'count':5},l)
+   if 'command' in params:params['command']='lop network credential github exclude <owner/repo>' if k.endswith('.opt_out_step') else 'lop network credential github repos'
+   text=runtime.render_message(value,params,l);before=runtime.render_message(old[k],params,l)
+   changed.append({'locale':l,'namespace':ns,'message_key':k,'old':old[k],'new':value,'params':params,'rendered':text,'before_rendered':before})
+   renders.append({'locale':l,'message_key':k,'params':params,'text':text,'kind':'changed value'})
+   # Pseudo expansion after formatting but only prose outside technical tokens/parameter spans.
+   tokens=sorted([str(v) for v in params.values() if isinstance(v,str) and v]+['lop network credential github repos --use-default','owner/repo','GitHub','push'],key=len,reverse=True)
+   pattern=re.compile('('+'|'.join(re.escape(t) for t in tokens)+')');pieces=pattern.split(text)
+   expanded='⟦'+''.join(piece if i%2 else ''.join(c+('~' if c.isalpha() else '') for c in piece) for i,piece in enumerate(pieces))+'⟧'
+   for token in tokens:
+    if token in text:assert token in expanded
+   c=Console(width=80,file=io.StringIO(),record=True);c.print(Text(expanded));wrapped=c.export_text(clear=False);assert re.sub(r'\s+','',wrapped)==re.sub(r'\s+','',expanded)
+   pseudo.append({'locale':l,'message_key':k,'original_cells':Text(text).cell_len,'pseudo_cells':Text(expanded).cell_len,'width':80,'no_clipping':True,'technical_tokens_preserved':True})
+# Prior PUSH finding is fixed without changing timing or its localized ttl neighbor.
+for k in ['opt_out_step','exclude_added','include_added']:
+ assert 'выполнять push в него' in catalogues['ru','wire.github']['wire.github.'+k]
+ assert 'при следующем получении учётных данных, {ttl}' in catalogues['ru','wire.github']['wire.github.'+k]
+# Full owner-only wording and glossary repairs inspected independently, not matched solely to a suggested string.
+assert 'кредитор' not in catalogues['ru','wire.github']['wire.github.wrapper_denied']
+assert 'صرف وہی ڈیوائس' in catalogues['ur','wire.github']['wire.github.wrapper_denied'];assert 'آلہ' not in catalogues['ur','wire.github']['wire.github.wrapper_denied']
+# Both changed wrappers must compose with every existing reason kind and all existing failure kind neighbors.
+reasons=['reason_explicit','reason_unavailable_local','reason_unavailable_remote','reason_excluded_local','reason_excluded_remote','reason_no_repos_local','reason_no_repos_remote']
+for l in ['es','ru']:
+ d=catalogues[l,'wire.github']
+ def tr(key,**params):return runtime.render_message(d['wire.github.'+key],params,l)
+ for reason in reasons:
+  args=runtime.message_arguments(d['wire.github.'+reason]);rp={n:(2 if kind in {'number','plural'} else ' ('+tr('failure_offline')+')') for n,kind in args};r=tr(reason,**rp)
+  remedy='remedy_unavailable' if 'unavailable' in reason else 'remedy_excluded' if 'excluded' in reason else 'remedy_no_repos' if 'no_repos' in reason else 'remedy_explicit'
+  ma=runtime.message_arguments(d['wire.github.'+remedy]);command='lop network credential github repos --refresh' if remedy=='remedy_unavailable' else 'lop network credential github include <owner/repo>' if remedy=='remedy_excluded' else 'lop network credential github repos --use-default'
+  mp={n:command for n,_ in ma};m=tr(remedy,**mp)
+  result=tr('share_empty',reason=r,remedy=m);assert r in result and m in result
+  before_result=runtime.render_message(oldcats[l,'wire.github']['wire.github.share_empty'],{'reason':r,'remedy':m},l)
+  renders.append({'locale':l,'message_key':'wire.github.share_empty','reason_key':reason,'text':result,'kind':'composed refusal'})
+# French changed retrieval error in directly neighboring composed wrappers.
+d=catalogues['fr','wire.github'];f=runtime.render_message(d['wire.github.failure_unknown'],{},'fr')
+for key,params in [('source_last_good',{'ago':'il y a 2 jours','failure':' ('+f+')'}),('reason_unavailable_local',{'failure':' ('+f+')'}),('readiness_last_good',{'ago':'il y a 2 jours','opted':'','failure':': '+f})]:
+ renders.append({'locale':'fr','message_key':'wire.github.'+key,'text':runtime.render_message(d['wire.github.'+key],params,'fr'),'kind':'changed failure neighbor'})
+# Missing argument must still fail, passing control must render; malformed ICU negative.
+try:runtime.render_message(catalogues['ur','wire.github']['wire.github.wrapper_denied'],{'repo':'octo-org/website'},'ur')
+except runtime.MessageFormatError:pass
+else:raise AssertionError('missing command accepted')
+try:runtime.parse_message('{reason')
+except runtime.MessageSyntaxError:pass
+else:raise AssertionError('malformed ICU accepted')
+# RTL paint-adapter control only. Not a native-terminal shaping claim or plain-CLI adapter proof.
+ur=next(x['rendered'] for x in changed if x['locale']=='ur');spans=[]
+for token in ['octo-org/website','lop network credential github repos']:
+ a=ur.index(token);spans.append(TechnicalSpan(a,a+len(token),token))
+projected=isolated_status_text(messages.RenderedMessage(ur,'ur'),sorted(spans,key=lambda x:x.start));assert projected.count('\u2066')==2 and projected.count('\u2067')==1 and projected.count('\u2069')==3
+assert ''.join(c for c in projected if c not in '\u2066\u2067\u2069')==ur
+# Actual production control before receipt/generation: explicit target lookup is still English.
+preactivation=[]
+for x in changed:
+ r=messages.render_record(x['message_key'],x['params'],locale=x['locale']);assert r.source_locale=='en';preactivation.append({'locale':x['locale'],'message_key':x['message_key'],'source_locale':r.source_locale,'text':r.text})
+# Same 100-column static raw-copy presentation for before/after. No live-app claim.
+for l in ['fr','es','ru','ur']:
+ for when in ['before','after']:
+  c=Console(width=100,file=io.StringIO(),record=True,color_system=None)
+  for x in changed:
+   if x['locale']==l and not x['message_key'].endswith('.share_empty'):c.print(Text(x['message_key'],style='bold'));c.print(Text(x['before_rendered' if when=='before' else 'rendered']));c.print()
+  if l in ['es','ru']:
+   d=catalogues[l,'wire.github']
+   for reason in ['reason_explicit','reason_unavailable_local']:
+    reasonparams={'failure':' ('+runtime.render_message(d['wire.github.failure_offline'],{},l)+')'} if 'unavailable' in reason else {}
+    r=runtime.render_message(d['wire.github.'+reason],reasonparams,l)
+    remedy='remedy_unavailable' if 'unavailable' in reason else 'remedy_explicit';cmd='lop network credential github repos --refresh' if 'unavailable' in reason else fixed['command']
+    m=runtime.render_message(d['wire.github.'+remedy],{'command':cmd},l)
+    source=oldcats[l,'wire.github'] if when=='before' else d
+    c.print(Text(reason,style='bold'));c.print(Text(runtime.render_message(source['wire.github.share_empty'],{'reason':r,'remedy':m},l)));c.print()
+  svg=c.export_svg(title=f'PR4052 R2 {l} {when} — raw CLI copy');(O/f'{l}-{when}.svg').write_text('\n'.join(line.rstrip() for line in svg.splitlines())+'\n')
+result={'head':HEAD,'base':BASE,'actual_auditor_model':'anthropic/claude-opus-5-5','fallback_this_resumed_round':'none observed','previous_round_actual_model':'openai/gpt-6.1-sol after Opus quota fallback','changed_value_count':len(changed),'retention':retention,'changed':changed,'renders':renders,'render_count':len(renders),'pseudo':pseudo,'rtl_probe':{'raw':ur,'projected':projected,'isolate_counts':{'RLI':1,'LRI':2,'PDI':3},'native_shaping_verified':False},'production_before_eligibility':preactivation,'unresolved_blocker_major_count':0,'all_prior_findings_resolved':['I-RU-PUSH','I-RU-WRAPPER','I-COMPOSE','I2-UR-01','I2-RU-01','I-FR-01','I-RU-02']}
+(O/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'changed_values':len(changed),'candidate_and_neighbor_renders':len(renders),'pseudo_cases':len(pseudo),'retained_pairs':len(retention),'source_and_context':'unchanged','prior_findings':'resolved','production_before_eligibility':'English as expected','output':str(O)},indent=2))

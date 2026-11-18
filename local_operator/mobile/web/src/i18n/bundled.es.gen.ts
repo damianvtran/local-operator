@@ -266,6 +266,18 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.action.stopping": "deteniendo",
     },
   },
+  "relay.diagram": {
+    "es": {
+      "relay.diagram.close": "Cerrar diagrama",
+      "relay.diagram.copied": "Copiado",
+      "relay.diagram.copy": "Copiar c\u00f3digo",
+      "relay.diagram.copy_failed": "No se pudo copiar",
+      "relay.diagram.error.title": "No se pudo dibujar este diagrama",
+      "relay.diagram.full_size": "Tama\u00f1o completo",
+      "relay.diagram.save": "Guardar SVG",
+      "relay.diagram.view": "Diagrama",
+    },
+  },
   "relay.health": {
     "es": {
       "relay.health.dropped_detail": "Tu m\u00e1quina no logra comunicarse con esta sesi\u00f3n ahora mismo y sigue intent\u00e1ndolo. Hasta que lo consiga, cualquier env\u00edo falla de inmediato y lo que escribiste se queda en el campo de texto.",

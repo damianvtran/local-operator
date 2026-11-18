@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.106.4"
+version = "0.107.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -451,6 +451,7 @@ local_operator = [
     # ever shipped again; tests/unit/mobile/test_web_package_data.py still
     # requires every asset any src file imports to be covered here.
     "mobile/web/src/fixtures/*.json",
+    "mobile/web/src/fixtures/*.ts",
     # `parity-sources.json` and any future non-fixture JSON the lib reads. The
     # cross-client `*.parity.json` fixtures this glob also matches are read only
     # by the `*.test.ts` files beside them (with `readFileSync`, so `tsc` never

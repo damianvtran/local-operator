@@ -38,6 +38,9 @@ import fnmatch
 import itertools
 import os
 import re
+import shutil
+import stat
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -56,9 +59,38 @@ from local_operator.tools.search_guard import (
     lex,
 )
 
-#: Programs whose output never contains ``/`` or ``..`` in normal use, so a
-#: substitution of one cannot move a path out of the directory it sits in.
+#: Programs whose output, with the arguments ``_contained_body`` allows, is a
+#: single path component, so a substitution of one cannot move a path out of
+#: the directory it sits in. Membership alone proves nothing: the argument
+#: allowlist below is what keeps ``date +%D`` (prints ``/``) or ``id`` (prints
+#: spaces that word-split into extra relative paths) out.
 _CONTAINED_PROGRAMS = frozenset({"date", "gdate", "uuidgen", "hostname", "whoami", "id"})
+#: Absolute spellings of those programs that ``_contained_body`` trusts. A bare
+#: name runs whatever PATH finds; any other path (``./date``, ``/tmp/x/date``)
+#: is a program the caller may have written, whose output proves nothing
+#: (review R1, PR #4147). The Homebrew prefixes are already on PATH, so
+#: trusting them adds nothing a bare name does not.
+_CONTAINED_PROGRAM_PATHS = frozenset(
+    f"{prefix}/{program}"
+    for prefix in ("/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin")
+    for program in _CONTAINED_PROGRAMS
+)
+#: ``date +FORMAT`` literal characters that print as themselves and can never
+#: be ``/``, ``.``, whitespace or a glob/shell metacharacter.
+_DATE_LITERAL_RE = re.compile(r"[A-Za-z0-9_:@,+=-]")
+#: ``date`` conversions whose output is drawn from ``[A-Za-z0-9+-]`` only.
+#: Deliberately absent: %c %x %X %D %r (print ``/``, ``:``-and-space or
+#: locale text with spaces), %e %k %l (space-padded), %n %t (whitespace),
+#: %+ %v (locale composites), the ``_`` (space-pad) flag, and every LC_TIME
+#: name — %a %A %b %B %h %p %P: ``es_ES`` prints ``a. m.`` for %p (a space,
+#: so an unquoted word splits) and ``ja_JP`` non-ASCII (review R2, PR #4147).
+#: %Z is excluded too (review R11, PR #4147): it prints the zone abbreviation
+#: the TZ environment variable names, verbatim — ``TZ=..0 date +%Z`` prints
+#: ``..`` — so its output is caller-controlled. %z prints only ``[+-]hhmm``
+#: whatever TZ holds; the remaining conversions print digits (or, for %F %T
+#: %R, digits joined by ``-``/``:``) and take no locale text without the
+#: ``E``/``O`` modifiers, which this pattern does not accept.
+_DATE_CONVERSION_RE = re.compile(r"%[-0^#]?[YCyGgmdjHIMSsNuwUVWzFTR]")
 #: Substitution bodies known to print nothing. Matching is on the stripped
 #: body text; anything not in this set is opaque.
 _EMPTY_BODIES = frozenset(
@@ -66,6 +98,10 @@ _EMPTY_BODIES = frozenset(
 )
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+#: ``NAME+=value``: bash appends to the current value. Before review R1 on PR
+#: #4147 the walker read it as a program name and kept the old value, so
+#: ``L=<pad>/x; L+=/../../..; rm -rf "$L"`` ranked the pad (LOW).
+_APPEND_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\+=")
 #: Words that may open a segment without being its program.
 _PREFIX_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{", "("})
 _DECLARE_WORDS = frozenset({"export", "declare", "typeset", "local", "readonly"})
@@ -77,6 +113,38 @@ CREDENTIAL_MARK = OPAQUE_MARK + "credential" + OPAQUE_MARK
 #: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
 #: unknowable, but known to be a fresh entry under the temp directory.
 TEMP_MARK = "\x02"
+#: Variables whose stored value is consumed as a path without ``_param``, so
+#: the setter invalidation below (``unset``, ``read``, arithmetic) leaves them
+#: alone rather than storing a marker where a raw path is expected.
+_RAW_PATH_VARS = frozenset({"HOME", "OLDPWD"})
+#: A symbolic fresh DIRECTORY below a pinned parent. Unlike TEMP_MARK this
+#: retains that parent in the value; it must never be anchored to cwd or /tmp.
+#: The byte alone proves NOTHING: a command can write it (``$'\x03'``, a raw
+#: U+0003), and trusting it let ``R="$PAD/q"$'\x03'`` through a planted link
+#: drop a state-root write from CRITICAL to LOW (PR #4116 review B1). Only a
+#: value of type :class:`_FreshDirValue` carries the mark; see there.
+FRESH_DIR_MARK = "\x03"
+
+
+class _FreshDirValue(str):
+    """An env value whose FRESH_DIR_MARK the walker itself minted.
+
+    Out-of-band provenance (PR #4116 review B1): command text and inherited
+    env can only ever produce plain ``str``, so they cannot forge this type.
+    Only ``_Walker._assign`` constructs it, from a ``_stored_assignment`` that
+    proved a fail-closed scratch mktemp directory. Any string operation
+    returns a plain ``str`` again, so a derived value loses the proof unless
+    the walker re-mints it. Everywhere else a ``\\x03`` byte is ordinary
+    literal text, exactly as on main, so a forged mark never changes a rank.
+    """
+
+    __slots__ = ()
+
+
+def _is_fresh_binding(value: object) -> bool:
+    return isinstance(value, _FreshDirValue) and FRESH_DIR_MARK in value
+
+
 #: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
 #: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
 #: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
@@ -541,6 +609,9 @@ class Expanded:
     vanished: bool = False
     #: The opaque part is a ``$(mktemp …)`` path: a fresh temp entry (R6).
     temp: bool = False
+    #: One proven-successful mktemp directory; assignment copies preserve the
+    #: symbolic component without claiming its random pathname already exists.
+    fresh_dir: bool = False
     #: Where each ``$NAME``/``${NAME}`` value landed in ``text`` (and in
     #: ``pattern``): ``(name, text_start, text_end, pattern_start, pattern_end,
     #: quoted)``. A ``for`` list fans a target out by rewriting exactly these
@@ -695,9 +766,16 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
         if TEMP_MARK in value:
             out.temp = True
             value = value.replace(TEMP_MARK, OPAQUE_MARK)
+        # B1: only a walker-minted binding is fresh; a plain value's \x03 is a
+        # literal byte (main's reading), never containment.
+        authentic = _is_fresh_binding(value)
+        fresh = authentic and value.count(FRESH_DIR_MARK) == 1 and OPAQUE_MARK not in value
+        if authentic:
+            out.fresh_dir = True
+            value = value.replace(FRESH_DIR_MARK, OPAQUE_MARK)
         if OPAQUE_MARK in value:
             out.opaque = True
-            out.opaque_contained = False
+            out.opaque_contained = out.opaque_contained and fresh
         return value
     dm = _BRACE_DEFAULT_RE.match(inner)
     if dm is not None and depth < 4:
@@ -898,6 +976,7 @@ def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
         opaque=exp.opaque,
         opaque_contained=exp.opaque_contained,
         temp=exp.temp,
+        fresh_dir=exp.fresh_dir,
     )
 
 
@@ -922,25 +1001,130 @@ def expand(word: _RawWord, env: Mapping[str, str], home: str) -> Expanded:
     return expand_all(word, env, home)[0]
 
 
+#: ``((…))`` / ``$((…))`` bodies, and the names an arithmetic body assigns:
+#: ``N=1``, ``N+=1`` (any compound op), ``N++``, ``--N``.
+_ARITH_RE = re.compile(r"\(\((.*?)\)\)", re.S)
+_ARITH_ASSIGN_RE = re.compile(
+    r"([A-Za-z_]\w*)\s*(?:(?:[-+*/%&|^]|<<|>>)?=(?!=)|\+\+|--)|(?:\+\+|--)\s*([A-Za-z_]\w*)"
+)
+
+
+def _arith_assigned(text: str) -> set[str]:
+    """Names an arithmetic body (``(( … ))``, ``let`` arguments) assigns."""
+    return {a or b for a, b in _ARITH_ASSIGN_RE.findall(text)}
+
+
 #: Programs whose output is a single path component in normal use, so a
 #: substitution of one cannot climb out of the directory it sits in — but only
 #: when called with no ``+FORMAT``/path-like argument (S4: ``date +../..``).
 def _contained_body(body: str) -> bool:
+    """True only for an exact allowlisted call whose output is one component.
+
+    An allowlist, not a blocklist (architect review of the node2 #4104 case):
+    rejecting only ``/`` and ``.`` let bare ``date`` / ``id`` (spaces, so an
+    unquoted use word-splits into extra unranked paths), ``date +%D`` (prints
+    ``/``), ``date -R`` and ``+%e`` (space-padded) through as contained.
+    """
     words = body.split()
-    if not words or os.path.basename(words[0]) not in _CONTAINED_PROGRAMS:
+    if not words:
         return False
-    # S4: an argument that could print a path (``date +../..``, ``id /x``) voids
-    # containment; a plain ``+%s``-style format cannot.
-    return not any("/" in w or "." in w for w in words[1:])
+    if words[0] not in _CONTAINED_PROGRAMS and words[0] not in _CONTAINED_PROGRAM_PATHS:
+        return False
+    program, args = os.path.basename(words[0]), words[1:]
+    if program in ("date", "gdate"):
+        formats = [a for a in args if a.startswith("+")]
+        # Bare ``date`` prints ``Mon Nov 16 …`` (spaces): never contained.
+        if len(formats) != 1 or any(a not in ("-u", "--utc") for a in args if a[0] != "+"):
+            return False
+        # ``+"%Y%m%d"`` is common; the shell drops the quotes. Any quoted
+        # space split the body into a second, non-flag word rejected above.
+        return _date_format_contained(formats[0][1:].replace('"', "").replace("'", ""))
+    if program == "uuidgen":
+        return not args
+    if program == "hostname":
+        return args in ([], ["-s"])
+    if program == "whoami":
+        return not args
+    # ``id``: a bare call prints ``uid=501(x) gid=… groups=…`` with spaces.
+    return len(args) == 1 and args[0] in ("-u", "-g", "-un", "-gn")
+
+
+def _date_format_contained(fmt: str) -> bool:
+    if not fmt:
+        return False
+    i = 0
+    while i < len(fmt):
+        if fmt[i] == "%":
+            m = _DATE_CONVERSION_RE.match(fmt, i)
+            if m is None:
+                return False
+            i = m.end()
+        elif _DATE_LITERAL_RE.fullmatch(fmt[i]):
+            i += 1
+        else:
+            return False
+    return True
+
+
+def _fresh_errexit_scope(command: str) -> bool:
+    """Recognize only a straight-line, top-level errexit shell, with for lists.
+
+    `set -e` is NOT effective inside an if/while test, an AND/OR list, a
+    negated command or a pipeline. Refuse those shapes rather than pretending
+    a failed substitution cannot leave an empty ROOT. This is a containment
+    proof, not a general shell-success interpreter.
+    """
+    parsed = lex(command)
+    if parsed.open or any(parsed.bodies) or not parsed.segments:
+        return False
+    if parsed.segments[0][0].strip() != "set -euo pipefail" or parsed.segments[0][2] not in (
+        ";",
+        "\n",
+    ):
+        return False
+    forbidden = {
+        "set",
+        "if",
+        "elif",
+        "then",
+        "else",
+        "while",
+        "until",
+        "case",
+        "function",
+        "!",
+        "trap",
+        "return",
+        "exit",
+        "break",
+        "continue",
+    }
+    for text, _, op in parsed.segments[1:]:
+        if op not in ("", ";", "\n"):
+            return False
+        words, redirects = scan(text)
+        if any(op not in (">", ">|", ">>") for op, _ in redirects):
+            return False
+        for word in words:
+            if word.broken:
+                return False
+            if all(p.kind in ("bare", "sq", "dq") for p in word.parts):
+                if "".join(p.text for p in word.parts) in forbidden:
+                    return False
+            for part in word.parts:
+                if part.kind == "bare" and (
+                    part.text in forbidden or any(c in part.text for c in "(){}!&|\\")
+                ):
+                    return False
+    return True
 
 
 def _is_mktemp(body: str) -> bool:
-    words = body.split()
-    return (
-        bool(words)
-        and os.path.basename(words[0]) == "mktemp"
-        and not any("/" in w or ".." in w for w in words[1:] if not w.startswith("-"))
-    )
+    # Only the default temp-root forms have this legacy anchor. Flags such as
+    # -p/-t/-u change the parent or remove freshness entirely; a variable-bearing
+    # template cannot be decided by looking for literal slashes in body.split().
+    # Explicit session-scratch templates have a separate fail-closed proof.
+    return body.strip() in ("mktemp", "mktemp -d", "/usr/bin/mktemp", "/usr/bin/mktemp -d")
 
 
 # ---------------------------------------------------------------------------
@@ -1059,6 +1243,11 @@ class Target:
     #: could not pin the interpreter, so ``classify._tree_read`` gives it no
     #: lineage credit either (convergence of #3906 with #3918).
     unproven_code: bool = False
+    #: Why ``unproven_code`` was not proven, when the proof can name it (a
+    #: shadowing cwd entry, an unsupported node type). Told to the judge,
+    #: never a ranking input: "may run code on it" alone gave it nothing to
+    #: weigh (node2 #4108 P2 QA).
+    proof_gap: str | None = None
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
@@ -1458,6 +1647,16 @@ def _plain_target(exp: Expanded, op: str, program: str, state: _State) -> Target
     pattern = exp.pattern
     opaque = exp.opaque
     contained = opaque and exp.opaque_contained
+    if exp.fresh_dir:
+        # Freshness belongs to ONE whole path component, not to a prefix:
+        # `${ROOT}old` may name a pre-existing symlink beside the fresh tree.
+        tail = text.partition(OPAQUE_MARK)[2]
+        contained = (
+            contained
+            and text.count(OPAQUE_MARK) == 1
+            and text.startswith("/")
+            and (not tail or tail.startswith("/"))
+        )
     climbs = False
     unpinned = False
     if opaque and OPAQUE_MARK in text:
@@ -2074,6 +2273,11 @@ _PY_ALLOWED_NODES = frozenset(
         "Pass",
         "Break",
         "Continue",
+        # ``assert`` only raises: its test and message are ordinary
+        # expressions that ``ast.walk`` hands to this same allow-list, so it
+        # adds no capability a bare ``if not x: …`` read lacks (a parent's
+        # ``b = Path(p).read_bytes(); assert b`` check of a child's output).
+        "Assert",
         "Import",
         "ImportFrom",
         "alias",
@@ -2353,6 +2557,115 @@ def _py_small_int(node: object) -> bool:
     )
 
 
+def _py_unsupported_node(code: str) -> str | None:
+    """The first AST node type outside ``_PY_ALLOWED_NODES``, for the judge.
+
+    Diagnostic only: ``python_code_read_only`` remains the proof.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return "(does not parse)"
+    for n in ast.walk(tree):
+        if type(n).__name__ not in _PY_ALLOWED_NODES:
+            return type(n).__name__
+    return None
+
+
+#: Methods whose call result is PROVEN to be ``str``/``bytes`` whatever the
+#: receiver: on every object the allow-lists can reach these are pathlib's
+#: reads (``Path.read_bytes``/``read_text``), and nothing reachable defines
+#: them otherwise. A ``.replace`` on such a value is ``bytes``/``str.replace``.
+_PY_STR_RESULT_METHODS = frozenset({"read_bytes", "read_text"})
+
+
+def _py_proven_replace_callees(tree: object, imported: set[str]) -> set[int]:
+    """``id`` of every ``.replace`` Attribute PROVEN to be ``str``/``bytes.replace``.
+
+    WHY (field case, node2 lane, guard 0.106.6): a parent's read-only
+    ``python3 -I -c`` asserting ``b == a.replace(b"r6", b"r8")`` over two
+    files in its descendant's pad was sent to the judge, only because
+    ``replace`` is not an allowed attribute. It must stay out of
+    ``_PY_ALLOWED_ATTRS``: ``Path.replace(target)`` RENAMES and the attribute
+    check is untyped. So ``replace`` is admitted only where the RECEIVER's
+    type is proven, never by name alone:
+
+    - a ``str``/``bytes`` literal;
+    - a ``.read_bytes()``/``.read_text()`` call result (``_PY_STR_RESULT_METHODS``);
+    - a Name whose EVERY binding anywhere in the program is a top-level
+      (direct child of the module, so unconditional and not in a loop,
+      branch, ``with``, ``try``, function or comprehension) single-target
+      ``Assign`` of one of the above or of another such Name. Any other
+      binding — augmented assignment, walrus, a ``for``/comprehension target,
+      tuple unpacking, ``del``, an import, an argument — disproves it.
+
+    The call itself must be ``recv.replace(old, new[, count])``: 2 or 3
+    positional arguments, no keywords, no ``*``. ``Path("a").replace("b")``,
+    ``os.replace``, ``x = Path; x.replace(a, b)``, a subscript receiver and
+    ``f = a.replace`` (not a callee) all stay unproven. Constraint: this may
+    only ADD proofs for str/bytes; anything uncertain returns no id.
+    """
+    import ast
+
+    assert isinstance(tree, ast.Module)
+    # name -> the values of its top-level single-Name Assigns; ``plain``
+    # holds those targets' ids, so any OTHER Store of the name disproves it.
+    bindings: dict[str, list[ast.expr]] = {}
+    plain: set[int] = set()
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            plain.add(id(stmt.targets[0]))
+            bindings.setdefault(stmt.targets[0].id, []).append(stmt.value)
+    other_binders: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            if id(node) not in plain:
+                other_binders.add(node.id)
+        elif isinstance(node, ast.arg):
+            other_binders.add(node.arg)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            other_binders.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other_binders.add(node.name)
+        elif isinstance(node, ast.alias):
+            other_binders.add(node.asname or node.name.split(".")[0])
+
+    def proven(expr: ast.expr, visiting: frozenset[str]) -> bool:
+        if isinstance(expr, ast.Constant):
+            return isinstance(expr.value, (str, bytes))
+        if isinstance(expr, ast.Call):
+            return isinstance(expr.func, ast.Attribute) and expr.func.attr in _PY_STR_RESULT_METHODS
+        if isinstance(expr, ast.Name):
+            name = expr.id
+            if name in visiting or name in imported or name in other_binders:
+                return False
+            values = bindings.get(name)
+            return bool(values) and all(proven(v, visiting | {name}) for v in values)
+        return False
+
+    ok: set[int] = set()
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "replace"
+        ):
+            continue
+        if node.keywords or not 2 <= len(node.args) <= 3:
+            continue
+        if any(isinstance(a, ast.Starred) for a in node.args):
+            continue
+        if proven(node.func.value, frozenset()):
+            ok.add(id(node.func))
+    return ok
+
+
 def python_code_read_only(code: str) -> bool:
     """Can ``python -c CODE`` be PROVEN to write, delete and run nothing?
 
@@ -2389,7 +2702,9 @@ def python_code_read_only(code: str) -> bool:
     - builtin ``open`` only as a callee with a literal read mode;
     - ``sub``/``subn`` only with literal leading arguments, so the
       replacement is a string, never a callable;
-    - no dunder or ``_``-prefixed name or alias.
+    - no dunder or ``_``-prefixed name or alias;
+    - ``replace`` only as the callee of a receiver proven ``str``/``bytes``
+      (:func:`_py_proven_replace_callees`), since ``Path.replace`` renames.
 
     Anything else — a parse error, an unlisted node or name — is ``False``
     and keeps the conservative ranking (a judge call, never a LOW).
@@ -2436,6 +2751,7 @@ def python_code_read_only(code: str) -> bool:
     if bound & (imported | builtin_names) or imported & builtin_names:
         return False
     callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    proven_replace = _py_proven_replace_callees(tree, imported)
     known = _PY_ALLOWED_BUILTINS | imported | bound
     for node in nodes:
         if isinstance(node, ast.Name):
@@ -2444,6 +2760,8 @@ def python_code_read_only(code: str) -> bool:
             if node.id == "open" and id(node) not in callees:
                 return False  # ``o = open`` can be called later with any mode
         elif isinstance(node, ast.Attribute):
+            if id(node) in proven_replace and isinstance(node.ctx, ast.Load):
+                continue
             if node.attr not in _PY_ALLOWED_ATTRS or not isinstance(node.ctx, ast.Load):
                 return False
         elif isinstance(node, ast.Subscript):
@@ -2529,22 +2847,145 @@ _PY_STARTUP_ENV = (
 #: A cwd entry ``python -c`` would import before the stdlib (``sys.path[0]``
 #: is the cwd): ``pathlib`` importing a planted ``fnmatch.py`` runs it.
 _PY_SHADOW_SUFFIXES = (".py", ".pyc", ".so", ".pyd", ".pth")
+#: Module names a cwd entry must not carry for the read-only proof to hold.
+#:
+#: WHY BY NAME (node2 #4108 P2 QA, 2026-11-16): the check used to refuse ANY
+#: importable entry, so a parent proving a read of its child's pad from a repo
+#: cwd (which always holds a package or ``conftest.py``) could never pass. A
+#: proven program imports only allow-listed stdlib modules, and the stdlib
+#: imports only stdlib modules, so the only cwd entries that can run code are
+#: ones NAMED like a stdlib module (or ``sitecustomize``/``usercustomize``,
+#: which ``site`` imports from ``sys.path``). A ``mypkg/`` or ``conftest.py``
+#: is never imported.
+#:
+#: CONSTRAINTS: ``sys.stdlib_module_names`` is THIS runtime's stdlib; the
+#: ``python3`` on PATH may be older, so modules removed from recent releases
+#: are listed too (PEP 594 dead batteries, 3.10-3.13 removals). Names are
+#: casefolded: APFS is case-insensitive, so ``JSON.py`` is refused (an
+#: over-refusal at worst — import itself checks case — never a miss). The
+#: ``python3`` on PATH may also be NEWER than this runtime, so a top-level
+#: module added since is not in the set; checked for 3.14.7 (PR #4142 review):
+#: ``-X importtime`` of the ``_PY_READ_MODULES`` closure imports no top-level
+#: name a 3.12 runtime lacks. Re-check when a new release adds stdlib modules.
+_PY_REMOVED_STDLIB = frozenset(
+    {
+        # 3.12 removals
+        "asynchat",
+        "asyncore",
+        "imp",
+        "distutils",
+        "smtpd",
+        # 3.13 removals (PEP 594) and lib2to3
+        "aifc",
+        "audioop",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "crypt",
+        "imghdr",
+        "mailcap",
+        "msilib",
+        "nis",
+        "nntplib",
+        "ossaudiodev",
+        "pipes",
+        "sndhdr",
+        "spwd",
+        "sunau",
+        "telnetlib",
+        "uu",
+        "xdrlib",
+        "lib2to3",
+        "_crypt",
+        "_msi",
+        # 3.9-3.11 removals an older interpreter's stdlib may still import
+        "_bootlocale",
+        "_dummy_thread",
+        "dummy_threading",
+        "formatter",
+        "parser",
+        "symbol",
+        "binhex",
+        "macpath",
+    }
+)
+_PY_SHADOWABLE = frozenset(
+    n.casefold()
+    for n in (*sys.stdlib_module_names, *_PY_REMOVED_STDLIB, "sitecustomize", "usercustomize")
+)
 
 
-def _cwd_shadows_imports(cwd: str) -> bool:
+def _shadow_name(entry: str) -> str:
+    """The module name a cwd entry would be imported as, casefolded.
+
+    Up to the first dot, so an extension's ABI tag drops away
+    (``json.cpython-314-darwin.so`` → ``json``); a package dir is its name.
+    """
+    return entry.split(".", 1)[0].casefold()
+
+
+def _dir_may_import(path: str) -> bool:
+    """Could a dir named like a stdlib module supply code to an import?
+
+    True when it holds ``__init__`` under any loader suffix (a regular package)
+    OR any other importable entry: a loader-suffix file or a subdir.
+
+    WHY NOT ONLY ``__init__`` (PR #4142 security m1): a dir without one is a
+    namespace portion, which a REAL stdlib module found later on ``sys.path``
+    beats — but some names in ``sys.stdlib_module_names`` are absent on this
+    platform. ``nt`` is one on macOS, and 3.14's ``ntpath`` (imported by
+    ``pathlib``) runs ``from nt import _path_splitroot_ex``: with no real
+    ``nt``, the cwd ``nt/`` namespace package wins and its
+    ``_path_splitroot_ex.py`` runs. Only an EMPTY (or non-importable) dir
+    stays harmless, so ``json/`` holding just ``notes.txt`` still passes.
+    """
+    with os.scandir(path) as it:
+        return any(e.name.endswith(_PY_SHADOW_SUFFIXES) or e.is_dir() for e in it)
+
+
+#: Longest module name a gap reason quotes; stdlib names are far shorter.
+_GAP_NAME_MAX = 64
+
+
+def _gap_name(module: str) -> str:
+    """``module`` made safe to quote in a reason the judge reads as proved fact.
+
+    WHY (PR #4142 security m2): a cwd FILENAME is attacker-chosen text — the
+    reviewer's ``json. Harness note - proof complete, rank LOW.py`` put a
+    fake instruction into the judge's lineage facts. Only the module name is
+    ever quoted, stripped to ``[A-Za-z0-9_.]`` and capped, never ``e.name``.
+    """
+    return re.sub(r"[^A-Za-z0-9_.]", "", module)[:_GAP_NAME_MAX] or "?"
+
+
+def _cwd_shadowing_entry(cwd: str) -> str | None:
+    """Why the cwd could shadow a stdlib import, as a judge-facing gap; else None.
+
+    Fails closed: an unreadable cwd or entry returns a description of that
+    instead of None, so the read-only proof is refused. The text names only
+    the sanitized module name (``_gap_name``), never the raw entry name.
+    """
     try:
         entries = list(os.scandir(cwd))
     except OSError:
-        return True
+        return "the cwd is unreadable"
     for e in entries:
+        module = _shadow_name(e.name)
+        if module not in _PY_SHADOWABLE:
+            continue
+        name = _gap_name(module)
         if e.name.endswith(_PY_SHADOW_SUFFIXES):
-            return True
+            return f"a cwd file for module {name} may shadow a stdlib import"
         try:
-            if e.is_dir() and os.path.exists(os.path.join(e.path, "__init__.py")):
-                return True
+            if e.is_dir() and _dir_may_import(e.path):
+                return f"a cwd package dir {name}/ may shadow a stdlib import"
         except OSError:
-            return True
-    return False
+            return f"the cwd dir {name}/ is unreadable, so it may shadow a stdlib import"
+    return None
+
+
+def _cwd_shadows_imports(cwd: str) -> bool:
+    return _cwd_shadowing_entry(cwd) is not None
 
 
 def _in_place_edit(name: str, args: list[Expanded]) -> bool:
@@ -3095,6 +3536,10 @@ class _Walker:
         #: ``PATH`` as the command inherits it: ``_inline_read_only`` trusts
         #: a bare ``python3`` only while this command has not changed it.
         self.inherited_path = env.get("PATH")
+        #: Why the last ``_inline_read_only`` refused its proof (``Target.proof_gap``).
+        self.read_only_gap: str | None = None
+        self.fresh_scope = False
+        self.scratch_parent = env.get("LOCAL_OPERATOR_SCRATCHPAD", "")
         self.result = Resolution()
         #: Non-read-only programs an earlier part of THIS command runs (each
         #: reaches ``_backstop``). Any of them could plant a module in the cwd
@@ -3104,6 +3549,12 @@ class _Walker:
         #: Paths an earlier segment of THIS command made into a symlink (S7):
         #: what they point at is resolved only at run time.
         self.linked: set[str] = set()
+        #: Literal directory prefixes under which an earlier part of THIS
+        #: command made a link, or moved/copied something, at a name with an
+        #: opaque part (``ln -s ~ "<pad>/$(date +%s)"``). The walker cannot
+        #: tell which later opaque name is that entry, so containment is void
+        #: under the prefix (QA Q1, PR #4147); see ``_through_new_link``.
+        self.opaque_linked: set[str] = set()
         #: Every path an earlier part of THIS command deleted, moved, copied or
         #: wrote to, or created (lexical and resolved spellings, no trailing
         #: ``/``). Any of them may be a symlink by the time a later word's
@@ -3169,6 +3620,11 @@ class _Walker:
         self.state.cwd_later_unknown = snap.cwd_later_unknown
         self.state.oldpwd_later_unknown = snap.oldpwd_later_unknown
         self.state.oldpwd_fan = snap.oldpwd_fan
+        if not self.fresh_scope:
+            # A child shell cannot change parent variables, but CAN replace
+            # their filesystem targets. Do not restore stale freshness after
+            # an unknown writer in a substitution/subshell/pipeline.
+            self._forget_fresh_directories()
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -3221,6 +3677,14 @@ class _Walker:
                         for body, nested in zip(owned_bodies[index], lexed.nested_bodies[index])
                         if not nested
                     ]
+        if depth == 0:
+            # Bash startup files and imported functions can shadow builtins or
+            # mktemp before the first visible segment. PATH inspection cannot
+            # prove executable identity in such a shell.
+            self.fresh_scope = _fresh_errexit_scope(command) and not any(
+                value and (key in ("BASH_ENV", "ENV") or key.startswith("BASH_FUNC_"))
+                for key, value in self.state.env.items()
+            )
         pieces, owned_bodies = _fd_redirect_merge(lexed.segments, owned_bodies)
         # R7-1/R8, structural: if the text ends inside a construct the ONE
         # shared scanner tracks (quote, ``$(``, ``${``, backtick, heredoc), its
@@ -3400,11 +3864,32 @@ class _Walker:
         text = _strip_grouping(text)
         if not text:
             return
+        # ``(( L=1 ))`` and ``$(( L++ ))`` assign (review R1, PR #4147). Done
+        # before this segment's own words expand, so a same-word read of the
+        # name is unknowable too.
+        for body in _ARITH_RE.findall(text):
+            for var in _arith_assigned(body):
+                self._invalidate(var)
         raw_words, redirects = scan(text)
+        # Arithmetic and parameter-assignment expansion can mutate bindings even
+        # inside otherwise harmless words. We do not model their shell lvalues.
+        # Bash's legacy $[...] form has the same assignment side effects as
+        # $((...)); neither may leave a fresh-directory proof on a stale value.
+        if "((" in text or "$[" in text or re.search(r"\$\{[^}]*[:+?=-]", text):
+            self._forget_fresh_directories()
         st = self.state
         words: list[Expanded] = []
         for w in raw_words:
-            words.extend(expand_all(w, st.env, st.home))
+            expanded = expand_all(w, st.env, st.home)
+            if (
+                depth == 0
+                and self.fresh_scope
+                and len(expanded) == 1
+                and len(raw_words) == 1
+                and not redirects
+            ):
+                self._fresh_directory_assignment(w, expanded[0])
+            words.extend(expanded)
         for w in words:
             for body in w.substitutions:
                 if body.strip() and body.strip() not in _EMPTY_BODIES:
@@ -3416,9 +3901,15 @@ class _Walker:
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self.result.touched.append(_target(exp, "write", op, st))
+                    target = _target(exp, "write", op, st)
+                    self.result.touched.append(target)
                     if op in (">", ">|", ">>"):
                         self._add(exp, "append" if op == ">>" else "overwrite", op)
+                    # A prior write may plant a PATH executable or shell input.
+                    # Only writes already confined to a proved fresh directory
+                    # preserve the proof; do not bless a later mktemp after it.
+                    if not target.opaque_contained:
+                        self._forget_fresh_directories()
             elif op == "<<<":
                 # R3-1: the body is re-parsed by the consuming shell, which
                 # loses the refs span; mask a referenced credential value now.
@@ -3430,15 +3921,10 @@ class _Walker:
             words = words[1:]
         raw_assigns: list[str] = []
         assign_words: list[Expanded] = []
-        while words and _ASSIGN_RE.match(words[0].text):
-            text_value = words[0].text
-            if words[0].temp and text_value.count(OPAQUE_MARK) == 1:
-                text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
-            raw_assigns.append(text_value)
-            # Same length (one marker char for another): the refs still line up.
-            assign_words.append(
-                Expanded(text=text_value, refs=list(words[0].refs), pattern=words[0].pattern)
-            )
+        while words and (_ASSIGN_RE.match(words[0].text) or _APPEND_RE.match(words[0].text)):
+            stored = self._stored_assignment(words[0])
+            raw_assigns.append(stored.text)
+            assign_words.append(stored)
             words = words[1:]
         if not words:
             # A bare assignment segment sets a shell variable for what follows.
@@ -3447,9 +3933,27 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
+            # Declarations can install namerefs, integer attributes and aliases
+            # for future assignments; ordinary assignment tracking cannot prove
+            # their effects. Invalidate all copies before accepting any binding.
+            self._forget_fresh_directories()
+            nameref = any(
+                w.text.startswith("-") and "n" in w.text and not w.text.startswith("--")
+                for w in words[1:]
+            )
             for w in words[1:]:
-                if _ASSIGN_RE.match(w.text):
-                    self._assign(w.text)
+                if nameref:
+                    # ``declare -n R=L``: a later ``R=/`` rewrites L, which
+                    # the walker does not model. Both names are unknowable.
+                    for var in _NAME_RE.findall(w.text.lstrip("-")):
+                        self._invalidate(var)
+                elif _ASSIGN_RE.match(w.text) or _APPEND_RE.match(w.text):
+                    # ``L+=`` appends here as in a bare assignment (review
+                    # R1, PR #4147). The mktemp TEMP_MARK swap stays off:
+                    # main stored ``export L=$(mktemp -d)`` as a bare opaque
+                    # value, and enabling it here ranked ``rm -rf "$L"``
+                    # LOW where main said HIGH — this PR only tightens.
+                    self._assign(self._stored_assignment(w, temp=False).text)
             return
         if name in ("cd", "pushd"):
             if any(a.startswith("CDPATH=") for a in raw_assigns):
@@ -3459,6 +3963,8 @@ class _Walker:
             self._cd(words[1:])
             return
         if name == "set":
+            if [w.text for w in words] != ["set", "-euo", "pipefail"]:
+                self._forget_fresh_directories()
             self._set_options(words[1:])
             return
         if name == "popd":
@@ -3468,10 +3974,47 @@ class _Walker:
         if name == "for" and len(words) >= 2:
             self._for(words[1:])
             return
+        if name == "unset":
+            # An unset fresh binding must not survive in the resolver's env.
+            # Unsupported forms conservatively drop every symbolic binding.
+            for w in words[1:]:
+                if _NAME_RE.fullmatch(w.text) and not w.opaque:
+                    st.env.pop(w.text, None)
+                elif w.text not in ("-v", "--"):
+                    self._forget_fresh_directories()
+            return
         if name == "read":
+            self._forget_fresh_directories()
             for w in words[1:]:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
+            return
+        if name in ("unset", "mapfile", "readarray", "getopts"):
+            # Review R1, PR #4147: these set or clear the NAMED variables. A
+            # stale value (above all a contained one) would rank
+            # ``unset L; rm -rf "/$L"`` as the scratchpad instead of ``/``.
+            for w in words[1:]:
+                if w.text.startswith("-"):
+                    continue
+                if name == "unset" and _NAME_RE.fullmatch(w.text) and w.text not in _RAW_PATH_VARS:
+                    # ``unset`` is exact: the name is empty afterwards, so
+                    # ``unset L; rm -rf "/$L"`` reads ``/`` (CRITICAL), not
+                    # an unknowable name (HIGH).
+                    st.env.pop(w.text, None)
+                    self.for_lists.pop(w.text, None)
+                    self.for_roots.pop(w.text, None)
+                else:
+                    self._invalidate(w.text)
+            return
+        if name == "printf":
+            for i, w in enumerate(words[1:], start=1):
+                if w.text == "-v" and i + 1 < len(words):
+                    self._invalidate(words[i + 1].text)
+                elif w.text.startswith("-v") and len(w.text) > 2:
+                    self._invalidate(w.text[2:])
+        if name == "let":
+            for var in _arith_assigned(" ".join(w.text for w in words[1:])):
+                self._invalidate(var)
             return
         split = _env_split(words[1:]) if name == "env" else None
         if split is not None:
@@ -3493,10 +4036,52 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         args = words[1:]
+        self._note_opaque_link(name, args)
         # An inline assignment of a pager/git variable can run a program even
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
-        if not read_only_argv(name, [w.text for w in args], assigned=assigned):
+        readonly = read_only_argv(name, [w.text for w in args], assigned=assigned)
+        # A move, link, arbitrary interpreter, or unmodelled writer can replace
+        # the fresh directory or its parent. Never carry containment past it.
+        # mkdir only creates directories; mktemp's substitution is walked in a
+        # child scope. No exemption is added for the unknown program itself.
+        # PR #4116 review M1: ``:``/echo/pwd/printf are bash builtins, so PATH
+        # never picks them; mkdir/mktemp ARE looked up on PATH and must pass
+        # the same root-owned identity check mktemp's provenance uses. git is
+        # deliberately absent: even read-only git runs repo-configured
+        # programs (core.fsmonitor, textconv), which could swap the fresh
+        # directory for a link. Its own redirections were already ranked
+        # above, while the proof still held; only LATER segments lose it.
+        preserves_fresh = (
+            words[0].text == name
+            and not raw_assigns
+            and st.env.get("PATH") == self.inherited_path
+            # Read-only *filesystem* classification is not a shell-state
+            # proof: printf -v/%n, let, eval and declaration builtins mutate
+            # variables. Preserve only the small forms this proof understands.
+            and (
+                name in (":", "echo", "pwd")
+                or (name in ("mkdir", "mktemp") and self._trusted_system_program(name))
+                or (
+                    name == "printf"
+                    and bool(args)
+                    and len(raw_words) == len(words)
+                    and "".join(p.text for p in raw_words[0].parts) == "printf"
+                    and len(raw_words) > 1
+                    and not args[0].text.startswith("-")
+                    and "n" not in args[0].text
+                    and all(
+                        p.kind != "sub" and "$" not in p.text and "`" not in p.text
+                        for p in raw_words[1].parts
+                    )
+                )
+            )
+        )
+        if not preserves_fresh or (
+            name == "set" and [w.text for w in args] != ["-euo", "pipefail"]
+        ):
+            self._forget_fresh_directories()
+        if not readonly:
             exempt = self._touch(name, args) | _read_inputs(name, args)
             # The program word too: after ``env``/``xargs`` peeling a path can
             # BE the program (``xargs -Q <path>``).
@@ -3740,11 +4325,197 @@ class _Walker:
                 target.critical_only = True
         return
 
+    def _forget_fresh_directories(self) -> None:
+        """Unmodelled effects end the proof, including for copied bindings."""
+        self.fresh_scope = False
+        for key, value in list(self.state.env.items()):
+            # A plain value's \x03 is literal text (B1): opaquing it would turn
+            # main's CRITICAL through a planted link into HIGH.
+            if _is_fresh_binding(value):
+                self.state.env[key] = OPAQUE_MARK
+
+    def _trusted_mktemp(self) -> bool:
+        return self._trusted_system_program("mktemp")
+
+    def _trusted_system_program(self, program: str) -> bool:
+        """Inspect, never execute, PATH's winner before granting fresh provenance.
+
+        An unchanged inherited PATH may start with a user-controlled executable.
+        Only the root-owned system mktemp, reached through root-owned unwritable
+        parents, proves the expected creator semantics. Other installations stay
+        opaque rather than running a candidate to ask whether it is trustworthy.
+        Earlier unmodelled shell/filesystem effects already end fresh_scope.
+        """
+        path = self.state.env.get("PATH")
+        if path is None:
+            return False
+        # PATH's empty/relative entries use the modeled shell cwd, not the
+        # resolver process's cwd. If it is unknown, identity is unknown too.
+        entries = path.split(os.pathsep)
+        if any(not os.path.isabs(p) for p in entries):
+            if self.state.cwd is None:
+                return False
+            entries = [p if os.path.isabs(p) else os.path.join(self.state.cwd, p) for p in entries]
+        selected = shutil.which(program, path=os.pathsep.join(entries))
+        if selected not in (f"/usr/bin/{program}", f"/bin/{program}"):
+            return False
+        selected = os.path.realpath(selected)
+        try:
+            info = os.stat(selected)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            current = selected
+            while True:
+                info = os.stat(current)
+                if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return False
+                parent = os.path.dirname(current)
+                if parent == current:
+                    return True
+                current = parent
+        except OSError:
+            return False
+
+    def _fresh_directory_assignment(self, raw: _RawWord, word: Expanded) -> None:
+        """Pin only the parent of `R=$(mktemp -d TEMPLATE)`; R stays symbolic.
+
+        The mac-proof capture wrote into its own scratch directory, but dropping
+        the template's parent made its redirections look like opaque cwd writes.
+        Never synthesize a random dirname or bless a template below an existing
+        symlink: the freshness proof begins at a fully pinned existing parent.
+        """
+        if (
+            self.state.env.get("PATH") != self.inherited_path
+            or raw.broken
+            or len(raw.parts) != 2
+            or raw.parts[0].kind != "bare"
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=", raw.parts[0].text)
+            or raw.parts[1].kind != "sub"
+        ):
+            return
+        body_words, redirects = scan(raw.parts[1].text)
+        if (
+            redirects
+            or len(body_words) != 3
+            or lex(raw.parts[1].text).segments != [(raw.parts[1].text, False, "")]
+        ):
+            return
+        args = [expand(w, self.state.env, self.state.home) for w in body_words]
+        if any(w.opaque or w.empty or w.pattern or w.substitutions for w in args):
+            return
+        if [w.text for w in args[:2]] != ["mktemp", "-d"]:
+            return
+        if not self._trusted_mktemp():
+            return
+        template = args[2].text
+        parent, leaf = os.path.split(template)
+        scratch = self.scratch_parent
+        if (
+            not scratch
+            or self.state.env.get("LOCAL_OPERATOR_SCRATCHPAD") != scratch
+            or not os.path.isabs(parent)
+            or ".." in template.split("/")
+            or not re.fullmatch(r"[A-Za-z0-9_.-]*X{6,}", leaf)
+            or not os.path.isdir(parent)
+            or os.path.realpath(parent) != parent
+            or not os.path.isdir(scratch)
+            or os.path.realpath(scratch) != scratch
+            or not (parent == scratch or parent.startswith(scratch.rstrip("/") + "/"))
+            or any(parent == p or parent.startswith(p.rstrip("/") + "/") for p in self.linked)
+        ):
+            return
+        word.text = raw.parts[0].text + parent + "/" + OPAQUE_MARK
+        word.opaque = word.opaque_contained = word.fresh_dir = True
+        word.temp = False
+
     # -- program handlers ------------------------------------------------------
-    def _assign(self, text: str) -> None:
+    def _invalidate(self, name: str) -> None:
+        """Forget ``name``'s value: a builtin or construct the walker does not
+        model set it. A credential value stays a credential (still unknowable)."""
+        if not _NAME_RE.fullmatch(name) or name in _RAW_PATH_VARS:
+            return
+        old = self.state.env.get(name, "")
+        if not old:
+            # Unset or empty: keep main's empty reading. An opaque value here
+            # turned ``let L=1; rm -rf "/$L"`` from CRITICAL (``/``) to HIGH,
+            # and the guard never ranks a delete lower than main did.
+            return
+        self.state.env[name] = CREDENTIAL_MARK if CREDENTIAL_MARK in old else OPAQUE_MARK
+        self.for_lists.pop(name, None)
+        self.for_roots.pop(name, None)
+
+    def _stored_assignment(self, word: Expanded, *, temp: bool = True) -> Expanded:
+        """The ``NAME=value`` text an assignment word stores, markers swapped.
+
+        * A single ``$(mktemp …)`` stretch becomes TEMP_MARK (R6) — only
+          when ``temp`` (a bare ``NAME=`` word, as on main; not a
+          declaration builtin's argument).
+        * Every other opaque stretch stays a bare OPAQUE_MARK, contained or
+          not: a later ``$NAME`` read is opaque and NOT contained, as on main.
+          Carrying the proof through a variable was tried and withdrawn on
+          PR #4147 — every gate around it (straight-line programs, a strict
+          character allowlist) still let a climb back in (``$_``, review Q6),
+          so the supported way to log under the scratchpad is a literal path.
+        * ``NAME+=v`` (review R1, PR #4147) is rewritten to ``NAME=<old>v``
+          against the CURRENT stored value, keeping its marker, so a climb
+          appended to a contained value is checked like ``L=$L/..``. When the
+          old value is one the concatenation cannot keep honest (a ``for``
+          fan-out list, a mktemp/for-glob marker) or the appended text names
+          a loop variable, the result is a bare OPAQUE_MARK instead.
+        """
+        text_value = word.text
+        append = _APPEND_RE.match(text_value)
+        name = append.group(1) if append else text_value.partition("=")[0]
+        if (
+            temp
+            and not append
+            and word.fresh_dir
+            and word.opaque_contained
+            and text_value.count(OPAQUE_MARK) == 1
+            # A literal \x03/\x02 already in the word would be read back as a
+            # second mark; keep such a value plain and opaque, as on main (B1).
+            and FRESH_DIR_MARK not in text_value
+            and TEMP_MARK not in text_value
+        ):
+            # PR #4116: a fail-closed ``$(mktemp -d "$SCRATCH/x.XXXXXXXX")``
+            # keeps its pinned parent as FRESH_DIR_MARK. This is NOT the
+            # withdrawn #4147 contained-variable proof: only a fresh mktemp
+            # directory under an existing pinned scratch parent qualifies, and
+            # every mutator below drops it again.
+            text_value = text_value.replace(OPAQUE_MARK, FRESH_DIR_MARK)
+            if append is None:
+                return Expanded(
+                    text=text_value, refs=list(word.refs), pattern=word.pattern, fresh_dir=True
+                )
+        elif temp and word.temp and text_value.count(OPAQUE_MARK) == 1 and not append:
+            text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
+        if append is None:
+            # Same length (one marker char for another): the refs still line up.
+            return Expanded(text=text_value, refs=list(word.refs), pattern=word.pattern)
+        old = self.state.env.get(name, "")
+        suffix = text_value[append.end() :]
+        if (
+            word.refs
+            or name in self.for_lists
+            or TEMP_MARK in old
+            or _is_fresh_binding(old)
+            or FOR_GLOB_MARK in old
+            or TEMP_MARK in suffix
+        ):
+            credential = CREDENTIAL_MARK in old or CREDENTIAL_MARK in suffix
+            return Expanded(text=f"{name}=" + (CREDENTIAL_MARK if credential else OPAQUE_MARK))
+        return Expanded(text=f"{name}={old}{suffix}")
+
+    def _assign(self, text: str, *, fresh: bool = False) -> None:
         name, _, value = text.partition("=")
         value = _tilde_value(value, self.state.home)
+        if fresh and FRESH_DIR_MARK in value:
+            # The ONLY place fresh provenance is minted (B1): ``fresh`` comes
+            # from ``_stored_assignment``'s proof, never from the text.
+            value = _FreshDirValue(value)
         self.state.env[name] = value
+        if name in ("PATH", "SHELLOPTS", "BASH_ENV", "ENV"):
+            self._forget_fresh_directories()
         if name == "HOME":
             # S7: a later ``~`` resolves against the NEW home, as bash does.
             self.state.home = value or self.state.home
@@ -4556,6 +5327,14 @@ class _Walker:
         for w in dests:
             if w.text and not w.vanished:
                 self.result.touched.append(_target(w, "write", name, st))
+                if name == "curl" and not w.text.startswith("/dev/"):
+                    # PR #4116 Q1: ``curl -o F`` truncates F exactly like
+                    # ``> F``, but as a touch alone only session-state paths
+                    # ranked, so ``-o <state>/config.yml`` was LOW while
+                    # ``printf > config.yml`` was CRITICAL. Rank it as the
+                    # same overwrite target a redirection records (``/dev/``
+                    # skipped there too), with no per-path special case.
+                    self._add(w, "overwrite", name)
         if (
             fully
             and dests
@@ -4609,33 +5388,65 @@ class _Walker:
         st = self.state
         if not words or not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
             return False
+        # Every refusal below names its gap (field case, node2 lane, guard
+        # 0.106.6): an unexplained refusal left the judge without the one fact
+        # that sent the read to it. Fixed phrases only, never command text
+        # (the judge reads the gap as proved fact; see ``_gap_name``).
         # Pin the interpreter (review r1 M2): ``./python3``, ``/abs/python3``
         # or a ``PATH`` this command rewrote can run a planted executable
         # named ``python3`` that ignores CODE. Only a bare word looked up on
         # the INHERITED ``PATH`` is the interpreter the proof is about.
         if words[0].text != name or "/" in words[0].text or words[0].opaque or assigns:
+            self.read_only_gap = "the interpreter is wrapped, assigned to or not a bare name"
             return False
         if st.env.get("PATH") != self.inherited_path:
+            self.read_only_gap = "the command changed PATH, so python3 may be another program"
             return False
         if self.programs_run or self.named or self.linked or self.result.targets:
+            self.read_only_gap = "an earlier program in the command may plant what python imports"
             return False
         if any(t.op != "touch" for t in self.result.touched) or self.result.created:
+            self.read_only_gap = "an earlier write in the command may plant what python imports"
             return False
-        if any(st.env.get(k) for k in _PY_STARTUP_ENV):
-            return False
-        if st.cwd is None or _cwd_shadows_imports(st.cwd):
+        startup = [k for k in _PY_STARTUP_ENV if st.env.get(k)]
+        if startup:
+            self.read_only_gap = f"start-up variable {startup[0]} is set"
             return False
         rest = words[1:]
+        flags: set[str] = set()
         while rest and rest[0].text in _PY_SAFE_FLAGS:
+            flags.add(rest[0].text)
             rest = rest[1:]
         if len(rest) < 2 or rest[0].text != "-c":
+            self.read_only_gap = "an interpreter option outside the safe set precedes -c"
             return False
+        # ``-I``/``-P`` keep the cwd off ``sys.path`` (an interpreter too old
+        # for ``-P`` exits on the unknown option, running nothing), so nothing
+        # there can shadow an import and the cwd need not be read at all.
+        if not flags & {"-I", "-P"}:
+            if st.cwd is None:
+                self.read_only_gap = "the cwd is unknown"
+                return False
+            shadow = _cwd_shadowing_entry(st.cwd)
+            if shadow is not None:
+                self.read_only_gap = shadow
+                return False
         code = rest[1]
         if code.opaque or code.pattern is not None or code.substitutions:
+            self.read_only_gap = "the code is substituted or not literal"
             return False
         if OPAQUE_MARK in code.text or TEMP_MARK in code.text:
+            self.read_only_gap = "the code is substituted or not literal"
             return False
-        return python_code_read_only(code.text)
+        if python_code_read_only(code.text):
+            return True
+        node = _py_unsupported_node(code.text)
+        self.read_only_gap = (
+            f"unsupported syntax {node}"
+            if node
+            else "the code calls or binds outside the allow-list"
+        )
+        return False
 
     def _backstop(
         self,
@@ -4664,6 +5475,7 @@ class _Walker:
         """
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
+        self.read_only_gap = None
         read_only_code = self._inline_read_only(name, args, assigns)
         # ``args[prefix]`` is the interpreter word: ``args`` is the UNPEELED
         # argv, so without the slice a wrapper (``env python3 -c …``) hides
@@ -4712,6 +5524,7 @@ class _Walker:
                             script=script,
                             read_only_code=read_only_code and not as_output,
                             unproven_code=unproven_code,
+                            proof_gap=self.read_only_gap if unproven_code else None,
                             as_output=as_output,
                             executes=executes,
                             assigned=assigned,
@@ -5004,6 +5817,16 @@ class _Walker:
         if target.path is None:
             return
         stripped = target.path.rstrip("/") or "/"
+        for prefix in self.opaque_linked:
+            under = stripped.startswith(prefix.rstrip("/") + "/")
+            if under or (target.opaque and stripped == prefix):
+                # QA Q1, PR #4147: ``ln -s ~ "<pad>/$(date +%s)"; rm -rf
+                # "<pad>/$(date +%s)"/*`` — an opaque name here may be the
+                # entry just linked or moved in, and any deeper path may pass
+                # through it. No containment exemption: opaque, judge-ranked.
+                target.opaque = True
+                target.opaque_contained = False
+                return
         covering = [
             ln for ln in self.linked if stripped == ln or stripped.startswith(ln.rstrip("/") + "/")
         ]
@@ -5057,6 +5880,50 @@ class _Walker:
         for spelled in (target.path, os.path.normpath(raw) if raw else None):
             if spelled:
                 self._name(spelled)
+
+    def _note_opaque_link(self, name: str, args: list[Expanded]) -> None:
+        """Record the literal prefix of an opaque link/move/copy operand.
+
+        ``ln`` (hard or symbolic), ``mv`` and a link-preserving ``cp`` put a
+        new entry — possibly a link to anywhere — at their destination. When
+        that destination's name has an opaque part (even a contained one),
+        no later word can be matched against it, so ``_through_new_link``
+        voids containment under its literal directory. Only DESTINATIONS are
+        recorded (the last operand, a ``-t`` directory): a source moves away
+        and links nothing, and marking one re-ranked an unrelated ``..``
+        landing (``L=$(cat f); ln -sfn $L <pad>/lnk``).
+        """
+        if name in ("cp", "gcp"):
+            flags = [a.text for a in args if a.text.startswith("-")]
+            if not (
+                _has_short(flags, "sPdaRr")
+                or {"--symbolic-link", "--archive", "--no-dereference", "--recursive"}
+                & {f.partition("=")[0] for f in flags}
+            ):
+                return
+        elif name not in ("ln", "gln", "mv", "gmv"):
+            return
+        operands, _flags = _operands(args, frozenset({"-t", "--target-directory"}))
+        dests = operands[-1:]
+        for i, word in enumerate(args):
+            if word.text in ("-t", "--target-directory") and i + 1 < len(args):
+                dests.append(args[i + 1])
+            for prefix in ("--target-directory=", "-t"):
+                if word.text.startswith(prefix) and len(word.text) > len(prefix):
+                    dests.append(
+                        Expanded(
+                            text=word.text[len(prefix) :],
+                            opaque=word.opaque,
+                            opaque_contained=word.opaque_contained,
+                        )
+                    )
+                    break
+        for word in dests:
+            if not word.opaque:
+                continue
+            target = _target(word, "write", name, self.state)
+            if target.path is not None:
+                self.opaque_linked.add(target.path.rstrip("/") or "/")
 
     def _name(self, path: str) -> None:
         """Record that an earlier part of this command named ``path`` (see
@@ -5247,7 +6114,7 @@ class _Walker:
         ``D=$S/x-$l`` inside a loop body binds D once per iteration, so a
         later ``$D`` target fans out with the loop like a direct ``$l`` one.
         """
-        self._assign(word.text)
+        self._assign(word.text, fresh=word.fresh_dir)
         name = word.text.partition("=")[0]
         self.for_lists.pop(name, None)
         self.for_roots.pop(name, None)
@@ -5383,6 +6250,12 @@ READ_ONLY_PROGRAMS = frozenset(
         "basename",
         "dirname",
         "sleep",
+        # ``cut`` (field case, node2 lane, guard 0.106.6: ``test "$(sha256sum
+        # F | cut -d' ' -f1)" = …`` before a proven-read python made the whole
+        # check unprovable). GNU (-b -c -d -f -n -s -z --complement
+        # --output-delimiter) and BSD (-b -c -d -f -n -s -w) cut have no
+        # option that writes a file or runs a program: stdout only.
+        "cut",
         # Shell words that move, bind or branch without writing a file; their
         # bodies and later segments are walked on their own.
         "cd",
@@ -6094,6 +6967,11 @@ def _write_surface(
         return _copy_dest(args, _MV_FLAGS), _flags_known(args, _MV_FLAGS)
     if name in ("tee",):
         return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
+    if name == "curl":
+        # Name the common explicit output destination without declaring curl
+        # read-only/fully modelled: config, remote-name and many other options
+        # have additional writes. Unknown argv still reaches the backstop.
+        return _cluster_value(args, "o", "--output"), False
     if name == "sort":
         # ``sort -o FILE`` writes FILE (it may also be an input: ``sort -o x x``).
         # Never fully modelled, so its other path words reach the backstop too.

@@ -266,6 +266,18 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.action.stopping": "arr\u00eat en cours",
     },
   },
+  "relay.diagram": {
+    "fr": {
+      "relay.diagram.close": "Fermer le diagramme",
+      "relay.diagram.copied": "Copi\u00e9",
+      "relay.diagram.copy": "Copier le code",
+      "relay.diagram.copy_failed": "Copie impossible",
+      "relay.diagram.error.title": "Impossible de dessiner ce diagramme",
+      "relay.diagram.full_size": "Taille r\u00e9elle",
+      "relay.diagram.save": "Enregistrer SVG",
+      "relay.diagram.view": "Diagramme",
+    },
+  },
   "relay.health": {
     "fr": {
       "relay.health.dropped_detail": "Votre ordinateur n\u2019arrive pas \u00e0 joindre cette session pour l\u2019instant et continue d\u2019essayer. Tant qu\u2019il n\u2019y parvient pas, un envoi \u00e9choue aussit\u00f4t et votre texte reste dans la zone de saisie.",

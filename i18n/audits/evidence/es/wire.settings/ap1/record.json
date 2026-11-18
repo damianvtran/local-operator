@@ -1,0 +1,197 @@
+{
+ "round": 2,
+ "auditor": {
+  "agent": "i18n-auditor (team lopdev), task as-au-es",
+  "session": "6d23d6953609",
+  "model": "anthropic/claude-opus-5-5",
+  "actual_model_source": "system prompt 'Model:' line of this session",
+  "fallback": "none observed",
+  "independent_from_translator_session": true,
+  "translator": "i18n-translator, job 2e94fb7583f3 resumed as bde68516ccdb, anthropic/claude-sonnet-5-5 (per manager brief)",
+  "native_speaker": false
+ },
+ "locale": "es",
+ "namespaces": [
+  "wire.settings"
+ ],
+ "keys_in_scope": [
+  "wire.settings.updates.title",
+  "wire.settings.updates.description",
+  "wire.settings.update_auto_prune.label",
+  "wire.settings.update_auto_prune.help",
+  "wire.settings.update_auto_prune.choice.true.description",
+  "wire.settings.update_auto_prune.choice.false.description",
+  "wire.settings.update_keep_generations.label",
+  "wire.settings.update_keep_generations.help"
+ ],
+ "key_count": 8,
+ "commit_audited": "cc66c51cb3add48bd1e88700fa1ba743bcdb252c + uncommitted working-tree catalogue edits (round-2 remediation)",
+ "diff_base": "cc66c51cb3ad",
+ "audit_date": "2026-11-16",
+ "scope": "round-2 delta: own round-1 findings + values changed since round 1; unchanged keys retained",
+ "input_hashes_sha256": {
+  "local_operator/i18n/catalogues/es/wire.settings.json": "b0acd06d72c591ff60cf2bd3020ad029380603bc291de4965c0777e7f0663225",
+  "local_operator/i18n/catalogues/en/wire.settings.json": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+  "local_operator/i18n/catalogues/en/wire.settings.context.json": "ebe0faa8bb9d26922c67493ba2ea8508f51df3897257e08dfac3b97dbad40cfe",
+  "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+  "i18n/style-guides/es.md": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+ },
+ "mechanical": {
+  "hashes_match_brief": true,
+  "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), exit 0",
+  "git_diff_stat_es": "local_operator/i18n/catalogues/es/wire.settings.json | 14 +++++++------- (1 file, 7+/7-)",
+  "key_sets_equal_en_draft_target": true,
+  "key_count_file": 877,
+  "values_changed_vs_draft": 7,
+  "changed_keys_all_within_8": true,
+  "values_changed_since_round1": [
+   "update_auto_prune.label",
+   "update_auto_prune.help",
+   "update_auto_prune.choice.true.description",
+   "update_keep_generations.help"
+  ],
+  "nfc_all_8": true,
+  "bidi_zero_width_nbsp_found": [],
+  "backticked_commands_byte_identical": {
+   "updates.description": [
+    "`lop update`"
+   ],
+   "update_auto_prune.help": [
+    "`lop install prune`"
+   ]
+  },
+  "icu_or_placeholders_added": false,
+  "label_cells_vs_29": {
+   "update_auto_prune.label": 24,
+   "update_keep_generations.label": 27
+  },
+  "help_min_two_row_wrap_width_cells": {
+   "update_keep_generations.help": {
+    "en": 95,
+    "es_r1": 121,
+    "es_r2": 106
+   },
+   "update_auto_prune.help": {
+    "en": 36,
+    "es_r2": 44
+   },
+   "updates.description": {
+    "en": 53,
+    "es": 57
+   }
+  },
+  "choice_true_row_estimate_cells": "~74 ('  ● activado (predeterminado)  conserva actual, en ejecución y las últimas') <= ~78"
+ },
+ "per_key": [
+  {
+   "key": "wire.settings.updates.title",
+   "text": "Actualizaciones",
+   "verdict": "PASS (retained, unchanged since R1)"
+  },
+  {
+   "key": "wire.settings.updates.description",
+   "text": "Qué hace una actualización con las instalaciones antiguas que deja atrás. Surte efecto en el próximo `lop update`.",
+   "verdict": "PASS (retained, unchanged since R1)"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.label",
+   "text": "Limpiar instal. antiguas",
+   "cells": 24,
+   "budget": 29,
+   "verdict": "PASS — es-A2 resolved",
+   "note": "'antiguas' now matches description/help; 'instal.' matches the sibling label; infinitive + Sentence case; understandable alone."
+  },
+  {
+   "key": "wire.settings.update_auto_prune.help",
+   "text": "Tras cada actualización, borra instalaciones antiguas sin uso, como `lop install prune`.",
+   "cells": 88,
+   "budget": "~72 soft",
+   "verdict": "PASS — es-A4 resolved (partial adoption accepted)",
+   "note": "Article dropped ('borra instalaciones antiguas sin uso'), grammatical; kept 'Tras cada actualización' (faithful to 'After each update'). Over soft hint but wraps whole in two rows from 44 cells; never truncated."
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.true.description",
+   "text": "conserva actual, en ejecución y las últimas",
+   "cells": 43,
+   "budget": "~40 soft",
+   "verdict": "PASS — es-A3 resolved",
+   "note": "'las últimas' restores the bounded 'newest few' sense; 'en ejecución' = running, same word as keep.help; row ~74 cells fits."
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.false.description",
+   "text": "conserva todas; limpieza manual",
+   "verdict": "PASS (retained, unchanged since R1)"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.label",
+   "text": "Instal. sin uso conservadas",
+   "cells": 27,
+   "budget": 29,
+   "verdict": "PASS (retained, unchanged since R1)"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.help",
+   "text": "Cuántas de las instalaciones sin uso más recientes conserva cada limpieza. Siempre se conservan la actual, la anterior, la que ejecuta la actualización y las registradas por una sesión o servicio en ejecución.",
+   "cells": 209,
+   "verdict": "PASS on meaning; es-A1 downgraded MAJOR→MINOR (residual width)",
+   "note": "All four always-kept classes present and unconditional, 'Siempre' fronted: actual / anterior / la que ejecuta la actualización / las registradas por una sesión o servicio en ejecución. Two-row wrap needs 106 cells vs en 95 (R1: 121)."
+  }
+ ],
+ "findings": [
+  {
+   "id": "es-A1",
+   "severity": "MINOR",
+   "status": "open (non-gating; downgraded from MAJOR)",
+   "key": "wire.settings.update_keep_generations.help",
+   "text": "Cuántas de las instalaciones sin uso más recientes conserva cada limpieza. Siempre se conservan la actual, la anterior, la que ejecuta la actualización y las registradas por una sesión o servicio en ejecución.",
+   "evidence": "Real _wrap_cells sweep: es fits the 2-row help band from 106 cells, en from 95. Between 95 and 105 the es line is cut to one row with '…' while en shows whole. The truncation band went from 26 cells (R1) to 11; English itself truncates below 95, so this is now a modest overrun, not loss of the guarantee in a common band. This was my own R1 suggested text; I did not tighten it enough.",
+   "fix": "optional: 'Cuántas instalaciones sin uso más recientes conserva cada limpieza. Siempre se conservan …' (drops 'de las', −7 cells, ~99). Defer acceptable."
+  }
+ ],
+ "round1": {
+  "target_sha256": "94461f2778827daec476b80712ab021c65da7791ad5fccbb1e98b86dc1313952",
+  "record_sha256_final_r1": "4ad22e0bd1d8af5b275a109fe5323627148768b4b055a21649858de9d6ce8bff",
+  "verdict": "BLOCKED (changes_requested)",
+  "counts": {
+   "blocker": 0,
+   "major": 1,
+   "minor": 3,
+   "nit": 0
+  },
+  "dispositions": {
+   "es-A1 (MAJOR, keep_generations.help truncation 121 vs 95)": "adopted auditor text verbatim → residual MINOR (106 vs 95)",
+   "es-A2 (MINOR, label 'viejas' vs 'antiguas')": "adopted 'Limpiar instal. antiguas' → resolved",
+   "es-A3 (MINOR, choice.true bare 'recientes')": "adopted 'las últimas' → resolved",
+   "es-A4 (MINOR, auto_prune.help 92 vs ~72)": "partial: dropped article (88), kept 'Tras cada actualización' → accepted, resolved (wraps whole, soft hint)"
+  }
+ },
+ "safety_recheck": {
+  "current": true,
+  "previous": true,
+  "running_the_update": true,
+  "registered_by_running_session_or_service": true,
+  "always_unweakened": true,
+  "no_leftover_in_use_class_in_choice_true": true
+ },
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 0
+ },
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "es-A1"
+  ]
+ },
+ "terminal_verdict": "CLEAN-WITH-FINDINGS",
+ "not_verified": [
+  "native-speaker judgement (LLM reasoning only; no native review claimed)",
+  "rendered fit in a live TUI frame (cell counts via rich.cells.cell_len and the real _wrap_cells only; no screenshot)",
+  "exact _detail_width per terminal size beyond its docstring (columns minus padding)",
+  "desktop/relay rendering of these keys"
+ ],
+ "audit_notes_not_execution_log": "round-2 commands run: shasum -a 256 (3 inputs); scripts/i18n/check.py --catalogues-only (rc 0, log $LOCAL_OPERATOR_SCRATCHPAD/es-check-r2.log); git diff cc66c51c --stat; python key-set/diff/NFC/Cf/backtick/cell_len checks; settings_view._wrap_cells min-width sweep. No ledger append, no edits (read-only brief)."
+}

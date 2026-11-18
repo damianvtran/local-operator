@@ -339,8 +339,14 @@ async def retirement_poll(
     and latch below; production has neither a successor-ready protocol nor a
     complete daemon-owned-work drain and must not exit on marker drift.
     """
+    # ONE reader for every disk read this task makes, so the in-flight bound and
+    # the warn-once streak span the whole poll (see `buildwatch.OffLoopBuildRead`
+    # for why no build read may run on the loop: the 145 s stall it caused).
+    read = buildwatch.OffLoopBuildRead("serve daemon")
     if boot is None:
-        boot = buildwatch.boot_build()
+        sampled = await read(buildwatch.boot_build)
+        # An unanswered boot read is "no baseline" — the never-retire direction.
+        boot = None if sampled is buildwatch.READ_UNKNOWN else sampled
     if boot is None:
         # No baseline, so no move can ever be PROVEN. Returning is the honest
         # shape: a watcher that polls forever comparing against nothing would
@@ -359,8 +365,8 @@ async def retirement_poll(
             pass
 
         if announced is None:
-            newer = buildwatch.build_changed(boot)
-            if newer is None:
+            newer = await read(buildwatch.build_changed, boot)
+            if newer is buildwatch.READ_UNKNOWN or newer is None:
                 continue
             try:
                 announce(
@@ -415,7 +421,12 @@ async def retirement_poll(
         # `retiring_to` naming a build that was no longer on disk. Read per check
         # interval, which is what the detection phase above already costs per
         # tick; nothing here is a hot path.
-        standing = buildwatch.handover_build(boot)
+        standing = await read(buildwatch.handover_build, boot)
+        if standing is buildwatch.READ_UNKNOWN:
+            # NOT the `None` branch below: an unanswered read is no evidence the
+            # handover stopped holding, and withdrawing on it would flap a true
+            # announcement every time the disk is slow. Keep it; re-read next tick.
+            continue
         if standing is None:
             try:
                 withdraw(publisher)

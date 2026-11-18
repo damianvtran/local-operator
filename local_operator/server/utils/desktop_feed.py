@@ -132,6 +132,7 @@ import sqlite3
 import time
 import zlib
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, cast
@@ -1909,7 +1910,24 @@ class DesktopFeed:
             # exists for — pay N of them inside one tick against 1 before.
             if presence is None:
                 presence = self._tick_presence()
-            policy = self._focus_policy_for(self._session_id(identity), presence)
+            # ADR 0009: the ROW's routing facts (this row's own kind/origin,
+            # F1's rule), over the conversation's unseen state.
+            route = {
+                **state,
+                **{
+                    key: row[key]
+                    for key in ("kind", "origin", "needs_user", "notify")
+                    if key in row
+                },
+            }
+            if route.get("origin") == "mobile":
+                # Only a mobile-origin row reads the device registry; off the
+                # loop like the test-hosting read below.
+                policy = await asyncio.to_thread(
+                    self._focus_policy_for, self._session_id(identity), presence, route
+                )
+            else:
+                policy = self._focus_policy_for(self._session_id(identity), presence, route)
             if policy is None:
                 continue
             if await asyncio.to_thread(
@@ -2036,7 +2054,12 @@ class DesktopFeed:
             ],
         }
 
-    def _focus_policy_for(self, session_id: str, presence: DesktopPresence) -> str | None:
+    def _focus_policy_for(
+        self,
+        session_id: str,
+        presence: DesktopPresence,
+        route: Mapping[str, Any] | None = None,
+    ) -> str | None:
         """``focus_policy`` for this completion, or ``None`` for "raise nothing".
 
         WHY THIS IS DERIVED AND NOT COPIED. ``focus_policy`` is a ROUTING field,
@@ -2074,6 +2097,18 @@ class DesktopFeed:
         # presence gate, so the phone suppresses exactly what this suppresses.
         if presence.attending(session_id):
             return None
+        # ADR 0009 §2 footnote 1: a MOBILE-origin completion or error raises no
+        # desktop banner while the phone would be told (``phone_would_emit``,
+        # the predicate the push worker asks, never a re-derivation). The row
+        # still lands unread in the sidebar, inbox and badge. When the phone
+        # would not emit, the desktop banners as before, so the item is never
+        # silent on every surface. A registry read, so the caller runs this off
+        # the event loop.
+        if route is not None:
+            from local_operator.notifications.routing import desktop_defers_to_phone
+
+            if desktop_defers_to_phone(route, self.root):
+                return None
         return "always"
 
     # -- catalogue ---------------------------------------------------------
@@ -2290,6 +2325,26 @@ class DesktopFeed:
             {"kind": kind, "intent": intent},
             session_id=session_id,
         )
+
+    def publish_team_bridge_authorize(self, payload: dict[str, Any]) -> None:
+        """Announce a batch Touch ID prompt's state (``team_bridge_authorize``).
+
+        WHY (PR #4099 security round 2, S-6): the OS sheet cannot say what it is
+        for, and any bearer holder can ask the daemon to raise it. So the daemon
+        publishes, on the MACHINE-WIDE feed every desktop window holds, what each
+        prompt is for — ``{authorize_id, client_ref, state, items}`` with the
+        senders and excerpts it resolved from the local asks — whoever started
+        it. The desktop renders it and labels a ``client_ref`` it did not
+        generate as "not started by you".
+
+        Pushed by ``POST /v1/desktop/team-bridge/requests/decide/authorize`` at
+        each transition (``prompting`` → ``signed`` | ``dismissed`` |
+        ``refused``), not polled: the route is the only place a prompt starts.
+        LIVE-ONLY, like ``settings_intent``: a prompt lasts seconds, so a missed
+        frame has nothing to replay into. The payload never carries a message
+        body, a screening rationale or a body hash.
+        """
+        self._publish("team_bridge_authorize", dict(payload))
 
     def _avatar_probe(self) -> dict[str, str | None]:
         """``{agent_id: avatar sha256 | None}`` from the shared, stat-memoised index.

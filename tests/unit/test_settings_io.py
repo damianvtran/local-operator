@@ -72,6 +72,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MODEL_CHOICE,
         DEFAULT_SLIM_CHILD_KNOWLEDGE,
     )
+    from local_operator.heavy_lease import HEAVY_JOBS_ENABLED_DEFAULT
     from local_operator.hook_forwarding import (
         FORWARD_CLAUDE_DEFAULT,
         FORWARD_CODEX_DEFAULT,
@@ -84,6 +85,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_CHECK_INTERVAL_MIN,
     )
     from local_operator.i18n.resolve import DEFAULT_LANGUAGE
+    from local_operator.install_defaults import (
+        DEFAULT_AUTO_PRUNE_GENERATIONS,
+        DEFAULT_KEEP_GENERATIONS,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -160,6 +165,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_ENABLED as DEFAULT_COMPRESSION_ENABLED,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
+    from local_operator.session.runtime.presence import DEFAULT_AWAY_AFTER_S
     from local_operator.session.runtime.process import (
         DEFAULT_KEEP_ALIVE_MAX,
         DEFAULT_KEEP_ALIVE_SECONDS,
@@ -258,6 +264,9 @@ def _consumer_defaults() -> dict[str, object]:
         "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
         "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
         "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+        # The heavy-job queue switch; its consumer constant sits beside the
+        # reader in heavy_lease.py.
+        "bash.heavy_jobs.enabled": HEAVY_JOBS_ENABLED_DEFAULT,
         # The three search_interception keys. The consumer constants live next to
         # the reader in tools/builtin.py, so this mapping is what stops the
         # registry default and the code default drifting.
@@ -320,6 +329,10 @@ def _consumer_defaults() -> dict[str, object]:
         # default and the code default cannot drift.
         "subagents.slim_child_knowledge": DEFAULT_SLIM_CHILD_KNOWLEDGE,
         "subagents.max_team_depth": DEFAULT_MAX_TEAM_DEPTH,
+        # The post-update prune: ``update.auto_prune_policy`` falls back to these
+        # when the keys are absent; the registry carries literals.
+        "update.auto_prune": DEFAULT_AUTO_PRUNE_GENERATIONS,
+        "update.keep_generations": DEFAULT_KEEP_GENERATIONS,
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
@@ -337,6 +350,9 @@ def _consumer_defaults() -> dict[str, object]:
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
         "tunnel.auto_setup_after_login": AUTO_SETUP_DEFAULT,
+        # ADR 0008: the reader's own default, which is also what a desk report
+        # omitting `away_after_s` is evaluated with.
+        "notifications.phone_away_after_s": DEFAULT_AWAY_AFTER_S,
         "memory.capture": MEMORY_DEFAULT_ENABLED,
         "memory.capture.locators": LOCATORS_DEFAULT_ENABLED,
         "memory.suggest": MEMORY_DEFAULT_ENABLED,
@@ -1328,6 +1344,23 @@ def test_query_budget_rows_share_the_consumer_paths(manager: ConfigManager) -> N
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _query_budget_config().seconds == QUERY_BUDGET_SECONDS_DEFAULT + 5
+
+
+def test_heavy_jobs_row_shares_the_consumer_path(manager: ConfigManager) -> None:
+    """``bash.heavy_jobs.enabled`` writes exactly where ``heavy_lease`` reads.
+
+    A registry writing one path while the reader looked at another would leave
+    the kill switch painted but dead, so the path is pinned to the consumer's
+    constant and a stored ``false`` round-trips through the real reader.
+    """
+    from local_operator import heavy_lease
+
+    row = settings_io.BY_KEY["bash.heavy_jobs.enabled"]
+    assert row.path == heavy_lease.HEAVY_JOBS_ENABLED_PATH
+    settings_io.write_setting(manager, row, False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        assert heavy_lease.configured_settings().enabled is False
 
 
 def test_memory_guard_rows_share_the_consumer_paths(manager: ConfigManager) -> None:

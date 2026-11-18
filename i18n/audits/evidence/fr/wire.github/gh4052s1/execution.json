@@ -1,0 +1,6582 @@
+{
+  "source_sha": "0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "scope": "95fff90559ae..0b754ce89567",
+  "input_hashes": {
+    "local_operator/i18n/catalogues/en/wire.github.json": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+    "local_operator/i18n/catalogues/en/wire.settings.json": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+    "local_operator/i18n/catalogues/fr/wire.github.json": "a7fa09f683e431a7537b0942a48aa1ef2d7bf0ff0db1a47ee5fd86b26f1be069",
+    "local_operator/i18n/catalogues/fr/wire.settings.json": "e773ea8aedb8b87586a4e0c8d72ed6e32cac39d6b522fd0f4b5ae34ac7315037",
+    "local_operator/i18n/catalogues/es/wire.github.json": "f3ec27fb36efb1e04cd51bf44acca3e2258a11400554d3cda44bb00064298287",
+    "local_operator/i18n/catalogues/es/wire.settings.json": "b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91",
+    "local_operator/i18n/catalogues/zh-CN/wire.github.json": "dc68606f6da5693a3c876b8a43c936f55dcb71ae4d219219cd505adc57993a69",
+    "local_operator/i18n/catalogues/zh-CN/wire.settings.json": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345",
+    "local_operator/i18n/catalogues/ru/wire.github.json": "5423f28f859465cc5f28b3b316257bd66c9b1bcfe2bfd0ade2ea834560e600f1",
+    "local_operator/i18n/catalogues/ru/wire.settings.json": "2b500c8786bdad052555f689678c28212384969512295b9d1cd495d90c0c57ee",
+    "local_operator/i18n/catalogues/vi/wire.github.json": "4aafd3e2688a454b0f80f938f05ae8eac0f2e25735e4c55a92168f274e22d253",
+    "local_operator/i18n/catalogues/vi/wire.settings.json": "28d393b48281312b1d918d3af7826581890b01607addb9dae23a702ae12e26e4",
+    "local_operator/i18n/catalogues/ur/wire.github.json": "bb25b9b554704e8b4f9e6494e8fc2ceb5804e2deb1474f3fbf915fe37aa27c86",
+    "local_operator/i18n/catalogues/ur/wire.settings.json": "47981cc870a599caf1ec964295ed3123b87a2f345bdb324c166694125d959476",
+    "local_operator/i18n/catalogues/hi/wire.github.json": "21d945c15034e7ccd1ff1ef4682910a582a981df65df1e3098598073a1966c7f",
+    "local_operator/i18n/catalogues/hi/wire.settings.json": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4",
+    "local_operator/i18n/catalogues/en/wire.github.context.json": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+  },
+  "validator": {
+    "entry": "scripts/i18n/check.py:check_catalogues",
+    "discovery_scope": [
+      "wire.github",
+      "wire.settings"
+    ],
+    "problems": []
+  },
+  "locale_stats": {
+    "fr": {
+      "key_count": 69,
+      "plural_categories": [
+        "many",
+        "one",
+        "other"
+      ],
+      "representative_render_count": 114
+    },
+    "es": {
+      "key_count": 69,
+      "plural_categories": [
+        "many",
+        "one",
+        "other"
+      ],
+      "representative_render_count": 114
+    },
+    "zh-CN": {
+      "key_count": 69,
+      "plural_categories": [
+        "other"
+      ],
+      "representative_render_count": 114
+    },
+    "ru": {
+      "key_count": 69,
+      "plural_categories": [
+        "few",
+        "many",
+        "one",
+        "other"
+      ],
+      "representative_render_count": 114
+    },
+    "vi": {
+      "key_count": 69,
+      "plural_categories": [
+        "other"
+      ],
+      "representative_render_count": 114
+    },
+    "ur": {
+      "key_count": 69,
+      "plural_categories": [
+        "one",
+        "other"
+      ],
+      "representative_render_count": 114
+    },
+    "hi": {
+      "key_count": 69,
+      "plural_categories": [
+        "one",
+        "other"
+      ],
+      "representative_render_count": 114
+    }
+  },
+  "scoped_key_count_per_locale": 69,
+  "scoped_locale_key_pairs": 483,
+  "render_execution_count": 1722,
+  "production_eligibility_controls": {
+    "fr": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "es": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "zh-CN": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "ru": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "vi": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "ur": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "hi": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    }
+  },
+  "render_path": "local_operator.i18n.runtime.render_message with explicit locale; catalogue candidate proof, NOT production activation",
+  "representative_renders": [
+    {
+      "locale": "fr",
+      "key": "wire.github.progress",
+      "count": 3,
+      "form": "other",
+      "text": "liste des dépôts auxquels votre compte GitHub peut envoyer des push…",
+      "max_line_cells": 68
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opt_out_none",
+      "count": 3,
+      "form": "other",
+      "text": "exclusions : aucune",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opt_out_names",
+      "count": 3,
+      "form": "other",
+      "text": "exclusions (3) : octo-org/website, octo-org/api — réinclure un dépôt : lop network credential github repos",
+      "max_line_cells": 106
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.share_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Dépôts GitHub : aucun pour le moment — le partage est en place, mais tout emprunt est refusé tant que REASON ; REMEDY",
+      "max_line_cells": 117
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.repos_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Dépôts GitHub : aucun — REASON ; REMEDY",
+      "max_line_cells": 39
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.repos_head",
+      "count": 3,
+      "form": "other",
+      "text": "Dépôts GitHub accessibles par prêt : 3 — SOURCE",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opted_suffix",
+      "count": 3,
+      "form": "other",
+      "text": ", moins 3 exclusions",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.more",
+      "count": 3,
+      "form": "other",
+      "text": "  … et 3 autres — tout voir : lop network credential github repos",
+      "max_line_cells": 65
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.capacity",
+      "count": 3,
+      "form": "other",
+      "text": "cela dépasse les 3 dépôts qu’un partage peut contenir ; tout emprunt est donc refusé jusqu’à ce que vous choisissiez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings) ou que vous en excluiez certains",
+      "max_line_cells": 235
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opt_out_step",
+      "count": 3,
+      "form": "other",
+      "text": "exclure un dépôt : lop network credential github repos — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL",
+      "max_line_cells": 161
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.source_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "la liste choisie à la main (paramètre des dépôts GitHub)",
+      "max_line_cells": 56
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.source_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "la liste récupérée AGO — impossible de lister les dépôts GitHub à l’instant ; elle peut donc être périmée",
+      "max_line_cells": 105
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.source_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push, listés AGO",
+      "max_line_cells": 91
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.which_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "la liste choisie à la main",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.which_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push",
+      "max_line_cells": 83
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_already",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website était déjà exclu",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website ne figure pas dans WHICH — vérifiez l’orthographe ; il est tout de même exclu au cas où il serait ajouté plus tard",
+      "max_line_cells": 131
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website est exclu ; son orthographe n’a pas pu être vérifiée, car la récupération de WHICH a échoué",
+      "max_line_cells": 108
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, TTL",
+      "max_line_cells": 133
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_unchanged",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website n’était pas exclu",
+      "max_line_cells": 34
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website n’est plus exclu (il ne figure pas dans WHICH, donc rien d’autre ne change)",
+      "max_line_cells": 92
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website n’est plus exclu ; impossible de vérifier sa présence dans WHICH",
+      "max_line_cells": 81
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website est réinclus — les appareils destinataires retrouvent le droit de push à leur prochaine récupération des identifiants, TTL",
+      "max_line_cells": 139
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "le paramètre des dépôts GitHub choisis à la main ne contient aucun dépôt après les exclusions",
+      "max_line_cells": 93
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_unavailable_local",
+      "count": 3,
+      "form": "other",
+      "text": "la liste des dépôts auxquels le compte GitHub de cet appareil peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours",
+      "max_line_cells": 143
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_unavailable_remote",
+      "count": 3,
+      "form": "other",
+      "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée, sans liste antérieure de secours",
+      "max_line_cells": 128
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_excluded_local",
+      "count": 3,
+      "form": "other",
+      "text": "tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (3) sont exclus",
+      "max_line_cells": 95
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_excluded_remote",
+      "count": 3,
+      "form": "other",
+      "text": "tous les dépôts auxquels son compte GitHub peut envoyer des push (3) sont exclus",
+      "max_line_cells": 80
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_no_repos_local",
+      "count": 3,
+      "form": "other",
+      "text": "le compte GitHub de cet appareil ne peut envoyer de push à aucun dépôt",
+      "max_line_cells": 70
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_no_repos_remote",
+      "count": 3,
+      "form": "other",
+      "text": "son compte GitHub ne peut envoyer de push à aucun dépôt",
+      "max_line_cells": 55
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "ajoutez des dépôts au paramètre des dépôts GitHub (à rechercher dans /settings), ou revenez explicitement à tous les dépôts autorisant le push, moins les exclusions, avec lop network credential github repos",
+      "max_line_cells": 206
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "réessayez quand GitHub est joignable : lop network credential github repos",
+      "max_line_cells": 74
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_excluded",
+      "count": 3,
+      "form": "other",
+      "text": "réincluez un dépôt avec lop network credential github repos",
+      "max_line_cells": 59
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_no_repos",
+      "count": 3,
+      "form": "other",
+      "text": "donnez à ce compte GitHub le droit de push sur un dépôt",
+      "max_line_cells": 55
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.refusal_detail",
+      "count": 3,
+      "form": "other",
+      "text": "REASON — REMEDY",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "à une date inconnue",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_now",
+      "count": 3,
+      "form": "other",
+      "text": "à l’instant",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_minutes",
+      "count": 3,
+      "form": "other",
+      "text": "il y a 3 min",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 0,
+      "form": "other",
+      "text": "il y a 0 h",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 1,
+      "form": "other",
+      "text": "il y a 1 h",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 2,
+      "form": "other",
+      "text": "il y a 2 h",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 3,
+      "form": "other",
+      "text": "il y a 3 h",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 5,
+      "form": "other",
+      "text": "il y a 5 h",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 11,
+      "form": "other",
+      "text": "il y a 11 h",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 21,
+      "form": "other",
+      "text": "il y a 21 h",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 22,
+      "form": "other",
+      "text": "il y a 22 h",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 25,
+      "form": "other",
+      "text": "il y a 25 h",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 101,
+      "form": "other",
+      "text": "il y a 101 h",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 1.5,
+      "form": "other",
+      "text": "il y a 1,5 h",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "count": 1000000,
+      "form": "other",
+      "text": "il y a 1 000 000 h",
+      "max_line_cells": 18
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 0,
+      "form": "other",
+      "text": "il y a 0 jour",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 1,
+      "form": "other",
+      "text": "il y a 1 jour",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 2,
+      "form": "other",
+      "text": "il y a 2 jours",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 3,
+      "form": "other",
+      "text": "il y a 3 jours",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 5,
+      "form": "other",
+      "text": "il y a 5 jours",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 11,
+      "form": "other",
+      "text": "il y a 11 jours",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 21,
+      "form": "other",
+      "text": "il y a 21 jours",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 22,
+      "form": "other",
+      "text": "il y a 22 jours",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 25,
+      "form": "other",
+      "text": "il y a 25 jours",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 101,
+      "form": "other",
+      "text": "il y a 101 jours",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 1.5,
+      "form": "other",
+      "text": "il y a 1,5 jour",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "count": 1000000,
+      "form": "other",
+      "text": "il y a 1 000 000 jours",
+      "max_line_cells": 22
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.ttl",
+      "count": 3,
+      "form": "other",
+      "text": "sous 3 min",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_auth",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub a refusé ce compte",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_offline",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub est injoignable",
+      "max_line_cells": 22
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_server",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub a renvoyé une erreur",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_coverage",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub n’a pas pu lister tous les dépôts autorisant le push",
+      "max_line_cells": 59
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "échec de la liste des dépôts GitHub",
+      "max_line_cells": 35
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_unfetched",
+      "count": 3,
+      "form": "other",
+      "text": "la liste des dépôts n’a pas encore été récupérée",
+      "max_line_cells": 48
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_earlier_login",
+      "count": 3,
+      "form": "other",
+      "text": "la liste enregistrée concerne un ancien compte GitHub",
+      "max_line_cells": 53
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_unknown_login",
+      "count": 3,
+      "form": "other",
+      "text": "le compte associé à la liste GitHub enregistrée est inconnu",
+      "max_line_cells": 59
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "aucun dépôt listé pour le moment — le prochain emprunt interrogera GitHub et sera refusé plutôt qu’élargi si cela échoue",
+      "max_line_cells": 120
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_empty",
+      "count": 3,
+      "form": "other",
+      "text": "aucun dépôt — un emprunt serait refusé plutôt qu’élargi",
+      "max_line_cells": 55
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_opted",
+      "count": 3,
+      "form": "other",
+      "text": ", 3 exclusions",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_more",
+      "count": 3,
+      "form": "other",
+      "text": "3 autres",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "la liste choisie à la main sur cet appareil",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "la liste récupérée AGO — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification",
+      "max_line_cells": 100
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "tous les dépôts auxquels son compte peut envoyer des push, listés AGO",
+      "max_line_cells": 69
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_pointer",
+      "count": 3,
+      "form": "other",
+      "text": " — liste complète : lop network credential github repos sur owner-device-7",
+      "max_line_cells": 74
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "one",
+      "text": "octo-org/api (0 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (0 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "one",
+      "text": "octo-org/api (1 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (1 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "one",
+      "text": "octo-org/api (2 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (2 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "one",
+      "text": "octo-org/api (3 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (3 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "one",
+      "text": "octo-org/api (5 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (5 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "one",
+      "text": "octo-org/api (11 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (11 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "one",
+      "text": "octo-org/api (21 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (21 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "one",
+      "text": "octo-org/api (22 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (22 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "one",
+      "text": "octo-org/api (25 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (25 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "one",
+      "text": "octo-org/api (101 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (101 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "one",
+      "text": "octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "one",
+      "text": "octo-org/api (1 000 000 — SOURCE)",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "other",
+      "text": "octo-org/website et octo-org/api (1 000 000 — SOURCE)",
+      "max_line_cells": 53
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.borrower_unset",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 n’a aucun dépôt GitHub dont il puisse prêter l’accès : DETAIL. Corrigez cela sur owner-device-7 ; aucun accès n’a été prêté.",
+      "max_line_cells": 139
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.borrower_unset_default",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 n’a aucun dépôt GitHub dont il puisse prêter l’accès. Vérifiez lop network credential github repos sur owner-device-7 ; aucun accès n’a été prêté.",
+      "max_line_cells": 161
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.borrower_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 a plus de dépôts GitHub qu’un partage peut contenirDETAIL ; aucun accès n’a donc été prêté. Sur owner-device-7, choisissez les dépôts à prêter dans le paramètre des dépôts GitHub (à rechercher dans /settings), ou excluez-en avec lop network credential github exclude <owner/repo>.",
+      "max_line_cells": 295
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.wrapper_denied",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête.",
+      "max_line_cells": 244
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_repo",
+      "count": 3,
+      "form": "other",
+      "text": "exclude nécessite un dépôt au format owner/repo, par exemple octo-org/website",
+      "max_line_cells": 77
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_repos_args",
+      "count": 3,
+      "form": "other",
+      "text": "repos n’accepte aucun dépôt",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_default",
+      "count": 3,
+      "form": "other",
+      "text": "--use-default s’applique uniquement à repos",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_refresh",
+      "count": 3,
+      "form": "other",
+      "text": "--refresh s’applique uniquement à repos",
+      "max_line_cells": 39
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.owner_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "3 dépôts ; un partage peut en contenir au plus 100",
+      "max_line_cells": 50
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reset_failed",
+      "count": 3,
+      "form": "other",
+      "text": "impossible de revenir à la liste automatique des dépôts GitHub (PermissionError) ; vérifiez que le dossier de données de cet appareil est accessible en écriture, puis réessayez lop network credential github repos",
+      "max_line_cells": 212
+    },
+    {
+      "locale": "fr",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "count": 3,
+      "form": "other",
+      "text": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default.",
+      "max_line_cells": 353
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.progress",
+      "count": 3,
+      "form": "other",
+      "text": "obteniendo los repositorios a los que tu cuenta de GitHub puede hacer push…",
+      "max_line_cells": 75
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opt_out_none",
+      "count": 3,
+      "form": "other",
+      "text": "excluidos: ninguno",
+      "max_line_cells": 18
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opt_out_names",
+      "count": 3,
+      "form": "other",
+      "text": "excluidos (3): octo-org/website, octo-org/api — volver a incluir uno: lop network credential github repos",
+      "max_line_cells": 105
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras REASON; REMEDY",
+      "max_line_cells": 134
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.repos_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Repositorios de GitHub: ninguno — REASON; REMEDY",
+      "max_line_cells": 48
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.repos_head",
+      "count": 3,
+      "form": "other",
+      "text": "Repositorios de GitHub cuyo acceso se presta: 3 — SOURCE",
+      "max_line_cells": 56
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opted_suffix",
+      "count": 3,
+      "form": "other",
+      "text": ", menos 3 excluidos",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.more",
+      "count": 3,
+      "form": "other",
+      "text": "  … y 3 más — ver todos: lop network credential github repos",
+      "max_line_cells": 60
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.capacity",
+      "count": 3,
+      "form": "other",
+      "text": "se supera el límite de 3 repositorios por acceso compartido, por lo que se rechaza todo préstamo hasta que elijas cuáles prestar en el ajuste de repositorios de GitHub (búscalo en /settings) o excluyas algunos",
+      "max_line_cells": 209
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opt_out_step",
+      "count": 3,
+      "form": "other",
+      "text": "excluir un repositorio: lop network credential github repos — los dispositivos destinatarios pierden el permiso de push la próxima vez que obtengan la credencial, TTL",
+      "max_line_cells": 166
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.source_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "la lista que elegiste a mano (ajuste de repositorios de GitHub)",
+      "max_line_cells": 63
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.source_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "la lista obtenida AGO — no se pudieron listar los repositorios de GitHub ahora, por lo que podría estar desactualizada",
+      "max_line_cells": 118
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.source_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push, listados AGO",
+      "max_line_cells": 103
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.which_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "la lista que elegiste a mano",
+      "max_line_cells": 28
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.which_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push",
+      "max_line_cells": 91
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_already",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website ya estaba excluido",
+      "max_line_cells": 35
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website no está en WHICH — comprueba cómo está escrito; se excluye de todos modos por si se añade más adelante",
+      "max_line_cells": 119
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website está excluido; no se pudo comprobar cómo está escrito porque no se pudo obtener WHICH",
+      "max_line_cells": 102
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website está excluido — los dispositivos destinatarios pierden el permiso de push la próxima vez que obtengan la credencial, TTL",
+      "max_line_cells": 137
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_unchanged",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website no estaba excluido",
+      "max_line_cells": 35
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website ya no está excluido (no está en WHICH, así que no cambia nada más)",
+      "max_line_cells": 83
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website ya no está excluido; no se pudo comprobar si está en WHICH",
+      "max_line_cells": 75
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website vuelve a estar incluido — los dispositivos destinatarios pueden volver a hacer push la próxima vez que obtengan la credencial, TTL",
+      "max_line_cells": 147
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones",
+      "max_line_cells": 111
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_unavailable_local",
+      "count": 3,
+      "form": "other",
+      "text": "no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push y no hay una lista anterior de respaldo",
+      "max_line_cells": 150
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_unavailable_remote",
+      "count": 3,
+      "form": "other",
+      "text": "no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push y no hay una lista anterior de respaldo",
+      "max_line_cells": 130
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_excluded_local",
+      "count": 3,
+      "form": "other",
+      "text": "todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (3) están excluidos",
+      "max_line_cells": 109
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_excluded_remote",
+      "count": 3,
+      "form": "other",
+      "text": "todos los repositorios a los que su cuenta de GitHub puede hacer push (3) están excluidos",
+      "max_line_cells": 89
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_no_repos_local",
+      "count": 3,
+      "form": "other",
+      "text": "la cuenta de GitHub de este dispositivo no puede hacer push a ningún repositorio",
+      "max_line_cells": 80
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_no_repos_remote",
+      "count": 3,
+      "form": "other",
+      "text": "su cuenta de GitHub no puede hacer push a ningún repositorio",
+      "max_line_cells": 60
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos",
+      "max_line_cells": 209
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos",
+      "max_line_cells": 85
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_excluded",
+      "count": 3,
+      "form": "other",
+      "text": "vuelve a incluir uno con lop network credential github repos",
+      "max_line_cells": 60
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_no_repos",
+      "count": 3,
+      "form": "other",
+      "text": "concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "max_line_cells": 64
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.refusal_detail",
+      "count": 3,
+      "form": "other",
+      "text": "REASON — REMEDY",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "en un momento desconocido",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_now",
+      "count": 3,
+      "form": "other",
+      "text": "ahora mismo",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_minutes",
+      "count": 3,
+      "form": "other",
+      "text": "hace 3 min",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 0,
+      "form": "other",
+      "text": "hace 0 h",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 1,
+      "form": "other",
+      "text": "hace 1 h",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 2,
+      "form": "other",
+      "text": "hace 2 h",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 3,
+      "form": "other",
+      "text": "hace 3 h",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 5,
+      "form": "other",
+      "text": "hace 5 h",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 11,
+      "form": "other",
+      "text": "hace 11 h",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 21,
+      "form": "other",
+      "text": "hace 21 h",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 22,
+      "form": "other",
+      "text": "hace 22 h",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 25,
+      "form": "other",
+      "text": "hace 25 h",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 101,
+      "form": "other",
+      "text": "hace 101 h",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 1.5,
+      "form": "other",
+      "text": "hace 1,5 h",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "count": 1000000,
+      "form": "other",
+      "text": "hace 1.000.000 h",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 0,
+      "form": "other",
+      "text": "hace 0 días",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 1,
+      "form": "other",
+      "text": "hace 1 día",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 2,
+      "form": "other",
+      "text": "hace 2 días",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 3,
+      "form": "other",
+      "text": "hace 3 días",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 5,
+      "form": "other",
+      "text": "hace 5 días",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 11,
+      "form": "other",
+      "text": "hace 11 días",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 21,
+      "form": "other",
+      "text": "hace 21 días",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 22,
+      "form": "other",
+      "text": "hace 22 días",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 25,
+      "form": "other",
+      "text": "hace 25 días",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 101,
+      "form": "other",
+      "text": "hace 101 días",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 1.5,
+      "form": "other",
+      "text": "hace 1,5 días",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "count": 1000000,
+      "form": "other",
+      "text": "hace 1.000.000 días",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.ttl",
+      "count": 3,
+      "form": "other",
+      "text": "en un máximo de 3 min",
+      "max_line_cells": 21
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_auth",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub rechazó esa cuenta",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_offline",
+      "count": 3,
+      "form": "other",
+      "text": "no se pudo contactar con GitHub",
+      "max_line_cells": 31
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_server",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub devolvió un error",
+      "max_line_cells": 24
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_coverage",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub no pudo listar todos los repositorios con permiso de push",
+      "max_line_cells": 64
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "falló la obtención de la lista de repositorios de GitHub",
+      "max_line_cells": 56
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unfetched",
+      "count": 3,
+      "form": "other",
+      "text": "todavía no se ha obtenido la lista de repositorios",
+      "max_line_cells": 50
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_earlier_login",
+      "count": 3,
+      "form": "other",
+      "text": "la lista guardada corresponde a una cuenta de GitHub anterior",
+      "max_line_cells": 61
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "count": 3,
+      "form": "other",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "max_line_cells": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "aún no hay repositorios listados — el próximo préstamo consultará GitHub y, si no puede, se rechazará en vez de ampliar el acceso",
+      "max_line_cells": 129
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_empty",
+      "count": 3,
+      "form": "other",
+      "text": "ningún repositorio — un préstamo se rechazaría en vez de ampliar el acceso",
+      "max_line_cells": 74
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_opted",
+      "count": 3,
+      "form": "other",
+      "text": ", 3 excluidos",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_more",
+      "count": 3,
+      "form": "other",
+      "text": "3 más",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "la lista elegida a mano allí",
+      "max_line_cells": 28
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "la lista obtenida AGO — ese dispositivo no pudo listar los repositorios de GitHub en su última comprobación",
+      "max_line_cells": 107
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "todos los repositorios a los que su cuenta puede hacer push, listados AGO",
+      "max_line_cells": 73
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_pointer",
+      "count": 3,
+      "form": "other",
+      "text": " — lista completa: lop network credential github repos en owner-device-7",
+      "max_line_cells": 72
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "one",
+      "text": "octo-org/api (0 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (0 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "one",
+      "text": "octo-org/api (1 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (1 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "one",
+      "text": "octo-org/api (2 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (2 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "one",
+      "text": "octo-org/api (3 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (3 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "one",
+      "text": "octo-org/api (5 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (5 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "one",
+      "text": "octo-org/api (11 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (11 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "one",
+      "text": "octo-org/api (21 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (21 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "one",
+      "text": "octo-org/api (22 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (22 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "one",
+      "text": "octo-org/api (25 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (25 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "one",
+      "text": "octo-org/api (101 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (101 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "one",
+      "text": "octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "one",
+      "text": "octo-org/api (1.000.000 — SOURCE)",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "other",
+      "text": "octo-org/website y octo-org/api (1.000.000 — SOURCE)",
+      "max_line_cells": 52
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.borrower_unset",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 no tiene repositorios de GitHub cuyo acceso pueda prestar: DETAIL. Corrígelo en owner-device-7; no se prestó ningún acceso.",
+      "max_line_cells": 138
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.borrower_unset_default",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 no tiene repositorios de GitHub cuyo acceso pueda prestar. Comprueba lop network credential github repos en owner-device-7; no se prestó ningún acceso.",
+      "max_line_cells": 166
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.borrower_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 tiene más repositorios de GitHub de los que admite un acceso compartidoDETAIL, así que no se prestó ningún acceso. En owner-device-7, elige cuáles prestar en el ajuste de repositorios de GitHub (búscalo en /settings) o excluye algunos con lop network credential github exclude <owner/repo>.",
+      "max_line_cells": 305
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.wrapper_denied",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website no está en la lista de repositorios proporcionada por el dispositivo que presta el acceso (puede estar excluido o no admitir push allí). Comprueba lop network credential github repos en ese dispositivo. Solo ese dispositivo puede cambiar qué acceso presta.",
+      "max_line_cells": 273
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_repo",
+      "count": 3,
+      "form": "other",
+      "text": "exclude necesita un repositorio con el formato owner/repo, por ejemplo octo-org/website",
+      "max_line_cells": 87
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_repos_args",
+      "count": 3,
+      "form": "other",
+      "text": "repos no acepta ningún repositorio",
+      "max_line_cells": 34
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_default",
+      "count": 3,
+      "form": "other",
+      "text": "--use-default solo se aplica a repos",
+      "max_line_cells": 36
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_refresh",
+      "count": 3,
+      "form": "other",
+      "text": "--refresh solo se aplica a repos",
+      "max_line_cells": 32
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.owner_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "3 repositorios; un acceso compartido admite un máximo de 100",
+      "max_line_cells": 60
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reset_failed",
+      "count": 3,
+      "form": "other",
+      "text": "no se pudo completar el retorno a la lista automática de repositorios de GitHub (PermissionError); comprueba que se pueda escribir en la carpeta de datos de este dispositivo y vuelve a intentar lop network credential github repos",
+      "max_line_cells": 229
+    },
+    {
+      "locale": "es",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "count": 3,
+      "form": "other",
+      "text": "Entradas owner/repo cuyo acceso a GitHub se puede prestar. Si nunca se ha configurado, se usan todos los repositorios a los que la cuenta puede hacer push, menos los excluidos. Vaciar una lista elegida a mano y compartida anteriormente detiene los préstamos; vuelve a la selección automática con lop network credential github repos --use-default.",
+      "max_line_cells": 346
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.progress",
+      "count": 3,
+      "form": "other",
+      "text": "正在列出你的GitHub账号可push的仓库……",
+      "max_line_cells": 36
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opt_out_none",
+      "count": 3,
+      "form": "other",
+      "text": "已排除：无",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opt_out_names",
+      "count": 3,
+      "form": "other",
+      "text": "已排除（3）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos",
+      "max_line_cells": 90
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.share_empty",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY",
+      "max_line_cells": 68
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.repos_empty",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub仓库：无——REASON；REMEDY",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.repos_head",
+      "count": 3,
+      "form": "other",
+      "text": "可出借访问权限的GitHub仓库：3——SOURCE",
+      "max_line_cells": 37
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opted_suffix",
+      "count": 3,
+      "form": "other",
+      "text": "，减去3个已排除的仓库",
+      "max_line_cells": 21
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.more",
+      "count": 3,
+      "form": "other",
+      "text": "  ……另有3个——查看全部：lop network credential github repos",
+      "max_line_cells": 58
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.capacity",
+      "count": 3,
+      "form": "other",
+      "text": "仓库数量超过单个共享可容纳的3个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库",
+      "max_line_cells": 134
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opt_out_step",
+      "count": 3,
+      "form": "other",
+      "text": "排除仓库：lop network credential github repos——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL",
+      "max_line_cells": 102
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.source_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "你手动选择的列表（GitHub仓库设置）",
+      "max_line_cells": 34
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.source_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.source_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.which_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "你手动选择的列表",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.which_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "此设备GitHub账号可push的仓库列表",
+      "max_line_cells": 32
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_already",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website已被排除",
+      "max_line_cells": 24
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表",
+      "max_line_cells": 69
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL",
+      "max_line_cells": 81
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_unchanged",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website原本未被排除",
+      "max_line_cells": 28
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）",
+      "max_line_cells": 61
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website不再被排除；未能检查它是否在WHICH中",
+      "max_line_cells": 51
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL",
+      "max_line_cells": 83
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库",
+      "max_line_cells": 52
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_unavailable_local",
+      "count": 3,
+      "form": "other",
+      "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表",
+      "max_line_cells": 66
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_unavailable_remote",
+      "count": 3,
+      "form": "other",
+      "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表",
+      "max_line_cells": 62
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_excluded_local",
+      "count": 3,
+      "form": "other",
+      "text": "此设备GitHub账号可push的所有仓库（3个）均已被排除",
+      "max_line_cells": 49
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_excluded_remote",
+      "count": 3,
+      "form": "other",
+      "text": "其GitHub账号可push的所有仓库（3个）均已被排除",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_no_repos_local",
+      "count": 3,
+      "form": "other",
+      "text": "此设备GitHub账号无法向任何仓库push",
+      "max_line_cells": 34
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_no_repos_remote",
+      "count": 3,
+      "form": "other",
+      "text": "其GitHub账号无法向任何仓库push",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos明确恢复为所有可push仓库减去已排除项",
+      "max_line_cells": 124
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub可访问后重试：lop network credential github repos",
+      "max_line_cells": 55
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_excluded",
+      "count": 3,
+      "form": "other",
+      "text": "用lop network credential github repos重新纳入一个仓库",
+      "max_line_cells": 53
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_no_repos",
+      "count": 3,
+      "form": "other",
+      "text": "为该GitHub账号授予某个仓库的push权限",
+      "max_line_cells": 36
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.refusal_detail",
+      "count": 3,
+      "form": "other",
+      "text": "REASON——REMEDY",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "时间未知",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_now",
+      "count": 3,
+      "form": "other",
+      "text": "刚刚",
+      "max_line_cells": 4
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_minutes",
+      "count": 3,
+      "form": "other",
+      "text": "3分钟前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 0,
+      "form": "other",
+      "text": "0小时前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 1,
+      "form": "other",
+      "text": "1小时前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 2,
+      "form": "other",
+      "text": "2小时前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 3,
+      "form": "other",
+      "text": "3小时前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 5,
+      "form": "other",
+      "text": "5小时前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 11,
+      "form": "other",
+      "text": "11小时前",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 21,
+      "form": "other",
+      "text": "21小时前",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 22,
+      "form": "other",
+      "text": "22小时前",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 25,
+      "form": "other",
+      "text": "25小时前",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 101,
+      "form": "other",
+      "text": "101小时前",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 1.5,
+      "form": "other",
+      "text": "1.5小时前",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "count": 1000000,
+      "form": "other",
+      "text": "1,000,000小时前",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 0,
+      "form": "other",
+      "text": "0天前",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 1,
+      "form": "other",
+      "text": "1天前",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 2,
+      "form": "other",
+      "text": "2天前",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 3,
+      "form": "other",
+      "text": "3天前",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 5,
+      "form": "other",
+      "text": "5天前",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 11,
+      "form": "other",
+      "text": "11天前",
+      "max_line_cells": 6
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 21,
+      "form": "other",
+      "text": "21天前",
+      "max_line_cells": 6
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 22,
+      "form": "other",
+      "text": "22天前",
+      "max_line_cells": 6
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 25,
+      "form": "other",
+      "text": "25天前",
+      "max_line_cells": 6
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 101,
+      "form": "other",
+      "text": "101天前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 1.5,
+      "form": "other",
+      "text": "1.5天前",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "count": 1000000,
+      "form": "other",
+      "text": "1,000,000天前",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.ttl",
+      "count": 3,
+      "form": "other",
+      "text": "3分钟内",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_auth",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub拒绝了该账号",
+      "max_line_cells": 18
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_offline",
+      "count": 3,
+      "form": "other",
+      "text": "无法连接GitHub",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_server",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub返回了错误",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_coverage",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub未能列出所有可push的仓库",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub仓库列表获取失败",
+      "max_line_cells": 22
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_unfetched",
+      "count": 3,
+      "form": "other",
+      "text": "尚未获取仓库列表",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_earlier_login",
+      "count": 3,
+      "form": "other",
+      "text": "保存的列表属于之前的GitHub账号",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_unknown_login",
+      "count": 3,
+      "form": "other",
+      "text": "保存的GitHub列表对应的账号未知",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围",
+      "max_line_cells": 86
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_empty",
+      "count": 3,
+      "form": "other",
+      "text": "无仓库——借用会被拒绝，而不会扩大访问范围",
+      "max_line_cells": 40
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_opted",
+      "count": 3,
+      "form": "other",
+      "text": "，已排除3个",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_more",
+      "count": 3,
+      "form": "other",
+      "text": "另有3个",
+      "max_line_cells": 7
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "在那里手动选择的列表",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库",
+      "max_line_cells": 49
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "其账号可push的所有仓库，列出时间：AGO",
+      "max_line_cells": 37
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_pointer",
+      "count": 3,
+      "form": "other",
+      "text": "——完整列表：lop network credential github repos（在owner-device-7上运行）",
+      "max_line_cells": 73
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "one",
+      "text": "octo-org/api（0——SOURCE）",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（0——SOURCE）",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "one",
+      "text": "octo-org/api（1——SOURCE）",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（1——SOURCE）",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "one",
+      "text": "octo-org/api（2——SOURCE）",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（2——SOURCE）",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "one",
+      "text": "octo-org/api（3——SOURCE）",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（3——SOURCE）",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "one",
+      "text": "octo-org/api（5——SOURCE）",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（5——SOURCE）",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "one",
+      "text": "octo-org/api（11——SOURCE）",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（11——SOURCE）",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "one",
+      "text": "octo-org/api（21——SOURCE）",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（21——SOURCE）",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "one",
+      "text": "octo-org/api（22——SOURCE）",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（22——SOURCE）",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "one",
+      "text": "octo-org/api（25——SOURCE）",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（25——SOURCE）",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "one",
+      "text": "octo-org/api（101——SOURCE）",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（101——SOURCE）",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "one",
+      "text": "octo-org/api（1.5——SOURCE）",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（1.5——SOURCE）",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "one",
+      "text": "octo-org/api（1,000,000——SOURCE）",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "other",
+      "text": "octo-org/website和octo-org/api（1,000,000——SOURCE）",
+      "max_line_cells": 51
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.borrower_unset",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7没有可出借访问权限的GitHub仓库：DETAIL。请在owner-device-7上处理；未出借任何权限。",
+      "max_line_cells": 96
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.borrower_unset_default",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7没有可出借访问权限的GitHub仓库。在owner-device-7上检查lop network credential github repos；未出借任何权限。",
+      "max_line_cells": 121
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.borrower_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在owner-device-7上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。",
+      "max_line_cells": 223
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.wrapper_denied",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos。只有该设备才能更改其出借范围。",
+      "max_line_cells": 167
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_repo",
+      "count": 3,
+      "form": "other",
+      "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_repos_args",
+      "count": 3,
+      "form": "other",
+      "text": "repos不接受仓库参数",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_default",
+      "count": 3,
+      "form": "other",
+      "text": "--use-default仅适用于repos",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_refresh",
+      "count": 3,
+      "form": "other",
+      "text": "--refresh仅适用于repos",
+      "max_line_cells": 22
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.owner_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "3个仓库；单个共享最多容纳100个",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reset_failed",
+      "count": 3,
+      "form": "other",
+      "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos",
+      "max_line_cells": 132
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "count": 3,
+      "form": "other",
+      "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。",
+      "max_line_cells": 195
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.progress",
+      "count": 3,
+      "form": "other",
+      "text": "получение списка репозиториев, в которые ваша учётная запись GitHub может выполнять push…",
+      "max_line_cells": 89
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opt_out_none",
+      "count": 3,
+      "form": "other",
+      "text": "исключения: нет",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opt_out_names",
+      "count": 3,
+      "form": "other",
+      "text": "исключения (3): octo-org/website, octo-org/api — вернуть репозиторий: lop network credential github repos",
+      "max_line_cells": 105
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока REASON; REMEDY",
+      "max_line_cells": 115
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.repos_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Репозитории GitHub: нет — REASON; REMEDY",
+      "max_line_cells": 40
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.repos_head",
+      "count": 3,
+      "form": "other",
+      "text": "Репозитории GitHub, доступ к которым предоставляется взаймы: 3 — SOURCE",
+      "max_line_cells": 71
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opted_suffix",
+      "count": 3,
+      "form": "other",
+      "text": ", за вычетом исключённых: 3",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.more",
+      "count": 3,
+      "form": "other",
+      "text": "  … и ещё 3 — весь список: lop network credential github repos",
+      "max_line_cells": 62
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.capacity",
+      "count": 3,
+      "form": "other",
+      "text": "это больше, чем может вместить один общий доступ (3), поэтому все запросы заимствования отклоняются, пока вы не выберете репозитории в настройке репозиториев GitHub (найдите её в /settings) или не исключите часть из них",
+      "max_line_cells": 219
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opt_out_step",
+      "count": 3,
+      "form": "other",
+      "text": "исключить репозиторий: lop network credential github repos — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL",
+      "max_line_cells": 191
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.source_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "список, выбранный вручную (настройка репозиториев GitHub)",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.source_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "список, полученный AGO — сейчас не удалось получить список репозиториев GitHub, поэтому он может быть устаревшим",
+      "max_line_cells": 112
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.source_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push; список получен AGO",
+      "max_line_cells": 106
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.which_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "список, выбранный вручную",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.which_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push",
+      "max_line_cells": 90
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_already",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website уже был исключён",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website отсутствует в списке «WHICH» — проверьте написание; он всё равно исключён на случай добавления в будущем",
+      "max_line_cells": 121
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website исключён; проверить написание не удалось, так как список «WHICH» недоступен",
+      "max_line_cells": 92
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, TTL",
+      "max_line_cells": 158
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_unchanged",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website не был исключён",
+      "max_line_cells": 32
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website больше не исключён (он отсутствует в списке «WHICH», поэтому других изменений нет)",
+      "max_line_cells": 99
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website больше не исключён; проверить его наличие в списке «WHICH» не удалось",
+      "max_line_cells": 86
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, TTL",
+      "max_line_cells": 157
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев",
+      "max_line_cells": 104
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_unavailable_local",
+      "count": 3,
+      "form": "other",
+      "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push, и нет предыдущего списка для замены",
+      "max_line_cells": 147
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_unavailable_remote",
+      "count": 3,
+      "form": "other",
+      "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push, и нет предыдущего списка для замены",
+      "max_line_cells": 134
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_excluded_local",
+      "count": 3,
+      "form": "other",
+      "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены",
+      "max_line_cells": 101
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_excluded_remote",
+      "count": 3,
+      "form": "other",
+      "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (3), исключены",
+      "max_line_cells": 88
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_no_repos_local",
+      "count": 3,
+      "form": "other",
+      "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий",
+      "max_line_cells": 84
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_no_repos_remote",
+      "count": 3,
+      "form": "other",
+      "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий",
+      "max_line_cells": 71
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos",
+      "max_line_cells": 202
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "повторите, когда GitHub станет доступен: lop network credential github repos",
+      "max_line_cells": 76
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_excluded",
+      "count": 3,
+      "form": "other",
+      "text": "верните один из репозиториев командой lop network credential github repos",
+      "max_line_cells": 73
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_no_repos",
+      "count": 3,
+      "form": "other",
+      "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "max_line_cells": 74
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.refusal_detail",
+      "count": 3,
+      "form": "other",
+      "text": "REASON — REMEDY",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "в неизвестное время",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_now",
+      "count": 3,
+      "form": "other",
+      "text": "только что",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_minutes",
+      "count": 3,
+      "form": "other",
+      "text": "3 мин назад",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 0,
+      "form": "other",
+      "text": "0 ч назад",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 1,
+      "form": "other",
+      "text": "1 ч назад",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 2,
+      "form": "other",
+      "text": "2 ч назад",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 3,
+      "form": "other",
+      "text": "3 ч назад",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 5,
+      "form": "other",
+      "text": "5 ч назад",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 11,
+      "form": "other",
+      "text": "11 ч назад",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 21,
+      "form": "other",
+      "text": "21 ч назад",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 22,
+      "form": "other",
+      "text": "22 ч назад",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 25,
+      "form": "other",
+      "text": "25 ч назад",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 101,
+      "form": "other",
+      "text": "101 ч назад",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 1.5,
+      "form": "other",
+      "text": "1,5 ч назад",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "count": 1000000,
+      "form": "other",
+      "text": "1 000 000 ч назад",
+      "max_line_cells": 17
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 0,
+      "form": "other",
+      "text": "0 дней назад",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 1,
+      "form": "other",
+      "text": "1 день назад",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 2,
+      "form": "other",
+      "text": "2 дня назад",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 3,
+      "form": "other",
+      "text": "3 дня назад",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 5,
+      "form": "other",
+      "text": "5 дней назад",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 11,
+      "form": "other",
+      "text": "11 дней назад",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 21,
+      "form": "other",
+      "text": "21 день назад",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 22,
+      "form": "other",
+      "text": "22 дня назад",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 25,
+      "form": "other",
+      "text": "25 дней назад",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 101,
+      "form": "other",
+      "text": "101 день назад",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 1.5,
+      "form": "other",
+      "text": "1,5 дня назад",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "count": 1000000,
+      "form": "other",
+      "text": "1 000 000 дней назад",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.ttl",
+      "count": 3,
+      "form": "other",
+      "text": "в течение 3 мин",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_auth",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub отклонил эту учётную запись",
+      "max_line_cells": 34
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_offline",
+      "count": 3,
+      "form": "other",
+      "text": "не удалось связаться с GitHub",
+      "max_line_cells": 29
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_server",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub вернул ошибку",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_coverage",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub не смог перечислить все репозитории с правом выполнения push",
+      "max_line_cells": 67
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "не удалось получить список репозиториев GitHub",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unfetched",
+      "count": 3,
+      "form": "other",
+      "text": "список репозиториев ещё не получен",
+      "max_line_cells": 34
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_earlier_login",
+      "count": 3,
+      "form": "other",
+      "text": "сохранённый список относится к предыдущей учётной записи GitHub",
+      "max_line_cells": 63
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "count": 3,
+      "form": "other",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "max_line_cells": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "репозитории пока не перечислены — при следующем заимствовании будет запрос к GitHub; если он не удастся, доступ будет отклонён, а не расширен",
+      "max_line_cells": 141
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_empty",
+      "count": 3,
+      "form": "other",
+      "text": "нет репозиториев — заимствование будет отклонено, а не расширено",
+      "max_line_cells": 64
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_opted",
+      "count": 3,
+      "form": "other",
+      "text": ", исключено: 3",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_more",
+      "count": 3,
+      "form": "other",
+      "text": "ещё 3",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "список, выбранный там вручную",
+      "max_line_cells": 29
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "список, полученный AGO — при последней проверке устройство не смогло перечислить репозитории GitHub",
+      "max_line_cells": 99
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "все репозитории, в которые его учётная запись может выполнять push; список получен AGO",
+      "max_line_cells": 86
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_pointer",
+      "count": 3,
+      "form": "other",
+      "text": " — весь список: lop network credential github repos на owner-device-7",
+      "max_line_cells": 69
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "one",
+      "text": "octo-org/api (0 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (0 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "one",
+      "text": "octo-org/api (1 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (1 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "one",
+      "text": "octo-org/api (2 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (2 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "one",
+      "text": "octo-org/api (3 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (3 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "one",
+      "text": "octo-org/api (5 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (5 — SOURCE)",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "one",
+      "text": "octo-org/api (11 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (11 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "one",
+      "text": "octo-org/api (21 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (21 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "one",
+      "text": "octo-org/api (22 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (22 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "one",
+      "text": "octo-org/api (25 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (25 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "one",
+      "text": "octo-org/api (101 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (101 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "one",
+      "text": "octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "one",
+      "text": "octo-org/api (1 000 000 — SOURCE)",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "other",
+      "text": "octo-org/website и octo-org/api (1 000 000 — SOURCE)",
+      "max_line_cells": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.borrower_unset",
+      "count": 3,
+      "form": "other",
+      "text": "На owner-device-7 нет репозиториев GitHub, доступ к которым можно предоставить взаймы: DETAIL. Исправьте это на owner-device-7; доступ не предоставлен.",
+      "max_line_cells": 151
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.borrower_unset_default",
+      "count": 3,
+      "form": "other",
+      "text": "На owner-device-7 нет репозиториев GitHub, доступ к которым можно предоставить взаймы. Проверьте lop network credential github repos на owner-device-7; доступ не предоставлен.",
+      "max_line_cells": 175
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.borrower_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "На owner-device-7 больше репозиториев GitHub, чем вмещает один общий доступDETAIL, поэтому доступ не предоставлен. На owner-device-7 выберите репозитории в настройке репозиториев GitHub (найдите её в /settings) или исключите часть командой lop network credential github exclude <owner/repo>.",
+      "max_line_cells": 291
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.wrapper_denied",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ.",
+      "max_line_cells": 296
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_repo",
+      "count": 3,
+      "form": "other",
+      "text": "Для exclude нужен один репозиторий в виде owner/repo, например octo-org/website",
+      "max_line_cells": 79
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_repos_args",
+      "count": 3,
+      "form": "other",
+      "text": "repos не принимает репозиторий",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_default",
+      "count": 3,
+      "form": "other",
+      "text": "--use-default применим только к repos",
+      "max_line_cells": 37
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_refresh",
+      "count": 3,
+      "form": "other",
+      "text": "--refresh применим только к repos",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.owner_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "Репозитории: 3; один общий доступ вмещает не более 100",
+      "max_line_cells": 54
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reset_failed",
+      "count": 3,
+      "form": "other",
+      "text": "не удалось завершить возврат к автоматическому списку репозиториев GitHub (PermissionError); проверьте, доступна ли папка данных этого устройства для записи, и повторите lop network credential github repos",
+      "max_line_cells": 205
+    },
+    {
+      "locale": "ru",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "count": 3,
+      "form": "other",
+      "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "max_line_cells": 394
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.progress",
+      "count": 3,
+      "form": "other",
+      "text": "đang liệt kê các kho mà tài khoản GitHub của bạn có thể push…",
+      "max_line_cells": 61
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opt_out_none",
+      "count": 3,
+      "form": "other",
+      "text": "đã loại trừ: không có",
+      "max_line_cells": 21
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opt_out_names",
+      "count": 3,
+      "form": "other",
+      "text": "đã loại trừ (3): octo-org/website, octo-org/api — đưa một kho trở lại: lop network credential github repos",
+      "max_line_cells": 106
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.share_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Kho GitHub: chưa có — đã thiết lập chia sẻ, nhưng mọi lần mượn đều bị từ chối khi REASON; REMEDY",
+      "max_line_cells": 96
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.repos_empty",
+      "count": 3,
+      "form": "other",
+      "text": "Kho GitHub: không có — REASON; REMEDY",
+      "max_line_cells": 37
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.repos_head",
+      "count": 3,
+      "form": "other",
+      "text": "Kho GitHub được cho mượn quyền truy cập: 3 — SOURCE",
+      "max_line_cells": 51
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opted_suffix",
+      "count": 3,
+      "form": "other",
+      "text": ", trừ 3 kho đã loại trừ",
+      "max_line_cells": 23
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.more",
+      "count": 3,
+      "form": "other",
+      "text": "  … và 3 kho nữa — xem tất cả: lop network credential github repos",
+      "max_line_cells": 66
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.capacity",
+      "count": 3,
+      "form": "other",
+      "text": "số lượng này vượt quá 3 kho mà một mục chia sẻ có thể chứa, nên mọi lần mượn đều bị từ chối cho đến khi bạn chọn các kho để cho mượn trong cài đặt kho GitHub (tìm trong /settings) hoặc loại trừ bớt",
+      "max_line_cells": 197
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opt_out_step",
+      "count": 3,
+      "form": "other",
+      "text": "loại trừ một kho: lop network credential github repos — các thiết bị được chia sẻ sẽ mất quyền push kho đó khi lấy thông tin xác thực lần tới, TTL",
+      "max_line_cells": 146
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.source_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "danh sách bạn chọn thủ công (cài đặt kho GitHub)",
+      "max_line_cells": 48
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.source_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "danh sách lấy AGO — vừa không thể liệt kê kho GitHub, nên danh sách có thể đã cũ",
+      "max_line_cells": 80
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.source_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "tất cả kho mà tài khoản GitHub trên thiết bị này có thể push, được liệt kê AGO",
+      "max_line_cells": 78
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.which_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "danh sách bạn chọn thủ công",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.which_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "danh sách kho mà tài khoản GitHub trên thiết bị này có thể push",
+      "max_line_cells": 63
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_already",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website đã được loại trừ từ trước",
+      "max_line_cells": 42
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website không nằm trong WHICH — kiểm tra chính tả; kho vẫn được loại trừ phòng khi được thêm vào sau này",
+      "max_line_cells": 113
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website đã được loại trừ; không thể kiểm tra chính tả vì không lấy được WHICH",
+      "max_line_cells": 86
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website đã được loại trừ — các thiết bị được chia sẻ sẽ mất quyền push kho đó khi lấy thông tin xác thực lần tới, TTL",
+      "max_line_cells": 126
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_unchanged",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website vốn không bị loại trừ",
+      "max_line_cells": 38
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website không còn bị loại trừ (kho không nằm trong WHICH, nên không có thay đổi nào khác)",
+      "max_line_cells": 98
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website không còn bị loại trừ; không thể kiểm tra xem kho có nằm trong WHICH hay không",
+      "max_line_cells": 95
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website đã được đưa trở lại — các thiết bị được chia sẻ có thể push kho đó lần nữa khi lấy thông tin xác thực lần tới, TTL",
+      "max_line_cells": 131
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "cài đặt kho GitHub chọn thủ công không còn kho nào sau khi bỏ các kho bị loại trừ",
+      "max_line_cells": 81
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_unavailable_local",
+      "count": 3,
+      "form": "other",
+      "text": "không lấy được danh sách kho mà tài khoản GitHub trên thiết bị này có thể push, và không có danh sách cũ để dùng thay",
+      "max_line_cells": 117
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_unavailable_remote",
+      "count": 3,
+      "form": "other",
+      "text": "không lấy được danh sách kho mà tài khoản GitHub của thiết bị đó có thể push, và không có danh sách cũ để dùng thay",
+      "max_line_cells": 115
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_excluded_local",
+      "count": 3,
+      "form": "other",
+      "text": "tất cả kho mà tài khoản GitHub trên thiết bị này có thể push (3) đều bị loại trừ",
+      "max_line_cells": 80
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_excluded_remote",
+      "count": 3,
+      "form": "other",
+      "text": "tất cả kho mà tài khoản GitHub của thiết bị đó có thể push (3) đều bị loại trừ",
+      "max_line_cells": 78
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_no_repos_local",
+      "count": 3,
+      "form": "other",
+      "text": "tài khoản GitHub trên thiết bị này không thể push kho nào",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_no_repos_remote",
+      "count": 3,
+      "form": "other",
+      "text": "tài khoản GitHub của thiết bị đó không thể push kho nào",
+      "max_line_cells": 55
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "thêm kho vào cài đặt kho GitHub (tìm trong /settings), hoặc chủ động trở lại tất cả kho có thể push trừ các kho bị loại trừ bằng lop network credential github repos",
+      "max_line_cells": 164
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "thử lại khi kết nối được GitHub: lop network credential github repos",
+      "max_line_cells": 68
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_excluded",
+      "count": 3,
+      "form": "other",
+      "text": "đưa một kho trở lại bằng lop network credential github repos",
+      "max_line_cells": 60
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_no_repos",
+      "count": 3,
+      "form": "other",
+      "text": "cấp cho tài khoản GitHub đó quyền push một kho",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.refusal_detail",
+      "count": 3,
+      "form": "other",
+      "text": "REASON — REMEDY",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "vào thời điểm không rõ",
+      "max_line_cells": 22
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_now",
+      "count": 3,
+      "form": "other",
+      "text": "vừa xong",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_minutes",
+      "count": 3,
+      "form": "other",
+      "text": "3 phút trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 0,
+      "form": "other",
+      "text": "0 giờ trước",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 1,
+      "form": "other",
+      "text": "1 giờ trước",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 2,
+      "form": "other",
+      "text": "2 giờ trước",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 3,
+      "form": "other",
+      "text": "3 giờ trước",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 5,
+      "form": "other",
+      "text": "5 giờ trước",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 11,
+      "form": "other",
+      "text": "11 giờ trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 21,
+      "form": "other",
+      "text": "21 giờ trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 22,
+      "form": "other",
+      "text": "22 giờ trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 25,
+      "form": "other",
+      "text": "25 giờ trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 101,
+      "form": "other",
+      "text": "101 giờ trước",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 1.5,
+      "form": "other",
+      "text": "1,5 giờ trước",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "count": 1000000,
+      "form": "other",
+      "text": "1.000.000 giờ trước",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 0,
+      "form": "other",
+      "text": "0 ngày trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 1,
+      "form": "other",
+      "text": "1 ngày trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 2,
+      "form": "other",
+      "text": "2 ngày trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 3,
+      "form": "other",
+      "text": "3 ngày trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 5,
+      "form": "other",
+      "text": "5 ngày trước",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 11,
+      "form": "other",
+      "text": "11 ngày trước",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 21,
+      "form": "other",
+      "text": "21 ngày trước",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 22,
+      "form": "other",
+      "text": "22 ngày trước",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 25,
+      "form": "other",
+      "text": "25 ngày trước",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 101,
+      "form": "other",
+      "text": "101 ngày trước",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 1.5,
+      "form": "other",
+      "text": "1,5 ngày trước",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "count": 1000000,
+      "form": "other",
+      "text": "1.000.000 ngày trước",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.ttl",
+      "count": 3,
+      "form": "other",
+      "text": "trong vòng 3 phút",
+      "max_line_cells": 17
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_auth",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub đã từ chối tài khoản đó",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_offline",
+      "count": 3,
+      "form": "other",
+      "text": "không kết nối được GitHub",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_server",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub trả về lỗi",
+      "max_line_cells": 17
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_coverage",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub không thể liệt kê mọi kho có thể push",
+      "max_line_cells": 44
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "liệt kê kho GitHub thất bại",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_unfetched",
+      "count": 3,
+      "form": "other",
+      "text": "chưa lấy danh sách kho",
+      "max_line_cells": 22
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_earlier_login",
+      "count": 3,
+      "form": "other",
+      "text": "danh sách đã lưu thuộc về tài khoản GitHub trước đó",
+      "max_line_cells": 51
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_unknown_login",
+      "count": 3,
+      "form": "other",
+      "text": "không rõ tài khoản của danh sách GitHub đã lưu",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "chưa có kho nào được liệt kê — lần mượn tới sẽ hỏi GitHub; nếu không hỏi được thì từ chối thay vì mở rộng quyền",
+      "max_line_cells": 111
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_empty",
+      "count": 3,
+      "form": "other",
+      "text": "không có kho — lần mượn sẽ bị từ chối thay vì mở rộng quyền",
+      "max_line_cells": 59
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_opted",
+      "count": 3,
+      "form": "other",
+      "text": ", 3 kho đã loại trừ",
+      "max_line_cells": 19
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_more",
+      "count": 3,
+      "form": "other",
+      "text": "3 kho nữa",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "danh sách chọn thủ công ở đó",
+      "max_line_cells": 28
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "danh sách lấy AGO — thiết bị đó không thể liệt kê kho GitHub ở lần kiểm tra gần nhất",
+      "max_line_cells": 84
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "tất cả kho mà tài khoản của thiết bị đó có thể push, được liệt kê AGO",
+      "max_line_cells": 69
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_pointer",
+      "count": 3,
+      "form": "other",
+      "text": " — danh sách đầy đủ: chạy lop network credential github repos trên owner-device-7",
+      "max_line_cells": 81
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "one",
+      "text": "octo-org/api (0 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (0 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "one",
+      "text": "octo-org/api (1 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (1 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "one",
+      "text": "octo-org/api (2 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (2 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "one",
+      "text": "octo-org/api (3 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (3 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "one",
+      "text": "octo-org/api (5 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (5 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "one",
+      "text": "octo-org/api (11 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (11 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "one",
+      "text": "octo-org/api (21 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (21 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "one",
+      "text": "octo-org/api (22 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (22 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "one",
+      "text": "octo-org/api (25 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (25 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "one",
+      "text": "octo-org/api (101 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (101 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "one",
+      "text": "octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (1,5 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "one",
+      "text": "octo-org/api (1.000.000 — SOURCE)",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "other",
+      "text": "octo-org/website và octo-org/api (1.000.000 — SOURCE)",
+      "max_line_cells": 53
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.borrower_unset",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 không có kho GitHub nào để cho mượn quyền truy cập: DETAIL. Sửa trên owner-device-7; chưa cho mượn quyền nào.",
+      "max_line_cells": 124
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.borrower_unset_default",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 không có kho GitHub nào để cho mượn quyền truy cập. Kiểm tra lop network credential github repos trên owner-device-7; chưa cho mượn quyền nào.",
+      "max_line_cells": 157
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.borrower_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 có nhiều kho GitHub hơn sức chứa của một mục chia sẻDETAIL, nên chưa cho mượn quyền nào. Trên owner-device-7, chọn các kho để cho mượn trong cài đặt kho GitHub (tìm trong /settings), hoặc loại trừ bớt bằng lop network credential github exclude <owner/repo>.",
+      "max_line_cells": 272
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.wrapper_denied",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website không nằm trong danh sách kho do thiết bị cho mượn cung cấp (có thể bị loại trừ hoặc không thể push từ đó). Kiểm tra lop network credential github repos trên thiết bị cho mượn. Chỉ thiết bị đó mới thay đổi được những gì nó cho mượn.",
+      "max_line_cells": 249
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_repo",
+      "count": 3,
+      "form": "other",
+      "text": "exclude cần một kho dạng owner/repo, ví dụ octo-org/website",
+      "max_line_cells": 59
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_repos_args",
+      "count": 3,
+      "form": "other",
+      "text": "repos không nhận đối số kho",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_default",
+      "count": 3,
+      "form": "other",
+      "text": "--use-default chỉ áp dụng cho repos",
+      "max_line_cells": 35
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_refresh",
+      "count": 3,
+      "form": "other",
+      "text": "--refresh chỉ áp dụng cho repos",
+      "max_line_cells": 31
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.owner_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "3 kho; một mục chia sẻ chứa tối đa 100 kho",
+      "max_line_cells": 42
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reset_failed",
+      "count": 3,
+      "form": "other",
+      "text": "không thể hoàn tất việc trở lại danh sách kho GitHub tự động (PermissionError); kiểm tra thư mục dữ liệu của thiết bị này có thể ghi, rồi thử lại lop network credential github repos",
+      "max_line_cells": 181
+    },
+    {
+      "locale": "vi",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "count": 3,
+      "form": "other",
+      "text": "Các mục owner/repo để cho mượn quyền truy cập GitHub. Nếu chưa từng đặt, dùng tất cả kho mà tài khoản có thể push, trừ các kho bị loại trừ. Xóa trắng danh sách chọn thủ công từng được chia sẻ sẽ dừng cho mượn; trở lại lựa chọn tự động bằng lop network credential github repos --use-default.",
+      "max_line_cells": 290
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.progress",
+      "count": 3,
+      "form": "other",
+      "text": "ان ریپوزیٹریوں کی فہرست بن رہی ہے جن میں آپ کا GitHub اکاؤنٹ push کر سکتا ہے…",
+      "max_line_cells": 77
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opt_out_none",
+      "count": 3,
+      "form": "other",
+      "text": "خارج کردہ: کوئی نہیں",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opt_out_names",
+      "count": 3,
+      "form": "other",
+      "text": "خارج کردہ (3): octo-org/website, octo-org/api — ایک کو واپس شامل کریں: lop network credential github repos",
+      "max_line_cells": 106
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.share_empty",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub ریپوزیٹریاں: ابھی کوئی نہیں — اشتراک قائم ہے، مگر جب تک REASON، مستعار لینے کی ہر درخواست مسترد ہوگی؛ REMEDY",
+      "max_line_cells": 115
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.repos_empty",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub ریپوزیٹریاں: کوئی نہیں — REASON؛ REMEDY",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.repos_head",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub ریپوزیٹریاں جن کی رسائی مستعار دی جا رہی ہے: 3 — SOURCE",
+      "max_line_cells": 62
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opted_suffix",
+      "count": 3,
+      "form": "other",
+      "text": "، خارج کردہ 3 کو چھوڑ کر",
+      "max_line_cells": 24
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.more",
+      "count": 3,
+      "form": "other",
+      "text": "  … اور مزید 3 — سب دیکھیں: lop network credential github repos",
+      "max_line_cells": 63
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.capacity",
+      "count": 3,
+      "form": "other",
+      "text": "یہ تعداد ایک اشتراک کی گنجائش، یعنی 3 ریپوزیٹریوں سے زیادہ ہے، اس لیے مستعار لینے کی ہر درخواست مسترد ہوگی جب تک آپ GitHub ریپوزیٹریوں کی ترتیبات میں مستعار دینے کے لیے کچھ منتخب نہ کریں (/settings میں تلاش کریں) یا کچھ کو خارج نہ کر دیں",
+      "max_line_cells": 237
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opt_out_step",
+      "count": 3,
+      "form": "other",
+      "text": "ریپوزیٹری خارج کریں: lop network credential github repos — جن ڈیوائسز سے اشتراک ہے وہ اگلی بار سند حاصل کرتے وقت اس میں push کا حق کھو دیں گے، TTL",
+      "max_line_cells": 146
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.source_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "آپ کی ہاتھ سے منتخب کردہ فہرست (GitHub ریپوزیٹریوں کی ترتیبات)",
+      "max_line_cells": 62
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.source_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "AGO حاصل کردہ فہرست — ابھی GitHub ریپوزیٹریوں کی فہرست نہیں مل سکی، اس لیے یہ پرانی ہو سکتی ہے",
+      "max_line_cells": 94
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.source_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "ہر ریپوزیٹری جس میں اس ڈیوائس کا GitHub اکاؤنٹ push کر سکتا ہے؛ فہرست بنی: AGO",
+      "max_line_cells": 78
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.which_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "آپ کی ہاتھ سے منتخب کردہ فہرست",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.which_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "ان ریپوزیٹریوں کی فہرست جن میں اس ڈیوائس کا GitHub اکاؤنٹ push کر سکتا ہے",
+      "max_line_cells": 73
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_already",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website پہلے ہی خارج تھی",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website، WHICH میں نہیں ہے — ہجے جانچیں؛ پھر بھی اسے خارج رکھا گیا ہے تاکہ بعد میں شامل ہونے پر بھی خارج رہے",
+      "max_line_cells": 117
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website خارج ہے؛ WHICH حاصل نہیں ہو سکی، اس لیے ہجے نہیں جانچے جا سکے",
+      "max_line_cells": 78
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website خارج ہے — جن ڈیوائسز سے اشتراک ہے وہ اگلی بار سند حاصل کرتے وقت اس میں push کا حق کھو دیں گے، TTL",
+      "max_line_cells": 114
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_unchanged",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website خارج نہیں تھی",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website اب خارج نہیں ہے (یہ WHICH میں نہیں ہے، اس لیے کوئی اور تبدیلی نہیں ہوئی)",
+      "max_line_cells": 89
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website اب خارج نہیں ہے؛ یہ WHICH میں ہے یا نہیں، یہ جانچا نہیں جا سکا",
+      "max_line_cells": 79
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website واپس شامل ہے — جن ڈیوائسز سے اشتراک ہے وہ اگلی بار سند حاصل کرتے وقت اس میں دوبارہ push کر سکیں گے، TTL",
+      "max_line_cells": 120
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "ہاتھ سے منتخب GitHub ریپوزیٹریوں کی ترتیبات میں خارج کردہ ریپوزیٹریاں نکالنے کے بعد کوئی ریپوزیٹری نہیں بچتی",
+      "max_line_cells": 108
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_unavailable_local",
+      "count": 3,
+      "form": "other",
+      "text": "اس ڈیوائس کے GitHub اکاؤنٹ کی push کے قابل ریپوزیٹریوں کی فہرست حاصل نہیں ہو سکی، اور متبادل کے لیے کوئی پچھلی فہرست نہیں ہے",
+      "max_line_cells": 124
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_unavailable_remote",
+      "count": 3,
+      "form": "other",
+      "text": "اس کے GitHub اکاؤنٹ کی push کے قابل ریپوزیٹریوں کی فہرست حاصل نہیں ہو سکی، اور متبادل کے لیے کوئی پچھلی فہرست نہیں ہے",
+      "max_line_cells": 117
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_excluded_local",
+      "count": 3,
+      "form": "other",
+      "text": "اس ڈیوائس کے GitHub اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں (3) خارج ہیں",
+      "max_line_cells": 72
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_excluded_remote",
+      "count": 3,
+      "form": "other",
+      "text": "اس کے GitHub اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں (3) خارج ہیں",
+      "max_line_cells": 65
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_no_repos_local",
+      "count": 3,
+      "form": "other",
+      "text": "اس ڈیوائس کا GitHub اکاؤنٹ کسی ریپوزیٹری میں push نہیں کر سکتا",
+      "max_line_cells": 62
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_no_repos_remote",
+      "count": 3,
+      "form": "other",
+      "text": "اس کا GitHub اکاؤنٹ کسی ریپوزیٹری میں push نہیں کر سکتا",
+      "max_line_cells": 55
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub ریپوزیٹریوں کی ترتیبات میں ریپوزیٹریاں شامل کریں (/settings میں تلاش کریں)، یا lop network credential github repos سے واضح طور پر push کے قابل تمام ریپوزیٹریوں پر واپس آئیں، خارج کردہ کو چھوڑ کر",
+      "max_line_cells": 201
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub سے رابطہ ممکن ہونے پر دوبارہ کوشش کریں: lop network credential github repos",
+      "max_line_cells": 82
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_excluded",
+      "count": 3,
+      "form": "other",
+      "text": "lop network credential github repos سے ایک کو واپس شامل کریں",
+      "max_line_cells": 60
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_no_repos",
+      "count": 3,
+      "form": "other",
+      "text": "اس GitHub اکاؤنٹ کو کسی ریپوزیٹری میں push کی اجازت دیں",
+      "max_line_cells": 55
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.refusal_detail",
+      "count": 3,
+      "form": "other",
+      "text": "REASON — REMEDY",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "نامعلوم وقت پر",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_now",
+      "count": 3,
+      "form": "other",
+      "text": "ابھی ابھی",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_minutes",
+      "count": 3,
+      "form": "other",
+      "text": "3 منٹ پہلے",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 0,
+      "form": "other",
+      "text": "0 گھنٹے پہلے",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 1,
+      "form": "other",
+      "text": "1 گھنٹہ پہلے",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 2,
+      "form": "other",
+      "text": "2 گھنٹے پہلے",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 3,
+      "form": "other",
+      "text": "3 گھنٹے پہلے",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 5,
+      "form": "other",
+      "text": "5 گھنٹے پہلے",
+      "max_line_cells": 12
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 11,
+      "form": "other",
+      "text": "11 گھنٹے پہلے",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 21,
+      "form": "other",
+      "text": "21 گھنٹے پہلے",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 22,
+      "form": "other",
+      "text": "22 گھنٹے پہلے",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 25,
+      "form": "other",
+      "text": "25 گھنٹے پہلے",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 101,
+      "form": "other",
+      "text": "101 گھنٹے پہلے",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 1.5,
+      "form": "other",
+      "text": "1.5 گھنٹے پہلے",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "count": 1000000,
+      "form": "other",
+      "text": "1,000,000 گھنٹے پہلے",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 0,
+      "form": "other",
+      "text": "0 دن پہلے",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 1,
+      "form": "other",
+      "text": "1 دن پہلے",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 2,
+      "form": "other",
+      "text": "2 دن پہلے",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 3,
+      "form": "other",
+      "text": "3 دن پہلے",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 5,
+      "form": "other",
+      "text": "5 دن پہلے",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 11,
+      "form": "other",
+      "text": "11 دن پہلے",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 21,
+      "form": "other",
+      "text": "21 دن پہلے",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 22,
+      "form": "other",
+      "text": "22 دن پہلے",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 25,
+      "form": "other",
+      "text": "25 دن پہلے",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 101,
+      "form": "other",
+      "text": "101 دن پہلے",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 1.5,
+      "form": "other",
+      "text": "1.5 دن پہلے",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "count": 1000000,
+      "form": "other",
+      "text": "1,000,000 دن پہلے",
+      "max_line_cells": 17
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.ttl",
+      "count": 3,
+      "form": "other",
+      "text": "3 منٹ کے اندر",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_auth",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub نے اس اکاؤنٹ کو مسترد کیا",
+      "max_line_cells": 32
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_offline",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub سے رابطہ نہیں ہو سکا",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_server",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub نے خرابی لوٹائی",
+      "max_line_cells": 22
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_coverage",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub push کے قابل تمام ریپوزیٹریوں کی فہرست نہیں دے سکا",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub ریپوزیٹریوں کی فہرست حاصل کرنے میں ناکامی",
+      "max_line_cells": 48
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_unfetched",
+      "count": 3,
+      "form": "other",
+      "text": "ریپوزیٹریوں کی فہرست ابھی حاصل نہیں کی گئی",
+      "max_line_cells": 42
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_earlier_login",
+      "count": 3,
+      "form": "other",
+      "text": "محفوظ فہرست پچھلے GitHub اکاؤنٹ کی ہے",
+      "max_line_cells": 37
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_unknown_login",
+      "count": 3,
+      "form": "other",
+      "text": "محفوظ GitHub فہرست کا اکاؤنٹ نامعلوم ہے",
+      "max_line_cells": 39
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "ابھی کوئی ریپوزیٹری درج نہیں — مستعار لینے کی اگلی درخواست GitHub سے پوچھے گی؛ ایسا نہ ہو سکنے پر رسائی بڑھانے کے بجائے درخواست مسترد ہوگی",
+      "max_line_cells": 138
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_empty",
+      "count": 3,
+      "form": "other",
+      "text": "کوئی ریپوزیٹری نہیں — مستعار لینے کی درخواست رسائی بڑھانے کے بجائے مسترد ہوگی",
+      "max_line_cells": 77
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_opted",
+      "count": 3,
+      "form": "other",
+      "text": "، 3 خارج کردہ",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_more",
+      "count": 3,
+      "form": "other",
+      "text": "مزید 3",
+      "max_line_cells": 6
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "وہاں ہاتھ سے منتخب کردہ فہرست",
+      "max_line_cells": 29
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "AGO حاصل کردہ فہرست — آخری جانچ میں وہ ڈیوائس GitHub ریپوزیٹریوں کی فہرست نہیں لے سکا",
+      "max_line_cells": 85
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "ہر ریپوزیٹری جس میں اس کا اکاؤنٹ push کر سکتا ہے؛ فہرست بنی: AGO",
+      "max_line_cells": 64
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_pointer",
+      "count": 3,
+      "form": "other",
+      "text": " — مکمل فہرست: lop network credential github repos (owner-device-7 پر چلائیں)",
+      "max_line_cells": 77
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "one",
+      "text": "octo-org/api (0 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (0 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "one",
+      "text": "octo-org/api (1 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (1 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "one",
+      "text": "octo-org/api (2 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (2 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "one",
+      "text": "octo-org/api (3 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (3 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "one",
+      "text": "octo-org/api (5 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (5 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "one",
+      "text": "octo-org/api (11 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (11 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "one",
+      "text": "octo-org/api (21 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (21 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "one",
+      "text": "octo-org/api (22 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (22 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "one",
+      "text": "octo-org/api (25 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (25 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "one",
+      "text": "octo-org/api (101 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (101 — SOURCE)",
+      "max_line_cells": 48
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "one",
+      "text": "octo-org/api (1.5 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (1.5 — SOURCE)",
+      "max_line_cells": 48
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "one",
+      "text": "octo-org/api (1,000,000 — SOURCE)",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "other",
+      "text": "octo-org/website اور octo-org/api (1,000,000 — SOURCE)",
+      "max_line_cells": 54
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.borrower_unset",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 کے پاس کوئی GitHub ریپوزیٹری نہیں جس کی رسائی وہ مستعار دے سکے: DETAIL۔ اسے owner-device-7 پر درست کریں؛ کوئی رسائی مستعار نہیں دی گئی۔",
+      "max_line_cells": 150
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.borrower_unset_default",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 کے پاس کوئی GitHub ریپوزیٹری نہیں جس کی رسائی وہ مستعار دے سکے۔ owner-device-7 پر lop network credential github repos جانچیں؛ کوئی رسائی مستعار نہیں دی گئی۔",
+      "max_line_cells": 171
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.borrower_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 کے پاس ایک اشتراک کی گنجائش سے زیادہ GitHub ریپوزیٹریاں ہیںDETAIL، اس لیے کوئی رسائی مستعار نہیں دی گئی۔ owner-device-7 پر GitHub ریپوزیٹریوں کی ترتیبات میں مستعار دینے کے لیے کچھ منتخب کریں (/settings میں تلاش کریں)، یا lop network credential github exclude <owner/repo> سے کچھ کو خارج کریں۔",
+      "max_line_cells": 307
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.wrapper_denied",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔",
+      "max_line_cells": 253
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_repo",
+      "count": 3,
+      "form": "other",
+      "text": "exclude کے لیے owner/repo کی صورت میں ایک ریپوزیٹری درکار ہے، مثلاً octo-org/website",
+      "max_line_cells": 83
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_repos_args",
+      "count": 3,
+      "form": "other",
+      "text": "repos کوئی ریپوزیٹری قبول نہیں کرتا",
+      "max_line_cells": 35
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_default",
+      "count": 3,
+      "form": "other",
+      "text": "--use-default صرف repos پر لاگو ہوتا ہے",
+      "max_line_cells": 39
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_refresh",
+      "count": 3,
+      "form": "other",
+      "text": "--refresh صرف repos پر لاگو ہوتا ہے",
+      "max_line_cells": 35
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.owner_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "3 ریپوزیٹریاں؛ ایک اشتراک میں زیادہ سے زیادہ 100 آ سکتی ہیں",
+      "max_line_cells": 59
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reset_failed",
+      "count": 3,
+      "form": "other",
+      "text": "خودکار GitHub ریپوزیٹری فہرست پر واپسی مکمل نہیں ہو سکی (PermissionError)؛ جانچیں کہ اس ڈیوائس کے ڈیٹا فولڈر میں لکھا جا سکتا ہے، پھر lop network credential github repos دوبارہ آزمائیں",
+      "max_line_cells": 184
+    },
+    {
+      "locale": "ur",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub رسائی مستعار دینے کے لیے owner/repo اندراجات۔ اگر کبھی مقرر نہیں کیا گیا تو اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں استعمال ہوں گی، خارج کردہ کو چھوڑ کر۔ پہلے مشترک کی گئی ہاتھ سے منتخب فہرست کو خالی کرنے سے مستعار دینا بند ہو جاتا ہے؛ lop network credential github repos --use-default سے خودکار انتخاب پر واپس آئیں۔",
+      "max_line_cells": 323
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.progress",
+      "count": 3,
+      "form": "other",
+      "text": "उन रिपॉज़िटरी की सूची बनाई जा रही है जिनमें आपका GitHub खाता push कर सकता है…",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opt_out_none",
+      "count": 3,
+      "form": "other",
+      "text": "बाहर रखी गईं: कोई नहीं",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opt_out_names",
+      "count": 3,
+      "form": "other",
+      "text": "बाहर रखी गईं (3): octo-org/website, octo-org/api — एक को वापस शामिल करें: lop network credential github repos",
+      "max_line_cells": 100
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.share_empty",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub रिपॉज़िटरी: अभी कोई नहीं — साझाकरण सेट है, लेकिन जब तक REASON, उधार लेने का हर अनुरोध अस्वीकार होगा; REMEDY",
+      "max_line_cells": 88
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.repos_empty",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub रिपॉज़िटरी: कोई नहीं — REASON; REMEDY",
+      "max_line_cells": 36
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.repos_head",
+      "count": 3,
+      "form": "other",
+      "text": "जिन GitHub रिपॉज़िटरी की पहुँच उधार दी जा रही है: 3 — SOURCE",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opted_suffix",
+      "count": 3,
+      "form": "other",
+      "text": ", बाहर रखी गई 3 को छोड़कर",
+      "max_line_cells": 20
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.more",
+      "count": 3,
+      "form": "other",
+      "text": "  … और 3 अन्य — सभी देखें: lop network credential github repos",
+      "max_line_cells": 57
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.capacity",
+      "count": 3,
+      "form": "other",
+      "text": "यह संख्या एक साझाकरण में आने वाली 3 रिपॉज़िटरी से अधिक है, इसलिए उधार लेने का हर अनुरोध अस्वीकार होगा जब तक आप GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुन न लें (/settings में खोजें) या कुछ को बाहर न रख दें",
+      "max_line_cells": 156
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opt_out_step",
+      "count": 3,
+      "form": "other",
+      "text": "रिपॉज़िटरी को बाहर रखें: lop network credential github repos — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL",
+      "max_line_cells": 118
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.source_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "आपकी हाथ से चुनी सूची (GitHub रिपॉज़िटरी सेटिंग)",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.source_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "AGO प्राप्त सूची — अभी GitHub रिपॉज़िटरी की सूची नहीं मिल सकी, इसलिए यह पुरानी हो सकती है",
+      "max_line_cells": 64
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.source_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "हर रिपॉज़िटरी जिसमें इस डिवाइस का GitHub खाता push कर सकता है; सूची बनी: AGO",
+      "max_line_cells": 58
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.which_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "आपकी हाथ से चुनी सूची",
+      "max_line_cells": 14
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.which_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "उन रिपॉज़िटरी की सूची जिनमें इस डिवाइस का GitHub खाता push कर सकता है",
+      "max_line_cells": 51
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_already",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website पहले से बाहर थी",
+      "max_line_cells": 28
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website, WHICH में नहीं है — वर्तनी जाँचें; फिर भी इसे बाहर रखा गया है ताकि बाद में जुड़ने पर भी बाहर रहे",
+      "max_line_cells": 85
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website को बाहर रखा गया है; WHICH नहीं मिल सकी, इसलिए वर्तनी की जाँच नहीं हो सकी",
+      "max_line_cells": 70
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, TTL",
+      "max_line_cells": 97
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_unchanged",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website बाहर नहीं थी",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_typo",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website अब बाहर नहीं है (यह WHICH में नहीं है, इसलिए और कुछ नहीं बदला)",
+      "max_line_cells": 65
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_unchecked",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website अब बाहर नहीं है; यह WHICH में है या नहीं, इसकी जाँच नहीं हो सकी",
+      "max_line_cells": 63
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_added",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website फिर शामिल है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें फिर push कर सकेंगे, TTL",
+      "max_line_cells": 86
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "हाथ से चुनी GitHub रिपॉज़िटरी सेटिंग में बाहर रखी गई रिपॉज़िटरी हटाने के बाद कोई रिपॉज़िटरी नहीं बचती",
+      "max_line_cells": 67
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_unavailable_local",
+      "count": 3,
+      "form": "other",
+      "text": "इस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है",
+      "max_line_cells": 87
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_unavailable_remote",
+      "count": 3,
+      "form": "other",
+      "text": "उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली, और विकल्प के लिए कोई पिछली सूची नहीं है",
+      "max_line_cells": 87
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_excluded_local",
+      "count": 3,
+      "form": "other",
+      "text": "इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (3), वे बाहर रखी गई हैं",
+      "max_line_cells": 66
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_excluded_remote",
+      "count": 3,
+      "form": "other",
+      "text": "उस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (3), वे बाहर रखी गई हैं",
+      "max_line_cells": 66
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_no_repos_local",
+      "count": 3,
+      "form": "other",
+      "text": "इस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_no_repos_remote",
+      "count": 3,
+      "form": "other",
+      "text": "उस डिवाइस का GitHub खाता किसी रिपॉज़िटरी में push नहीं कर सकता",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub रिपॉज़िटरी सेटिंग में रिपॉज़िटरी जोड़ें (/settings में खोजें), या lop network credential github repos से स्पष्ट रूप से सभी push-योग्य रिपॉज़िटरी में लौटें, बाहर रखी गई रिपॉज़िटरी को छोड़कर",
+      "max_line_cells": 142
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos",
+      "max_line_cells": 66
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_excluded",
+      "count": 3,
+      "form": "other",
+      "text": "lop network credential github repos से किसी एक को वापस शामिल करें",
+      "max_line_cells": 56
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_no_repos",
+      "count": 3,
+      "form": "other",
+      "text": "उस GitHub खाते को किसी रिपॉज़िटरी में push करने की अनुमति दें",
+      "max_line_cells": 43
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.refusal_detail",
+      "count": 3,
+      "form": "other",
+      "text": "REASON — REMEDY",
+      "max_line_cells": 15
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "अज्ञात समय पर",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_now",
+      "count": 3,
+      "form": "other",
+      "text": "अभी-अभी",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_minutes",
+      "count": 3,
+      "form": "other",
+      "text": "3 मिनट पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 0,
+      "form": "other",
+      "text": "0 घंटा पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 1,
+      "form": "other",
+      "text": "1 घंटा पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 2,
+      "form": "other",
+      "text": "2 घंटे पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 3,
+      "form": "other",
+      "text": "3 घंटे पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 5,
+      "form": "other",
+      "text": "5 घंटे पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 11,
+      "form": "other",
+      "text": "11 घंटे पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 21,
+      "form": "other",
+      "text": "21 घंटे पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 22,
+      "form": "other",
+      "text": "22 घंटे पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 25,
+      "form": "other",
+      "text": "25 घंटे पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 101,
+      "form": "other",
+      "text": "101 घंटे पहले",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 1.5,
+      "form": "other",
+      "text": "1.5 घंटे पहले",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "count": 1000000,
+      "form": "other",
+      "text": "10,00,000 घंटे पहले",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 0,
+      "form": "other",
+      "text": "0 दिन पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 1,
+      "form": "other",
+      "text": "1 दिन पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 2,
+      "form": "other",
+      "text": "2 दिन पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 3,
+      "form": "other",
+      "text": "3 दिन पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 5,
+      "form": "other",
+      "text": "5 दिन पहले",
+      "max_line_cells": 8
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 11,
+      "form": "other",
+      "text": "11 दिन पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 21,
+      "form": "other",
+      "text": "21 दिन पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 22,
+      "form": "other",
+      "text": "22 दिन पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 25,
+      "form": "other",
+      "text": "25 दिन पहले",
+      "max_line_cells": 9
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 101,
+      "form": "other",
+      "text": "101 दिन पहले",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 1.5,
+      "form": "other",
+      "text": "1.5 दिन पहले",
+      "max_line_cells": 10
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "count": 1000000,
+      "form": "other",
+      "text": "10,00,000 दिन पहले",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.ttl",
+      "count": 3,
+      "form": "other",
+      "text": "3 मिनट के भीतर",
+      "max_line_cells": 11
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_auth",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub ने उस खाते को अस्वीकार किया",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_offline",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub से संपर्क नहीं हो सका",
+      "max_line_cells": 21
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_server",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub ने त्रुटि लौटाई",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_coverage",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub सभी push-योग्य रिपॉज़िटरी की सूची नहीं दे सका",
+      "max_line_cells": 37
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_unknown",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub रिपॉज़िटरी की सूची प्राप्त करने में विफल",
+      "max_line_cells": 32
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_unfetched",
+      "count": 3,
+      "form": "other",
+      "text": "रिपॉज़िटरी की सूची अभी प्राप्त नहीं हुई है",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_earlier_login",
+      "count": 3,
+      "form": "other",
+      "text": "सहेजी गई सूची पिछले GitHub खाते की है",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_unknown_login",
+      "count": 3,
+      "form": "other",
+      "text": "सहेजी गई GitHub सूची का खाता अज्ञात है",
+      "max_line_cells": 28
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_unavailable",
+      "count": 3,
+      "form": "other",
+      "text": "अभी कोई रिपॉज़िटरी सूचीबद्ध नहीं है — अगला उधार अनुरोध GitHub से पूछेगा; न पूछ पाने पर पहुँच बढ़ाने के बजाय अनुरोध अस्वीकार होगा",
+      "max_line_cells": 90
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_empty",
+      "count": 3,
+      "form": "other",
+      "text": "कोई रिपॉज़िटरी नहीं — उधार अनुरोध पहुँच बढ़ाने के बजाय अस्वीकार होगा",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_opted",
+      "count": 3,
+      "form": "other",
+      "text": ", 3 बाहर रखी गईं",
+      "max_line_cells": 13
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_more",
+      "count": 3,
+      "form": "other",
+      "text": "3 अन्य",
+      "max_line_cells": 5
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_explicit",
+      "count": 3,
+      "form": "other",
+      "text": "वहाँ हाथ से चुनी गई सूची",
+      "max_line_cells": 16
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_last_good",
+      "count": 3,
+      "form": "other",
+      "text": "AGO प्राप्त सूची — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका",
+      "max_line_cells": 56
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_enumerated",
+      "count": 3,
+      "form": "other",
+      "text": "हर रिपॉज़िटरी जिसमें उसका खाता push कर सकता है; सूची बनी: AGO",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_pointer",
+      "count": 3,
+      "form": "other",
+      "text": " — पूरी सूची: lop network credential github repos (owner-device-7 पर चलाएँ)",
+      "max_line_cells": 69
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "one",
+      "text": "octo-org/api (0 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 0,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (0 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "one",
+      "text": "octo-org/api (1 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 1,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (1 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "one",
+      "text": "octo-org/api (2 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 2,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (2 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "one",
+      "text": "octo-org/api (3 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (3 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "one",
+      "text": "octo-org/api (5 — SOURCE)",
+      "max_line_cells": 25
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 5,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (5 — SOURCE)",
+      "max_line_cells": 45
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "one",
+      "text": "octo-org/api (11 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 11,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (11 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "one",
+      "text": "octo-org/api (21 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 21,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (21 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "one",
+      "text": "octo-org/api (22 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 22,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (22 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "one",
+      "text": "octo-org/api (25 — SOURCE)",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 25,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (25 — SOURCE)",
+      "max_line_cells": 46
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "one",
+      "text": "octo-org/api (101 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 101,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (101 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "one",
+      "text": "octo-org/api (1.5 — SOURCE)",
+      "max_line_cells": 27
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 1.5,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (1.5 — SOURCE)",
+      "max_line_cells": 47
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "one",
+      "text": "octo-org/api (10,00,000 — SOURCE)",
+      "max_line_cells": 33
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "count": 1000000,
+      "form": "other",
+      "text": "octo-org/website और octo-org/api (10,00,000 — SOURCE)",
+      "max_line_cells": 53
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.borrower_unset",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: DETAIL। इसे owner-device-7 पर ठीक करें; कोई पहुँच उधार नहीं दी गई।",
+      "max_line_cells": 117
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.borrower_unset_default",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके। owner-device-7 पर lop network credential github repos जाँचें; कोई पहुँच उधार नहीं दी गई।",
+      "max_line_cells": 139
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.borrower_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "owner-device-7 के पास एक साझाकरण की क्षमता से अधिक GitHub रिपॉज़िटरी हैंDETAIL, इसलिए कोई पहुँच उधार नहीं दी गई। owner-device-7 पर GitHub रिपॉज़िटरी सेटिंग में उधार देने के लिए कुछ चुनें (/settings में खोजें), या lop network credential github exclude <owner/repo> से कुछ को बाहर रखें।",
+      "max_line_cells": 229
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.wrapper_denied",
+      "count": 3,
+      "form": "other",
+      "text": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।",
+      "max_line_cells": 199
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_repo",
+      "count": 3,
+      "form": "other",
+      "text": "exclude के लिए owner/repo के रूप में एक रिपॉज़िटरी चाहिए, जैसे octo-org/website",
+      "max_line_cells": 64
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_repos_args",
+      "count": 3,
+      "form": "other",
+      "text": "repos कोई रिपॉज़िटरी स्वीकार नहीं करता",
+      "max_line_cells": 26
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_default",
+      "count": 3,
+      "form": "other",
+      "text": "--use-default केवल repos पर लागू होता है",
+      "max_line_cells": 34
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_refresh",
+      "count": 3,
+      "form": "other",
+      "text": "--refresh केवल repos पर लागू होता है",
+      "max_line_cells": 30
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.owner_overflow",
+      "count": 3,
+      "form": "other",
+      "text": "3 रिपॉज़िटरी; एक साझाकरण में अधिकतम 100 आ सकती हैं",
+      "max_line_cells": 37
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reset_failed",
+      "count": 3,
+      "form": "other",
+      "text": "स्वचालित GitHub रिपॉज़िटरी सूची में वापसी पूरी नहीं हो सकी (PermissionError); जाँचें कि इस डिवाइस के डेटा फ़ोल्डर में लिखा जा सकता है, फिर lop network credential github repos दोबारा आज़माएँ",
+      "max_line_cells": 142
+    },
+    {
+      "locale": "hi",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "count": 3,
+      "form": "other",
+      "text": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।",
+      "max_line_cells": 242
+    }
+  ],
+  "composed_safety_messages": {
+    "fr": {
+      "borrower_no_matching_account": "owner-device-7 n’a aucun dépôt GitHub dont il puisse prêter l’accès : la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (le compte associé à la liste GitHub enregistrée est inconnu), sans liste antérieure de secours — réessayez quand GitHub est joignable : lop network credential github repos --refresh. Corrigez cela sur owner-device-7 ; aucun accès n’a été prêté.",
+      "denied_repo": "octo-org/website ne figure pas dans la liste fournie par l’appareil prêteur (il peut y être exclu ou ne pas autoriser le push). Vérifiez lop network credential github repos sur l’appareil prêteur. Seul cet appareil peut modifier ce qu’il prête.",
+      "stale_readiness": "octo-org/website et octo-org/api (3 — la liste récupérée il y a 2 jours, 2 exclusions — cet appareil n’a pas pu lister les dépôts GitHub à sa dernière vérification (le compte associé à la liste GitHub enregistrée est inconnu)) — liste complète : lop network credential github repos sur owner-device-7",
+      "all_opted_out": "Dépôts GitHub : aucun — tous les dépôts auxquels le compte GitHub de cet appareil peut envoyer des push (3) sont exclus ; réincluez un dépôt avec lop network credential github include octo-org/website",
+      "opt_out_timing": "octo-org/website est exclu — les appareils destinataires perdent le droit de push à leur prochaine récupération des identifiants, sous 5 min",
+      "clear_vs_never_set": "Entrées owner/repo dont l’accès GitHub peut être prêté. Si ce paramètre n’a jamais été défini, tous les dépôts auxquels le compte peut envoyer des push sont utilisés, moins les exclusions. Vider une liste auparavant partagée et choisie à la main arrête le prêt ; revenez à la sélection automatique avec lop network credential github repos --use-default.",
+      "auth_request_failure": "GitHub a refusé ce compte"
+    },
+    "es": {
+      "borrower_no_matching_account": "owner-device-7 no tiene repositorios de GitHub cuyo acceso pueda prestar: no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo — vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh. Corrígelo en owner-device-7; no se prestó ningún acceso.",
+      "denied_repo": "octo-org/website no está en la lista de repositorios proporcionada por el dispositivo que presta el acceso (puede estar excluido o no admitir push allí). Comprueba lop network credential github repos en ese dispositivo. Solo ese dispositivo puede cambiar qué acceso presta.",
+      "stale_readiness": "octo-org/website y octo-org/api (3 — la lista obtenida hace 2 días, 2 excluidos — ese dispositivo no pudo listar los repositorios de GitHub en su última comprobación (se desconoce la cuenta de la lista de GitHub guardada)) — lista completa: lop network credential github repos en owner-device-7",
+      "all_opted_out": "Repositorios de GitHub: ninguno — todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (3) están excluidos; vuelve a incluir uno con lop network credential github include octo-org/website",
+      "opt_out_timing": "octo-org/website está excluido — los dispositivos destinatarios pierden el permiso de push la próxima vez que obtengan la credencial, en un máximo de 5 min",
+      "clear_vs_never_set": "Entradas owner/repo cuyo acceso a GitHub se puede prestar. Si nunca se ha configurado, se usan todos los repositorios a los que la cuenta puede hacer push, menos los excluidos. Vaciar una lista elegida a mano y compartida anteriormente detiene los préstamos; vuelve a la selección automática con lop network credential github repos --use-default.",
+      "auth_request_failure": "GitHub rechazó esa cuenta"
+    },
+    "zh-CN": {
+      "borrower_no_matching_account": "owner-device-7没有可出借访问权限的GitHub仓库：未能获取其GitHub账号可push的仓库列表 (保存的GitHub列表对应的账号未知)，且没有可回退使用的旧列表——GitHub可访问后重试：lop network credential github repos --refresh。请在owner-device-7上处理；未出借任何权限。",
+      "denied_repo": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos。只有该设备才能更改其出借范围。",
+      "stale_readiness": "octo-org/website和octo-org/api（3——2天前获取的列表，已排除2个——该设备上次检查时未能列出GitHub仓库 (保存的GitHub列表对应的账号未知)）——完整列表：lop network credential github repos（在owner-device-7上运行）",
+      "all_opted_out": "GitHub仓库：无——此设备GitHub账号可push的所有仓库（3个）均已被排除；用lop network credential github include octo-org/website重新纳入一个仓库",
+      "opt_out_timing": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，5分钟内",
+      "clear_vs_never_set": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。",
+      "auth_request_failure": "GitHub拒绝了该账号"
+    },
+    "ru": {
+      "borrower_no_matching_account": "На owner-device-7 нет репозиториев GitHub, доступ к которым можно предоставить взаймы: не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены — повторите, когда GitHub станет доступен: lop network credential github repos --refresh. Исправьте это на owner-device-7; доступ не предоставлен.",
+      "denied_repo": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте lop network credential github repos на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ.",
+      "stale_readiness": "octo-org/website и octo-org/api (3 — список, полученный 2 дня назад, исключено: 2 — при последней проверке устройство не смогло перечислить репозитории GitHub (учётная запись сохранённого списка GitHub неизвестна)) — весь список: lop network credential github repos на owner-device-7",
+      "all_opted_out": "Репозитории GitHub: нет — все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены; верните один из репозиториев командой lop network credential github include octo-org/website",
+      "opt_out_timing": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, в течение 5 мин",
+      "clear_vs_never_set": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "auth_request_failure": "GitHub отклонил эту учётную запись"
+    },
+    "vi": {
+      "borrower_no_matching_account": "owner-device-7 không có kho GitHub nào để cho mượn quyền truy cập: không lấy được danh sách kho mà tài khoản GitHub của thiết bị đó có thể push (không rõ tài khoản của danh sách GitHub đã lưu), và không có danh sách cũ để dùng thay — thử lại khi kết nối được GitHub: lop network credential github repos --refresh. Sửa trên owner-device-7; chưa cho mượn quyền nào.",
+      "denied_repo": "octo-org/website không nằm trong danh sách kho do thiết bị cho mượn cung cấp (có thể bị loại trừ hoặc không thể push từ đó). Kiểm tra lop network credential github repos trên thiết bị cho mượn. Chỉ thiết bị đó mới thay đổi được những gì nó cho mượn.",
+      "stale_readiness": "octo-org/website và octo-org/api (3 — danh sách lấy 2 ngày trước, 2 kho đã loại trừ — thiết bị đó không thể liệt kê kho GitHub ở lần kiểm tra gần nhất (không rõ tài khoản của danh sách GitHub đã lưu)) — danh sách đầy đủ: chạy lop network credential github repos trên owner-device-7",
+      "all_opted_out": "Kho GitHub: không có — tất cả kho mà tài khoản GitHub trên thiết bị này có thể push (3) đều bị loại trừ; đưa một kho trở lại bằng lop network credential github include octo-org/website",
+      "opt_out_timing": "octo-org/website đã được loại trừ — các thiết bị được chia sẻ sẽ mất quyền push kho đó khi lấy thông tin xác thực lần tới, trong vòng 5 phút",
+      "clear_vs_never_set": "Các mục owner/repo để cho mượn quyền truy cập GitHub. Nếu chưa từng đặt, dùng tất cả kho mà tài khoản có thể push, trừ các kho bị loại trừ. Xóa trắng danh sách chọn thủ công từng được chia sẻ sẽ dừng cho mượn; trở lại lựa chọn tự động bằng lop network credential github repos --use-default.",
+      "auth_request_failure": "GitHub đã từ chối tài khoản đó"
+    },
+    "ur": {
+      "borrower_no_matching_account": "owner-device-7 کے پاس کوئی GitHub ریپوزیٹری نہیں جس کی رسائی وہ مستعار دے سکے: اس کے GitHub اکاؤنٹ کی push کے قابل ریپوزیٹریوں کی فہرست حاصل نہیں ہو سکی (محفوظ GitHub فہرست کا اکاؤنٹ نامعلوم ہے)، اور متبادل کے لیے کوئی پچھلی فہرست نہیں ہے — GitHub سے رابطہ ممکن ہونے پر دوبارہ کوشش کریں: lop network credential github repos --refresh۔ اسے owner-device-7 پر درست کریں؛ کوئی رسائی مستعار نہیں دی گئی۔",
+      "denied_repo": "octo-org/website، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔",
+      "stale_readiness": "octo-org/website اور octo-org/api (3 — 2 دن پہلے حاصل کردہ فہرست، 2 خارج کردہ — آخری جانچ میں وہ ڈیوائس GitHub ریپوزیٹریوں کی فہرست نہیں لے سکا (محفوظ GitHub فہرست کا اکاؤنٹ نامعلوم ہے)) — مکمل فہرست: lop network credential github repos (owner-device-7 پر چلائیں)",
+      "all_opted_out": "GitHub ریپوزیٹریاں: کوئی نہیں — اس ڈیوائس کے GitHub اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں (3) خارج ہیں؛ lop network credential github include octo-org/website سے ایک کو واپس شامل کریں",
+      "opt_out_timing": "octo-org/website خارج ہے — جن ڈیوائسز سے اشتراک ہے وہ اگلی بار سند حاصل کرتے وقت اس میں push کا حق کھو دیں گے، 5 منٹ کے اندر",
+      "clear_vs_never_set": "GitHub رسائی مستعار دینے کے لیے owner/repo اندراجات۔ اگر کبھی مقرر نہیں کیا گیا تو اکاؤنٹ کی push کے قابل تمام ریپوزیٹریاں استعمال ہوں گی، خارج کردہ کو چھوڑ کر۔ پہلے مشترک کی گئی ہاتھ سے منتخب فہرست کو خالی کرنے سے مستعار دینا بند ہو جاتا ہے؛ lop network credential github repos --use-default سے خودکار انتخاب پر واپس آئیں۔",
+      "auth_request_failure": "GitHub نے اس اکاؤنٹ کو مسترد کیا"
+    },
+    "hi": {
+      "borrower_no_matching_account": "owner-device-7 के पास कोई GitHub रिपॉज़िटरी नहीं है जिसकी पहुँच वह उधार दे सके: उस डिवाइस का GitHub खाता जिन रिपॉज़िटरी में push कर सकता है, उनकी सूची नहीं मिली (सहेजी गई GitHub सूची का खाता अज्ञात है), और विकल्प के लिए कोई पिछली सूची नहीं है — GitHub से संपर्क होने पर फिर कोशिश करें: lop network credential github repos --refresh। इसे owner-device-7 पर ठीक करें; कोई पहुँच उधार नहीं दी गई।",
+      "denied_repo": "octo-org/website, उधार देने वाले डिवाइस की दी हुई रिपॉज़िटरी सूची में नहीं है (हो सकता है इसे बाहर रखा गया हो या वहाँ से push संभव न हो)। उधार देने वाले डिवाइस पर lop network credential github repos जाँचें। केवल वही डिवाइस बदल सकता है कि वह क्या उधार देता है।",
+      "stale_readiness": "octo-org/website और octo-org/api (3 — 2 दिन पहले प्राप्त सूची, 2 बाहर रखी गईं — पिछली जाँच में वह डिवाइस GitHub रिपॉज़िटरी की सूची नहीं पा सका (सहेजी गई GitHub सूची का खाता अज्ञात है)) — पूरी सूची: lop network credential github repos (owner-device-7 पर चलाएँ)",
+      "all_opted_out": "GitHub रिपॉज़िटरी: कोई नहीं — इस डिवाइस का GitHub खाता जिन सभी रिपॉज़िटरी में push कर सकता है (3), वे बाहर रखी गई हैं; lop network credential github include octo-org/website से किसी एक को वापस शामिल करें",
+      "opt_out_timing": "octo-org/website को बाहर रखा गया है — साझा पहुँच वाले डिवाइस अगली बार क्रेडेंशियल पाने पर उसमें push करने का अधिकार खो देंगे, 5 मिनट के भीतर",
+      "clear_vs_never_set": "GitHub पहुँच उधार देने के लिए owner/repo प्रविष्टियाँ। यदि कभी सेट नहीं किया गया है, तो खाते की सभी push-योग्य रिपॉज़िटरी इस्तेमाल होती हैं, बाहर रखी गई रिपॉज़िटरी को छोड़कर। पहले साझा की गई हाथ से चुनी सूची को खाली करने से उधार देना रुक जाता है; lop network credential github repos --use-default से स्वचालित चयन पर लौटें।",
+      "auth_request_failure": "GitHub ने उस खाते को अस्वीकार किया"
+    }
+  },
+  "limitations": [
+    "No browser/native/app visual capture; actual message render text and measured cell widths only.",
+    "CLI/TUI Urdu shaping and terminal bidi are not certified. No manual bidi controls inserted.",
+    "No catalogue edits, ledger appends, generators, installs or worktree creation."
+  ]
+}

@@ -3202,7 +3202,15 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         entry.operator_nonce = operator_nonce() if entry.operator_cap is not None else ""
         entry.operator_salt = ""
         entry.authority_bearing = False
-        auth: dict[str, Any] = {"key": record.control_key, "locality": "remote"}
+        # ADR 0009: ``origin: "mobile"`` on every dial that carries the phone's
+        # human input, so the runtime routes the completion of work started or
+        # steered here back to the phone. The runtime reads it once at auth time
+        # and never from a frame; the mesh relay never forwards it.
+        auth: dict[str, Any] = {
+            "key": record.control_key,
+            "locality": "remote",
+            "origin": "mobile",
+        }
         if entry.operator_nonce:
             # A nonce, never the capability: see ``harness/approval._proof``.
             auth["operator_nonce"] = entry.operator_nonce
@@ -6096,6 +6104,9 @@ class MobileDaemon:
             repaint,
             lambda _reason: None,
             locality="remote",
+            # ADR 0009: this viewer carries the phone's input (see the control
+            # socket's auth frame).
+            origin="mobile",
             # A PROMPT RAISED FOR A RELAY'S OWN SIGNATURE NAMES THE SESSION IN THE
             # LOG (UX round 6, U3 = design round 6, D3). There is no human at this
             # process's terminal — the person who asked is on the phone, and the
@@ -7415,6 +7426,20 @@ def build_app(daemon: MobileDaemon):
                 # unknown field, failing the whole registration; the app sends
                 # the key only when this capability is present.
                 "push_previews": {"available": True},
+                # ADR 0009 routing by origin: the register body accepts the
+                # enum keys ``preferences.completions_scope`` (phone | all) and
+                # ``preferences.attention`` (away | always | never). Its own key
+                # for the reason ``push_previews`` has one: an older daemon
+                # refuses either as an unknown field and would fail the whole
+                # registration, so the app sends them only when this is present.
+                "push_routing": {"available": True},
+                # ADR 0008 desk presence: ``GET/PATCH
+                # /api/settings/phone-away-after`` reads and writes this
+                # computer's ``notifications.phone_away_after_s`` ("send to
+                # phone when I'm away for N"). The phone shows its
+                # per-computer row only when this key is present; an older
+                # relay 404s the route.
+                "phone_away_after": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".
@@ -7855,6 +7880,62 @@ def build_app(daemon: MobileDaemon):
         try:
             payload = await asyncio.to_thread(
                 policy_payload, config_dir(), patch, write=request.method == "PATCH"
+            )
+        except AccountRoutingError as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": str(exc)},
+                status_code=exc.status,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    async def api_phone_away_after(request: Request) -> Response:
+        """ADR 0008: the phone edits THIS computer's "away for N" threshold.
+
+        One named key, through the same projection as account routing
+        (``account_routing.setting_payload``): the phone can never reach an
+        arbitrary config path. It is a computer setting because it describes
+        the desk; the desktop app reads it and sends it on its presence beat.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.i18n.keys import wire_settings_account_policy as _ap
+        from local_operator.mobile.account_routing import (
+            PHONE_AWAY_AFTER_CAPABILITY,
+            PHONE_AWAY_AFTER_KEY,
+            AccountRoutingError,
+            setting_payload,
+        )
+        from local_operator.paths import config_dir
+
+        patch = None
+        if request.method == "PATCH":
+            try:
+                patch = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse(
+                    {
+                        "code": "invalid_setting",
+                        "error": _ap.error_invalid_json().envelope(locale=resolve_language())[
+                            "text"
+                        ],
+                    },
+                    status_code=422,
+                )
+        try:
+            payload = await asyncio.to_thread(
+                setting_payload,
+                config_dir(),
+                PHONE_AWAY_AFTER_KEY,
+                PHONE_AWAY_AFTER_CAPABILITY,
+                patch,
+                write=request.method == "PATCH",
+                unavailable_code="setting_unavailable",
+                # Unreachable in practice: the key is registered in this same
+                # build (pinned by test_phone_away_routes). The generic
+                # "could not be saved" copy is the honest fallback.
+                unavailable=_ap.error_write_failed(),
             )
         except AccountRoutingError as exc:
             return JSONResponse(
@@ -9663,7 +9744,9 @@ def build_app(daemon: MobileDaemon):
                 )
 
                 async def _deliver_prompt() -> str:
-                    client, detail = await continue_command(config_dir(), command)
+                    # ADR 0009: a phone prompt that wakes a cold conversation
+                    # keeps the phone's origin (``PromptErrand.origin``).
+                    client, detail = await continue_command(config_dir(), command, origin="mobile")
                     client.close()
                     return detail
 
@@ -9792,7 +9875,12 @@ def build_app(daemon: MobileDaemon):
                     # runtime records it as ``remote`` (``asks.surfaces``), the
                     # label the live daemon route already gets — not consent.
                     client, _ = await engage_session_client(
-                        config_dir(), session_id, AskErrand(ask_id=ask_id), locality="remote"
+                        config_dir(),
+                        session_id,
+                        AskErrand(ask_id=ask_id),
+                        locality="remote",
+                        # ADR 0009: the cold answer is the phone's input.
+                        origin="mobile",
                     )
                     try:
                         if op == "ask_respond":
@@ -10955,6 +11043,7 @@ def build_app(daemon: MobileDaemon):
                 lambda _projection: None,
                 lambda _reason: None,
                 locality="remote",
+                origin="mobile",
                 on_operator_prompt=lambda copy: logger.warning(
                     "mobile session move: owner prompts an operator: %s", copy
                 ),
@@ -12564,6 +12653,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/usage/reset", api_usage_reset, methods=["POST"]),
         Route("/api/config/events", api_config_events),
         Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
+        Route("/api/settings/phone-away-after", api_phone_away_after, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),

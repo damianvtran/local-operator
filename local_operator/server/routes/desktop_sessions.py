@@ -31,6 +31,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    StrictInt,
     field_validator,
     model_serializer,
     model_validator,
@@ -863,6 +864,50 @@ class PresenceBeat(Input):
     #: "nothing is on screen".
     session_id: str = Field(default="", pattern=r"^$|^[a-f0-9]{12}$")
     window: PresenceWindow = Field(default_factory=PresenceWindow)
+    # -- ADR 0008 desk presence (slice 1) --------------------------------------
+    # "Is a PERSON at this computer", as opposed to the window state above,
+    # which answers "is this card on screen". All four are OPTIONAL so today's
+    # beat stays valid byte-for-byte; the model is still `extra="forbid"`,
+    # which is exactly why an app may only send them to a backend advertising
+    # `features.desk_presence` (an undeclared field is a 422 the app swallows,
+    # and the lease then lapses). Raw relative facts only: the receiver turns
+    # them into wall-clock deadlines on its own clock (`presence.DeskReport`).
+    #: Seconds since the last OS input, from Electron `getSystemIdleTime()`.
+    idle_s: StrictInt | None = Field(default=None, ge=0)
+    #: Screen locked (or a lock/suspend/resign event since the last unlock).
+    locked: StrictBool | None = None
+    #: False when the app cannot vouch for `idle_s` (e.g. Wayland, ADR R2).
+    idle_trusted: StrictBool | None = None
+    #: The operator's threshold, one of `presence.AWAY_AFTER_CHOICES_S`. A
+    #: Literal rather than a range so no receiver ever computes a deadline
+    #: from a value no settings surface can show.
+    away_after_s: Literal[60, 120, 300, 600] | None = None
+
+    @field_validator("away_after_s", mode="before")
+    @classmethod
+    def _strict_threshold(cls, value: Any) -> Any:
+        # `Literal[60, ...]` would accept `True`/`60.0` in lax mode; a
+        # threshold is an integer the app read from the setting, nothing else.
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError("away_after_s must be an integer")
+        return value
+
+    def desk_fields(self) -> dict[str, Any]:
+        """The desk fields as publisher kwargs, or ``{}`` for a legacy beat.
+
+        Empty when the app sent none of them, which is what keeps a legacy
+        beat's published record free of any `desk` entry (version skew row
+        "old app, new core" falls back to the focus rule).
+        """
+        fields = {
+            "idle_s": self.idle_s,
+            "locked": self.locked,
+            "idle_trusted": self.idle_trusted,
+            "away_after_s": self.away_after_s,
+        }
+        if all(value is None for value in fields.values()):
+            return {}
+        return fields
 
 
 class SessionTarget(Input):
@@ -5140,7 +5185,29 @@ async def answer(session_id: str, body: Answer, request: Request):
                 # two shapes stay distinguishable.
                 message = str(error) or "the answer was refused"
                 raise HTTPException(409, message) from None
-            return reply({"detail": detail})
+            # ``consent_bearing`` (feature ``ask_consent_bearing``): whether
+            # THIS backend presented operator proof with the answer, i.e. holds
+            # the capability of the runtime it answered (it started that
+            # runtime). False means the runtime stamped the answer
+            # ``unverified``: recorded, but never delete/move consent (incident
+            # a-48e3, 2026-11-16). Computed from the facade's handshake state,
+            # never from the body (``Answer`` is ``extra="forbid"``, so a body
+            # field of that name is a 422). A peer's conversation is always
+            # False: its answer is relayed and stamped ``remote`` whatever this
+            # process holds for a same-numbered local pid. Absent probe (an
+            # older facade or a test double) reads False: fail closed. A
+            # DECLINE reads null: a decline is never consent, so "this answer
+            # can authorise" must not be claimable for one, whatever proof the
+            # connection held (PR #4127 QA Q2).
+            probe = getattr(bridge.remote, "ask_consent_bearing", None)
+            consent_bearing: bool | None = (
+                None
+                if body.decline
+                else bool(
+                    getattr(bridge, "remote_row", None) is None and callable(probe) and probe()
+                )
+            )
+            return reply({"detail": detail, "consent_bearing": consent_bearing})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         if body.request_id.startswith("prv_"):
@@ -6777,5 +6844,6 @@ async def desktop_presence(
         can_notify_kinds=list(body.can_notify_kinds),
         session_id=body.session_id,
         window=body.window.model_dump(),
+        **body.desk_fields(),
     )
     return reply(PresenceReceipt(lease_seconds=int(PRESENCE_TTL_S)))

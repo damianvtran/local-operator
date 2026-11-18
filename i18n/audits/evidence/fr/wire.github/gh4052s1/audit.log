@@ -1,0 +1,18 @@
+[run_bounded] memory budget 5430 MiB (auto); sampled owned child group and escaped descendants
+[run_bounded] refused before spawn: cleanup-required cannot certify owned-group cleanup on darwin (this instrument cannot certify coverage on this installed OS). Run this gate on Linux/CI, or pass --contract=command-status if the command's own status is enough (it enforces the memory grant but never certifies cleanup)
+[run_bounded] contract=cleanup-required rc=125 cause=unsupported-backend cleanup=unknown spawned=no invocation_id=ddcbae7d15924079954f73f0daa292e7 completion=/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/run-bounded-runs/ddcbae7d15924079954f73f0daa292e7.completion.json
+[run_bounded] memory budget 5306 MiB (auto); sampled owned child group and escaped descendants
+REPO check.check_catalogues scoped discovery wire.github/wire.settings: []
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-run.py", line 52, in <module>
+    assert actual.source_locale==locale,(locale,key,actual)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('fr', 'wire.github.progress', RenderedMessage(text='listing the repositories your GitHub login can push to…', source_locale='en'))
+[run_bounded] contract=command-status rc=1 cause=child-exit cleanup=unknown invocation_id=deafd0bee8b54a8083950a54ccad7c5a completion=/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/run-bounded-runs/deafd0bee8b54a8083950a54ccad7c5a.completion.json
+[run_bounded] memory budget 4415 MiB (auto); sampled owned child group and escaped descendants
+REPO check.check_catalogues scoped discovery wire.github/wire.settings: []
+Unmodified production eligibility controls: {"fr": {"text": "listing the repositories your GitHub login can push to…", "source_locale": "en"}, "es": {"text": "listing the repositories your GitHub login can push to…", "source_locale": "en"}, "zh-CN": {"text": "listing the repositories your GitHub login can push to…", "source_locale": "en"}, "ru": {"text": "listing the repositories your GitHub login can push to…", "source_locale": "en"}, "vi": {"text": "listing the repositories your GitHub login can push to…", "source_locale": "en"}, "ur": {"text": "listing the repositories your GitHub login can push to…", "source_locale": "en"}, "hi": {"text": "listing the repositories your GitHub login can push to…", "source_locale": "en"}}
+PASS 483 locale-key pairs; 1722 actual locale render executions; 798 retained representative renders
+{"fr": {"key_count": 69, "plural_categories": ["many", "one", "other"], "representative_render_count": 114}, "es": {"key_count": 69, "plural_categories": ["many", "one", "other"], "representative_render_count": 114}, "zh-CN": {"key_count": 69, "plural_categories": ["other"], "representative_render_count": 114}, "ru": {"key_count": 69, "plural_categories": ["few", "many", "one", "other"], "representative_render_count": 114}, "vi": {"key_count": 69, "plural_categories": ["other"], "representative_render_count": 114}, "ur": {"key_count": 69, "plural_categories": ["one", "other"], "representative_render_count": 114}, "hi": {"key_count": 69, "plural_categories": ["one", "other"], "representative_render_count": 114}}
+evidence: /Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-execution.json /Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-rendered.txt
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=042ce0e903ef46e6a14ac56b8463b51c completion=/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/run-bounded-runs/042ce0e903ef46e6a14ac56b8463b51c.completion.json

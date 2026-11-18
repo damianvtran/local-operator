@@ -1,0 +1,234 @@
+{
+ "round": 5,
+ "auditor": {
+  "agent": "i18n-auditor (team lopdev), task as-au-es",
+  "session": "6d23d6953609",
+  "model": "anthropic/claude-opus-5-5",
+  "actual_model_source": "system prompt 'Model:' line of this session",
+  "fallback": "none observed",
+  "independent_from_translator_session": true,
+  "translator": "i18n-translator, job 2e94fb7583f3 resumed as bde68516ccdb, anthropic/claude-sonnet-5-5 (per manager brief)",
+  "native_speaker": false
+ },
+ "locale": "es",
+ "namespaces": [
+  "wire.settings"
+ ],
+ "keys_in_scope": [
+  "wire.settings.updates.title",
+  "wire.settings.updates.description",
+  "wire.settings.update_auto_prune.label",
+  "wire.settings.update_auto_prune.help",
+  "wire.settings.update_auto_prune.choice.true.description",
+  "wire.settings.update_auto_prune.choice.false.description",
+  "wire.settings.update_keep_generations.label",
+  "wire.settings.update_keep_generations.help"
+ ],
+ "key_count": 8,
+ "commit_audited": "a67cdd7c7350255802f8f1b44417f06b9697b288 + uncommitted working-tree catalogue edits (round-5)",
+ "worktree": "/Users/damian/local-operator/.worktrees/as4135-copy3",
+ "diff_base": "a67cdd7c7350",
+ "audit_date": "2026-11-16",
+ "scope": "round-5 delta: update_keep_generations.help only (es-A7 adoption); 7 keys retained",
+ "input_hashes_sha256": {
+  "local_operator/i18n/catalogues/es/wire.settings.json": "cd1ea9e66f6e35a3fe166425d56880a1dcfad71ceb9609b81bbe9ae437a497af",
+  "local_operator/i18n/catalogues/en/wire.settings.json": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6",
+  "local_operator/i18n/catalogues/en/wire.settings.context.json": "431a5d92412501edc1fad1589ba65f3220e42ba931148cf9179cbd8218d4b860",
+  "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+  "i18n/style-guides/es.md": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+ },
+ "artifacts": {
+  "/Users/damian/.local-operator/sessions/6d23d6953609/scratchpad/r3rig/test_r3_es_render.py": "5d8ba84b1dbbea477ae8702cebbd4afb1a837187a3bae00a376ebc09efb02bda",
+  "/Users/damian/.local-operator/sessions/6d23d6953609/scratchpad/r3rig/render-es-r5.out": "01954fc9ae8342fe6cca396b874c23f35b4ba8cd46aa58a451fcfaf8f99a9c9c",
+  "/Users/damian/.local-operator/sessions/6d23d6953609/scratchpad/es-check-r5.log": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+ },
+ "mechanical": {
+  "hashes_match_brief": true,
+  "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), exit 0",
+  "git_diff_stat_es_vs_a67cdd7c": "es/wire.settings.json | 2 +- (1 value)",
+  "values_changed_vs_a67cdd7c": [
+   "wire.settings.update_keep_generations.help"
+  ],
+  "key_sets_equal_en_base_target": true,
+  "retained_7_byte_identical": true,
+  "nfc": true,
+  "bidi_zero_width_nbsp_found": [],
+  "icu_or_placeholders_added": false,
+  "cells_whole": {
+   "en": 138,
+   "es": 145
+  },
+  "guarantee_clause_end_cell": {
+   "en": 93,
+   "es": 93
+  },
+  "two_row_wrap_min_width_cells(_wrap_cells)": {
+   "en": 70,
+   "es": 74
+  },
+  "es_wrap_at_74": [
+   "Siempre se conservan: actual, anterior, en ejecución y registradas por una",
+   "sesión o servicio. Además conserva este número de las últimas sin uso."
+  ]
+ },
+ "real_render_current_one_row_code": {
+  "how": "same scratch pytest probe (-p tests.conftest, -p no:cacheprovider), 6 passed",
+  "80x24 (w74)": {
+   "en": "Always kept: current, previous and running installs, and any a session or…",
+   "es": "Siempre se conservan: actual, anterior, en ejecución y registradas por un…"
+  },
+  "100x30 (w94)": {
+   "en": "…any a session or service registered.…",
+   "es": "…registradas por una sesión o servicio.…"
+  },
+  "120x40 (w114)": {
+   "en": "…registered. Also keeps this man…",
+   "es": "…o servicio. Además conserva est…"
+  },
+  "ruling": "parity with en on current code; on pending two-row code es fits whole at 80 cols (needs 74 = detail width at 80x24)"
+ },
+ "per_key": [
+  {
+   "key": "wire.settings.updates.title",
+   "text": "Actualizaciones",
+   "verdict": "PASS (retained; byte-identical to rounds 2-4)"
+  },
+  {
+   "key": "wire.settings.updates.description",
+   "text": "Qué hace una actualización con las instalaciones antiguas que deja atrás. Surte efecto en el próximo `lop update`.",
+   "verdict": "PASS (retained; byte-identical to rounds 2-4)"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.label",
+   "text": "Limpiar instal. antiguas",
+   "verdict": "PASS (retained; byte-identical to rounds 2-4)"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.help",
+   "text": "Tras cada actualización, borra instalaciones antiguas sin uso, como `lop install prune`.",
+   "verdict": "PASS (retained; byte-identical to rounds 2-4)"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.true.description",
+   "text": "conserva actual, en ejecución y las últimas",
+   "verdict": "PASS (retained; byte-identical to rounds 2-4)"
+  },
+  {
+   "key": "wire.settings.update_auto_prune.choice.false.description",
+   "text": "conserva todas; limpieza manual",
+   "verdict": "PASS (retained; byte-identical to rounds 2-4)"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.label",
+   "text": "Instal. sin uso conservadas",
+   "verdict": "PASS (retained; byte-identical to rounds 2-4)"
+  },
+  {
+   "key": "wire.settings.update_keep_generations.help",
+   "text": "Siempre se conservan: actual, anterior, en ejecución y registradas por una sesión o servicio. Además conserva este número de las últimas sin uso.",
+   "cells": 145,
+   "guarantee_clause_end_cell": 93,
+   "verdict": "PASS — es-A7 resolved",
+   "note": "Guarantee first and complete; four classes unconditional. 'las últimas sin uso' = the latest unused (standard 'últimas versiones' sense; time-ordered context and 'este número de' make 'the final/remaining ones' implausible). Same word as choice.true 'las últimas'."
+  }
+ ],
+ "findings": [],
+ "round1": {
+  "target_sha256": "94461f2778827daec476b80712ab021c65da7791ad5fccbb1e98b86dc1313952",
+  "record_sha256_final_r1": "4ad22e0bd1d8af5b275a109fe5323627148768b4b055a21649858de9d6ce8bff",
+  "verdict": "BLOCKED (changes_requested)",
+  "counts": {
+   "blocker": 0,
+   "major": 1,
+   "minor": 3,
+   "nit": 0
+  },
+  "dispositions": {
+   "es-A1 (MAJOR, keep_generations.help truncation 121 vs 95)": "adopted auditor text verbatim → residual MINOR (106 vs 95)",
+   "es-A2 (MINOR, label 'viejas' vs 'antiguas')": "adopted 'Limpiar instal. antiguas' → resolved",
+   "es-A3 (MINOR, choice.true bare 'recientes')": "adopted 'las últimas' → resolved",
+   "es-A4 (MINOR, auto_prune.help 92 vs ~72)": "partial: dropped article (88), kept 'Tras cada actualización' → accepted, resolved (wraps whole, soft hint)"
+  }
+ },
+ "round2": {
+  "target_sha256": "b0acd06d72c591ff60cf2bd3020ad029380603bc291de4965c0777e7f0663225",
+  "verdict": "CLEAN-WITH-FINDINGS",
+  "counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 1,
+   "nit": 0
+  },
+  "open_after_round2": [
+   "es-A1 MINOR (keep.help two-row wrap 106 vs en 95)"
+  ],
+  "resolved_in_round2": [
+   "es-A2",
+   "es-A3",
+   "es-A4"
+  ]
+ },
+ "round3": {
+  "target_sha256": "3a6dd27b76be705f65a7e31ab97012702be55f1c874dbfecc1557befa2a89b78",
+  "verdict": "BLOCKED",
+  "counts": {
+   "blocker": 0,
+   "major": 1,
+   "minor": 1,
+   "nit": 0
+  },
+  "findings": [
+   "es-A5 MAJOR",
+   "es-A6 MINOR",
+   "X1 cross-locale note"
+  ],
+  "record_sha256": "06f0767ea72480ab6574be6cfc734f0788da6a7a84b2eb20bfdfb704febfff27"
+ },
+ "round4": {
+  "target_sha256": "6d024471da11723a838cc841ac27dfe40dfe124bd5bd6635ca5f3e76707f134e",
+  "verdict": "CLEAN-WITH-FINDINGS",
+  "counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 1,
+   "nit": 0
+  },
+  "findings": [
+   "es-A7 MINOR"
+  ],
+  "record_sha256": "064d6414f4386ddac5580bc775636850da99dd1c1c9f34d1f75576abd2bd74f4"
+ },
+ "round5": {
+  "es-A7": "resolved — adopted verbatim (145 cells, wraps from 74; 'las últimas' matches choice.true)",
+  "new": []
+ },
+ "safety_recheck": {
+  "guarantee_first": true,
+  "current": true,
+  "previous": true,
+  "running": true,
+  "registered_by_session_or_service": true,
+  "always_unweakened": true
+ },
+ "terminology_consistency": "'en ejecución' and 'las últimas' identical to choice.true; 'sin uso' = label; 'antiguas' across description/help/label; 'limpiar/limpieza' across all prune keys",
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": []
+ },
+ "terminal_verdict": "CLEAN",
+ "verdict_conditions": "Holds on the current one-row code (render parity) and on the pending two-row code if it uses the repo's _wrap_cells (es wraps whole from 74 cells = 80x24).",
+ "not_verified": [
+  "native-speaker judgement (LLM reasoning only)",
+  "screenshot/SVG frame (render_lines_for_test text only)",
+  "the pending two-row code itself (not in this worktree)",
+  "desktop/relay rendering"
+ ],
+ "audit_notes_not_execution_log": "round-5 commands run: shasum -a 256; check.py --catalogues-only (rc 0, es-check-r5.log); git diff a67cdd7c --stat; python key/NFC/Cf/cell_len/_wrap_cells checks; scratch pytest render probe (6 passed, render-es-r5.out). No ledger append, no repo edits."
+}

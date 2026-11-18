@@ -28,7 +28,7 @@ from local_operator.session.attention import (
     conversation_identity,
     provisional_anchor,
 )
-from tests.unit.session.test_quiet_acceptance import SETTLE_TIMEOUT_S, peer_input
+from tests.unit.session.test_quiet_acceptance import SETTLE_CPU_BUDGET_S, peer_input
 from tests.unit.session.test_session import ScriptedStream, make_session
 
 TEST_CEILING_S = 0.3
@@ -48,11 +48,15 @@ def test_shipping_ceilings_leave_room_inside_the_settle_window():
     # The property needed: the turn's own offload wait plus the banner stamp, AND
     # a republish rung's lock hold (same ceiling, see
     # `_republish_journalled_outcome`) that the next turn may queue behind, all
-    # fit inside the settle window: 3.0 + 3.0 + 1.0 = 7.0 <= 8.
+    # fit inside the quiet-acceptance settle window, which is now its CPU budget
+    # (`SETTLE_CPU_BUDGET_S`, twice the publish + banner ceilings): 3.0 + 3.0 +
+    # 1.0 = 7.0 <= 8. Because the budget is derived from these same ceilings,
+    # this pins the derivation: a budget formula that stops covering a republish
+    # rung's queued hold fails here rather than as a timing flake.
     assert (
         2 * session_module.ATTENTION_PUBLISH_OFFLOAD_CEILING_S
         + session_module.ATTENTION_BANNER_STAMP_CEILING_S
-        <= SETTLE_TIMEOUT_S
+        <= SETTLE_CPU_BUDGET_S
     ), total
 
 

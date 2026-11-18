@@ -40,6 +40,8 @@ import zlib
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from local_operator.providers.account_selection_trace import SelectionExplanation
+
 # ---------------------------------------------------------------------------
 # Op names and the two legs
 # ---------------------------------------------------------------------------
@@ -646,7 +648,8 @@ CAUSES: frozenset[str] = frozenset(
 #: loop that asks a rate-limited owner on every provider call.
 DEFAULT_RETRY_AFTER_MS = 60_000
 
-#: ``BrokerError.reason`` values, a closed set (anything else reads as absent).
+#: Semantic ``BrokerError.reason`` values (anything else reads as absent,
+#: apart from the code-bound GitHub presentation provenance defined below).
 #:
 #: WHY A MARKER (review round 1 on #3108, m1): ``quota_blocked`` with no
 #: remainder used to have ONE producer, the owner's holder-exclusion arm, so a
@@ -659,6 +662,15 @@ QUOTA_REASON_POOL_DEPLETED = "pool_depleted"
 BROKER_ERROR_REASONS: frozenset[str] = frozenset(
     {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED, "owner_busy"}
 )
+
+
+# Presentation provenance on the existing optional reason field, bound to CODE.
+# Never accept these tags on quota/policy errors: that would change the legacy
+# holder-exclusion interpretation. They carry no credential or authority.
+GITHUB_RENDERED_REASONS: dict[str, str] = {
+    "github_repositories_unset": "github_repositories_unset_rendered",
+    "github_repositories_overflow": "github_repositories_overflow_rendered",
+}
 
 
 @dataclasses.dataclass
@@ -678,9 +690,12 @@ class BrokerError:
     owner_device: str = ""
     owner_device_name: str = ""
     retry_after_ms: int = 0
-    #: Which arm produced this refusal, from :data:`BROKER_ERROR_REASONS`; "" when
-    #: the producer did not say. Also distinguishes a GitHub owner lookup timeout
-    #: from rate limiting without breaking older borrowers' transient-code fence.
+    #: Producer semantic reason from :data:`BROKER_ERROR_REASONS`, or code-bound
+    #: GitHub presentation provenance (:data:`GITHUB_RENDERED_REASONS`); "" when
+    #: the producer did not say. A renderer must preserve a populated semantic
+    #: reason. Presentation tags are accepted only for GitHub unset/overflow, never
+    #: as quota/policy arms. ``owner_busy`` distinguishes a GitHub owner lookup
+    #: timeout from rate limiting without breaking older borrowers' transient-code fence.
     reason: str = ""
     #: ``retry_after_ms`` is a FLOOR, not the owner's reset (#3108 review r2 m1): the
     #: owner stated a longer wait than ``MAX_PEER_RETRY_AFTER_MS``, which the boundary
@@ -757,7 +772,11 @@ class BrokerError:
             retry_after_is_floor=stated >= MAX_PEER_RETRY_AFTER_MS,
             reason=(
                 str(detail.get("reason"))
-                if str(detail.get("reason") or "") in BROKER_ERROR_REASONS
+                if (
+                    str(detail.get("reason") or "") in BROKER_ERROR_REASONS
+                    or str(detail.get("reason") or "")
+                    == GITHUB_RENDERED_REASONS.get(str(detail.get("code") or ""))
+                )
                 else ""
             ),
         )
@@ -836,6 +855,12 @@ class Grant:
     identity: dict[str, str] = dataclasses.field(default_factory=dict)
     latency_ms: int = 0
     grant_id: str = ""
+    #: Owner-local audit evidence, deliberately absent from to_detail/from_detail.
+    #: Coalesced outcomes carry their own immutable observation; neither grant
+    #: equality nor credential/cache identity may depend on diagnostic metadata.
+    selection: SelectionExplanation | None = dataclasses.field(
+        default=None, compare=False, repr=False, kw_only=True
+    )
     #: Per-grant narrowing metadata the OWNER enforced at serve time, for the
     #: borrower to materialise locally where a provider needs it at use time —
     #: github's ``{"repositories": [owner/repo, ...]}`` is the git helper's

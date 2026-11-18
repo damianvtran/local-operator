@@ -1,0 +1,23 @@
+{
+  "round": 2,
+  "head": "b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "scope": "2afbb818b69074d9f11b0fc1a9a6360967218476..b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "closed_findings": [
+    "I2-UR-01",
+    "I2-RU-01"
+  ],
+  "comment_url": "https://github.com/damianvtran/local-operator/pull/4052#issuecomment-6896308748",
+  "body_readback_matches": true,
+  "record_path": "/Users/damian/.local-operator/sessions/dbf144330553/scratchpad/second-pass-r2-record.json",
+  "record_sha256": "738cef804176ec35519718fb2e3580b56353c306e6726883e1bd3b89c401392b",
+  "input_and_companion_hashes_verified": true,
+  "input_hash_mismatches": [],
+  "changed_values_retested": 9,
+  "unchanged_values_retained": 474,
+  "render_count": 77,
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": null,
+  "primary_writer_handoff_required": true
+}

@@ -114,6 +114,7 @@ class DrainHost:
     _forget_spooled_owner_row = ServingSessionHandle._forget_spooled_owner_row
     _session_directory = ServingSessionHandle._session_directory
     receive_peer_message = ServingSessionHandle.receive_peer_message
+    _admits_into_live_turn = ServingSessionHandle._admits_into_live_turn
     _note_deliberate_stop = ServingSessionHandle._note_deliberate_stop
     _check_loop_thread = lambda self: None  # noqa: E731 — the real one only asserts
 
@@ -619,6 +620,7 @@ class WakeHost:
     retire_wakes_to_inbox = Session.retire_wakes_to_inbox
     resume_wakes_from_inbox = Session.resume_wakes_from_inbox
     _spool_wake_to_inbox = Session._spool_wake_to_inbox
+    _spool_wake_fire = Session._spool_wake_fire
     _queue_wake_rearm = Session._queue_wake_rearm
     hand_wakes_to_successor = Session.hand_wakes_to_successor
 
@@ -797,6 +799,7 @@ class PersistHost:
     _persist_wake_schedules = Session._persist_wake_schedules
     retire_wakes_to_inbox = Session.retire_wakes_to_inbox
     _spool_wake_to_inbox = Session._spool_wake_to_inbox
+    _spool_wake_fire = Session._spool_wake_fire
     _queue_wake_rearm = Session._queue_wake_rearm
 
     def __init__(self) -> None:
@@ -1577,6 +1580,7 @@ class CancelHost:
 
     retire_wakes_to_inbox = Session.retire_wakes_to_inbox
     _spool_wake_to_inbox = Session._spool_wake_to_inbox
+    _spool_wake_fire = Session._spool_wake_fire
     _queue_wake_rearm = Session._queue_wake_rearm
     _purge_removed_wakes = Session._purge_removed_wakes
     _drop_queued_wake_deliveries = Session._drop_queued_wake_deliveries
@@ -1695,3 +1699,297 @@ async def test_an_update_that_removes_nothing_purges_nothing(tmp_path: Path) -> 
 
     assert len(peek_inbox(tmp_path)) == 1, "an edit is not a cancel"
     scheduler.dispose()
+
+
+# -- a busy turn keeps taking peer messages and wakes while a move is pending ----
+#
+# The node2 incident, 2026-11-17 10:31–11:15Z: after ``lop update`` installed
+# 0.106.6, a 0.106.5 runtime stayed busy in one turn for ~40 min with its move
+# pending, and every LOCAL send (``now=True`` steers too) and every one of its own
+# wakes was answered ``SPOOL_RECEIPT_WAKE`` and appended to ``inbox.jsonl`` — 3
+# peer rows and 6 wakes — reaching nobody until the runtime rolled at idle. These
+# cells drive the REAL handle over a REAL session whose turn is in flight.
+
+_PEER = {"name": "peer", "pid": 4242}
+
+
+def _busy_retiring(tmp_path: Path, window: str) -> tuple[ServingSessionHandle, Session]:
+    """A real handle over a real session that is mid-turn with a move pending."""
+    session = build_session(tmp_path / "sess", ScriptedStream([text_turn("reply")]))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    # The turn in flight. Forced rather than driven: the admission decision reads
+    # this flag synchronously, and a scripted turn would race the assertions.
+    session._is_streaming = True
+    if window == "drain":
+        assert handle.begin_drain(LEAVING_FOR_BUILD, "0.106.5 -> 0.106.6") is True
+    else:
+        # A busy checkpointed move opens the update window without the idle gate.
+        handle._updating = "0.106.5 -> 0.106.6"
+    return handle, session
+
+
+def _wake_due(text: str = "check the deploy") -> Any:
+    from local_operator.harness.wake_types import DueWake
+
+    return DueWake(
+        schedule=WakeSchedule(id="w-own", message=text, next_due_at=1, every_ms=60_000),
+        occurrence=1,
+    )
+
+
+def _queued_custom_types(session: Session) -> list[str]:
+    # `queued_steering()` is the public, typed FIFO snapshot (the recall seam);
+    # `asyncio.Queue._queue` is a private CPython detail pyright cannot see.
+    return [str(getattr(item, "custom_type", "")) for item in session.queued_steering()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", ["drain", "update"])
+async def test_a_busy_turn_with_a_move_pending_still_takes_sends_and_its_own_wakes(
+    tmp_path: Path, window: str
+) -> None:
+    handle, session = _busy_retiring(tmp_path, window)
+    try:
+        mailbox = await handle.receive_peer_message(
+            "rebased, take a look", mode="mailbox", wake=True, sender=_PEER
+        )
+        steer = await handle.receive_peer_message(
+            "stop, wrong branch", mode="steer", wake=True, sender=_PEER
+        )
+        if window == "drain":
+            # The drain is what installs the wake divert; the update window does not.
+            assert session._wake_deliver_hook == session._spool_wake_to_inbox
+        await session._wake_deliver_hook(_wake_due())
+
+        for receipt in (mailbox, steer):
+            assert receipt.detail != SPOOL_RECEIPT_WAKE, receipt
+            assert receipt.fields["delivery"]["committed"] is True
+        assert steer.detail == "delivered mid-turn (steered)"
+        assert peek_inbox(session.transcript.directory) == [], "nothing held for a successor"
+        # The busy mailbox arm records the row durably at once; the steer and the
+        # wake ride the live turn's next tool boundary.
+        assert any(
+            entry.payload.get("custom_type") == "peer_message"
+            for entry in session._transcript.entries()
+        )
+        assert _queued_custom_types(session) == ["peer_message", "wake_prompt"]
+    finally:
+        session._is_streaming = False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped", ["idle", "exit-committed", "disposing"])
+async def test_once_admission_has_stopped_the_same_send_spools(
+    tmp_path: Path, stopped: str
+) -> None:
+    """The control: the windows' spool is still the answer when no live turn can
+    take the message."""
+    handle, session = _busy_retiring(tmp_path, "drain")
+    if stopped == "idle":
+        session._is_streaming = False
+    elif stopped == "exit-committed":
+        handle._exit_committed = True
+    else:
+        handle._disposing = True
+    if stopped == "exit-committed":
+        # A committed exit has no successor window left: the pre-existing typed
+        # refusal, never the live turn.
+        with pytest.raises(RuntimeRetiring):
+            await handle.receive_peer_message(
+                "rebased, take a look", mode="steer", wake=True, sender=_PEER
+            )
+        assert peek_inbox(session.transcript.directory) == []
+    else:
+        receipt = await handle.receive_peer_message(
+            "rebased, take a look", mode="steer", wake=True, sender=_PEER
+        )
+        assert receipt.detail == SPOOL_RECEIPT_WAKE, receipt
+        assert [row.text for row in peek_inbox(session.transcript.directory)] == [
+            "rebased, take a look"
+        ]
+    assert _queued_custom_types(session) == []
+    session._is_streaming = False
+
+
+@pytest.mark.asyncio
+async def test_an_idle_fire_on_a_draining_runtime_still_spools(tmp_path: Path) -> None:
+    handle, session = _busy_retiring(tmp_path, "drain")
+    session._is_streaming = False
+    await session._wake_deliver_hook(_wake_due())
+    rows = peek_inbox(session.transcript.directory)
+    assert len(rows) == 1 and rows[0].wake is True and rows[0].wake_id == "w-own"
+    assert _queued_custom_types(session) == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_ends_with_deliveries_parked_hands_them_to_the_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tail the live-turn admission opens: a steer and a wake parked past the
+    turn's last boundary must reach the successor, not die with the exit — and
+    the successor's boot drain delivers the peer row once, by its message id."""
+    from local_operator.session.runtime.process import _drain_inbox_into
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    handle, session = _busy_retiring(tmp_path, "drain")
+    from local_operator.harness.types import Message
+
+    # The operator engaged this session: the successor's boot drain delivers
+    # peer rows only to a conversation with a durable user row (a pristine one
+    # defers them to its first turn, ``engagement.durable_conversation_path``).
+    await session._transcript.append_message(Message.user("ship it"))
+    steer = await handle.receive_peer_message(
+        "stop, wrong branch", mode="steer", wake=True, sender=_PEER
+    )
+    await session._wake_deliver_hook(_wake_due())
+    assert _queued_custom_types(session) == ["peer_message", "wake_prompt"]
+
+    # The turn ends without reaching another boundary.
+    session._is_streaming = False
+    await session._flush_parked_deliveries()
+
+    assert _queued_custom_types(session) == []
+    rows = peek_inbox(session.transcript.directory)
+    assert [(row.wake, bool(row.wake_id)) for row in rows] == [(True, False), (True, True)]
+    peer_row = rows[0]
+    assert peer_row.text == "stop, wrong branch"
+    assert peer_row.message_id == steer.fields["delivery"]["message_id"]
+    assert peer_row.sender.get("name") == "peer"
+    # R1-1: the rows OWE a turn, so the supervisor starts a successor for a
+    # headless session that would otherwise just exit at idle and leave them.
+    assert read_spooled_turn(config_dir, session.transcript.directory.name) is not None
+
+    # (b) The successor's boot drain hands both rows to its first turn, the peer
+    # row carrying its id so a second copy is answered as a duplicate.
+    received: list[tuple[str, bool, str | None]] = []
+
+    successor_transcript = SimpleNamespace(directory=session.transcript.directory)
+
+    class _Successor:
+        _session = SimpleNamespace(transcript=successor_transcript)
+
+        async def receive_peer_message(
+            self, text, *, mode, wake, sender=None, message_id=None, custom_type=None
+        ):
+            received.append((text, wake, message_id))
+            return "ok"
+
+    assert await _drain_inbox_into(_Successor()) >= 1
+    assert ("stop, wrong branch", True, peer_row.message_id) in received
+    assert any("check the deploy" in text and wake for text, wake, _ in received)
+    assert peek_inbox(session.transcript.directory) == []
+
+
+# -- review round 1: the tail keeps the spool's guarantees ----------------------
+
+
+def _one_shot_due(text: str = "remind me to ship") -> Any:
+    from local_operator.harness.wake_types import DueWake
+
+    return DueWake(
+        schedule=WakeSchedule(id="w-once", message=text, next_due_at=1),
+        occurrence=1,
+        final=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_peer_message_parked_at_turn_end_owes_the_successor_a_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1, peer half alone: a live-admitted steer the turn never reached is
+    spooled WITH the owed-turn record the admission-time spool makes."""
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    handle, session = _busy_retiring(tmp_path, "drain")
+    steer = await handle.receive_peer_message("stop", mode="steer", wake=True, sender=_PEER)
+    assert steer.detail == "delivered mid-turn (steered)"
+
+    session._is_streaming = False
+    await session._flush_parked_deliveries()
+
+    assert [row.text for row in peek_inbox(session.transcript.directory)] == ["stop"]
+    assert read_spooled_turn(config_dir, session.transcript.directory.name) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_one_shot_wake_parked_at_turn_end_is_re_armed_not_spooled_as_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1, wake half: a one-shot handed to the live turn retired its schedule.
+    Parked past the last boundary it must be re-armed (the id stays the user's,
+    the exit's handover writes it), exactly as an idle fire is — not become a
+    text-only row nothing re-arms; a recurring wake still spools, owed."""
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    _handle, session = _busy_retiring(tmp_path, "drain")
+    await session._wake_deliver_hook(_one_shot_due())
+    await session._wake_deliver_hook(_wake_due())
+    assert _queued_custom_types(session) == ["wake_prompt", "wake_prompt"]
+
+    session._is_streaming = False
+    await session._flush_parked_deliveries()
+
+    assert [s.id for s in session._wake.held_schedules] == ["w-once"], "re-armed"
+    rows = peek_inbox(session.transcript.directory)
+    assert [row.wake_id for row in rows] == ["w-own"], "the one-shot is not ALSO text"
+    assert read_spooled_turn(config_dir, session.transcript.directory.name) is not None
+    assert session._live_final_wakes == {}
+
+
+@pytest.mark.asyncio
+async def test_a_signal_drain_that_disposes_a_busy_turn_spools_what_it_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: the signal drain may dispose a turn that is still running, and
+    disposal empties the steering queue while the turn-end spool skips a
+    disposed session. What the live turn admitted ("delivered mid-turn") must
+    reach the inbox with an owed record, not vanish."""
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    session = build_session(tmp_path / "sess", ScriptedStream([text_turn("reply")]))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    session._is_streaming = True
+    assert handle.begin_drain(SIGNAL_DRAIN_CAUSE, "SIGTERM") is True
+
+    steer = await handle.receive_peer_message("stop", mode="steer", wake=True, sender=_PEER)
+    assert steer.detail == "delivered mid-turn (steered)"
+    await session._wake_deliver_hook(_one_shot_due())
+    assert _queued_custom_types(session) == ["peer_message", "wake_prompt"]
+
+    await session.dispose()
+
+    rows = peek_inbox(session.transcript.directory)
+    assert (rows[0].text, rows[0].wake) == ("stop", True)
+    assert [row.wake_id for row in rows] == ["", "w-once"], "the one-shot spools as owed text"
+    assert session._wake.held_schedules == (), "no hold a disposal could leave unwritten"
+    assert read_spooled_turn(config_dir, session.transcript.directory.name) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_wake_whose_turn_ends_mid_delivery_spools_instead_of_going_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-3: the live arm samples ``busy`` and ``_deliver_wake`` awaits before
+    re-sampling it. A turn that ends in that gap must hand the fire back to the
+    draining spool, not to the idle arm a leaving runtime holds transcript-only."""
+    _spooled_store(monkeypatch, tmp_path)
+    _handle, session = _busy_retiring(tmp_path, "drain")
+
+    async def _turn_ends() -> None:
+        session._is_streaming = False
+
+    monkeypatch.setattr(session, "_mark_code_requests_dirty", _turn_ends)
+    spawned: list[Any] = []
+    monkeypatch.setattr(session, "_spawn_background", lambda coro: spawned.append(coro))
+
+    await session._wake_deliver_hook(_wake_due())
+
+    for coro in spawned:
+        coro.close()
+    assert spawned == [], "no idle turn opened on a leaving runtime"
+    assert [row.wake_id for row in peek_inbox(session.transcript.directory)] == ["w-own"]

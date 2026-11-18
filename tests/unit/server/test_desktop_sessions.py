@@ -9592,8 +9592,104 @@ async def test_a_queued_ask_answer_is_accepted_without_an_epoch(answers_api) -> 
         json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "answered"}
+    assert result.json()["result"] == {"detail": "answered", "consent_bearing": False}
     assert remote.calls == [("a-1", {"q0": ["yes"]}, False, False)]
+
+
+class _ProvingAskRemote(_AskRemote):
+    """A facade whose bound client holds (or not) the runtime's operator proof.
+
+    ``ask_consent_bearing`` is ``AttachedSession``'s probe of its own handshake
+    state; ``probes`` records that the route read it AFTER the answer went out
+    (a cold bind this process just engaged must count).
+    """
+
+    def __init__(self, *, bearing: bool) -> None:
+        super().__init__()
+        self.bearing = bearing
+        self.probes: list[int] = []
+
+    def ask_consent_bearing(self) -> bool:
+        self.probes.append(len(self.calls))
+        return self.bearing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bearing", [True, False])
+async def test_the_answer_receipt_reports_consent_bearing_from_the_facade(
+    answers_api, bearing: bool
+) -> None:
+    """Incident a-48e3 (2026-11-16): a card answer to a runtime this backend did
+    not start is stamped ``unverified`` and can never authorise a delete. The
+    receipt says so, from server-side state only."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=bearing)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "answered", "consent_bearing": bearing}
+    assert remote.probes == [1]  # read once, after the answer was sent
+
+
+@pytest.mark.asyncio
+async def test_a_body_supplied_consent_bearing_is_never_accepted(answers_api) -> None:
+    """Negative control: the client cannot assert the flag. ``Answer`` forbids
+    unknown fields, so the request is refused and nothing reaches the runtime."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=False)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "consent_bearing": True},
+    )
+    assert result.status_code == 422, result.text
+    assert remote.calls == [] and remote.probes == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_conversation_answer_is_never_consent_bearing(answers_api) -> None:
+    """Negative control: a peer's conversation is answered over the mesh and
+    stamped ``remote``; whatever this process holds for a same-numbered local
+    pid, the receipt reads False and the probe is not even consulted."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=True)
+    _install_ask_remote(app, remote, remote_row=SimpleNamespace(device_id="dev-peer"))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["consent_bearing"] is False
+    assert remote.probes == []  # R1-n1: short-circuited before the probe
+
+
+@pytest.mark.asyncio
+async def test_a_decline_receipt_never_reports_consent_bearing(answers_api) -> None:
+    """PR #4127 QA Q2: a decline is never consent, so even a connection that held
+    the operator proof must not let a card read "this answer can authorise"."""
+    client, app = answers_api
+    remote = _ProvingAskRemote(bearing=True)
+    remote.detail = "declined"
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "declined", "consent_bearing": None}
+    assert remote.calls == [("a-1", None, True, False)]
+
+
+@pytest.mark.asyncio
+async def test_the_ask_consent_bearing_feature_is_published_desktop_only(answers_api) -> None:
+    from local_operator.server.features import DESKTOP_ONLY_FEATURES
+
+    client, _app = answers_api
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+    assert features["ask_consent_bearing"] == 1
+    assert "ask_consent_bearing" in DESKTOP_ONLY_FEATURES
 
 
 @pytest.mark.asyncio
@@ -9708,7 +9804,7 @@ async def test_a_cold_open_ask_is_dismissed_without_dialling_anything(answers_ap
         json={"ask_id": "a-1", "dismiss": True, "reason": "answered_in_chat"},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "dismissed"}
+    assert result.json()["result"] == {"detail": "dismissed", "consent_bearing": None}
     assert remote.dismissals == [], "a cold dismissal must not dial (a bind BOOTS)"
     assert remote.calls == []
     events = store.read_events(directory)
@@ -9730,7 +9826,7 @@ async def test_a_live_owner_gets_the_live_dismiss_op(answers_api, monkeypatch) -
         json={"ask_id": "a-1", "dismiss": True, "reason": "moot"},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "dismissed"}
+    assert result.json()["result"] == {"detail": "dismissed", "consent_bearing": None}
     assert remote.dismissals == [("a-1", "desktop", "moot")]
     assert remote.calls == []
 
@@ -9855,7 +9951,7 @@ async def test_a_revision_reaches_the_runtime_as_its_own_op(answers_api) -> None
         json={"ask_id": "a-1", "answers": {"q0": ["yes"]}, "revise": True},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "revised"}
+    assert result.json()["result"] == {"detail": "revised", "consent_bearing": False}
     assert remote.calls == [("a-1", {"q0": ["yes"]}, False, True)]
 
 
@@ -10813,7 +10909,7 @@ async def test_a_signed_door_ask_is_decided_through_bridge_decide(answers_api) -
         json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
     )
     assert result.status_code == 200, result.text
-    assert result.json()["result"] == {"detail": "decided"}
+    assert result.json()["result"] == {"detail": "decided", "consent_bearing": None}
     assert remote.decisions == [("a-site", "bmsg_" + "ab" * 16, "approve")]
     assert remote.calls == []
 
@@ -10897,3 +10993,41 @@ async def test_the_desktop_route_signs_only_a_card_it_can_rebuild(answers_api, s
         assert "did not sign" in result.json()["detail"]
         assert remote.decisions == []
     assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_bridge_keeps_adr_0009_routing_facts_off_its_frames(
+    tmp_path, monkeypatch
+) -> None:
+    """A local session's attention frame and snapshot omit ``origin``/``needs_user``.
+
+    Review round 3, R3-2: the bridge publishes raw ``AttentionStore.state`` for a
+    local session and installs it on the snapshot with ``model_copy``, which
+    skips the model validator. The bridge's own copy keeps the full state, since
+    its notification edge reads the store's facts.
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    raw = {"unseen": True, "completion_token": "t2", "origin": "o" * 4000, "needs_user": True}
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    bridge.attention = {"unseen": False, "completion_token": "t1"}
+
+    async def read() -> dict[str, Any]:
+        return dict(raw)
+
+    monkeypatch.setattr(bridge, "_read_attention", read)
+    await bridge.refresh_attention()
+
+    frames = [frame["payload"] for frame, _ in bridge.replay if frame.get("type") == "attention"]
+    assert frames, "the bridge published no attention frame"
+    assert not {"origin", "needs_user"} & set(frames[-1])
+    assert frames[-1]["completion_token"] == "t2"
+    assert bridge.attention["origin"] == "o" * 4000
+
+    bridge.remote = cast(
+        Any, SimpleNamespace(frontend_state=FrontendSessionState(session_id="s1", epoch="e1"))
+    )
+    capture = bridge._capture_wire_state()
+    assert not {"origin", "needs_user"} & set(capture.attention)
+    snapshot = module._wire_state_of(capture)["snapshot"]
+    assert not {"origin", "needs_user"} & set(snapshot["attention"])

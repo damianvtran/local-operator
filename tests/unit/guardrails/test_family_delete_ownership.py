@@ -84,7 +84,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Synthetic forge/process facts: no live cwd inside any tree, a GitLab
     # remote whose MRs are merged (as in the field), nobody running unless a
     # test says so through ``running``.
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _, **_kw: False)
     # Own-tree checks now bypass the cached inventory (#3987). Keep this
     # synthetic idle fixture idle for both paths; hidden-pid fail-closed
     # behavior is exercised by test_cwd_inventory_hidden_pid.

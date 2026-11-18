@@ -56,7 +56,11 @@ from typing import (
     Sequence,
 )
 
+from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr as _github_tr
 from local_operator.network import wire
+
+_github_text = _github_tr("wire.github")
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.network.relay import PeerLink, RelayServer
@@ -3737,14 +3741,7 @@ def _github_scope_clause(fact: Mapping[str, Any], peer_label: str, where: str = 
 
 
 def _designation_phrase(fact: Mapping[str, Any], where: str) -> str:
-    """The designated list and WHERE it came from, in one phrase.
-
-    The source is never left implicit: an enumerated list says it is what the
-    login can push to, a fallback says how old it is and why, and an unlisted
-    one says a borrow refuses rather than widens (never "all repositories").
-    Ages come from ``github.listed_ago`` — the receipt's and ``repos``' own
-    wording (UX round 1, U3) — and the full list is one command away (U2).
-    """
+    """Localized display of existing provenance; never resolve or lend here."""
     from local_operator.network.credentials import github as github_mod
 
     names = [str(name) for name in (fact.get("repositories") or []) if str(name)]
@@ -3757,35 +3754,53 @@ def _designation_phrase(fact: Mapping[str, Any], where: str) -> str:
         excluded = int(fact.get("excluded_count") or 0)
     except (TypeError, ValueError):
         excluded = 0
-    opted = f", {excluded} opted out" if excluded else ""
-    # Older peers/cache records may carry API text; only local kind wording is
-    # suitable for a readiness surface, just like the owner's refusal boundary.
-    error = github_mod.enumeration_failure_words(str(fact.get("repositories_error") or ""))
+    opted = _github_text(_github_strings.readiness_opted(count=excluded)) if excluded else ""
+    error = github_mod.listing_failure_text(str(fact.get("repositories_error") or ""))
     if not count:
         if origin == "unavailable":
-            why = f" ({error})" if error else ""
-            return (
-                f"no repository listed yet{why} — the next borrow asks GitHub, and is "
-                "refused rather than widened if it cannot"
+            return _github_text(
+                _github_strings.readiness_unavailable(failure=f" ({error})" if error else "")
             )
-        return f"no repository{opted} — a borrow would refuse rather than widen"
-    # Five names and a count: the whole list is `credential github repos` on the
-    # device that lends, and a readiness row is read at a glance.
-    shown = names if count <= 5 and len(names) == count else [*names[:5], f"{count - 5} more"]
-    listed = _name_list(shown)
+        return _github_text(_github_strings.readiness_empty(opted=opted))
+    shown = (
+        names
+        if count <= 5 and len(names) == count
+        else [*names[:5], _github_text(_github_strings.readiness_more(count=count - 5))]
+    )
     ago = github_mod.listed_ago(fact.get("repositories_age_s"))
     if origin == "explicit":
-        source = f"the list chosen by hand there{opted}"
+        source = _github_text(_github_strings.readiness_explicit(opted=opted))
     elif origin == "last_good":
-        why = f": {error}" if error else ""
-        source = (
-            f"the list fetched {ago}{opted} — that device could not list GitHub repositories "
-            f"at its last check{why}"
+        source = _github_text(
+            _github_strings.readiness_last_good(
+                ago=ago, opted=opted, failure=f": {error}" if error else ""
+            )
         )
     else:
-        source = f"every repository its login can push to, listed {ago}{opted}"
-    pointer = f"; full list: lop network credential github repos on {where}" if where else ""
-    return f"{listed} ({count} — {source}{pointer})"
+        source = _github_text(_github_strings.readiness_enumerated(ago=ago, opted=opted))
+    # Keep the full-list pointer OUTSIDE the inner group: the surrounding
+    # capability clause can add its own parentheses without a doubled close.
+    pointer = (
+        _github_text(
+            _github_strings.readiness_pointer(
+                command="lop network credential github repos", owner=where
+            )
+        )
+        if where
+        else ""
+    )
+    return _github_text(
+        _github_strings.readiness_list(
+            # Keep the conjunction in this owned message. The shared helper
+            # remains English-only and is outside this GitHub extraction.
+            form="one" if len(shown) == 1 else "other",
+            head=", ".join(shown[:-1]),
+            last=shown[-1],
+            count=count,
+            source=source,
+            pointer=pointer,
+        )
+    )
 
 
 def _github_observed(fact: Any) -> dict[str, Any]:

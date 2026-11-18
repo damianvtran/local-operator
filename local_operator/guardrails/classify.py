@@ -554,6 +554,8 @@ def _lineage_facts(target: Target, *, only_assigned: bool) -> str:
     else:
         what = "the path is handed to a program that may run code on it"
     facts = [what]
+    if target.unproven_code and target.proof_gap:
+        facts.append(f"its python -c code is not proven read-only: {target.proof_gap}")
     if target.assigned and only_assigned:
         facts.append(f"it reaches this call only as the inline env assignment {target.assigned}=…")
     facts.append("no recognised delete or write op names it")
@@ -1388,14 +1390,18 @@ def _rank(
         # caller never made is not known to be reproducible.
         own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
         relation = own[2] if own is not None else ""
+        # A hidden pid with no evidence is ignored for the PLAIN removal only
+        # (git itself still refuses untracked content); ``--force`` keeps the
+        # strict rule (review M1, PR #4161).
         state = worktree_state(
             path,
             own=own is not None and (relation == "" or not target.forced),
             session_id=session_id,
+            hidden_blocks=target.forced,
         )
         # Never a bare "busy" (operator directive 2026-11-14): the reason names
         # each holder (pid, command, session) or why the inventory failed.
-        state_text = state_phrase(path, state, session_id)
+        state_text = state_phrase(path, state, session_id, hidden_blocks=target.forced)
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1592,6 +1598,24 @@ def _rank(
                     f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
                 )
             return RankedTarget(target, Risk.LOW, reason, shown)
+        rig, rig_why = _finished_rig_reason(
+            target, path, reasons, notes, link is not None, session_id
+        )
+        if rig is not None:
+            if foreign is not None:
+                # Carried to the agent and journaled (``check``) like the
+                # finished-foreign-worktree notice: a LOW resting on facts says so.
+                note = (
+                    f"Guardrail dangerous-delete: {os.path.realpath(path)} removed without "
+                    f"review — {rig}."
+                )
+                if note not in foreign.notices:
+                    foreign.notices.append(note)
+            return RankedTarget(target, Risk.LOW, rig)
+        if rig_why and rig_why not in _RIG_SILENT_WHY:
+            # Say why the finished-rig route did not apply, so the judge and
+            # the agent see the one fact that kept it (e.g. creator running).
+            notes = [*notes, f"not finished work: {rig_why}"]
         return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
@@ -1727,7 +1751,12 @@ def _bounded_lookups(jobs: dict[str, Any], deadline: float) -> dict[str, Any]:
         max_workers=min(_REACH_LOOKUP_WORKERS, len(jobs)), thread_name_prefix="lop-reach"
     )
     try:
-        futures = {pool.submit(fn): key for key, fn in jobs.items()}
+        # The forge auth of this guard call reaches the pool threads (field
+        # report 2026-11-17: ``worktree_activity``'s ``gh`` must see the
+        # session's GH_TOKEN, and a pool does not copy context variables).
+        from local_operator.guardrails.provenance import bind_forge_auth
+
+        futures = {pool.submit(bind_forge_auth(fn)): key for key, fn in jobs.items()}
         done, _ = cf.wait(futures, timeout=max(0.0, deadline - time.monotonic()))
         results: dict[str, Any] = {}
         for fut in done:
@@ -1838,8 +1867,10 @@ def _reached_worktrees(
     checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
     jobs: dict[str, Any] = {}
     for root in checked:
+        # A reached tree is deleted by ``rm -rf``-style targets: strict on
+        # hidden pids for the not-own (inherited) case (review M1, PR #4161).
         jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(
-            r, own=r not in inherited, session_id=session_id
+            r, own=r not in inherited, session_id=session_id, hidden_blocks=True
         )
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
@@ -1894,9 +1925,10 @@ def _reached_worktrees(
                 if state == "dirty"
                 else ""
             )
+            state_text = prov.state_phrase(root, state, session_id, hidden_blocks=True)
             held.append(
                 f"{root}: created by this session; linked worktree state: "
-                f"{prov.state_phrase(root, state, session_id)}{changes}; {facts}"
+                f"{state_text}{changes}; {facts}"
             )
     if unchecked:
         held.append(
@@ -1962,12 +1994,60 @@ def _reached_worktrees(
             who = "not created by this session (not in the ledger)"
         activity = activities.get(root)
         facts = activity.facts() if activity is not None else "PR state unknown (lookup timed out)"
-        state_text = prov.state_phrase(root, state, session_id)
+        state_text = prov.state_phrase(root, state, session_id, hidden_blocks=True)
         parts.append(f"{root}: {who}; linked worktree state: {state_text}{changes}; {facts}")
     if len(foreign) > _MAX_FOREIGN_SHOWN:
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
+
+
+#: Finished-rig refusals not worth a note: the route never applied (no ledger
+#: row is the ordinary case for the operator's own ``$HOME`` directories).
+_RIG_SILENT_WHY = frozenset({"no creation ledger row for this directory", "not a directory"})
+#: The one ``_high_reason`` the finished-rig route may settle.
+_HOME_CHILD_REASON = "a top-level directory of the home directory"
+
+
+def _finished_rig_reason(
+    target: Target,
+    path: str,
+    reasons: list[tuple[str, str]],
+    notes: list[str],
+    through_link: bool,
+    session_id: str,
+) -> tuple[str | None, str]:
+    """``(LOW reason, "")`` for deleting a finished ``$HOME`` rig, else ``(None, why)``.
+
+    ``why`` is "" when the route does not apply at all (wrong shape).
+
+    WHY (node-2 census 2026-11-15; operator, ask a-798d): see
+    ``provenance.finished_rig``. Narrow by construction: only a literal
+    ``rm``-style delete (no glob, no selecting ``find``, no link entry, no
+    unresolved notes) whose EVERY spelling's only objection is "a top-level
+    directory of the home directory". Anything CRITICAL (``$HOME`` itself,
+    the state root, secrets, the install layout, credential-derived or opaque
+    targets) returned earlier in ``_rank``; a repository root ranks on its own
+    reason and never reaches here; linked worktrees inside were ranked by
+    ``_reached_worktrees`` before this, so an unfinished one already held.
+    """
+    if (
+        target.op != "delete"
+        or target.pattern is not None
+        or target.selected
+        or target.worktree_remove
+        or through_link
+        or notes
+        or target.credential_derived
+        or target.opaque
+        or not session_id
+    ):
+        return None, ""
+    if any(r != _HOME_CHILD_REASON for _, r in reasons):
+        return None, ""
+    from local_operator.guardrails import provenance as prov
+
+    return prov.finished_rig(path, session_id)
 
 
 def _finished_route_barred(root: str, prot: _Protected) -> bool:

@@ -1,0 +1,274 @@
+{
+  "round": 3,
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, task as-au-vi)",
+    "session": "9bde6e3b38c6",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "system prompt 'Model:' line of this session",
+    "fallback": "none observed",
+    "independent_from_translator_session": true,
+    "translator": "i18n-translator (vi job 6bf342c7825b; brief also names 9c61998557fb resumed as 4f5e2163d473), anthropic/claude-sonnet-5-5",
+    "native_speaker": false
+  },
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "keys_in_scope": [
+    "wire.settings.updates.title",
+    "wire.settings.updates.description",
+    "wire.settings.update_auto_prune.label",
+    "wire.settings.update_auto_prune.help",
+    "wire.settings.update_auto_prune.choice.true.description",
+    "wire.settings.update_auto_prune.choice.false.description",
+    "wire.settings.update_keep_generations.label",
+    "wire.settings.update_keep_generations.help"
+  ],
+  "key_count": 8,
+  "pr": "https://github.com/damianvtran/local-operator/pull/4135",
+  "commit_audited": "a67cdd7c7350255802f8f1b44417f06b9697b288 + uncommitted round-3 translator working tree",
+  "diff_base": "a67cdd7c7350255802f8f1b44417f06b9697b288",
+  "audit_date": "2026-11-16",
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/vi/wire.settings.json": "fa571f18d5247ab5db8007db9f1afe5662b66693325a867d97950ec32759522e",
+    "local_operator/i18n/catalogues/en/wire.settings.json": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "431a5d92412501edc1fad1589ba65f3220e42ba931148cf9179cbd8218d4b860",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/vi.md": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+  },
+  "mechanical": {
+    "hashes_match_brief": true,
+    "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), rc=0",
+    "git_diff_stat_vs_a67cdd7c": "local_operator/i18n/catalogues/vi/wire.settings.json | 2 +-; 1 file changed, 1 insertion(+), 1 deletion(-)",
+    "values_changed_vs_a67cdd7c": [
+      "wire.settings.update_keep_generations.help"
+    ],
+    "retained_7_byte_identical_to_round2_audited_values": true,
+    "key_set_equal_en": true,
+    "key_count_file": 877,
+    "changed_value_nfc": true,
+    "bidi_or_zero_width_chars": 0,
+    "icu_placeholders_added": 0,
+    "changed_value_cells": 144,
+    "en_cells": 138,
+    "budget_cells": 146,
+    "guarantee_clause_end_cell": 93,
+    "guarantee_within_first_146": true,
+    "whole_value_within_146": true
+  },
+  "per_key": [
+    {
+      "key": "wire.settings.updates.title",
+      "text": "Cập nhật",
+      "cells": 8,
+      "verdict": "PASS (retained; byte-identical to round 2)"
+    },
+    {
+      "key": "wire.settings.updates.description",
+      "text": "Cách mỗi lần cập nhật xử lý các bản cài đặt cũ mà nó để lại. Có hiệu lực từ lần `lop update` kế tiếp.",
+      "cells": 101,
+      "verdict": "PASS (retained; byte-identical to round 2)"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.label",
+      "text": "Dọn bản cài đặt cũ",
+      "cells": 18,
+      "budget": 29,
+      "verdict": "PASS (retained; byte-identical to round 2)"
+    },
+    {
+      "key": "wire.settings.update_auto_prune.help",
+      "text": "Sau mỗi lần cập nhật, xóa bản cài đặt cũ không dùng, như `lop install prune`.",
+      "cells": 77,
+      "budget": "~72; help renders on up to two rows",
+      "verdict": "PASS (retained; byte-identical to round 2)",
+      "note": "Restores 'each' (mỗi lần); 77 cells wraps well within two rows, so no truncation; command byte-identical."
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.true.description",
+      "text": "giữ bản hiện tại, bản đang chạy, vài bản mới",
+      "cells": 44,
+      "budget": "~40; row total ~70 of ~78-84",
+      "verdict": "PASS (retained; byte-identical to round 2)",
+      "note": "Repeating 'bản' makes three list items unambiguous; 'đang chạy' still matches the help's running session/service. 'vài bản mới' reads as the newest few in context. 4 cells over the soft hint, but the row fits."
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.false.description",
+      "text": "giữ tất cả; dọn thủ công",
+      "cells": 24,
+      "verdict": "PASS (retained; byte-identical to round 2)"
+    },
+    {
+      "key": "wire.settings.update_keep_generations.label",
+      "text": "Số bản không dùng giữ lại",
+      "cells": 25,
+      "budget": 29,
+      "verdict": "PASS (retained; byte-identical to round 2)",
+      "note": "The 'không dùng được' (unusable) collocation is gone; 'giữ lại' matches the sibling label 'Số thế hệ kiểm toán giữ lại'."
+    },
+    {
+      "key": "wire.settings.update_keep_generations.help",
+      "text": "Luôn giữ: bản hiện tại, bản trước, bản đang chạy và mọi bản mà phiên hoặc dịch vụ đã đăng ký. Số này giữ thêm bấy nhiêu bản không dùng mới nhất.",
+      "cells": 144,
+      "en_cells": 138,
+      "budget": "<=146 (two 80-col rows); guarantee first",
+      "verdict": "PASS (round 3)",
+      "note": "Guarantee first, opened by 'Luôn giữ:' (always kept), complete at cell 93: current (bản hiện tại), previous (bản trước), running (bản đang chạy: unmarked plural in vi, covers the updater and any install a session runs from), registered (mọi bản mà phiên hoặc dịch vụ đã đăng ký: 'any copy a session or service registered', not readable as sign-in). Second sentence 'Số này giữ thêm bấy nhiêu bản không dùng mới nhất' = 'this number additionally keeps that many newest unused copies'; 'Số này' anchors it to the field labelled 'Số bản không dùng giữ lại'; 'thêm' marks it as on top of the guarantee. 'bấy nhiêu' is slightly bookish but standard; not raised."
+    }
+  ],
+  "findings": [],
+  "round1": {
+    "record_sha256_round1": "d104cfa58165e3a28a84f4a8f378aab61e51e10a13f4a728a41a59afa92b4473",
+    "target_sha256_round1": "bf11f75dc660133fdf10f5fbaea1be2454957b9dfe712483ecf09195e5adae03",
+    "verdict": "BLOCKED (changes_requested)",
+    "counts": {
+      "blocker": 0,
+      "major": 1,
+      "minor": 1,
+      "nit": 1
+    },
+    "findings": [
+      {
+        "id": "vi-A1",
+        "severity": "MAJOR",
+        "key": "update_keep_generations.label",
+        "was": "Số bản không dùng được giữ",
+        "disposition": "adopted as suggested -> 'Số bản không dùng giữ lại' (25 cells); RESOLVED"
+      },
+      {
+        "id": "vi-A2",
+        "severity": "MINOR",
+        "key": "update_auto_prune.choice.true.description",
+        "was": "giữ bản hiện tại, đang chạy, vài bản mới nhất (45)",
+        "disposition": "adopted as suggested -> 'giữ bản hiện tại, bản đang chạy, vài bản mới' (44); RESOLVED"
+      },
+      {
+        "id": "vi-A3",
+        "severity": "NIT",
+        "key": "update_auto_prune.help",
+        "was": "Cập nhật xong, xóa …",
+        "disposition": "adopted as suggested -> 'Sau mỗi lần cập nhật, xóa …' (77); RESOLVED"
+      }
+    ]
+  },
+  "terminology": {
+    "install": "bản cài đặt / bản",
+    "prune": "dọn ('xóa' only where en says delete)",
+    "unused": "không dùng (3 uses)",
+    "running": "bản đang chạy (choice.true and help, identical)",
+    "keep": "giữ / giữ lại",
+    "no_leftover_in_use_sense": true,
+    "previous": "bản trước"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "terminal_verdict": "CLEAN",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "not_verified": [
+    "native-speaker judgement (LLM reasoning only, no native review claimed)",
+    "rendered fit in TUI (cell counts via rich.cells.cell_len only; no screenshot of the two-row help wrap)",
+    "font rendering of stacked Vietnamese diacritics"
+  ],
+  "audit_notes_not_execution_log": "round-3 commands run in /Users/damian/local-operator/.worktrees/as4135-copy3 (CMUX_* unset, Node 24, PYTHONPATH=worktree): shasum -a 256 on vi/en/context; scripts/i18n/check.py --catalogues-only (rc 0); git diff a67cdd7c --stat -- local_operator/i18n/catalogues/vi/; read-only python key-set/diff/retained-identity/NFC/bidi/cell_len checks. Ledger NOT written (read-only brief).",
+  "round2": {
+    "round2_scope": "remediation delta: the 3 keys changed since round 1 (update_auto_prune.help, choice.true.description, update_keep_generations.label) plus re-verification of the keep_generations.help safety text; other 5 keys byte-identical to round 1, carried as retained",
+    "commit_audited": "cc66c51cb3add48bd1e88700fa1ba743bcdb252c + uncommitted translator working tree (round-2 final)",
+    "per_key": [
+      {
+        "key": "wire.settings.updates.title",
+        "text": "Cập nhật",
+        "cells": 8,
+        "verdict": "PASS (retained; byte-identical to round 2)"
+      },
+      {
+        "key": "wire.settings.updates.description",
+        "text": "Cách mỗi lần cập nhật xử lý các bản cài đặt cũ mà nó để lại. Có hiệu lực từ lần `lop update` kế tiếp.",
+        "cells": 101,
+        "verdict": "PASS (retained; byte-identical to round 2)"
+      },
+      {
+        "key": "wire.settings.update_auto_prune.label",
+        "text": "Dọn bản cài đặt cũ",
+        "cells": 18,
+        "budget": 29,
+        "verdict": "PASS (retained; byte-identical to round 2)"
+      },
+      {
+        "key": "wire.settings.update_auto_prune.help",
+        "text": "Sau mỗi lần cập nhật, xóa bản cài đặt cũ không dùng, như `lop install prune`.",
+        "cells": 77,
+        "budget": "~72; help renders on up to two rows",
+        "verdict": "PASS (retained; byte-identical to round 2)",
+        "note": "Restores 'each' (mỗi lần); 77 cells wraps well within two rows, so no truncation; command byte-identical."
+      },
+      {
+        "key": "wire.settings.update_auto_prune.choice.true.description",
+        "text": "giữ bản hiện tại, bản đang chạy, vài bản mới",
+        "cells": 44,
+        "budget": "~40; row total ~70 of ~78-84",
+        "verdict": "PASS (retained; byte-identical to round 2)",
+        "note": "Repeating 'bản' makes three list items unambiguous; 'đang chạy' still matches the help's running session/service. 'vài bản mới' reads as the newest few in context. 4 cells over the soft hint, but the row fits."
+      },
+      {
+        "key": "wire.settings.update_auto_prune.choice.false.description",
+        "text": "giữ tất cả; dọn thủ công",
+        "cells": 24,
+        "verdict": "PASS (retained; byte-identical to round 2)"
+      },
+      {
+        "key": "wire.settings.update_keep_generations.label",
+        "text": "Số bản không dùng giữ lại",
+        "cells": 25,
+        "budget": 29,
+        "verdict": "PASS (retained; byte-identical to round 2)",
+        "note": "The 'không dùng được' (unusable) collocation is gone; 'giữ lại' matches the sibling label 'Số thế hệ kiểm toán giữ lại'."
+      },
+      {
+        "key": "wire.settings.update_keep_generations.help",
+        "text": "Luôn giữ: bản hiện tại, bản trước, bản đang chạy và mọi bản mà phiên hoặc dịch vụ đã đăng ký. Số này giữ thêm bấy nhiêu bản không dùng mới nhất.",
+        "cells": 144,
+        "en_cells": 138,
+        "budget": "<=146 (two 80-col rows); guarantee first",
+        "verdict": "PASS (round 3)",
+        "note": "Guarantee first, opened by 'Luôn giữ:' (always kept), complete at cell 93: current (bản hiện tại), previous (bản trước), running (bản đang chạy: unmarked plural in vi, covers the updater and any install a session runs from), registered (mọi bản mà phiên hoặc dịch vụ đã đăng ký: 'any copy a session or service registered', not readable as sign-in). Second sentence 'Số này giữ thêm bấy nhiêu bản không dùng mới nhất' = 'this number additionally keeps that many newest unused copies'; 'Số này' anchors it to the field labelled 'Số bản không dùng giữ lại'; 'thêm' marks it as on top of the guarantee. 'bấy nhiêu' is slightly bookish but standard; not raised."
+      }
+    ],
+    "findings": [],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "terminal_verdict": "CLEAN",
+    "current_report_verdict": {
+      "status": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": []
+    },
+    "input_hashes_sha256": {
+      "local_operator/i18n/catalogues/vi/wire.settings.json": "fa571f18d5247ab5db8007db9f1afe5662b66693325a867d97950ec32759522e",
+      "local_operator/i18n/catalogues/en/wire.settings.json": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6",
+      "local_operator/i18n/catalogues/en/wire.settings.context.json": "431a5d92412501edc1fad1589ba65f3220e42ba931148cf9179cbd8218d4b860",
+      "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+      "i18n/style-guides/vi.md": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+    },
+    "record_sha256_round2": "2de009f8d126bbd9c80fe6fa7545fdee0561724fcdd2653a0545eb498fe7a3e8"
+  },
+  "worktree": "/Users/damian/local-operator/.worktrees/as4135-copy3",
+  "round3": {
+    "scope": "one changed key wire.settings.update_keep_generations.help (new English after TUI render showed the guarantee was cut); 7 keys retained, verified byte-identical to round-2 audited values",
+    "was": "Số bản cài đặt không dùng mới nhất được giữ lại sau mỗi lần dọn. Luôn giữ bản hiện tại, bản trước đó, bản đang thực hiện lần cập nhật và mọi bản mà phiên hoặc dịch vụ đang chạy đã đăng ký.",
+    "now_cells": 144,
+    "guarantee_end_cell": 93,
+    "new_findings": [],
+    "consistency": "'bản đang chạy' now identical in choice.true and help (round 2 had 'bản đang thực hiện lần cập nhật'); 'không dùng' and 'giữ' consistent with label 'Số bản không dùng giữ lại'; no 'đang dùng' (in use) wording anywhere in the 8 keys; no retained-value inconsistency."
+  },
+  "carried_findings_from_prior_rounds": []
+}

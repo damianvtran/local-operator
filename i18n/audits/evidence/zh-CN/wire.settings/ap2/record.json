@@ -1,0 +1,204 @@
+{
+  "round": 3,
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev, task as-au-zh-CN)",
+    "session": "a8c8bed2f011",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "system prompt 'Model:' line of this session",
+    "fallback": "none observed",
+    "independent_from_translator_session": true,
+    "translator": "i18n-translator, job b2041023691c, anthropic/claude-sonnet-5-5",
+    "native_speaker": false
+  },
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "keys_audited": [
+    "wire.settings.updates.title",
+    "wire.settings.updates.description",
+    "wire.settings.update_auto_prune.label",
+    "wire.settings.update_auto_prune.help",
+    "wire.settings.update_auto_prune.choice.true.description",
+    "wire.settings.update_auto_prune.choice.false.description",
+    "wire.settings.update_keep_generations.label",
+    "wire.settings.update_keep_generations.help"
+  ],
+  "key_count": 8,
+  "pr": "https://github.com/damianvtran/local-operator/pull/4135",
+  "commit_audited": "a67cdd7c7350255802f8f1b44417f06b9697b288 + uncommitted round-3 translator edit (target hash below)",
+  "diff_base": "a67cdd7c7350255802f8f1b44417f06b9697b288",
+  "audit_date": "2026-11-16",
+  "input_hashes_sha256": {
+    "local_operator/i18n/catalogues/zh-CN/wire.settings.json": "2e75b8d473e5874e47c2d7b46a0bfc9a18f4ada4497baa59aa305a009c51189f",
+    "local_operator/i18n/catalogues/en/wire.settings.json": "d1f1d715f5206b1c7ad4194bf9f3158f8398016513fd7da2bffe9de7e18836f6",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "431a5d92412501edc1fad1589ba65f3220e42ba931148cf9179cbd8218d4b860",
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/zh-CN.md": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+  },
+  "mechanical": {
+    "hashes_match_brief": true,
+    "check_py_catalogues_only": "check.py: catalogue checks: 0 problem(s), exit 0 (PYTHONPATH=as4135-copy3, Node v24.22.1, CMUX_* unset)",
+    "git_diff_stat_vs_a67cdd7c": "local_operator/i18n/catalogues/zh-CN/wire.settings.json | 2 +- (1 insertion, 1 deletion)",
+    "changed_values_vs_a67cdd7c": [
+      "wire.settings.update_keep_generations.help"
+    ],
+    "other_keys_changed": 0,
+    "a67cdd7c_values_equal_round2_audited_values": true,
+    "retained_7_byte_identical_to_round2": true,
+    "key_set_equal_en": true,
+    "key_count_file": 877,
+    "nfc": true,
+    "bidi_or_zero_width_chars": [],
+    "icu_placeholders_or_code_added": false,
+    "cell_len": {
+      "wire.settings.updates.title": 4,
+      "wire.settings.updates.description": 56,
+      "wire.settings.update_auto_prune.label": 10,
+      "wire.settings.update_auto_prune.help": 61,
+      "wire.settings.update_auto_prune.choice.true.description": 28,
+      "wire.settings.update_auto_prune.choice.false.description": 18,
+      "wire.settings.update_keep_generations.label": 18,
+      "wire.settings.update_keep_generations.help": 108
+    },
+    "keep_help_guarantee_clause_end_cell": 66,
+    "keep_help_whole_cells": 108,
+    "fits_146": true
+  },
+  "per_key": [
+    {
+      "key": "wire.settings.updates.title",
+      "value": "更新",
+      "verdict": "PASS",
+      "note": "更新 (4 cells); distinct from mesh_updates.title “mesh更新”, so the two sections cannot be confused; terse heading, no 。.",
+      "retained_from_round": 2,
+      "byte_identical_verified_round3": true
+    },
+    {
+      "key": "wire.settings.updates.description",
+      "value": "更新后如何处理留下的旧安装。从下一次`lop update`起生效。",
+      "verdict": "PASS",
+      "note": "Accurate; 从下一次`lop update`起生效 is idiomatic; command byte-identical; no space around the code span, per the style guide (no space between CJK and Latin runs). 56 cells.",
+      "retained_from_round": 2,
+      "byte_identical_verified_round3": true
+    },
+    {
+      "key": "wire.settings.update_auto_prune.label",
+      "value": "清理旧安装",
+      "verdict": "PASS",
+      "note": "清理旧安装 (10/29 cells; Sentence case not applicable to Han). 清理 matches house wire.settings usage for cleanup/prune (会话清理); understandable on its own as an on/off switch. Noun: see A1.",
+      "retained_from_round": 2,
+      "byte_identical_verified_round3": true
+    },
+    {
+      "key": "wire.settings.update_auto_prune.help",
+      "value": "每次更新后自动删除未使用的旧安装，规则同`lop install prune`。",
+      "verdict": "PASS",
+      "note": "每次更新后自动删除未使用的旧安装，规则同`lop install prune`。 — 规则同 is more precise than “like” and matches the sidecar (exactly that command’s rules); 自动 is implied by the setting, adds no meaning; 删除 = delete. 61/≈72 cells.",
+      "retained_from_round": 2,
+      "byte_identical_verified_round3": true
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.true.description",
+      "value": "保留当前、运行中及最新的几个",
+      "verdict": "FINDING",
+      "note": "运行中 correctly replaces the old 使用中 and matches the help’s 运行中的会话; no leftover in-use sense. Coordination ambiguity remains (A2). 28/≈40 cells.",
+      "retained_from_round": 2,
+      "byte_identical_verified_round3": true
+    },
+    {
+      "key": "wire.settings.update_auto_prune.choice.false.description",
+      "value": "全部保留；手动清理",
+      "verdict": "PASS",
+      "note": "全部保留；手动清理: accurate terse fragment, no 。; 清理 consistent with the label.",
+      "retained_from_round": 2,
+      "byte_identical_verified_round3": true
+    },
+    {
+      "key": "wire.settings.update_keep_generations.label",
+      "value": "保留的未使用安装数",
+      "verdict": "PASS",
+      "note": "保留的未使用安装数 (18/29 cells): a count of unused installs kept; understandable on its own; 未使用 consistent with the help keys.",
+      "retained_from_round": 2,
+      "byte_identical_verified_round3": true
+    },
+    {
+      "key": "wire.settings.update_keep_generations.help",
+      "value": "始终保留：当前、上一个和运行中的安装，以及会话或服务登记过的安装。此数值另外决定保留多少个最新的未使用安装。",
+      "verdict": "PASS",
+      "note": "始终保留 leads, complete at cell 66/146. All four classes: 当前 (current), 上一个 (previous), 运行中的安装 (running: generic, so it covers the updater and any install a session runs from), 会话或服务登记过的安装 (registered = 登记, not 登录 login). There is no 几个 quantifier, so the coordinated list reads as exhaustive (unlike A2). Second sentence 此数值另外决定保留多少个最新的未使用安装 points to the number field (此数值) and reuses the label term 未使用安装, so it reads as attached. 108 cells.",
+      "round_changed": 3
+    }
+  ],
+  "findings": [
+    {
+      "id": "zh-CN-A1",
+      "severity": "MINOR",
+      "keys": [
+        "update_auto_prune.label",
+        "update_auto_prune.help",
+        "updates.description",
+        "update_keep_generations.label",
+        "update_keep_generations.help"
+      ],
+      "current": "旧安装 / 未使用安装 / 当前安装 / 上一个安装",
+      "problem": "Bare 安装 as a countable noun reads slightly verb-like (未使用安装数), and the same concept is 安装代次 in cli.install_help (the `lop install --help` text, incl. prune), which this copy points to (规则同`lop install prune`). Idiom/consistency only, no misreading risk.",
+      "suggestion": "Optional: 清理旧安装代次 (14 cells), 保留的未使用代次数 (18), …删除未使用的旧安装代次，规则同`lop install prune`。 (65). Keeping 安装 is defensible because the English says 'installs'.",
+      "status": "carried from round 1/2, unresolved (translator decision)"
+    },
+    {
+      "id": "zh-CN-A2",
+      "severity": "MINOR",
+      "keys": [
+        "update_auto_prune.choice.true.description"
+      ],
+      "current": "保留当前、运行中及最新的几个",
+      "problem": "Three modifiers coordinated by 、/及 before one head (的几个) can parse as 'keep a few [installs] that are current/running/newest', which blurs that ALL running installs are kept. Not a dropped fact: the guarantee is stated in full in keep_generations.help. Head noun 安装 elided.",
+      "suggestion": "保留当前和运行中的安装及最新几个 (32 cells, within ≈40).",
+      "status": "carried from round 1/2, unresolved (translator decision)"
+    }
+  ],
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "zh-CN-A1",
+      "zh-CN-A2"
+    ]
+  },
+  "verdict": "CLEAN-WITH-FINDINGS",
+  "ledger_status_recommendation": "passed (no BLOCKER/MAJOR); ledger not run by this auditor (read-only brief)",
+  "round1": {
+    "summary": "Pre-review English (en 6d6083d3…, context c85532dc…), target 37a2b89d3e5f8eced5593e304b084e12bba4a7d185c346d3423867f346122064 at worktree update-terminal-closure on cc66c51c. Verdict CLEAN-WITH-FINDINGS, 0/0/2/0 (A1, A2). Its JSON record was overwritten by round 2 as instructed; this summary is from this session's context, not a retained file."
+  },
+  "round2": {
+    "summary": "FINAL post-review English (en 42166215…, context ebe0faa8…), target 798daa637873dfbe2d4dc781450c7e045c42dbd61f0e345b070cab70e5dca036 on cc66c51c + edits; check.py rc 0; verdict CLEAN-WITH-FINDINGS 0/0/2/0; record sha256 7a3f4ba22f4d5283c80d5ca6c458d1c2b0d0d22a8133348c220f1e7c387ac30a.",
+    "input_hashes_sha256": {
+      "local_operator/i18n/catalogues/zh-CN/wire.settings.json": "798daa637873dfbe2d4dc781450c7e045c42dbd61f0e345b070cab70e5dca036",
+      "local_operator/i18n/catalogues/en/wire.settings.json": "4216621551341578051621a89c3c08ae290f728d7bb6389e561e7ee59e31458f",
+      "local_operator/i18n/catalogues/en/wire.settings.context.json": "ebe0faa8bb9d26922c67493ba2ea8508f51df3897257e08dfac3b97dbad40cfe",
+      "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+      "i18n/style-guides/zh-CN.md": "615a126a8dbff72c52875a56aa80728f8af858764ef4974e1f74192589b830b6"
+    },
+    "keep_generations_help_value": "每次清理保留的最新未使用安装数量。当前安装、上一个安装、执行本次更新的安装，以及运行中的会话或服务登记过的安装，始终保留。"
+  },
+  "round3": {
+    "scope": "wire.settings.update_keep_generations.help only; 7 others retained (byte-identical verified)",
+    "en_value": "Always kept: current, previous and running installs, and any a session or service registered. Also keeps this many newest unused installs.",
+    "zh_value": "始终保留：当前、上一个和运行中的安装，以及会话或服务登记过的安装。此数值另外决定保留多少个最新的未使用安装。",
+    "verdict": "PASS",
+    "new_findings": [],
+    "terminology_consistency": "运行中 matches choice.true 运行中; 未使用安装 matches the label 保留的未使用安装数; no leftover 使用中; bare 安装 noun continues (A1, carried). No retained value became inconsistent.",
+    "translator_claims_checked": "zh-CN 108 cells: TRUE; guarantee clause first and complete at 66 cells (≤146)"
+  },
+  "not_verified": [
+    "native-speaker judgement (LLM reasoning only; no native review claimed)",
+    "rendered fit in the TUI (cell counts via rich.cells.cell_len only; no screenshot of the two-row wrap)",
+    "font rendering of mixed Latin/CJK runs"
+  ],
+  "audit_notes_not_execution_log": "round-3 commands run: shasum -a 256 (zh-CN, en, context); scripts/i18n/check.py --catalogues-only (log: scratchpad zh-check-r3.log); git diff a67cdd7c --stat and full diff for zh-CN; python checks of key set, NFC, Cf, braces/backticks, cell_len and byte-identity against the round-2 record values"
+}

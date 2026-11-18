@@ -7778,10 +7778,17 @@ class AgentLoop:
             settings = guard_check.read_settings(authorised=frozenset(authorised))
             env: Mapping[str, str] = {}
             scratchpad: str | None = None
+            forge_auth = None
             if tool.name == "bash":
-                from local_operator.tools.builtin import bash_guard_environment
+                from local_operator.tools.builtin import (
+                    bash_guard_environment,
+                    bash_guard_forge_auth,
+                )
 
                 env, scratchpad = bash_guard_environment(tool_context)
+                # The guard's own PR-state lookups must authenticate as this
+                # session's shell does (field report 2026-11-17, node-2).
+                forge_auth = bash_guard_forge_auth(tool_context)
             session_id = (tool_context.session_id if tool_context is not None else "") or ""
             operator = None
             if tool.name == "bash":
@@ -7806,6 +7813,7 @@ class AgentLoop:
                 intent=item.intent or "",
                 operator=operator,
                 messages=context.messages if tool.name == "bash" else None,
+                forge_auth=forge_auth,
             )
             return await guard_check.check_tool_call(
                 tool.name,

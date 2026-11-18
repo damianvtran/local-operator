@@ -1,0 +1,23 @@
+{
+ "schema": 1,
+ "audit_id": "a2",
+ "locale": "es",
+ "namespace": "wire.phone_access",
+ "record": "i18n/audits/evidence/es/wire.phone_access/a2/record.json",
+ "source_sha256": "1d6935b1259cab3b9d4975c8b8149de76ceb61be177f22c6b4e01a289b6e762a",
+ "target_sha256": "8d9c424bbc63e1ae4f91c855d14aea48bac4704386b1cdd1a32fc60cd5e41033",
+ "verdict": "passed",
+ "auditor": {
+  "agent": "i18n-auditor role, independent `task` subagent of team lopdev, Local Operator session 43bcb19f888e; not the translator (the coder that authored 9134015c with the draft values) nor the English-drafting coder; did not edit any catalogue value",
+  "model": "anthropic/claude-opus-5-5"
+ },
+ "hashes": {
+  "record.json": "5e25d9bed1608395dbcf650011951bb734d2e1b1ba32279e63fce156823b2e9b",
+  "report.md": "0f7c4a79eb7cec6d689d27bd01edc9467d4907608590720a58cd10b22943cc50",
+  "audit.log": "f4f9b8886fc669940ab9496cfef394cf57670206b288ca67873cc4c993eb2135",
+  "dryrun.log": "16be672ecc19a7ea24b1f27f3dd4143fb4b5899eb561806b4eb923bb3eb4a915"
+ },
+ "ledger_receipt_staged": "$SCRATCH/i18n-away/es.wire.phone_access.json",
+ "ledger_receipt_sha256": "c9d7171182cf01446ca883c0ef675b9faa2ec170b19ed6868d47ba6b4f8b27e1",
+ "ledger_expected_history_sha": "2d987230bdd2b5ea72ad5183d431d93d8b2cecbf5f6289835e7f6d2b17329258"
+}

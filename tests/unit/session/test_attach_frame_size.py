@@ -1308,6 +1308,13 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         # ``cause``) are unaffected. That is the whole size policy: there is no
         # string here to cap.
         "notify",
+        # ADR 0009's routing facts. The STORE carries them; the attach frame
+        # does NOT (``FrontendSessionState._attention_wire`` drops them, and
+        # the frame assertion below pins that), because every routing reader
+        # queries ``attention.db`` itself and ``origin`` is an uncapped string
+        # replayed from the transcript. Their size policy is "not on the wire".
+        "origin",
+        "needs_user",
     }
     # Published at the store's own cap: the field is one string per
     # conversation, and the ceiling this fixture exists to police is why it is
@@ -1599,7 +1606,13 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
     }
 
-    assert frame["data"]["snapshot"]["attention"] == attention
+    # The frame carries the store's state minus ADR 0009's routing facts
+    # (spelled literally, not via the module constant, so emptying that
+    # constant fails here instead of passing tautologically).
+    assert frame["data"]["snapshot"]["attention"] == {
+        key: value for key, value in attention.items() if key not in {"origin", "needs_user"}
+    }
+    assert not {"origin", "needs_user"} & set(frame["data"]["snapshot"]["attention"])
     # The settings outcomes ride the frame whole, so the size below charges them.
     assert frame["data"]["snapshot"]["settings_results"] == populated["settings_results"]
     # The all-year frame already spends its line budget. Complete proof stays
@@ -7364,3 +7377,34 @@ def test_peer_cycle_budget_marker_withholds_without_revoking_loaded_proof() -> N
     untouched = {"peer_cycle_display": dict(refusal)}
     _bound_peer_cycle_display_in_place(untouched)
     assert untouched["peer_cycle_display"] == refusal
+
+
+def test_the_live_refresh_keeps_adr_0009_routing_facts_off_the_attach_frame() -> None:
+    """``mutate`` — the publisher's live refresh — strips ``origin``/``needs_user`` too.
+
+    Review round 3, R3-1: construction ran the model's attention validator, but
+    ``refresh_from_session(initial=False)`` goes through ``mutate``, whose
+    per-field ``TypeAdapter`` and ``model_copy`` install never do. So after the
+    first live attention change the uncapped ``origin`` rode the stored state,
+    the update frame and every later attach snapshot. Pins all three, with the
+    4000-character origin the reviewer's repro used, and that a change confined
+    to the omitted keys is no change on the wire.
+    """
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    updates: list[FrontendUpdate] = []
+    store.subscribe(updates.append)
+    raw = {"unseen": True, "completion_token": "t", "origin": "o" * 4000, "needs_user": True}
+
+    update = store.mutate(attention=dict(raw))
+
+    projected = {"unseen": True, "completion_token": "t"}
+    assert store.state.attention == projected
+    assert update is not None
+    assert update.changes["attention"] == projected
+    assert [u.changes["attention"] for u in updates] == [projected]
+    snapshot = sync_wire_payload(store.subscribe(lambda _u: None).sync)["snapshot"]
+    assert snapshot["attention"] == projected
+    assert "o" * 4000 not in json.dumps(snapshot)
+
+    # Only the routing facts moved: nothing the frame carries changed.
+    assert store.mutate(attention={**raw, "origin": "phone", "needs_user": False}) is None

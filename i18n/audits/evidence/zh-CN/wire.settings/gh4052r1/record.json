@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "audit_date": "2026-11-15T14:29:14.704155+00:00",
+  "key_count": 1,
+  "namespace_key_count": 867,
+  "source_audit_revision": "0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "scope": "aa051d55925b483175388edcbae9dff315ca49f1..0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev primary audit)",
+    "session": "91d1e05d2d82",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "df4617d39efa (allocation); 9af0b0ea9021 (session named in current translator receipts)",
+    "actual_model_source": "Host [model switch] from anthropic/claude-opus-5-5 after provider quota failure; all substantive audit performed with openai/gpt-6.1-sol",
+    "fallback": {
+      "from": "anthropic/claude-opus-5-5",
+      "to": "openai/gpt-6.1-sol",
+      "reason": "provider failure: quota"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "sha256": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/gh4052r1/report.md",
+      "sha256": "3ba34f0f190bf0f16b04cf3bad763c8d1fc4542796bd7d1347b0808cc61b0323"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/summary.json",
+      "sha256": "5dd38a3b2de460a0a7bb0bd54accb505529491d649de69eba025eb6b990b0069"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/pseudo.json",
+      "sha256": "0d6674491d447684236a83994df405e80e6ab0511fdb34c6dceb8406dba8ae55"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/rtl-probe.json",
+      "sha256": "dec3cc1968d5230a630bf9484f22e633e7c59b5d15358c1aead1b79238db2b1c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/runner.py.txt",
+      "sha256": "486ab27058b188ce14e5453ba52bf45b5d91cf1e0d9b9f60033d7c70899827c0"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/audit.log",
+      "sha256": "0eb30433c336853aaee7180e2d1c1cc7de79d3d0094f0f8f4d1227f864911a8d"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.github/gh4052r1/findings.json",
+      "sha256": "5be4404a25e560245d148a589b0178325f3128734dd515b9156c54434ab5e6d3"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/gh4052s1/record.json",
+      "sha256": "9270dd1a28146963805a408f7328c821d27d279e28286c52eb80e764f7f58229"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "report.md contains reasoning; audit.log is captured execution output. Direct ICU and static frame proof are limited as stated; production activation remains English.",
+  "ledger_disposition": "clean_receipt_deferred_no_eligibility_restoration"
+}

@@ -1,0 +1,3 @@
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $SCRATCH/rc/es.wire.settings.json --expected-history-sha 60ecb76826bfcd26efca3ea7e9d50e0bd0f845a1571d8449724cad52c4a956ef --dry-run
+i18n/audit-history/es/wire.settings.json
+exit=0

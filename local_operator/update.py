@@ -81,6 +81,7 @@ from local_operator.helpers import retention_label
 # a stdlib-only module; every existing consumer of the name here is unaffected.
 # The ``as`` spelling is what marks this as a deliberate re-export rather than
 # an unused import.
+from local_operator.install_defaults import DEFAULT_AUTO_PRUNE_GENERATIONS
 from local_operator.install_defaults import (
     DEFAULT_KEEP_GENERATIONS as DEFAULT_KEEP_GENERATIONS,
 )
@@ -112,6 +113,14 @@ PYPI_JSON_URL = "https://pypi.org/pypi/local-operator/json"
 #: than the full index — it already knows the version it is asking about, and
 #: the full document is ~1.3 MB and grows with every release.
 PYPI_VERSION_JSON_URL = "https://pypi.org/pypi/local-operator/{version}/json"
+
+#: The PEP 691 JSON simple index: the page uv itself resolves against, and a
+#: DIFFERENT Fastly object from :data:`PYPI_JSON_URL`, so the two go stale
+#: independently. :func:`_fetch_pypi_read` cross-checks the project document
+#: against it because a client cannot bust PyPI's edge cache for the project
+#: document (see the CDN-lag note there).
+PYPI_SIMPLE_URL = "https://pypi.org/simple/local-operator/"
+_SIMPLE_JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
 
 #: Short enough that a hung PyPI cannot stall a splash worker across the
 #: TUI suite; long enough for a slow but living mirror.
@@ -1227,23 +1236,157 @@ class _PypiRead:
     named_version: str | None = None
 
 
-def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
-    """One live read: ready version, or an answered-but-not-ready refusal."""
+def _final_release(value: Any) -> Any | None:
+    """``packaging`` Version for a final (non-pre, non-dev) release string, else None."""
+    from packaging.version import InvalidVersion, Version
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = Version(value.strip())
+    except InvalidVersion:
+        return None
+    if parsed.is_prerelease or parsed.is_devrelease:
+        return None
+    return parsed
+
+
+def _newest_listed_release(payload: dict[str, Any]) -> str | None:
+    """Newest final ``releases`` key with at least one non-yanked file.
+
+    An empty file list is skipped on purpose: that is a release still being
+    created, and it stays the readiness gate's ("still publishing") call via
+    ``info.version``, not a version this picks over a ready one.
+    """
+    releases = payload.get("releases")
+    if not isinstance(releases, dict):
+        return None
+    best: tuple[Any, str] | None = None
+    for key, files in releases.items():
+        parsed = _final_release(key)
+        if parsed is None or not isinstance(files, list):
+            continue
+        if not any(isinstance(f, dict) and not f.get("yanked") for f in files):
+            continue
+        if best is None or parsed > best[0]:
+            best = (parsed, str(key).strip())
+    return best[1] if best else None
+
+
+def _newest_simple_release(payload: Any) -> str | None:
+    """Newest final version with a non-yanked file on a PEP 691 simple page.
+
+    Versions come from the FILENAMES, not the PEP 700 ``versions`` list,
+    because yanking is per file: a version whose files are all yanked is not
+    offered, exactly as uv treats it.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("files"), list):
+        return None
+    from packaging.utils import (
+        InvalidSdistFilename,
+        InvalidWheelFilename,
+        parse_sdist_filename,
+        parse_wheel_filename,
+    )
+
+    best: Any | None = None
+    for entry in payload["files"]:
+        if not isinstance(entry, dict) or entry.get("yanked"):
+            continue
+        name = entry.get("filename")
+        if not isinstance(name, str):
+            continue
+        try:
+            if name.endswith(".whl"):
+                version = parse_wheel_filename(name)[1]
+            else:
+                version = parse_sdist_filename(name)[1]
+        except (InvalidWheelFilename, InvalidSdistFilename):
+            continue
+        parsed = _final_release(str(version))
+        if parsed is not None and (best is None or parsed > best):
+            best = parsed
+    return str(best) if best is not None else None
+
+
+def _get_json(url: str, client: Any | None, headers: dict[str, str] | None = None) -> Any:
+    """One bounded GET returning parsed JSON; raises on any failure."""
     import httpx
 
+    getter = httpx.get if client is None else client.get
+    if headers:
+        response = getter(url, timeout=_FETCH_TIMEOUT_S, headers=headers)
+    else:
+        response = getter(url, timeout=_FETCH_TIMEOUT_S)
+    response.raise_for_status()
+    return response.json()
+
+
+def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
+    """One live read: ready version, or an answered-but-not-ready refusal.
+
+    THE PROJECT DOCUMENT ALONE LAGS A RELEASE (2026-11-17, fix/update-live-index).
+    ``/pypi/local-operator/json`` is served by PyPI's Fastly edge with
+    ``cache-control: max-age=900``; right after a publish an edge can keep the
+    previous object for minutes. Reproduced twice that day on two hosts:
+    ~1 min after 0.106.6 went live ``lop update`` said 0.106.5 was latest, and
+    ~4 min after 0.106.7 ``lop update --check`` said 0.106.6, while the same URL
+    fetched elsewhere already named the new release. Measured the same day, a
+    client CANNOT bust that object: ``Cache-Control: no-cache`` and
+    ``max-age=0`` request headers and a random query string all still came back
+    ``x-cache: ...HIT`` with the same ETag. So the answer is a cross-check of
+    independently cached sources, taking the newest that is proven ready:
+
+    1. the project document — ``info.version``, raised to its newest final,
+       non-yanked ``releases`` key when those two disagree;
+    2. the JSON simple index (:data:`PYPI_SIMPLE_URL`, a separate edge object,
+       and the page uv resolves against); a newer final version there is
+       confirmed through ITS per-version document, an object no client has
+       asked the edge for yet, so it cannot be a stale copy of the release.
+
+    The simple-index probe is best effort: unreachable, malformed, or naming a
+    version whose own document is not served (or names something else) leaves
+    the project document's answer exactly as before. The readiness gate is
+    unchanged: a newer version with no installer wheel yet is the same
+    "still publishing" refusal (``answered`` with ``named_version``).
+    """
     try:
-        if client is None:
-            response = httpx.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
-        else:
-            response = client.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
-        response.raise_for_status()
-        payload = response.json()
+        payload = _get_json(PYPI_JSON_URL, client)
     except Exception:
         return _PypiRead(version=None)
     named = _named_pypi_version(payload)
     if named is None:
         return _PypiRead(version=None)
-    return _PypiRead(version=_ready_pypi_version(payload), answered=True, named_version=named)
+    ready = _ready_pypi_version(payload)
+    listed = _newest_listed_release(payload)
+    named_final = _final_release(named)
+    if listed is not None and (named_final is None or _final_release(listed) > named_final):
+        releases = payload.get("releases")
+        files = releases.get(listed) if isinstance(releases, dict) else None
+        if _downloadable_wheel(files, listed):
+            named, ready = listed, listed
+
+    try:
+        simple = _newest_simple_release(
+            _get_json(PYPI_SIMPLE_URL, client, headers={"Accept": _SIMPLE_JSON_ACCEPT})
+        )
+    except Exception:
+        simple = None
+    baseline = _final_release(named)
+    if simple is not None and (baseline is None or _final_release(simple) > baseline):
+        document, _why = _pypi_release_document(simple, client=client)
+        if document is not None:
+            logger.info(
+                "PyPI project JSON names %s but the simple index and %s's own document "
+                "name %s; using the newer (CDN lag right after publish)",
+                named,
+                simple,
+                simple,
+            )
+            return _PypiRead(
+                version=_ready_pypi_version(document), answered=True, named_version=simple
+            )
+    return _PypiRead(version=ready, answered=True, named_version=named)
 
 
 def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
@@ -4316,10 +4459,10 @@ def install_into_generation(
     that point, and a machine whose sandbox denies a write must not be told the
     upgrade failed. PRUNING IS THE CALLER'S, not this function's: it is a
     deletion, so a caller that wants one asks for it explicitly where it can
-    report what went (``lop install prune``). No update tail prunes
-    automatically: automatic generation collection is frozen (AGENTS.md,
-    "Immutable rolling promotion"), because a complete record census is not proof
-    that a runtime will never read another file from its loaded generation.
+    report what went. The update tails ask for one AFTER this returns, through
+    :func:`reclaim_after_promotion` — the same guarded :func:`prune_generations`
+    ``lop install prune`` runs, on by default since 2026-11-16 (``update.auto_prune``,
+    ``update.keep_generations``); see that function for why the freeze ended.
 
     NO STAGING RENAME, deliberately. Building in ``<id>.partial`` and renaming
     it into place looks tidier and is WRONG here: uv bakes the installation path
@@ -5886,9 +6029,11 @@ def prune_generations(
     only when :func:`note_doomed_runtimes` still finds a runtime to attest, which
     the veto above now makes rare.
 
-    THIS RUNS ONLY ON DEMAND (``lop install prune``) and, as ``dry_run``, from
-    capacity measurement. No update tail calls it: automatic collection is frozen
-    in the PyPI, snapshot and mesh promotion paths. Deletion is what keeps the
+    THIS RUNS ON DEMAND (``lop install prune``), AFTER EVERY SUCCESSFUL PROMOTION
+    (:func:`reclaim_after_promotion`, the PyPI, snapshot and mesh tails, unless
+    ``update.auto_prune`` is off) and, as ``dry_run``, from capacity measurement.
+    One function for all three, so the automatic pass can never be looser than the
+    command an operator runs by hand. Deletion is what keeps the
     layout from being a leak — each generation is a whole venv — so removals are
     returned rather than only logged, because the caller reports them: a silent
     136 MB delete is not something this tool gets to do. The KEEPS are returned too, with their
@@ -6254,6 +6399,12 @@ def prune_notice_lines(plan: PrunePlan) -> list[str]:
             # D14). The wording is the prune command's own reason string.
             lines.append(f"pruned unfinished generation {decision.path.name} ({decision.reason})")
     return lines
+
+
+def _print_prune_notice(plan: PrunePlan) -> None:
+    """Print :func:`prune_notice_lines` — the CLI tails' ``on_prune`` reporter."""
+    for line in prune_notice_lines(plan):
+        print(line)
 
 
 def install_migrate_command() -> int:
@@ -7232,8 +7383,9 @@ def _run_installer(argv: list[str], *, executable: str | None = None) -> int:
 def _note_capacity_after_promotion(promoted: Path) -> None:
     """Record capacity pressure on the promoted candidate's own operation, or nothing.
 
-    THE ONLY AUTOMATIC ACTION THIS TAIL TAKES TOWARD DISK, and it is a RECORD, not
-    a deletion: it measures count and free space, and crossing a threshold writes
+    A RECORD, not a deletion, run by :func:`reclaim_after_promotion` AFTER the
+    automatic prune, so it reports only pressure the prune could not relieve: it
+    measures count and free space, and crossing a threshold writes
     the durable ``handoff.capacity`` sub-map (``note_capacity``) so a controller
     that can consult the fleet has the request. The candidate's own operation is the
     right record — ``operation_for_generation`` ties recovery to THIS candidate, not
@@ -7258,6 +7410,235 @@ def _note_capacity_after_promotion(promoted: Path) -> None:
         threshold=measurement.threshold,
         cohort=(),
     )
+
+
+#: The registry keys :func:`auto_prune_policy` reads (``settings_io`` rows
+#: ``update.auto_prune`` / ``update.keep_generations``, section ``updates``).
+#: Spelled once so the reader and the tests cannot drift from the registry path.
+AUTO_PRUNE_PATH: tuple[str, str] = ("update", "auto_prune")
+KEEP_GENERATIONS_PATH: tuple[str, str] = ("update", "keep_generations")
+
+
+@dataclass(frozen=True)
+class AutoPrunePolicy:
+    """What the two ``update.*`` retention settings say, read fresh from config."""
+
+    enabled: bool
+    keep: int
+
+
+def auto_prune_policy(config_root: Path | None = None) -> AutoPrunePolicy | None:
+    """``update.auto_prune`` and ``update.keep_generations``, or ``None`` if unreadable.
+
+    READ LIVE, per update, straight off ``config.yml`` (:func:`read_config_values`,
+    the no-side-effect reader) — an update is a fresh decision, and the registry
+    section says edits apply to the next update.
+
+    EVERY DOUBT LEANS TOWARD KEEPING TREES, because only one direction of a wrong
+    answer here is recoverable:
+
+    * an unreadable/torn ``config.yml`` returns ``None`` and the caller prunes
+      nothing this time — the operator may have switched this off, and a read
+      that did not finish cannot say they did not;
+    * a non-boolean ``auto_prune`` (a hand-edited ``"no"``) reads as OFF, not as
+      the default, with a warning naming the value: the registry refuses such a
+      value on write, so only a hand edit produces it, and a hand edit of this key
+      is someone trying to stop it;
+    * an ``update`` block that is not a mapping, or a ``keep_generations`` that is
+      not a non-negative integer (a float, a string, a negative, a ``bool`` —
+      ``True`` is an ``int``), returns ``None`` with a warning: the prune is
+      SKIPPED, never run at the default 2. Falling back would delete with a margin
+      the operator did not choose — someone who typed ``keep_generations: "10"``
+      meant to keep more, not fewer (review round 1, R1).
+    """
+    from local_operator.config import read_config_values
+    from local_operator.paths import config_dir
+
+    values = read_config_values(config_dir() if config_root is None else config_root)
+    if values is None:
+        return None
+    block = values.get(AUTO_PRUNE_PATH[0])
+    if block is None:
+        section: Mapping[str, Any] = {}
+    elif isinstance(block, Mapping):
+        section = block
+    else:
+        logger.warning(
+            "config.yml 'update' is %s, not a mapping; skipping the automatic prune",
+            type(block).__name__,
+        )
+        return None
+    # An explicit ``null`` is UNSET (a reset or a bare ``key:`` line), not a bad
+    # value: it reads the default exactly as a missing key does.
+    raw_enabled = section.get(AUTO_PRUNE_PATH[1])
+    if raw_enabled is None:
+        raw_enabled = DEFAULT_AUTO_PRUNE_GENERATIONS
+    if not isinstance(raw_enabled, bool):
+        # N2: said out loud, because "off" is not what the value looks like it says.
+        logger.warning("update.auto_prune is %r, not true/false; treating it as off", raw_enabled)
+    enabled = raw_enabled if isinstance(raw_enabled, bool) else False
+    raw_keep = section.get(KEEP_GENERATIONS_PATH[1])
+    if raw_keep is None:
+        raw_keep = DEFAULT_KEEP_GENERATIONS
+    if not isinstance(raw_keep, int) or isinstance(raw_keep, bool) or raw_keep < 0:
+        logger.warning(
+            "update.keep_generations is %r, not a non-negative integer; "
+            "skipping the automatic prune",
+            raw_keep,
+        )
+        return None
+    return AutoPrunePolicy(enabled=enabled, keep=raw_keep)
+
+
+def auto_prune_after_promotion(
+    promoted: Path | None, *, previous: Path | None = None
+) -> PrunePlan | None:
+    """Apply ``lop install prune``'s retention policy after a promotion; ``None`` if skipped.
+
+    WHY THIS EXISTS (operator decision, 2026-11-16). Automatic collection had been
+    frozen at every promotion tail (a589a3f27) on the argument that a record census
+    is not a lifetime-pin proof, and :mod:`local_operator.capacity_recovery` was
+    meant to be the other half. Its controller never got a production caller: the
+    tail only RECORDED a ``handoff.capacity`` request nobody consumed, and node2
+    reached 113 generations (~8.6 GB, reclaimed by one manual ``lop install prune
+    --keep 2``). The operator chose: prune automatically, with the same policy as
+    the command.
+
+    THE SAME PATH, NOT A SECOND ONE. This calls :func:`prune_generations` exactly
+    as :func:`install_prune_command` does (same ``referenced_install_roots()``
+    census, ``keep`` from ``update.keep_generations``), so every protection is
+    shared rather than re-implemented:
+
+    * the pointer's target (the build just promoted) and the tree THIS process
+      runs from (:func:`_running_generation` — the updater still imports from the
+      generation it replaced) are never candidates;
+    * any generation a live, persisted, reaped-sidecar or boot record names is
+      kept, and each removal candidate gets a FRESH census that vetoes it;
+    * an incomplete census keeps every candidate, an unresolvable pointer keeps
+      everything, and an unmarked tree younger than the partial TTL is kept as an
+      install in flight;
+    * ``keep`` newest unreferenced generations survive as the margin for a
+      runtime with no record yet;
+    * ``previous`` — the build ``current`` named BEFORE this run's flip, captured
+      by the caller — is kept too, whatever ``keep`` says (review round 1, R2).
+      Anything launched just before the flip started from it and may not have
+      published a record yet; the running-tree rule covers only THIS process,
+      and a mesh relay or desktop updater can run from an older tree than the
+      one the pointer named. It is added to the census as one more named root,
+      so the protection is ``prune_generations``' own record rule, not a new one.
+
+    THE LIFETIME-PIN CAVEAT IS NOT CLOSED, IT IS BOUNDED: a process no supported
+    namespace describes is not protected by the census, which is why the keep
+    margin exists and why anything the census cannot prove dead is retained. That
+    residual is accepted by the operator decision above, against the certainty of
+    disk exhaustion with no collection at all.
+
+    NOTHING IS KILLED OR MOVED. The capacity controller's cohort-move half
+    (:func:`capacity_recovery.run_capacity_recovery`) stays out of this path; a
+    generation still in use is simply kept.
+
+    SKIPPED, returning ``None``: no promoted path; ``update.auto_prune`` off; a
+    config that could not be read; no generations directory; or a pointer that no
+    longer names ``promoted`` (a concurrent actor flipped it — that actor's own
+    tail decides, and pruning on a pointer this run does not own is the guess the
+    rest of this module refuses to make). Exceptions propagate; the caller
+    (:func:`reclaim_after_promotion`) is what keeps them from failing an update.
+    """
+    if promoted is None:
+        return None
+    policy = auto_prune_policy()
+    if policy is None:
+        # The reader already warned with the specific reason (unreadable file,
+        # non-mapping block or invalid keep); this line names the consequence.
+        logger.warning("keeping every install generation this time")
+        return None
+    if not policy.enabled:
+        return None
+    if not generations_dir().is_dir():
+        return None
+    current = current_generation()
+    if current is None or _real(current) != _real(Path(promoted)):
+        logger.info("install pointer no longer names %s; skipping the automatic prune", promoted)
+        return None
+    census = referenced_install_roots()
+    if previous is not None:
+        census = _with_named_generation(census, Path(previous))
+    return prune_generations(keep=policy.keep, referenced=census, actor=ACTOR_UPGRADE)
+
+
+def _with_named_generation(
+    census: Iterable[str | Path] | ReferencedTrees, generation: Path
+) -> ReferencedTrees:
+    """``census`` plus ``generation``'s venv as one more named root.
+
+    The venv (``<gen>/tools/<dist>``) is the shape a record carries and the shape
+    ``prune_generations`` normalises two levels up, so the added root is kept by
+    the existing record rule. ``complete``/``gaps`` are carried over unchanged —
+    adding a protection must never turn an incomplete read into a complete one.
+    """
+    extra = generation / "tools" / DISTRIBUTION_NAME
+    if isinstance(census, ReferencedTrees):
+        return ReferencedTrees(
+            roots=(*census.roots, extra), complete=census.complete, gaps=census.gaps
+        )
+    return ReferencedTrees(roots=(*(Path(root) for root in census), extra))
+
+
+def previous_generation_for_reclaim() -> Path | None:
+    """The generation ``current`` names now, read BEFORE a flip; ``None`` on doubt.
+
+    Callers capture this before installing and hand it to
+    :func:`reclaim_after_promotion` so the build being replaced survives the
+    post-promotion prune (R2). A read that fails returns ``None``: the prune
+    then relies on its other protections, and a failed READ must not fail an
+    update that has not started yet. No ``try`` here: :func:`current_generation`
+    already answers ``None`` for an unreadable pointer (it catches the
+    ``OSError`` from ``os.readlink``, and ``is_dir`` does not raise), so a
+    handler around it could never run (review round 2, R2-N1).
+    """
+    return current_generation()
+
+
+def reclaim_after_promotion(
+    promoted: Path | None,
+    *,
+    previous: Path | None = None,
+    on_prune: Callable[["PrunePlan"], None] | None = None,
+) -> PrunePlan | None:
+    """The one post-promotion disk step every update tail runs; never raises.
+
+    Two halves, in this order: the automatic prune
+    (:func:`auto_prune_after_promotion`), then the capacity note
+    (:func:`_note_capacity_after_promotion`) measured AFTER it, so a request is
+    recorded only for pressure the prune could not relieve (everything left is
+    referenced or inside the keep margin).
+
+    BEST-EFFORT BY CONTRACT: the build is already current when this runs, so a
+    failure here (a busy install lock, an unreadable tree, a reporter that
+    raised) is logged and the update still succeeds. ``on_prune`` receives the
+    plan so the front end prints removals on its own surface
+    (:func:`prune_notice_lines`); it is not called when the pass was skipped.
+    ``previous`` is the pre-flip ``current`` (:func:`previous_generation_for_reclaim`),
+    kept by the prune whatever the keep margin says.
+    """
+    plan: PrunePlan | None = None
+    try:
+        plan = auto_prune_after_promotion(promoted, previous=previous)
+    except Exception:  # noqa: BLE001 — a reclaim never fails an install
+        logger.warning(
+            "automatic generation prune failed; the update itself succeeded", exc_info=True
+        )
+    if plan is not None and on_prune is not None:
+        try:
+            on_prune(plan)
+        except Exception:  # noqa: BLE001 — reporting a prune never fails an install
+            logger.warning("could not report the automatic prune", exc_info=True)
+    if promoted is not None:
+        try:
+            _note_capacity_after_promotion(promoted)
+        except Exception:  # noqa: BLE001 — a capacity note never fails an install
+            logger.warning("could not record capacity pressure", exc_info=True)
+    return plan
 
 
 def upgrade_runs_in_generation(kind: InstallKind) -> bool:
@@ -7349,6 +7730,8 @@ def perform_upgrade(
         # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
         # ``commit``/``ref`` describe that case, and leaving them empty is what
         # makes the marker say ``pypi <version>``.
+        # Read BEFORE the flip: the build being replaced survives the prune (R2).
+        previous = previous_generation_for_reclaim()
         promoted = install_into_generation(
             source,
             version=target,
@@ -7359,24 +7742,19 @@ def perform_upgrade(
         )
         if on_promoted is not None:
             on_promoted(promoted)
-        # Rolling promotion must retain EVERY previous runtime/resource tree.
-        # Discovery/argv/open-file absence is not a lifetime-pin proof: an old
-        # process may load an asset later with no handle open now. Automatic GC
-        # stays frozen, including on unreadable census, rather than weakening
-        # install admission or assuming that a successful pointer swap retires A.
-        # Explicit maintenance keeps its own guarded policy; this tail never
-        # invokes it or the historical on_prune observer.
-        #
-        # WHAT THE TAIL DOES DO ABOUT CAPACITY: measure and RECORD, never delete.
-        # Crossing a threshold writes the durable capacity request on this
-        # candidate's own operation, so a later controller (which CAN see the
-        # fleet) has the pressure on the record. Recording here is best-effort: a
-        # machine whose sandbox denies the write must not be told the upgrade
-        # failed, and nothing observable has been reclaimed by this step.
-        try:
-            _note_capacity_after_promotion(promoted)
-        except Exception:  # noqa: BLE001 — a capacity note never fails an install
-            logger.warning("could not record capacity pressure", exc_info=True)
+        # AUTOMATIC COLLECTION, THROUGH THE COMMAND'S OWN POLICY (2026-11-16).
+        # This tail used to retain every previous tree (a589a3f27: a census is
+        # not a lifetime-pin proof) and only RECORD capacity pressure for a
+        # controller that never got a caller, so nothing reclaimed disk and a
+        # fleet node reached 113 generations. Now it runs the same guarded
+        # ``prune_generations`` as ``lop install prune``: current, the tree this
+        # process runs from, every record-named root and the ``keep`` newest
+        # unreferenced generations survive, and an incomplete census keeps
+        # everything. ``update.auto_prune: false`` turns it off. The capacity
+        # note still runs, after the prune, for pressure the prune could not
+        # relieve. Best-effort: the build is already current, so nothing here
+        # may fail the upgrade (see ``reclaim_after_promotion``).
+        reclaim_after_promotion(promoted, previous=previous, on_prune=on_prune)
         return target
     argv, image = installer_invocation(
         detected,
@@ -9976,13 +10354,16 @@ def _generation_upgrade(
     before_version: str = "",
     via: str = "snapshot",
     promoted_generation: Path | None = None,
+    previous_generation: Path | None = None,
 ) -> int:
     """The tail successful installs share: report, retain roots, refresh, succeed.
 
     ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
-    ``installed`` line and then runs the same tail. Automatic collection is frozen
-    on BOTH paths: committing B does not retire the package/dependency/resource
-    roots that still-running A processes may read later.
+    ``installed`` line and then runs the same tail. BOTH paths prune automatically
+    after a promotion (:func:`reclaim_after_promotion`, the same guarded policy as
+    ``lop install prune``; off with ``update.auto_prune: false``) — here only when
+    ``promoted_generation`` names the build this run promoted, so a tail that did
+    not promote anything never deletes.
 
     ``services=False`` (``lop update --no-services``) stops after the supervised
     daemons are repaired, which is the pre-``services`` behaviour exactly: a caller
@@ -9999,8 +10380,12 @@ def _generation_upgrade(
     between the services tail and the report line.
     """
     _print_current_generation()
-    # Match perform_upgrade's no-collection tail. A snapshot/controller caller
-    # must not silently reintroduce deletion after immutable promotion succeeds.
+    # perform_upgrade's tail, for the snapshot route (``lop-update`` lands here,
+    # which is how most fleet generations are made). Printed right under the
+    # ``current`` line, in the same words and position the PyPI path uses (D4).
+    reclaim_after_promotion(
+        promoted_generation, previous=previous_generation, on_prune=_print_prune_notice
+    )
     _reach("services")
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
@@ -10068,6 +10453,8 @@ def _snapshot_command(
     # ref has nothing for members to do (note §3, condition 1).
     stamp_before = disk_build()
     before_version = str(stamp_before.version) if stamp_before is not None else ""
+    # The same "before", as a TREE: the post-promotion prune keeps it (R2).
+    previous_generation = previous_generation_for_reclaim()
     _reach("download")
     try:
         snapshot = resolve_snapshot(value)
@@ -10286,6 +10673,7 @@ def _snapshot_command(
         before_version=before_version,
         via="snapshot",
         promoted_generation=promoted_generation,
+        previous_generation=previous_generation,
     )
 
 

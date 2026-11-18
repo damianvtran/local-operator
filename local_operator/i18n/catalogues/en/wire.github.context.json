@@ -1,0 +1,342 @@
+{
+  "wire.github.progress": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.opt_out_none": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.opt_out_names": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.share_empty": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.repos_empty": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.repos_head": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.opted_suffix": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.more": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.capacity": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.opt_out_step": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.source_explicit": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.source_last_good": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.source_enumerated": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.which_explicit": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.which_enumerated": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.exclude_already": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.exclude_typo": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.exclude_unchecked": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.exclude_added": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.include_unchanged": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.include_typo": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.include_unchecked": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.include_added": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.reason_explicit": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.reason_unavailable_local": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.reason_unavailable_remote": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.reason_excluded_local": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.reason_excluded_remote": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.reason_no_repos_local": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.reason_no_repos_remote": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.remedy_explicit": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.remedy_unavailable": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.remedy_excluded": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.remedy_no_repos": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.refusal_detail": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.age_unknown": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.age_now": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.age_minutes": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.age_hours": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.age_days": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.ttl": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.failure_auth": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.failure_offline": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.failure_server": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.failure_coverage": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.failure_unknown": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.failure_unfetched": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.failure_earlier_login": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.failure_unknown_login": {
+    "role": "safe listing-failure display clause",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Owned reason, not upstream API text. Unknown login means the current account identity could not be established from metadata: never blame a previous login unless two known hints differ. Auth failure means this GitHub request was refused, not proof of a dead or revoked grant."
+  },
+  "wire.github.readiness_unavailable": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_empty": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_opted": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_more": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_explicit": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_last_good": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_enumerated": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_pointer": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.readiness_list": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget. form is a technical ICU selector: one selects one displayed item, other selects multiple; do not translate selector names. head is the comma-separated preceding technical repository identifiers; last is the final displayed identifier (or an already localized more-count). Translate the conjunction IN this message; never insert English into head/last."
+  },
+  "wire.github.borrower_unset": {
+    "role": "borrower GitHub repository refusal",
+    "tone": "plain, precise, no authorization promises",
+    "note": "owner is the lending device name. detail is producer-owned reason/remedy text, not raw API output. Commands repair policy ON THE OWNER only. Do not imply access was lent or the borrower can authorize itself. Preserve placeholders and do not translate command values."
+  },
+  "wire.github.borrower_unset_default": {
+    "role": "borrower GitHub repository refusal",
+    "tone": "plain, precise, no authorization promises",
+    "note": "owner is the lending device name. detail is producer-owned reason/remedy text, not raw API output. Commands repair policy ON THE OWNER only. Do not imply access was lent or the borrower can authorize itself. Preserve placeholders and do not translate command values."
+  },
+  "wire.github.borrower_overflow": {
+    "role": "borrower GitHub repository refusal",
+    "tone": "plain, precise, no authorization promises",
+    "note": "owner is the lending device name. detail is producer-owned reason/remedy text, not raw API output. Commands repair policy ON THE OWNER only. Do not imply access was lent or the borrower can authorize itself. Preserve placeholders and do not translate command values."
+  },
+  "wire.github.wrapper_denied": {
+    "role": "git credential helper stderr diagnostic",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Shown ONLY for a validated repository outside a known borrowed list, with matching display context. Credential stdout stays unchanged. command runs ON THE LENDING DEVICE, not the borrower. Never imply the borrower can authorize itself; opted-out versus unpushable is deliberately uncertain. repo is a validated owner/repo identifier, command stays literal English. No token, fingerprint or context value is shown."
+  },
+  "wire.github.usage_repo": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.usage_repos_args": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.usage_default": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.usage_refresh": {
+    "role": "GitHub owner/borrower CLI status, refusal or readiness fragment",
+    "tone": "plain, precise, no authorization promises",
+    "note": "Preserve technical names GitHub, owner/repo, /settings and command parameters. repo/names are repository identifiers; command is a literal CLI command, never translate it; owner is a device label. Counts are numbers. Reason/remedy/source/ago/opted/failure/pointer/ttl are already localized owned fragments. A refusal does not grant access or prove remote copies deleted. No fixed cell-width budget."
+  },
+  "wire.github.owner_overflow": {
+    "role": "owner GitHub refusal detail",
+    "tone": "plain and precise",
+    "note": "count/limit are numbers. error is a technical exception class name, never raw API text. command is a literal existing CLI command. This reports a refusal and does not promise access or reset a withdrawal marker."
+  },
+  "wire.github.reset_failed": {
+    "role": "owner GitHub refusal detail",
+    "tone": "plain and precise",
+    "note": "count/limit are numbers. error is a technical exception class name, never raw API text. command is a literal existing CLI command. This reports a refusal and does not promise access or reset a withdrawal marker."
+  }
+}

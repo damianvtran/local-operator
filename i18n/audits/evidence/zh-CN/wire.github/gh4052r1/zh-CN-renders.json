@@ -1,0 +1,5042 @@
+[
+  {
+    "key": "wire.github.progress",
+    "count": 0,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 2,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 3,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 4,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 5,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 11,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 21,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 22,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 25,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1.5,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.progress",
+    "count": 1000000,
+    "form": "other",
+    "text": "正在列出你的GitHub账号可push的仓库……"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 0,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 2,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 3,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 4,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 5,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 11,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 21,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 22,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 25,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1.5,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "count": 1000000,
+    "form": "other",
+    "text": "已排除：无"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 0,
+    "form": "other",
+    "text": "已排除（0）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1,
+    "form": "other",
+    "text": "已排除（1）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 2,
+    "form": "other",
+    "text": "已排除（2）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 3,
+    "form": "other",
+    "text": "已排除（3）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 4,
+    "form": "other",
+    "text": "已排除（4）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 5,
+    "form": "other",
+    "text": "已排除（5）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 11,
+    "form": "other",
+    "text": "已排除（11）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 21,
+    "form": "other",
+    "text": "已排除（21）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 22,
+    "form": "other",
+    "text": "已排除（22）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 25,
+    "form": "other",
+    "text": "已排除（25）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1.5,
+    "form": "other",
+    "text": "已排除（1.5）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "count": 1000000,
+    "form": "other",
+    "text": "已排除（1,000,000）：octo-org/website, octo-org/api——重新纳入：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.share_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub仓库：暂无——共享已设置，但只要REASON，就会拒绝所有借用；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub仓库：无——REASON；REMEDY"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 0,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：0——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：1——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 2,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：2——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 3,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：3——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 4,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：4——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 5,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：5——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 11,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：11——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 21,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：21——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 22,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：22——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 25,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：25——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1.5,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：1.5——SOURCE"
+  },
+  {
+    "key": "wire.github.repos_head",
+    "count": 1000000,
+    "form": "other",
+    "text": "可出借访问权限的GitHub仓库：1,000,000——SOURCE"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 0,
+    "form": "other",
+    "text": "，减去0个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1,
+    "form": "other",
+    "text": "，减去1个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 2,
+    "form": "other",
+    "text": "，减去2个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 3,
+    "form": "other",
+    "text": "，减去3个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 4,
+    "form": "other",
+    "text": "，减去4个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 5,
+    "form": "other",
+    "text": "，减去5个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 11,
+    "form": "other",
+    "text": "，减去11个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 21,
+    "form": "other",
+    "text": "，减去21个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 22,
+    "form": "other",
+    "text": "，减去22个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 25,
+    "form": "other",
+    "text": "，减去25个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1.5,
+    "form": "other",
+    "text": "，减去1.5个已排除的仓库"
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "count": 1000000,
+    "form": "other",
+    "text": "，减去1,000,000个已排除的仓库"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 0,
+    "form": "other",
+    "text": "  ……另有0个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1,
+    "form": "other",
+    "text": "  ……另有1个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 2,
+    "form": "other",
+    "text": "  ……另有2个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 3,
+    "form": "other",
+    "text": "  ……另有3个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 4,
+    "form": "other",
+    "text": "  ……另有4个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 5,
+    "form": "other",
+    "text": "  ……另有5个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 11,
+    "form": "other",
+    "text": "  ……另有11个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 21,
+    "form": "other",
+    "text": "  ……另有21个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 22,
+    "form": "other",
+    "text": "  ……另有22个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 25,
+    "form": "other",
+    "text": "  ……另有25个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1.5,
+    "form": "other",
+    "text": "  ……另有1.5个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.more",
+    "count": 1000000,
+    "form": "other",
+    "text": "  ……另有1,000,000个——查看全部：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 0,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的0个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的1个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 2,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的2个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 3,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的3个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 4,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的4个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 5,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的5个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 11,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的11个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 21,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的21个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 22,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的22个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 25,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的25个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1.5,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的1.5个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.capacity",
+    "count": 1000000,
+    "form": "other",
+    "text": "仓库数量超过单个共享可容纳的1,000,000个，因此会拒绝所有借用，直到你在GitHub仓库设置中选择要出借权限的仓库（在/settings中搜索），或排除一些仓库"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 0,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 2,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 3,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 4,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 5,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 11,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 21,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 22,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 25,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1.5,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "count": 1000000,
+    "form": "other",
+    "text": "排除仓库：lop network credential github repos --use-default——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "你手动选择的列表（GitHub仓库设置）"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "AGO获取的列表——刚才无法列出GitHub仓库，因此列表可能已过时"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "你手动选择的列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "此设备GitHub账号可push的仓库列表"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website已被排除"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website不在WHICH中——检查拼写；仍会将其排除，以防以后加入列表"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website已被排除；无法获取WHICH，因此未能检查拼写"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website已被排除——共享对象设备下次获取凭据时将失去对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website原本未被排除"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_typo",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website不再被排除（它不在WHICH中，因此其他内容不变）"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website不再被排除；未能检查它是否在WHICH中"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.include_added",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website已重新纳入——共享对象设备下次获取凭据时将恢复对该仓库的push权限，TTL"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "手动选择的GitHub仓库设置在去除已排除项后不含任何仓库"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 0,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 2,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 3,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 4,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 5,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 11,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 21,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 22,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 25,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "未能获取此设备GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 0,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 2,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 3,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 4,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 5,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 11,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 21,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 22,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 25,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "未能获取其GitHub账号可push的仓库列表，且没有可回退使用的旧列表"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 0,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（0个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（1个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 2,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（2个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 3,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（3个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 4,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（4个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 5,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（5个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 11,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（11个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 21,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（21个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 22,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（22个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 25,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（25个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（1.5个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "此设备GitHub账号可push的所有仓库（1,000,000个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 0,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（0个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（1个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 2,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（2个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 3,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（3个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 4,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（4个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 5,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（5个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 11,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（11个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 21,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（21个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 22,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（22个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 25,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（25个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（1.5个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "其GitHub账号可push的所有仓库（1,000,000个）均已被排除"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 0,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 2,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 3,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 4,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 5,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 11,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 21,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 22,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 25,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1.5,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "count": 1000000,
+    "form": "other",
+    "text": "此设备GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 0,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 2,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 3,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 4,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 5,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 11,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 21,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 22,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 25,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1.5,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "count": 1000000,
+    "form": "other",
+    "text": "其GitHub账号无法向任何仓库push"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "在GitHub仓库设置中添加仓库（在/settings中搜索），或用lop network credential github repos --use-default明确恢复为所有可push仓库减去已排除项"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub可访问后重试：lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 0,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 2,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 3,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 4,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 5,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 11,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 21,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 22,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 25,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1.5,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "count": 1000000,
+    "form": "other",
+    "text": "用lop network credential github repos --use-default重新纳入一个仓库"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 0,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 2,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 3,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 4,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 5,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 11,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 21,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 22,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 25,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1.5,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "count": 1000000,
+    "form": "other",
+    "text": "为该GitHub账号授予某个仓库的push权限"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 0,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 2,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 3,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 4,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 5,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 11,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 21,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 22,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 25,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1.5,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "count": 1000000,
+    "form": "other",
+    "text": "REASON——REMEDY"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "时间未知"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 0,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 2,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 3,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 4,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 5,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 11,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 21,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 22,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 25,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1.5,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_now",
+    "count": 1000000,
+    "form": "other",
+    "text": "刚刚"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 0,
+    "form": "other",
+    "text": "0分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1,
+    "form": "other",
+    "text": "1分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 2,
+    "form": "other",
+    "text": "2分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 3,
+    "form": "other",
+    "text": "3分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 4,
+    "form": "other",
+    "text": "4分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 5,
+    "form": "other",
+    "text": "5分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 11,
+    "form": "other",
+    "text": "11分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 21,
+    "form": "other",
+    "text": "21分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 22,
+    "form": "other",
+    "text": "22分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 25,
+    "form": "other",
+    "text": "25分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5分钟前"
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "count": 1000000,
+    "form": "other",
+    "text": "1,000,000分钟前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 0,
+    "form": "other",
+    "text": "0小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1,
+    "form": "other",
+    "text": "1小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 2,
+    "form": "other",
+    "text": "2小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 3,
+    "form": "other",
+    "text": "3小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 4,
+    "form": "other",
+    "text": "4小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 5,
+    "form": "other",
+    "text": "5小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 11,
+    "form": "other",
+    "text": "11小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 21,
+    "form": "other",
+    "text": "21小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 22,
+    "form": "other",
+    "text": "22小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 25,
+    "form": "other",
+    "text": "25小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5小时前"
+  },
+  {
+    "key": "wire.github.age_hours",
+    "count": 1000000,
+    "form": "other",
+    "text": "1,000,000小时前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 0,
+    "form": "other",
+    "text": "0天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1,
+    "form": "other",
+    "text": "1天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 2,
+    "form": "other",
+    "text": "2天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 3,
+    "form": "other",
+    "text": "3天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 4,
+    "form": "other",
+    "text": "4天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 5,
+    "form": "other",
+    "text": "5天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 11,
+    "form": "other",
+    "text": "11天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 21,
+    "form": "other",
+    "text": "21天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 22,
+    "form": "other",
+    "text": "22天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 25,
+    "form": "other",
+    "text": "25天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5天前"
+  },
+  {
+    "key": "wire.github.age_days",
+    "count": 1000000,
+    "form": "other",
+    "text": "1,000,000天前"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 0,
+    "form": "other",
+    "text": "0分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1,
+    "form": "other",
+    "text": "1分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 2,
+    "form": "other",
+    "text": "2分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 3,
+    "form": "other",
+    "text": "3分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 4,
+    "form": "other",
+    "text": "4分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 5,
+    "form": "other",
+    "text": "5分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 11,
+    "form": "other",
+    "text": "11分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 21,
+    "form": "other",
+    "text": "21分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 22,
+    "form": "other",
+    "text": "22分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 25,
+    "form": "other",
+    "text": "25分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5分钟内"
+  },
+  {
+    "key": "wire.github.ttl",
+    "count": 1000000,
+    "form": "other",
+    "text": "1,000,000分钟内"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub拒绝了该账号"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 0,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 2,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 3,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 4,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 5,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 11,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 21,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 22,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 25,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1.5,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "count": 1000000,
+    "form": "other",
+    "text": "无法连接GitHub"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_server",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub返回了错误"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub未能列出所有可push的仓库"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 0,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 2,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 3,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 4,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 5,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 11,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 21,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 22,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 25,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1.5,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "count": 1000000,
+    "form": "other",
+    "text": "GitHub仓库列表获取失败"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 0,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 2,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 3,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 4,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 5,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 11,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 21,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 22,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 25,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1.5,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "count": 1000000,
+    "form": "other",
+    "text": "尚未获取仓库列表"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 0,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 2,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 3,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 4,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 5,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 11,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 21,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 22,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 25,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "保存的列表属于之前的GitHub账号"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 0,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 2,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 3,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 4,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 5,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 11,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 21,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 22,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 25,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1.5,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "count": 1000000,
+    "form": "other",
+    "text": "保存的GitHub列表对应的账号未知"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 0,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 2,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 3,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 4,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 5,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 11,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 21,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 22,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 25,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1.5,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "count": 1000000,
+    "form": "other",
+    "text": "尚未列出任何仓库——下次借用时会查询GitHub；如果查询失败，将拒绝借用，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 0,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 2,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 3,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 4,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 5,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 11,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 21,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 22,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 25,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1.5,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "count": 1000000,
+    "form": "other",
+    "text": "无仓库——借用会被拒绝，而不会扩大访问范围"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 0,
+    "form": "other",
+    "text": "，已排除0个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1,
+    "form": "other",
+    "text": "，已排除1个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 2,
+    "form": "other",
+    "text": "，已排除2个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 3,
+    "form": "other",
+    "text": "，已排除3个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 4,
+    "form": "other",
+    "text": "，已排除4个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 5,
+    "form": "other",
+    "text": "，已排除5个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 11,
+    "form": "other",
+    "text": "，已排除11个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 21,
+    "form": "other",
+    "text": "，已排除21个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 22,
+    "form": "other",
+    "text": "，已排除22个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 25,
+    "form": "other",
+    "text": "，已排除25个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1.5,
+    "form": "other",
+    "text": "，已排除1.5个"
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "count": 1000000,
+    "form": "other",
+    "text": "，已排除1,000,000个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 0,
+    "form": "other",
+    "text": "另有0个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1,
+    "form": "other",
+    "text": "另有1个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 2,
+    "form": "other",
+    "text": "另有2个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 3,
+    "form": "other",
+    "text": "另有3个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 4,
+    "form": "other",
+    "text": "另有4个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 5,
+    "form": "other",
+    "text": "另有5个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 11,
+    "form": "other",
+    "text": "另有11个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 21,
+    "form": "other",
+    "text": "另有21个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 22,
+    "form": "other",
+    "text": "另有22个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 25,
+    "form": "other",
+    "text": "另有25个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1.5,
+    "form": "other",
+    "text": "另有1.5个"
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "count": 1000000,
+    "form": "other",
+    "text": "另有1,000,000个"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 0,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 2,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 3,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 4,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 5,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 11,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 21,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 22,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 25,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1.5,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "count": 1000000,
+    "form": "other",
+    "text": "在那里手动选择的列表"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 0,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 2,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 3,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 4,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 5,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 11,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 21,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 22,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 25,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1.5,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "count": 1000000,
+    "form": "other",
+    "text": "AGO获取的列表——该设备上次检查时未能列出GitHub仓库"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 0,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 2,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 3,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 4,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 5,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 11,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 21,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 22,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 25,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1.5,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "count": 1000000,
+    "form": "other",
+    "text": "其账号可push的所有仓库，列出时间：AGO"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 0,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 2,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 3,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 4,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 5,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 11,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 21,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 22,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 25,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1.5,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "count": 1000000,
+    "form": "other",
+    "text": "——完整列表：lop network credential github repos --use-default（在lender-qa上运行）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "one",
+    "text": "octo-org/api（0——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（0——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "one",
+    "text": "octo-org/api（1——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（1——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "one",
+    "text": "octo-org/api（2——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（2——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "one",
+    "text": "octo-org/api（3——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（3——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "one",
+    "text": "octo-org/api（4——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（4——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "one",
+    "text": "octo-org/api（5——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（5——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "one",
+    "text": "octo-org/api（11——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（11——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "one",
+    "text": "octo-org/api（21——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（21——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "one",
+    "text": "octo-org/api（22——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（22——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "one",
+    "text": "octo-org/api（25——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（25——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "one",
+    "text": "octo-org/api（1.5——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（1.5——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "one",
+    "text": "octo-org/api（1,000,000——SOURCE）"
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website和octo-org/api（1,000,000——SOURCE）"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库：DETAIL。请在lender-qa上处理；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa没有可出借访问权限的GitHub仓库。在lender-qa上检查lop network credential github repos --use-default；未出借任何权限。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "lender-qa的GitHub仓库数量超过单个共享的容量DETAIL，因此未出借任何权限。在lender-qa上通过GitHub仓库设置选择要出借权限的仓库（在/settings中搜索），或用lop network credential github exclude <owner/repo>排除一些仓库。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 0,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 2,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 3,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 4,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 5,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 11,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 21,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 22,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 25,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1.5,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "count": 1000000,
+    "form": "other",
+    "text": "octo-org/website不在出借设备提供的仓库列表中（可能已被排除，或在该设备上不可push）。在出借设备上检查lop network credential github repos --use-default。只有该设备才能更改其出借范围。"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 0,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 2,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 3,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 4,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 5,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 11,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 21,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 22,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 25,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1.5,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "count": 1000000,
+    "form": "other",
+    "text": "exclude需要一个owner/repo格式的仓库，例如octo-org/website"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 0,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 2,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 3,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 4,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 5,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 11,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 21,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 22,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 25,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1.5,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "count": 1000000,
+    "form": "other",
+    "text": "repos不接受仓库参数"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 0,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 2,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 3,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 4,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 5,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 11,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 21,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 22,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 25,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1.5,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_default",
+    "count": 1000000,
+    "form": "other",
+    "text": "--use-default仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 0,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 2,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 3,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 4,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 5,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 11,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 21,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 22,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 25,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1.5,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "count": 1000000,
+    "form": "other",
+    "text": "--refresh仅适用于repos"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 0,
+    "form": "other",
+    "text": "0个仓库；单个共享最多容纳0个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1,
+    "form": "other",
+    "text": "1个仓库；单个共享最多容纳1个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 2,
+    "form": "other",
+    "text": "2个仓库；单个共享最多容纳2个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 3,
+    "form": "other",
+    "text": "3个仓库；单个共享最多容纳3个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 4,
+    "form": "other",
+    "text": "4个仓库；单个共享最多容纳4个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 5,
+    "form": "other",
+    "text": "5个仓库；单个共享最多容纳5个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 11,
+    "form": "other",
+    "text": "11个仓库；单个共享最多容纳11个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 21,
+    "form": "other",
+    "text": "21个仓库；单个共享最多容纳21个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 22,
+    "form": "other",
+    "text": "22个仓库；单个共享最多容纳22个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 25,
+    "form": "other",
+    "text": "25个仓库；单个共享最多容纳25个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1.5,
+    "form": "other",
+    "text": "1.5个仓库；单个共享最多容纳1.5个"
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "count": 1000000,
+    "form": "other",
+    "text": "1,000,000个仓库；单个共享最多容纳1,000,000个"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 0,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 2,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 3,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 4,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 5,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 11,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 21,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 22,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 25,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1.5,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "count": 1000000,
+    "form": "other",
+    "text": "未能完成恢复GitHub仓库自动列表的操作（PermissionError）；检查此设备的数据文件夹是否可写，然后重试lop network credential github repos --use-default"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 0,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 2,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 3,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 4,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 5,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 11,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 21,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 22,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 25,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1.5,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  },
+  {
+    "key": "wire.settings.network_credentials_github_repositories.help",
+    "count": 1000000,
+    "form": "other",
+    "text": "可出借GitHub访问权限的owner/repo条目。若从未设置，则使用该账号可push的所有仓库，减去已排除项。清空先前已共享的手选列表会停止出借；用lop network credential github repos --use-default恢复自动选择。"
+  }
+]

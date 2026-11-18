@@ -435,6 +435,60 @@ def _is_remote_prompt(message: Any) -> bool:
     return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
 
 
+#: ``provider_payload`` key on a user row naming the SURFACE its human input came
+#: from (ADR 0009 Decision 1, mobile repo ``docs/adr/0009-*``). Why it exists: the
+#: phone should hear about work it started, and the desktop about everything
+#: else, and no other record says which surface a turn came from (``origin.json``
+#: is the code path that created a directory, ``mesh.json`` the device). The
+#: value is decided by the runtime from the AUTHENTICATED connection
+#: (``server._input_surface_for``), never read off a frame, and defaults to
+#: ``tui`` for the in-process owner. Invisible to the model and to providers,
+#: like the remote-prompt stamp beside it.
+INPUT_SURFACE_KEY = "lop_input_surface"
+
+#: The routing vocabulary. ``unknown`` is the reading for a conversation with no
+#: stamped human input (a legacy row, a channel-only conversation) and routes as
+#: non-mobile, which errs quiet on the phone.
+INPUT_SURFACES = frozenset({"mobile", "remote", "desktop", "tui", "unknown"})
+
+
+def _input_surface(value: object, default: str = "tui") -> str:
+    """Clamp a surface to :data:`INPUT_SURFACES` (anything else is ``default``)."""
+    return value if isinstance(value, str) and value in INPUT_SURFACES else default
+
+
+def _stamp_input_surface(message: Any, surface: str) -> None:
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[INPUT_SURFACE_KEY] = _input_surface(surface)
+    message.provider_payload = payload
+
+
+def spooled_input_surface(line: Any) -> str:
+    """The surface a SPOOLED owner line carries (``serving._owner_sender``).
+
+    A line spooled across a runtime swap keeps the surface it would have had
+    live. A line from a build before the key reads ``unknown`` rather than
+    ``tui``: it may have come from the phone, and ``unknown`` errs quiet.
+    """
+    sender = getattr(line, "sender", None)
+    value = sender.get("input_surface") if isinstance(sender, Mapping) else None
+    return _input_surface(value, default="unknown")
+
+
+def _noop_answer_surface_undo() -> None:
+    """``Session.note_answer_surface``'s undo when the note changed nothing."""
+    return None
+
+
+def _input_surface_of(message: Any) -> str | None:
+    """The stamped surface of one row, or ``None`` when it carries no stamp."""
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get(INPUT_SURFACE_KEY)
+    return value if isinstance(value, str) and value in INPUT_SURFACES else None
+
+
 #: Transcript custom entry carrying the PROFILE-TRUST EPISODE bit (host-only,
 #: never model context; ``details = {"untrusted": bool}``). Why it is durable:
 #: run-scoped taint reset at every run start, so a Bridge-tainted child's job
@@ -4071,6 +4125,40 @@ class Session:
         #: provenance: the pre-filter's touched-directory sweep only lists files modified
         #: at or after it.
         self._run_started_at: float = 0.0
+        #: ADR 0009 origin: the surface of the most recent HUMAN input admitted
+        #: into the current run (a stamped prompt/steer row, an ask answer, a live
+        #: approval or picker answer), or ``None`` for a run with none so far.
+        #: Reset at every pipeline head beside ``_run_started_at``.
+        self._run_input_surface: str | None = None
+        #: The conversation's LAST DRIVER, which a run with no human input (a
+        #: wake, a job result, a peer or channel message) inherits. ``None`` means
+        #: "not rebuilt yet"; the first run end rebuilds it from the transcript
+        #: (``_reconstruct_input_driver``) so a resumed conversation keeps it.
+        self._conversation_driver: str | None = None
+        #: Surfaces of queued-ask answers, keyed by ask id, noted by the control
+        #: server when the answer op arrives (``note_answer_surface``) and taken
+        #: when the ``ask_response`` row reaches ``_note_run_input``. In memory on
+        #: purpose: the answer and its delivery run happen in one runtime, and a
+        #: lost entry only means the run inherits the last driver (errs quiet).
+        self._ask_answer_surfaces: dict[str, str] = {}
+        #: Epoch ms the next ``needs_user`` window opens: one past the previous
+        #: run END (initialised to construction, so an ask restored from an
+        #: earlier process is never re-announced). It opens there rather than at
+        #: ``_run_started_at``:
+        #: a Team Bridge request ask is raised by the harness BETWEEN runs
+        #: (``_deliver_peer_message``'s idle arm, ``_retry_pending_bridge_issuances``),
+        #: so "opened during this run" would never announce it (ADR 0009 review
+        #: round 3, R3-1, the "opened since the previous run end" remedy). Each ask
+        #: still falls in exactly one window, so it is announced once.
+        #:
+        #: Seeded from the newest durable outcome marker
+        #: (``_seed_needs_user_window``): a runtime swap or resume must not drop
+        #: an ask raised between the previous runtime's last run end and this
+        #: construction (review round 1, m1). Read HERE, at construction, so the
+        #: seed is the PREVIOUS runtime's marker: any marker this runtime appends
+        #: (its own run ends, a republish) comes later and must not move it.
+        self._needs_user_constructed_ms: int = int(time.time() * 1000)
+        self._needs_user_window_ms: int = self._seed_needs_user_window()
         #: The session's last REAL typed request, kept across runs (NOT reset at the
         #: pipeline head, unlike ``_run_user_text``). A turn that resumes after an ANSWERED
         #: ask carries no typed row of its own -- the ``ask_response`` is the only input --
@@ -4309,6 +4397,11 @@ class Session:
         #: disposal that follows it. Released by ``end_drain``'s abandon arm,
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
+        #: One-shot wake fires a leaving runtime handed to its LIVE turn, by
+        #: ``(wake_id, occurrence)``, so a fire left parked past the turn's last
+        #: boundary is re-armed rather than spooled as text
+        #: (``_spool_parked_for_successor``). Empty except while draining.
+        self._live_final_wakes: dict[tuple[str, int], DueWake] = {}
         #: Declared by a ONE-SHOT host at entry
         #: (``Session.declare_one_shot_exit``, called from ``run_print_mode``;
         #: v3, 2026-09-30). The session then arms the departure pair itself in
@@ -10395,6 +10488,7 @@ class Session:
         documents: Sequence[DocumentContent] | None = None,
         owner_typed: bool = True,
         _file_capture: Any = ...,
+        input_surface: str = "tui",
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -10627,6 +10721,12 @@ class Session:
                     self._file_owner().admissions.pop(producer_command_id, None)
             if not owner_typed:
                 _stamp_remote_prompt(user)
+            # ADR 0009: which surface typed this, decided by the runtime from the
+            # connection (``input_surface``; ``tui`` for the in-process owner).
+            # A harness-minted row is not human input, so it carries no stamp and
+            # the run inherits the conversation's last driver.
+            if not harness_injected:
+                _stamp_input_surface(user, input_surface)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -10739,6 +10839,7 @@ class Session:
         harness_injected: bool = False,
         owner_typed: bool = True,
         _file_capture: Any = ...,
+        input_surface: str = "tui",
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -10812,6 +10913,10 @@ class Session:
                 self._file_owner().admissions.pop(producer_command_id, None)
         if not owner_typed:
             _stamp_remote_prompt(message)
+        # ADR 0009: a steer is human input, so it flips the run it lands in (a
+        # phone steer into a desk-started run makes that run mobile-origin).
+        if not harness_injected:
+            _stamp_input_surface(message, input_surface)
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -11730,6 +11835,7 @@ class Session:
             # (``serving.REMOTE_ORIGIN_SENDER_KEY``): never owner-typed here.
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
             _file_capture=self._take_file_continuation(command_id),
+            input_surface=spooled_input_surface(line),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -11738,6 +11844,170 @@ class Session:
         if command_id:
             seen.add(command_id)
         return True
+
+    # -- ADR 0009 origin ------------------------------------------------------
+
+    def _note_run_input_surface(self, message: Any) -> None:
+        """Record the surface of one run input, when it is HUMAN input.
+
+        Origin is the surface of the MOST RECENT human input admitted into the
+        run (ADR 0009 Decision 1, option B): a stamped prompt or steer row, or a
+        person's answer to a queued ask whose answer op the control server
+        noted. Everything else (wakes, job results, peer and channel messages,
+        harness injections) leaves the run to inherit the last driver.
+        """
+        stamped = _input_surface_of(message)
+        if stamped is not None and getattr(message, "role", None) == "user":
+            self._run_input_surface = stamped
+            return
+        if ask_answer_is_person(message):
+            details = getattr(message, "details", None) or {}
+            ask_id = details.get("ask_id") if isinstance(details, Mapping) else None
+            surface = self._ask_answer_surfaces.pop(ask_id, None) if ask_id else None
+            if surface is not None:
+                self._run_input_surface = surface
+
+    def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None]:
+        """The control server's record of WHO answered (ADR 0009, R10).
+
+        Returns an UNDO the server runs when the answer is then refused (review
+        round 1, m2), so a refused answer relabels nothing. The note itself
+        must precede the answer (see ``_answer_noting_surface``).
+
+        ``ask_id`` names a QUEUED ask: its answer reaches the run later as an
+        ``ask_response`` row, which picks this up in ``_note_run_input``. ``None``
+        is a live answer (an approval, a blocking picker) inside the run in
+        flight, which flips that run now. ``surface`` is derived by the server
+        from the authenticated connection, never from the frame.
+        """
+        clamped = _input_surface(surface, default="unknown")
+        if ask_id:
+            previous = self._ask_answer_surfaces.get(ask_id)
+            self._ask_answer_surfaces[ask_id] = clamped
+
+            def undo_queued() -> None:
+                # Only this note's own value is retracted: a later note for the
+                # same ask (another surface answering) stays.
+                if self._ask_answer_surfaces.get(ask_id) != clamped:
+                    return
+                if previous is None:
+                    self._ask_answer_surfaces.pop(ask_id, None)
+                else:
+                    self._ask_answer_surfaces[ask_id] = previous
+
+            return undo_queued
+        if self._is_streaming:
+            previous_run = self._run_input_surface
+            self._run_input_surface = clamped
+
+            def undo_live() -> None:
+                if self._run_input_surface == clamped:
+                    self._run_input_surface = previous_run
+
+            return undo_live
+        return _noop_answer_surface_undo
+
+    def _reconstruct_input_driver(self) -> str:
+        """The conversation's last driver, rebuilt from the transcript on resume.
+
+        Newest first: a stamped user row is that surface, and an attention
+        marker carrying ``origin`` is the origin a previous run ended with (that
+        covers runs driven by an ask answer, whose row carries no stamp). No
+        such entry, which is every conversation written before ADR 0009, is
+        ``unknown``. Never raises: unreadable history is ``unknown`` (errs quiet).
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+
+        try:
+            entries = self._transcript.entries()
+            for entry in reversed(entries):
+                if entry.type == ENTRY_CUSTOM:
+                    if entry.payload.get("custom_type") == ATTENTION_CUSTOM_TYPE:
+                        details = entry.payload.get("details")
+                        origin = details.get("origin") if isinstance(details, Mapping) else None
+                        if isinstance(origin, str) and origin in INPUT_SURFACES:
+                            return origin
+                    continue
+                message = _entry_to_message(entry)
+                if getattr(message, "role", None) != "user":
+                    continue
+                stamped = _input_surface_of(message)
+                if stamped is not None:
+                    return stamped
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("origin: could not rebuild the last driver", exc_info=True)
+        return "unknown"
+
+    def _run_origin(self) -> str:
+        """This run's origin: its own human input, else the inherited driver."""
+        if self._run_input_surface is not None:
+            return self._run_input_surface
+        if self._conversation_driver is None:
+            self._conversation_driver = self._reconstruct_input_driver()
+        return self._conversation_driver
+
+    def _run_needs_user(self, now: float | None = None) -> bool:
+        """Whether an ask NEW to this run's window is still open at its end.
+
+        ADR 0009 §3 (R2-1): a queued ask is durable, so every later wake, job
+        or peer run also ends with it open; counting "any open ask" would
+        re-push the same question on every background tick. So only an ask
+        whose ``created_at`` falls inside this run's window counts. The window
+        opens just past the PREVIOUS run's end (R3-1: a Team Bridge request ask
+        is raised by the harness between runs, and would otherwise never be
+        announced) and closes now; calling this CLOSES it, so it is called once
+        per run end. Both clocks are this process's wall clock, which
+        ``AskQueue`` stamps ``created_at`` from.
+        """
+        end_ms = int((now if now is not None else time.time()) * 1000)
+        start_ms = self._needs_user_window_ms
+        # The NEXT window opens one millisecond after this one closes, so the
+        # windows tile with no overlap: an ask whose ``created_at`` ties this
+        # run's end at millisecond resolution is counted here and never again.
+        self._needs_user_window_ms = end_ms + 1
+        records = self._open_ask_records(end_ms)
+        return any(start_ms <= int(record.get("created_at") or 0) <= end_ms for record in records)
+
+    def _seed_needs_user_window(self) -> int:
+        """Where this runtime's FIRST needs-you window opens.
+
+        Just past the newest durable outcome marker, else construction. Every
+        marker is appended after its run's window closed, so an ask counted by
+        an earlier runtime (``created_at`` <= that run end <= the marker) is
+        never counted again, while one raised after it (a Bridge issuance retried
+        by ``reconcile_asks`` on a deadline tick before a swap, with no turn
+        following) still falls in this window (review round 1, m1). Capped at
+        construction so the seed can only widen the old window, never narrow it.
+        A read failure keeps construction: routing must never cost a turn.
+        """
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+
+        seed = self._needs_user_constructed_ms
+        try:
+            entry = self._transcript.latest_custom_entry(ATTENTION_CUSTOM_TYPE)
+            if entry is not None and entry.ts:
+                seed = min(seed, int(float(entry.ts) * 1000) + 1)
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the outcome marker", exc_info=True)
+        return seed
+
+    def _open_ask_records(self, now_ms: int) -> list[dict[str, Any]]:
+        """The queue's OPEN asks (``asks.store.open_asks``), or ``[]``.
+
+        ``[]`` while the blocking arm is live (no queue: an ask there blocks the
+        run, which therefore cannot end on it) and on any read failure, which
+        errs quiet. Its own seam so the window rule above is testable apart
+        from the queue's delivery machinery.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        try:
+            return list(queue.open_records(now_ms))
+        except Exception:  # noqa: BLE001 — routing must never cost a turn
+            logger.debug("needs_user: could not read the ask queue", exc_info=True)
+            return []
 
     def _steer_is_live_queued(self, command_id: str) -> bool:
         """Whether a steer with this producer id is already owed by this process.
@@ -13178,14 +13448,27 @@ class Session:
         from local_operator.team_bridge import ask_issuance as ledger_mod
 
         directory = asks_store.session_dir(self._config_dir, self.session_id)
+        now = _time.time()
         try:
+            # A delivered bridge row is a CustomMessage, persisted as a
+            # ``message`` row (payload kind ``custom``) — never a ``custom``
+            # entry, so ``custom_messages`` is what makes this scan see it at
+            # all. ``min_ts`` is the repair's own 24 h window pushed into the
+            # walk: this runs synchronously on the event loop at every turn
+            # start, ask op and deadline tick, and without the bound its cost
+            # tracked the journal's whole size (1.07 s warm on a 688 MB one,
+            # while matching nothing). With both, it reads back only as far as
+            # the window or the 20th row, whichever comes first.
             rows = transcript_mod.read_custom_entries(
-                directory, TEAM_BRIDGE_MESSAGE_TYPE, max_rows=20
+                directory,
+                TEAM_BRIDGE_MESSAGE_TYPE,
+                max_rows=20,
+                custom_messages=True,
+                min_ts=now - 86400,
             )
         except Exception:  # noqa: BLE001 — repair is best-effort, never a crash
             return
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
-        now = _time.time()
         for entry in rows:
             if now - float(getattr(entry, "ts", 0.0) or 0.0) > 86400:
                 continue
@@ -13894,6 +14177,27 @@ class Session:
             # the user's language; the exception still carries the developer's.
             logger.debug("bridge decide refused at the word: %s", failure)
             return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
+        # ONE WORD PER ASK (PR #4099 design (c), exit 7). A desktop approvals
+        # batch recorded a signed word for this ask that the hub has not
+        # confirmed. The card may neither contradict it (the hub could later get
+        # the batch's word while the session acts on the card's) nor repeat it
+        # (its consumption would find the batch row and send nothing — a silent
+        # no-op). Refused BEFORE any ask-log write, with the grant withdrawn; the
+        # list row shows the word as ``unsent_decision`` and re-sends it there.
+        # Fails closed: an unreadable ledger cannot prove there is no such row.
+        try:
+            from local_operator.team_bridge.decide_intents import DecideIntents
+
+            unconfirmed = DecideIntents(runtime.config_dir).unconfirmed_batch_intent(
+                runtime.key(), str(ask_id), str(question_id)
+            )
+        except Exception:  # noqa: BLE001 — refused, never raised into the door
+            logger.warning("bridge decide: decide-intent ledger unreadable", exc_info=True)
+            return _refuse("this machine's decision record could not be read; nothing was sent.")
+        if unconfirmed is not None:
+            from local_operator.asks.render import BATCH_PENDING_COPY
+
+            return _refuse_with_code("decided_from_list", BATCH_PENDING_COPY)
         question_slot = str(question.get("id") or "")
         existing = record.get("answers") or {}
         picks = [str(value) for value in (existing.get(question_slot) or ())]
@@ -17879,6 +18183,10 @@ class Session:
                         # pre-notify marker (key absent) means notify=1 — its
                         # behaviour, verbatim.
                         notify=bool(saved.get("notify", True)),
+                        # ADR 0009: replayed verbatim too; absent reads as
+                        # ``unknown`` origin and no open ask.
+                        origin=str(saved.get("origin") or ""),
+                        needs_user=bool(saved.get("needs_user", False)),
                     ),
                     timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                 )
@@ -18152,6 +18460,7 @@ class Session:
         # distinguished: they require the approval card rather than granting.
         # The assistant/tool rows a session appends itself never reach here.
         input_class = _profile_input_class(message)
+        self._note_run_input_surface(message)
         if input_class == "untrusted":
             self._run_untrusted_input = True
         elif input_class == "consent":
@@ -18479,9 +18788,14 @@ class Session:
         * user semantics win: a consumed user message, or a queued-but-
           unconsumed one (``awaiting_user``), notifies, and a mixed run keeps
           that behaviour with EXACTLY one publication (one row per turn);
-        * any non-user trigger that is not exclusively wake/monitor deliveries
-          notifies (a job result, an incident notice, a wake+job mix) — a
-          quiet delivery never suppresses it;
+        * routine ask answers, background-job results and known system notices
+          stay silent on EVERY surface. The operator's decision (ask a-91bd,
+          2026-11-16) was "No, stay quiet everywhere unless it errors or needs
+          me": bookkeeping completion is not worth another interruption.
+          Errors and awaiting-user inputs still override this default; explicit
+          high-priority attention items keep their independent delivery path;
+        * other non-user inputs keep their existing loud default; unknown types
+          are never silently classified as routine;
         * EXCEPT a PEER-ONLY run: a run whose non-user inputs are exclusively
           peer-family — a ``peer_message`` from another local session, or a
           defensive ``hub_message`` (``PEER_FAMILY_INPUT_TYPES``) — optionally
@@ -18491,8 +18805,8 @@ class Session:
           to, and the sender reads the reply as the turn's own outcome. It
           notifies again the moment a typed or queued user joins the run, a
           delivery asked to be told, or the run errors; peer mixed with any
-          other internal input keeps that input's loud semantics — fail loud
-          for every class the policy has not explicitly quieted;
+          other internal input keeps that input's semantics — fail loud for
+          every class the policy has not explicitly quieted;
         * wake/monitor-only runs notify iff one of their deliveries asked to
           (``notify_requested``, the OR of their ``notify`` parameters);
         * AIDA'S CHECK-IN QUIETING VETO, applied after the rule above and only
@@ -18513,16 +18827,27 @@ class Session:
         )
         triggers = set(self._run_triggers)
         non_user = triggers - {"user"}
-        # PEER-ONLY runs stay quiet: non-user inputs that are exclusively
-        # peer-family (the peer-notify policy, 2026-10-10). ``_run_input_types``
-        # holds the raw custom types of this run's INTERNAL inputs —
-        # wake/monitor deliveries are not recorded there — and the empty or
-        # unknown sentinel can never match, so every input the policy has not
-        # explicitly quieted is LOUD.
-        peer_only = (
+        # One shared eligibility decision prevents desktop and phone policy
+        # drift. Use an explicit vocabulary, not a session_* prefix: a future
+        # input requiring attention must fail loud until deliberately classified.
+        # Wake/monitor inputs have no raw type here; their notify request still
+        # wins below, as do a real user (including mixed runs) and actual errors.
+        routine_input_types = {
+            ASK_RESPONSE_MESSAGE_TYPE,
+            JOB_RESULT_MESSAGE_TYPE,
+            SESSION_INCIDENT_MESSAGE_TYPE,
+            SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+            SESSION_CREDENTIAL_MESSAGE_TYPE,
+            SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
+            SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+            SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            SESSION_SEND_NOTICE_MESSAGE_TYPE,
+        }
+        quiet_internal = (
             "internal" in non_user
             and bool(self._run_input_types)
-            and self._run_input_types <= PEER_FAMILY_INPUT_TYPES
+            and self._run_input_types <= PEER_FAMILY_INPUT_TYPES | routine_input_types
         )
         notify = (
             self._has_awaiting_user()
@@ -18530,7 +18855,12 @@ class Session:
             or not (
                 non_user
                 and (
-                    non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE} or peer_only
+                    non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+                    or (
+                        non_user
+                        <= {"internal", WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+                        and quiet_internal
+                    )
                 )
             )
             or self._run_notify_requested
@@ -19543,6 +19873,9 @@ class Session:
         # errors notify, and interrupted stays suppressed by the readers' kind
         # filters whatever this says.
         notify = bool(getattr(outcome, "notify", True))
+        # ADR 0009: read off the same end event, never re-derived here.
+        origin = str(getattr(outcome, "origin", "") or "")
+        needs_user = bool(getattr(outcome, "needs_user", False))
         token = self._attention_run_token or str(uuid.uuid4())
         # The DURABLE reason. For a cut-off it is the harness-authored cause
         # sentence, never the live notice's longer framing: this string is what
@@ -19578,7 +19911,29 @@ class Session:
             # narration text and ``not messages`` alone would miss it. Errors
             # never reach this branch (``kind == "complete"``), which keeps
             # R3's "always notifies" for a quiet batch whose re-entry fails.
-            if kind == "complete" and (not messages or delegated or self._run_ended_quiet(outcome)):
+            # ADR 0009: a quiet or textless end that leaves an ask opened in its
+            # window still open is NOT quiet for the phone (``needs_user``
+            # bypasses ``notify``), so it publishes its row; ``notify`` is forced
+            # false so the desktop's completion banner stays silent, as the
+            # quiet end asked (the ask keeps its own desktop banner).
+            #
+            # The DELEGATED arm gets the same exception (review round 1, M1): a
+            # run that opens an ask AND leaves a ``task`` job running has already
+            # closed its needs-you window (``_run_needs_user``), so suppressing its
+            # row here would lose the ask for good — the job_result run's window
+            # starts after it. Its desktop completion banner stays silent (the
+            # delegated parent is not finished), so ``notify`` is forced false.
+            if (
+                kind == "complete"
+                and needs_user
+                and (not messages or self._run_ended_quiet(outcome) or delegated)
+            ):
+                notify = False
+            if kind == "complete" and (
+                (not messages and not needs_user)
+                or (delegated and not needs_user)
+                or (self._run_ended_quiet(outcome) and not needs_user)
+            ):
                 await self._transcript.append_custom(
                     ATTENTION_CUSTOM_TYPE,
                     {
@@ -19590,7 +19945,11 @@ class Session:
                 return
             # Failure may precede the first assistant message. Its durable outcome
             # marker, not an unrelated previous answer, is the viewable anchor.
-            anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
+            # A ``needs_user`` run with no text of its own (an ask raised, then
+            # ``no_reply``) anchors on its outcome marker the same way.
+            anchor = (
+                messages[-1].id if kind == "complete" and messages else provisional_anchor(token)
+            )
             # The journal precedes publication: runtime death between these writes
             # is repaired idempotently on resume, without fabricating a new token.
             await self._transcript.append_custom(
@@ -19606,6 +19965,11 @@ class Session:
                     # (bootstrap/republish, both of which replay this marker)
                     # re-lands the same row instead of a defaulted one.
                     "notify": notify,
+                    # ADR 0009: durable for the same reason, and the marker's
+                    # ``origin`` is also how a resumed session rebuilds the
+                    # conversation's last driver (``_reconstruct_input_driver``).
+                    "origin": origin,
+                    "needs_user": needs_user,
                 },
             )
             try:
@@ -19628,6 +19992,8 @@ class Session:
                             reason=reason,
                             cause=cause,
                             notify=notify,
+                            origin=origin,
+                            needs_user=needs_user,
                         ),
                         timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                     )
@@ -20357,6 +20723,17 @@ class Session:
             # ``_publish_attention_outcome`` reads it back rather than
             # re-deriving it. One value, four readers, decided by nobody else.
             event = event.model_copy(update={"notify": self._finalize_attention_notify(event)})
+            # ADR 0009: WHERE the outcome goes is decided by origin, and whether
+            # it needs the user by an ask opened in this run's window. Both are
+            # stamped here, at the same choke point as ``notify`` and computed
+            # independently of it: ``notify`` is false for exactly the runs that
+            # end on an open ask without a typed prompt (a wake), which are the
+            # ones the phone must hear about when the desk is away.
+            origin = self._run_origin()
+            needs_user = self._run_needs_user()
+            if self._run_input_surface is not None:
+                self._conversation_driver = self._run_input_surface
+            event = event.model_copy(update={"origin": origin, "needs_user": needs_user})
             self._attention_outcome = event
             # Turn supplements (§2.1): freeze the facts the runtime subscriber needs, while
             # they still exist -- ``_run_triggers`` and the accumulator are reset at the
@@ -20989,6 +21366,9 @@ class Session:
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()
+        # ADR 0009: origin is per run, so the previous run's human input never
+        # labels this one (a wake after a phone prompt inherits it instead).
+        self._run_input_surface = None
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
@@ -22416,6 +22796,114 @@ class Session:
             # turn that never reached one again (see ``_flush_parked_deliveries``).
             await self._flush_parked_deliveries()
 
+    async def _spool_parked_for_successor(self, *, disposing: bool = False) -> None:
+        """Hand peer messages and wakes parked past the last boundary to the successor.
+
+        The leaving-runtime twin of the flush below. A turn on a draining
+        runtime still takes peer messages and its own wakes (the node2
+        incident, 2026-11-17: holding them for ~40 min behind one busy turn was
+        the defect), and the busy arms park them on the steering queue for "the
+        next tool boundary". A turn that ends first has no next boundary, and
+        opening a new turn for them is exactly what a leaving runtime must not
+        do — so they go to the inbox the successor drains into its first turn
+        (``process._drain_inbox_into``), with ``wake=True`` because each was a
+        delivery somebody asked to be acted on.
+
+        Only wake and peer ``CustomMessage`` rows are taken; everything else
+        (plain steers, asks, monitors) keeps its place and its pre-existing
+        handling. A peer row carries its own ``message.id`` so the successor's
+        ``receive_peer_message`` duplicate gate answers a second copy instead of
+        appending it twice. Never raises: this runs in the turn's ``finally``.
+
+        EVERY ROW GOES THROUGH ``inbox.append_for_successor`` (review round 1,
+        R1-1), the vehicle the admission-time spool
+        (``ServingSessionHandle._spool_for_successor``) uses: it records the
+        owed turn (``wakes/spooled/<sid>.json``) BEFORE the append and raises
+        the supervisor's reader. A plain ``append_inbox`` wrote a row nothing
+        was obliged to read — on a headless session the runtime exits at idle
+        and no successor is ever started for it (the 2026-09-21 class
+        ``inbox.SPOOL_RECEIPT_WAKE`` documents).
+
+        A ONE-SHOT (``due.final``) wake keeps its re-arm: the live arm of
+        ``_spool_wake_to_inbox`` remembers the ``DueWake`` it handed the turn,
+        and here that occurrence is re-armed through ``_queue_wake_rearm``
+        exactly as an idle fire would have been, so the id the user knows stays
+        cancellable and ``hand_wakes_to_successor`` writes it at the exit.
+        ``disposing=True`` (the call from ``_dispose_impl``) skips the re-arm:
+        a disposal may come after the exit's handover already ran, or with no
+        handover at all (the signal drain), so a hold placed then could be
+        written by nobody — the owed text row is the one durable outcome there.
+        """
+        from local_operator.harness.message_types import PEER_DELIVERABLE_CUSTOM_TYPES
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import InboxLine, append_for_successor
+        from local_operator.wakes.spooled import await_spool_write
+
+        kept: list[AgentMessage] = []
+        taken: list[CustomMessage] = []
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            if isinstance(item, CustomMessage) and (
+                item.custom_type == WAKE_PROMPT_MESSAGE_TYPE
+                or item.custom_type in PEER_DELIVERABLE_CUSTOM_TYPES
+            ):
+                taken.append(item)
+            else:
+                kept.append(item)
+        for item in kept:
+            self._steering_queue.put_nowait(item)
+        # Every live-handed one-shot is settled by this pass or was already
+        # consumed by a boundary; either way the memo must not outlive it.
+        live_finals: dict[tuple[str, int], DueWake] = getattr(self, "_live_final_wakes", {})
+        self._live_final_wakes = {}
+        if not taken:
+            return
+        directory = getattr(self._transcript, "directory", None)
+        for message in taken:
+            try:
+                if message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+                    details = message.details or {}
+                    due = live_finals.get(
+                        (str(details.get("wake_id", "")), int(details.get("occurrence") or 0))
+                    )
+                    if due is not None and not disposing and self._queue_wake_rearm(due):
+                        continue
+                    await self._spool_parked_wake(message, for_successor=True)
+                    continue
+                details = message.details or {}
+                if directory is None:
+                    logger.warning("parked peer message %s could not be spooled", message.id)
+                    continue
+                custom_type = (
+                    message.custom_type if message.custom_type != PEER_MESSAGE_MESSAGE_TYPE else ""
+                )
+                await await_spool_write(
+                    append_for_successor,
+                    config_dir(),
+                    Path(directory),
+                    InboxLine(
+                        text=str(details.get("body") or details.get("text") or ""),
+                        sender=dict(details.get("sender") or {}),
+                        mode="mailbox",
+                        written_at=time.time(),
+                        wake=True,
+                        message_id=str(message.id or ""),
+                        custom_type=custom_type,
+                        # The bridge locator, which the successor cannot
+                        # re-derive (H5 F3; review round 1, R1-5) — the same
+                        # carriage the admission-time spool makes.
+                        bridge_meta=dict(details.get("bridge") or {}),
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — the turn's finally must not die here
+                logger.warning(
+                    "parked delivery %s could not be spooled while draining",
+                    getattr(message, "id", ""),
+                    exc_info=True,
+                )
+        self._courtesy_wake_count = 0
+        self.refresh_frontend_state()
+
     async def _flush_parked_deliveries(self) -> None:
         """Hand over what a busy latch parked, now that the turn has ended.
 
@@ -22492,6 +22980,14 @@ class Session:
         would cost the busy arms one shared sentence. Recorded here so the
         next reader does not re-derive the mismatch as a bug.
         """
+        if self._leaving_deliveries and not self._disposed and not self._one_shot_exit:
+            # A DRAINING RUNTIME NOW PARKS PEER MESSAGES AND WAKES HERE: they are
+            # delivered into its live turn rather than spooled
+            # (``ServingSessionHandle._admits_into_live_turn``,
+            # ``_spool_wake_to_inbox``), so one that lands past the turn's last
+            # boundary would otherwise sit in memory until the exit disposes it.
+            await self._spool_parked_for_successor()
+            return
         if self._disposed or self._leaving_deliveries or self._one_shot_exit:
             return
         drained: list[AgentMessage] = []
@@ -32428,7 +32924,9 @@ class Session:
             logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
             return False
 
-    async def _spool_parked_wake(self, wake_message: CustomMessage) -> None:
+    async def _spool_parked_wake(
+        self, wake_message: CustomMessage, *, for_successor: bool = False
+    ) -> None:
         """Spool one parked wake for the successor on retire. Never raises.
 
         A parked wake is already a fired occurrence with no schedule left to
@@ -32436,8 +32934,20 @@ class Session:
         the durable handoff — the same vehicle ``_spool_wake_to_inbox`` uses
         for a fire arriving while draining. The text is the delivery text
         the parked row carries, so the successor runs the same occurrence.
+
+        ``for_successor`` writes through ``inbox.append_for_successor`` so the
+        row also records the turn the successor owes and raises its reader —
+        the turn-end spool needs that (review round 1, R1-1): its wake was
+        handed to a live turn, so no schedule row is left to engage a runtime.
+        The retire-time caller keeps its plain append unchanged.
         """
-        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import (
+            InboxLine,
+            append_for_successor,
+            append_inbox,
+        )
+        from local_operator.wakes.spooled import await_spool_write
 
         wake_id = str(wake_message.details.get("wake_id", ""))
         text = str(wake_message.details.get("text", ""))
@@ -32445,19 +32955,21 @@ class Session:
         if directory is None or not text:
             logger.warning("parked wake %s could not be spooled (no session dir)", wake_id)
             return
+        line = InboxLine(
+            text=text,
+            sender={},
+            mode="mailbox",
+            written_at=time.time(),
+            wake=True,
+            wake_id=wake_id,
+        )
         try:
-            written = await asyncio.to_thread(
-                append_inbox,
-                Path(directory),
-                InboxLine(
-                    text=text,
-                    sender={},
-                    mode="mailbox",
-                    written_at=time.time(),
-                    wake=True,
-                    wake_id=wake_id,
-                ),
-            )
+            if for_successor:
+                written = await await_spool_write(
+                    append_for_successor, config_dir(), Path(directory), line
+                )
+            else:
+                written = await asyncio.to_thread(append_inbox, Path(directory), line)
         except Exception:  # noqa: BLE001 — a drain must not die on a spool write
             logger.warning(
                 "parked wake %s could not be spooled while draining", wake_id, exc_info=True
@@ -32491,6 +33003,59 @@ class Session:
         fallback: a wake that ended up in neither place is lost work the user is
         waiting on, and a log line is the only trace it existed
         (``design-runtime-autorefresh`` §5.3).
+        """
+        # A FIRE INTO A LIVE TURN IS DELIVERED, not spooled. The divert is
+        # installed when a drain LATCHES, and a build-replaced drain latches on a
+        # busy runtime by construction — so for the whole rest of that turn the
+        # session's own reminders went to a successor that boots only after the
+        # turn ends (node2, 2026-11-17: 6 own wakes held ~40 min behind one
+        # turn). Riding the running turn opens no new work on the leaving build,
+        # which is the only thing the divert exists to prevent; an idle fire
+        # still spools below. ``_deliver_wake``'s busy arm parks it for the next
+        # tool boundary, and a turn that ends first hands the park to
+        # ``_flush_parked_deliveries``, whose leaving arm spools it.
+        # ``getattr``: the cell harnesses bind this method onto hosts without the
+        # session's turn flags, and those hosts are idle by construction.
+        if getattr(self, "_is_streaming", False) and not getattr(self, "_disposed", False):
+            deliver = getattr(self, "_wake_hook_before_drain", None) or self._deliver_wake
+            if deliver != self._spool_wake_to_inbox:
+                if due.final:
+                    # The fire retired its schedule, so if this delivery ends
+                    # up parked past the last boundary the turn-end spool must
+                    # re-arm it rather than write text only (R1-1). Keyed like
+                    # the parked row's details so that spool can find it.
+                    finals = getattr(self, "_live_final_wakes", None)
+                    if finals is None:
+                        finals = self._live_final_wakes = {}
+                    finals[(due.schedule.id, due.occurrence)] = due
+                if deliver == self._deliver_wake:
+                    # ``_deliver_wake`` awaits before it re-samples ``busy``; a
+                    # turn that ends in that gap would take its idle arm, whose
+                    # turn a leaving runtime holds at admission (transcript
+                    # only, nobody woken — R1-3). Hand that arm back here.
+                    await self._deliver_wake(due, idle_fallback=self._spool_wake_fire)
+                else:
+                    await deliver(due)
+                # The busy arm parks AFTER an awaited emit, so the turn may have
+                # ended (and run its turn-end spool) before the park landed.
+                # Nothing else would ever drain it on a leaving runtime, so
+                # sweep it to the successor now; a no-op when nothing is parked.
+                if (
+                    getattr(self, "_leaving_deliveries", False)
+                    and not getattr(self, "_is_streaming", False)
+                    and not getattr(self, "_disposed", False)
+                    and not getattr(self, "_one_shot_exit", False)
+                ):
+                    await self._spool_parked_for_successor()
+                return
+        await self._spool_wake_fire(due)
+
+    async def _spool_wake_fire(self, due: DueWake) -> None:
+        """Re-arm (one-shot) or spool (recurring) one fire for the successor.
+
+        The idle half of :meth:`_spool_wake_to_inbox`, split out so the live
+        arm can hand a fire back to it when the turn it aimed at ended first
+        (``_deliver_wake``'s ``idle_fallback``). Never raises.
         """
         from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
@@ -34223,7 +34788,12 @@ class Session:
         except Exception:  # noqa: BLE001 — the ledger is observation
             logger.debug("aida: could not re-owe the withheld greeting", exc_info=True)
 
-    async def _deliver_wake(self, due: DueWake) -> None:
+    async def _deliver_wake(
+        self,
+        due: DueWake,
+        *,
+        idle_fallback: Callable[[DueWake], Awaitable[None]] | None = None,
+    ) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
         annotated as missed — the agent must not read it as punctual, and a
@@ -34316,6 +34886,12 @@ class Session:
         if missed_note:
             text = f"{missed_note}\n\n{text}"
         busy = self._is_streaming
+        if not busy and idle_fallback is not None:
+            # The caller aimed this fire at a live turn that has ended since it
+            # looked (only ``_spool_wake_to_inbox``'s live arm passes this): its
+            # idle arm is the one that knows what an idle fire means for it.
+            await idle_fallback(due)
+            return
         if busy:
             # The resume guidance rides the text itself: the wake reached a
             # turn that was already working, and the message is the only
@@ -36572,6 +37148,19 @@ class Session:
         if unsubscribe_state is not None:
             unsubscribe_state()
             self._unsubscribe_subagent_state = None
+        # A LEAVING RUNTIME'S PARKED PEER MESSAGES AND WAKES GO TO THE SUCCESSOR
+        # FIRST (review round 1, R1-2). A leaving runtime delivers them into its
+        # live turn (``ServingSessionHandle._admits_into_live_turn``), and the
+        # sender was told "delivered mid-turn"; the turn's own turn-end spool
+        # skips once ``_disposed`` is set, and the loop below empties the queue.
+        # A disposal that catches the turn still busy — the signal drain's reap,
+        # a SIGTERM during a build drain — would otherwise drop them. Chosen over
+        # narrowing live admission to the build drain: this covers EVERY exit
+        # that disposes mid-turn, including ones no drain cause names today,
+        # while narrowing would still lose a build drain interrupted by a signal.
+        # The one-shot host has no successor and keeps its own semantics.
+        if self._leaving_deliveries and not self._one_shot_exit:
+            await self._spool_parked_for_successor(disposing=True)
         # No later boundary can drain producer steers once disposal starts.
         # Reject them while rejection subscribers and viewers are still attached so
         # capacity is released and the producer can safely reuse the same ID.
