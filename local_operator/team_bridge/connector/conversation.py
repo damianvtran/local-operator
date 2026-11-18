@@ -1113,6 +1113,7 @@ async def _deliver_card_to(
     live_only: bool,
 ) -> str:
     card = build_conversation_card(metadata)
+    extra: dict[str, Any] = {"live_only": True} if live_only else {}
     return await deliver_wake(
         owner,
         card,
@@ -1120,7 +1121,7 @@ async def _deliver_card_to(
         config_dir=config_dir,
         # Only a routed delivery passes it: the designated path keeps the exact
         # call it always made (and the seams tests patch in for it).
-        **({"live_only": True} if live_only else {}),
+        **extra,
         sender_display={
             "sender_name": metadata.sender_label,
             # Display-only facts come from this card's typed producer, never
