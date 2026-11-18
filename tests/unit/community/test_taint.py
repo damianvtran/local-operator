@@ -34,7 +34,7 @@ from local_operator.community.taint import (
     session_tainted,
     standing_grant_usable,
 )
-from local_operator.harness.types import Message, TextContent, ToolResult
+from local_operator.harness.types import Message, TextContent, ToolCall, ToolResult
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 
@@ -153,3 +153,35 @@ async def test_row_payload_is_content_free(tmp_path: Path) -> None:
     row = transcript.latest_custom_entry(COMMUNITY_TAINT_ROW_TYPE)
     assert row is not None
     assert json.loads(json.dumps(row.payload.get("details"))) == {"version": 1, "inherited": False}
+
+
+@pytest.mark.asyncio
+async def test_real_fork_snapshot_inherits_the_flag_even_cut_before_the_read(
+    tmp_path: Path,
+) -> None:
+    """Through ``Transcript.fork_snapshot`` itself (``/fork``), not a file copy.
+
+    The custom row is copied wholesale (journal rows are not conversation rows),
+    so a fork cut BEFORE the read is still tainted: fail-closed, matching the RFC
+    ("a forked session inherits it") rather than reasoning about where the
+    model's context begins.
+    """
+    parent = await asyncio.to_thread(Transcript, tmp_path / "sessions" / "parent000001")
+    session = _session(parent)
+    first = Message.user("summarize #help")
+    await parent.append_message(first)
+    # A paired call/result: fork refuses an orphaned tool result.
+    call = Message(
+        role="assistant",
+        content=[TextContent(text="")],
+        tool_calls=[ToolCall(id="c1", name="bridge", arguments={"op": "community_read"})],
+    )
+    await parent.append_messages(
+        [call, _read_result({"ok": True, "state": "ok", COMMUNITY_CONTENT_DETAILS_KEY: True})]
+    )
+    await _drain(session)
+    await parent.append_message(Message.user("thanks"))
+    for cut in (None, first.id):
+        fork_id, _, _ = await parent.fork_snapshot(through_entry_id=cut)
+        child = await asyncio.to_thread(Transcript, tmp_path / "sessions" / fork_id)
+        assert _session(child).community_tainted is True, cut
