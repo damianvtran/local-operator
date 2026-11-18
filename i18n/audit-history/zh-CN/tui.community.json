@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.community",
+  "history_sha256": "eee014cd9342e1dbfab715b2403a4b0392719d14c382876d07ecca89dd3eaaf5",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.community",
+      "source_sha256": "cf2cc44838daed3feee13561e45dac11ddce031ac3fa702854a3215536671ac1",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer / i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN `tui.community` PR #4221 first independent audit (pass A), full namespace (148 keys). Evidence: i18n/audits/evidence/zh-CN/community-primary/record.json. Auditor anthropic/claude-opus-5-5 session c739715f0519; 0 minor, 1 nit (locale-wide counts), 0 blocker/major; no wording changed.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/community-primary/record.json",
+          "sha256": "987741bb49f4a5bbb656fa1e7cbee231ca58cd0058e65b74df285cca73fe25d4"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/community-primary/report.md",
+          "sha256": "d1b6e9072a619b1e4517e51e80cadb44277558c15f396450b45f4458a9bb4c80"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/community-primary/audit.log",
+          "sha256": "2ead19495647787fd0628b12ae117caadc455e36dade1b20ea2794f67aadd39f"
+        }
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.community",
+      "source_sha256": "cf2cc44838daed3feee13561e45dac11ddce031ac3fa702854a3215536671ac1",
+      "translator": {
+        "agent": "Local Operator coder subagent (community lane, session 06c3529d8318)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "reviewer / i18n-auditor (second pass, same session)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN `tui.community` PR #4221 second pass (pass B), approval-card keys only (3 keys). Evidence: i18n/audits/evidence/zh-CN/community-secondary/record.json. Auditor anthropic/claude-opus-5-5 session c739715f0519; 0 minor, 0 nit (locale-wide counts), 0 blocker/major; no wording changed. Same auditor session as pass A: independent of the translator, NOT of the first audit.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/community-secondary/record.json",
+          "sha256": "2bfc1c754fc6554396583719ef7cd3e4d61ed54e00abce6b0120bf78aac53728"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/community-secondary/report.md",
+          "sha256": "2544ebe8a1b91c2c2fdc78ad690befd002af32a9d32422792b5e7c1cdca48d08"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/community-secondary/audit.log",
+          "sha256": "3d4e266eae8583db1dd654cf74752418a606d0e9a396ec5a3bd7e765eeab082d"
+        }
+      ]
+    }
+  ]
+}
