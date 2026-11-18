@@ -725,9 +725,15 @@ def run_probe(root: Path, frame: Mapping[str, Any], *, device: str = "") -> dict
         item = {"remote_url": url, **checks.get(url, {})}
         item["missing_tools"] = missing_tools(row.get("markers") or [])
         answered.append(item)
+    from local_operator.network.workset import WORKSET_TRANSFER_VERSION
+
     answer: dict[str, Any] = {
         "ok": True,
         "probe_version": PROBE_VERSION,
+        # Whether THIS device can receive the files (PR B): the offload preflight
+        # recomputes its manifest as "they stay" for a destination below the
+        # transfer protocol, so the user is never shown a send that will not happen.
+        "working_set_version": WORKSET_TRANSFER_VERSION,
         "worktrees": answered,
         # Whether a remedy should be ``include`` (a share exists) or ``share``; the
         # asker builds the command (S3).
@@ -919,6 +925,13 @@ def apply_probe(
         row["missing_tools"] = tools
         missing_union.extend(t for t in tools if t not in missing_union)
     probe: dict[str, Any] = {"state": "answered", "missing_tools": sorted(missing_union)}
+    if "working_set_version" in answer:
+        # Absent from a destination that predates the transfer: the reader treats a
+        # missing key as 0 ("cannot receive files"), so it is not invented here.
+        try:
+            probe["working_set_version"] = int(answer.get("working_set_version") or 0)
+        except (TypeError, ValueError):
+            probe["working_set_version"] = 0
     bridge = answer.get("team_bridge")
     if isinstance(bridge, Mapping) and bridge.get("needed"):
         probe["team_bridge"] = {"needed": True, "enrolled": bridge.get("enrolled") is True}

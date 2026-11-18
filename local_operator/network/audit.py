@@ -116,6 +116,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # manifest, and a destination probed remotes at a peer's request.
         "session.workset.preflight",
         "session.workset.probe",
+        # A moved session's working set (move-working-set.md §8.3; workset_move).
+        "session.workset.serve",
+        "session.workset.restore",
+        "session.workset.departed",
         # transport scope (§7.6 of mesh-transport-identity.md)
         "pairing_refused",
         "invite_minted",

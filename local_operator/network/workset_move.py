@@ -930,31 +930,50 @@ def destination_transfer(
     for row in rows:
         n = str(row.get("n"))
         remote_url = str(row.get("remote_url") or "")
-        rewrite = (
-            row.get("https_rewrite") if isinstance(row.get("https_rewrite"), Mapping) else None
-        )
-        # A2's probe may offer an https form of an ssh remote this device cannot use;
-        # the clone and the restore then use it, repo-locally, and the note says so.
-        use_url = str(rewrite.get("to")) if rewrite and rewrite.get("to") else remote_url
-        if rewrite and rewrite.get("to"):
-            rewrite_notes.append(f"{row.get('repo')}: {remote_url} -> {use_url}")
         repo_rel = str(row.get("repo") or "")
+        use_url = remote_url
         res = engine.resolve_primary(use_url, repo_rel, home=home) if use_url else None
         cloned = False
         if res is not None and res.state == "absent":
-            try:
-                res = engine.clone_primary(
-                    use_url, repo_rel, home=home, pack_bytes=int(row.get("pack_bytes") or 0)
-                )
-                cloned = res.state == "present"
-            except engine.MoveWorksetError as exc:
-                if exc.reason == "insufficient_space":
-                    raise WorksetTransferRefused(
-                        "insufficient_space",
-                        f"this device does not have room to clone {repo_rel} ({exc.detail}), "
-                        "so nothing was moved",
-                    ) from exc
-                res = engine.PrimaryResolution("absent", None, reason="destination_cannot_clone")
+            # THE HTTPS REWRITE (the destination probe's offer, design §4 W1): an ssh
+            # remote this device has no key for is cloned over its https form instead,
+            # with THIS device's own credentials. Tried in order — the original URL,
+            # then the rewrite — so a destination that can use ssh keeps it. The
+            # rewrite is repo-local by construction (it is the fresh clone's origin;
+            # a checkout the user already had is never re-pointed) and is named in
+            # the receipt's notes. ``https_rewrite.url`` on the row is the probe's
+            # offer when an owner forwards it; else this device derives the same form.
+            from local_operator.network import workset_probe
+
+            offered = row.get("https_rewrite")
+            alt = (
+                str(offered.get("url") or "")
+                if isinstance(offered, Mapping)
+                else workset_probe.https_rewrite(remote_url)
+            )
+            candidates = [remote_url] + ([alt] if alt and alt != remote_url else [])
+            res = engine.PrimaryResolution("absent", None, reason="destination_cannot_clone")
+            for candidate in candidates:
+                try:
+                    got = engine.clone_primary(
+                        candidate,
+                        repo_rel,
+                        home=home,
+                        pack_bytes=int(row.get("pack_bytes") or 0),
+                    )
+                except engine.MoveWorksetError as exc:
+                    if exc.reason == "insufficient_space":
+                        raise WorksetTransferRefused(
+                            "insufficient_space",
+                            f"this device does not have room to clone {repo_rel} "
+                            f"({exc.detail}), so nothing was moved",
+                        ) from exc
+                    continue
+                if got.state == "present":
+                    res, use_url, cloned = got, candidate, True
+                    if candidate != remote_url:
+                        rewrite_notes.append(f"{repo_rel}: {remote_url} -> {candidate}")
+                    break
         primaries[n] = {"res": res, "url": use_url, "cloned": cloned}
         if res is not None and res.state == "present" and res.path is not None:
             tips = [str(t) for t in row.get("tips") or [] if _SHA.match(str(t))]

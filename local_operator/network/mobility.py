@@ -4821,11 +4821,13 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
                 f"{session_id} does not live on this device, so it cannot be moved FROM here",
             )
         target_device, target_name = _resolve_typed_peer(server, to)
-        # OPTIMISTIC CARRY for an offload preflight: this owner cannot yet ask the
-        # destination which protocol it speaks before the prepare (the destination
-        # probe is separate work), so the dialog says the files travel. If the
-        # destination turns out older, the gate's narrowing rule moves the session
-        # WITHOUT them and the receipt says so per worktree — never the reverse.
+        # CARRY FIRST, THEN ASK: the destination's probe answer (below) states the
+        # working-set protocol it speaks; one that cannot receive files gets the
+        # manifest recomputed as "they stay here", so the dialog never promises a
+        # transfer an older destination will not take. Should the destination change
+        # between this preflight and the prepare, the gate's narrowing rule still
+        # moves the session WITHOUT the files and the receipt says so — never the
+        # reverse.
         block = _workset_block(
             server, session_id, to_device=target_device, to_name=target_name, carries=True
         )
@@ -4842,6 +4844,26 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
         target_name=target_name,
         here=to == "local",
     )
+    if to != "local" and block.get("carries_files"):
+        from local_operator.network import workset as _ws_mod
+
+        probe = block.get("destination_probe")
+        spoken = (
+            int((probe or {}).get("working_set_version") or 0) if isinstance(probe, dict) else 0
+        )
+        if spoken < _ws_mod.WORKSET_TRANSFER_MIN_VERSION:
+            block = _workset_block(
+                server, session_id, to_device=target_device, to_name=target_name, carries=False
+            )
+            _note_team_bridge_use(server, session_id, block)
+            block = _probe_destination(
+                server,
+                block,
+                session_id,
+                target_device=target_device,
+                target_name=target_name,
+                here=False,
+            )
     # ``unknown`` and ``unsupported`` need a decision too: only --without-working-set
     # proceeds past either, so the surface must show them rather than "nothing here".
     required = bool(block.get("worktrees")) or block.get("state") in ("unsupported", "unknown")

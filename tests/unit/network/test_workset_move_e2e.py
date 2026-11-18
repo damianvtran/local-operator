@@ -268,3 +268,48 @@ def test_an_older_destination_keeps_the_files_on_the_source(
     assert moved["working_set"]["transferred"] is False
     assert [r["reason"] for r in moved["working_set"]["worktrees"]] == ["not_transferred"]
     assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+
+
+def test_a_destination_without_the_repository_clones_it_with_its_own_credentials(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, tmp_path: Path
+) -> None:
+    """W1's clone path: B has no ``~/proj`` at all, so it clones the origin itself
+    (its own credentials, never the owner's) and the worktree lands registered there."""
+    empty_home = tmp_path / "empty-bhome"
+    empty_home.mkdir()
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, empty_home)
+    block = _confirmed(server_b, monkeypatch)
+
+    moved = _move(server_b, monkeypatch, to="local", confirm_working_set=block["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    (row,) = [r for r in moved["working_set"]["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] == "restored", moved["working_set"]
+    landed = empty_home / "proj" / ".worktrees" / "feat"
+    assert git(landed, "log", "-1", "--format=%s") == "unpushed work"
+    assert git(empty_home / "proj", "remote", "get-url", "origin") == str(rig.origin)
+    assert str(landed) in git(empty_home / "proj", "worktree", "list")
+
+
+def test_an_offload_to_an_older_destination_is_shown_as_staying(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """The OFFLOAD preflight asks the destination (its probe answer states the protocol
+    it speaks): one below the transfer protocol gets the "they stay here" manifest, so
+    the user is never asked to confirm a send that will not happen."""
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    target = server_b.identity.device_id
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    assert sends["carries_files"] is True, sends
+    monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
+
+    stays = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+
+    assert stays["carries_files"] is False, stays
+    assert stays["scope_digest"] != sends["scope_digest"]
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=stays["scope_digest"])
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is False
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()

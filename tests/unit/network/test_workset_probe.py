@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import mobility, workset_probe
+from local_operator.network import mobility, workset, workset_probe
 from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a fixture
     SESSION,
     Devices,
@@ -272,6 +272,8 @@ def test_missing_toolchains_and_team_bridge_are_reported_never_blocking(
         "state": "answered",
         "missing_tools": ["go", "pnpm"],
         "team_bridge": {"needed": True, "enrolled": False},
+        # PR B: the destination states the working-set protocol it can receive.
+        "working_set_version": workset.WORKSET_TRANSFER_VERSION,
     }
 
 
