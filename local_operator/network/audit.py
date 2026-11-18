@@ -75,6 +75,7 @@ beside their reader.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import sys
@@ -1101,8 +1102,9 @@ class AuditLog:
         #: buffer can split; see :data:`STREAM_LIFECYCLE_EVENTS`). Its whole point is
         #: that those calls are bounded by the 1 Hz tick plus the buffer filling plus
         #: durable events, NOT by the frame rate, and ``syncs``
-        #: counts ``os.fsync`` calls, which happen for ``DURABLE_EVENTS`` and on
-        #: rotation and for nothing else. ``scripts/mesh_audit_probe.py`` reads both; a
+        #: counts completed live-file durability cycles for ``DURABLE_EVENTS``
+        #: and rotation. Each cycle now also persists directory names; archive
+        #: publication has its own file/directory fsync before live retirement. ``scripts/mesh_audit_probe.py`` reads both; a
         #: bound with no instrument behind it is a claim nobody can check.
         self.write_calls = 0
         self.syncs = 0
@@ -1112,6 +1114,15 @@ class AuditLog:
         self.degraded = False
         self.degraded_reason = ""
         self.records_written = 0
+        # Only record_required owns this receipt, under the writer lock. Counters
+        # alone cannot certify a row: rotation may move it to a different inode
+        # and render later bookkeeping before the caller receives its answer.
+        self._required_seq: int | None = None
+        self._required_line: str | None = None
+        self._required_path: Path | None = None
+        self._required_identity: tuple[int, int] | None = None
+        self._required_durable = False
+        self._pending_directory_syncs: set[Path] = set()
 
     @property
     def max_bytes(self) -> int:
@@ -1217,14 +1228,37 @@ class AuditLog:
         with self._write_lock:
             if not self._enabled or self.degraded:
                 return False
-            before_seq, before_syncs = self._seq, self.syncs
-            self.record(event)
-            return (
-                not self.degraded
-                and self._seq > before_seq
-                and self._published_seq >= self._seq
-                and self.syncs > before_syncs
-            )
+            # Required content admission cannot acknowledge a scrubbed/truncated
+            # row. Ordinary telemetry still tolerates dropping unapproved detail.
+            if event.event == "session_file_read_admitted" and (
+                set(event.detail) != DETAIL_KEYS[event.event]
+                or _sanitize_detail(event.event, event.detail) != event.detail
+            ):
+                return False
+            requested_seq = self._seq + 1
+            self._required_seq = requested_seq
+            self._required_line = None
+            self._required_path = None
+            self._required_identity = None
+            self._required_durable = False
+            try:
+                self.record(event)
+                return (
+                    not self.degraded
+                    and self._published_seq >= requested_seq
+                    and self._required_path is not None
+                    and self._required_durable
+                    and (
+                        event.event != "session_file_read_admitted"
+                        or json.loads(self._required_line or "{}").get("detail") == event.detail
+                    )
+                )
+            finally:
+                self._required_seq = None
+                self._required_line = None
+                self._required_path = None
+                self._required_identity = None
+                self._required_durable = False
 
     def record(self, event: AuditEvent) -> None:
         """Append one event. Never raises: a lost record is worse than a dropped key.
@@ -1242,6 +1276,8 @@ class AuditLog:
         # the other end (the module docstring has the measured account).
         with self._write_lock:
             line = self._render(event)
+            if self._seq == self._required_seq:
+                self._required_line = line
             self._buffer.append(line)
             self._buffered_bytes += len(line)
             self.records_written += 1
@@ -1291,9 +1327,18 @@ class AuditLog:
                 self._last_flush = time.monotonic()
                 return
             payload = "".join(self._buffer)
+            contains_required = (
+                self._required_line is not None and self._required_line in self._buffer
+            )
             self._buffer.clear()
             self._buffered_bytes = 0
             try:
+                # A newly created directory also needs its own parent synced;
+                # syncing only audit.jsonl's parent can lose the whole directory.
+                parent = self._path.parent
+                while not parent.exists():
+                    self._pending_directory_syncs.add(parent.parent)
+                    parent = parent.parent
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 os.chmod(self._path.parent, 0o700)
                 self._rotate_if_needed()
@@ -1304,6 +1349,11 @@ class AuditLog:
                     os.close(descriptor)
                 with self._path.open("a", encoding="utf-8") as handle:
                     handle.write(payload)
+                    written = os.fstat(handle.fileno())
+                if contains_required:
+                    self._required_path = self._path
+                    self._required_identity = (written.st_dev, written.st_ino)
+                    self._required_durable = False
                 self.write_calls += 1
                 # EVERYTHING RENDERED SO FAR IS NOW IN THE FILE. Each rendered record
                 # either joined this batch (and has just been written) or was a rotation
@@ -1339,10 +1389,16 @@ class AuditLog:
             try:
                 descriptor = os.open(self._path, os.O_WRONLY | os.O_APPEND)
                 try:
+                    synced = os.fstat(descriptor)
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
+                self._sync_directories()
                 self.syncs += 1
+                if self._required_path == self._path and self._required_identity == (
+                    synced.st_dev, synced.st_ino
+                ):
+                    self._required_durable = True
             except OSError as exc:
                 self.degraded = True
                 self.degraded_reason = str(exc)
@@ -1428,6 +1484,21 @@ class AuditLog:
             record["detail"] = detail
         return json.dumps(record, separators=(",", ":"), ensure_ascii=False, sort_keys=True) + "\n"
 
+    def _sync_directories(self) -> None:
+        """Make published names discoverable, not just their inode bytes durable.
+
+        Durable events/rotation pay this cost; ordinary batched telemetry does
+        not. Keep failed ancestors pending so a later sync cannot hide a hole.
+        """
+        directories = self._pending_directory_syncs | {self._path.parent}
+        for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        self._pending_directory_syncs.clear()
+
     # -- retention ----------------------------------------------------------
 
     def _rotate_if_needed(self) -> None:
@@ -1453,6 +1524,20 @@ class AuditLog:
                 while chunk := source.read(65536):
                     sink.write(chunk)
             os.chmod(target, 0o600)
+            # gzip.close writes its trailer. Sync the COMPLETE archive and its
+            # published name before retiring the live copy; syncing the fresh
+            # audit_rotated inode afterwards says nothing about these bytes.
+            descriptor = os.open(target, os.O_RDONLY)
+            try:
+                archived = os.fstat(descriptor)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self._sync_directories()
+            if self._required_path == self._path:
+                self._required_path = target
+                self._required_identity = (archived.st_dev, archived.st_ino)
+                self._required_durable = True
             self._path.unlink()
         except OSError as exc:
             self.degraded = True
@@ -1498,6 +1583,10 @@ class AuditLog:
             over_age = age_days > AUDIT_MAX_AGE_DAYS
             if not (over_count or over_age):
                 continue
+            # The active caller must receive its receipt before retention can
+            # retire that exact generation (including a zero-generation policy).
+            if path == self._required_path:
+                continue
             try:
                 path.unlink()
             except OSError:
@@ -1522,6 +1611,26 @@ class AuditLog:
 # ---------------------------------------------------------------------------
 # Sanitising
 # ---------------------------------------------------------------------------
+
+
+def file_read_reference(reference: str, offset: int, admitted: int) -> str:
+    """Bound an owner-canonical reference without reading the referenced content.
+
+    Test the actual sanitizer, whose ASCII-escaped JSON budget differs from its
+    string-length cap. The typed fallback hashes only the relative reference:
+    it is neither a file-content digest nor authority to resolve an absolute path.
+    """
+    detail = {
+        "reference": reference,
+        "admitted_bytes": admitted,
+        "offset": offset,
+        "decision": "allow",
+    }
+    if not any(ch < " " for ch in reference) and (
+        _sanitize_detail("session_file_read_admitted", detail) == detail
+    ):
+        return reference
+    return "reference:sha256:" + hashlib.sha256(reference.encode("utf-8")).hexdigest()
 
 
 def _sanitize_detail(event: str, detail: dict[str, Any]) -> dict[str, Any]:

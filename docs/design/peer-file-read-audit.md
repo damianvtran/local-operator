@@ -18,10 +18,18 @@ not a preview/download alias; do not infer that every mesh byte is audited here.
 Every owner `net_file_get` **fetch** phase calls the same admission callback
 before reading file content for its response. The owner emits
 `session_file_read_admitted` through the existing rotating `AuditLog` writer.
-The callback requires an enabled, non-degraded writer, successful publication
-and completed fsync while holding the writer's existing lock. A failed append,
-failed fsync, buffered-only acceptance, disabled writer or already degraded
-writer refuses that fetch with `audit_unavailable`. Refusal/control frames are
+The callback requires an enabled, non-degraded writer and an exact-row receipt
+while holding the writer's existing lock. The receipt binds the requested
+sequence to the inode/generation that actually contains it, not the latest
+bookkeeping sequence or an increased sync counter. Live-file bytes and directory
+publication (including newly created ancestors) must be fsynced. Rotation closes
+the streamed gzip, fsyncs its complete bytes/trailer and published directory name
+**before** unlinking the prior live copy; archive/publication failure preserves
+that copy and refuses content. The active receipt's generation is not pruned
+before acknowledgement. Later `audit_rotated` bookkeeping does not invalidate a
+healthy admission or certify an unrelated replacement inode. A failed append,
+file/archive/directory fsync, buffered-only acceptance, disabled writer or already
+degraded writer refuses that fetch with `audit_unavailable`. Refusal/control frames are
 not FILE content. Direct fetch calls without an admission callback also refuse.
 Other existing events retain their existing batching/durability policy.
 
@@ -38,12 +46,18 @@ A source read error, truncation, interrupted response or lost link can leave
 an allow row with fewer (even zero) delivered bytes. A resumed fetch is a new
 admission: authorization and source checks happen again for each request.
 
-References contain only a canonical pad-relative `scratchpad://` reference or
-an attachment digest. If a pad reference cannot survive the audit writer's
-existing string bound/control-character scrub intact, an owner-computed
-streamed SHA-256 content digest replaces it. No file contents are logged, and
-no whole-file content buffer is added. Hashing remains streamed; fetch buffering
-remains bounded by the existing chunk size.
+References contain only a canonical pad-relative `scratchpad://` reference,
+an attachment digest, or a typed `reference:sha256:<hex>` fallback. The fallback
+hashes the UTF-8 **canonical relative reference string**, never file contents;
+it cannot trigger a fetch-content read before admission. The owner checks the
+existing sanitizer's actual serialized detail budget as well as string/control
+scrubbing: legal short Unicode paths can expand under JSON ASCII escaping.
+Required acknowledgement refuses missing/changed detail fields, including the
+actual rendered row, rather than silently accepting `truncated=true`. Neither
+caps nor authority are widened. Existing stat/verify content hashing is separate
+metadata/integrity behavior, not a fetch admission or an all-reads guarantee.
+Compression/content hashing remain streamed and fetch buffering remains bounded
+by the existing chunk size.
 
 ## Source inventory
 
@@ -73,10 +87,17 @@ attachment operations are not peer session-file serving.
 relay fixture and CLI control-socket path. Positive controls inspect committed
 owner rows and observed successful fsync before the source fetch read and first
 received content, for both pad and attachment sources. Negative controls inject
-append/fsync failures and disabled/degraded audit state, requiring zero source
-fetch reads and zero received FILE bytes. Additional controls cover EOF plans,
-post-admission source failure, long-reference digest fallback, and buffer-only
-acceptance. Existing S1 authorization/path/sensitivity tests remain neighbors.
+the **new admission's own** append/file/directory-fsync failures after fresh-link
+lifecycle writes, checking healthy entry and exact target sequence, requiring zero
+source fetch reads/received FILE bytes/landed payload for pad and digest sources.
+Archive fault controls target the generation holding that admission and preserve
+the prior copy. Descriptor-aware controls cover first creation, complete archive
+publication-before-unlink, healthy pre/post-append rotation and wrong-inode sync.
+Long/control/Unicode fallback controls instrument all source `pread` calls only
+within fetch, retaining separate stat/verify behavior, and require exact usable
+fields before content. EOF plans, post-admission read failure, sanitizer refusal
+and buffer-only acceptance remain covered. Existing S1 authorization/path/
+sensitivity tests remain neighbors.
 
 The positive and injected-failure relay controls deliberately use existing-base
 APIs, so base-red must be unaudited content behavior, not missing new helpers.

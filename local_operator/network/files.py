@@ -460,12 +460,13 @@ def serve_file(
                 if source.attachment
                 else "scratchpad://" + source.scope.relative_in(source.path).as_posix()
             )
-            # The audit's existing scrubber bounds string values; use an
-            # owner-computed content digest rather than a truncated long path.
-            from local_operator.network.audit import MAX_DETAIL_VALUE_CHARS
+            # Audit fallback names the canonical REFERENCE, never its contents:
+            # hashing this descriptor here would read protected bytes before admission.
+            # Use the real detail sanitizer (including its serialized JSON budget),
+            # not just a character count: short Unicode paths can expand in JSON.
+            from local_operator.network.audit import file_read_reference
 
-            if len(reference) > MAX_DETAIL_VALUE_CHARS or any(ch < " " for ch in reference):
-                reference = _hash_fd(fd, info.st_size)
+            reference = file_read_reference(reference, offset, admitted)
             admit(reference, offset, admitted)
             span = _read_span(fd, offset, admitted)
             return {
