@@ -2125,7 +2125,9 @@ def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, 
     # The synopsis is a hand-written string in ``main``; derive the expected verb
     # list from the parser itself so adding a verb (``heavy`` did) fails here only
     # when the synopsis forgot it, not every time the group grows.
-    def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
+    def _subparsers(
+        parser: argparse.ArgumentParser,
+    ) -> argparse._SubParsersAction[argparse.ArgumentParser]:
         return next(
             a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
         )
