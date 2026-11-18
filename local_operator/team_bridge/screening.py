@@ -1839,14 +1839,24 @@ def _screen_prepare(
             retry_at=float(breaker["open_until"]),
             failure_class=breaker.get("last_failure_class"),
         )
-        return ScreenResult("hold", hold_code="breaker_open", retry_at=float(breaker["open_until"]))
+        return _aged_review_hold(
+            store,
+            owner,
+            _review_target(envelope, snapshot, epoch, item),
+            ScreenResult("hold", hold_code="breaker_open", retry_at=float(breaker["open_until"])),
+        )
 
     # 8. Availability before the reservation: a known-missing runner or an
     #    unusable default is a durable hold, never a spent budget unit
     #    (H3-Q8 — no charge for a dispatch that provably cannot happen).
     if snapshot.default_model is None or runner is None:
         _persist_hold(store, owner, message_id, "runner_unavailable")
-        return ScreenResult("hold", hold_code="runner_unavailable")
+        return _aged_review_hold(
+            store,
+            owner,
+            _review_target(envelope, snapshot, epoch, item),
+            ScreenResult("hold", hold_code="runner_unavailable"),
+        )
 
     # Canonical provider (R6/R8/Q3): the job must carry a REAL configured
     # provider, never an empty string from a fixture snapshot. The trusted
@@ -1954,7 +1964,7 @@ async def _screen_core(
     if isinstance(prepared, ScreenResult):
         return prepared
     tier = screening_allocation(item)
-    return await _screen_spend(
+    result = await _screen_spend(
         owner,
         prepared,
         store=store,
@@ -1967,6 +1977,8 @@ async def _screen_core(
         authority=authority,
         privacy_runner_factory=privacy_runner_factory,
     )
+    # The pass's FINAL hold: the chain has already walked every hop.
+    return _aged_review_hold(store, owner, prepared, result)
 
 
 def _item_message_id(item: Mapping[str, Any]) -> str:
@@ -2660,6 +2672,139 @@ def _unusable_review_hold(
     )
     logger.info("bridge: screening unusable passes=%d converted code=%s", passes, code)
     return ScreenResult("hold", hold_code=code)
+
+
+#: Screening-unavailable codes that convert to owner review once the hold is old
+#: enough (operator report 2026-11-17). Before this, only an empty/unparsable
+#: reply had an exit (:func:`_unusable_review_hold`); every code here re-held on
+#: the connector's ladder forever, published as ``screening_unavailable`` with
+#: ``delay: transient``. Each one is reached only AFTER the envelope validated
+#: and the policy epoch is known, which is what a review decision row (and so a
+#: Deliver that can commit) needs. Deliberately NOT here: ``policy_stale`` raised
+#: BEFORE an epoch exists (no decision can bind to it; the post-dispatch
+#: ``policy_stale`` IS covered), ``owner_changed``/``stale_generation`` (the
+#: owner itself moved, so no row could be written), ``busy``/``retry_later``
+#: (another worker holds the turn; the next pass decides), ``template_mismatch``
+#: (pre-envelope), and ``parse_failed``/``empty_reply``, which keep their own
+#: pass-counted exit.
+AGED_REVIEW_CODES = frozenset(
+    {
+        "provider_error",
+        "breaker_open",
+        "runner_unavailable",
+        "budget_exhausted",
+        "policy_stale",
+        "model_identity_unknown",
+        "model_identity_mismatch",
+        "screening_model_unavailable",
+        "screening_unavailable",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _ReviewTarget:
+    """The fields a review decision row binds to, for a hold raised before
+    :class:`_Prepared` exists (the breaker and availability checks)."""
+
+    envelope: Envelope
+    snapshot: PolicySnapshot
+    epoch: int
+    sender_account_id: str
+    conversation_id: str
+
+
+def _review_target(
+    envelope: Envelope, snapshot: PolicySnapshot, epoch: int, item: Mapping[str, Any]
+) -> _ReviewTarget:
+    # The same two identities ``_screen_prepare`` puts on ``_Prepared``, so a
+    # review row raised before it exists binds exactly what a later one would.
+    return _ReviewTarget(
+        envelope=envelope,
+        snapshot=snapshot,
+        epoch=int(epoch),
+        sender_account_id=envelope.sender_account,
+        conversation_id=_conversation_of(item),
+    )
+
+
+def _aged_review_hold(
+    store: Store,
+    owner: OwnerSnapshot,
+    target: "_Prepared | _ReviewTarget",
+    result: ScreenResult,
+) -> ScreenResult:
+    """Turn an OLD screening-unavailable hold into the owner's review; else ``result``.
+
+    WHY. A screening-unavailable hold had no age limit and no exit: a provider
+    outage, an open breaker or a stale policy re-held the message on the
+    connector's ladder (gap capped at 1 h) indefinitely while the sender was
+    promised a transient delay (production, 2026-11-17: five messages held for
+    hours, later admitted ``allow``). Past
+    ``team_bridge.screening_hold_review_after_minutes`` the hold becomes
+    ``model_hold`` with a review decision row — the existing Deliver/Discard
+    path, published as ``awaiting_review`` — so a person decides.
+
+    CONSTRAINTS.
+
+    * NEVER DELIVERS. The conversion only hands the decision to the owner;
+      nothing is admitted without their signed word. Moderation stays
+      fail-closed.
+    * DURABLE AGE. Measured from the hold rows' ``created_at``
+      (:meth:`Store.screening_hold_first_held_at`), never from the loop's
+      in-memory ``_RETRY_ATTEMPTS``, so a connector restart cannot reset it.
+    * THE CASCADE GETS ITS CHANCE FIRST. Called only with a pass's final hold —
+      after the screening chain walked the preferred hop and every fallback
+      (``ScreenChainRunner``), or with ``breaker_open``, which the breaker only
+      reaches after whole-chain failures. A pass on which any hop answered
+      never arrives here with one of these codes.
+    * NOT CACHED. No model answered, so nothing goes into the answer cache: an
+      identical later message gets its own screening. The decision row is
+      replayed by ``_replay_work_scope_decision`` with no model call.
+    * ``review_held`` off or the threshold ``0`` keeps today's behaviour.
+    """
+
+    from local_operator.team_bridge import hold_release as hr
+
+    code = result.hold_code
+    if result.disposition != "hold" or code not in AGED_REVIEW_CODES:
+        return result
+    threshold = hr.screening_hold_review_after_s(store.config_dir)
+    if threshold is None:
+        return result
+    message_id = target.envelope.message_id
+    first_held = store.screening_hold_first_held_at(owner, message_id)
+    if first_held is None:
+        # No durable row (the hold write was refused): nothing to age.
+        return result
+    import time as _time
+
+    age = _time.time() - first_held
+    if age < threshold:
+        return result
+    review_code = "model_hold"
+    _persist_hold(store, owner, message_id, review_code)
+    _record_review_decision(
+        store,
+        owner,
+        target,
+        review_code,
+        # Nothing answered: the configured screener is the provenance (the row
+        # falls back to ``snapshot.default_model``), with no hop and no verdict,
+        # so the signed record never claims a model judged this message.
+        actual_model="",
+        served_provider="",
+        served_hop=None,
+        screener_preferred=False,
+        screener_verdict="",
+    )
+    logger.info(
+        "bridge: screening hold aged code=%s age_s=%d converted code=%s",
+        code,
+        int(age),
+        review_code,
+    )
+    return ScreenResult("hold", hold_code=review_code)
 
 
 def _answer_key_model(
@@ -3392,7 +3537,7 @@ def _REVIEW_HOLD_CODES() -> frozenset[str]:
 def _record_review_decision(
     store: Store,
     owner: OwnerSnapshot,
-    prepared: "_Prepared",
+    prepared: "_Prepared | _ReviewTarget",
     code: str,
     *,
     actual_model: str | None,
@@ -4222,6 +4367,48 @@ async def _screen_batch_core(
     turn: str,
     privacy_runner_factory: Any = None,
 ) -> "list[ScreenResult]":
+    """The batch pass, then the aged-hold escalation per message.
+
+    Content-blind holds (``provider_error``, ``budget_exhausted`` …) stay
+    batchable, so a message whose retries always ride a batch would otherwise
+    never meet :func:`_aged_review_hold` — the same exit the single path has.
+    """
+
+    prepared_at: dict[int, _Prepared] = {}
+    results = await _screen_batch_pass(
+        owner,
+        items,
+        config_dir=config_dir,
+        policy=policy,
+        runner=runner,
+        nonce=nonce,
+        turn=turn,
+        privacy_runner_factory=privacy_runner_factory,
+        prepared_at=prepared_at,
+    )
+    store = Store(config_dir)
+    return [
+        (
+            _aged_review_hold(store, owner, prepared_at[index], result)
+            if index in prepared_at
+            else result
+        )
+        for index, result in enumerate(results)
+    ]
+
+
+async def _screen_batch_pass(
+    owner: OwnerSnapshot,
+    items: "Sequence[Mapping[str, Any]]",
+    *,
+    config_dir: Path,
+    policy: ScreeningPolicy,
+    runner: ScreenRunner | None,
+    nonce: str | None,
+    turn: str,
+    privacy_runner_factory: Any = None,
+    prepared_at: "dict[int, _Prepared] | None" = None,
+) -> "list[ScreenResult]":
     """Steps 1-14 over N messages with ONE reservation unit and ONE dispatch.
 
     Per message: ``_screen_prepare`` (early holds and cache hits charge
@@ -4262,6 +4449,8 @@ async def _screen_batch_core(
             results[index] = ScreenResult("hold", hold_code="retry_later")
         else:
             pending.append((index, prepared))
+            if prepared_at is not None:
+                prepared_at[index] = prepared
     if not pending:
         return [result or ScreenResult("hold", hold_code="retry_later") for result in results]
 

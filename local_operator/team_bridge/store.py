@@ -8211,6 +8211,63 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def screening_hold_first_held_at(self, owner: OwnerSnapshot, message_id: str) -> float | None:
+        """When this message was FIRST held, from the durable rows; ``None`` if unheld.
+
+        WHY (operator report 2026-11-17). The screening-unavailable escalation
+        (``screening._aged_review_hold``) needs a hold age that a connector
+        restart cannot reset, so it must not come from the loop's in-memory
+        ``_RETRY_ATTEMPTS``. ``created_at`` is that fact: every re-hold upserts IN
+        PLACE and keeps it (``persist_hold``, PR #3063 m10).
+
+        WHY THE MINIMUM ACROSS BOTH KEYSPACES. A held conversation message has
+        two rows (:func:`_screening_hold_row`): the screener's bare ``bcmsg_``
+        row, which :meth:`retire_due_bare_conversation_holds` deletes every tick
+        once due — so its ``created_at`` restarts on every pass — and the
+        connector's composite feed-ref row, which lives until a verdict. The
+        earliest of them is the age the sender has actually waited. Read-only;
+        a damaged store answers ``None`` (no escalation, the old behaviour).
+        """
+
+        from local_operator.team_bridge.types import (
+            CONVERSATION_FEED_KIND,
+            CONVERSATION_FEED_TYPE,
+            is_conversation_message_id,
+        )
+
+        owner_key = _owner_key(owner)
+        try:
+            exact = _contentless_delivery_key(message_id)
+        except StoreRefused:
+            return None
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                stamps: list[float] = []
+                row = conn.execute(
+                    "SELECT created_at FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, exact),
+                ).fetchone()
+                if row is not None and row["created_at"] is not None:
+                    stamps.append(float(row["created_at"]))
+                if is_conversation_message_id(message_id):
+                    prefix = f"{CONVERSATION_FEED_TYPE}:{CONVERSATION_FEED_KIND}="
+                    for candidate in conn.execute(
+                        "SELECT message_id, created_at FROM screening_holds "
+                        "WHERE owner_key = ? AND substr(message_id, 1, ?) = ? "
+                        "AND instr(message_id, ?) > 0",
+                        (owner_key, len(prefix), prefix, f"/{message_id}/"),
+                    ).fetchall():
+                        if (
+                            screening_hold_message_id(str(candidate["message_id"])) == message_id
+                            and candidate["created_at"] is not None
+                        ):
+                            stamps.append(float(candidate["created_at"]))
+        except sqlite3.Error:
+            return None
+        finite = [stamp for stamp in stamps if math.isfinite(stamp)]
+        return min(finite) if finite else None
+
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
 

@@ -217,6 +217,32 @@ DEFAULT_HOLD_RELEASE = False
 #: ``/settings`` row, for the same i18n-ledger reason as ``hold_release``.
 DEFAULT_REVIEW_HELD = True
 
+#: ``team_bridge.screening_hold_review_after_minutes`` — how long a message may
+#: sit in a SCREENING-UNAVAILABLE hold (``provider_error``, ``breaker_open``,
+#: ``policy_stale``, ``model_identity_unknown`` and the rest of
+#: ``store._HOLD_CLASS_SCREENING_UNAVAILABLE``) before it becomes the owner's
+#: review (``model_hold`` + a review decision row: Deliver/Discard). ``0`` turns
+#: the escalation off (the old retry-forever ladder); valid range 0..10080.
+#:
+#: WHY (operator report 2026-11-17). Those holds had no age limit and no exit:
+#: only an empty/unparsable reply escalated (``UNUSABLE_PASSES_BEFORE_REVIEW``),
+#: every other code re-held on the connector's ladder (gap capped at 1 h)
+#: forever while the sender read "temporarily unavailable" — five production
+#: messages sat for hours and were later admitted ``allow``. The age is the
+#: hold row's DURABLE ``created_at`` (``Store.screening_hold_first_held_at``),
+#: never the loop's in-memory ``_RETRY_ATTEMPTS``, so a restart cannot reset it.
+#:
+#: WHY 30. The ladder (``connector/loop.py``: 60 s doubling) re-screens at
+#: ~+1, +3, +7, +15 and +31 min, and the account breaker's longest rung is
+#: 900 s (``Store.BREAKER_BACKOFF_S``), so 30 minutes gives the full screening
+#: chain (preferred model, then every fallback hop) four to five complete passes
+#: and outlasts any single breaker window before a person is asked. It never
+#: delivers anything: escalation only hands the decision to the owner, so
+#: moderation stays fail-closed. Gated by ``review_held`` like every review
+#: hold. No ``/settings`` row, for the same i18n-ledger reason as
+#: ``hold_alert_after_minutes``.
+DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES = 30
+
 #: ``team_bridge.share_typing`` — whether this person's composers tell the other
 #: members of a conversation "X is typing" (typing-indicators design §7).
 #:
@@ -285,6 +311,7 @@ SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
 REVIEW_HELD_PATH = ("team_bridge", "review_held")
+SCREENING_HOLD_REVIEW_AFTER_PATH = ("team_bridge", "screening_hold_review_after_minutes")
 SHARE_TYPING_PATH = ("team_bridge", "share_typing")
 #: The SUBTREE the four screening ceilings live under. Readers take this tuple,
 #: so no consumer re-spells "where screening lives" and drifts from the writer.
@@ -497,6 +524,16 @@ def _hold_alert_after_minutes(value: Any) -> int:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
     if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
+    return value
+
+
+def _screening_hold_review_after_minutes(value: Any) -> int:
+    """Whole minutes in 0..10080, else the default (same rule as the alert)."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
+    if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
+        return DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
     return value
 
 
@@ -731,6 +768,9 @@ class TeamBridgeSettings:
     #: Owner review of cached answer holds (``hold_release.REVIEW_HOLD_CODES``);
     #: ON unless the file says a real ``false``.
     review_held: bool = DEFAULT_REVIEW_HELD
+    #: Minutes a screening-unavailable hold may age before it becomes the
+    #: owner's review; ``0`` = never (see the constant).
+    screening_hold_review_after_minutes: int = DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES
     #: Whether this person's composers report "is typing" (sender-side only).
     share_typing: bool = DEFAULT_TEAM_BRIDGE_SHARE_TYPING
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
@@ -796,6 +836,9 @@ class TeamBridgeSettings:
                 get(SCREENING_MODEL_PATH, DEFAULT_TEAM_BRIDGE_SCREENING_MODEL)
             ),
             review_held=get(REVIEW_HELD_PATH, DEFAULT_REVIEW_HELD) is not False,
+            screening_hold_review_after_minutes=_screening_hold_review_after_minutes(
+                get(SCREENING_HOLD_REVIEW_AFTER_PATH, DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES)
+            ),
             share_typing=_share_typing(get(SHARE_TYPING_PATH, _MISSING)),
         )
 

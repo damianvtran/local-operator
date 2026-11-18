@@ -43,6 +43,9 @@ from local_operator.team_bridge.events import plan_feed_refs
 from local_operator.team_bridge.screening import ScreenResult
 from local_operator.team_bridge.store import OwnerReceipt, Store, StoreRefused
 from local_operator.team_bridge.types import OwnerSnapshot, project_events_batch
+from tests.unit.team_bridge.test_hold_release import (  # noqa: F401 — used by review_rig
+    rig,
+)
 
 CONVERSATION_ID = "bcv_abcdefgh"
 MESSAGE_ID = "bcmsg_abcdef01"
@@ -1793,3 +1796,317 @@ def test_the_config_request_rule_reaches_the_model_once_per_hop() -> None:
     assert "tell your operator of real conflicts or new risk, nothing else" in peer
     assert wrapped.count(peer) == 1
     assert wrapped.index(BRIDGE_UNTRUSTED_CLAUSE) < wrapped.index(peer) < wrapped.index(rule)
+
+
+# --- screening-unavailable holds age into the owner's review ------------------
+#
+# Operator report 2026-11-17: ``provider_error``, ``breaker_open``,
+# ``policy_stale``, ``model_identity_unknown`` (and the rest of the
+# screening-unavailable class) re-held on the ladder forever, published as
+# ``delay: transient``; five production messages sat for hours. These cells run
+# the REAL connector iteration (feed ref, composite hold row, bare-row retire,
+# retry pass) over the REAL screening pipeline, with a scripted model, so the
+# durable age, the conversion and the Deliver path are what is under test.
+
+_SENDER_VICTOR = {"account_id": "acc_sender", "kind": "human", "display_label": "Victor"}
+_THRESHOLD_MIN = 30
+
+
+@pytest.fixture
+def review_rig(request: pytest.FixtureRequest):
+    """``test_hold_release``'s enrolled owner + real file-only operator key.
+
+    Taken by name so the signed Deliver path is the real one; requested through
+    ``getfixturevalue`` so this module's tests never shadow the imported name.
+    """
+
+    return request.getfixturevalue("rig")
+
+
+def _review_config(config_dir: Path, *, minutes: int = _THRESHOLD_MIN) -> None:
+    (config_dir / "config.yml").write_text(
+        json.dumps(
+            {
+                "values": {
+                    "team_bridge": {
+                        "enabled": True,
+                        "review_held": True,
+                        "screening_hold_review_after_minutes": minutes,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _escalation_rig(monkeypatch, config_dir: Path, owner: OwnerSnapshot, make_runner, **config):
+    """The conversation replay rig with the real screener behind ``screen_item``.
+
+    ``make_runner(policy)`` builds the pass's runner over a FRESH policy (the
+    connector resolves one per pass), so a runner can move that pass's live
+    policy without poisoning the next one.
+    """
+
+    from local_operator.team_bridge import screening
+    from tests.unit.team_bridge.test_hold_release import Policy
+
+    _review_config(config_dir, **config)
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    server = FakeServer(
+        notify={owner.endpoint_id: "all"}, active={owner.endpoint_id: True}, sender=_SENDER_VICTOR
+    )
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"recv": (owner, config_dir)})
+
+    async def real_screen(o: Any, item: Any, *, config_dir: Path, **_kw: Any) -> Any:
+        policy = Policy()
+        return await screening.screen_message_async(
+            o, item, config_dir=config_dir, policy=policy, runner=make_runner(policy)
+        )
+
+    monkeypatch.setattr(conversation_mod, "screen_item", real_screen)
+    return server, transcripts, clock
+
+
+def _handled_code(summary: dict[str, Any]) -> str | None:
+    handled = [row for row in summary.get("handled") or () if row.get("code")]
+    return handled[-1]["code"] if handled else None
+
+
+def _min_created_at(config_dir: Path) -> float:
+    return min(float(row["created_at"]) for row in _hold_rows(config_dir))
+
+
+def _composite_created_at(config_dir: Path) -> list[float]:
+    return [
+        float(row["created_at"])
+        for row in _hold_rows(config_dir)
+        if not str(row["message_id"]).startswith("bcmsg_")
+    ]
+
+
+class _BareRunner:
+    """A bare (unchained) model callback: ``(reply, served_model)`` or a raise."""
+
+    def __init__(
+        self,
+        *,
+        reply: str = "VERDICT: deliver\nREASON: ordinary.",
+        model: Any = None,
+        raises: BaseException | None = None,
+        on_call: Any = None,
+    ) -> None:
+        self.reply, self.model, self.raises, self.on_call, self.calls = (
+            reply,
+            model,
+            raises,
+            on_call,
+            0,
+        )
+
+    def __call__(self, prompt: str, *, default_model: str) -> tuple[str, Any]:
+        self.calls += 1
+        if self.on_call is not None:
+            self.on_call()
+        if self.raises is not None:
+            raise self.raises
+        return self.reply, self.model
+
+
+def _scenario(code: str, monkeypatch) -> tuple[Any, list[_BareRunner]]:
+    """``make_runner`` for a pass that ends in ``code``; the runners it built."""
+
+    from tests.unit.team_bridge.test_hold_release import SONNET
+
+    built: list[_BareRunner] = []
+    if code == "breaker_open":
+        # An open account breaker (it only opens after whole-chain failures).
+        monkeypatch.setattr(
+            Store,
+            "screening_breaker_state",
+            lambda self, owner: {
+                "failures": 5,
+                "open_until": time.time() + 10**6,
+                "last_failure_class": None,
+            },
+        )
+
+    def make(policy: Any) -> _BareRunner:
+        if code == "provider_error":
+            runner = _BareRunner(raises=RuntimeError("route down"))
+        elif code == "policy_stale":
+
+            def moved() -> None:
+                policy.admission_revision = "rev-moved-mid-dispatch"
+
+            runner = _BareRunner(model=SONNET[1], on_call=moved)
+        elif code == "model_identity_unknown":
+            runner = _BareRunner(model=None)
+        else:  # breaker_open: never dispatched
+            runner = _BareRunner(model=SONNET[1])
+        built.append(runner)
+        return runner
+
+    return make, built
+
+
+_ESCALATING_CODES = ["provider_error", "breaker_open", "policy_stale", "model_identity_unknown"]
+
+
+@pytest.mark.parametrize("code", _ESCALATING_CODES)
+def test_a_screening_unavailable_hold_becomes_owner_review_after_the_threshold(
+    review_rig, monkeypatch, code
+) -> None:
+    from local_operator.team_bridge.store import delivery_hold_class
+
+    config_dir, store, owner = review_rig
+    make, built = _scenario(code, monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+
+    first = _run(owner, config_dir)
+    t0 = clock.now
+    # provider_error opens the breaker, so its later passes may read breaker_open:
+    # both are the screening-unavailable class, which is the point.
+    assert _handled_code(first) == code
+    assert delivery_hold_class(code) == "screening_unavailable"
+    created = _min_created_at(config_dir)
+    assert created == pytest.approx(t0)
+    composite = _composite_created_at(config_dir)
+    assert composite, "the connector's durable feed-ref row exists"
+
+    # Below the threshold: today's behaviour — still the transient class, no
+    # review row, nothing delivered.
+    clock.now += 15 * 60 + 5
+    below = _run(owner, config_dir)
+    below_code = _handled_code(below)
+    assert below_code != "model_hold" and delivery_hold_class(below_code) == "screening_unavailable"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+    # Past it: the owner's review, published as awaiting_review.
+    clock.now = t0 + _THRESHOLD_MIN * 60 + 5
+    aged = _run(owner, config_dir)
+    assert _handled_code(aged) == "model_hold"
+    assert delivery_hold_class("model_hold") == "awaiting_review"
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "model_hold" and decision["eligible"]
+    # Nothing answered: the signed record claims no verdict and no hop.
+    assert decision["screener_verdict"] == "" and decision["screener_hop"] == -1
+
+    # Later passes replay the review with no model call; nothing is delivered.
+    calls = sum(r.calls for r in built)
+    clock.now += 2 * 3600
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert sum(r.calls for r in built) == calls
+    assert transcripts.get("s1", []) == [] and transcripts.get("sess_recv", []) == []
+    assert [row for row in server.admits if row["verdict"] == "allow"] == []
+    # The durable age never moved.
+    assert _composite_created_at(config_dir) == composite
+    assert store.screening_hold_first_held_at(owner, MESSAGE_ID) == pytest.approx(created)
+
+
+def test_escalation_survives_a_restart_that_clears_the_retry_counter(
+    review_rig, monkeypatch
+) -> None:
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("provider_error", monkeypatch)
+    _server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+
+    _run(owner, config_dir)
+    t0 = clock.now
+    for minutes in (8, 16, 24):
+        loop_mod._RETRY_ATTEMPTS.clear()  # a connector restart
+        clock.now = t0 + minutes * 60
+        assert _handled_code(_run(owner, config_dir)) != "model_hold"
+    loop_mod._RETRY_ATTEMPTS.clear()
+    clock.now = t0 + _THRESHOLD_MIN * 60 + 1
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is not None
+    assert all(not rows for rows in transcripts.values())
+
+
+def test_a_deliver_decision_on_an_escalated_hold_delivers_it_once(review_rig, monkeypatch) -> None:
+    from tests.unit.team_bridge.test_hold_release import _decide
+
+    config_dir, _store, owner = review_rig
+    make, _built = _scenario("model_identity_unknown", monkeypatch)
+    server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+
+    _run(owner, config_dir)
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    assert _handled_code(_run(owner, config_dir)) == "model_hold"
+    assert server.admits == []
+
+    _decide(config_dir, owner, "deliver", body=BODY)
+    clock.now += 2 * 3600  # every hold row is due again
+    _run(owner, config_dir)
+    _drive_across_leases(owner, config_dir, clock)
+    delivered = [row for rows in transcripts.values() for row in rows]
+    assert len(delivered) == 1, "delivered exactly once, on the owner's word"
+    # The fake hub re-serves the ref every iteration, so the idempotent admit is
+    # re-posted; every one of them is the owner's ``allow``, none before it.
+    assert server.admits and {row["verdict"] for row in server.admits} == {"allow"}
+
+
+def test_a_fallback_hop_that_answers_admits_before_any_escalation(review_rig, monkeypatch) -> None:
+    """The cascade gets its chance first: a pass on which the fallback answers
+    admits even when the hold is already older than the threshold."""
+
+    from local_operator.model.configure import build_model_spec
+    from local_operator.team_bridge.model_boundary import (
+        DefaultSelection,
+        ScreenChainRunner,
+    )
+
+    config_dir, store, owner = review_rig
+    fallback_up = {"flag": False}
+
+    class _Hop:
+        def __init__(self, model: str, primary: bool) -> None:
+            self.model, self.primary = model, primary
+
+        async def acall(self, prompt: str, *, default_model: str, **_: Any) -> Any:
+            if self.primary or not fallback_up["flag"]:
+                raise TimeoutError("route timed out")  # a route failure: advances
+            return "VERDICT: deliver\nREASON: ordinary.", self.model
+
+    def make(policy: Any) -> Any:
+        models = (policy.default_model, "claude-opus-5-5")
+        policy.approved_serving_identities = models
+        hops = [
+            DefaultSelection(policy.provider, m, build_model_spec(policy.provider, m))
+            for m in models
+        ]
+        return ScreenChainRunner(hops, lambda hop: _Hop(hop.model_id, hop.model_id == models[0]))
+
+    _server, transcripts, clock = _escalation_rig(monkeypatch, config_dir, owner, make)
+    held = _run(owner, config_dir)
+    assert _handled_code(held) in {"provider_error", "screening_model_unavailable"}
+
+    fallback_up["flag"] = True
+    clock.now += _THRESHOLD_MIN * 60 + 5
+    _run(owner, config_dir)
+    delivered = [row for rows in transcripts.values() for row in rows]
+    assert len(delivered) == 1
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+@pytest.mark.parametrize("minutes", [0, 120], ids=["escalation-off", "below-threshold"])
+def test_the_control_keeps_todays_retry_below_the_threshold(
+    review_rig, monkeypatch, minutes
+) -> None:
+    from local_operator.team_bridge.store import delivery_hold_class
+
+    config_dir, store, owner = review_rig
+    make, _built = _scenario("provider_error", monkeypatch)
+    _server, transcripts, clock = _escalation_rig(
+        monkeypatch, config_dir, owner, make, minutes=minutes
+    )
+    _run(owner, config_dir)
+    t0 = clock.now
+    for step in range(1, 7):  # 90 minutes of passes
+        clock.now = t0 + step * 15 * 60
+        code = _handled_code(_run(owner, config_dir))
+        assert code != "model_hold" and delivery_hold_class(code) == "screening_unavailable"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    assert all(not rows for rows in transcripts.values())

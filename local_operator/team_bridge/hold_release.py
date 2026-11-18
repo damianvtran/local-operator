@@ -284,6 +284,31 @@ def review_enabled(config_dir: Path | str) -> bool:
     return TeamBridgeSettings.from_values(values).review_held
 
 
+def screening_hold_review_after_s(config_dir: Path | str) -> float | None:
+    """Seconds a screening-unavailable hold may age before owner review; ``None`` = never.
+
+    ``None`` when ``review_held`` is off (a review hold would have no exit) or
+    ``team_bridge.screening_hold_review_after_minutes`` is ``0``; see that
+    constant in ``team_bridge/settings.py`` for why the default is 30.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.team_bridge.settings import (
+        DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES,
+        TeamBridgeSettings,
+    )
+
+    values = read_config_values(Path(config_dir))
+    if values is None:
+        minutes, review = DEFAULT_SCREENING_HOLD_REVIEW_AFTER_MINUTES, review_enabled(config_dir)
+    else:
+        settings = TeamBridgeSettings.from_values(values)
+        minutes, review = settings.screening_hold_review_after_minutes, settings.review_held
+    if not review or minutes <= 0:
+        return None
+    return float(minutes) * 60.0
+
+
 def enabled_for(config_dir: Path | str, hold_code: str | None) -> bool:
     """Is the release path open for a decision/release of THIS hold code?
 
