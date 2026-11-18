@@ -52,6 +52,7 @@ import os
 import stat
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, TypedDict, cast
 
@@ -271,6 +272,8 @@ AUDIT_HANDING_OFF = "session.handoff.handing_off"
 AUDIT_COMMITTED = "session.handoff.committed"
 AUDIT_ROLLED_BACK = "session.handoff.rolled_back"
 AUDIT_DONE = "session.handoff.done"
+#: design §8.3: the owner answered a working-set preflight (counts only, no paths).
+AUDIT_WORKSET_PREFLIGHT = "session.workset.preflight"
 
 # ---------------------------------------------------------------------------
 # The ``session_move`` contract (frozen at P0; slices V and DB build against it)
@@ -379,6 +382,27 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         # can tell "a peer stopped answering" (its remedy is time) from "no row
         # at all" (its remedy is looking where the id was last staged, HERE).
         "no_holder",
+        # THE WORKING-SET GATE (docs/design/move-working-set.md §11.1). The session
+        # worked in git worktrees outside its directory and the move would arrive
+        # without them, so the OWNER refuses until the user has seen and confirmed
+        # that set. All four are ``changed: False`` and carry the fresh manifest in
+        # ``working_set``; a confirmed move passes the manifest's scope digest back.
+        "working_set_unconfirmed",  # non-empty manifest, no consent on the move
+        "working_set_changed",  # consent given for a different scope (or device)
+        "working_set_over_cap",  # the payload is over ``workset.DEFAULT_CAP_BYTES``
+        "working_set_unsupported",  # the owner predates the gate; --without-working-set
+    }
+)
+
+#: The subset of :data:`MOVE_REFUSAL_CODES` the working-set gate produces. A surface
+#: that holds one of these re-renders the refusal's ``working_set`` block and asks
+#: again — never a blind retry.
+WORKSET_REFUSAL_CODES: frozenset[str] = frozenset(
+    {
+        "working_set_unconfirmed",
+        "working_set_changed",
+        "working_set_over_cap",
+        "working_set_unsupported",
     }
 )
 
@@ -548,6 +572,12 @@ class SessionMoveResult(TypedDict):
     #: destination's supervisor is not running (``notice``), or confirms the
     #: supervisor it relies on (``supervisor: "running"``).
     carry: NotRequired[MoveCarryBlock]
+    #: The session's git working set (docs/design/move-working-set.md §3.4) —
+    #: ABSENT for every move whose manifest is empty, so a chat-only session's
+    #: receipt is unchanged byte for byte. Until the transfer half lands the block
+    #: says ``transferred: false`` and every planned worktree reads
+    #: ``left_behind``/``not_transferred``: the move was confirmed knowing that.
+    working_set: NotRequired[dict[str, Any]]
 
 
 class MoveEngagement(TypedDict):
@@ -587,6 +617,9 @@ class SessionMoveRefusal(TypedDict):
     session_id: str
     phase_reached: SessionMovePhase | None
     changed: bool
+    #: The FRESH manifest on a :data:`WORKSET_REFUSAL_CODES` refusal, so the surface
+    #: can show what the confirmation covers without a second preflight round trip.
+    working_set: NotRequired[dict[str, Any]]
 
 
 LifecycleAction = Literal["archive", "unarchive", "delete"]
@@ -877,8 +910,9 @@ def _move_refusal(
     *,
     phase_reached: SessionMovePhase | None = None,
     changed: bool = False,
+    working_set: dict[str, Any] | None = None,
 ) -> SessionMoveRefusal:
-    return {
+    refusal: SessionMoveRefusal = {
         "ok": False,
         "code": code,
         "message": message,
@@ -886,6 +920,11 @@ def _move_refusal(
         "phase_reached": phase_reached,
         "changed": changed,
     }
+    # ADDITIVE AND ABSENT BY DEFAULT: only the working-set gate's refusals carry a
+    # manifest, so every other refusal keeps the frozen five-key-plus-ok shape.
+    if working_set is not None:
+        refusal["working_set"] = working_set
+    return refusal
 
 
 #: ``created_at.json`` is the ONLY entry a bare remnant may hold: it is the birth
@@ -1344,10 +1383,16 @@ def _await_record_gone(root: Path, session_id: str, *, deadline_s: float) -> boo
 class Moved(Exception):
     """A peer answered a refusal. Carries the family's code and sentence."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, working_set: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        #: The owner's manifest when the refusal is the working-set gate's; it has to
+        #: survive this exception because the refusal is raised two hops away from
+        #: the surface that must render it.
+        self.working_set = working_set
 
 
 class LinkTransport:
@@ -1388,9 +1433,11 @@ class LinkTransport:
                 "the peer answered with nothing this build can read, so nothing was changed",
             )
         if str(detail.get("result") or "") == "refused":
+            raw_ws = detail.get("working_set")
             raise Moved(
                 str(detail.get("code") or "refused"),
                 str(detail.get("message") or detail.get("detail") or "the move was refused"),
+                working_set=dict(raw_ws) if isinstance(raw_ws, dict) else None,
             )
         return detail
 
@@ -1573,6 +1620,7 @@ def _destination_move(
     request_id: str = "",
     resume_queued: bool = False,
     drop_session_roles: bool = False,
+    working_set: dict[str, Any] | None = None,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -1721,6 +1769,12 @@ def _destination_move(
                     # every prepare so the key's presence does not depend on a
                     # boolean, and an older source ignores it.
                     "drop_session_roles": bool(drop_session_roles),
+                    # THE USER'S WORKING-SET CONSENT (design §4, §11.1): the owner's
+                    # gate compares ``confirm`` with the scope digest of the manifest
+                    # it computes for THIS device's authenticated id. Sent on every
+                    # prepare — ``confirm: None`` is "nothing confirmed", which is
+                    # what an old requester's missing key also reads as.
+                    "working_set": _consent_frame(working_set),
                 }
             )
         except Moved as refusal:
@@ -1733,7 +1787,11 @@ def _destination_move(
                     time.sleep(min(MOVE_WAIT_POLL_S, remaining))
                     continue
             code = refusal.code if refusal.code in MOVE_REFUSAL_CODES else "refused"
-            return None, _move_refusal(session_id, code, refusal.message), ""
+            return (
+                None,
+                _move_refusal(session_id, code, refusal.message, working_set=refusal.working_set),
+                "",
+            )
         if str(prepared.get("result") or "") == "queued":
             # THE SOURCE ACCEPTED THE QUEUE (design note §5.4) — the conversation is
             # NOT coming now: the owner holds the intent durably and will invite THIS
@@ -1762,6 +1820,10 @@ def _destination_move(
                 None,
                 "",
             )
+        # THE OWNER'S ARRIVAL BLOCK for the working set, carried into this receipt
+        # verbatim (absent when the session has none, and from an older owner).
+        raw_workset = prepared.get("working_set")
+        arrival_workset = dict(raw_workset) if isinstance(raw_workset, dict) else None
         lease_epoch = str(prepared.get("lease_epoch") or "")
         manifest_raw = prepared.get("manifest")
         manifest: dict[str, Any] = manifest_raw if isinstance(manifest_raw, dict) else {}
@@ -2238,6 +2300,8 @@ def _destination_move(
         receipt["carry"] = carry_block
     if engagement is not None:
         receipt["engagement"] = engagement
+    if arrival_workset is not None:
+        receipt["working_set"] = arrival_workset
     return (
         cast(SessionMoveResult, receipt),
         None,
@@ -3774,6 +3838,271 @@ def _session_roles_refusal(
     }
 
 
+# ---------------------------------------------------------------------------
+# The working-set consent gate (docs/design/move-working-set.md §3, §4 P1/P3, §11)
+# ---------------------------------------------------------------------------
+
+
+def _consent_frame(working_set: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The wire form of the user's consent: ``{version, confirm, without}``.
+
+    ONE SPELLING for every hop (request → relay → invite → prepare → queue record →
+    resume invite), so a hop that forwards it cannot drop a field the gate reads.
+    ``confirm`` is a scope digest or ``None``; ``without`` is the explicit "leave the
+    working set behind" consent (``--without-working-set``).
+    """
+    from local_operator.network.workset import WORKSET_VERSION
+
+    raw = working_set if isinstance(working_set, Mapping) else {}
+    confirm = str(raw.get("confirm") or "").strip()
+    return {
+        "version": WORKSET_VERSION,
+        "confirm": confirm or None,
+        "without": bool(raw.get("without") or False),
+    }
+
+
+def _workset_manifest(
+    server: "RelayServer", session_id: str, *, to_device: str, to_name: str = ""
+) -> Any:
+    """The owner's manifest for ``session_id`` → ``to_device``, or ``None`` if it failed.
+
+    FAIL-OPEN, DELIBERATELY AND LOUDLY: the manifest is a read-only inventory of git
+    state, and a bug or a missing ``git`` there must not make every move on the mesh
+    unmovable. A failure is logged at WARNING and the move proceeds as it did before
+    this gate existed — the pre-feature behaviour, never a silent widening (nothing is
+    TRANSFERRED on this path either way).
+    """
+    from local_operator.network import workset
+
+    try:
+        return workset.compute_manifest(
+            Path(server.root),
+            session_id,
+            to_device=to_device,
+            to_name=to_name or server._member_name(to_device),  # noqa: SLF001
+            cwd_hint=_source_session_cwd(server, session_id),
+        )
+    except Exception:  # noqa: BLE001 — see the docstring: an inventory bug never pins a session
+        logger.warning(
+            "mobility: the working-set manifest for %s could not be computed; the move "
+            "proceeds without the gate",
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _workset_refusal(
+    session_id: str, code: str, block: dict[str, Any], *, to_label: str
+) -> dict[str, Any]:
+    """One gate refusal in the in-ack shape ``LinkTransport.ask`` turns into ``Moved``.
+
+    The sentence is the relay's English fallback (every relay sentence is); surfaces
+    render their own localized text from ``code`` + the ``working_set`` numbers.
+    """
+    totals = block.get("totals") or {}
+    count = len(block.get("worktrees") or [])
+    messages = {
+        "working_set_unconfirmed": (
+            f"this conversation worked in {count} git "
+            f"{'worktree' if count == 1 else 'worktrees'} on this device "
+            f"({int(totals.get('unpushed_commits') or 0)} unpushed commits, "
+            f"{int(totals.get('dirty_files') or 0)} uncommitted files) that the move has "
+            f"to account for before it goes to {to_label}. Nothing was moved. Review them "
+            "with `lop sessions move <id> --to <device> --dry-run`, then confirm with "
+            "--confirm-working-set <scope_digest> or leave them here with "
+            "--without-working-set (an older lop that cannot do either must be updated)."
+        ),
+        "working_set_changed": (
+            "the working files changed since they were confirmed (a worktree, a withheld "
+            f"file or the destination differs), so nothing was moved to {to_label}; review "
+            "the fresh list and confirm again"
+        ),
+        "working_set_over_cap": (
+            f"the working files are larger than this device sends in one move "
+            f"({int(totals.get('bytes') or 0)} bytes, cap "
+            f"{int(totals.get('cap_bytes') or 0)}), so nothing was moved"
+        ),
+    }
+    return {
+        "result": "refused",
+        "code": code,
+        "message": messages.get(code, "the working files were not confirmed, so nothing moved"),
+        "session_id": session_id,
+        "working_set": block,
+    }
+
+
+def _workset_gate(
+    server: "RelayServer",
+    session_id: str,
+    *,
+    to_device: str,
+    consent: Mapping[str, Any] | None,
+    to_name: str = "",
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(refusal, arrival_block)`` for a ``move`` of ``session_id`` to ``to_device``.
+
+    THE SERVER-SIDE CONSENT CHECK (design §4 P1/P3). Runs on the OWNER, which is the
+    only device that can read the worktrees, with ``to_device`` the AUTHENTICATED
+    destination id (the prepare link's peer, or the id an offload resolved) — the
+    digest covers it, so consent shown for one device can never authorise another
+    (security lead, 2026-11-18). Both returns ``None`` → an empty working set: the
+    move proceeds exactly as before and its receipt carries no ``working_set`` key.
+
+    PR A HAS NO TRANSFER, and the arrival block says so (``transferred: false``,
+    each planned worktree ``left_behind``/``not_transferred``). SEAM FOR THE TRANSFER
+    HALF: where ``manifest.carries_files`` is true it stages the planned worktrees
+    after P3 and binds their artifact digests to the lease epoch
+    (``workset._artifact_binding``); the over-cap refusal below is live only then,
+    because a cap on bytes that are not sent would refuse moves for nothing.
+    """
+    from local_operator.network import workset
+
+    manifest = _workset_manifest(server, session_id, to_device=to_device, to_name=to_name)
+    if manifest is None or manifest.empty:
+        return None, None
+    block = manifest.to_dict()
+    label = manifest.to_name or to_device
+    given = _consent_frame(consent)
+    if given["without"]:
+        arrival = workset.arrival_block(manifest)
+        arrival["consent"] = "without"
+        return None, arrival
+    if not given["confirm"]:
+        return _workset_refusal(session_id, "working_set_unconfirmed", block, to_label=label), None
+    if given["confirm"] != block["scope_digest"]:
+        return _workset_refusal(session_id, "working_set_changed", block, to_label=label), None
+    if manifest.carries_files and manifest.over_cap:
+        return _workset_refusal(session_id, "working_set_over_cap", block, to_label=label), None
+    arrival = workset.arrival_block(manifest)
+    arrival["consent"] = "confirmed"
+    return None, arrival
+
+
+def _source_workset_preflight(
+    server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
+) -> dict[str, Any]:
+    """``net_session_move {phase: "workset_preflight"}``: the manifest, READ-ONLY.
+
+    The recall's preflight (design §3.1, §10): the requester is the destination, so
+    the manifest is computed for the LINK's authenticated device id — never for a
+    ``to_device`` the frame names. Nothing is retired, journaled or written; it rides
+    the ``net_session_move`` op, so the relay's ``move`` capability check already
+    admitted the caller (design §8.2 (a)). An owner older than this phase answers
+    ``unknown move phase``, which the requester reports as ``working_set_unsupported``.
+    """
+    from local_operator.network import workset
+
+    session_id = str(frame["session_id"])
+    if not _owned_here(server, session_id):
+        return {
+            "result": "refused",
+            "code": "not_owner",
+            "message": f"this device does not hold {session_id} any more",
+            "session_id": session_id,
+        }
+    manifest = _workset_manifest(server, session_id, to_device=link.device_id)
+    if manifest is None:
+        manifest = workset.Manifest(
+            to_device=link.device_id, to_name=server._member_name(link.device_id)  # noqa: SLF001
+        )
+    block = manifest.to_dict()
+    _audit(
+        server,
+        AUDIT_WORKSET_PREFLIGHT,
+        session_id,
+        link.device_id,
+        **workset.manifest_summary(block),
+    )
+    return {"result": "preflight", "session_id": session_id, "working_set": block}
+
+
+def _ask_workset_preflight(
+    transport: "LinkTransport", session_id: str, owner_device: str, owner_name: str
+) -> dict[str, Any]:
+    """Ask a REMOTE owner for its manifest; the recall's preflight (design §10).
+
+    An owner older than the phase answers ``unknown move phase`` as a bare error
+    frame (``wire.refusal_frame`` drops the code), so that sentence is the only
+    signal there is; it becomes ``working_set_unsupported`` with an ``unsupported``
+    block naming the device, which the surfaces render as "<device> must be updated
+    to carry working files".
+    """
+    from local_operator.network import workset
+
+    try:
+        answer = transport.ask(
+            {"op": "net_session_move", "phase": "workset_preflight", "session_id": session_id}
+        )
+    except Moved as refusal:
+        if "unknown move phase" in str(refusal.message or ""):
+            block = workset.Manifest(
+                to_device=transport.server.identity.device_id,
+                to_name=str(transport.server._own_label()),  # noqa: SLF001
+                state="unsupported",
+            ).to_dict()
+            block["owner"] = {"device_id": owner_device, "name": owner_name}
+            raise Moved(
+                "working_set_unsupported",
+                f"{owner_name or owner_device} runs a lop that cannot tell which working "
+                "files this conversation uses, so nothing was moved; update lop there, or "
+                "re-run with --without-working-set to move the conversation and leave any "
+                "working files on that device",
+                working_set=block,
+            ) from refusal
+        raise
+    raw = answer.get("working_set")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str) -> dict[str, Any]:
+    """The ``--dry-run`` answer: ``{ok, dry_run, session_id, working_set}``, nothing moved.
+
+    Offload (``--to <peer>``): this device owns the session, so the manifest is
+    computed here for the peer's resolved device id. Recall (``--to local``): the
+    remote owner computes it over the link, for THIS device's authenticated id.
+    ``confirmation_required`` is the one boolean a surface branches on: an empty
+    manifest moves exactly as before, a non-empty one needs the scope digest.
+    """
+    from local_operator.network import workset
+
+    if to == "local":
+        if _owned_here(server, session_id):
+            raise Moved("already_local", f"{session_id} is already on this device")
+        owner_device, owner_name = resolve_remote_owner(server, session_id)
+        link = _link_for_move(server, owner_device, owner_name)
+        transport = LinkTransport(server, link, session_id)
+        try:
+            block = _ask_workset_preflight(transport, session_id, owner_device, owner_name)
+        except Moved as refusal:
+            if refusal.code != "working_set_unsupported" or refusal.working_set is None:
+                raise
+            block = refusal.working_set
+    else:
+        if not _owned_here(server, session_id):
+            raise Moved(
+                "third_device",
+                f"{session_id} does not live on this device, so it cannot be moved FROM here",
+            )
+        target_device, target_name = _resolve_typed_peer(server, to)
+        manifest = _workset_manifest(
+            server, session_id, to_device=target_device, to_name=target_name
+        )
+        if manifest is None:
+            manifest = workset.Manifest(to_device=target_device, to_name=target_name)
+        block = manifest.to_dict()
+    required = bool(block.get("worktrees")) or block.get("state") == "unsupported"
+    return {
+        "ok": True,
+        "dry_run": True,
+        "session_id": session_id,
+        "confirmation_required": required,
+        "working_set": block,
+    }
+
+
 def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     """The working directory this device's copy of ``session_id`` was last used in.
 
@@ -4034,6 +4363,23 @@ def _source_prepare(
                 ),
                 "session_id": session_id,
             }
+    # P1 — THE WORKING-SET CONSENT GATE, BEFORE THE RETIRE (design §4). Cheap (git
+    # reads only), nothing mutated, so an unconfirmed move costs the user nothing: the
+    # conversation keeps serving. ``to_device`` is the LINK's authenticated id — the
+    # destination is the device asking to pull — so a digest confirmed for another
+    # device answers ``working_set_changed``. A queued move's resume reaches here too,
+    # with the consent its record stored, and is re-judged on the then-current tree.
+    # ``--keep`` is not gated: it retires nothing and the source keeps every worktree.
+    workset_consent = _consent_frame(
+        frame.get("working_set") if isinstance(frame.get("working_set"), dict) else None
+    )
+    workset_arrival: dict[str, Any] | None = None
+    if not keep:
+        refused_ws, workset_arrival = _workset_gate(
+            server, session_id, to_device=link.device_id, consent=workset_consent
+        )
+        if refused_ws is not None:
+            return refused_ws
     if keep:
         # ``--keep`` MUTATES NOTHING here: no retirement, no journal, no tombstone.
         # The destination mints its own id and copies; the source keeps running, so
@@ -4195,6 +4541,9 @@ def _source_prepare(
                         if drop_session_roles and session_roles
                         else ""
                     ),
+                    # The resume prepare runs long after this frame is gone, so the
+                    # user's consent rides the intent exactly like the role opt-out.
+                    working_set=workset_consent,
                 )
             except Exception as exc:  # noqa: BLE001 — a record that cannot be written is a refusal
                 return {
@@ -4227,6 +4576,9 @@ def _source_prepare(
                 "queue": move_queue.payload(record),
                 "session_id": session_id,
             }
+            if workset_arrival is not None:
+                # What the queued move will (not) carry, stated when it is accepted.
+                queued_receipt["working_set"] = workset_arrival
             if session_roles and drop_session_roles:
                 # THE PROMISE THE QUEUED MOVE MAKES (M3): the very line the run
                 # will print later, in the tense that is true NOW — the stash does
@@ -4323,6 +4675,17 @@ def _source_prepare(
                 ),
                 "session_id": session_id,
             }
+    # P3 — THE SAME GATE ON THE QUIESCENT TREE (design §4): the retire above waited
+    # for the runtime to stop, so this manifest is the one the move would act on. A
+    # scope that changed since the user confirmed (a new worktree, a new withheld
+    # file) is refused before the journal is written — nothing journaled, nothing
+    # deleted, the same honest "ask again" as the busy refusal above. Run even when P1
+    # found nothing: a worktree the session entered during the retire's wait counts.
+    refused_ws, workset_arrival = _workset_gate(
+        server, session_id, to_device=link.device_id, consent=workset_consent
+    )
+    if refused_ws is not None:
+        return refused_ws
     lease_epoch = new_lease_epoch()
     manifest = sync_mod.build_manifest(
         server.root,
@@ -4382,6 +4745,9 @@ def _source_prepare(
     }
     if source_cwd:
         answer["cwd"] = source_cwd
+    if workset_arrival is not None:
+        # ADDITIVE: the destination copies it into its receipt; an older one ignores it.
+        answer["working_set"] = workset_arrival
     # THE SESSION'S LINKED PROJECTS TRAVEL WITH IT (2026-11-13: a session moved to
     # lop-remote-node-2 found "no project named secret-guardrails-relax" there — the
     # project store is per-device). Additive: an older destination ignores the key.
@@ -4918,6 +5284,10 @@ def _destination_invite(
     # LOH-9 S2: the inviter's explicit opt-out from the source's role-definition
     # gate travels to the prepare this destination sends; absent reads False.
     drop_session_roles = bool(frame.get("drop_session_roles") or False)
+    # The inviter's working-set consent, forwarded verbatim into the prepare: the
+    # gate that reads it runs on the OWNER, which is the device that invited us.
+    raw_consent = frame.get("working_set")
+    invite_consent = raw_consent if isinstance(raw_consent, dict) else None
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -4964,6 +5334,7 @@ def _destination_invite(
                 request_id=request_id,
                 resume_queued=resume_queued,
                 drop_session_roles=drop_session_roles,
+                working_set=invite_consent,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -5814,6 +6185,10 @@ def make_handler(
             # than touching the journal, so reconciling for it would be recovery work
             # done for a move that was refused.
             return _source_refused(server, link, frame)
+        if phase == "workset_preflight":
+            # READ-ONLY, so before the reconcile for the same reason as ``refused``:
+            # a preflight must never do recovery work for a move nobody started.
+            return _source_workset_preflight(server, link, frame)
         if phase == "cancel_queue":
             # THE QUEUE'S CANCEL, and it runs before the reconcile for the same
             # reason ``refused`` does: it is a durable-RECORD op and must be able
@@ -5907,6 +6282,16 @@ def local_move_handler(server: "RelayServer") -> Any:
         # Absent reads False, so an older caller gets the protective default.
         drop_session_roles = bool(frame.get("drop_session_roles") or False)
         to = str(frame.get("to") or "local")
+        # THE WORKING-SET CONSENT (design §11.1) and the read-only PREFLIGHT. The dry
+        # run answers BEFORE the reconcile on purpose: it must not do recovery work,
+        # write a journal or retire anything — it is how a surface learns what to show.
+        raw_consent = frame.get("working_set")
+        consent = raw_consent if isinstance(raw_consent, dict) else None
+        if bool(frame.get("dry_run") or False):
+            try:
+                return _workset_preflight_local(server, session_id, to=to)
+            except Moved as refusal:
+                return _move_refusal(session_id, refusal.code or "unreachable", refusal.message)
         try:
             reconcile(server.root, server=server, only=session_id)
         except Exception:  # noqa: BLE001 — recovery is best effort
@@ -5923,6 +6308,7 @@ def local_move_handler(server: "RelayServer") -> Any:
                     drop_session_roles=drop_session_roles,
                     request_id=request_id,
                     resume_queued=resume_queued,
+                    working_set=consent,
                 )
             return _offload(
                 server,
@@ -5934,6 +6320,7 @@ def local_move_handler(server: "RelayServer") -> Any:
                 queue=queue,
                 request_id=request_id,
                 drop_session_roles=drop_session_roles,
+                working_set=consent,
             )
         except Moved as refusal:
             # THE CONTROL CONNECTION MAY NOT DIE ON A MOVEMENT FAILURE. Every
@@ -5973,6 +6360,7 @@ def _recall(
     request_id: str = "",
     resume_queued: bool = False,
     drop_session_roles: bool = False,
+    working_set: dict[str, Any] | None = None,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to local``: this device is the destination and pulls.
 
@@ -6034,6 +6422,23 @@ def _recall(
     except Moved as refusal:
         return _move_refusal(session_id, "unreachable", refusal.message)
     transport = LinkTransport(server, link, session_id)
+    if not keep and not _consent_frame(working_set)["without"]:
+        # AN OWNER OLDER THAN THE GATE WOULD MOVE THE CONVERSATION AWAY FROM ITS
+        # WORKTREES WITHOUT A WORD (design §4.3). One read-only preflight tells: an
+        # owner that does not know the phase is refused ``working_set_unsupported``
+        # here, and only the explicit ``--without-working-set`` proceeds against it.
+        try:
+            _ask_workset_preflight(transport, session_id, owner_device, owner_name)
+        except Moved as refusal:
+            if refusal.code == "working_set_unsupported":
+                return _move_refusal(
+                    session_id,
+                    refusal.code,
+                    refusal.message,
+                    working_set=refusal.working_set,
+                )
+            # Any other failure is the move's own to report on its next ask.
+            logger.debug("mobility: working-set preflight of %s failed", session_id)
     result, refusal, _target = _destination_move(
         server,
         session_id,
@@ -6047,6 +6452,7 @@ def _recall(
         request_id=request_id,
         resume_queued=resume_queued,
         drop_session_roles=drop_session_roles,
+        working_set=working_set,
     )
     return result or refusal or _move_refusal(session_id, "unreachable", "the move did not finish")
 
@@ -6153,6 +6559,7 @@ def _offload(
     queue: bool = False,
     request_id: str = "",
     drop_session_roles: bool = False,
+    working_set: dict[str, Any] | None = None,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to <peer>``: this device owns the session and asks the peer to pull.
 
@@ -6215,6 +6622,31 @@ def _offload(
         held = _handoff_in_progress_refusal(server, session_id)
         if held is not None:
             return _move_refusal(session_id, "in_progress", str(held["message"]))
+    # THE WORKING-SET GATE, HERE AND FIRST (design §4 P1, §11.1). This device is the
+    # owner, so it can answer without dialling: a non-empty manifest the user did not
+    # confirm (or confirmed for a different scope or device) is refused before the
+    # destination is even asked, with the manifest on the refusal for the surface to
+    # render. ``target_device`` is the id this relay resolved from its own member
+    # table — the authenticated destination the digest binds to. The source prepare
+    # runs the same gate again (P1 + P3 on the quiescent tree), which is the check an
+    # older inviter or a third party cannot skip.
+    offload_consent = _consent_frame(working_set)
+    offload_workset: dict[str, Any] | None = None
+    if not keep:
+        refused_ws, offload_workset = _workset_gate(
+            server,
+            session_id,
+            to_device=target_device,
+            to_name=target_name,
+            consent=offload_consent,
+        )
+        if refused_ws is not None:
+            return _move_refusal(
+                session_id,
+                str(refused_ws["code"]),
+                str(refused_ws["message"]),
+                working_set=refused_ws.get("working_set"),
+            )
     try:
         link = _link_for_move(server, target_device, target_name)
     except Moved as refusal:
@@ -6316,6 +6748,9 @@ def _offload(
                 # gate) runs on the SOURCE, so the flag must travel with the
                 # invite — the destination folds it into its prepare.
                 "drop_session_roles": bool(drop_session_roles),
+                # The working-set consent, for the same reason: the gate that reads
+                # it is the source prepare the destination's pull triggers.
+                "working_set": offload_consent,
                 "to_device": target_device,
                 # THE SESSION'S AUTO AUTHORITY TRAVELS WITH THE INVITE, for the same
                 # reason as the two fields above: the runtime it would be applied at
@@ -6392,6 +6827,8 @@ def _offload(
             carry_block["monitors_notice"] = carry.monitors_notice(monitors_here)
         if carry_block:
             result_doc["carry"] = carry_block
+        if offload_workset is not None:
+            result_doc["working_set"] = offload_workset
         return cast(SessionMoveResult, result_doc)
     phases = _move_phases(server, session_id)
     reached = phases[-1]["phase"] if phases else None
@@ -6445,12 +6882,22 @@ def _offload(
         # by the same rule the deadline path below uses: the refusal is about whether
         # a retry is safe, and only the disk this device holds can answer that.
         code, message = refusal
+        refused_workset: dict[str, Any] | None = None
+        if code in WORKSET_REFUSAL_CODES:
+            # The source prepare's P3 refused (the scope changed during the retire's
+            # wait). The refusal crossed two hops as code + sentence only, and this
+            # device IS the owner, so the fresh manifest is recomputed here.
+            fresh = _workset_manifest(
+                server, session_id, to_device=target_device, to_name=target_name
+            )
+            refused_workset = fresh.to_dict() if fresh is not None else None
         return _move_refusal(
             session_id,
             code,
             message,
             phase_reached=reached,
             changed=bool(reached and reached != "prepared"),
+            working_set=refused_workset,
         )
     if keep:
         return _move_refusal(
@@ -6820,7 +7267,10 @@ def request_move(
     engage_on_arrival: bool = False,
     queue: bool = False,
     drop_session_roles: bool = False,
-) -> SessionMoveResult | SessionMoveRefusal:
+    confirm_working_set: str = "",
+    without_working_set: bool = False,
+    dry_run: bool = False,
+) -> SessionMoveResult | SessionMoveRefusal | dict[str, Any]:
     """Move (or with ``keep``, copy) ``session_id`` to the device named by ``to``.
 
     ``to`` is a peer name or device id, or ``"local"`` to recall a session to this
@@ -6846,6 +7296,15 @@ def request_move(
     owns the links and is the only process that speaks the mesh, and a second
     implementation of the protocol in a CLI would be a second thing to get wrong.
     A missing relay is a REFUSAL naming the remedy, never a silent no-op.
+
+    THE WORKING SET (docs/design/move-working-set.md §11.1). ``dry_run`` asks the
+    owner for the session's git working set and moves nothing: the answer is
+    ``{ok: True, dry_run: True, confirmation_required, working_set}``. A move whose
+    working set is non-empty is refused ``working_set_unconfirmed`` (with the manifest)
+    unless it carries ``confirm_working_set`` — the ``working_set.scope_digest`` the
+    user was shown — or the explicit ``without_working_set`` "leave it behind".
+    v1 has NO opt-in for history secrets (security ruling, 2026-11-18): a worktree
+    whose unpushed history holds secret-shaped material is listed as withheld.
     """
     from local_operator.network import relay, store
 
@@ -6894,6 +7353,11 @@ def request_move(
         # every request, never only when true, so the frame's shape does not
         # depend on a boolean; absent on an older relay reads False.
         drop_session_roles=bool(drop_session_roles),
+        # THE USER'S CONSENT, in the one wire spelling every hop forwards.
+        working_set=_consent_frame(
+            {"confirm": confirm_working_set, "without": bool(without_working_set)}
+        ),
+        dry_run=bool(dry_run),
     )
     if reply is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())
@@ -6914,6 +7378,8 @@ def request_move(
         "phase_reached": detail.get("phase_reached"),  # type: ignore[typeddict-item]
         "changed": bool(detail.get("changed", False)),
     }
+    if isinstance(detail.get("working_set"), dict):
+        shaped["working_set"] = detail["working_set"]
     return shaped
 
 

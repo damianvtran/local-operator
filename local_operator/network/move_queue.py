@@ -252,6 +252,7 @@ def enqueue(
     drop_session_roles: bool = False,
     session_roles: int = 0,
     session_roles_notice: str = "",
+    working_set: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Create (or return the existing) queue record for ``session_id``.
 
@@ -286,6 +287,11 @@ def enqueue(
             # the record, not be recomputed where the definitions do not exist.
             "session_roles": int(session_roles),
             "session_roles_notice": str(session_roles_notice),
+            # THE USER'S WORKING-SET CONSENT RIDES THE INTENT for the same reason as
+            # ``drop_session_roles``: the resume prepare re-runs the owner's gate on
+            # the then-current tree, and without the stored digest it would refuse the
+            # very move the user confirmed (docs/design/move-working-set.md §4).
+            "working_set": dict(working_set) if isinstance(working_set, dict) else None,
             "phase": QUEUE_PHASE_QUEUED,
             "phases": [{"phase": QUEUE_PHASE_QUEUED, "at": time.time()}],
             "detail": "",
@@ -900,6 +906,13 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
                 # Stored when the move was queued; the prepare this invite starts
                 # is on the SOURCE, which cannot see the original request.
                 "drop_session_roles": bool(record.get("drop_session_roles") or False),
+                # Stored for the same reason: the destination folds it into the
+                # resume prepare, where the owner's working-set gate reads it.
+                "working_set": (
+                    record.get("working_set")
+                    if isinstance(record.get("working_set"), dict)
+                    else None
+                ),
             }
         )
     except Exception as refusal:  # noqa: BLE001 — a Moved carries the sentence

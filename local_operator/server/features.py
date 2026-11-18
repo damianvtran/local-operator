@@ -979,6 +979,13 @@ def static_feature_flags() -> dict[str, Any]:
         # nothing.
         "peers": 1,
         "session_transfer": 1,
+        # The move's WORKING-SET GATE (docs/design/move-working-set.md §11.1):
+        # ``POST /v1/desktop/sessions/{id}/transfer/preflight`` and the
+        # ``confirm_working_set``/``without_working_set`` transfer fields. Its own
+        # key, per this file's rule: the old dialog keeps working byte for byte and
+        # meets an honest ``working_set_unconfirmed`` refusal (with the manifest)
+        # only for a session that has git worktrees to account for.
+        "session_transfer_working_set": 1,
         # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
         # tool and ``/project``). ONE key gating both the affordance and
         # the reads: the Projects tab, its CRUD dialogs and the

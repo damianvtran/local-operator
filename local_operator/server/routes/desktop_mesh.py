@@ -49,6 +49,8 @@ from local_operator.server.models.desktop_mesh import (
     PeerList,
     RemovedMember,
     RemoveMember,
+    TransferPreflight,
+    TransferPreflightRequest,
     TransferReceipt,
     TransferSession,
 )
@@ -254,6 +256,8 @@ async def transfer_session(session_id: str, body: TransferSession, request: Requ
             keep=bool(body.keep),
             wait_s=float(body.wait_s or 0.0),
             root=root,
+            confirm_working_set=str(body.confirm_working_set or ""),
+            without_working_set=bool(body.without_working_set),
         )
         if result.get("ok"):
             return transfer_receipt(result, session_id=session_id, keep=bool(body.keep), to=body.to)
@@ -264,6 +268,10 @@ async def transfer_session(session_id: str, body: TransferSession, request: Requ
             "message": str(result.get("message") or "the move was refused"),
             "changed": bool(result.get("changed")),
         }
+        if isinstance(result.get("working_set"), dict):
+            # The gate's refusals carry the FRESH manifest (design §11.1), so the
+            # dialog re-renders what it must confirm without another preflight.
+            document["working_set"] = result["working_set"]
         if code in _MOVE_UNCONFIRMED_CODES:
             # RETURNED rather than raised, so the receipt journal RECORDS it: a retry
             # of this request id replays "unconfirmed" instead of starting a second
@@ -292,12 +300,57 @@ async def transfer_session(session_id: str, body: TransferSession, request: Requ
         # (Addendum 2, C): the request was sent and the outcome is unknown, which is a
         # different instruction to the user than "the move was refused".
         code = str(result.get("code") or "move_refused")
-        raise HTTPException(
-            503 if code in _MOVE_UNCONFIRMED_CODES else 409,
-            _wd.desktop_refusal(
-                error=str(result.get("message") or "the move was refused")
-            ).envelope(code=code),
+        detail = _wd.desktop_refusal(
+            error=str(result.get("message") or "the move was refused")
+        ).envelope(code=code)
+        if isinstance(result.get("working_set"), dict):
+            # ADDITIVE on the 409 envelope: ``{code, params, text}`` is unchanged for
+            # every refusal that is not the working-set gate's.
+            detail["working_set"] = result["working_set"]
+        raise HTTPException(503 if code in _MOVE_UNCONFIRMED_CODES else 409, detail)
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/transfer/preflight",
+    response_model=CRUDResponse[TransferPreflight],
+)
+async def transfer_preflight(session_id: str, body: TransferPreflightRequest, request: Request):
+    """What moving ``session_id`` to ``to`` would do with its git working set. READ-ONLY.
+
+    The move dialog calls this when it opens (and again when the destination changes)
+    and renders the manifest: worktrees, unpushed and uncommitted counts, size, what is
+    withheld as secret-shaped and what is left behind. A non-empty manifest
+    (``confirmation_required``) means the transfer must carry
+    ``confirm_working_set: working_set.scope_digest`` or ``without_working_set: true``;
+    the owner refuses it otherwise (docs/design/move-working-set.md §11.1).
+
+    Gated, like the move itself, by ``features.session_transfer_working_set``. A
+    refusal (unknown peer, not this device's session, an owner that cannot answer) is
+    a 409 with the move's own code, the same envelope as ``transfer``.
+    """
+    root = _root(request)
+    async with errors(request):
+        try:
+            result = await asyncio.to_thread(
+                transfer, session_id, to=body.to, root=root, dry_run=True
+            )
+        except MeshRefusal as error:
+            raise _http_refusal(error) from None
+    if result.get("ok") and isinstance(result.get("working_set"), dict):
+        return reply(
+            {
+                "session_id": session_id,
+                "confirmation_required": bool(result.get("confirmation_required")),
+                "working_set": result["working_set"],
+            }
         )
+    code = str(result.get("code") or "move_refused")
+    raise HTTPException(
+        503 if code in _MOVE_UNCONFIRMED_CODES else 409,
+        _wd.desktop_refusal(
+            error=str(result.get("message") or "the preflight was refused")
+        ).envelope(code=code),
+    )
 
 
 def _root(request: Request) -> Path:
