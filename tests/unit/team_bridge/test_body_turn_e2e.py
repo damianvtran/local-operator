@@ -1714,7 +1714,10 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
     """
     from local_operator.harness.render import _default_convert_to_llm
     from local_operator.mobile import peer_send
-    from local_operator.team_bridge.card_projection import PENDING_CARD
+
+    # The journal card's marker now names its ids (bridge-body design §5) but
+    # still never carries a body; what is pinned is the retention prefix.
+    PENDING_CARD = "[team_bridge: body not retained in history"
     from local_operator.team_bridge.connector.conversation import (
         ConversationCardMetadata,
         _deliver_card,
@@ -1786,8 +1789,11 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
                 "expect:",
                 "sender-name-canary",
                 "private-room-canary",
-                CONVERSATION_ID,
-                MESSAGE_ID,
+                # The ids ARE in the marker now (bridge-body design §5: the
+                # agent needs them to re-read the message), but only inside
+                # the marker; the raw envelope's id lines never render.
+                f"conversation_id: {CONVERSATION_ID}",
+                f"message_id: {MESSAGE_ID}",
                 BODY,
                 "<team-bridge-message",
             ):
@@ -1803,6 +1809,10 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
             _message_texts(session._render_history(session._transcript.build_llm_history()))
         )
         assert PENDING_CARD in later, later
+        # Property B: the marker is not a completion oracle — the bytes the
+        # model saw while the body was pending equal those after completion.
+        marker = [line for line in before_body if PENDING_CARD in line]
+        assert marker and all(line in later for line in marker), (marker, later)
         assert "mention: no" not in later and "sender-name-canary" not in later, later
         assert BODY not in _transcript_text(tmp_path / "sess")
         print(

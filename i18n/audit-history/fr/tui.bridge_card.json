@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.bridge_card",
+  "history_sha256": "a6f6903234a7b1048fa7c1309ea8c2baff58cf480b71935c42c30a784f357f66",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "769543b0ce36575906cd49adfd51447874caddd2e5d3c4118d9549143ed318a7",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 52fccdacba96)",
+        "session": "52fccdacba96",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, job 14b97e09e500; independent of the translator)",
+        "session": "14b97e09e500",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace tui.bridge_card (14 keys, bridge-body PR 1+2). Independent audit PASS, 0 unresolved blocker/major. Minor applied as auditor-suggested: body.offline → 'Impossible de joindre Radient — rouvrez pour réessayer'. Remaining nits deferred. Target fr/tui.bridge_card.json sha256 d493fbe06dc203ea38aa1a5e09ce4bc0db62098323d47a7be121fb6c586df3d3. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    }
+  ]
+}

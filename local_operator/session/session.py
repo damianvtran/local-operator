@@ -21828,6 +21828,50 @@ class Session:
         self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
         return stranded
 
+    def _bridge_history_transform(self, messages: list[Any]) -> list[Any]:
+        """Attach bounded replay excerpts to recent Team Bridge journal cards.
+
+        WHY here: the excerpt is a STANDING decision (live owner, consent,
+        designation) and only the session holds the runtime that can prove it.
+        Re-evaluated on every physical provider call, so a revoked owner loses
+        excerpts at the next request (design §5, property C). It never mutates
+        the context: cards get request-local copies (``card_projection``).
+        Any failure is "no excerpts", which is today's ids-only marker.
+        """
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None or not any(
+            getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE
+            for message in messages
+        ):
+            return messages
+        try:
+            from local_operator.team_bridge.authority import authority_fence
+            from local_operator.team_bridge.card_projection import (
+                attach_history_excerpts,
+            )
+            from local_operator.team_bridge.store import _owner_key
+
+            if authority_fence(runtime) is not None:
+                return messages
+            return attach_history_excerpts(
+                messages, config_dir=runtime.config_dir, owner_key=_owner_key(runtime.owner)
+            )
+        except Exception:  # noqa: BLE001 — excerpts are optional; never fail a request
+            logger.debug("bridge: history excerpts skipped", exc_info=False)
+            return messages
+
+    def _compose_transform_context(self) -> Any:
+        """The loop's one ``transform_context``: excerpts first, then the live frame."""
+        frame = self._pending_body_turn
+        if getattr(self, "bridge_runtime", None) is None:
+            return frame.transform if frame is not None else None
+
+        def transform(messages: list[Any]) -> list[Any]:
+            shaped = self._bridge_history_transform(messages)
+            return frame.transform(shaped) if frame is not None else shaped
+
+        return transform
+
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
@@ -22376,11 +22420,10 @@ class Session:
                 # calls this once per PHYSICAL request, so a turn that makes
                 # several calls gets the same cached bytes every time (the
                 # per-call invariant lives in ``PendingTurn.for_call``).
-                transform_context=(
-                    self._pending_body_turn.transform
-                    if self._pending_body_turn is not None
-                    else None
-                ),
+                # Replay excerpts for past bridge cards ride the same hook
+                # (``_compose_transform_context``); without a bridge runtime it
+                # is exactly the frame's transform (or None), as before.
+                transform_context=self._compose_transform_context(),
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),

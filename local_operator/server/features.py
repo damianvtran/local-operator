@@ -1333,6 +1333,13 @@ def static_feature_flags() -> dict[str, Any]:
         # and on/off are NOT on these routes: they stay on `PATCH
         # /v1/settings/{key}`, the one write funnel.
         "notification_sounds": 1,
+        # TEAM BRIDGE CARD BODIES (bridge-body design §4): `GET
+        # /v1/desktop/sessions/{id}/bridge-cards/{entry_id}/body` and the relay's
+        # `/api/sessions/{id}/bridge-cards/{entry_id}/body` answer the admitted
+        # body (or held/refused/pending state) behind one inbound bridge card.
+        # Shared by desktop and relay because both serve the route. Absent, a
+        # client keeps today's "body unavailable" copy.
+        "team_bridge_card_body": 1,
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the

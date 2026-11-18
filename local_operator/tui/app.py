@@ -258,6 +258,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.bridge_card_body import card_body_loader
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
     OperatorCommandProvider,
@@ -63794,6 +63795,11 @@ class OperatorApp(App[None]):
                 TeamBridgeBlock(
                     bridge_card_text(message.details),
                     bridge_card_sender(message.details),
+                    # ``message_id`` is the persisted CustomMessage.id (the
+                    # entry id the resolver is keyed by).
+                    body_loader=card_body_loader(
+                        getattr(self, "_session", None), message.message_id or ""
+                    ),
                 )
             )
         else:

@@ -1,0 +1,16 @@
+{
+  "tui.bridge_card.frame.untrusted": "Message externe · contenu non fiable",
+  "tui.bridge_card.body.loading": "Chargement du message…",
+  "tui.bridge_card.body.pending": "En attente de transmission à votre agent",
+  "tui.bridge_card.body.held": "Retenu par la modération",
+  "tui.bridge_card.body.refused": "Refusé par la modération",
+  "tui.bridge_card.body.not_admitted": "Non transmis à votre agent",
+  "tui.bridge_card.body.unavailable": "Contenu du message indisponible",
+  "tui.bridge_card.body.signed_out": "Connectez-vous à Radient pour voir ce message",
+  "tui.bridge_card.body.other_account": "Reçu sur un autre compte Radient",
+  "tui.bridge_card.body.not_member": "Vous ne faites plus partie de cette conversation",
+  "tui.bridge_card.body.offline": "Impossible de joindre Radient — rouvrez pour réessayer",
+  "tui.bridge_card.body.show_more": "Afficher plus · {shown} sur {total, plural, one {# ligne} many {# de lignes} other {# lignes}} · appuyez sur m",
+  "tui.bridge_card.body.show_less": "Afficher moins · appuyez sur m",
+  "tui.bridge_card.body.more_messages": "{count, plural, one {# message supplémentaire dans cette carte} many {# de messages supplémentaires dans cette carte} other {# messages supplémentaires dans cette carte}}"
+}

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "tui.bridge_card",
+  "history_sha256": "6e5557ab30a1cefc82a92e8f5003ba26c6a8b7cea4acac40b9a6ebbf7558c009",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "769543b0ce36575906cd49adfd51447874caddd2e5d3c4118d9549143ed318a7",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 52fccdacba96)",
+        "session": "52fccdacba96",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, job 14b97e09e500; independent of the translator)",
+        "session": "14b97e09e500",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace tui.bridge_card (14 keys, bridge-body PR 1+2). Independent audit PASS, 0 unresolved blocker/major. Minor applied as auditor-suggested: body.more_messages capitalised 'Ещё' in all four plural arms. Remaining nits deferred. Target ru/tui.bridge_card.json sha256 ae7ae07d304e9edaa1fc04e2ca4a73e3f01d75ddb882c47bb7198541ace10cc4. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    }
+  ]
+}

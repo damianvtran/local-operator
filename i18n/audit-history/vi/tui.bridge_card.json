@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.bridge_card",
+  "history_sha256": "3f7d97b10ad799c5d11f7e7b45d356d17017d23c32f0df51099deccb9ec2a08a",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.bridge_card",
+      "source_sha256": "769543b0ce36575906cd49adfd51447874caddd2e5d3c4118d9549143ed318a7",
+      "translator": {
+        "agent": "translator specialist (lopdev team, job 52fccdacba96)",
+        "session": "52fccdacba96",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (lopdev team, job 14b97e09e500; independent of the translator)",
+        "session": "14b97e09e500",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-18",
+        "result": "passed",
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace tui.bridge_card (14 keys, bridge-body PR 1+2). Independent audit PASS, 0 unresolved blocker/major. Remaining nits deferred. Target vi/tui.bridge_card.json sha256 66663a7eb769439789c7e3abcebd99d454030791f8489514743cb70ac7d42cbd. Single independent audit on the same model family as the translator; no native-speaker audit claimed."
+    }
+  ]
+}
