@@ -4032,7 +4032,11 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             "Agent bridge: directory teammates/chiefs; dm person/agent direct/relay, "
             "not 'forward this'; channel_post rooms; send/reply bmsg_ answers only; "
             "shared_* owner-shared conversations. No approve/deny. "
-            "Reply where received; teammates use bridge. "
+            "Reply where received. "
+            # "teammates use bridge" was dropped (PR #4239, to pay for the
+            # emoji field's shortcode hint under the context budget): the next
+            # sentence already makes this the ONE teammate channel.
+            #
             # The operator's discoverability fix (one-channel rule): a session
             # holding THIS tool is the one place the rule is guaranteed to be
             # read, so the prohibition lives on the wire rather than only in the

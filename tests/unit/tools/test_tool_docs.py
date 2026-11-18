@@ -486,7 +486,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # design). The doc renders that description too, so the react blurb drops
     # its now-duplicate "(✅ or shortcode `thumbsup`)" to stay under the cap.
     # Measured by this test's print.
-    "bridge": 1996,
+    # 1996 -> 1990 (same PR, CI context-budget fix): the wire description drops
+    # "teammates use bridge" (restated by the ONE-channel sentence) and the
+    # ``to`` hint's "or substring" (implied by WHOLE), paying for the emoji hint.
+    "bridge": 1990,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
