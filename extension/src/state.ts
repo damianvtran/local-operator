@@ -34,6 +34,13 @@ export interface StoredSurface {
   // ephemeral, so a mismatch is never repaired on an ordinary command; only
   // explicit open/resume may establish and persist a fresh LO-owned group.
   appliedGroupId?: number;
+  // Origins this tab reached through a CONSUMED one-time approval (allow-once
+  // or an in-command popup approval). The once grant is spent by the
+  // navigation that used it, so the persistent grant set never names these
+  // origins; without this record every later read of the page the user just
+  // approved would be refused (surface-origin.ts). Bounded and per-surface:
+  // it dies with the tab, like the approval it records.
+  admittedOrigins?: string[];
 }
 
 export interface PendingOrigin {
@@ -206,7 +213,49 @@ export function withAdmission<T>(op: () => Promise<T>): Promise<T> {
 export function putSurface(surface: StoredSurface): Promise<void> {
   return withStore(async () => {
     const surfaces = await getSurfaces();
-    surfaces[surfaceToken(surface)] = surface;
+    const token = surfaceToken(surface);
+    // Callers write back a copy they read BEFORE a navigation (goto/open bump
+    // the epoch after `navigate`), while the navigation itself recorded
+    // admitted origins (noteAdmittedOrigin). The set only grows during a
+    // surface's life, so union instead of letting the stale copy erase it.
+    const stored = surfaces[token]?.admittedOrigins ?? [];
+    const merged = [...new Set([...stored, ...(surface.admittedOrigins ?? [])])];
+    surfaces[token] = merged.length
+      ? { ...surface, admittedOrigins: merged.slice(-MAX_ADMITTED_ORIGINS) }
+      : surface;
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
+  });
+}
+
+/** Admitted origins kept per surface; a driven tab rarely crosses more than a
+ * handful of once-approved sites, and the oldest entry is dropped past this. */
+export const MAX_ADMITTED_ORIGINS = 16;
+
+/**
+ * Remember that every surface bound to `tabId` was admitted to `origin` by a
+ * consumed one-time approval (see `StoredSurface.admittedOrigins`).
+ *
+ * Keyed by tab id, not token: the navigation gate (`withOriginGate`) only knows
+ * the CDP tab id. Runs in the store lane so it cannot interleave with a prune
+ * or another surface write, and writes nothing when the origin is already
+ * recorded — the common repeat case costs one read.
+ */
+export function noteAdmittedOrigin(tabId: number, origin: string): Promise<void> {
+  return withStore(async () => {
+    const surfaces = await getSurfaces();
+    let changed = false;
+    for (const surface of Object.values(surfaces)) {
+      if (surface.tabId !== tabId) continue;
+      const admitted = surface.admittedOrigins ?? [];
+      if (admitted.includes(origin)) continue;
+      surface.admittedOrigins = [...admitted, origin].slice(-MAX_ADMITTED_ORIGINS);
+      changed = true;
+    }
+    if (!changed) return;
     await deadline(
       chrome.storage.session.set({ surfaces }),
       CHROME_API_DEADLINE_MS,

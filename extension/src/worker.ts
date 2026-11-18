@@ -9,6 +9,7 @@ import {
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
+import { gateSurfaceOrigin } from "./surface-origin";
 import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
@@ -405,8 +406,15 @@ async function dispatch(
     if (request.method !== "open" && request.method !== "retitle" && request.method !== "owner_inspect") {
       await reconcileCommandTab(request.params);
     }
+    // The current-document origin gate runs INSIDE the ownership lane, after
+    // its fence, so a foreign handle still gets `owner_refused` first; it is
+    // the single choke point that keeps a page the tab navigated to on its own
+    // from reaching any page-touching handler (surface-origin.ts).
     const result = await withOwnership(request.method, request.params,
-      () => handler(request.params, request.id), close);
+      async () => {
+        await gateSurfaceOrigin(request.method, request.params, request.id);
+        return handler(request.params, request.id);
+      }, close);
     // Push the driven page so the daemon (and the Connected popup) can show
     // the human what the agent is on (finding U3).
     if (typeof result.url === "string" && result.url) {
