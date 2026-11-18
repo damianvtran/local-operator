@@ -479,6 +479,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "net_rename",
     "net_rm",
     "net_invite",
+    # The policy-carrying mint (``lop network invite --no-credential-offers``).
+    # A SEPARATE NAME rather than a field on ``net_invite`` so a relay that
+    # predates the policy refuses it unserved instead of ignoring the field and
+    # minting a credential-offering invite (PR #4233 review round 1, S2).
+    "net_invite_policy",
     "net_join",
     "net_member_rm",
     "net_peer_ls",

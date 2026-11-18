@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from secrets import token_bytes
 from typing import Any
@@ -205,7 +205,7 @@ def mint(
             "bad_offer_policy",
             f"unknown credential-offer policy {credential_offers!r}",
         )
-    resolved = sorted(capabilities_for_role(role))
+    resolved = sorted(capabilities_under_policy(capabilities_for_role(role), credential_offers))
     envelope = InviteEnvelope(
         network_id=record.network_id,
         network_name=record.name,
@@ -229,6 +229,33 @@ def mint(
     return MintedInvite(
         token=encode(envelope, material), envelope=envelope, record=envelope.to_record(record.epoch)
     )
+
+
+def capabilities_under_policy(capabilities: Iterable[str], credential_offers: str) -> set[str]:
+    """``capabilities`` with what the invite's credential-offer policy forbids removed.
+
+    WHY THIS EXISTS (review round 1, S1/R1-1): ``--no-credential-offers`` promises
+    the pairing adds no ``broker_credential`` capability, and that is independent
+    of ``--role`` — but the ``admin`` role's own capability set INCLUDES
+    ``broker_credential``, and admission admits with the invite's saved
+    capabilities, not through the share-grant helper. Guarding only the grant
+    helper therefore still admitted an ``admin`` joiner able to dial this
+    device's credential broker. Every other capability of the role is kept: the
+    flag is about credentials, not about what else an admin may do, and refusing
+    ``--role admin --no-credential-offers`` outright would couple the two.
+
+    Applied at MINT (so the saved row, the token copy and the joiner's own view
+    agree) and again at ADMISSION by the relay (so a row whose policy says
+    ``none`` can never admit the capability, however its list was written).
+    """
+    allowed = set(capabilities)
+    if credential_offers == CREDENTIAL_OFFERS_NONE:
+        # Lazy import: the credentials package is the capability's owner, and the
+        # invite module is imported by code paths that never touch credentials.
+        from local_operator.network.credentials.types import BROKER_CAPABILITY
+
+        allowed.discard(BROKER_CAPABILITY)
+    return allowed
 
 
 def encode(envelope: InviteEnvelope, material: str) -> str:

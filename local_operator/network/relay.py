@@ -13980,6 +13980,7 @@ class RelayServer:
             "net_show": lambda frame: self.network_detail(str(frame.get("network") or "")),
             "net_peer_ls": lambda frame: self.peer_status(),
             "net_invite": self._ctl_invite,
+            "net_invite_policy": self._ctl_invite_policy,
             "net_member_rm": self._ctl_member_rm,
             "net_trust_local": self._ctl_trust,
             "net_panic_local": self._ctl_panic,
@@ -14026,6 +14027,32 @@ class RelayServer:
             self.network_summary(record, report=reports.get(record.network_id))
             for record in store.list_networks(self.root)
         ]
+
+    def _ctl_invite_policy(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """``net_invite_policy``: mint an invite that carries a NON-DEFAULT offer policy.
+
+        WHY A SEPARATE OP (review round 1, S2/R1-2): ``net_invite`` cannot carry
+        a restrictive policy safely across versions. A relay built before the
+        policy existed ignores the unknown ``credential_offers`` field, mints an
+        ordinary credential-offering invite and writes its token file BEFORE the
+        CLI can read the reply and notice — leaving exactly the invite the
+        operator asked not to create. An op name such a relay does not serve is
+        refused by ``control_dispatch`` with nothing changed, so the version
+        check happens before any mutation instead of after it.
+
+        The policy is REQUIRED here and must be one this build understands and
+        not the default; a default mint keeps using ``net_invite`` unchanged.
+        """
+        from local_operator.network.types import CREDENTIAL_OFFER_POLICIES
+
+        policy = frame.get("credential_offers")
+        if not isinstance(policy, str) or not policy or policy not in CREDENTIAL_OFFER_POLICIES:
+            raise MeshRefusal(
+                "bad_offer_policy",
+                f"net_invite_policy needs a known non-default credential-offer policy; "
+                f"got {policy!r}. Nothing was minted.",
+            )
+        return self._ctl_invite(frame)
 
     def _ctl_invite(self, frame: dict[str, Any]) -> dict[str, Any]:
         # ``_require_network`` resolves a name to an id and answers the refusal;
@@ -16497,8 +16524,20 @@ def _invite_role(record: NetworkRecord, invite_id: str) -> str:
 
 
 def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
+    """The capabilities admission grants for ``invite_id``: the saved row's, under its policy.
+
+    The policy filter repeats the one ``invite.mint`` applies (review round 1,
+    S1/R1-1): a ``--no-credential-offers`` row must never admit
+    ``broker_credential`` — the ``admin`` role carries it — so admission
+    enforces that from the row's own policy rather than trusting how the row's
+    capability list was written.
+    """
+    from local_operator.network.invite import capabilities_under_policy
+
     invite = record.invite(invite_id)
-    return set(invite.capabilities) if invite else set()
+    if invite is None:
+        return set()
+    return capabilities_under_policy(invite.capabilities, invite.credential_offers)
 
 
 #: The refusals that are about TIME or about a motion a human can correct, and which

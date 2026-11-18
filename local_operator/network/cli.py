@@ -5082,6 +5082,12 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+#: The control-plane codes a relay answers for an op it does not serve
+#: (``RelayServer.control_dispatch``): what an older relay says to
+#: ``net_invite_policy``, having changed nothing.
+_UNSERVED_OP_CODES: frozenset[str] = frozenset({"unknown_local_op", "not_implemented"})
+
+
 def _cmd_invite(args: argparse.Namespace) -> int:
     """Mint an invite, write the token to a FILE, and print the path.
 
@@ -5124,32 +5130,56 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             adoption = adopt_literal_credentials(config_dir())
         except Exception:  # noqa: BLE001 — an invite is not blocked by adoption
             adoption = {}
-    relay_args: dict[str, Any] = {}
     if no_offers:
-        # Only when set, so a default mint's control frame is unchanged.
-        relay_args["credential_offers"] = CREDENTIAL_OFFERS_NONE
-    live = _relay_call(
-        "net_invite",
-        network=args.network,
-        role=args.role,
-        ttl_s=float(args.expires),
-        hosts=hosts,
-        device_id=args.device,
-        allow_no_answer=True,
-        **relay_args,
-    )
-    if live is not None and no_offers and live.get("credential_offers") != CREDENTIAL_OFFERS_NONE:
-        # AN OLDER RUNNING RELAY IGNORES THE UNKNOWN FIELD and mints a default
-        # invite. Handing that token out would silently drop the policy the
-        # operator asked for, so the mint is refused instead (the minted row is a
-        # harmless unused invite that expires on its own).
-        print(
-            "refusing: the running relay does not support --no-credential-offers, so the "
-            "invite it minted would offer credentials; restart the relay on this build "
-            "and mint again",
-            file=sys.stderr,
+        # A SEPARATE, VERSIONED OP, NOT A FIELD ON ``net_invite`` (review round 1,
+        # S2/R1-2): a relay that predates the policy ignores an unknown field and
+        # mints, and writes the token of, an ordinary credential-offering invite
+        # before this process could read its reply. ``net_invite_policy`` is an op
+        # name such a relay does not serve, so it refuses with NOTHING written —
+        # the support check is the mutation's own precondition, not a rollback.
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            live = _relay_call(
+                "net_invite_policy",
+                network=args.network,
+                role=args.role,
+                ttl_s=float(args.expires),
+                hosts=hosts,
+                device_id=args.device,
+                credential_offers=CREDENTIAL_OFFERS_NONE,
+                allow_no_answer=True,
+            )
+        except MeshRefusal as refusal:
+            if refusal.code not in _UNSERVED_OP_CODES:
+                raise
+            print(
+                "refusing: the running relay predates --no-credential-offers, so it was not "
+                "asked to mint anything and no invite or token was created; restart it "
+                "(`lop network serve`/launchd unit) on this build and mint again",
+                file=sys.stderr,
+            )
+            return 2
+        if live is not None and live.get("credential_offers") != CREDENTIAL_OFFERS_NONE:
+            # Unreachable from any build that serves ``net_invite_policy`` (it
+            # mints with the policy or refuses); kept so a receipt can never
+            # present a policy the relay did not confirm.
+            print(
+                "refusing: the running relay did not confirm --no-credential-offers for "
+                f"invite {live.get('invite_id') or '?'}; do not hand out its token",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        live = _relay_call(
+            "net_invite",
+            network=args.network,
+            role=args.role,
+            ttl_s=float(args.expires),
+            hosts=hosts,
+            device_id=args.device,
+            allow_no_answer=True,
         )
-        return 2
     if live is not None:
         payload = {"ok": True, **live}
         path = str(live.get("path") or "")
@@ -6225,7 +6255,9 @@ def _join_one(
             remaining_s=invite_mod.remaining_seconds(envelope),
             attempt=attempt,
         )
-        _refuse_offer_against_policy(envelope, offer_view["items"])
+        _refuse_offer_against_policy(
+            envelope, offer_view["items"], sock=sock, codec=codec, helpers=helpers
+        )
         # The offer read is done; the NEXT wire step is the ready frame, whichever
         # seat (park, automated, prompt) decides its value. Marking it here means a
         # failure on that step — including the declined local abort — reads
@@ -6449,22 +6481,44 @@ def _drain_pair_offer(
     return ("empty" if not items else "listed"), items
 
 
-def _refuse_offer_against_policy(envelope: Any, items: list[dict[str, Any]]) -> None:
+def _refuse_offer_against_policy(
+    envelope: Any,
+    items: list[dict[str, Any]],
+    *,
+    sock: Any,
+    codec: Any,
+    helpers: dict[str, Any],
+) -> None:
     """Fail closed when a ``--no-credential-offers`` invite receives a non-empty list.
 
     The owner enforces the policy from its saved invite; this is the joiner's own
     half, so a modified or misbehaving owner cannot get credential rows onto this
     screen (or into a confirm) under an invite that promised none. An EMPTY list,
     or no frame at all (an owner predating ``pair-offer-v1``), is fine.
+
+    THE OWNER IS TOLD (review round 1, R1-3): raising alone left the owner waiting
+    out its window and recording a retryable ``timeout``, so the invite stayed
+    redeemable. A sealed ``net_pair_abort`` (``protocol_error``) in place of the
+    ready frame is what the owner's ready read already treats as terminal, so it
+    consumes the invite at once — the same wire the local decline uses. Sending
+    is best effort: the joiner refuses whether or not the owner is still there.
     """
     if items and not getattr(envelope, "offers_credentials", True):
         from local_operator.network.types import MeshRefusal
 
-        raise MeshRefusal(
-            "protocol_error",
+        sentence = (
             "the other device sent a share list although this invite carries no "
-            "credential offers; the pairing is refused",
+            "credential offers; the pairing is refused"
         )
+        try:
+            sock.sendall(
+                codec.seal(
+                    helpers["pair_abort_frame"](req=1, reason="protocol_error", detail=sentence)
+                )
+            )
+        except OSError:
+            pass
+        raise MeshRefusal("protocol_error", sentence)
 
 
 def _finish_pairing(
@@ -6531,7 +6585,7 @@ def _finish_pairing(
                 "the other device sent a second share list; the pairing is refused",
             )
         items = parse_pair_offer(answer)
-        _refuse_offer_against_policy(envelope, items)
+        _refuse_offer_against_policy(envelope, items, sock=sock, codec=codec, helpers=helpers)
         offer_view["state"] = "empty" if not items else "listed"
         offer_view["items"] = items
         answer = codec.open(reader.read_record_payload(deadline))

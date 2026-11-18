@@ -86,8 +86,11 @@ and `lop tunnel setup --json`, not mesh admission.
    To pair **without any credential sharing**, pass `--no-credential-offers`:
    the owner never enumerates its logins for that ceremony (not even literal-MCP
    adoption runs at mint), the joining device is sent an explicitly EMPTY share
-   list (`No credentials were offered.`), and no credential is granted and no
-   `broker_credential` capability is added. The policy is saved with the invite
+   list (`No credentials were offered.`), and during this pairing no credential
+   is granted and no `broker_credential` capability is admitted (not even the
+   one the `admin` role normally carries). It governs this pairing only: a
+   later, explicit signed remote onboarding or credential grant to that
+   member is a separate operator act outside the policy. The policy is saved with the invite
    on the owner and enforced from there; a token whose copy of the policy was
    edited (added, dropped or changed) is refused and burned, and so is a joining
    device whose lop predates the flag — update it and mint a fresh invite. It is
