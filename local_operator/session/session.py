@@ -1487,6 +1487,15 @@ class _CompactionPlan:
     #: commit: ``_run_compaction`` never reads it, so a hint can never reach the
     #: summarizer or permanent history.
     advisor_hint: Any | None = None
+    #: Index into ``llm_history`` where the LIVE TASK carried on the archive's
+    #: tail edge starts, or ``None`` when no span changed carrier. When set,
+    #: ``llm_history[dense_tail_from:cut]`` is the span the task floor would
+    #: have kept raw; the commit hands its length to ``compact_to_archive`` so
+    #: it is replayed as plain text rather than paged (see
+    #: :meth:`Session._dense_tail_cut` for why and for the measurements).
+    #: Carried as an INDEX, not a count, because the byte-aware step may move
+    #: ``cut`` later after the plan decided this, and the span must follow it.
+    dense_tail_from: int | None = None
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
     memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
@@ -29195,6 +29204,25 @@ class Session:
                 tokens_after=local_estimate,
             )
 
+        # (2b') Dense carry of the live task. Only the automatic task floor
+        # changes carrier: an advisory (live or parked) is a semantic "this
+        # must survive as it is" and keeps its raw window exactly as before, so
+        # the advisor's widen-only guarantee and its reclaim bookkeeping mean
+        # what they meant. Snapcompact only: context-full has no verbatim tail,
+        # and handing the task to an LLM summary would paraphrase it.
+        dense_tail_from: int | None = None
+        if (
+            strategy == "snapcompact"
+            and parked_hint is None
+            and advisor_hint is None
+            and keep_recent > settings.keep_recent_tokens
+        ):
+            dense_cut = await self._dense_tail_cut(
+                compaction_api, llm_history, cut, settings.keep_recent_tokens
+            )
+            if dense_cut is not None:
+                dense_tail_from, cut = cut, dense_cut
+
         # (2c) Byte-aware cut. The cut above is ruled in TOKENS; a screenshot
         # history is over the BYTE trigger long before it is over any token
         # line, so a byte-fired pass would land beside the trigger and re-fire
@@ -29229,6 +29257,7 @@ class Session:
             strategy=strategy,
             llm_history=llm_history,
             cut=cut,
+            dense_tail_from=dense_tail_from,
             context_tokens=context_tokens,
             tokens_before=local_estimate,
             # ATTRIBUTION, not influence. The hint above may have widened the
@@ -29271,6 +29300,105 @@ class Session:
                     else None
                 )
             ),
+        )
+
+    async def _dense_tail_cut(
+        self,
+        compaction_api: Any,
+        llm_history: list[Message],
+        wide_cut: int,
+        keep_recent_tokens: int,
+    ) -> int | None:
+        """The plain-recency cut to use INSTEAD of the task floor's, or ``None``.
+
+        WHY. The task floor keeps the whole live task raw (up to its cap)
+        because a recency-shaped cut used to land inside the task the agent
+        was still executing. That protection is right and the carrier was
+        expensive. Replaying 25 real compaction points through
+        :meth:`compact_now` (``docs/design/compaction-dense-tail.md``),
+        the passes the floor widened landed at 82k / 108k / 134k local tokens
+        (task spans of 20-50k / 50-100k / over the 100k cap) against 57k where
+        it did not bind -- and a local token is roughly 1.4-1.7 provider tokens
+        on an Anthropic model, so those are the passes that leave a 400k
+        context above 250k.
+
+        Narrowing the raw window is not the fix, and that was measured on the
+        same points rather than assumed. Cutting back to plain recency kept
+        49% of the live task's steps and 55% of its result heads in the
+        rebuilt context; capping the floor at 50k kept 77% of each. The
+        archive's fixed-size middle cannot absorb the history a narrower
+        window hands it.
+
+        WHAT. Keep the protection, change the carrier. The pass cuts at plain
+        recency and the span the floor would have kept raw --
+        ``llm_history[wide_cut:returned]`` -- rides the archive's verbatim
+        tail edge as serialized text (``compact_to_archive``'s
+        ``protected_tail_messages``). On those 25 points the passes land at
+        55k / 69k / 87k for the same three groups (median 99k -> 63k overall,
+        worst case 155k -> 109k, none larger), with 100% of the task's steps
+        and assistant messages, 99% of its result heads and 97% of its
+        long-result ends still present, at the same CPU cost per pass.
+
+        WHAT IS GIVEN UP, stated because it is the whole trade: inside the
+        moved span the serializer keeps the first 1,500 and the last 500
+        characters of a tool result longer than ``TOOL_RESULT_MAX_CHARS``
+        and cuts the middle, cuts a tool call's arguments past
+        ``TOOL_ARGS_MAX_CHARS``, drops results flagged useless, and carries
+        no provider reasoning blocks. So the model still sees every step,
+        every assistant message and both ends of every output, but not the
+        middle of a long output or the body of a long write: it re-reads the
+        file or re-runs the command if it needs those. The operator's own
+        turns are unaffected (preserved verbatim outside the archive), and
+        the newest ``keep_recent_tokens`` stay raw as they always have.
+
+        ``None`` -- keep the floor's raw window, exactly the pre-existing
+        behaviour -- whenever the change would not be a clean win:
+
+        * recency finds no cut, or none later than the floor's (nothing to
+          move);
+        * the recency cut's first kept message is not a transcript entry: the
+          floor's cut may be replayable where this one is not, and a pass must
+          never be refused as ``cut_not_replayable`` because of an
+          optimisation;
+        * the span is not smaller serialized than raw
+          (``snapcompact.dense_tail_saves``) -- the invariant that makes this
+          change unable to enlarge a pass.
+
+        Runs only once a pass is already going to happen, so the second
+        ``find_cut_point`` and one tokenization of the span are paid per PASS,
+        never per turn; both go off the event loop for the reason
+        :meth:`_offloaded` gives.
+        """
+        narrow = await self._offloaded(
+            compaction_api, "find_cut_point", llm_history, keep_recent_tokens
+        )
+        if narrow is None or narrow <= wide_cut:
+            return None
+        if not self._transcript.has_entry(llm_history[narrow].id):
+            return None
+        span = [m for m in llm_history[wide_cut:narrow] if _is_summarizable(m)]
+        try:
+            from local_operator.compaction import snapcompact
+
+            saves = await asyncio.to_thread(snapcompact.dense_tail_saves, span)
+        except Exception:  # noqa: BLE001 - an optimisation must never fail a pass
+            logger.debug("dense tail check failed; keeping the raw task window", exc_info=True)
+            return None
+        return narrow if saves else None
+
+    @staticmethod
+    def _dense_tail_count(plan: _CompactionPlan) -> int:
+        """How many trailing ``to_summarize`` messages are the dense-carried task.
+
+        Counted with the same filter that builds ``to_summarize``
+        (:func:`_is_summarizable`) over the plan's own slice, so the number is
+        exactly "the last N messages handed to the archive" whatever the
+        byte-aware step did to ``cut`` after the plan chose its span.
+        """
+        if plan.dense_tail_from is None:
+            return 0
+        return sum(
+            1 for m in plan.llm_history[plan.dense_tail_from : plan.cut] if _is_summarizable(m)
         )
 
     def _settle_advisor(self, plan: _CompactionPlan, outcome: CompactionOutcome) -> None:
@@ -29564,7 +29692,18 @@ class Session:
             [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
             settings=plan.settings,
+            **self._dense_tail_kwargs(plan),
         )
+
+    @classmethod
+    def _dense_tail_kwargs(cls, plan: _CompactionPlan) -> dict[str, int]:
+        """``dense_tail=N`` for :meth:`_produce_summary`, or nothing.
+
+        Passed only when set, so a duck-typed ``_produce_summary`` that
+        predates the parameter (the suite has several) keeps its signature.
+        """
+        count = cls._dense_tail_count(plan)
+        return {"dense_tail": count} if count else {}
 
     def _carried_tier_live_state(
         self,
@@ -29665,7 +29804,11 @@ class Session:
                 summarized
                 if summarized is not None
                 else await self._produce_summary(
-                    compaction_api, to_summarize, plan.strategy, settings=plan.settings
+                    compaction_api,
+                    to_summarize,
+                    plan.strategy,
+                    settings=plan.settings,
+                    **self._dense_tail_kwargs(plan),
                 )
             )
             # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
@@ -29746,6 +29889,15 @@ class Session:
                     carried_genuine, carried_shed = int(carried[0]), int(carried[1])
                     preserved_turns_dropped = max(preserved_turns_dropped, carried_genuine)
                     preserved_turns_shed = max(preserved_turns_shed, carried_shed)
+            # A resumed subagent's launch brief is re-stamped on every resume
+            # and each copy is a genuine user turn; carry it once so the cap
+            # below budgets distinct content (``collapse_relaunch_briefs``
+            # has the measurements). Resolved by name like its neighbours, so
+            # a partial double degrades to the uncollapsed block.
+            collapse: Any = getattr(compaction_api, "collapse_relaunch_briefs", None)
+            if callable(collapse):
+                collapsed: Any = collapse(preserved_user_turns)
+                preserved_user_turns = list(collapsed)
             if callable(cap):
                 preserved_turns_cap = self._preserved_turns_cap(plan.settings)
                 capped: Any = cap(
@@ -30536,8 +30688,17 @@ class Session:
         strategy: str,
         *,
         settings: Any = None,
+        dense_tail: int = 0,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
+
+        ``dense_tail`` is how many TRAILING ``to_summarize`` messages are the
+        live task the plan moved out of the raw window
+        (:meth:`_dense_tail_cut`); snapcompact carries them verbatim on the
+        archive's tail edge. Ignored by the context-full fallback below, which
+        has no such edge: the plan only sets it for snapcompact, and if that
+        branch fails the task is summarized with the rest, as any pre-cut
+        history is.
 
         Snapcompact stores ``{"snapcompact": <archive dump>}`` (JSON-safe:
         base64 frames) and renders the frames back into context through the
@@ -30602,6 +30763,9 @@ class Session:
                     threshold_tokens=self._snapcompact_threshold_tokens(
                         compaction_api, effective.context_window, settings
                     ),
+                    # Clamped to the span actually archived: lifting the
+                    # leading marker above can only shorten it from the FRONT.
+                    protected_tail_messages=min(max(0, dense_tail), len(archive_span)),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id

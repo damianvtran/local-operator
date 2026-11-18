@@ -10,21 +10,28 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
+from local_operator.compaction.api import (
+    TOOL_ARGS_MAX_CHARS,
+    TOOL_RESULT_MAX_CHARS,
+    TOOL_RESULT_TAIL_CHARS,
+)
 from local_operator.compaction.snapcompact import (
     CROSS_RULER_SLOPE_MARGIN,
     DEFAULT_MAX_FRAMES,
     EDGE_THRESHOLD_FRACTION,
     FRAME_DATA_BYTES_BUDGET,
     FRAME_TOKEN_ESTIMATE,
+    HEAD_EDGE_FRAMES,
     HQ_EDGE_FRAMES,
     MAX_FRAMES,
     Archive,
     _edge_chars_for,
+    _head_chars_for,
     _middle_page_kinds,
     _page_digest,
     archive_summary,
     compact_to_archive,
+    dense_tail_saves,
     estimate_archive_tokens,
     frame_token_estimate_for,
     history_blocks,
@@ -125,8 +132,48 @@ def test_serialize_role_headers_and_tool_result_truncation():
     assert "[Tool result: bash]" in out
     # Truncation marker names the exact elided char count.
     assert f"[... {len(big) - TOOL_RESULT_MAX_CHARS} more characters truncated]" in out
-    kept = out.split("[Tool result: bash]\n")[1].split("\n[... ")[0]
-    assert len(kept) == TOOL_RESULT_MAX_CHARS
+    # The budget is unchanged; it is split between the head and the END.
+    body = out.split("[Tool result: bash]\n")[1]
+    head, tail = body.split(
+        f"\n[... {len(big) - TOOL_RESULT_MAX_CHARS} more characters truncated]\n"
+    )
+    assert len(head) == TOOL_RESULT_MAX_CHARS - TOOL_RESULT_TAIL_CHARS
+    assert len(tail) == TOOL_RESULT_TAIL_CHARS
+
+
+def test_a_long_tool_result_keeps_its_end():
+    """The END of an output is where the verdict is, so the cut is in the middle.
+
+    A command's exit summary, a test run's totals, a traceback's exception line
+    and this harness's own ``--- stderr ---`` block all sit at the end. Cutting
+    head-only kept the first 2,000 characters and dropped all of that: on 25
+    replayed real compaction points, 24% of long results in a dense-carried
+    task still had their last line (measured by line-start probe) against 99%
+    raw. Same budget, split head/tail, so the archive is not one character
+    larger.
+    """
+    lines = [f"collected item {i}: ok" for i in range(400)]
+    verdict = "=== 3 failed, 397 passed in 12.31s ==="
+    text = "exit code: 1\n" + "\n".join(lines) + "\n" + verdict
+    messages = [
+        Message(
+            role="assistant",
+            content=[TextContent(text="running the suite")],
+            tool_calls=[ToolCall(id="c1", name="bash", arguments={"cmd": "pytest"})],
+        ),
+        _tool_message("c1", text),
+    ]
+    out = serialize_for_snapcompact(messages)
+    body = out.split("[Tool result: bash]\n")[1]
+    assert body.startswith("exit code: 1\ncollected item 0: ok")
+    assert body.endswith(verdict)
+    marker = f"\n[... {len(text) - TOOL_RESULT_MAX_CHARS} more characters truncated]\n"
+    assert body.count(marker) == 1
+    assert len(body) == TOOL_RESULT_MAX_CHARS + len(marker)
+    # Short results are untouched, and the head/tail never overlap or reorder.
+    assert body.index("collected item 0:") < body.index(marker) < body.index(verdict)
+    short = serialize_for_snapcompact([messages[0], _tool_message("c1", "exit code: 0\nfine")])
+    assert short.endswith("[Tool result: bash]\nexit code: 0\nfine")
 
 
 def test_serialize_tool_args_truncated():
@@ -307,9 +354,10 @@ def test_compact_large_history_frames_and_edges():
     # page keeps its image — chat-shaped pages here flip to text.
     assert len(archive.middle_kinds) == len(archive.frames)
     shape = resolve_shape("anthropic", "claude-sonnet-4-5")
-    edge = HQ_EDGE_FRAMES * shape.capacity
-    assert len(archive.text_head) == edge
-    assert len(archive.text_tail) == edge
+    # Asymmetric by design (HEAD_EDGE_FRAMES): one page of the oldest text, the
+    # shape default of the newest. The head also carries this pass's drop marker.
+    assert len(archive.text_head.split("\n[... ")[0]) == HEAD_EDGE_FRAMES * shape.capacity
+    assert len(archive.text_tail) == HQ_EDGE_FRAMES * shape.capacity
     # Re-render source: previous text folds in ahead of the new history.
     again = compact_to_archive(
         _conversation_messages(2), "anthropic", "claude-sonnet-4-5", previous_text=archive.text
@@ -349,14 +397,16 @@ def test_edges_default_to_frame_shape_without_a_window():
 
     This is the wide-window / unknown-window path: the edge cap only ever
     SHRINKS the default, never grows it, so an archive built without a window
-    (or on a 1M-token model where the default already fits its share) is byte
-    for byte what it was before the cap existed. Guards against the cap
-    silently changing the common case.
+    (or on a 1M-token model where the default already fits its share) keeps
+    the shape defaults. Guards against the cap silently changing the common
+    case. The defaults themselves are asymmetric (``HEAD_EDGE_FRAMES`` for the
+    oldest text, ``HQ_EDGE_FRAMES`` for the newest); the head is compared
+    without the drop marker this fixture's overflow appends to it.
     """
     shape = resolve_shape("anthropic", "claude-sonnet-4-5")
     messages = _conversation_messages(200)
     archive = compact_to_archive(messages, "anthropic", "claude-sonnet-4-5")
-    assert len(archive.text_head) == HQ_EDGE_FRAMES * shape.capacity
+    assert len(archive.text_head.split("\n[... ")[0]) == HEAD_EDGE_FRAMES * shape.capacity
     assert len(archive.text_tail) == HQ_EDGE_FRAMES * shape.capacity
 
 
@@ -514,8 +564,18 @@ def test_threshold_bounds_archive_budget_on_a_1m_window():
         context_window=1_000_000,
         threshold_tokens=400_000,
     )
-    assert estimate_archive_tokens(bounded) <= 200_000
-    assert estimate_archive_tokens(legacy) > 200_000
+    # The budget loop prices a frame with the READER's billing
+    # (``frame_token_estimate_for``, 5,000 here) while ``estimate_archive_tokens``
+    # prices it at the cross-provider ceiling (``FRAME_TOKEN_ESTIMATE``, 5,024),
+    # both deliberately. The bound the loop enforces is therefore 0.5 * T_eff on
+    # ITS ruler; on the estimator's it carries that per-frame difference. The
+    # bare ``<= 200_000`` this assertion used to make held only while the
+    # fixture's remainder happened to exceed it (30 frames x 24 = 720 here).
+    ruler_slack = len(bounded.frames) * (
+        FRAME_TOKEN_ESTIMATE - frame_token_estimate_for(provider, model_id)
+    )
+    assert estimate_archive_tokens(bounded) <= 200_000 + ruler_slack
+    assert estimate_archive_tokens(legacy) > 200_000 + ruler_slack
     assert len(bounded.frames) < len(legacy.frames)
 
 
@@ -575,7 +635,7 @@ def _head_cut_archive(body: str, cut_into: str, split: int, previous_carry: str 
     """
     provider, model_id = "anthropic", "claude-opus-4-8"
     shape = resolve_shape(provider, model_id)
-    edge = _edge_chars_for(shape, 200_000, 160_000)
+    edge = _head_chars_for(shape, 200_000, 160_000)
     lead = "[User]\nplease keep the ledger\n"
     pad = "u" * (edge - len(lead) - split - 1) + "\n"
     filler = "\n".join(["[Assistant]\n" + "w" * 150] * 4000)
@@ -1069,3 +1129,156 @@ def test_archive_created_at_set():
 
 def test_default_budget_constant():
     assert FRAME_DATA_BYTES_BUDGET == 3_000_000
+
+
+# ---------------------------------------------------------------------------
+# Asymmetric edges: a one-page head, and a tail that carries the live task
+# ---------------------------------------------------------------------------
+
+
+def test_head_edge_is_one_page_while_the_tail_keeps_the_shape_default():
+    """The head is the session's OLDEST text, re-sent unchanged on every pass.
+
+    Measured on 15 chained real passes the head shared 99.9% of its prefix with
+    the previous pass's head, at a median 10.8k tokens. One page keeps a
+    verbatim anchor (the floor ``_edge_chars_for`` already documents); the rest
+    joins the middle, where the budget can act on it and dropped pages are
+    mined into the carry. The tail, the NEWEST archived text, is not trimmed.
+    """
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(8)]
+    archive = compact_to_archive(messages, "anthropic", "claude-opus-4-8")
+    assert not archive.truncated_chars, "fixture must not drop pages (head would gain a marker)"
+    assert len(archive.text_head) == HEAD_EDGE_FRAMES * shape.capacity
+    assert len(archive.text_tail) == HQ_EDGE_FRAMES * shape.capacity
+    assert _head_chars_for(shape, None) == HEAD_EDGE_FRAMES * shape.capacity
+
+
+def test_head_edge_never_exceeds_a_small_windows_tail_share():
+    """The one-page head is a ceiling under the window share, never above it."""
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    for window in (8_000, 64_000, 128_000, 200_000, 1_000_000):
+        assert _head_chars_for(shape, window) <= _edge_chars_for(shape, window)
+        assert _head_chars_for(shape, window) >= shape.capacity
+
+
+def _task_messages(steps: int, tag: str) -> list[Message]:
+    """An agent working: a call and a result per step, no user turn between."""
+    out: list[Message] = []
+    for i in range(steps):
+        out.append(
+            Message(
+                role="assistant",
+                content=[TextContent(text=f"{tag} step {i}")],
+                tool_calls=[ToolCall(id=f"{tag}-{i}", name="bash", arguments={"cmd": f"{tag}{i}"})],
+            )
+        )
+        out.append(_tool_message(f"{tag}-{i}", f"{tag}-out-{i} " + "z" * 900))
+    return out
+
+
+def test_protected_tail_rides_the_tail_edge_verbatim():
+    """The live task the raw window no longer holds must not be imaged or dropped.
+
+    ``protected_tail_messages`` widens the TAIL edge so the serialized task
+    span is replayed as plain text. Without it the same span lands in middle pages,
+    which are capped at ``DEFAULT_MAX_FRAMES`` and dropped oldest-first: the
+    measured cost of that was 62% of a live task's distinctive lines.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    older = _task_messages(400, "old")
+    task = _task_messages(300, "live")
+    span = serialize_for_snapcompact(task)
+    assert len(span) > HQ_EDGE_FRAMES * shape.capacity, "fixture must exceed the default tail"
+
+    plain = compact_to_archive(older + task, provider, model_id)
+    assert "live step 0\n" not in plain.text_tail, "control: default tail does not hold it"
+
+    archive = compact_to_archive(
+        older + task, provider, model_id, protected_tail_messages=len(task)
+    )
+    assert archive.text_tail.endswith(span)
+    assert len(archive.text_tail) == len(span)
+    assert archive.text_tail.startswith("[Assistant]\nlive step 0")
+    # Still one coherent archive: text is head + middle + tail, and the replay
+    # policy can re-derive its pages (digest-checked) with the wider tail.
+    assert archive.text.endswith(archive.text_tail)
+    assert archive.text.startswith(archive.text_head.split("\n[... ")[0])
+    blocks = history_blocks(archive)
+    assert blocks[-1] == {"kind": "text", "text": archive.text_tail}
+    assert replayed_frame_count(archive) <= len(archive.frames)
+
+
+def test_protected_tail_below_the_default_changes_nothing():
+    """A short task is already inside the default tail: byte-identical archive."""
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    messages = _task_messages(400, "old") + _task_messages(3, "live")
+    base = compact_to_archive(messages, provider, model_id)
+    same = compact_to_archive(messages, provider, model_id, protected_tail_messages=6)
+    assert same.model_dump(exclude={"created_at"}) == base.model_dump(exclude={"created_at"})
+
+
+def test_protected_tail_covering_everything_keeps_all_text_and_renders_no_frames():
+    """A span as long as the whole archive degrades to the all-text form."""
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    task = _task_messages(200, "live")
+    span = serialize_for_snapcompact(task)
+    assert compact_to_archive(task, provider, model_id).frames, "control: unprotected it is paged"
+    archive = compact_to_archive(task, provider, model_id, protected_tail_messages=len(task) + 99)
+    assert archive.frames == []
+    assert archive.text == span
+
+
+def test_a_chained_pass_folds_the_previous_protected_tail_into_the_middle():
+    """The wide tail is a property of ONE pass, not a ratchet.
+
+    The next pass re-slices its own edges from ``previous_text + new``; the
+    earlier task text becomes ordinary middle history (paged, budgeted, mined
+    into the carry when dropped) and the tail returns to what that pass asks.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    task = _task_messages(300, "live")
+    span = serialize_for_snapcompact(task)
+    first = compact_to_archive(
+        _task_messages(400, "old") + task, provider, model_id, protected_tail_messages=len(task)
+    )
+    assert first.text_tail == span
+    second = compact_to_archive(
+        _task_messages(200, "next"), provider, model_id, previous_text=first.text
+    )
+    assert len(second.text_tail) == HQ_EDGE_FRAMES * shape.capacity
+    assert "next step 199" in second.text_tail
+    assert "live step 0\n" not in second.text_tail
+
+
+def test_protected_tail_starts_on_the_spans_first_header_after_a_ragged_prefix():
+    """The junction's blank-run collapse shortens the PREFIX, never the span."""
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    older = _task_messages(400, "old")
+    older.append(_tool_message("old-399", "trailing newlines\n\n\n\n"))
+    task = _task_messages(300, "live")
+    archive = compact_to_archive(
+        older + task, provider, model_id, protected_tail_messages=len(task)
+    )
+    assert archive.text_tail == serialize_for_snapcompact(task)
+
+
+def test_dense_tail_saves_only_when_the_serialized_span_is_smaller():
+    """The guard that keeps the change of carrier from ever costing tokens."""
+    long_outputs = []
+    for i in range(20):
+        body = "\n".join(f"row {i} {r}: value={r * 7919 % 10007}" for r in range(400))
+        long_outputs.append(
+            Message(
+                role="assistant",
+                content=[TextContent(text=f"step {i}")],
+                tool_calls=[ToolCall(id=f"c{i}", name="bash", arguments={"cmd": f"s{i}"})],
+            )
+        )
+        long_outputs.append(_tool_message(f"c{i}", body))
+    assert dense_tail_saves(long_outputs)
+    # Nothing to truncate, and a role header per message: larger serialized.
+    assert not dense_tail_saves([Message.assistant("ok") for _ in range(50)])
+    assert not dense_tail_saves([])

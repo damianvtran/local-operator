@@ -12,9 +12,13 @@ Contract (see ``docs/REWRITE.md`` §C snapcompact bullets):
   re-render from
   :attr:`Archive.text` (folded in via ``previous_text``) rather than carrying
   old PNGs forward.
-- Tool results are truncated to 2000 chars, useless-flagged results AND their
-  paired calls are dropped, head/tail plain-text edges surround the imaged
-  middle (foveation: :data:`HQ_EDGE_FRAMES` HQ frames at each edge).
+- Tool results are truncated to 2000 chars (head and END kept, middle cut:
+  :func:`_truncate_middle`), useless-flagged results AND their paired calls
+  are dropped, head/tail plain-text edges surround the imaged middle. The
+  edges are asymmetric: :data:`HEAD_EDGE_FRAMES` page of the oldest text,
+  :data:`HQ_EDGE_FRAMES` pages of the newest -- or, when the session hands
+  over the live task it stopped keeping raw, that whole span
+  (``compact_to_archive(protected_tail_messages=...)``).
 - Replay is decided per middle page at pass time (``middle_kinds``): a page
   whose source text stays cheaper than its frame even under the worst
   provider/local tokenizer divergence the repo has measured
@@ -55,7 +59,7 @@ from local_operator.harness.types import (
     TextContent,
 )
 
-from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
+from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_TAIL_CHARS
 from .cutpoint import OPERATOR_ANSWER_KEY, is_rendered_injection
 from .marker import marker_details
 from .mine import (
@@ -376,6 +380,74 @@ def _edge_chars_for(
     return max(shape.capacity, min(default, per_edge_chars))
 
 
+#: Pages of the archive's OLDEST text kept verbatim at the HEAD edge. The tail
+#: keeps :data:`HQ_EDGE_FRAMES`; the head is smaller on purpose.
+#:
+#: WHY the edges are not symmetric: the head is re-sliced from the front of
+#: ``previous_text + new`` on every pass, so from the second pass on it is the
+#: SAME text re-sent each time. Measured on 15 chained real passes (replay of
+#: real compaction points through ``Session.compact_now``): the head shared a
+#: 99.9% prefix with the previous pass's head, at 9.8k / 10.8k / 19.7k tokens
+#: (min / median / max, n=23). The tail is the opposite: it is the newest
+#: archived text and different every pass.
+#:
+#: One page is the floor :func:`_edge_chars_for` already guarantees ("some
+#: verbatim anchor always beats none"), so this introduces no new minimum.
+#: Text the smaller head no longer holds is NOT deleted: it joins the middle,
+#: where it is paged, budgeted and, if its page is dropped, mined into the
+#: carry -- the same route every other oldest-history character takes. The
+#: operator's own turns do not depend on it either way: they are preserved
+#: verbatim outside the archive (``extract_preserved_user_turns``).
+HEAD_EDGE_FRAMES = 1
+
+
+def _head_chars_for(
+    shape: Shape, context_window: int | None, threshold_tokens: int | None = None
+) -> int:
+    """Chars kept VERBATIM at the archive's head (oldest) edge.
+
+    :data:`HEAD_EDGE_FRAMES` pages, and never more than the tail's share
+    (:func:`_edge_chars_for`), so a small window that already trims its edges
+    below one head allowance keeps trimming exactly as it did.
+    """
+    return min(
+        _edge_chars_for(shape, context_window, threshold_tokens),
+        HEAD_EDGE_FRAMES * shape.capacity,
+    )
+
+
+def dense_tail_saves(span: Sequence[Message]) -> bool:
+    """Whether ``span`` costs fewer tokens as archive tail text than raw.
+
+    THE invariant behind carrying a live task on the tail edge
+    (``compact_to_archive(protected_tail_messages=...)``): the session moves a
+    span out of the raw window ONLY when this is true, so the change of
+    carrier can never make a pass land larger than keeping the span raw would
+    have. Measured on 15 real spans the serialized form was 0.67x raw at the
+    median (0.40-0.92): :func:`serialize_for_snapcompact` cuts the middle of
+    long tool results, truncates long arguments and drops useless results,
+    which is where the saving comes from. A span of short messages can come out LARGER (a role
+    header per message, nothing to truncate), and then it stays raw.
+
+    Both sides use the ruler the archive is priced with
+    (:func:`estimate_archive_tokens` sends the text through
+    ``estimate_tokens(Message.assistant(...))``), so the comparison is
+    like-for-like. On the provider's tokenizer the saving is larger than this
+    shows, not smaller: a raw assistant message also replays its provider
+    reasoning blocks, which the local ruler does not price and the serialized
+    form does not carry. Pure and CPU-only: the caller runs it off the event
+    loop.
+    """
+    if not span:
+        return False
+    serialized = serialize_for_snapcompact(span)
+    if not serialized:
+        return False
+    dense = estimate_tokens(Message.assistant(serialized))
+    raw = sum(estimate_tokens(message) for message in span)
+    return dense < raw
+
+
 def carry_token_budget() -> int:
     """Tokens an archive may reserve for its carry digest.
 
@@ -580,6 +652,33 @@ def _truncate(text: str, max_chars: int) -> str:
     return f"{text[:max_chars]}\n[... {len(text) - max_chars} more characters truncated]"
 
 
+def _truncate_middle(text: str, max_chars: int, tail_chars: int) -> str:
+    """Keep the head AND the end of ``text`` within ``max_chars``; cut the middle.
+
+    For TOOL RESULTS only (arguments keep :func:`_truncate`: the start of a
+    command or a path is what identifies the call). The end of an output is
+    where the verdict is: a command's exit summary, a test run's totals, a
+    traceback's exception line, and this harness's own ``--- stderr ---``
+    block. Head-only truncation kept the first ``max_chars`` and dropped all of
+    it; replaying 25 real compaction points, 24% of the long results in a
+    dense-carried task still had their last line, against 99% raw.
+
+    The budget is unchanged (``max_chars`` characters of the result plus the
+    one marker line it always had), so no archive grows by this: only which
+    characters are kept changes. The marker keeps its wording and its exact
+    count, and now sits where the cut is, so a reader can see that what
+    follows it is the END of the output rather than a continuation.
+    """
+    if len(text) <= max_chars:
+        return text
+    tail_chars = max(0, min(tail_chars, max_chars))
+    head = text[: max_chars - tail_chars]
+    marker = f"[... {len(text) - max_chars} more characters truncated]"
+    if not tail_chars:
+        return f"{head}\n{marker}"
+    return f"{head}\n{marker}\n{text[len(text) - tail_chars :]}"
+
+
 def _content_text(message: Message) -> str:
     """Joined text content; image and document blocks become placeholders.
 
@@ -619,8 +718,9 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
     """Deterministic transcript of ``messages`` for frame rendering.
 
     Serialization rules: role headers; tool results truncated to
-    :data:`TOOL_RESULT_MAX_CHARS` with an explicit ``[... N more characters
-    truncated]`` tail; tool arguments truncated to :data:`TOOL_ARGS_MAX_CHARS`;
+    :data:`TOOL_RESULT_MAX_CHARS` -- head and END kept, the middle cut at an
+    explicit ``[... N more characters truncated]`` line (see
+    :func:`_truncate_middle`); tool arguments truncated to :data:`TOOL_ARGS_MAX_CHARS`;
     useless-flagged tool results AND their paired calls dropped entirely;
     image content replaced by ``[image]``; runs of blank lines collapsed.
     """
@@ -690,7 +790,10 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
                 continue
             name = message.tool_name or "tool"
             prefix = f"[Tool ERROR: {name}]" if message.is_error else f"[Tool result: {name}]"
-            blocks.append(f"{prefix}\n{_truncate(text, TOOL_RESULT_MAX_CHARS)}")
+            blocks.append(
+                f"{prefix}\n"
+                f"{_truncate_middle(text, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_TAIL_CHARS)}"
+            )
 
     return _BLANK_RUN_RE.sub("\n\n", "\n\n".join(blocks))
 
@@ -930,6 +1033,7 @@ def compact_to_archive(
     context_window: int | None = None,
     previous_carry: str | None = None,
     threshold_tokens: int | None = None,
+    protected_tail_messages: int = 0,
 ) -> Archive:
     """Run one snapcompact pass over discarded ``messages``.
 
@@ -952,6 +1056,18 @@ def compact_to_archive(
     the archive text with an explicit ``[... N chars of oldest history
     dropped]`` marker, and the un-imaged source is what ``Archive.text``
     carries forward for the next pass.
+
+    ``protected_tail_messages`` says the LAST that many ``messages`` are the
+    live task the session stopped keeping raw (``Session._dense_tail_cut``),
+    and widens the TAIL edge to hold their whole serialization, so they are
+    replayed as plain text instead of being paged. They must not ride the
+    middle: pages are capped at ``max_frames`` and dropped oldest-first, and
+    replaying real compaction points showed what that costs a live task (49%
+    of its steps left when it rides the middle, 100% on the tail edge). It
+    is a property of this one pass, not a ratchet: the next pass re-slices
+    its edges from ``previous_text + new``, so this pass's wide tail becomes
+    ordinary middle history there. ``0``
+    (every other caller) leaves the tail at its shape default.
 
     ``threshold_tokens`` is the resolved compaction trigger (``T_eff``). When
     given, the archive budget and the verbatim-edge cap are sized against it
@@ -983,8 +1099,22 @@ def compact_to_archive(
     # which windows this trims): the trimmed-away oldest edge content is not
     # lost, it flows into image_text and is imaged (or dropped with the
     # standard marker) like any other middle history.
-    edge_chars = _edge_chars_for(shape, context_window, threshold_tokens)
-    if len(archive_text) <= 2 * edge_chars:
+    #
+    # The two edges are sized separately (see HEAD_EDGE_FRAMES): the head is one
+    # page of the oldest text, the tail the shape default or the caller's
+    # protected span, whichever is longer.
+    head_chars = _head_chars_for(shape, context_window, threshold_tokens)
+    #
+    # The protected span is measured by serializing it on its own. That is
+    # exactly the suffix of ``serialized``: blocks are per message, a useless
+    # result drops its paired call wherever the call sits, and the blank-run
+    # collapse at the junction shortens the text BEFORE the span, never the
+    # span. So the tail edge starts on the span's first role header.
+    protected_chars = 0
+    if protected_tail_messages > 0:
+        protected_chars = len(serialize_for_snapcompact(messages[-protected_tail_messages:]))
+    tail_chars = max(_edge_chars_for(shape, context_window, threshold_tokens), protected_chars)
+    if len(archive_text) <= head_chars + tail_chars:
         return Archive(
             frames=[],
             text=archive_text,
@@ -993,9 +1123,9 @@ def compact_to_archive(
             shape_id=shape.id,
         )
 
-    text_head = archive_text[:edge_chars]
-    text_tail = archive_text[len(archive_text) - edge_chars :]
-    image_text = archive_text[edge_chars : len(archive_text) - edge_chars]
+    text_head = archive_text[:head_chars]
+    text_tail = archive_text[len(archive_text) - tail_chars :]
+    image_text = archive_text[head_chars : len(archive_text) - tail_chars]
 
     pages = _paginate(image_text, shape)
     truncated_chars = 0
@@ -1099,7 +1229,7 @@ def compact_to_archive(
     # Read from the head BEFORE this pass's own drop marker was appended above:
     # that marker would end every truncated head and hide its last header.
     if dropped_text:
-        head_body = archive_text[:edge_chars]
+        head_body = archive_text[:head_chars]
         partial = head_body.rpartition("\n")[2]
         joined = partial + dropped_text.partition("\n")[0]
         if is_role_header(joined):
