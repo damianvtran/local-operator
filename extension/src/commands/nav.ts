@@ -14,6 +14,7 @@ import {
   atSurfaceCap,
   getSurfaces,
   MAX_SURFACES,
+  noteAdmittedOrigin,
   putSurface,
   redactToken,
   removeSurface,
@@ -81,6 +82,14 @@ async function navigate(tabId: number, url: URL, requestId: string, admission: O
       throw new BridgeCommandError("origin_denied", "site permission was denied", { origin: url.origin });
     }
   }
+  // A once grant spent at command entry admits the destination for this tab
+  // NOW, not only if Fetch interception later sees the document request: a
+  // load the interceptor never pauses (e.g. one a service worker serves) would
+  // otherwise leave the page the user just allowed unreadable, and with the
+  // grant already spent the agent's next read would raise a SECOND prompt.
+  // Recorded before navigating so the top-frame commit (which keeps only the
+  // committed origin, state.ts `retainAdmittedOrigin`) retains it.
+  if (admission.viaOnceGrant) await noteAdmittedOrigin(tabId, url.origin);
   return withOriginGate(
     tabId,
     requestId,

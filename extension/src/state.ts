@@ -215,14 +215,18 @@ export function putSurface(surface: StoredSurface): Promise<void> {
     const surfaces = await getSurfaces();
     const token = surfaceToken(surface);
     // Callers write back a copy they read BEFORE a navigation (goto/open bump
-    // the epoch after `navigate`), while the navigation itself recorded
-    // admitted origins (noteAdmittedOrigin). The set only grows during a
-    // surface's life, so union instead of letting the stale copy erase it.
-    const stored = surfaces[token]?.admittedOrigins ?? [];
-    const merged = [...new Set([...stored, ...(surface.admittedOrigins ?? [])])];
-    surfaces[token] = merged.length
-      ? { ...surface, admittedOrigins: merged.slice(-MAX_ADMITTED_ORIGINS) }
-      : surface;
+    // the epoch after `navigate`), while the navigation itself added or
+    // dropped admitted origins (noteAdmittedOrigin / retainAdmittedOrigin /
+    // forgetAdmittedOrigin). The STORED list is therefore the authority for an
+    // existing surface: a stale copy must neither erase an admission nor
+    // resurrect one the top-frame commit already dropped. Only a brand-new
+    // surface takes the caller's list.
+    const existing = surfaces[token];
+    const admitted = existing ? existing.admittedOrigins : surface.admittedOrigins;
+    const next: StoredSurface = { ...surface };
+    if (admitted?.length) next.admittedOrigins = admitted.slice(-MAX_ADMITTED_ORIGINS);
+    else delete next.admittedOrigins;
+    surfaces[token] = next;
     await deadline(
       chrome.storage.session.set({ surfaces }),
       CHROME_API_DEADLINE_MS,
@@ -262,6 +266,51 @@ export function noteAdmittedOrigin(tabId: number, origin: string): Promise<void>
       "chrome.storage.session.set(surfaces)",
     );
   });
+}
+
+/** Rewrite the admitted list of every surface `select` picks; one store-lane
+ * read, and a write only when something actually changed. */
+function rewriteAdmitted(
+  select: (surface: StoredSurface) => boolean,
+  keep: (origin: string) => boolean,
+): Promise<void> {
+  return withStore(async () => {
+    const surfaces = await getSurfaces();
+    let changed = false;
+    for (const surface of Object.values(surfaces)) {
+      if (!select(surface) || !surface.admittedOrigins?.length) continue;
+      const kept = surface.admittedOrigins.filter(keep);
+      if (kept.length === surface.admittedOrigins.length) continue;
+      if (kept.length) surface.admittedOrigins = kept;
+      else delete surface.admittedOrigins;
+      changed = true;
+    }
+    if (!changed) return;
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
+  });
+}
+
+/**
+ * The top frame of `tabId` committed a document at `origin`: keep only that
+ * origin's admission. An allow-once admits the document the user approved,
+ * not the origin forever — once the tab leaves it, coming back (on its own or
+ * by a later command) goes through the normal grant again, as a fresh goto
+ * would. Keeping the committed origin is what lets the goto/open that spent
+ * the grant (it records the destination BEFORE navigating) keep reading the
+ * page it just reached without a second prompt.
+ */
+export function retainAdmittedOrigin(tabId: number, origin: string): Promise<void> {
+  return rewriteAdmitted((surface) => surface.tabId === tabId, (admitted) => admitted === origin);
+}
+
+/** A revoke names an origin the user no longer wants exposed: drop it from
+ * every live surface so an earlier allow-once cannot outlive the revoke. */
+export function forgetAdmittedOrigin(origin: string): Promise<void> {
+  return rewriteAdmitted(() => true, (admitted) => admitted !== origin);
 }
 
 /** Remove one surface and its snapshot refs; other surfaces are untouched. */

@@ -39,9 +39,37 @@ const MAX_BYTES = 256 * 1024;
 // text ceiling on the Python side.
 const MAX_ARG_CHARS = 2000;
 
+/*
+ * ORIGIN TAGS. The buffer outlives navigation (it is "since this surface
+ * opened"), and a tab can navigate itself to a site the user never approved,
+ * log there, and come back. Each entry is therefore stamped, at capture, with
+ * the origin of the page that produced it, and `logs` returns only entries
+ * whose origin the tab is admitted to NOW (commands/logs.ts) — the same rule
+ * the dispatch gate applies to live page reads (surface-origin.ts). The tag
+ * lives beside the entry, not in it, so the wire `LogEntry` shape is
+ * unchanged.
+ *
+ * Where the origin comes from: the CDP Runtime stream itself, so it is
+ * ordered with the events it labels (a webNavigation commit arrives on a
+ * different channel and could land after the new page's first logs).
+ * `Runtime.executionContextCreated` names each context's origin; console calls
+ * and exceptions carry their `executionContextId`. `Log.entryAdded` carries no
+ * context, so it takes the current DOCUMENT origin: the first default context
+ * created after the last `executionContextsCleared` (the main frame's: its
+ * document commits before any child frame of it exists). An entry whose origin is unknown
+ * is tagged "" and never returned — fail closed.
+ */
+interface Tagged {
+  entry: LogEntry;
+  origin: string;
+}
+
 interface Buffer {
-  entries: LogEntry[];
+  entries: Tagged[];
   bytes: number;
+  contexts: Map<number, string>;
+  docOrigin: string;
+  awaitingDoc: boolean;
 }
 
 const buffers = new Map<number, Buffer>();
@@ -49,22 +77,32 @@ const buffers = new Map<number, Buffer>();
 function bufferFor(tabId: number): Buffer {
   let buffer = buffers.get(tabId);
   if (!buffer) {
-    buffer = { entries: [], bytes: 0 };
+    buffer = { entries: [], bytes: 0, contexts: new Map(), docOrigin: "", awaitingDoc: true };
     buffers.set(tabId, buffer);
   }
   return buffer;
 }
 
-function push(tabId: number, entry: LogEntry): void {
+/** Normalize CDP's context origin: opaque contexts report "null" or "". */
+function cleanOrigin(value: unknown): string {
+  return typeof value === "string" && value !== "null" ? value : "";
+}
+
+function contextOrigin(buffer: Buffer, contextId: unknown): string {
+  if (typeof contextId === "number" && buffer.contexts.has(contextId)) return buffer.contexts.get(contextId)!;
+  return buffer.docOrigin;
+}
+
+function push(tabId: number, entry: LogEntry, origin: string): void {
   const buffer = bufferFor(tabId);
-  buffer.entries.push(entry);
+  buffer.entries.push({ entry, origin });
   buffer.bytes += entry.text.length;
   // Evict oldest-first until BOTH caps are satisfied. Order matters: the tool
   // contract is newest-last, so we always drop from the front.
   while (buffer.entries.length > MAX_ENTRIES || buffer.bytes > MAX_BYTES) {
     const dropped = buffer.entries.shift();
     if (!dropped) break;
-    buffer.bytes -= dropped.text.length;
+    buffer.bytes -= dropped.entry.text.length;
   }
 }
 
@@ -125,8 +163,26 @@ function onEvent(source: chrome.debugger.Debuggee, method: string, rawParams?: o
   const tabId = source.tabId;
   if (tabId === undefined || !buffers.has(tabId)) return;
   const params = (rawParams ?? {}) as Record<string, unknown>;
+  const buffer = bufferFor(tabId);
 
-  if (method === "Runtime.consoleAPICalled") {
+  if (method === "Runtime.executionContextCreated") {
+    const context = (params.context ?? {}) as Record<string, unknown>;
+    const aux = (context.auxData ?? {}) as Record<string, unknown>;
+    const origin = cleanOrigin(context.origin);
+    if (typeof context.id === "number") buffer.contexts.set(context.id, origin);
+    if (aux.isDefault === true && buffer.awaitingDoc) {
+      buffer.docOrigin = origin;
+      buffer.awaitingDoc = false;
+    }
+  } else if (method === "Runtime.executionContextDestroyed") {
+    if (typeof params.executionContextId === "number") buffer.contexts.delete(params.executionContextId);
+  } else if (method === "Runtime.executionContextsCleared") {
+    // A main-frame navigation: every old context is gone, and the next
+    // document's origin is unknown until its context is created.
+    buffer.contexts.clear();
+    buffer.docOrigin = "";
+    buffer.awaitingDoc = true;
+  } else if (method === "Runtime.consoleAPICalled") {
     const args = Array.isArray(params.args) ? (params.args as Record<string, unknown>[]) : [];
     const text = clip(args.map(renderArg).join(" ").trim());
     const frame = topFrame(params.stackTrace);
@@ -137,7 +193,7 @@ function onEvent(source: chrome.debugger.Debuggee, method: string, rawParams?: o
       url: frame.url,
       line: frame.line,
       timestamp: typeof params.timestamp === "number" ? params.timestamp : Date.now(),
-    });
+    }, contextOrigin(buffer, params.executionContextId));
   } else if (method === "Runtime.exceptionThrown") {
     const details = (params.exceptionDetails ?? {}) as Record<string, unknown>;
     // Prefer the thrown value's description (the Error's message + stack); fall
@@ -153,7 +209,7 @@ function onEvent(source: chrome.debugger.Debuggee, method: string, rawParams?: o
       url: typeof details.url === "string" ? details.url : "",
       line: typeof details.lineNumber === "number" ? details.lineNumber : 0,
       timestamp: typeof params.timestamp === "number" ? params.timestamp : Date.now(),
-    });
+    }, contextOrigin(buffer, details.executionContextId));
   } else if (method === "Log.entryAdded") {
     const entry = (params.entry ?? {}) as Record<string, unknown>;
     push(tabId, {
@@ -163,7 +219,7 @@ function onEvent(source: chrome.debugger.Debuggee, method: string, rawParams?: o
       url: typeof entry.url === "string" ? entry.url : "",
       line: typeof entry.lineNumber === "number" ? entry.lineNumber : 0,
       timestamp: typeof entry.timestamp === "number" ? entry.timestamp : Date.now(),
-    });
+    }, buffer.docOrigin);
   }
 }
 
@@ -218,9 +274,21 @@ export function filterEntries(entries: LogEntry[], level: string, limit: number)
   return limit > 0 && filtered.length > limit ? filtered.slice(filtered.length - limit) : filtered;
 }
 
-/** Read filtered entries for a tab, newest-last. `level` "all" keeps every entry. */
-export function readLogs(tabId: number, level: string, limit: number): LogEntry[] {
-  return filterEntries(buffers.get(tabId)?.entries ?? [], level, limit);
+/** The distinct origins a tab's buffered entries came from, so the caller can
+ * decide admission once per origin (an async storage read) rather than per
+ * entry. */
+export function loggedOrigins(tabId: number): string[] {
+  return [...new Set((buffers.get(tabId)?.entries ?? []).map((tagged) => tagged.origin))];
+}
+
+/** Read filtered entries for a tab, newest-last, keeping only entries whose
+ * capture origin is in `admitted` (see ORIGIN TAGS above). `level` "all"
+ * keeps every level; `limit` applies after the origin filter. */
+export function readLogs(tabId: number, level: string, limit: number, admitted: ReadonlySet<string>): LogEntry[] {
+  const entries = (buffers.get(tabId)?.entries ?? [])
+    .filter((tagged) => admitted.has(tagged.origin))
+    .map((tagged) => tagged.entry);
+  return filterEntries(entries, level, limit);
 }
 
 /** Drop a tab's buffer when its surface closes so a stale tabId cannot leak. */
