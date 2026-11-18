@@ -103,6 +103,7 @@ from local_operator.mobile.auth import (
     sign_cookie,
     verify_cookie,
 )
+from local_operator.mobile.community import community_routes
 from local_operator.mobile.start_receipts import CAPABILITY as START_CAPABILITY
 from local_operator.mobile.start_receipts import (
     START_BODY_MAX_BYTES,
@@ -12733,6 +12734,12 @@ def build_app(daemon: MobileDaemon):
             api_push_device_unrevoke,
             methods=["POST"],
         ),
+        # Relay web's community door (RFC v2.4 §7.2): exactly the member
+        # operations of `community.member_ops.MEMBER_OPERATIONS`, behind this
+        # daemon's own `gate`; no staff operation is reachable over relay.
+        # Every template starts with the literal `/api/community/communities`,
+        # which nothing above declares. See `mobile/community.py`.
+        *community_routes(gate),
         Route("/mark.png", mark_png),
         Route("/manifest.webmanifest", manifest),
         Route("/", index),

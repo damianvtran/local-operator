@@ -52,6 +52,7 @@ from local_operator.server.routes import (
     desktop_catalogues,
     desktop_claim,
     desktop_code_requests,
+    desktop_community,
     desktop_credentials,
     desktop_hub,
     desktop_imports,
@@ -1126,6 +1127,14 @@ app.include_router(desktop_link_preview.router)
 # module, and the catalogue usage route returns credential identities that
 # this advisory must never echo. See `routes/desktop_quota.py`.
 app.include_router(desktop_quota.router)
+# The Local Operator Community member door (RFC v2.4 §7.2):
+# `/v1/desktop/community/communities...`. Every template starts with the
+# literal `community/communities` segment pair, which no sibling above
+# declares, so nothing registered earlier can swallow it. Registered
+# unconditionally: the handlers answer `community_disabled` themselves while
+# `LOCAL_OPERATOR_COMMUNITY` is off, so a dark install is a typed refusal
+# rather than a 404 the renderer would read as a broken backend.
+app.include_router(desktop_community.router)
 # The machine-wide wake surface. Registered AFTER `desktop_sessions` and after
 # the lifecycle routes for the reason the sessions module documents about its
 # own ordering: FastAPI matches in declaration order, so a `/v1/desktop/...`
