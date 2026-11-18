@@ -24088,6 +24088,7 @@ class Session:
         from local_operator.harness.subagent import ChildSurface, run_subagent
         from local_operator.harness.verifier import (
             CANCEL_JOIN_S,
+            COMMAND_BUDGET_REFUSAL,
             REQUEST_BUDGET_REFUSAL,
             VERIFIER_ROLE,
             VerdictStatus,
@@ -24102,6 +24103,8 @@ class Session:
             verifier_profile,
         )
         from local_operator.harness.verifier_evidence import (
+            TYPED_COMMAND_BUDGET_REFUSAL,
+            TYPED_REQUEST_BUDGET_REFUSAL,
             VerifierEvidence,
             assess_completion,
         )
@@ -24114,6 +24117,11 @@ class Session:
             )
         limits = limits or VerifierLimits()
         started = time.monotonic()
+        # The budget cue is the last thing a capped child reads before it
+        # answers, so it must ask for the format ``decode`` below reads.
+        typed = typed_evidence is not None
+        command_cue = TYPED_COMMAND_BUDGET_REFUSAL if typed else COMMAND_BUDGET_REFUSAL
+        request_cue = TYPED_REQUEST_BUDGET_REFUSAL if typed else REQUEST_BUDGET_REFUSAL
 
         def decode(text: str | None) -> tuple[VerdictStatus, str]:
             return (
@@ -24214,7 +24222,7 @@ class Session:
             # the time they run) -- host or the child's own -- are refused
             # with the cue to answer, so the one request past the cap is spent
             # on the verdict.
-            return REQUEST_BUDGET_REFUSAL if state["requests"] >= cap_requests else None
+            return request_cue if state["requests"] >= cap_requests else None
 
         try:
             unsubscribe = self.subscribe_requests(observe)
@@ -24229,6 +24237,7 @@ class Session:
             on_exhausted=lambda: hit("commands"),
             refuse_when=request_budget_spent,
             on_result=typed_evidence.record_result if typed_evidence is not None else None,
+            command_refusal=command_cue,
         )
         # ``readonly_shell`` confines this launch's ``bash`` by the launch
         # itself, never by the ``verifier`` name (an operator's registry role
