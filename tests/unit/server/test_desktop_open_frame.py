@@ -42,6 +42,27 @@ from local_operator.session.transcript import (
 
 TOKEN = "synthetic-desktop-token"
 
+#: How long a gated scan waits for its gate before finishing anyway. NOT a
+#: latency figure: a correct frame answers while the gate is still shut, so this
+#: only bounds how long a mutant that awaits the scan takes to fail.
+_SCAN_HANG_S = 10.0
+
+
+def _finished_without_suspending(coro: Any) -> Any:
+    """Run ``coro`` one step and return its value; fail if it awaited anything.
+
+    The open-frame read's "waits for none of it" arms are properties of control
+    flow -- there is no await on those paths -- so they are checked as such,
+    not as a wall-clock ceiling a loaded runner can cross. A coroutine that
+    reaches any real wait yields on its first step instead of finishing.
+    """
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    coro.close()
+    raise AssertionError("the read suspended: it waited on something it must not")
+
 
 @pytest.fixture(autouse=True)
 def _desktop_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -426,38 +447,59 @@ async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
                 assert run["action_count"] is None and run["worked_seconds"] is None
 
         # A scan that cannot land inside the budget is not waited on.
+        #
+        # The scan is GATED rather than slept: it cannot finish until this test
+        # opens the gate, which it does only after the frame has answered. So
+        # "the frame answered while its scan was still running" is a fact about
+        # ordering that host load cannot change. It replaces `elapsed < 1.0`
+        # against a 2 s sleep, which a runner that stalls the request by a
+        # second crosses with the product unchanged (docs/TEST_TIME_ASSERTIONS.md).
+        # `_SCAN_HANG_S` only bounds a mutant that awaits the scan: it returns
+        # once the gate times out, with the scan finished, and fails below.
         ti._reset_for_tests()
         ti.index_path(harness.root, harness.session_id).unlink()
+        gate = threading.Event()
+        scan_finished = threading.Event()
 
-        def slow_refresh(*_: Any, **__: Any) -> Any:
-            time.sleep(2.0)
+        def gated_refresh(*_: Any, **__: Any) -> Any:
+            gate.wait(_SCAN_HANG_S)
+            scan_finished.set()
             return None
 
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(ti, "refresh_index", slow_refresh)
-            started = time.monotonic()
-            slow = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
-                "result"
-            ]
-            elapsed = time.monotonic() - started
-        assert slow["runs_state"] == "building" and slow["runs"] == []
-        # Bounded by the budget, not by the scan (2 s) and not by the request
-        # deadline: the frame answers without its facts rather than making the
-        # open pay for them.
-        assert elapsed < 1.0
+        try:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(ti, "refresh_index", gated_refresh)
+                slow = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
+                    "result"
+                ]
+                scan_finished_at_answer = scan_finished.is_set()
+            assert slow["runs_state"] == "building" and slow["runs"] == []
+            # Bounded by the budget, not by the scan and not by the request
+            # deadline: the frame answers without its facts rather than making
+            # the open pay for them.
+            assert not scan_finished_at_answer, "the frame waited for its scan to finish"
+        finally:
+            gate.set()
 
         # THE DEADLINE ITSELF, at the seam a slow page read produces: a read whose
         # budget is already spent starts the build (so the frame after it is
-        # cheap) and waits for none of it.
+        # cheap) and waits for none of it. "None of it" is checked as "the read
+        # never suspended": `_frame_index` has no await before its spent-budget
+        # return, so any wait at all -- however short -- shows up as a
+        # suspension, on a fast host or a loaded one (was `elapsed < 0.5`).
         ti._reset_for_tests()
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(ti, "refresh_index", slow_refresh)
-            async with harness.pool.session(harness.session_id, read=True) as bridge:
-                started = time.monotonic()
-                index = await bridge._frame_index(time.monotonic() - 1.0)
-                elapsed_deadline = time.monotonic() - started
-        assert index is None
-        assert elapsed_deadline < 0.5
+        gate.clear()
+        scan_finished.clear()
+        try:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(ti, "refresh_index", gated_refresh)
+                async with harness.pool.session(harness.session_id, read=True) as bridge:
+                    index = _finished_without_suspending(
+                        bridge._frame_index(time.monotonic() - 1.0)
+                    )
+            assert index is None
+        finally:
+            gate.set()
 
 
 @pytest.mark.asyncio
@@ -482,18 +524,45 @@ async def test_a_warm_reopen_does_not_wait_on_its_own_paused_scan(tmp_path: Path
             )
         )
         _write(session_dir, rows)
-        task, started = ti.start_refresh(harness.root, harness.session_id)
-        assert started
-        release = ti.hold_paint(harness.root, harness.session_id)
+        # THE PRECONDITION IS PINNED, not raced. "A scan still running, paused
+        # for this open's hold" used to rely on the real 6 MB scan still being
+        # in flight and the hold still young (< _YIELD_HOLD_STALE_S, 5 s) when
+        # the read arrived; under CPU starvation the bridge open outlasted
+        # that, the read (correctly) awaited a no-longer-paused scan, and the
+        # test failed 3/3 on `index is None` with the guard intact. The scan is
+        # gated so it is in flight by construction, and the hold cannot age.
+        scan_gate = threading.Event()
+        real_refresh = ti.refresh_index
+
+        def gated_refresh(*args: Any, **kwargs: Any) -> Any:
+            scan_gate.wait(_SCAN_HANG_S)
+            return real_refresh(*args, **kwargs)
+
+        patch = pytest.MonkeyPatch()
+        patch.setattr(ti, "refresh_index", gated_refresh)
+        patch.setattr(ti, "_YIELD_HOLD_STALE_S", 600.0)
         try:
-            async with harness.pool.session(harness.session_id, read=True) as bridge:
-                began = time.monotonic()
-                index = await bridge._frame_index(time.monotonic() + 1.0)
-                elapsed = time.monotonic() - began
+            task, started = ti.start_refresh(harness.root, harness.session_id)
+            assert started
+            release = ti.hold_paint(harness.root, harness.session_id)
+            try:
+                assert ti.refresh_paused_for_paint(
+                    harness.root, harness.session_id
+                ), "fixture: the scan must be running and paused for this open"
+                async with harness.pool.session(harness.session_id, read=True) as bridge:
+                    # A generous deadline, so the only way to answer at once is
+                    # to not wait on the paused scan at all -- asserted as
+                    # "never suspended" rather than `elapsed < 0.5`, which
+                    # measured the host as much as the guard.
+                    index = _finished_without_suspending(
+                        bridge._frame_index(time.monotonic() + 1.0)
+                    )
+            finally:
+                release()
         finally:
-            release()
-        assert index is None
-        assert elapsed < 0.5, f"waited {elapsed:.2f}s on a scan paused for this very open"
+            scan_gate.set()
+            patch.undo()
+        assert index is None, "answered with facts from a scan paused for this very open"
         assert await asyncio.wait_for(task, 30) is not None
 
 

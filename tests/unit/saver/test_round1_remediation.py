@@ -792,15 +792,29 @@ async def test_r1_a_hung_availability_read_adds_nothing_to_the_turn(
     stream = create_stream_fn(_NO_STORE, {"radient": {"saver": {"mode": "auto"}}})
     try:
         request = ChatRequest(model=MODEL, messages=_history(2))
-        started = time.perf_counter()
-        out = await stream._apply_saver(request)
-        elapsed = time.perf_counter() - started
+        # "Adds nothing to the turn" is checked as "the turn never suspended":
+        # with the read still unanswered this path has no await to reach, so
+        # one step of the coroutine runs it to completion. Any wait on the
+        # read -- bounded by its own deadline or not -- yields instead. This
+        # replaces `elapsed < 0.1`, a ceiling a loaded runner crosses with the
+        # non-awaiting code intact (docs/TEST_TIME_ASSERTIONS.md).
+        turn = stream._apply_saver(request)
+        try:
+            turn.send(None)
+        except StopIteration as done:
+            out = done.value
+        else:
+            turn.close()
+            raise AssertionError("the turn suspended on the availability read")
+        # No "the read was started" check: in LO1 `auto` resolves off for a
+        # best-case answer (`auto_unavailable`), so this path returns before it
+        # starts a read at all; the never-suspended property holds either way.
     finally:
         read = stream._saver_availability_read
         await stream.close()
         if read is not None:
             read._task.cancel()
-    assert out is request and elapsed < 0.1, elapsed
+    assert out is request
 
 
 @pytest.mark.asyncio
