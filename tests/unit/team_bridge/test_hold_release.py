@@ -483,6 +483,44 @@ def test_enabled_reads_on_with_no_key_and_with_no_config_file(tmp_path) -> None:
     assert hr.enabled(tmp_path) is False
 
 
+def test_enabled_reads_on_when_the_config_is_torn(tmp_path, monkeypatch) -> None:
+    """R1-m1: an unreadable/unparsable file (``read_config_values`` -> None) reads the
+    default, ON, exactly like ``review_enabled``: what it opens is a person-held hold."""
+
+    (tmp_path / "config.yml").write_bytes(b"values: {team_bridge: [unclosed\n\xff")
+    from local_operator.config import read_config_values
+
+    assert read_config_values(tmp_path) is None  # really the torn branch, not "{}"
+    assert hr.enabled(tmp_path) is True
+    import local_operator.config as config_mod
+
+    monkeypatch.setattr(config_mod, "read_config_values", lambda _d: None)
+    _setting(tmp_path, False)  # even an explicit false is unreadable mid-save
+    assert hr.enabled(tmp_path) is True
+
+
+def test_a_non_boolean_value_reads_on_and_is_logged_once(tmp_path, monkeypatch, caplog) -> None:
+    """S-3: a quoted ``"false"`` is not the off switch; the operator is told once."""
+
+    import logging
+
+    monkeypatch.setattr(hr, "_non_boolean_logged", False)
+    values = {"team_bridge": {"enabled": True, "hold_release": "false"}}
+    (tmp_path / "config.yml").write_text(json.dumps({"values": values}), encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger=hr.logger.name):
+        assert hr.enabled(tmp_path) is True
+        assert hr.enabled(tmp_path) is True
+    lines = [r.getMessage() for r in caplog.records if "hold_release" in r.getMessage()]
+    assert len(lines) == 1 and "unquoted false" in lines[0]
+    assert '"false"' not in lines[0]  # the value itself is not echoed
+    monkeypatch.setattr(hr, "_non_boolean_logged", False)
+    _setting(tmp_path, False)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=hr.logger.name):
+        assert hr.enabled(tmp_path) is False
+    assert not [r for r in caplog.records if "hold_release" in r.getMessage()]
+
+
 def test_default_on_holds_an_operator_decision_for_the_owner_with_an_ask(rig, monkeypatch) -> None:
     """The default-on path end to end: no key set, preferred [new_work_request]
     becomes a work_scope_hold, the hub hears no reject, and the per-message

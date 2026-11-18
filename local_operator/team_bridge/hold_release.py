@@ -275,7 +275,37 @@ def enabled(config_dir: Path | str) -> bool:
     values = read_config_values(Path(config_dir))
     if values is None:
         return DEFAULT_HOLD_RELEASE
+    _warn_non_boolean_once(values)
     return TeamBridgeSettings.from_values(values).hold_release
+
+
+#: Whether the non-boolean ``hold_release`` notice has been logged in this process.
+_non_boolean_logged = False
+
+
+def _warn_non_boolean_once(values: Any) -> None:
+    """Log ONCE when ``team_bridge.hold_release`` holds a non-boolean (security S-3).
+
+    Only a real ``false`` is the off switch, so a quoted ``"false"``, ``off`` or
+    ``0`` reads ON. That direction is safe (a hold, never an admit), but an
+    operator who believes they turned it off would keep getting holds with no
+    clue why. One ``info`` line per process names the fix without echoing the
+    value (config text is the operator's, and the log is not).
+    """
+
+    global _non_boolean_logged
+    if _non_boolean_logged or not isinstance(values, Mapping):
+        return
+    section = values.get("team_bridge")
+    if not isinstance(section, Mapping) or "hold_release" not in section:
+        return
+    if isinstance(section["hold_release"], bool):
+        return
+    _non_boolean_logged = True
+    logger.info(
+        "bridge: team_bridge.hold_release is not a boolean and reads ON; "
+        "write an unquoted false to turn it off"
+    )
 
 
 def review_enabled(config_dir: Path | str) -> bool:

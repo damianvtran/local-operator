@@ -330,8 +330,11 @@ Every hold ends in one of two ways; none waits forever:
   engineering, `out_of_scope_work`, `personal_info_request` and any answer with
   more than one category are still rejected. Only a preferred, allowlisted
   screener's answer converts; others reject as before. It has no
-  `lop config edit` key: set `hold_release: false` under `values:` >
-  `team_bridge:` (via `lop config open`) to reject these again.
+  `lop config edit` key: set `hold_release: false` (an unquoted `false`; a
+  quoted `"false"`, `off` or `0` still reads on, and the receiver logs that once)
+  under `values:` > `team_bridge:` (via `lop config open`) to reject these again.
+  A screener outside the preferred allowlist (a fallback after the preferred
+  models fail) still rejects these requests.
 
 The owner's own posts are never screened by their own agent: a message whose
 server-recorded sender is the owner's account, posting as a person, is

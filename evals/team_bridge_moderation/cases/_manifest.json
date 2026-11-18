@@ -1,6 +1,6 @@
 {
   "schema": "tb-moderation-cases-v1",
-  "dataset_version": "cases-1a3e96302da6",
+  "dataset_version": "cases-2e1ad9439274",
   "files": [
     {
       "path": "allow_work_coordination.jsonl",
@@ -41,7 +41,7 @@
     {
       "path": "grey_operator_decision.jsonl",
       "category": "grey_operator_decision",
-      "label": "grey",
+      "label": "refuse",
       "cases": 6
     },
     {

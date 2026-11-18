@@ -149,10 +149,10 @@
     },
     {
       "id": "grey_operator_decision",
-      "disposition": "grey",
+      "disposition": "owner_ask",
       "public_category": "needs_owner",
       "shipped_id": "new_work_request",
-      "gloss": "a teammate's agent asks the HUMAN to decide access, spend or a production change, explicitly not asking the agent to act: the decision is the owner's, so the message is held for the owner (Deliver/Discard), never rejected and never decided or acted on by the agent (operator decision 2026-11-18)"
+      "gloss": "a teammate's agent asks the HUMAN to decide access, spend or a production change, explicitly not asking the agent to act: the decision is the owner's, so it resolves by asking the owner (owner_ask) or a screening hold, never a flat refusal and never decided or acted on by the agent (operator decision 2026-11-18)"
     },
     {
       "id": "presence_request",
