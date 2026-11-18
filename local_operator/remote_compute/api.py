@@ -77,7 +77,9 @@ LOGS_EMPTY_PAGES_BEFORE_CAUGHT_UP = 2
 #: silently dead.
 #:
 #: THE BOUND, and its honesty: with the schedule in :func:`_retry_delay`, five
-#: attempts wait at most 1 + 2 + 4 + 8 + 8 = 23 s before the refusal is raised.
+#: attempts make FOUR waits — 1 + 2 + 4 + 8 = 15 s — before the fifth failure is
+#: raised (the counter compares ``failures + 1`` against the attempt count, so the
+#: last attempt never sleeps).
 #: Both numbers are CHOSEN, not measured: this repository holds no distribution of
 #: transient 503s on this path, so they are the interval at which someone watching
 #: a log panel concludes it is stuck (a product judgement), and 8 s is also the

@@ -1823,3 +1823,140 @@ async def test_an_apply_to_a_clone_without_the_base_commit_is_a_409(
     assert answer.status_code == 409, answer.text
     assert answer.json()["error"]["code"] == "bundle_invalid"
     assert not (unrelated / ".git" / "refs" / "remotes" / "radient").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_not_configured_surface_explains_the_deployment_not_the_run(api: Api) -> None:
+    """The code was right and the REMEDY was wrong: "use a different name" cannot fix this."""
+    api.configure()
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/logs",
+        status=503,
+        payload={"error": {"code": "not_configured"}},
+    )
+
+    answer = await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}/logs")
+
+    body = answer.json()["error"]
+    assert answer.status_code == 503, answer.text
+    assert body["code"] == "not_configured"
+    assert "does not serve this" in body["message"]
+    assert "deployment" in body["message"]
+    assert "Read the run again" not in body["message"]
+    assert "different name" not in body["message"]
+
+
+@pytest.mark.asyncio
+async def test_the_flag_off_copy_still_names_this_devices_switch(api: Api) -> None:
+    """The code-aware sentence must not swallow the local refusal it shares a code with."""
+    api.configure(enabled=False)
+
+    answer = await api.client.get(f"/v1/desktop/remote-compute/runs/{RUN_ID}/logs")
+
+    body = answer.json()["error"]
+    assert body["code"] == "not_configured"
+    assert "remote_compute.enabled" in body["message"]
+    assert api.radient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_directory_path_the_filesystem_refuses_is_a_typed_400(api: Api) -> None:
+    """A 4096-character body is admitted by the model and refused by the kernel."""
+    api.configure()
+    _network(api.root)
+
+    answer = await api.client.post(
+        "/v1/desktop/remote-compute/runs",
+        json={"directory": "a" * 4096, "prompt": "do the thing", "tier": "cloud_run"},
+    )
+
+    assert answer.status_code == 400, answer.text
+    assert answer.json()["error"]["code"] == "directory_unusable"
+    assert api.radient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_whose_download_connection_drops_is_a_503(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dropped transfer is the far end being unavailable, not a bad run."""
+    api.configure()
+    payload = _session_archive()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    _install_download(monkeypatch, httpx.MockTransport(handle))
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("results.tar.gz", len(payload))),
+    )
+
+    answer = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch")
+
+    assert answer.status_code == 503, answer.text
+    assert answer.json()["error"]["code"] == "results_unreachable"
+    assert SIGNATURE not in answer.text
+    assert not (api.root / "remote-compute" / "results" / RUN_ID).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_fetch_leaves_no_directory_so_the_retry_is_answered_again(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q2: the default destination is per run, so a leftover wedges it."""
+    api.configure()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+        payload = b"escaped\n"
+        info = tarfile.TarInfo("../escaped.txt")
+        info.size = len(payload)
+        bundle.addfile(info, io.BytesIO(payload))
+    transport, _downloads = _serve(buffer.getvalue())
+    _install_download(monkeypatch, transport)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("results.tar.gz", len(buffer.getvalue()))),
+    )
+
+    first = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch")
+    second = await api.client.post(f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/fetch")
+
+    assert first.status_code == 502, first.text
+    assert first.json()["error"]["code"] == "outside_destination"
+    # The retry gets the SAME refusal rather than "destination exists": nothing of
+    # the refused attempt is on disk.
+    assert second.status_code == 502, second.text
+    assert second.json()["error"]["code"] == "outside_destination"
+    assert not (api.root / "remote-compute" / "results" / RUN_ID).exists()
+    assert not (api.root / "escaped.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_apply_into_a_directory_inside_a_repository_is_a_409(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fetch there would write this app's ref into a repository nobody named."""
+    api.configure()
+    clone, bundle = _bundle_for_run(api.root)
+    inside = clone / "sub"
+    inside.mkdir()
+    transport, _downloads = _serve(bundle)
+    _install_download(monkeypatch, transport)
+    api.radient.add(
+        "GET",
+        f"/v1/remote-compute/runs/{RUN_ID}/artifacts",
+        payload=_artifacts(_artifact_row("repo.bundle", len(bundle))),
+    )
+
+    answer = await api.client.post(
+        f"/v1/desktop/remote-compute/runs/{RUN_ID}/results/apply",
+        json={"directory": str(inside)},
+    )
+
+    assert answer.status_code == 409, answer.text
+    assert answer.json()["error"]["code"] == "not_repository_root"
+    assert not (clone / ".git" / "refs" / "remotes" / "radient").exists()

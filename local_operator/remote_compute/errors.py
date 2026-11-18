@@ -319,8 +319,13 @@ class UnsafeArchive(RemoteComputeError):
     link or a device file is not a results archive this build can extract, and
     the operator's remedy is to report it, not to retype anything. The reasons
     are ``absolute_path``, ``outside_destination``, ``link`` (a symbolic or hard
-    link of any kind, in or out of the destination) and ``special_file``
-    (anything that is neither a regular file nor a directory).
+    link of any kind, in or out of the destination), ``special_file``
+    (anything that is neither a regular file nor a directory), ``archive_member_unwritable``
+    (the member's own write failed — a name the filesystem refuses, a path through a
+    file, a file over a directory, no space) and ``archive_too_large`` (the archive
+    would expand past :data:`~local_operator.remote_compute.results.EXPANSION_LIMIT`
+    times its compressed size, or carry more members than
+    :data:`~local_operator.remote_compute.results.MAX_MEMBERS`).
     """
 
     def __init__(self, reason: str, *, detail: str = "") -> None:
@@ -329,6 +334,27 @@ class UnsafeArchive(RemoteComputeError):
             f"{reason} {detail}".strip()
         )
         self.reason = reason
+        self.detail = detail
+
+
+class ResultsUnreachable(RemoteComputeError):
+    """A presigned download that never completed: refused, dropped or timed out.
+
+    A TRANSPORT FAILURE rather than a refusal about the run. Nothing about the run's
+    state is wrong and nothing the operator could retype would help: the artifact
+    host could not be reached, or the transfer broke mid-body. The remedy is a FRESH
+    LISTING — a presigned URL lives minutes and cannot be resumed — which is why this
+    is its own class: the results family's refusals are 409s about what the run
+    published, while an unreachable artifact host is the far end being unavailable,
+    and surfaces answer it 503.
+
+    ``detail`` names the artifact and the transport error's TYPE, never the request:
+    a presigned URL is a bearer (see :mod:`local_operator.remote_compute.results`),
+    and httpx's own exception carries it, so no chain is kept either.
+    """
+
+    def __init__(self, *, detail: str = "") -> None:
+        super().__init__(f"the run's results could not be downloaded: {detail}".strip())
         self.detail = detail
 
 
@@ -356,12 +382,17 @@ class BundleApplyFailed(RemoteComputeError):
     """A run's repository bundle could not be applied to a local repository, and WHY.
 
     A REASON CODE, and the reasons separate the two ends: ``invalid_run_id`` (an
-    id that is not one this build will write into a ref name), ``not_a_directory``
-    (the target is not a directory), ``bundle_invalid`` (``git bundle verify``
-    refused it — most often because the run's base commit is not in this clone)
-    and ``fetch_refused`` (git would not create the ref). ``detail`` names the ref
-    or the path, and never carries git's own stderr: a fixed sentence is what
-    this module's redaction rule allows, and a refusal is reported by its reason.
+    id that is not one this build will write into a ref name), ``relative_destination``
+    (a caller-supplied path must be absolute, because the daemon's working directory
+    is not the operator's), ``not_a_directory`` (the target does not exist or is not
+    a directory), ``not_a_repository`` (it is not inside a git repository at all),
+    ``not_repository_root`` (it is inside one but is not its root, so a fetch there
+    would write a ref into a repository the caller did not name), ``bundle_invalid``
+    (``git bundle verify`` refused it — most often because the run's base commit is
+    not in this clone) and ``fetch_refused`` (git would not create the ref).
+    ``detail`` names the ref or the path, and never carries git's own stderr: a fixed
+    sentence is what this module's redaction rule allows, and a refusal is reported by
+    its reason.
     """
 
     def __init__(self, reason: str, *, detail: str = "") -> None:
@@ -719,6 +750,7 @@ __all__ = [
     "RETRY_AFTER_MAX_S",
     "RemoteComputeError",
     "ResultsUnavailable",
+    "ResultsUnreachable",
     "RunBusy",
     "RunIdentityMismatch",
     "RunLimitReached",

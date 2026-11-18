@@ -42,6 +42,7 @@ from local_operator.remote_compute.client import Artifact, RunArtifacts
 from local_operator.remote_compute.errors import (
     BundleApplyFailed,
     ResultsUnavailable,
+    ResultsUnreachable,
     SizeMismatch,
     UnsafeArchive,
 )
@@ -548,8 +549,11 @@ async def test_a_bundle_the_clone_cannot_use_is_refused(
 
 @pytest.mark.asyncio
 async def test_a_run_without_a_bundle_is_refused(tmp_path: Path) -> None:
+    # A REAL repository, because the directory checks run first now: a run with no
+    # bundle in a directory that is not a repository answers ``not_a_repository``.
+    clone, _bundle = _source_repository(tmp_path)
     with pytest.raises(ResultsUnavailable) as refusal:
-        await results.apply_bundle(_client(artifacts=()), RUN_ID, tmp_path)
+        await results.apply_bundle(_client(artifacts=()), RUN_ID, clone)
     assert refusal.value.reason == results.REASON_NO_BUNDLE
 
 
@@ -602,3 +606,249 @@ async def test_neither_the_url_nor_the_bearer_reaches_a_log_or_the_record(
     assert BEARER not in text
     assert SIGNATURE not in record.read_text()
     assert BEARER not in record.read_text()
+
+
+# ---------------------------------------------------------------------------
+# A refusal leaves nothing behind, and every failure of a write is typed
+# ---------------------------------------------------------------------------
+
+
+def _dir(name: str) -> tuple[tarfile.TarInfo, None]:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.DIRTYPE
+    info.mode = 0o755
+    return info, None
+
+
+def _sequence_server(payloads: list[bytes]) -> httpx.MockTransport:
+    """A download transport that answers each payload in turn."""
+    pending = list(payloads)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=pending.pop(0))
+
+    return httpx.MockTransport(handle)
+
+
+def _sized_client(payloads: list[bytes]) -> Any:
+    """A run client whose listing advertises each payload's own size, in order."""
+
+    class _Sequenced:
+        def __init__(self) -> None:
+            self.answered = 0
+
+        async def run_artifacts(self, identifier: str) -> RunArtifacts:
+            payload = payloads[min(self.answered, len(payloads) - 1)]
+            self.answered += 1
+            return RunArtifacts(
+                run_status="succeeded",
+                artifacts=(Artifact("results.tar.gz", len(payload), _presigned()),),
+                git=None,
+            )
+
+    return _Sequenced()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_archive_leaves_no_destination_and_the_retry_succeeds(
+    tmp_path: Path, presigned_client: Any
+) -> None:
+    """The default destination is per run, so a leftover tree wedges that run forever."""
+    hostile = _archive([_file("fine.txt", b"fine\n"), _file("../escape", b"no\n")])
+    good = _session_archive()
+    presigned_client(_sequence_server([hostile, good]))
+    client = _sized_client([hostile, good])
+    destination = tmp_path / "out"
+
+    with pytest.raises(UnsafeArchive) as refusal:
+        await results.fetch_results(client, RUN_ID, destination)
+    assert refusal.value.reason == results.REASON_OUTSIDE_DESTINATION
+    assert not destination.exists()
+    # Nor a staging directory beside it: the refusal removed the only thing it made.
+    assert [child for child in tmp_path.iterdir() if ".extracting-" in child.name] == []
+
+    fetched = await results.fetch_results(client, RUN_ID, destination)
+
+    assert fetched.file_count == 2
+    assert (destination / "sessions" / SESSION_ID / "meta.json").read_text() == "{}\n"
+
+
+#: The reviewer's crafted archives: each asks the FILESYSTEM for something it will
+#: not do, and each has to come back as a typed refusal naming the member rather
+#: than as an ``OSError`` a surface can only answer 500 to.
+_CRAFTED_MEMBERS: dict[str, list[tuple[tarfile.TarInfo, bytes | None]]] = {
+    "a name too long for the filesystem": [_file("a" * 300, b"x\n")],
+    "a path through a file": [_file("f", b"x\n"), _file("f/child", b"y\n")],
+    "a file over an existing directory": [_dir("d"), _file("d", b"x\n")],
+    "a directory over an existing file": [_file("d", b"x\n"), _dir("d")],
+    "a name with no component to write": [_file(".", b"x\n")],
+}
+
+
+@pytest.mark.parametrize("described", sorted(_CRAFTED_MEMBERS))
+def test_a_member_write_the_filesystem_refuses_is_a_typed_refusal(
+    tmp_path: Path, described: str
+) -> None:
+    archive = _write(tmp_path / "results.tar.gz", _archive(_CRAFTED_MEMBERS[described]))
+    destination = tmp_path / "out"
+
+    with pytest.raises(UnsafeArchive) as refusal:
+        results.extract(archive, destination)
+
+    assert refusal.value.reason == results.REASON_MEMBER_UNWRITABLE
+    assert not destination.exists()
+
+
+def test_an_archive_that_expands_past_the_bound_is_refused(tmp_path: Path) -> None:
+    """A zip bomb: 8 MB of zeros in one member out of a few KB of gzip."""
+    archive = _write(
+        tmp_path / "results.tar.gz", _archive([_file("sessions/x/blob.bin", b"\0" * 8_000_000)])
+    )
+    limit = archive.stat().st_size * results.EXPANSION_LIMIT
+    assert 8_000_000 > limit  # the bomb is really over the bound
+
+    with pytest.raises(UnsafeArchive) as refusal:
+        results.extract(archive, tmp_path / "out")
+
+    assert refusal.value.reason == results.REASON_TOO_LARGE
+    assert not (tmp_path / "out").exists()
+    # Nothing was written past the bound, and the staging tree went with the refusal.
+    assert [child for child in tmp_path.iterdir() if ".extracting-" in child.name] == []
+
+
+def test_an_archive_with_more_members_than_the_bound_is_refused(tmp_path: Path) -> None:
+    members: list[tuple[tarfile.TarInfo, bytes | None]] = [
+        _file(f"f{number:05d}.txt", b"") for number in range(results.MAX_MEMBERS + 1)
+    ]
+    archive = _write(tmp_path / "results.tar.gz", _archive(members))
+
+    with pytest.raises(UnsafeArchive) as refusal:
+        results.extract(archive, tmp_path / "out")
+
+    assert refusal.value.reason == results.REASON_TOO_LARGE
+    assert "members" in str(refusal.value)
+
+
+def test_file_count_counts_distinct_files_not_members(tmp_path: Path) -> None:
+    """A tar may repeat a name; the count a panel shows has to match the disk."""
+    archive = _write(
+        tmp_path / "results.tar.gz",
+        _archive([_file("same.txt", b"one\n"), _file("same.txt", b"one\n")]),
+    )
+
+    assert results.extract(archive, tmp_path / "out") == 1
+
+
+@pytest.mark.parametrize("raised", [httpx.ConnectError, httpx.ReadTimeout])
+@pytest.mark.asyncio
+async def test_a_download_that_never_completes_is_a_typed_refusal(
+    tmp_path: Path, presigned_client: Any, raised: type[httpx.TransportError]
+) -> None:
+    """A dropped connection and a timeout share a remedy: a fresh listing."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise raised("the transport gave up", request=request)
+
+    presigned_client(httpx.MockTransport(handle))
+    artifact = Artifact(name="results.tar.gz", size_bytes=4, url=_presigned())
+
+    with pytest.raises(ResultsUnreachable) as refusal:
+        await results._download(artifact, tmp_path / "archive.tar.gz")  # noqa: SLF001
+
+    assert raised.__name__ in str(refusal.value)
+    assert SIGNATURE not in str(refusal.value)
+    # No chain is kept, because httpx's exception carries the presigned request.
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_both_wire_loggers_are_pinned_while_a_presigned_get_runs(
+    tmp_path: Path, presigned_client: Any
+) -> None:
+    """httpcore emits its own records for the same request, so it is pinned too."""
+    payload = _session_archive()
+    levels: list[tuple[int, int]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        levels.append((logging.getLogger("httpx").level, logging.getLogger("httpcore").level))
+        return httpx.Response(200, content=payload)
+
+    presigned_client(httpx.MockTransport(handle))
+    wire = logging.getLogger("httpx")
+    core = logging.getLogger("httpcore")
+    # ONE OF THE TWO IS ALREADY PINNED product-wide (``logger.quiet_wire_clients``
+    # sets httpx to WARNING in every entry point), so the assertion is that BOTH come
+    # back to whatever they were rather than to the level the pin uses.
+    core.setLevel(logging.NOTSET)
+    before = (wire.level, core.level)
+    artifact = Artifact(name="results.tar.gz", size_bytes=len(payload), url=_presigned())
+
+    await results._download(artifact, tmp_path / "archive.tar.gz")  # noqa: SLF001
+
+    assert levels == [(logging.WARNING, logging.WARNING)]
+    assert (wire.level, core.level) == before
+
+
+def test_a_run_id_git_would_refuse_as_a_ref_is_refused_before_git() -> None:
+    """``a..b`` and ``x.lock`` are legal filenames and illegal ref names."""
+    for bad in ("a..b", "x.lock", "x.", "..", "..."):
+        with pytest.raises(ResultsUnavailable) as refusal:
+            results.checked_run_id(bad)
+        assert refusal.value.reason == results.REASON_INVALID_RUN_ID
+    assert results.checked_run_id(RUN_ID) == RUN_ID
+    assert results.bundle_ref(RUN_ID) == f"refs/remotes/radient/lop/{RUN_ID}"
+
+
+@pytest.mark.asyncio
+async def test_a_directory_that_is_not_a_repository_is_refused_before_any_download(
+    tmp_path: Path,
+) -> None:
+    """The directory is the answer here, not the bundle: nothing was fetched to find out."""
+    client = _client()
+
+    with pytest.raises(BundleApplyFailed) as refusal:
+        await results.apply_bundle(client, RUN_ID, tmp_path)
+
+    assert refusal.value.reason == results.REASON_NOT_A_REPOSITORY
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_directory_inside_a_repository_but_not_its_root_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A fetch there would write this app's ref into a repository nobody named."""
+    clone, _bundle = _source_repository(tmp_path)
+    inside = clone / "sub"
+    inside.mkdir()
+
+    with pytest.raises(BundleApplyFailed) as refusal:
+        await results.apply_bundle(_client(), RUN_ID, inside)
+
+    assert refusal.value.reason == results.REASON_NOT_REPOSITORY_ROOT
+
+
+@pytest.mark.asyncio
+async def test_a_relative_repository_directory_is_refused(tmp_path: Path) -> None:
+    """A relative path would resolve against the daemon's working directory."""
+    with pytest.raises(BundleApplyFailed) as refusal:
+        await results.apply_bundle(_client(), RUN_ID, "clone")
+
+    assert refusal.value.reason == results.REASON_RELATIVE_DESTINATION
+
+
+def test_restoring_a_session_with_a_link_inside_is_refused(
+    tmp_path: Path, isolated_roots: Path
+) -> None:
+    """``restore_session`` is public, so the link rule has to hold here too."""
+    session = tmp_path / "results" / "sessions" / SESSION_ID
+    session.mkdir(parents=True)
+    (session / "meta.json").write_text("{}\n")
+    (session / "link").symlink_to("/etc/passwd")
+
+    with pytest.raises(UnsafeArchive) as refusal:
+        results.restore_session(tmp_path / "results")
+
+    assert refusal.value.reason == results.REASON_LINK
+    assert not (isolated_roots / "sessions" / SESSION_ID).exists()

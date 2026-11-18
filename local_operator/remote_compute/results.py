@@ -23,10 +23,10 @@ WHAT THIS MODULE DOES NOT DO. It does not record anything locally: the run recor
 and a results fetch writes files, not rows. It does not verify the archive's
 contents beyond refusing what must never be written — a session directory is the
 far end's own format, and a decision about what belongs in it would be a second
-copy of that format here. And it does not cap the EXPANDED size of the archive:
-the advertised ``size_bytes`` bounds the download, and the expansion ratio of a
-session directory is not a number this repository has measured, so a cap would be
-a guess that fails a legitimate large run.
+copy of that format here. And what it lets an archive EXPAND to is bounded only
+RELATIVE to the bytes the listing advertised (:data:`EXPANSION_LIMIT`), never by
+an absolute size: a legitimate large run is not this build's to refuse, and the
+ratio this module bounds is one it measured on archives of this shape.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ from local_operator.remote_compute import repo as repo_module
 from local_operator.remote_compute.errors import (
     BundleApplyFailed,
     ResultsUnavailable,
+    ResultsUnreachable,
     SizeMismatch,
     UnsafeArchive,
 )
@@ -84,9 +85,12 @@ BUNDLE_SOURCE_PREFIX = "lop/"
 #: The shape a run id must have to become a path component or a git ref name.
 #:
 #: TIGHTER THAN THE WIRE NEEDS, deliberately: the id is written into a directory
-#: name and into a ref, and git's ref grammar refuses ``..``, ``~``, ``^``, spaces
-#: and control bytes. The server's ids are UUID-shaped, so a value outside this
-#: set is a value this build should not be asked to turn into a path.
+#: name and into a ref, so it has to satisfy BOTH grammars, and a rule that only
+#: satisfies the path one lets a refusal come back as ``fetch_refused`` (git) where
+#: it belongs as ``invalid_run_id``. Besides this character set — which already
+#: excludes git's ``~ ^ : ? * [ \\`` space and control bytes — git additionally
+#: refuses ``..`` anywhere in a ref, a name ending in ``.`` and any name whose
+#: component ends in ``.lock``; :func:`checked_run_id` refuses those too.
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 #: What this module refuses, as the reason codes its errors carry.
@@ -94,6 +98,10 @@ REASON_NO_RESULTS = "no_results"
 REASON_NO_BUNDLE = "no_bundle"
 REASON_DOWNLOAD_REFUSED = "download_refused"
 REASON_DESTINATION_EXISTS = "destination_exists"
+#: A caller-supplied directory this module refuses because it is RELATIVE: it would
+#: resolve against the daemon's working directory rather than the operator's. One
+#: code for both entry points (a results destination and a clone to fetch into),
+#: because the fault and the remedy are the same.
 REASON_RELATIVE_DESTINATION = "relative_destination"
 REASON_UNREADABLE_ARCHIVE = "unreadable_archive"
 REASON_INVALID_RUN_ID = "invalid_run_id"
@@ -101,7 +109,22 @@ REASON_ABSOLUTE_PATH = "absolute_path"
 REASON_OUTSIDE_DESTINATION = "outside_destination"
 REASON_LINK = "link"
 REASON_SPECIAL_FILE = "special_file"
+#: A member whose own write failed: a name too long for the filesystem, a path
+#: through a file, a file over a directory, no space. The archive asked for
+#: something this device cannot lay down, which is the archive's problem and not a
+#: 500 — see :func:`_write_member`.
+REASON_MEMBER_UNWRITABLE = "archive_member_unwritable"
+#: An archive that would expand past :data:`EXPANSION_LIMIT` (or carry more than
+#: :data:`MAX_MEMBERS` members): a compression bomb, or a far end publishing one by
+#: accident.
+REASON_TOO_LARGE = "archive_too_large"
 REASON_NOT_A_DIRECTORY = "not_a_directory"
+#: The path exists but is not inside a git repository at all, so no bundle can be
+#: verified or fetched there.
+REASON_NOT_A_REPOSITORY = "not_a_repository"
+#: The path is inside a repository but is not its ROOT: a fetch there would write a
+#: ref into a repository the caller did not name.
+REASON_NOT_REPOSITORY_ROOT = "not_repository_root"
 REASON_BUNDLE_INVALID = "bundle_invalid"
 REASON_FETCH_REFUSED = "fetch_refused"
 
@@ -113,6 +136,28 @@ FILE_MODE = 0o600
 
 #: How much of a download is read at a time.
 CHUNK_BYTES = 64 * 1024
+
+#: How many times its own COMPRESSED size one archive may expand to.
+#:
+#: MEASURED ON ARCHIVES OF THIS SHAPE, then set well above the measurement, because
+#: the point of the bound is a compression bomb rather than a tight allowance for
+#: real work. Four archives built from what a run's ``results.tar.gz`` actually
+#: holds (a session directory with its transcript, text logs, ``probes.json``,
+#: ``git.json`` and a real ``repo.bundle``) expanded at 0.86x (40 markdown notes:
+#: tar's 512-byte blocks dominate 845 KB of prose), 1.21x (one long prose
+#: transcript), 2.2x (the full shape: 3.7 MB of session, logs and a 137 KB bundle
+#: from this repository's own history) and 13.13x (120k short JSONL turns, 14.5 MB
+#: of repeated keys — the most compressible thing a legitimate session publishes).
+#: 64 is 4.9x the worst of those and still refuses a bomb: a 0.26 MB archive of one
+#: 256 MB zero-filled member measured 1028x, which this bound stops at 16.6 MB.
+EXPANSION_LIMIT = 64
+
+#: The most members one archive may carry.
+#:
+#: The same measurement counted 3 to 42 members across the four shapes above, so a
+#: session directory is a handful of files, not a tree: 5000 is 119x the largest and
+#: still bounds the inode cost of a tar that repeats tiny entries to exhaustion.
+MAX_MEMBERS = 5_000
 
 #: How long one presigned download may take.
 #:
@@ -130,6 +175,8 @@ class FetchedResults:
 
     directory: Path
     archive_bytes: int
+    #: DISTINCT files written, not archive members: a tar may carry the same name
+    #: twice, and the number a panel shows should match what is on disk.
     file_count: int
 
 
@@ -179,10 +226,20 @@ def checked_run_id(identifier: str) -> str:
     """``identifier`` when it is safe to write into a path or a ref, else a refusal.
 
     ONE SPELLING OF THE QUESTION for both uses, because they fail together: an id
-    that cannot be a path component is also one that cannot be a ref name.
+    that cannot be a path component is also one that cannot be a ref name — and the
+    converse is why the git-only rules below are refused HERE. ``a..b`` and
+    ``x.lock`` are legal filenames and illegal ref names, so accepting them would
+    answer ``fetch_refused`` (git would not create the ref) for a value this module
+    should never have offered git at all.
     """
     if not isinstance(identifier, str) or RUN_ID_PATTERN.fullmatch(identifier) is None:
         raise ResultsUnavailable(REASON_INVALID_RUN_ID, detail=str(identifier)[:64])
+    # ``git check-ref-format``'s remaining rules for one component, spelled as
+    # predicates rather than shelling out: no ``..`` anywhere, nothing ending in
+    # ``.``, and no ``.lock`` suffix (git reserves that form for its own lock
+    # files). The character set above already covers the rest of its grammar.
+    if ".." in identifier or identifier.endswith((".", ".lock")):
+        raise ResultsUnavailable(REASON_INVALID_RUN_ID, detail=identifier[:64])
     return identifier
 
 
@@ -193,9 +250,10 @@ async def fetch_results(
 
     THE ORDER IS THE SAFETY. The archive is downloaded into a private temp file
     and checked against the size the listing advertised BEFORE anything is
-    extracted, and the extraction target is created only once that check passed —
-    so a truncated, padded or refused download leaves no half-populated results
-    directory for a surface to offer.
+    extracted, and the extraction itself lands in a private staging directory that
+    is renamed onto ``destination`` only once every member was written — so a
+    truncated or padded download, a member this device refuses, and a crash while
+    extracting all leave NO results directory at all (see :func:`extract`).
     """
     directory = Path(destination)
     if not directory.is_absolute():
@@ -216,10 +274,20 @@ async def apply_bundle(
 ) -> AppliedBundle:
     """Fetch the run's ``repo.bundle`` into ``repo_dir`` as ``refs/remotes/radient/lop/<id>``.
 
+    THE DIRECTORY MUST BE ABSOLUTE AND THE REPOSITORY'S ROOT, checked here rather
+    than at a surface so every caller gets the same answer. Absolute because a
+    relative path would resolve against the daemon's working directory rather than
+    the operator's; the root because a fetch writes a ref into ``<dir>/.git``, so a
+    directory that merely sits INSIDE a repository would put this app's ref in a
+    repository nobody named (``git rev-parse --show-toplevel`` is the question, and
+    the answer has to be the directory itself).
+
     ``git bundle verify`` RUNS FIRST AND IN THE REPOSITORY, because that is what
     it checks: a bundle records the commits it assumes are already present, and a
     clone that does not hold the run's base refuses here instead of fetching a
-    broken history. Only then is the bundle fetched.
+    broken history. Only then is the bundle fetched. A directory that is not a git
+    repository at all is refused as ``not_a_repository`` before that, so the answer
+    is about the directory rather than about the bundle.
 
     NOTHING IN THE OPERATOR'S CHECKOUT MOVES. The refspec writes one
     ``refs/remotes/radient/lop/<id>`` and nothing else, ``--no-tags`` keeps the
@@ -236,9 +304,18 @@ async def apply_bundle(
     and the daemon serves every other request on the loop it is awaited from.
     """
     run = checked_run_id(identifier)
-    root = Path(repo_dir)
+    asked = Path(repo_dir).expanduser()
+    if not asked.is_absolute():
+        raise BundleApplyFailed(REASON_RELATIVE_DESTINATION, detail=str(repo_dir))
+    root = asked.resolve()
     if not root.is_dir():
         raise BundleApplyFailed(REASON_NOT_A_DIRECTORY, detail=str(root))
+    code, _ = await _git(root, "rev-parse", "--git-dir")
+    if code != 0:
+        raise BundleApplyFailed(REASON_NOT_A_REPOSITORY, detail=str(root))
+    code, toplevel = await _git(root, "rev-parse", "--show-toplevel")
+    if code != 0 or Path(toplevel.strip()).resolve() != root:
+        raise BundleApplyFailed(REASON_NOT_REPOSITORY_ROOT, detail=str(root))
     listing = await client.run_artifacts(identifier)
     artifact = listing.artifact(BUNDLE_ARTIFACT)
     if artifact is None:
@@ -343,40 +420,130 @@ def extract(archive: Path, destination: Path) -> int:
     creates the intermediate levels with the umask's mode, so a per-call chmod would
     leave every parent of a deep member at 0755 — the sweep is what makes the rule
     true of the whole tree.
+
+    IT IS WRITTEN ASIDE AND RENAMED. Every member goes into a private staging
+    directory beside ``destination``, and only a complete extraction is renamed
+    onto the destination with ``os.replace`` — so a refusal (or a crash, or a full
+    disk) leaves NO directory where the results would have been, and the retry after
+    a bad archive is a second attempt rather than ``destination_exists`` forever. The
+    staged path is the one this call created, and it is the only thing removed. A
+    killed process can leave that staging directory behind (nothing here can run on
+    the way out); it does not block the retry, because the destination is what the
+    check above reads.
+
+    WHAT IT MAY EXPAND TO IS BOUNDED RELATIVE TO ITS OWN COMPRESSED SIZE
+    (:data:`EXPANSION_LIMIT`) and to :data:`MAX_MEMBERS`, both checked WHILE
+    STREAMING so nothing is written past the bound: a tar whose member sizes or
+    count were composed by the far end is the one part of a download this device
+    cannot check against the listing, and 1000x expansion out of a few hundred KB
+    is a filled disk rather than a report.
     """
     if destination.exists():
         raise ResultsUnavailable(REASON_DESTINATION_EXISTS, detail=str(destination))
-    destination.mkdir(parents=True, mode=DIRECTORY_MODE, exist_ok=True)
-    _restrict_directories(destination)
-    files = 0
+    destination.parent.mkdir(parents=True, mode=DIRECTORY_MODE, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.extracting-", dir=destination.parent)
+    )
+    try:
+        files = _extract_into(archive, staging)
+        try:
+            os.replace(staging, destination)
+        except OSError as failure:
+            # The check above passed, so the only way this fails is somebody else
+            # creating the destination in between — the same refusal, honestly.
+            raise ResultsUnavailable(
+                REASON_DESTINATION_EXISTS, detail=str(destination)
+            ) from failure
+    except BaseException:
+        # ONLY the staging directory, by the exact path this call created it at.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return files
+
+
+def _extract_into(archive: Path, root: Path) -> int:
+    """Write every member of ``archive`` under ``root``; answers distinct files.
+
+    ``root`` IS A PRIVATE DIRECTORY THIS MODULE OWNS, so nothing here has to worry
+    about what was already in it; the caller renames it onto the destination once
+    this returns.
+    """
+    limit = archive.stat().st_size * EXPANSION_LIMIT
     try:
         opened = tarfile.open(archive, "r:gz")
     except (tarfile.TarError, OSError) as failure:
         raise ResultsUnavailable(REASON_UNREADABLE_ARCHIVE, detail=archive.name) from failure
+    #: DISTINCT names, not members: a tar may repeat an entry, and two members for
+    #: one path on disk is one file to whoever reads the results.
+    written: set[str] = set()
+    expanded = 0
+    members = 0
     with opened:
         try:
             for member in opened:
-                _checked(member, destination)
-                target = destination / member.name
-                if member.isdir():
-                    target.mkdir(parents=True, mode=DIRECTORY_MODE, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, mode=DIRECTORY_MODE, exist_ok=True)
-                source = opened.extractfile(member)
-                if source is None:
-                    # Unreachable for a regular file (checked above); refused
-                    # rather than skipped so a member this module cannot read is
-                    # never silently dropped from the results.
-                    raise UnsafeArchive(REASON_SPECIAL_FILE, detail=member.name)
-                with source, _private_file(target) as sink:
-                    shutil.copyfileobj(source, sink, CHUNK_BYTES)
-                files += 1
+                members += 1
+                if members > MAX_MEMBERS:
+                    raise UnsafeArchive(REASON_TOO_LARGE, detail=f"past {MAX_MEMBERS} members")
+                _checked(member, root)
+                expanded = _write_member(opened, member, root, expanded, limit)
+                if member.isfile():
+                    written.add(member.name)
         finally:
             # Runs on the refusal path too: a bare ``mkdir`` above creates
             # intermediates with the umask's mode, and a half-extracted tree must
             # not be left group- or world-readable.
-            _restrict_directories(destination)
-    return files
+            _restrict_directories(root)
+    return len(written)
+
+
+def _write_member(
+    opened: tarfile.TarFile, member: tarfile.TarInfo, root: Path, expanded: int, limit: int
+) -> int:
+    """Write one member under ``root``, and answer the expanded byte count so far.
+
+    A WRITE THAT FAILS IS THE ARCHIVE'S REFUSAL, NEVER A 500. The far end composes
+    every name in the member table, so ``ENAMETOOLONG``, a path that runs through a
+    file, a file over an existing directory and ``FileExistsError`` are all failures
+    a crafted archive can provoke; each is a refusal about the archive, so each
+    becomes :data:`REASON_MEMBER_UNWRITABLE` with the member named rather than an
+    ``OSError`` escaping to a surface that can only say "something broke".
+    """
+    target = root / member.name
+    try:
+        if member.isdir():
+            target.mkdir(parents=True, mode=DIRECTORY_MODE, exist_ok=True)
+            return expanded
+        target.parent.mkdir(parents=True, mode=DIRECTORY_MODE, exist_ok=True)
+        payload = opened.extractfile(member)
+        if payload is None:
+            # Unreachable for a regular file (checked above); refused rather than
+            # skipped so a member this module cannot read is never silently
+            # dropped from the results.
+            raise UnsafeArchive(REASON_SPECIAL_FILE, detail=member.name)
+        with payload, _private_file(target) as sink:
+            return _copy_bounded(payload, sink, member, expanded, limit)
+    except OSError as failure:
+        raise UnsafeArchive(REASON_MEMBER_UNWRITABLE, detail=member.name) from failure
+
+
+def _copy_bounded(
+    payload: IO[bytes], sink: IO[bytes], member: tarfile.TarInfo, expanded: int, limit: int
+) -> int:
+    """Copy one member's bytes, refusing to write the byte that would pass ``limit``.
+
+    THE CHECK IS ON WHAT IS WRITTEN, not on the header's ``size``: a member that
+    declares 1 KB and delivers 1 GB is stopped at the bound by this loop, and the
+    crossing chunk is refused BEFORE it reaches the sink so the disk never holds
+    more than the bound allows.
+    """
+    while True:
+        chunk = payload.read(CHUNK_BYTES)
+        if not chunk:
+            return expanded
+        expanded += len(chunk)
+        if expanded > limit:
+            raise UnsafeArchive(REASON_TOO_LARGE, detail=f"{member.name}, past {limit} bytes")
+        sink.write(chunk)
 
 
 async def _download(artifact: "Artifact", destination: Path) -> int:
@@ -388,28 +555,43 @@ async def _download(artifact: "Artifact", destination: Path) -> int:
     ends short is refused after the transfer. Either way nothing is extracted from
     it.
 
+    A TRANSFER THAT BREAKS IS TYPED, NOT A 500. A refused connection, a timeout and
+    a body that stops mid-stream are all the same remedy — this URL cannot be
+    resumed, so ask the listing for a fresh one — and ``httpx.TransportError`` is
+    the family that covers them (``ConnectError`` and every ``TimeoutException``
+    alike). The refusal is raised OUTSIDE the handler, following
+    ``client._request``'s note: an httpx error carries its request, that request is
+    the presigned URL, and a ``__context__`` kept here would put a bearer one
+    traceback away.
+
     NEITHER THE URL NOR THE BODY REACHES AN ERROR: the reasons name the artifact
     and the status, never the request.
     """
     written = 0
+    unreachable: str | None = None
     with _unlogged_request():
         async with artifact_client() as client:
-            async with client.stream("GET", artifact.url) as response:
-                if response.status_code != 200:
-                    raise ResultsUnavailable(
-                        REASON_DOWNLOAD_REFUSED,
-                        detail=f"{artifact.name} (HTTP {response.status_code})",
-                    )
-                with _private_file(destination) as sink:
-                    async for chunk in response.aiter_bytes(CHUNK_BYTES):
-                        written += len(chunk)
-                        if written > artifact.size_bytes:
-                            raise SizeMismatch(
-                                artifact=artifact.name,
-                                expected=artifact.size_bytes,
-                                actual=written,
-                            )
-                        sink.write(chunk)
+            try:
+                async with client.stream("GET", artifact.url) as response:
+                    if response.status_code != 200:
+                        raise ResultsUnavailable(
+                            REASON_DOWNLOAD_REFUSED,
+                            detail=f"{artifact.name} (HTTP {response.status_code})",
+                        )
+                    with _private_file(destination) as sink:
+                        async for chunk in response.aiter_bytes(CHUNK_BYTES):
+                            written += len(chunk)
+                            if written > artifact.size_bytes:
+                                raise SizeMismatch(
+                                    artifact=artifact.name,
+                                    expected=artifact.size_bytes,
+                                    actual=written,
+                                )
+                            sink.write(chunk)
+            except httpx.TransportError as failure:
+                unreachable = type(failure).__name__
+    if unreachable is not None:
+        raise ResultsUnreachable(detail=f"{artifact.name} ({unreachable})")
     if written != artifact.size_bytes:
         raise SizeMismatch(artifact=artifact.name, expected=artifact.size_bytes, actual=written)
     return written
@@ -433,6 +615,13 @@ def _checked(member: tarfile.TarInfo, destination: Path) -> None:
         raise UnsafeArchive(REASON_LINK, detail=member.name)
     if not (member.isfile() or member.isdir()):
         raise UnsafeArchive(REASON_SPECIAL_FILE, detail=member.name)
+    # A NAME WITH NO USABLE LAST COMPONENT NAMES THE DESTINATION ITSELF (``""``,
+    # ``"."``, ``".."`` or a trailing slash on one of those), and written out it
+    # would be a file over the directory being extracted into — an ``OSError`` on
+    # the destination rather than on a member. Refused here, where the fault is the
+    # name, instead of being left to the write path.
+    if member.name.rstrip("/").rsplit("/", 1)[-1] in ("", ".", ".."):
+        raise UnsafeArchive(REASON_MEMBER_UNWRITABLE, detail=member.name)
     # AN ABSOLUTE NAME IS REFUSED BEFORE THE FILTER SEES IT, and this is the one
     # place where ``data_filter`` is not the right judge: it STRIPS a leading
     # separator and extracts the entry under a mangled path INSIDE the destination
@@ -442,13 +631,21 @@ def _checked(member: tarfile.TarInfo, destination: Path) -> None:
     if _absolute(member.name):
         raise UnsafeArchive(REASON_ABSOLUTE_PATH, detail=member.name)
     filter_ = getattr(tarfile, "data_filter", None)
-    if filter_ is None:  # pragma: no cover - requires-python >= 3.12 provides it
-        _refuse_escape(destination, member.name)
-        return
     try:
-        filter_(member, str(destination))
+        if filter_ is None:  # pragma: no cover - requires-python >= 3.12 provides it
+            _refuse_escape(destination, member.name)
+        else:
+            filter_(member, str(destination))
     except tarfile.TarError as refusal:
         raise UnsafeArchive(_filter_reason(refusal), detail=member.name) from None
+    except OSError as failure:
+        # THE FILTER RESOLVES THE TARGET PATH, and that resolution is a filesystem
+        # call of its own: it asks where the member would land, so a name the kernel
+        # refuses (``ENAMETOOLONG``) or one that runs through a file already on disk
+        # (``NotADirectoryError``) comes back as an ``OSError`` from the filter rather
+        # than from a write. Same answer as a failed write, because it is the same
+        # name — and measured: both shapes raise here, not in ``_write_member``.
+        raise UnsafeArchive(REASON_MEMBER_UNWRITABLE, detail=member.name) from failure
 
 
 def _absolute(name: str) -> bool:
@@ -465,7 +662,7 @@ def _absolute(name: str) -> bool:
 
 @contextlib.contextmanager
 def _unlogged_request() -> Iterator[None]:
-    """Keep ``httpx``'s request line out of the log while a presigned GET runs.
+    """Keep ``httpx``'s and ``httpcore``'s request lines out of the log for a URL read.
 
     THE LINE IS THE CREDENTIAL: httpx logs ``HTTP Request: GET <url> ``"HTTP/1.1
     200 OK"`` at INFO, and a presigned URL carries its signature in the query
@@ -474,18 +671,26 @@ def _unlogged_request() -> Iterator[None]:
     that is safe only because of a level set somewhere else is not protected by
     this module.
 
+    BOTH LOGGERS, because httpx delegates the transfer to httpcore: ``httpcore.http11``
+    and ``httpcore.connection`` emit their own DEBUG records for the same request
+    (measured: 12 of them during one presigned GET), and their message set carrying
+    no query string today is an accident of the current release rather than an
+    invariant. Pinning the two parents covers every child a version adds.
+
     A LEVEL PIN FOR THE WINDOW rather than a log filter: a filter that rewrites
     ``record.args`` would have to know httpx's format string, and the cost of the
     pin is only that another request's line in the same window is not logged,
     which is a diagnostic the product turns off anyway.
     """
-    logger = logging.getLogger("httpx")
-    previous = logger.level
-    logger.setLevel(logging.WARNING)
+    loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    previous = [logger.level for logger in loggers]
     try:
+        for logger in loggers:
+            logger.setLevel(logging.WARNING)
         yield
     finally:
-        logger.setLevel(previous)
+        for logger, level in zip(loggers, previous):
+            logger.setLevel(level)
 
 
 def _filter_reason(refusal: tarfile.TarError) -> str:
@@ -531,10 +736,19 @@ def _restore_one(source: Path, config_dir: Path) -> RestoredSession:
     ``copytree`` creates the destination with ``exist_ok=False``, so the "already
     there" arm is the directory's own atomic refusal — which is also why a racing
     restore of the same id answers ``created=False`` instead of half-copying over
-    the other one. ``symlinks=True`` copies a link as a link: extraction refused
-    every link already, so this is a second refusal rather than a dereference of
-    something unexpected.
+    the other one.
+
+    A LINK IN THE TREE IS REFUSED, NOT COPIED. ``copytree(..., symlinks=True)``
+    preserves a link as a link, which its docstring used to describe as a second
+    refusal while nothing refused it: ``extract`` refuses links, but this function is
+    public and takes any ``extracted`` path, so a link that appeared after extraction
+    would be copied into the sessions store as a dangling or pointing-outward entry.
+    The walk below is what makes the refusal true; ``symlinks=True`` stays so that a
+    link appearing between the walk and the copy is never DEREFERENCED into a copy of
+    whatever it points at.
     """
+    if _carries_link(source):
+        raise UnsafeArchive(REASON_LINK, detail=source.name)
     target = config_dir / SESSIONS_DIRECTORY / source.name
     if target.exists():
         return RestoredSession(session_id=source.name, created=False)
@@ -544,6 +758,22 @@ def _restore_one(source: Path, config_dir: Path) -> RestoredSession:
     except FileExistsError:
         return RestoredSession(session_id=source.name, created=False)
     return RestoredSession(session_id=source.name, created=True)
+
+
+def _carries_link(root: Path) -> bool:
+    """Whether anything under ``root`` (itself included) is a symbolic link.
+
+    ``followlinks=False`` keeps the walk inside the tree, and the directory list is
+    checked as well as the files because a link to a directory is exactly the shape
+    that would make a copy leave the archive.
+    """
+    if root.is_symlink():
+        return True
+    for directory, subdirectories, files in os.walk(root, followlinks=False):
+        for name in (*subdirectories, *files):
+            if (Path(directory) / name).is_symlink():
+                return True
+    return False
 
 
 def _default_config_dir() -> Path:
@@ -562,6 +792,8 @@ __all__ = [
     "BUNDLE_ARTIFACT",
     "BUNDLE_REF_PREFIX",
     "BUNDLE_SOURCE_PREFIX",
+    "EXPANSION_LIMIT",
+    "MAX_MEMBERS",
     "REASON_ABSOLUTE_PATH",
     "REASON_BUNDLE_INVALID",
     "REASON_DESTINATION_EXISTS",
@@ -569,12 +801,16 @@ __all__ = [
     "REASON_FETCH_REFUSED",
     "REASON_INVALID_RUN_ID",
     "REASON_LINK",
+    "REASON_MEMBER_UNWRITABLE",
     "REASON_NO_BUNDLE",
     "REASON_NO_RESULTS",
     "REASON_NOT_A_DIRECTORY",
+    "REASON_NOT_A_REPOSITORY",
+    "REASON_NOT_REPOSITORY_ROOT",
     "REASON_OUTSIDE_DESTINATION",
     "REASON_RELATIVE_DESTINATION",
     "REASON_SPECIAL_FILE",
+    "REASON_TOO_LARGE",
     "REASON_UNREADABLE_ARCHIVE",
     "RESULTS_ARTIFACT",
     "RESULTS_SUBDIRECTORY",

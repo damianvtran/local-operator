@@ -98,6 +98,7 @@ from local_operator.remote_compute.errors import (
     PreviewNotEnabled,
     RemoteComputeError,
     ResultsUnavailable,
+    ResultsUnreachable,
     RunBusy,
     RunIdentityMismatch,
     RunLimitReached,
@@ -136,6 +137,38 @@ _t = tr("wire.remote_compute")
 TIER_NOT_AVAILABLE_MESSAGE = (
     "This app can start only Cloud runs on Radient for now; the Dedicated tier is "
     "not offered here yet, so nothing was submitted."
+)
+
+#: The sentence for a directory path this surface cannot even resolve or read.
+#:
+#: ROUTE-OWNED ENGLISH PROSE for the reason ``TIER_NOT_AVAILABLE_MESSAGE`` records:
+#: the code is the contract and a renderer branches on it, while a keyed message needs
+#: seven translations and an audit before it may ship. What reaches this is the
+#: caller's own string — a 4096-character body, which ``RunSubmission`` admits and the
+#: filesystem refuses — and never a repository verdict, which ``repo.detect_repo``
+#: answers as ``no_remote`` in its own words.
+DIRECTORY_UNUSABLE_MESSAGE = (
+    "That directory cannot be read on this machine — its path is too long, or a part "
+    "of it is not a directory — so no run was submitted. Pick the repository folder "
+    "again."
+)
+
+#: The contract's own code for "this deployment does not serve that".
+CODE_NOT_CONFIGURED = "not_configured"
+
+#: The sentence for a surface this Radient deployment does not serve.
+#:
+#: ROUTE-OWNED ENGLISH PROSE for the reason ``TIER_NOT_AVAILABLE_MESSAGE`` records,
+#: and here it is also the only way to say it in one round: a keyed sentence would
+#: have to join ``wire.remote_compute``, whose ledger rows then go stale and whose
+#: seven carried locales UN-SHIP until an independent audit of the namespace lands
+#: (`generate.py --check` regenerates ``shipped.json`` to ``en`` only, and the suite's
+#: carrying-locale tests fail until the audit restores it). The code is the contract
+#: a renderer branches on; this is what a person reads when it has no copy of its own.
+SURFACE_NOT_CONFIGURED_MESSAGE = (
+    "This Radient deployment does not serve this: the feature is not configured "
+    "there, so nothing was read or changed. Retrying here will not help — it has to "
+    "be switched on for the deployment."
 )
 
 #: The tiers this PR can start. ``dedicated`` is refused as ``tier_not_available``
@@ -191,6 +224,13 @@ CODE_RUN_NOT_FOUND = "not_found"
 #: Also the contract's spelling, for a key this client refuses before sending.
 CODE_INVALID_IDEMPOTENCY_KEY = "invalid_idempotency_key"
 CODE_RESULTS_SIZE_MISMATCH = "results_size_mismatch"
+#: The artifact host could not be reached, or the transfer broke (503, because the
+#: far end is unavailable rather than the request being wrong).
+CODE_RESULTS_UNREACHABLE = "results_unreachable"
+#: A caller-supplied directory this surface could not even resolve or read: a path
+#: whose own bytes the filesystem refuses (``ENAMETOOLONG``), not a directory
+#: problem about the repository (that is ``no_remote``, from ``repo.detect_repo``).
+CODE_DIRECTORY_UNUSABLE = "directory_unusable"
 CODE_FAILED = "remote_compute_failed"
 
 #: The status each refusal answers when the library carries no HTTP status of its
@@ -223,6 +263,10 @@ _STATUS_BY_CLASS: tuple[tuple[type[BaseException], int], ...] = (
     (BundleApplyFailed, 409),
     (UnsafeArchive, 502),
     (SizeMismatch, 502),
+    # NOT 409, because the run is not in a bad state: the artifact host could not be
+    # reached or the transfer broke, and the remedy is to ask for a fresh listing
+    # once it is back — the same status a store that is down answers elsewhere here.
+    (ResultsUnreachable, 503),
 )
 
 #: The code each library-internal refusal answers, in the same order. Read only
@@ -239,6 +283,7 @@ _CODE_BY_CLASS: tuple[tuple[type[BaseException], str], ...] = (
     (CapacityUnavailable, CODE_CAPACITY_UNAVAILABLE),
     (RunNotFound, CODE_RUN_NOT_FOUND),
     (SizeMismatch, CODE_RESULTS_SIZE_MISMATCH),
+    (ResultsUnreachable, CODE_RESULTS_UNREACHABLE),
 )
 
 #: The status a MESH refusal answers, by the refusal's own code.
@@ -300,6 +345,19 @@ def refusal_from(failure: BaseException) -> ClientRefusal:
         # the remedy beside the message.
         return ClientRefusal(409, failure.reason, refusal_message(failure))
     if isinstance(failure, RemoteComputeError):
+        if failure.code == CODE_NOT_CONFIGURED:
+            # THE FAR END'S OWN CODE OUTRANKS ITS CLASS'S SENTENCE. ``not_configured``
+            # reaches this table on a ``Conflict`` (``errors.ERROR_BY_CODE``), whose
+            # remedy — read the run again, use a different name — cannot fix a
+            # deployment that does not serve the surface at all (QA round 1, Q1).
+            # Only the far end sets this code: this plane's own switch-off refusal is
+            # built by ``_disabled`` and never passes through here.
+            return ClientRefusal(
+                status_for(failure),
+                CODE_NOT_CONFIGURED,
+                SURFACE_NOT_CONFIGURED_MESSAGE,
+                retry_after=failure.retry_after,
+            )
         code = _contract_code(failure) or _class_code(failure)
         retry_after = failure.retry_after
         return ClientRefusal(
@@ -463,6 +521,12 @@ class ResultsApply(BaseModel):
     beside the commits it builds on, and only the operator knows which clone that
     is. The clone must already hold the run's base commit
     (``git bundle verify`` enforces it).
+
+    ABSOLUTE AND THE REPOSITORY'S OWN ROOT, both refused by the library rather than
+    here (``relative_destination``, ``not_repository_root``): the fetch writes a ref
+    into ``<dir>/.git``, so a relative path would resolve against the daemon's working
+    directory and a path merely INSIDE a repository would put this app's ref in a
+    repository nobody named.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -808,8 +872,17 @@ async def create_run(
     # RESOLVED, not taken raw: see ``RunSubmission.directory``. A ``~`` the caller
     # meant as the operator's home reached ``detect_repo`` as a literal folder name
     # and came back "not a git repository".
-    directory = Path(body.directory).expanduser().resolve()
-    repository = await asyncio.to_thread(repository_for, directory)
+    try:
+        directory = Path(body.directory).expanduser().resolve()
+        repository = await asyncio.to_thread(repository_for, directory)
+    except OSError:
+        # THE PATH ITSELF CAN FAIL BEFORE ANY REPOSITORY QUESTION IS ASKED: a
+        # 4096-character body (the field's own limit) is a component the filesystem
+        # refuses with ``ENAMETOOLONG``, and reading the repository through it fails
+        # the same way. That is the caller's input rather than this surface's fault,
+        # so it answers a coded refusal instead of the unclassified-failure 500 the
+        # blanket handler would otherwise produce (PR #4200 review round 2, Q3).
+        raise ClientRefusal(400, CODE_DIRECTORY_UNUSABLE, DIRECTORY_UNUSABLE_MESSAGE) from None
     try:
         hosting, model = await asyncio.to_thread(_hosting_model, manager)
     except ValueError as failure:
@@ -922,9 +995,12 @@ async def fetch_results(
 
     THE ORDER IS THE SAFETY, and it is the library's: the archive is downloaded to a
     private temp file, checked against the size the listing advertised, and only
-    then extracted into a directory that must NOT already exist. So a refused or
-    truncated download leaves no half-populated results directory for a panel to
-    offer as the run's work.
+    then extracted into a staging directory this call renames onto a destination
+    that must NOT already exist. So a refused or truncated download, and an archive
+    whose members this device will not write, all leave NO results directory — a
+    panel therefore never offers a half-populated tree as the run's work, and the
+    retry at the same (per-run default) path is answered on its merits rather than
+    ``destination_exists``.
 
     THE SESSION IS RESTORED IN A THREAD. Copying a session directory is file I/O
     that can take a moment on a large transcript, and this loop serves every other
@@ -1005,7 +1081,7 @@ def _disabled() -> ClientRefusal:
     the code is ``not_configured``: a renderer that branches on the code must see
     the same one from a create and from a log read.
     """
-    return ClientRefusal(403, "not_configured", _t(_wr.disabled()))
+    return ClientRefusal(403, CODE_NOT_CONFIGURED, _t(_wr.disabled()))
 
 
 async def _account(auth: DesktopAuth) -> dict[str, str]:
