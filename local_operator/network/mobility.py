@@ -4220,7 +4220,7 @@ def _peer_workset_version(raw: Any) -> int:
     """The working-set protocol version a PEER's frame states (``0`` when absent).
 
     Read from the RAW frame, before ``_consent_frame`` re-stamps it with this build's
-    own number. ``>= workset.WORKSET_TRANSFER_VERSION`` means the peer can receive the
+    own number. ``>= workset.WORKSET_TRANSFER_MIN_VERSION`` means the peer can receive the
     files (PR B); anything lower keeps PR A's "confirmed, files stay" behaviour.
     """
     if not isinstance(raw, Mapping):
@@ -4471,7 +4471,7 @@ def _workset_gate_full(
     naming the device that must be updated. A session with no working files still
     moves, so a chat-only move to an older peer keeps working during a rollout.
     THE CARRY DECISION (PR B). ``transfer`` says the destination speaks the transfer
-    protocol (its prepare's consent ``version`` >= ``WORKSET_TRANSFER_VERSION``). The
+    protocol (its prepare's consent ``version`` >= ``WORKSET_TRANSFER_MIN_VERSION``). The
     manifest is then computed with ``carries_files: true``, which is a scope-digest
     input (``workset._artifact_binding``). The consent decides, never the build:
 
@@ -4600,7 +4600,7 @@ def _source_workset_preflight(
         session_id,
         to_device=link.device_id,
         carries=_peer_workset_version(frame.get("working_set"))
-        >= workset.WORKSET_TRANSFER_VERSION,
+        >= workset.WORKSET_TRANSFER_MIN_VERSION,
     )
     _note_team_bridge_use(server, session_id, block)
     _audit(
@@ -5213,7 +5213,8 @@ def _source_prepare(
     from local_operator.network import workset as _workset_mod
 
     workset_transfer = (
-        _peer_workset_version(frame.get("working_set")) >= _workset_mod.WORKSET_TRANSFER_VERSION
+        _peer_workset_version(frame.get("working_set"))
+        >= _workset_mod.WORKSET_TRANSFER_MIN_VERSION
     )
     workset_arrival: dict[str, Any] | None = None
     if not keep:
@@ -5562,6 +5563,7 @@ def _source_prepare(
                 workset_manifest,
                 lease_epoch=lease_epoch,
                 to_device=link.device_id,
+                cwd=_source_session_cwd(server, session_id),
             )
         except Exception as exc:  # noqa: BLE001 — refused before anything is journaled
             logger.warning(

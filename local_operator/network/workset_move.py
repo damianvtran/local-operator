@@ -260,6 +260,7 @@ def source_prepare(
     *,
     lease_epoch: str,
     to_device: str,
+    cwd: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """P4 on the owner, after the retire and the P3 re-check: snapshot and journal.
 
@@ -343,6 +344,10 @@ def source_prepare(
     handoff_block = {"binding": binding, "scope_digest": scope, "worktrees": len(rows)}
     offer = {
         "version": workset.WORKSET_TRANSFER_VERSION,
+        # The session's cwd in ``~/`` form, so the destination can point the arrived
+        # session at the RESTORED tree (the promote's cwd mapping runs before the
+        # restore exists). Empty when it is outside this device's home.
+        "cwd": engine.home_relative(cwd, home=home) or "" if cwd else "",
         "binding": binding,
         "worktrees": offer_rows,
         "left_behind": left,
@@ -1013,6 +1018,7 @@ def destination_transfer(
             "plans": plans,
             "left_behind": [*[dict(r) for r in offer.get("left_behind") or []], *left],
             "notes": rewrite_notes,
+            "cwd": str(offer.get("cwd") or ""),
             "restored": {},
         },
     )
@@ -1087,6 +1093,7 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
         pending["restored"] = restored
         _write_json(directory / "pending.json", pending)
     rows = [restored[str(p.get("n"))] for p in pending.get("plans") or [] if str(p.get("n")) in restored]
+    _retarget_cwd(server, session_id, str(pending.get("cwd") or ""), rows, home)
     waiting = [r for r in rows if r.get("state") == "pending_restore"]
     state = "pending_restore" if waiting else "restored"
     if not waiting:
@@ -1108,6 +1115,41 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
         "left_behind": list(pending.get("left_behind") or []),
         "notes": list(pending.get("notes") or []),
     }
+
+
+def _retarget_cwd(
+    server: Any, session_id: str, cwd_rel: str, rows: Sequence[Mapping[str, Any]], home: Path
+) -> None:
+    """Point the arrived session's cwd marker at the tree that now holds its work.
+
+    The promote maps the recorded cwd (``carry.rewrite_host_cwd``) BEFORE the restore
+    has created the worktree, so it cannot pick the restored path; and a restore that
+    landed ``beside`` (conflict suffix) or under ``.worktrees/moved-<sid8>`` is somewhere
+    no path rule could guess. The source's ``~/`` cwd inside a restored row's source
+    path is rewritten to the same tail under that row's ``dest_path``, contained under
+    this device's home. Best effort: a marker it cannot write keeps the promote's value.
+    """
+    from local_operator.network import carry, workset_transfer as engine
+
+    if not cwd_rel.startswith("~/"):
+        return
+    for row in rows:
+        src, dest = str(row.get("path") or ""), str(row.get("dest_path") or "")
+        if row.get("state") != "restored" or not src.startswith("~/") or not dest:
+            continue
+        if cwd_rel != src and not cwd_rel.startswith(src.rstrip("/") + "/"):
+            continue
+        try:
+            target = engine.contained_path(home, dest + cwd_rel[len(src) :])
+            if not target.is_dir():
+                target = engine.contained_path(home, dest)
+            marker_path = Path(server.root) / "sessions" / session_id / carry.DESKTOP_MARKER_NAME
+            marker = _read_json(marker_path) or {}
+            marker["cwd"] = str(target)
+            carry._write_marker(marker_path, marker)  # noqa: SLF001 — the one marker writer
+        except Exception:  # noqa: BLE001 — advice for the next open, never a failure
+            logger.debug("workset: could not retarget %s's cwd", session_id, exc_info=True)
+        return
 
 
 def arrival_receipt(block: Mapping[str, Any] | None, restored: Mapping[str, Any] | None) -> dict[str, Any] | None:

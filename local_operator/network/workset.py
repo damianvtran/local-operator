@@ -66,6 +66,11 @@ DEFAULT_CAP_BYTES = 256 * 1024 * 1024
 #: negotiation can move without changing every scope digest.
 WORKSET_TRANSFER_VERSION = 2
 
+#: The lowest peer protocol the OWNER sends files to. Separate from the number this
+#: build speaks so the two halves of a negotiation are separately addressable (and an
+#: in-process test can make one relay "old" without making the other one forget).
+WORKSET_TRANSFER_MIN_VERSION = 2
+
 #: Config key for the per-move cap (``mesh.move.working_set_max_bytes``; AGENTS.md
 #: "Adding a configuration key"). The default is ``DEFAULT_CAP_BYTES``.
 CAP_CONFIG_PATH = ("mesh", "move", "working_set_max_bytes")

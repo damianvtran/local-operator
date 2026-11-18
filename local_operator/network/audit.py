@@ -823,6 +823,15 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # fixed result codes only — never a path, a URL path, userinfo or git output.
     "session.workset.preflight": frozenset({"peer", "worktrees", "planned", "bytes", "excluded"}),
     "session.workset.probe": frozenset({"peer", "hosts", "results", "refused"}),
+    # A moved session's working set (design move-working-set.md §8.3). Bounded
+    # metadata only — ids, sizes, one home-relative path, reason codes — never
+    # bytes or file contents. ``serve`` is the required row written before the
+    # first byte of each artifact (and before each resumed serve) leaves.
+    "session.workset.serve": frozenset(
+        {"peer", "to_device", "lease_epoch", "artifact", "bytes", "offset", "path"}
+    ),
+    "session.workset.restore": frozenset({"peer", "state", "worktrees"}),
+    "session.workset.departed": frozenset({"peer", "marked"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
