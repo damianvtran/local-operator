@@ -5163,8 +5163,16 @@ class DesktopSessionBridge:
             )
             return resident if source == expected else None
         step = _OpenFrameSteps(self.session_id)
+        # Large journals also accept a companion the journal has grown past by
+        # run-neutral rows (``index_read_model._prefix_tail``; see
+        # ``_journal_order_page``'s "LARGE JOURNALS STAY ON THE COMPANION").
         finished, projected = await _bounded_frame_read(
-            paint_deadline, index_read_model.summary, self.root, self.session_id, source
+            paint_deadline,
+            index_read_model.summary,
+            self.root,
+            self.session_id,
+            source,
+            prefix_ok=transcript_index.companion_first(self.root, self.session_id),
         )
         if not finished:
             step("frame_source.summary", state="deadline")
@@ -5213,6 +5221,7 @@ class DesktopSessionBridge:
                 reaches_eof=reaches_eof,
                 order_ids=order_ids,
                 source=source,
+                prefix_ok=transcript_index.companion_first(self.root, self.session_id),
             )
             if not finished:
                 return None, None
@@ -5367,11 +5376,28 @@ class DesktopSessionBridge:
         worker (a thread cannot be cancelled) and ``_bounded_frame_read`` retrieves
         its outcome; it is not retried here. A standalone ``/history``
         (``paint_deadline=None``) still waits for the companion in full.
+
+        LARGE JOURNALS STAY ON THE COMPANION (``transcript_index.companion_first``,
+        ADR ``docs/design/transcript-index-off-process.md`` step 2). Two changes,
+        both only above ``COMPANION_FIRST_MIN_BYTES``:
+
+        * the companion may answer for a journal that has GROWN since it was
+          published (``prefix_ok``, the append-prefix rule in
+          ``index_read_model._extends``) whenever every row asked about lies in
+          the covered prefix; a page reaching an appended row still falls to (3);
+        * a companion answer does NOT arm the resident scan. For these journals
+          that "warm" is a whole-index hydration on serve's GIL (~1.1 s for the
+          808 MB anchor) that the 4-slot resident LRU evicts again as soon as the
+          operator switches across more than four large conversations -- so it
+          was re-paid on most opens. Re-opening the companion is the cheaper
+          steady state (a page-bounded SQLite read), which is the trade the
+          25/25-reopen measurement above did NOT have to weigh at 36.5 MB.
         """
         ids = list(dict.fromkeys(ids))
         source = index_read_model.page_source(pages)
         if self._apply_journal_order(answer, source, ids):
             return answer
+        large = transcript_index.companion_first(self.root, self.session_id)
         finished, projected = await _bounded_frame_read(
             paint_deadline,
             index_read_model.order_facts,
@@ -5380,12 +5406,14 @@ class DesktopSessionBridge:
             collected_ids=[row["id"] for row in answer["entries"]],
             order_ids=ids,
             source=source,
+            prefix_ok=large,
         )
         if not finished:
             _OpenFrameSteps(self.session_id)("journal_order.companion", state="deadline")
             return self._journal_page(answer, pages, ids)
         if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
-            self._warm_resident_scan()
+            if not large:
+                self._warm_resident_scan()
             return answer
         # A missing, stale, corrupt or unsupported projection is NOT an error: the
         # policy below is exactly what an absent companion answered before this

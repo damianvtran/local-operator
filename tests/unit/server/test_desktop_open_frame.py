@@ -1717,3 +1717,228 @@ async def test_a_slow_companion_does_not_hold_the_snapshots_first_frame(
             row["id"] == "ans05" and row.get("journal_seq") is not None for row in rows
         ), published
         assert ti.fresh_resident(harness.root, harness.session_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# Large journals: the companion answers, serve never hydrates (ADR step 2,
+# docs/design/transcript-index-off-process.md). "Large" is
+# ``ti.COMPANION_FIRST_MIN_BYTES``; these tests lower it so a six-turn fixture
+# qualifies, because the behaviour under test is the branch, not the bytes.
+# ---------------------------------------------------------------------------
+
+
+def _count_hydrations(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every whole-index build or hydration serve performs, by session.
+
+    ``refresh_index`` is the one door ``start_refresh`` (and therefore every
+    open-path warm, correction and fallback) goes through to hydrate a persisted
+    index or scan a journal, so counting its calls counts hydrations.
+    """
+    calls: list[str] = []
+    original = ti.refresh_index
+
+    def counted(config_dir: Any, session_id: str) -> Any:
+        calls.append(session_id)
+        return original(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", counted)
+    return calls
+
+
+def _append_raw(directory: Path, row: dict[str, Any]) -> None:
+    """Append one journal row in place (same inode), as a live runtime does."""
+    with (directory / TRANSCRIPT_FILENAME).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+@pytest.mark.asyncio
+async def test_switching_across_six_large_sessions_never_hydrates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six published large journals, each opened twice: zero ``refresh_index``.
+
+    On main a companion answer armed ``_warm_resident_scan`` -- a full hydration
+    of the persisted index on serve's GIL -- and the 4-slot resident LRU evicted
+    it again once the operator moved across more than four conversations, so
+    the hydration was re-paid on most switches. Counted, not timed.
+    """
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        sids = [harness.session_id] + [
+            await harness.pool.create(str(harness.root)) for _ in range(5)
+        ]
+        for sid in sids:
+            _write(harness.root / "sessions" / sid, _conversation(6))
+            index = ti.refresh_index(harness.root, sid)
+            assert index is not None
+            _publish(harness.root, sid, index)
+        ti._reset_for_tests()  # a fresh serve: only the companions exist
+        calls = _count_hydrations(monkeypatch)
+        assert harness.client is not None
+        for _round in range(2):
+            for sid in sids:
+                url = f"/v1/desktop/sessions/{sid}/history"
+                for params in (
+                    _order_params(["ans05", "user05"]),
+                    {"limit": 5, "open_frame": 1, "journal_order": 1},
+                ):
+                    body = (await harness.client.get(url, params=params)).json()["result"]
+                    assert body["journal_order_state"] == "ready", (sid, params)
+                await asyncio.sleep(0)
+        # Let any armed background task run before counting.
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+        assert calls == [], f"serve hydrated large journals on open: {calls}"
+        assert all(ti.fresh_resident(harness.root, sid) is None for sid in sids)
+
+
+@pytest.mark.asyncio
+async def test_a_large_journal_companion_answer_is_the_resident_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Byte-equal to the resident join for the same journal, both read shapes."""
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        for params in (
+            _order_params(["ans05", "user05", "user01"]),
+            {"limit": 5, "open_frame": 1, "journal_order": 1},
+        ):
+            ti._reset_for_tests()
+            projected = (await harness.client.get(url, params=params)).json()["result"]
+            ti._remember(
+                ti._key(harness.root, harness.session_id),
+                index,
+                ti.index_path(harness.root, harness.session_id).stat().st_mtime,
+            )
+            control = (await harness.client.get(url, params=params)).json()["result"]
+            assert control["journal_order_state"] == "ready"
+            assert json.dumps(projected, sort_keys=True) == json.dumps(control, sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_a_grown_large_journal_answers_its_prefix_from_the_companion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE APPEND-PREFIX RULE: a journal grown by run-neutral rows stays ``ready``.
+
+    A live session appends bookkeeping rows (attention, spend, frontend state
+    checkpoints) constantly, which moved the journal's signature and made the
+    companion ``stale``: main answered ``building`` and hydrated serve's whole
+    index to correct it. The appended rows are read directly and given their
+    ordinals; every answer must equal the resident index of the GROWN journal,
+    for both read shapes, with zero hydrations on the way.
+    """
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        directory = harness.root / "sessions" / harness.session_id
+        for id_, custom_type, details in (
+            ("attn-after", "attention_started", {"token": "t-after"}),
+            ("spend-after", "session_spend.v1", {"usd": 0.01}),
+            ("bk-after", "frontend_state_checkpoint_v1", {"blob": "x" * 4096}),
+        ):
+            _append_raw(
+                directory,
+                {
+                    "id": id_,
+                    "ts": time.time(),
+                    "type": "custom",
+                    "payload": {"custom_type": custom_type, "details": details},
+                },
+            )
+        shapes = (
+            _order_params(["ans05", "user05", "user02", "bk-after"]),
+            {"limit": 5, "open_frame": 1, "journal_order": 1, "order_ids": ["user02"]},
+        )
+        ti._reset_for_tests()
+        calls = _count_hydrations(monkeypatch)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        projected = []
+        for params in shapes:
+            body = (await harness.client.get(url, params=params)).json()["result"]
+            assert body["journal_order_state"] == "ready", (params, body.get("journal_order_state"))
+            projected.append(body)
+        assert "bk-after" in {row["id"] for row in projected[0]["entries"]}
+        assert calls == [], "a run-neutral append still hydrated"
+
+        grown = ti.refresh_index(harness.root, harness.session_id)
+        assert grown is not None and grown.sig["size"] > index.sig["size"]
+        ti._remember(
+            ti._key(harness.root, harness.session_id),
+            grown,
+            ti.index_path(harness.root, harness.session_id).stat().st_mtime,
+        )
+        for params, body in zip(shapes, projected):
+            control = (await harness.client.get(url, params=params)).json()["result"]
+            assert control["journal_order_state"] == "ready"
+            assert json.dumps(body, sort_keys=True) == json.dumps(control, sort_keys=True), params
+
+
+@pytest.mark.asyncio
+async def test_a_grown_large_journal_never_serves_a_stale_ready_for_new_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Visible rows past the prefix: ``building`` first, then every coordinate.
+
+    The prefix rule must not answer for a row the companion never derived; the
+    page that reaches one falls to the existing correction, which settles it.
+    """
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=3)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        directory = harness.root / "sessions" / harness.session_id
+        await Transcript(directory).append_message(
+            Message(role="user", content=[TextContent(text="after the publication")])
+        )
+        ti._reset_for_tests()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = _order_params(["ans02", "user02"])
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        assert first["journal_order_state"] == "building"
+        assert not first.get("journal_ordinals"), "a building frame carried coordinates"
+        steady: dict[str, Any] = first
+        for _ in range(200):
+            steady = (await harness.client.get(url, params=params)).json()["result"]
+            if steady["journal_order_state"] == "ready":
+                break
+            await asyncio.sleep(0.05)
+        assert steady["journal_order_state"] == "ready"
+        assert all(row.get("journal_seq") is not None for row in steady["entries"])
+
+
+@pytest.mark.asyncio
+async def test_a_small_journal_keeps_arming_the_resident_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Below the threshold nothing changed: a companion answer still warms."""
+    monkeypatch.setattr(ti, "COMPANION_FIRST_MIN_BYTES", 1 << 40)
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        ti._reset_for_tests()
+        calls = _count_hydrations(monkeypatch)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        first = (await harness.client.get(url, params=_order_params(["ans05"]))).json()["result"]
+        assert first["journal_order_state"] == "ready"
+        for _ in range(200):
+            if ti.fresh_resident(harness.root, harness.session_id) is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert calls == [harness.session_id]

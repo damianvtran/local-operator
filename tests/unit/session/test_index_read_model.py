@@ -1170,3 +1170,142 @@ def test_the_order_projection_rejects_a_row_a_later_append_added(tmp_path):
         tmp_path, SID, collected_ids=[new_id], order_ids=[], source=rm.source_of(index)
     )
     assert result.state != "ready", "a pre-append projection answered for an appended row"
+
+
+# ---------------------------------------------------------------------------
+# The append-prefix rule (ADR docs/design/transcript-index-off-process.md step 2)
+# ---------------------------------------------------------------------------
+
+
+def _append(path: Path, *rows: dict[str, object]) -> tuple[int, int, float]:
+    """Append in place (same inode) and return the grown journal's source."""
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    st = path.stat()
+    return st.st_ino, st.st_size, st.st_mtime
+
+
+def _custom(id_: str, custom_type: str, **details: object) -> dict[str, object]:
+    return {
+        "id": id_,
+        "ts": 99.0,
+        "type": "custom",
+        "payload": {"custom_type": custom_type, "details": details},
+    }
+
+
+def _all_reads(root: Path, source: Any, *, prefix_ok: bool, collected: list[str]) -> list[str]:
+    return [
+        rm.summary(root, SID, source, prefix_ok=prefix_ok).state,
+        rm.order_facts(
+            root, SID, collected_ids=collected, order_ids=[], source=source, prefix_ok=prefix_ok
+        ).state,
+        rm.frame_facts(
+            root,
+            SID,
+            collected_ids=collected,
+            reaches_eof=True,
+            order_ids=[],
+            source=source,
+            prefix_ok=prefix_ok,
+        ).state,
+    ]
+
+
+def test_a_run_neutral_append_matches_the_grown_derivation(publication):
+    """Every prefix answer equals the resident derivation of the grown journal."""
+    from local_operator.session import open_frame as frame
+
+    root, _ = publication
+    path = root / "sessions" / SID / "transcript.jsonl"
+    source = _append(
+        path, _custom("s1", "attention_started", token="t"), _custom("b1", "session_spend.v1")
+    )
+    collected = ["u2", "a2", "s1", "b1"]
+    assert _all_reads(root, source, prefix_ok=False, collected=collected) == ["stale"] * 3
+    summary = rm.summary(root, SID, source, prefix_ok=True)
+    facts = rm.frame_facts(
+        root,
+        SID,
+        collected_ids=collected,
+        reaches_eof=True,
+        order_ids=["b1", "u1", "absent"],
+        source=source,
+        prefix_ok=True,
+    )
+    order = rm.order_facts(
+        root,
+        SID,
+        collected_ids=collected,
+        order_ids=["b1", "absent"],
+        source=source,
+        prefix_ok=True,
+    )
+    assert (summary.state, facts.state, order.state) == ("ready",) * 3, (
+        summary.reason,
+        facts.reason,
+        order.reason,
+    )
+    grown = ti.refresh_index(root, SID)
+    assert grown is not None
+    assert summary.value.scan.rows == grown.scan.rows
+    assert summary.value.runs == grown.runs[-1:]
+    bounds = frame.page_seq_bounds(grown, [{"id": id_} for id_ in collected], reaches_eof=True)
+    assert bounds is not None
+    assert facts.value.runs == frame.publish_runs(grown, first_seq=bounds[0], last_seq=bounds[1])
+    assert facts.value.rows == {id_: grown.journal_rows[id_] for id_ in (*collected, "u1", "b1")}
+    assert facts.value.missing_ids == ["absent"] and order.value.missing_ids == ["absent"]
+    assert facts.value.generation == grown.journal_generation
+    assert order.value.rows == {id_: grown.journal_rows[id_] for id_ in (*collected, "b1")}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(
+            {
+                "id": "u9",
+                "ts": 9.0,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": [{"text": "q"}]},
+            },
+            id="message-opens-a-run",
+        ),
+        pytest.param(_custom("m1", "completion_attention", token="t", anchor="u2"), id="marker"),
+        pytest.param(_custom("u1", "session_spend.v1"), id="repeats-a-covered-id"),
+        pytest.param({"id": "c1", "ts": 9.0, "type": "compaction", "payload": {}}, id="compaction"),
+    ],
+)
+def test_an_append_that_can_move_a_fact_is_never_prefix_ready(publication, row):
+    root, _ = publication
+    source = _append(root / "sessions" / SID / "transcript.jsonl", row)
+    assert "ready" not in _all_reads(root, source, prefix_ok=True, collected=["u2", "a2"])
+
+
+def test_a_torn_or_oversized_tail_and_an_in_place_rewrite_are_refused(publication, monkeypatch):
+    root, _ = publication
+    path = root / "sessions" / SID / "transcript.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"id":"half","type":"custom"')  # no newline: a write in flight
+    st = path.stat()
+    torn = (st.st_ino, st.st_size, st.st_mtime)
+    assert "ready" not in _all_reads(root, torn, prefix_ok=True, collected=["u2"])
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(',"payload":{"custom_type":"x"}}\n')
+    st = path.stat()
+    whole = (st.st_ino, st.st_size, st.st_mtime)
+    assert _all_reads(root, whole, prefix_ok=True, collected=["u2"]) == ["ready"] * 3
+    monkeypatch.setattr(rm, "_PREFIX_TAIL_MAX_BYTES", 8)
+    assert "ready" not in _all_reads(root, whole, prefix_ok=True, collected=["u2"])
+    monkeypatch.undo()
+
+    # Same inode, rewritten in place and longer: the covered last row moved, so
+    # the prefix is not proved and nothing answers from it.
+    data = path.read_bytes()
+    with path.open("r+b") as handle:
+        handle.write(data.replace(b'"q1"', b'"Q1-rewritten"'))
+    st = path.stat()
+    rewritten = (st.st_ino, st.st_size, st.st_mtime)
+    assert "ready" not in _all_reads(root, rewritten, prefix_ok=True, collected=["u2"])

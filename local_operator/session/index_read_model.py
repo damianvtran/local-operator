@@ -348,6 +348,55 @@ def failed(root: str | Path, sid: str, source: tuple[int, int, float] | None) ->
     return _FAILED.get((str(root), sid)) == source
 
 
+def _extends(pub: Publication, live: tuple[int, int, float] | None) -> bool:
+    """Whether the live journal is THIS publication's journal plus appended rows.
+
+    THE APPEND-PREFIX RULE (ADR ``docs/design/transcript-index-off-process.md``,
+    step 2). A journal is append-only between compactions, and a compaction
+    swaps the file in with ``os.replace`` -- a NEW inode. So a journal on the
+    same inode that has only grown still holds, byte for byte, the rows this
+    publication was derived from, and every fact the companion states about
+    THOSE rows (their ordinal, their containing run's first row, its opening
+    user) is still true: an append can add rows and runs after them, never
+    renumber or regroup them.
+
+    "Only grown" is proved, not assumed: the same check the refresh ladder uses
+    before it increments (``refresh_index``'s ``_verify_tail``) -- the last row
+    the scan covered must still end exactly at the recorded offset and still
+    carry the recorded id. An in-place rewrite that kept the inode fails it and
+    the caller takes base's refresh path, as it did before this rule existed.
+    Cost: one bounded backward read of a single row (``_TAIL_VERIFY_LIMIT``), on
+    the caller's worker hop.
+    """
+    sig = pub.signature
+    if live is None or live[0] != sig[0] or live[1] <= sig[1]:
+        return False
+    scan = pub.header.get("scan")
+    end = scan.get("offset") if isinstance(scan, dict) else None
+    if type(end) is not int or end != sig[1]:
+        return False
+    last_id = pub.header["sig"].get("last_id")
+    return ti._verify_tail(ti._journal_path(pub.root, pub.sid), end, str(last_id or ""))
+
+
+def _prefix_current(pub: Publication) -> bool:
+    """``_current`` for a publication served under the append-prefix rule.
+
+    The head document must still be the one resolved (no publish landed
+    mid-read), and the journal must still be the same inode, longer than the
+    publication's coverage. Its exact size/mtime are expected to move: that is
+    a live session writing, which this rule exists to tolerate.
+    """
+    try:
+        if _identity(ti.index_path(pub.root, pub.sid).stat()) != pub.identity:
+            return False
+        st = ti._journal_path(pub.root, pub.sid).stat()
+    except OSError:
+        return False
+    sig = pub.signature
+    return st.st_ino == sig[0] and st.st_size > sig[1]
+
+
 def remember_failure(root: str | Path, sid: str, source: tuple[int, int, float] | None) -> None:
     """Remember ONE failed source per session, bounded across sessions."""
     if source is None:
@@ -684,6 +733,7 @@ def _read(
     select: Callable[[sqlite3.Connection, Publication, dict[str, Any]], Any],
     *,
     with_publication: bool = False,
+    prefix_ok: bool = False,
 ) -> Result:
     """One read-only handle per attempt; bounded retry on publication motion.
 
@@ -691,13 +741,27 @@ def _read(
     read ACTUALLY resolved. A caller must never pair facts from one publication
     with a ``built_at`` read from another: a flip between two header reads is
     exactly the incoherence the retry exists to prevent.
+
+    ``prefix_ok`` also accepts a ``stale`` publication whose journal has only
+    GROWN (:func:`_extends`). The selector then receives a publication whose
+    signature is OLDER than the caller's page source, and it alone decides
+    whether what it was asked for is answerable from the covered prefix; every
+    selector that does not opt in keeps the exact-signature contract.
     """
     for _ in range(2):
         probe = header(root, sid)
-        if probe.state != "ready":
+        current = _current
+        if (
+            prefix_ok
+            and probe.state == "stale"
+            and isinstance(probe.value, Publication)
+            and _extends(probe.value, _journal_signature(Path(root), sid))
+        ):
+            current = _prefix_current
+        elif probe.state != "ready":
             return probe
         pub = probe.value
-        if not _current(pub):
+        if not current(pub):
             continue
         try:
             with closing(
@@ -706,10 +770,10 @@ def _read(
                 db.execute("PRAGMA trusted_schema=OFF")
                 db.execute("PRAGMA query_only=ON")
                 value = select(db, pub, _meta(db, pub))
-            if _current(pub):
+            if current(pub):
                 return Result("ready", (pub, value) if with_publication else value)
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, IndexError) as exc:
-            if not _current(pub):
+            if not current(pub):
                 continue
             return Result("corrupt", reason=str(exc))
     return Result("stale")
@@ -734,19 +798,131 @@ def _summary(db: sqlite3.Connection, pub: Publication, meta: dict[str, Any]) -> 
     return FrameSummary(scan, [_run(last[1])] if last else [], pub.signature)
 
 
-def summary(root: str | Path, sid: str, source: tuple[int, int, float] | None) -> Result:
-    """The tail summary, only for a page read from THIS publication's source."""
+def summary(
+    root: str | Path,
+    sid: str,
+    source: tuple[int, int, float] | None,
+    *,
+    prefix_ok: bool = False,
+) -> Result:
+    """The tail summary, only for a page read from THIS publication's source.
+
+    ``prefix_ok`` also answers for a journal grown by run-neutral rows only
+    (:func:`_prefix_tail`), with the row count advanced to the grown journal's.
+    """
 
     def select(db: sqlite3.Connection, pub: Publication, meta: dict[str, Any]) -> FrameSummary:
-        if source is None or source != pub.signature:
-            raise ValueError("page/source mismatch")
-        return _summary(db, pub, meta)
+        found = _summary(db, pub, meta)
+        tail = _tail_ordinals(db, pub, meta, source, prefix_ok)
+        if tail is not None:
+            assert source is not None
+            return FrameSummary(_grown_scan(found.scan, list(tail), source), found.runs, source)
+        return found
 
-    return _read(root, sid, select)
+    return _read(root, sid, select, prefix_ok=prefix_ok)
+
+
+#: The most appended bytes a prefix read will classify itself (see
+#: :func:`_prefix_tail`). WHY 2 MiB: it is ``ti._MAX_KEPT_LINE_BYTES``, the
+#: largest row the scan itself keeps parsed, and it holds ~10 of the anchor
+#: journal's largest bookkeeping rows (``frontend_state_checkpoint_v1``, ~195 KB
+#: each, ADR "The anchor journal, measured"). The one published-vs-live gap the
+#: ADR measured on the anchor was a 2 KB delta. Past the cap the read falls to
+#: base's path -- correct, only slower -- so the cap bounds cost, never truth.
+_PREFIX_TAIL_MAX_BYTES = 2 << 20
+
+
+def _prefix_tail(pub: Publication, source: tuple[int, int, float]) -> list[str]:
+    """The ids of the rows appended after ``pub``'s coverage, in journal order.
+
+    THE TAIL IS READ DIRECTLY, AND ONLY ANSWERED WHEN IT CANNOT MOVE A FACT. The
+    page was read from ``source`` (the grown journal), so its rows may include
+    some the companion never derived. Those rows are classified here, from the
+    same bytes the page came from (``[coverage end, source size)``), and the
+    read is answered only when every one of them is a ``custom`` row other than
+    ``completion_attention``: the derivation classifies those as ``start`` or
+    ``other`` (``ti._classify``), and ``_Derivation`` lets neither open, extend
+    nor close a run (its "NEITHER KIND IS A RECORD THE CLIENT EVER SEES"), nor
+    become a checkpoint or a message. Such a row changes exactly one derived
+    fact: it takes the next journal ordinal, ``scan.rows + i``. That is the
+    common live-session append (attention, spend, frontend state checkpoints).
+
+    Anything else -- a message, a tool row, a completion marker, a compaction, a
+    torn or blank line, an id the prefix already holds, more than
+    :data:`_PREFIX_TAIL_MAX_BYTES` -- raises ``ValueError``, which every caller
+    already maps to base's fallback (``building`` plus the existing correction,
+    or the refresh wait). Nothing here may turn into ``ready`` what the resident
+    derivation would answer differently.
+    """
+    start, end = pub.signature[1], source[1]
+    if end <= start or end - start > _PREFIX_TAIL_MAX_BYTES:
+        raise ValueError("appended tail beyond the prefix read bound")
+    with ti._journal_path(pub.root, pub.sid).open("rb") as handle:
+        if os.fstat(handle.fileno()).st_ino != pub.signature[0]:
+            raise ValueError("journal replaced under the prefix read")
+        handle.seek(start)
+        data = handle.read(end - start)
+    if len(data) != end - start or not data.endswith(b"\n"):
+        raise ValueError("torn appended tail")
+    ids: list[str] = []
+    for line in data[:-1].split(b"\n"):
+        entry = json.loads(line)
+        payload = entry.get("payload") if isinstance(entry, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or entry.get("type") != "custom"
+            or payload.get("custom_type") == ti._COMPLETION_ATTENTION
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"]
+        ):
+            raise ValueError("appended row may move a derived fact")
+        ids.append(entry["id"])
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate identity in the appended tail")
+    return ids
+
+
+def _grown_scan(scan: ti.ScanState, tail: list[str], source: Any) -> ti.ScanState:
+    """The summary's scan advanced over ``tail``: its row count and byte offset.
+
+    ``rows`` is the one scan field the frame reads from a summary
+    (``open_frame.tail_head_reachable``: the tail run head's distance from the
+    journal's end), and each appended row is one more ordinal. The resume
+    window belongs to the incremental refresh, never to the frame, and is
+    carried unchanged.
+    """
+    return ti.ScanState(
+        rows=scan.rows + len(tail),
+        offset=source[1],
+        window_offset=scan.window_offset,
+        window_rows=scan.window_rows,
+    )
+
+
+def _prefix_source(
+    pub: Publication, source: tuple[int, int, float] | None, prefix_ok: bool
+) -> bool:
+    """Validate a page source against ``pub``; ``True`` when it is a PREFIX read.
+
+    Exact match is base's contract. Otherwise the page must come from the same
+    inode grown past the coverage, and the caller must have opted in -- ``_read``
+    only hands a selector an older publication when the LIVE journal extends it.
+    """
+    if source is None:
+        raise ValueError("page/source mismatch")
+    if source == pub.signature:
+        return False
+    if prefix_ok and source[0] == pub.signature[0] and source[1] > pub.signature[1]:
+        return True
+    raise ValueError("page/source mismatch")
 
 
 def _projected_rows(
-    db: sqlite3.Connection, ids: list[str], collected_ids: list[str]
+    db: sqlite3.Connection,
+    ids: list[str],
+    collected_ids: list[str],
+    *,
+    tail: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """The ordinals this publication proves for ``ids``, bounded by input size.
 
@@ -761,6 +937,11 @@ def _projected_rows(
         chunk = ids[start : start + 128]
         slots = ",".join("?" for _ in chunk)
         rows.update(db.execute(f"SELECT id,seq FROM nodes WHERE id IN ({slots})", chunk))
+    if tail:
+        # A prefix read's appended rows (:func:`_tail_ordinals`, already checked
+        # never to repeat a covered id).
+        wanted = set(ids)
+        rows.update({id_: seq for id_, seq in tail.items() if id_ in wanted})
     if any(id_ not in rows for id_ in collected_ids):
         raise ValueError("page identity missing from projection")
     return rows
@@ -773,6 +954,7 @@ def order_facts(
     collected_ids: list[str],
     order_ids: list[str],
     source: tuple[int, int, float] | None,
+    prefix_ok: bool = False,
 ) -> Result:
     """The journal-order half of the projection, for a read that serves no runs.
 
@@ -792,6 +974,10 @@ def order_facts(
     with 0 ordinals in 8.7 ms, while this projection's sibling read of the SAME
     store answered ``ready`` with 9 ordinals in 5.3 ms.
 
+    ``prefix_ok`` (large journals only, decided by the caller) also answers for
+    a journal that has grown by run-neutral rows since this publication
+    (:func:`_extends`, :func:`_prefix_tail`); any other append is refused whole.
+
     THE RULES ARE NOT RESTATED HERE. ``ti.journal_order_opener`` decides which
     opening user a coordinate may carry and ``apply_order`` narrows the answer to
     what the caller actually serves — the same two helpers the resident join and
@@ -799,10 +985,9 @@ def order_facts(
     """
 
     def select(db: sqlite3.Connection, pub: Publication, meta: dict[str, Any]) -> FrameFacts:
-        if source is None or source != pub.signature:
-            raise ValueError("page/source mismatch")
+        tail = _tail_ordinals(db, pub, meta, source, prefix_ok)
         ids = list(dict.fromkeys(collected_ids + order_ids))
-        rows = _projected_rows(db, ids, collected_ids)
+        rows = _projected_rows(db, ids, collected_ids, tail=tail)
         records: dict[int, ti.RunRecord] = {}
         # The CONTAINING run of every identity, which is what the opener rule
         # reads: real run membership at an exact ordinal, never a last-user guess.
@@ -852,7 +1037,35 @@ def order_facts(
             pub.signature,
         )
 
-    return _read(root, sid, select)
+    return _read(root, sid, select, prefix_ok=prefix_ok)
+
+
+def _tail_ordinals(
+    db: sqlite3.Connection,
+    pub: Publication,
+    meta: dict[str, Any],
+    source: tuple[int, int, float] | None,
+    prefix_ok: bool,
+) -> dict[str, int] | None:
+    """``None`` for an exact read; the appended rows' ordinals for a prefix read.
+
+    An appended row must not repeat an id the prefix holds: which occurrence the
+    derivation keeps is not a question this read may answer, so the whole read
+    is refused (one bounded ``IN`` query per 128 appended ids).
+    """
+    if not _prefix_source(pub, source, prefix_ok):
+        return None
+    assert source is not None
+    scan = ti.ScanState.from_payload(meta["scan"])
+    if scan is None:
+        raise ValueError("invalid scan metadata")
+    appended = _prefix_tail(pub, source)
+    for start in range(0, len(appended), 128):
+        chunk = appended[start : start + 128]
+        slots = ",".join("?" for _ in chunk)
+        if db.execute(f"SELECT 1 FROM nodes WHERE id IN ({slots}) LIMIT 1", chunk).fetchone():
+            raise ValueError("appended identity repeats a covered row")
+    return {id_: scan.rows + i for i, id_ in enumerate(appended)}
 
 
 def frame_facts(
@@ -863,20 +1076,25 @@ def frame_facts(
     reaches_eof: bool,
     order_ids: list[str],
     source: tuple[int, int, float] | None,
+    prefix_ok: bool = False,
 ) -> Result:
     """Materialize bounded records in this worker; reuse authoritative helpers.
 
     SQL selects the containing run, its predecessor and the next boundary, not
     new run semantics. No connection/accessor escapes to the rendering loop.
     Missing page identities reject the join; absent requested IDs remain explicit.
+
+    ``prefix_ok``: as :func:`order_facts`. The appended rows are run-neutral by
+    :func:`_prefix_tail`'s rule, so the run selection below is the one the
+    resident derivation of the grown journal would make; only their ordinals
+    and the tail summary's row count are added.
     """
     from local_operator.session import open_frame as frame
 
     def select(db: sqlite3.Connection, pub: Publication, meta: dict[str, Any]) -> FrameFacts:
-        if source is None or source != pub.signature:
-            raise ValueError("page/source mismatch")
+        tail_rows = _tail_ordinals(db, pub, meta, source, prefix_ok)
         ids = list(dict.fromkeys(collected_ids + order_ids))
-        rows = _projected_rows(db, ids, collected_ids)
+        rows = _projected_rows(db, ids, collected_ids, tail=tail_rows)
         checkpoints: list[ti.Checkpoint] = []
         # Chunk by input identities, not history. Checkpoint duplicate IDs follow
         # the canonical dict's LAST-position policy without truncating manifests.
@@ -895,6 +1113,9 @@ def frame_facts(
                     raise ValueError("invalid checkpoint projection")
                 checkpoints.append(checkpoint)
         tail = _summary(db, pub, meta)
+        if tail_rows is not None:
+            assert source is not None
+            tail = FrameSummary(_grown_scan(tail.scan, list(tail_rows), source), tail.runs, source)
         records: dict[int, ti.RunRecord] = {}
 
         def take(query: str, args: tuple[Any, ...]) -> list[int]:
@@ -993,7 +1214,7 @@ def frame_facts(
             tail,
         )
 
-    return _read(root, sid, select)
+    return _read(root, sid, select, prefix_ok=prefix_ok)
 
 
 def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) -> None:

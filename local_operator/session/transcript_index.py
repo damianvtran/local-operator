@@ -4403,6 +4403,34 @@ def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex |
     return None
 
 
+#: Journals at or above this size are answered from the persisted read-model
+#: companion (``index_read_model``) on the open path, and a companion answer no
+#: longer arms a resident hydration for them. WHY 64 MiB, from data
+#: (``docs/design/transcript-index-off-process.md``, "Measurements"): hydrating
+#: a persisted index costs ~1.2-1.4 ms of GIL-held serve CPU per journal MB (86 ms
+#: for the 70 MB fixture, ~1.1 s for the 808 MB anchor's 84 MB snapshot), all of
+#: it uninterruptible ``json.loads`` plus typing, against the open frame's whole
+#: 120 ms ``OPEN_FRAME_SNAPSHOT_BUDGET_S``; a companion read is page-bounded
+#: (median 1.7 ms over 146 traced reads on the operator's desktop). At 64 MiB a
+#: hydration is ~75 ms -- most of a frame -- while below it the measured 36.5 MB
+#: case (25/25 companion reopens without a resident copy) keeps base's
+#: resident-first behaviour unchanged. On the operator's machine (2026-11-18,
+#: ``ls -S`` of session journals) the twelve largest live journals run
+#: 174-827 MB, all well above the line.
+COMPANION_FIRST_MIN_BYTES = 64 << 20
+
+
+def companion_first(config_dir: str | Path, session_id: str) -> bool:
+    """Whether this journal is large enough to serve opens from the companion.
+
+    One ``stat``, no read: callers sit on the event loop (``fresh_resident``'s
+    two stats are the precedent). A missing journal answers ``False`` so the
+    caller keeps base's path, which already knows how to say "no journal".
+    """
+    st = _stat_or_none(_journal_path(config_dir, session_id))
+    return st is not None and st.st_size >= COMPANION_FIRST_MIN_BYTES
+
+
 def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Task[Any], bool]":
     """Start (or join) the background refresh for one session.
 
