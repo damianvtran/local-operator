@@ -2524,7 +2524,7 @@ _TURN_STARTERS = frozenset(
 )
 
 
-def test_managed_gate_covers_every_route_that_can_start_an_agent_turn() -> None:
+async def test_managed_gate_covers_every_route_that_can_start_an_agent_turn() -> None:
     """Every app route whose module can start a turn is gated, or a recorded exception.
 
     The prefix walk and the control-surface walk above only see the families
@@ -2540,6 +2540,11 @@ def test_managed_gate_covers_every_route_that_can_start_an_agent_turn() -> None:
 
     from local_operator.server.app import _LEGACY_GATE_EXCEPTIONS, _legacy_desktop_gated
     from local_operator.server.app import app as application
+
+    # The exception list is pinned, not just validated: widening the bearer-less
+    # surface must be a deliberate edit to this assertion (QA round 1 showed an
+    # extra `POST /v1/chat/async` entry would otherwise pass the walk below).
+    assert set(_LEGACY_GATE_EXCEPTIONS) == {"POST /v1/chat/agents/{agent_id}/edit"}
 
     turn_routes: list[tuple[str, str]] = []
     for route in _apiroutes(application.routes):
@@ -2698,3 +2703,194 @@ async def test_inline_edit_exception_cannot_reach_tool_execution(
     assert requests, "the scripted model was never reached"
     assert all(request.tools == [] and request.tool_choice == "none" for request in requests)
     assert not sentinel.exists()
+
+
+def _edit_rig(app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[Any]]:
+    """An agent whose workspace holds a canary file, and a recording text-only model.
+
+    Also installs the production CORS pair (``CORSMiddleware`` echoing every
+    origin, then ``desktop_origin_cors`` outside it) in the same order as
+    ``server/app.py``, so the grant a browser would see is asserted, not assumed.
+    Must run before the fixture client's first request: Starlette builds the
+    middleware stack on first use.
+    """
+    from fastapi.middleware.cors import CORSMiddleware
+
+    import local_operator.model.configure as configure_module
+    from local_operator.agents import AgentEditFields
+    from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.access import open_store
+    from local_operator.server.app import desktop_origin_cors
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.middleware("http")(desktop_origin_cors)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "inside.txt").write_text("WORKSPACE_CANARY\n", encoding="utf-8")
+    open_store(tmp_path, create=True)
+    store_provider_key("OPENAI_API_KEY", "sk-test-not-real", base=tmp_path)
+    agent = app.state.agent_registry.create_agent(
+        AgentEditFields(name="editor", current_working_directory=str(workspace))
+    )
+    requests: list[Any] = []
+
+    class _Scripted:
+        def __call__(self, request, signal):
+            requests.append(request)
+
+            async def gen():
+                yield StreamTextDelta(delta="no edits")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(configure_module, "create_stream_fn", lambda *a, **k: _Scripted())
+    return agent, requests
+
+
+def _edit_body(**overrides: Any) -> dict[str, Any]:
+    """The shipped renderer's body (`inline-edit.tsx`: buffer always sent)."""
+    body: dict[str, Any] = {
+        "hosting": "openai",
+        "model": "gpt-4o",
+        "file_path": "inside.txt",
+        "file_content": "hello\n",
+        "edit_prompt": "tidy",
+        "selection": None,
+        "attachments": [],
+    }
+    body.update(overrides)
+    return body
+
+
+def _sent_text(requests: list[Any]) -> str:
+    return repr([request.messages for request in requests])
+
+
+async def test_inline_edit_renderer_shape_still_works_without_the_bearer(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """The renderer's exact request (Origin null, or no Origin from a native relay)."""
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    url = f"/v1/chat/agents/{agent.id}/edit"
+
+    response = await client.post(
+        url, json=_edit_body(), headers={"Authorization": "", "Origin": "null"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers.get("access-control-allow-origin") == "null"
+
+    response = await client.post(url, json=_edit_body(), headers={"Authorization": ""})
+    assert response.status_code == 200, response.text
+    assert len(requests) == 2
+
+    preflight = await client.options(
+        url,
+        headers={
+            "Authorization": "",
+            "Origin": "null",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers.get("access-control-allow-origin") == "null"
+
+
+async def test_inline_edit_without_bearer_cannot_read_the_workspace(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """No buffer means a workspace read: refused without the bearer, before the model."""
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    response = await client.post(
+        f"/v1/chat/agents/{agent.id}/edit",
+        json=_edit_body(file_content=None),
+        headers={"Authorization": "", "Origin": "null"},
+    )
+    assert response.status_code == 403, response.text
+    assert requests == []
+    assert "WORKSPACE_CANARY" not in response.text
+
+
+async def test_inline_edit_without_bearer_refuses_browser_origins_and_grants_no_cors(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """A foreign Origin (or an Origin-less browser request) is refused with no grant."""
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    url = f"/v1/chat/agents/{agent.id}/edit"
+
+    response = await client.post(
+        url, json=_edit_body(), headers={"Authorization": "", "Origin": "https://evil.test"}
+    )
+    assert response.status_code == 403, response.text
+    assert "access-control-allow-origin" not in response.headers
+    assert "access-control-allow-credentials" not in response.headers
+
+    response = await client.post(
+        url, json=_edit_body(), headers={"Authorization": "", "Sec-Fetch-Site": "same-site"}
+    )
+    assert response.status_code == 403, response.text
+
+    preflight = await client.options(
+        url,
+        headers={
+            "Authorization": "",
+            "Origin": "https://evil.test",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert "access-control-allow-origin" not in preflight.headers
+    assert requests == []
+
+
+async def test_inline_edit_without_bearer_writes_no_attachment(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """``data:`` attachments are never persisted for a bearer-less caller."""
+    import base64
+
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    payload = "data:text/plain;base64," + base64.b64encode(b"x" * 16000).decode()
+    response = await client.post(
+        f"/v1/chat/agents/{agent.id}/edit",
+        json=_edit_body(attachments=[payload]),
+        headers={"Authorization": "", "Origin": "null"},
+    )
+    assert response.status_code == 200, response.text
+    uploads = tmp_path / "uploads"
+    assert not uploads.exists() or not any(uploads.iterdir())
+
+
+async def test_inline_edit_with_bearer_keeps_the_full_route(
+    desktop, tmp_path: Path, monkeypatch
+) -> None:
+    """Bearer'd callers are unchanged: workspace read and attachment persistence."""
+    import base64
+
+    client, app = desktop
+    agent, requests = _edit_rig(app, tmp_path, monkeypatch)
+    payload = "data:text/plain;base64," + base64.b64encode(b"attached").decode()
+    # The fixture client sends the bearer; no Origin, as from Electron main.
+    response = await client.post(
+        f"/v1/chat/agents/{agent.id}/edit",
+        json=_edit_body(file_content=None, attachments=[payload]),
+    )
+    assert response.status_code == 200, response.text
+    assert "WORKSPACE_CANARY" in _sent_text(requests)
+    assert len(list((tmp_path / "uploads").iterdir())) == 1

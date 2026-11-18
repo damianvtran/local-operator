@@ -956,11 +956,27 @@ _LEGACY_GATED_PREFIXES = (
 #: of safety: ``POST /v1/chat/agents/{agent_id}/edit``. The desktop canvas's
 #: inline edit calls it straight from the renderer (``file://``, Origin
 #: ``"null"``) with a plain ``fetch`` that carries no bearer, so gating it would
-#: break that feature for every managed install. It invokes the model only
-#: (``executor.invoke_model``; no tool executes and no file is written), which
-#: is why it is the one route of the family that can wait. Remove this entry in
-#: the change that moves the UI's edit call onto the bearer-carrying desktop
-#: transport — the coverage tests then hold the route gated.
+#: break that feature for every managed install.
+#:
+#: What the route really does: ONE model completion (``executor.invoke_model``,
+#: ``tools=[]``, ``tool_choice="none"``; no session, no tool executes) over the
+#: agent's stored conversation history plus the edit prompt and file text, and
+#: it returns the model's text. With the bearer it may read the target from the
+#: agent's workspace (confined by ``_read_edit_workspace_file``) and persists
+#: ``data:`` attachments under ``<config>/uploads``. WITHOUT the bearer
+#: (``_edit_caller_is_unauthenticated_managed`` in ``routes/chat.py``) it is
+#: narrowed to the renderer's own request shape: Origin ``"null"`` or a
+#: non-browser caller with no Origin (anything else is 403 and gets no CORS
+#: grant -- ``desktop_origin_cors``), the caller's ``file_content`` is required
+#: (no workspace read), and attachments are never written to disk.
+#:
+#: The RESIDUAL this entry still carries: a ``null``-origin page (a sandboxed
+#: iframe, a local file) or a local process that knows an agent's UUID can
+#: have that agent's stored history fed to the model and, with a prompt asking
+#: for it, echoed back -- and spend model quota. Agent ids are disclosed only by
+#: gated routes. Remove this entry in the change that moves the UI's edit call
+#: onto the main-process, bearer-carrying desktop transport — the coverage
+#: tests then hold the route gated.
 #:
 #: It previously held the two agent-scoped schedules routes, excused as "paired
 #: with the ungated /v1/schedules/{schedule_id}; gate the surface as one
@@ -978,9 +994,13 @@ _LEGACY_GATED_PREFIXES = (
 #: something ungated may be the only way in.
 _LEGACY_GATE_EXCEPTIONS: dict[str, str] = {
     "POST /v1/chat/agents/{agent_id}/edit": (
-        "model-only edit suggestion (no tool execution, no file write); the "
-        "desktop canvas inline edit calls it from the renderer without the "
-        "bearer, so gating it waits for that client to carry one"
+        "one model completion, no tools, over the agent's stored history and the "
+        "caller's buffer; without the bearer it requires file_content (no "
+        "workspace read), writes no attachments and admits only Origin null or "
+        "a non-browser caller. Open because the desktop renderer calls it "
+        "without the bearer; residual: a null-origin caller knowing an agent id "
+        "can have that agent's history echoed via the model, until the UI routes "
+        "the call through the main-process bearer transport"
     ),
 }
 
@@ -1038,6 +1058,22 @@ def _legacy_gate_matchers() -> tuple[tuple[Pattern[str], frozenset[str]], ...]:
         regex, _format, _converters = compile_path(path)
         matchers.append((regex, frozenset(gated)))
     return tuple(matchers)
+
+
+@lru_cache(maxsize=1)
+def _legacy_gate_exception_matchers() -> tuple[Pattern[str], ...]:
+    """Compiled path regexes of :data:`_LEGACY_GATE_EXCEPTIONS`, any method.
+
+    Method-agnostic on purpose: the CORS preflight for an exception route is an
+    ``OPTIONS`` request, and it is the preflight's grant that decides whether a
+    page may send the real request at all.
+    """
+    return tuple(compile_path(key.split(" ", 1)[1])[0] for key in _LEGACY_GATE_EXCEPTIONS)
+
+
+def _legacy_gate_exception_path(path: str) -> bool:
+    """Whether ``path`` is one of the managed gate's bearer-less exceptions."""
+    return any(regex.match(path) for regex in _legacy_gate_exception_matchers())
 
 
 def _legacy_desktop_gated(path: str, method: str) -> bool:
@@ -1423,6 +1459,24 @@ async def desktop_origin_cors(request: Request, call_next):
     posture = desktop_posture()
     allowed = posture.origins
     origin = request.headers.get("origin")
+    # The managed gate's open exceptions (today only the inline-edit route) are
+    # reachable without the bearer, so even an allowlist-less managed daemon
+    # must not hand them a grant for a foreign origin: the renderer that the
+    # exception exists for sends ``Origin: null``, and an echoed grant for any
+    # other origin -- on the preflight too, which ``CORSMiddleware`` answers
+    # without reaching the route -- would let that page read the model's reply.
+    # ``"null"`` and admitted origins keep their grant, so inline edit and a
+    # bearer'd desktop caller are unchanged.
+    if (
+        posture.enabled
+        and origin is not None
+        and origin != "null"
+        and origin not in allowed
+        and _legacy_gate_exception_path(request.url.path)
+    ):
+        del response.headers["access-control-allow-origin"]
+        del response.headers["access-control-allow-credentials"]
+        return response
     if not allowed:
         if posture.enabled or origin is None:
             return response
