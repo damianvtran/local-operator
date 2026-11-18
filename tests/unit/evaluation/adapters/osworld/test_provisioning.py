@@ -487,3 +487,92 @@ def test_a_proxy_config_symlinked_to_a_regular_file_is_accepted(tmp_path) -> Non
 def test_a_proxy_config_naming_a_directory_is_refused(tmp_path) -> None:
     with pytest.raises(ProvisioningError, match="regular file"):
         provisioning.validate_proxy_config_file(_proxy_infra(str(tmp_path)), enable_proxy=True)
+
+
+# ---------------------------------------------------------------------------
+# EVALUATOR_TOOL_PATH: declared host directories for evaluator tools
+# ---------------------------------------------------------------------------
+#
+# The worker environment is constructed without a PATH, so an evaluator that
+# shells out finds only the interpreter's default search path. The value names
+# DIRECTORIES (never tools); what is accepted here is exactly what the manifest
+# stamps, which is why a non-normalised spelling is refused rather than tidied.
+
+
+def _with_tool_path(*values: str) -> tuple[ScopedInfraValue, ...]:
+    return tuple(
+        ScopedInfraValue(name="EVALUATOR_TOOL_PATH", purpose="benchmark_compute", value=value)
+        for value in values
+    )
+
+
+def test_an_unset_tool_path_resolves_to_nothing(tmp_path) -> None:
+    roots = (str(tmp_path),)
+    assert provisioning.resolve_evaluator_tool_path(_INFRA, forbidden_roots=roots) is None
+
+
+def test_declared_tool_directories_are_returned_in_the_order_given(tmp_path) -> None:
+    first, second, workspace = tmp_path / "b-tools", tmp_path / "a-tools", tmp_path / "ws"
+    for directory in (first, second, workspace):
+        directory.mkdir()
+    value = os.pathsep.join((str(first), str(second)))
+    resolved = provisioning.resolve_evaluator_tool_path(
+        _INFRA + _with_tool_path(value), forbidden_roots=(str(workspace),)
+    )
+    assert resolved == (str(first), str(second))
+    # The stamp records the request, so the two must be the same string.
+    assert os.pathsep.join(resolved) == value
+
+
+@pytest.mark.parametrize(
+    "case,match",
+    [
+        ("empty-element", "empty entry"),
+        ("trailing-separator", "empty entry"),
+        ("relative", "not an absolute, normalised path"),
+        ("dot-dot", "not an absolute, normalised path"),
+        ("trailing-slash", "not an absolute, normalised path"),
+        ("missing", "not an existing directory"),
+        ("file", "not an existing directory"),
+        ("workspace-itself", "is inside"),
+        ("under-workspace", "is inside"),
+        ("under-artifact-root", "is inside"),
+        ("symlink-into-workspace", "is inside"),
+        ("twice", "more than once"),
+    ],
+)
+def test_each_unusable_tool_path_is_refused_by_name(tmp_path, case: str, match: str) -> None:
+    tools, workspace, artifacts = tmp_path / "tools", tmp_path / "ws", tmp_path / "artifacts"
+    for directory in (tools, workspace / "bin", artifacts / "episode" / "bin"):
+        directory.mkdir(parents=True)
+    (tmp_path / "a-file").write_text("not a directory")
+    (tmp_path / "link").symlink_to(workspace / "bin", target_is_directory=True)
+    sep = os.pathsep
+    values = {
+        "empty-element": (f"{tools}{sep}{sep}{tools}",),
+        "trailing-separator": (f"{tools}{sep}",),
+        "relative": ("tools/bin",),
+        "dot-dot": (f"{workspace}/../tools",),
+        "trailing-slash": (f"{tools}/",),
+        "missing": (str(tmp_path / "absent"),),
+        "file": (str(tmp_path / "a-file"),),
+        "workspace-itself": (str(workspace),),
+        "under-workspace": (f"{tools}{sep}{workspace / 'bin'}",),
+        "under-artifact-root": (str(artifacts / "episode" / "bin"),),
+        "symlink-into-workspace": (str(tmp_path / "link"),),
+        "twice": (str(tools), str(tools)),
+    }[case]
+    with pytest.raises(ProvisioningError, match=match) as excinfo:
+        provisioning.resolve_evaluator_tool_path(
+            _INFRA + _with_tool_path(*values),
+            forbidden_roots=(str(workspace), str(artifacts)),
+        )
+    assert "EVALUATOR_TOOL_PATH" in str(excinfo.value)
+
+
+def test_an_empty_tool_path_never_reaches_the_adapter() -> None:
+    """``--infra EVALUATOR_TOOL_PATH=`` is refused by the wire type itself."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _with_tool_path("")

@@ -136,6 +136,26 @@ def inject_infra_environment(infra_values: tuple[ScopedInfraValue, ...]) -> None
     os.environ["AWS_AUTO_CREATE_SCHEDULER_ROLE"] = "false"
 
 
+def inject_evaluator_tool_path(directories: tuple[str, ...] | None) -> None:
+    """Give the worker a PATH: the default search path, then the declared dirs.
+
+    ``None`` (the value was not supplied) writes NOTHING, so an undeclared run
+    keeps today's environment byte for byte -- no PATH key at all. Otherwise
+    the default directories come FIRST and in their own order: a declared
+    directory can add a tool, never shadow a system one. ``os.defpath`` is
+    used because it is what ``exec`` already falls back to when PATH is
+    absent, so setting this value only ever ADDS directories to what an
+    evaluator's subprocess could resolve before.
+
+    Takes already-validated directories (``provisioning
+    .resolve_evaluator_tool_path``); this writes, it does not judge.
+    """
+
+    if directories is None:
+        return
+    os.environ["PATH"] = os.pathsep.join((*os.defpath.split(os.pathsep), *directories))
+
+
 def install_secret_environment(values: dict[str, str]) -> None:
     """The documented exception: hand OSWorld the env-only secrets.
 

@@ -303,6 +303,71 @@ def validate_proxy_config_file(
     return path
 
 
+def resolve_evaluator_tool_path(
+    infra_values: tuple[ScopedInfraValue, ...],
+    *,
+    forbidden_roots: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    """``EVALUATOR_TOOL_PATH`` as the directories to append, or ``None`` when unset.
+
+    WHY IT EXISTS. The worker's environment is constructed from a closed
+    allowlist and has no PATH, so an evaluator that shells out to a host tool
+    finds only what the interpreter's default search path holds. This is the
+    declared way to widen that -- deliberately not a PATH passthrough, which
+    would make the tool set depend on whichever shell launched the run and
+    leave nothing in the bundle to say so.
+
+    THE RULES, each for a reason:
+
+    * every entry is absolute and already normalised (no ``..``, no trailing
+      slash). The manifest stamps the value as REQUESTED -- there is no channel
+      to read the applied one back -- so the only honest stamp is one where
+      the two cannot differ;
+    * every entry is an existing directory. A typo would otherwise be applied,
+      stamped and silently contribute nothing, which is the failure this value
+      exists to remove;
+    * no entry is, or sits under, a ``forbidden_roots`` directory (the adapter
+      workspace and the episode's own artifact root), compared after resolving
+      symlinks. Those are where an episode's files land: a tool directory
+      there would let a run's own output be executed as its evaluator's tool;
+    * no empty entry. POSIX reads an empty PATH element as the current
+      directory, and the worker's cwd is the episode scratch.
+
+    Tool NAMES are deliberately not this function's business: which tools an
+    evaluator wants is the task's affair, and the operator names directories.
+    """
+
+    entries = [item.value for item in infra_values if item.name == "EVALUATOR_TOOL_PATH"]
+    if not entries:
+        return None
+    if len(entries) > 1:
+        raise ProvisioningError("EVALUATOR_TOOL_PATH was supplied more than once")
+    directories = tuple(entries[0].split(os.pathsep))
+    roots = [os.path.realpath(root) for root in forbidden_roots]
+    for directory in directories:
+        if not directory:
+            raise ProvisioningError(
+                "EVALUATOR_TOOL_PATH has an empty entry (an empty PATH element means the "
+                f"current directory); give {os.pathsep!r}-separated absolute directories"
+            )
+        if not os.path.isabs(directory) or os.path.normpath(directory) != directory:
+            raise ProvisioningError(
+                f"EVALUATOR_TOOL_PATH entry {directory!r} is not an absolute, normalised path"
+            )
+        if not os.path.isdir(directory):
+            raise ProvisioningError(
+                f"EVALUATOR_TOOL_PATH entry {directory!r} is not an existing directory"
+            )
+        real = os.path.realpath(directory)
+        for root in roots:
+            if os.path.commonpath([real, root]) == root:
+                raise ProvisioningError(
+                    f"EVALUATOR_TOOL_PATH entry {directory!r} is inside {root!r}, where this "
+                    "episode's own files are written; name a directory outside it"
+                )
+    return directories
+
+
 def _has(infra_values: tuple[ScopedInfraValue, ...], name: str) -> bool:
     # Delegates to _get so this module has ONE lookup rule: a second scan with
     # its own matching logic is how "present" and "readable" drift apart.

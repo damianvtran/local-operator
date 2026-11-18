@@ -24,7 +24,7 @@ def _infra(name: str, value: str) -> ScopedInfraValue:
 @pytest.fixture(autouse=True)
 def _restore_environment():
     """Injection writes to the real process environment; put it back."""
-    names = ("PROXY_CONFIG_FILE", "WEBSITE_HOST_SUFFIX", "AWS_REGION", "NOT_INJECTABLE")
+    names = ("PROXY_CONFIG_FILE", "WEBSITE_HOST_SUFFIX", "AWS_REGION", "NOT_INJECTABLE", "PATH")
     saved = {name: os.environ.get(name) for name in names}
     yield
     for name, value in saved.items():
@@ -188,3 +188,122 @@ def test_model_client_providers_reads_the_registry_the_judge_will_use(
     monkeypatch.setitem(sys.modules, "desktop_env.evaluators.backends", backends)
 
     assert vendor_bridge.model_client_providers() == ("zeta", "alpha")
+
+
+def test_an_undeclared_tool_path_writes_nothing() -> None:
+    """Unset must be today's environment byte for byte: no PATH key appears."""
+    os.environ.pop("PATH", None)
+    before = dict(os.environ)
+    vendor_bridge.inject_evaluator_tool_path(None)
+    assert dict(os.environ) == before and "PATH" not in os.environ
+
+
+def test_declared_directories_follow_the_default_search_path() -> None:
+    """Appended, never prepended: a declared directory cannot shadow a system tool."""
+    os.environ["PATH"] = "/parent/shell/bin"
+    vendor_bridge.inject_evaluator_tool_path(("/opt/tools/bin", "/srv/more"))
+    assert os.environ["PATH"].split(os.pathsep) == [
+        *os.defpath.split(os.pathsep),
+        "/opt/tools/bin",
+        "/srv/more",
+    ]
+
+
+_WORKER_PROBE = """
+import json, os, shutil, subprocess, sys
+sys.path[:0] = json.loads(sys.argv[1])
+from lop_osworld_v2_adapter import provisioning, vendor_bridge
+from local_operator.evaluation.adapters.api import ScopedInfraValue
+
+def run():
+    try:
+        return subprocess.run(["lop-fake-evaluator-tool"], capture_output=True, text=True).stdout
+    except FileNotFoundError:
+        return None
+
+report = {"path_at_start": os.environ.get("PATH"), "before": run()}
+infra = tuple(
+    ScopedInfraValue(name="EVALUATOR_TOOL_PATH", purpose="benchmark_compute", value=value)
+    for value in sys.argv[3:]
+)
+vendor_bridge.inject_evaluator_tool_path(
+    provisioning.resolve_evaluator_tool_path(infra, forbidden_roots=(sys.argv[2],))
+)
+report.update(
+    after=run(),
+    which=shutil.which("lop-fake-evaluator-tool"),
+    path=os.environ.get("PATH"),
+    parent_only=os.environ.get("LOP_PARENT_ONLY_MARKER"),
+    names=sorted(os.environ),
+)
+print(json.dumps(report))
+"""
+
+
+def _probe_worker(tmp_path, *tool_path: str) -> dict:
+    """Run the adapter's own resolve+inject in a child whose environment is
+    built the way the supervisor builds the worker's, from a parent that has
+    a PATH and a marker the child must never see."""
+    import json
+    import subprocess
+    import sys
+
+    from local_operator.evaluation.adapters.supervisor import minimal_environment
+
+    parent = {
+        "PATH": os.pathsep.join((str(tmp_path / "parent-bin"), "/usr/bin", "/bin")),
+        "LOP_PARENT_ONLY_MARKER": "parent-only",
+        "LANG": "C",
+    }
+    environment = minimal_environment(parent, protocol_fds={})
+    # The constructed environment itself is unchanged by this feature.
+    assert environment == {"LANG": "C"}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", _WORKER_PROBE, json.dumps(sys.path), str(workspace)]
+        + list(tool_path),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.splitlines()[-1])
+
+
+def _fake_tool(directory) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / "lop-fake-evaluator-tool"
+    tool.write_text("#!/bin/sh\necho resolved-from-declared-dir\n")
+    tool.chmod(0o755)
+
+
+def test_a_worker_resolves_a_tool_only_from_a_declared_directory(tmp_path) -> None:
+    """The real path: a child process built like the worker, shelling out.
+
+    The same tool also sits in a directory that is ONLY on the parent's PATH;
+    it must stay invisible, declared or not -- the declared list is the whole
+    widening, and nothing else of the parent's environment arrives.
+    """
+    declared = tmp_path / "declared-tools"
+    _fake_tool(declared)
+    _fake_tool(tmp_path / "parent-bin")
+
+    unset = _probe_worker(tmp_path)
+    assert unset["path_at_start"] is None and unset["path"] is None
+    assert unset["before"] is None and unset["after"] is None and unset["which"] is None
+    assert "PATH" not in unset["names"] and "LOP_PARENT_ONLY_MARKER" not in unset["names"]
+
+    declared_run = _probe_worker(tmp_path, str(declared))
+    assert declared_run["before"] is None  # negative control inside the same child
+    assert declared_run["after"] == "resolved-from-declared-dir\n"
+    assert declared_run["which"] == str(declared / "lop-fake-evaluator-tool")
+    assert declared_run["path"].split(os.pathsep) == [*os.defpath.split(os.pathsep), str(declared)]
+    assert str(tmp_path / "parent-bin") not in declared_run["path"]
+    assert declared_run["parent_only"] is None
+    # The interpreter and the platform add names of their own at startup
+    # (locale coercion, CoreFoundation), declared or not: the feature's whole
+    # footprint is the difference between the two children.
+    assert set(declared_run["names"]) - set(unset["names"]) == {"PATH"}
+    assert set(unset["names"]) <= set(declared_run["names"])

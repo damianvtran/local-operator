@@ -545,6 +545,35 @@ the gate and the stamp derive from a single table
 (`DISCLOSED_INFRA_METADATA_KEYS` in `local_operator/evaluation/runner/episode.py`),
 so a future value cannot be gated without being disclosed or vice versa.
 
+### Declared evaluator tool path
+
+The adapter worker's environment is constructed from a closed allowlist and
+carries **no `PATH`**, so a task evaluator that shells out to a host tool
+resolves it only on the interpreter's default search path (`/bin:/usr/bin`).
+A tool installed anywhere else either raises or, where the evaluator swallows
+the failure, silently scores lower. Upstream runs evaluators under the
+operator's ordinary environment, so this is a harness-side fidelity gap.
+
+`--infra EVALUATOR_TOOL_PATH=<dir>[:<dir>...]` closes it explicitly. At
+`prepare` the worker's `PATH` becomes the default directories **followed by**
+the declared ones, in the order given (a declared directory can add a tool,
+never shadow a system one). Nothing else of the launching shell's environment
+reaches the worker, and the launching shell's own `PATH` is never read.
+
+Each entry must be an absolute, already-normalised, existing directory, and
+must not be the adapter workspace or the episode's artifact root or sit under
+either (checked after resolving symlinks, at `prepare` and again at
+`reset_start`, both before allocation). Relative paths, empty entries, files
+and missing directories are refused by name.
+
+Omitting the value reproduces the previous behaviour exactly: no `PATH` key is
+written. When it **is** set, `scripts/run_episode.py` stamps the requested
+list as `evaluator_tool_path` in the evidence manifest's metadata, and the
+value is gated like the two above: an adapter build that does not declare it
+fails the episode before `prepare` with `UndeclaredDisclosedInfra`. Scores
+from a run that sets it are comparable to runs disclosing the same
+directories.
+
 ### Explicit system proxy policy
 
 `--infra OSWORLD_ENABLE_PROXY=false` in `benchmark_compute` scope selects
