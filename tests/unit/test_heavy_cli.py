@@ -170,8 +170,9 @@ _PROBE = textwrap.dedent("""
     # The parent records the child's group just after spawning it.
     while (h := heavy_lease.read_holders(d)[0]).pgid is None:
         time.sleep(0.02)
+    cmd_ok = h.command.startswith(shlex.quote(sys.executable) + ' -c ')
     print(f"free={taken is not None} pid={h.pid} parent={os.getppid()} "
-          f"pgid_ok={h.pgid == os.getpgrp()} cmd_ok={h.command.startswith(shlex.quote(sys.executable) + ' -c ')}")
+          f"pgid_ok={h.pgid == os.getpgrp()} cmd_ok={cmd_ok}")
 """)
 
 
@@ -305,3 +306,37 @@ def test_unsupported_platform_says_so(
     assert heavy_cli.status_command(out=out) == 0
     assert heavy_cli.run_command(["sh", "-c", "exit 4"], None, out=out) == 4
     assert out.getvalue().splitlines() == [line, line, line]
+
+
+def _reload_heavy_cli_without(monkeypatch: pytest.MonkeyPatch, *missing: tuple[object, str]):
+    """Reload ``heavy_cli`` with POSIX-only names removed, as on Windows.
+
+    Regression for the ``xplat-probe-windows`` failure: a module-level
+    ``signal.SIGHUP`` made the module unimportable there. The reload is undone
+    (names restored, module reloaded again) so later cells see the real tuple.
+    """
+    import importlib
+
+    for owner, name in missing:
+        monkeypatch.delattr(owner, name)
+    try:
+        return tuple(importlib.reload(heavy_cli)._FORWARDED)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(heavy_cli)
+
+
+def test_imports_without_sighup_and_does_not_forward_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    forwarded = _reload_heavy_cli_without(monkeypatch, (signal, "SIGHUP"))
+    assert forwarded == (signal.SIGINT, signal.SIGTERM)
+
+
+def test_without_killpg_nothing_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows shape: no SIGHUP and no process groups, so ``run`` must install
+    # no handler that could reach ``os.killpg``.
+    forwarded = _reload_heavy_cli_without(monkeypatch, (signal, "SIGHUP"), (os, "killpg"))
+    assert forwarded == ()
+
+
+def test_posix_forwarded_signals_are_unchanged() -> None:
+    assert heavy_cli._FORWARDED == (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)

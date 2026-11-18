@@ -56,7 +56,24 @@ NOTE_EVERY_SECONDS = 5.0
 _POLL_SECONDS = 0.25
 
 #: The signals ``run`` forwards to its child's group and treats as "stop now".
-_FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+#:
+#: Built defensively because this module is imported on every platform (the
+#: CLI parser reaches it) and Windows has neither ``signal.SIGHUP`` nor
+#: ``os.killpg``: a literal ``signal.SIGHUP`` here made the whole module raise
+#: AttributeError at import there. Without ``killpg`` there is no group to
+#: forward to, so the tuple is empty and ``run`` installs no handlers at all --
+#: the unqueued fallback then never reaches ``killpg``, and a console Ctrl-C
+#: still reaches the child because it shares the console. On POSIX the tuple
+#: is exactly ``(SIGINT, SIGTERM, SIGHUP)``, as before.
+_FORWARDED: tuple[int, ...] = (
+    tuple(
+        sig
+        for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None))
+        if sig is not None
+    )
+    if hasattr(os, "killpg")
+    else ()
+)
 
 
 def _queue_off_line() -> str | None:
