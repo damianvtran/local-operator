@@ -28,7 +28,7 @@
   "wire.remote_compute.no_capacity": "Radient के पास अभी रिमोट कंप्यूट की क्षमता नहीं है; बाद में फिर कोशिश करें।",
   "wire.remote_compute.no_credit": "Radient के पास इस खाते के लिए कंप्यूट क्रेडिट नहीं है, इसलिए रन स्वीकार नहीं किया गया।",
   "wire.remote_compute.only_with": "{flag} केवल --remote के साथ लागू होता है।",
-  "wire.remote_compute.option_spot": "Spot",
+  "wire.remote_compute.option_spot": "स्पॉट",
   "wire.remote_compute.preview_not_enabled": "इस Radient खाते के लिए रिमोट कंप्यूट अभी तक सक्षम नहीं है (प्रीव्यू)।",
   "wire.remote_compute.refusal_conflict": "Radient ने रन या खाते की मौजूदा स्थिति से टकराव बताकर यह अनुरोध अस्वीकार किया। रन को फिर से पढ़ें, या कोई दूसरा नाम दें, फिर दोबारा कोशिश करें।",
   "wire.remote_compute.replayed": "आइडेम्पोटेंसी कुंजी पहले भेजे गए किसी अनुरोध से मेल खाती है, इसलिए यह रिमोट रन {run_id} ही है और कोई नया रन नहीं बनाया गया।",

@@ -33,7 +33,7 @@
   "wire.remote_compute.refusal_conflict": "Radient نے رن یا اکاؤنٹ کی موجودہ حالت سے تصادم کی بنا پر یہ درخواست مسترد کر دی۔ رن دوبارہ پڑھیں، یا کوئی دوسرا نام دیں، پھر دوبارہ کوشش کریں۔",
   "wire.remote_compute.replayed": "idempotency key پچھلی جمع کردہ درخواست سے مل گئی، اس لیے یہ ریموٹ رن {run_id} ہے اور کوئی نیا رن نہیں بنایا گیا۔",
   "wire.remote_compute.repo_no_remote": "یہ فولڈر origin ریموٹ والی git ریپوزیٹری نہیں ہے، اس لیے کنٹینر کے clone کرنے کے لیے کوئی ریپوزیٹری موجود نہیں۔",
-  "wire.remote_compute.repo_not_https_remote": "origin ریموٹ بغیر کریڈنشل کے https:// URL نہیں ہے، اور کنٹینر کے پاس SSH سے clone کرنے کی نہ کلید ہے نہ ایجنٹ۔ پہلے origin کو https:// URL پر سیٹ کریں۔",
+  "wire.remote_compute.repo_not_https_remote": "origin ریموٹ بغیر کریڈینشل کے https:// URL نہیں ہے، اور کنٹینر کے پاس SSH سے clone کرنے کی نہ کلید ہے نہ ایجنٹ۔ پہلے origin کو https:// URL پر سیٹ کریں۔",
   "wire.remote_compute.repo_unpushed_commit": "commit {detail} origin کی کسی برانچ پر نہیں ہے۔ کنٹینر ریموٹ سے clone کرتا ہے، اس لیے پہلے یہ commit push کریں۔",
   "wire.remote_compute.retrying": "Radient نے اس رن کی خرابی رپورٹ کی ہے اور اس کی دوبارہ کوشش کر رہا ہے، اس لیے نگرانی جاری رہے گی۔",
   "wire.remote_compute.run_busy": "یہ رن یا ورک لوڈ پہلے ہی کسی دوسرے آپریشن میں مصروف ہے۔ اس کے ختم ہونے کا انتظار کریں، پھر دوبارہ کوشش کریں۔",
