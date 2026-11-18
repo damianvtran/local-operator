@@ -1,0 +1,108 @@
+$ env -u LOCAL_OPERATOR_COMMUNITY .venv/bin/lop community status --json
+{
+  "ok": false,
+  "code": "community_disabled"
+}
+→ exit 1
+
+$ .venv/bin/lop community status
+Local Operator: not joined · guidelines 2026-11-01
+→ exit 0
+
+$ .venv/bin/lop community guidelines --version
+2026-11-01
+→ exit 0
+
+$ .venv/bin/lop community join --accept-guidelines 2025-01-01 --json
+{
+  "ok": false,
+  "code": "guidelines",
+  "version": "2026-11-01"
+}
+→ exit 8
+
+$ .venv/bin/lop community join --accept-guidelines 2026-11-01
+Joined Local Operator · guidelines 2026-11-01 accepted
+→ exit 0
+
+$ .venv/bin/lop community channels
+#general  joined
+→ exit 0
+
+$ .venv/bin/lop community read #general --json
+{
+  "ok": true,
+  "channel": "#general",
+  "messages": [
+    {
+      "id": "msg_1",
+      "conversation_id": "conv_general",
+      "seq": 1,
+      "author": {
+        "kind": "human",
+        "display_name": "Ada"
+      },
+      "created_at": "2026-11-18T10:00:00Z",
+      "text": "welcome",
+      "reactions": [
+        {
+          "emoji": "👍",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}
+→ exit 0
+
+$ sh -c .venv/bin/lop community post '#general' --text - --json < /Users/damian/.local-operator/sessions/955507fe6211/scratchpad/cli-qa/post.txt
+{
+  "ok": true,
+  "kind": "posted",
+  "submission_id": "DPCQgrqLABI_fKK0PNtX6OSWKzcwd5eD",
+  "message_id": "msg_2"
+}
+→ exit 0
+
+$ .venv/bin/lop community post #general --text spam buy now --json
+{
+  "ok": false,
+  "kind": "refused",
+  "submission_id": "wVK6Opl6P4Xfu7K4-cI5OsTIEaHezOGy",
+  "category": "spam_or_promotion",
+  "reference": "MOD-7K2Q-9XDF"
+}
+→ exit 3
+
+$ .venv/bin/lop community post #busy --text hi --json
+{
+  "ok": false,
+  "code": "channel_not_found"
+}
+→ exit 1
+
+$ .venv/bin/lop community post #down --text hi --json
+{
+  "ok": false,
+  "code": "channel_not_found"
+}
+→ exit 1
+
+$ .venv/bin/lop community leave
+community leave: leaving ends your channels and DMs; pass --yes to leave. To switch orgs instead, use /orgs in the app.
+→ exit 1
+
+$ .venv/bin/lop community leave --yes --json
+{
+  "ok": true,
+  "state": "left"
+}
+→ exit 0
+
+$ .venv/bin/lop community post #general --text after leaving --json
+{
+  "ok": false,
+  "code": "not_joined"
+}
+→ exit 1
+

@@ -1,0 +1,31 @@
+$ .venv/bin/lop community join --accept-guidelines 2026-11-01 --json
+{
+  "ok": true,
+  "state": "joined",
+  "guidelines_version": "2026-11-01"
+}
+→ exit 0
+
+$ .venv/bin/lop community post conv_busy --text hi --json
+{
+  "ok": false,
+  "code": "channel_not_found"
+}
+→ exit 1
+
+$ .venv/bin/lop community post conv_down --text hi --json
+{
+  "ok": false,
+  "code": "channel_not_found"
+}
+→ exit 1
+
+no-wait key=O7KcHvPbqyQqZSmkPuWCTsvgtBzzSdvp
+$ .venv/bin/lop community cancel O7KcHvPbqyQqZSmkPuWCTsvgtBzzSdvp --json
+{
+  "ok": true,
+  "kind": "cancelled",
+  "submission_id": "O7KcHvPbqyQqZSmkPuWCTsvgtBzzSdvp"
+}
+→ exit 0
+
