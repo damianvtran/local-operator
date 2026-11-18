@@ -4,7 +4,7 @@
   "cli.services_heavy.wait": "بھاری کام کا سلاٹ خالی ہونے تک رکیں، اسے لیے بغیر",
   "cli.services_heavy.run": "بھاری کام کا سلاٹ تھام کر ایک کمانڈ چلائیں، اور اس کے ختم ہونے پر سلاٹ خالی کریں",
   "cli.services_heavy.status": "بھاری کام کے سلاٹ اور ہر رکھنے والے کا pid، دورانیہ اور کمانڈ دکھائیں",
-  "cli.services_heavy.timeout": "سلاٹ کے لیے قطار میں انتظار کی زیادہ سے زیادہ مدت، سیکنڈوں میں (طے شدہ: مشین کی قطار کی حد، {wait_seconds}s، جب تک {env_name} کوئی اور مقرر نہ کرے)",
+  "cli.services_heavy.timeout": "سلاٹ کے لیے قطار میں انتظار کی زیادہ سے زیادہ مدت، سیکنڈوں میں (ڈیفالٹ: مشین کی قطار کی حد، {wait_seconds}s، جب تک {env_name} کوئی اور مقرر نہ کرے)",
   "cli.services_heavy.command": "چلانے کے لیے کمانڈ، `--` کے بعد",
   "cli.services_heavy.holder": "  سلاٹ {slot}: {holder}، {age} سے چل رہا ہے: {command}",
   "cli.services_heavy.no_command": "چلانے کو کچھ نہیں: کمانڈ `--` کے بعد لکھیں، مثلاً `lop services heavy run -- make test`"

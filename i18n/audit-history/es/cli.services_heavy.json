@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.services_heavy",
+  "history_sha256": "42bf41f5c1b4f926ff762f00ef78d0413682c6bf16d8d5d63f646e5841c68e39",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "15dbe0c3cc4e5eed1309e34070c6f70df6c126d11057b98ac19eae1c21293f93",
+      "translator": {
+        "agent": "coder agent (lopdev team; commit 117f0383b; session id not relayed)",
+        "model": "not relayed to auditor",
+        "fallback": "unknown",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "copy-reviewer agent acting as i18n auditor (lopdev team, session bae8340eabcb; independent of the coder)",
+        "session": "bae8340eabcb",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target es/cli.services_heavy.json sha256 43a8ba5ca5b3877f3a8793d2bda04913446537ce171ab269dbef10fc2c35defc (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. C3 (MINOR, fixed by auditor): heavy_description quoted subcommands with «» ; es style guide and the es catalogue precedent use “ ” -> “wait”, “run”, “status”. Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    }
+  ]
+}
