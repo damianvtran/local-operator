@@ -106,8 +106,9 @@ Everything else in the span is verbatim. Outside it:
 - when the protected span is wider than the default three-page tail, the text
   just OLDER than the span sits in the middle pages instead of on that tail.
   The archive therefore reaches about three pages less far back. On the two
-  real tasks wider than the floor cap, 38 of 259 steps that today's second
-  pass still held are gone from the replayed archive (see below).
+  real tasks wider than the floor cap, 38 of the 234 steps (of 259) that
+  today's second pass still held are gone from the replayed archive (see
+  below).
 
 The operator's own turns, the carried tier, and the newest `keep_recent_tokens`
 of raw history are unchanged.
@@ -188,8 +189,8 @@ from the replayed archive (their pages are mined into the carry digest, which
 keeps asks, decisions and identifiers, not steps). The mechanism is the last
 item under "What is given up": the wide tail displaces about three pages of
 older text. Giving those pages back would cost roughly 12k tokens on every
-pass with a wide tail, about a third of the saving in that row, and was not
-done.
+pass with a wide tail (an estimate from three pages of text, not a measured
+run), about a third of the saving in that row, and was not done.
 
 ### Limits of this evidence
 
