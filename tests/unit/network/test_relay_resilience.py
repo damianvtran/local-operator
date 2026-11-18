@@ -293,7 +293,13 @@ def test_doctor_skips_poisoned_self_hint_but_handshakes_the_foreign_winner(
         }
 
     monkeypatch.setattr(relay, "probe_candidates", fake_probe)
-    server: Any = SimpleNamespace(settings=relay.NetworkSettings(port=4097), _handshake=handshake)
+    # ``_link_for`` -> None: no live link, so the live-link coverage rule
+    # (readiness.mark_covered_by_link) does not apply to this cell's rows.
+    server: Any = SimpleNamespace(
+        settings=relay.NetworkSettings(port=4097),
+        _handshake=handshake,
+        _link_for=lambda *_args, **_kwargs: None,
+    )
     server._redial_candidates = lambda m: relay.RelayServer._redial_candidates(server, m)
     rows = relay.RelayServer._probe_member(server, cast(Any, object()), member, deadline=None)
     assert raced == [["16.52.146.32:4097"]]
