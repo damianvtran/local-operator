@@ -82,6 +82,36 @@ def add_parser(
     # tranche for these strings is not opened here, and inventing eight
     # translations without the independent audit the contract requires would be
     # worse than shipping English. `scripts/i18n/check.py` reads the pragma.
+    # `holds` (and its alias `holds list`): the READ-ONLY held-messages list,
+    # the desktop `/holds` reader plus the owner-audit sender join, for a
+    # machine with no app attached (team_bridge/holds_cli.py). No deliver or
+    # discard verb exists here by design: releasing stays bearer-gated in the app.
+    holds_flags = argparse.ArgumentParser(add_help=False)
+    holds_flags.add_argument(
+        "--json",
+        action="store_true",
+        # i18n: ignore developer CLI flag help (see the pragma above)
+        help="Print the list as JSON",
+    )
+    holds_flags.add_argument(
+        "--excerpt",
+        action="store_true",
+        # i18n: ignore developer CLI flag help (see the pragma above)
+        help="Add a short redacted excerpt of each held message (at most 160 characters)",
+    )
+    holds = group_actions.add_parser(
+        "holds",  # i18n: ignore CLI command name
+        parents=[holds_flags],
+        # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
+        help="List the agent messages held on this machine (read-only)",
+    )
+    holds_actions = holds.add_subparsers(dest="holds_command")
+    holds_actions.add_parser(
+        "list",  # i18n: ignore CLI command name
+        parents=[holds_flags],
+        # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
+        help="Same as `holds`",
+    )
     avatar = group_actions.add_parser(
         "avatar",  # i18n: ignore CLI command name
         # i18n: ignore developer CLI help pending the CLI copy-extraction tranche

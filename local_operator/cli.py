@@ -18763,6 +18763,12 @@ def main() -> int:
                 from local_operator.team_bridge.cli import main as team_bridge_avatar
 
                 return team_bridge_avatar(args)
+            if getattr(args, "team_bridge_command", None) == "holds":
+                from local_operator.team_bridge.holds_cli import (
+                    main as team_bridge_holds,
+                )
+
+                return team_bridge_holds(args)
             if getattr(args, "team_bridge_command", None) == "setup":
                 from local_operator.team_bridge.setup_cli import (
                     main as team_bridge_setup,
