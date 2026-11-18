@@ -33,17 +33,17 @@ from local_operator.tools.search_guard import lex
 @pytest.mark.parametrize(
     "command",
     [
-        'case choice in choice) tee marker ;; esac',
-        'case choice in\nchoice)\ntee marker\n;;\nesac',
-        'case choice in other) : ;; choice) tee marker ;; esac',
-        'case choice in other) tee marker ;; choice) : ;; esac',
-        'case choice in choice) case nested in nested) tee marker ;; esac ;; esac',
-        'case choice in (other|choice) tee marker ;; esac',
-        '''case choice in '(' | "a)b" | choice) tee marker ;; esac''',
+        "case choice in choice) tee marker ;; esac",
+        "case choice in\nchoice)\ntee marker\n;;\nesac",
+        "case choice in other) : ;; choice) tee marker ;; esac",
+        "case choice in other) tee marker ;; choice) : ;; esac",
+        "case choice in choice) case nested in nested) tee marker ;; esac ;; esac",
+        "case choice in (other|choice) tee marker ;; esac",
+        """case choice in '(' | "a)b" | choice) tee marker ;; esac""",
         r"case choice in a\)b|choice) tee marker ;; esac",
-        'emit(){ tee marker; }; case choice in choice) emit ;; esac',
-        'emit(){ case choice in choice) tee marker ;; esac; }; emit',
-        'emit(){ tee marker; }; case choice in other) emit(){ :; } ;; choice) emit ;; esac',
+        "emit(){ tee marker; }; case choice in choice) emit ;; esac",
+        "emit(){ case choice in choice) tee marker ;; esac; }; emit",
+        "emit(){ tee marker; }; case choice in other) emit(){ :; } ;; choice) emit ;; esac",
     ],
 )
 def test_case_arm_reaches_output_target(command: str, tmp_path: Path) -> None:
@@ -382,8 +382,8 @@ def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CallContext:
             Risk.CRITICAL,
         ),
         ('case choice in choice) tee "$LOCAL_OPERATOR_SCRATCHPAD/marker" ;; esac', Risk.LOW),
-        ('''case choice in "tee"|"marker) ;; esac") printf '%s' 'tee marker' ;; esac''', Risk.LOW),
-        ('''printf '%s' 'case choice in choice) tee marker ;; esac' ''', Risk.LOW),
+        ("""case choice in "tee"|"marker) ;; esac") printf '%s' 'tee marker' ;; esac""", Risk.LOW),
+        ("""printf '%s' 'case choice in choice) tee marker ;; esac' """, Risk.LOW),
     ],
 )
 async def test_case_arm_checkpoint(ctx: CallContext, command: str, expected: Risk) -> None:

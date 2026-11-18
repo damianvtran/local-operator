@@ -3804,6 +3804,7 @@ def _case_arm_pieces(
     syntax in case-pattern position; neither the literal pattern words nor
     their ``|`` should go through command dispatch. Keep their expansions.
     """
+
     def legacy_pieces() -> tuple[list[tuple[str, bool, str]], list[list[str]]]:
         # Standalone terminators are private to this consumer, even on fallback.
         kept = [(piece, bodies) for piece, bodies in zip(pieces, owned) if piece[0]]
