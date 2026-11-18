@@ -689,9 +689,10 @@ waiter exists yet: the `bash` tool takes the slot itself for a heavy command
 (`pytest -n N`, JS builds, `tsc`/`vue-tsc` and `typecheck` scripts; not
 mypy/pyright), queues up to 15 min and names the holder. A serial `python -m
 pytest` of targeted FILES or node ids, or narrowed with `-k`, takes no slot
-(repo addopts are not read), so it never queues behind a held one. An explicit
-`-n N`/`-n auto` on the command line, a directory or whole-suite pytest and
-`affected_tests.py --run/--evidence` take the slot. Otherwise check `lop
+while its effective xdist workers (command line over addopts) are 0-2, so it
+never queues behind a held one; this repo's addopts say `-n auto`, so pass `-n
+0`. More workers, a directory or whole-suite pytest and `affected_tests.py
+--run/--evidence` take the slot. Otherwise check `lop
 services status` once (it names the holder without waiting), or take a specific
 run's exact pid once and wait with a bounded `kill -0 <pid>` loop. Never wait on any
 `pgrep -f` pattern for test or heavy names: the waiter's shell, its `timeout`

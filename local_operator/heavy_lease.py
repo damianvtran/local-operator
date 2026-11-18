@@ -70,12 +70,14 @@ from and never capped by the command's own ``timeout``).
 from __future__ import annotations
 
 import asyncio
+import configparser
 import json
 import math
 import os
 import re
 import shlex
 import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -290,6 +292,9 @@ _PYTEST_VALUE_OPTS = frozenset(
 )
 #: Calls that never run a test: collection listings and plugin/fixture docs.
 _PYTEST_INFO_FLAGS = frozenset({"--collect-only", "--co", "--fixtures", "--markers"})
+#: pytest config files, in pytest's own precedence order per directory.
+_PYTEST_CONFIGS = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+_PYTEST_CONFIG_MAX_BYTES = 1_000_000
 
 _Seen = frozenset[tuple[str | None, str]]
 
@@ -369,7 +374,7 @@ def _shallow_guess(command: str) -> str | None:
                 if later in ("&&", "||", ";", "|", "&"):
                     break
                 after.append(later.strip("'\""))
-            if verdict := _classify_pytest(after):
+            if verdict := _classify_pytest(after, None):  # no cwd: token-only
                 return verdict
         if name in _PACKAGE_MANAGERS:
             rest = [w.strip("'\"") for w in words[index + 1 :] if not w.startswith("-")]
@@ -760,7 +765,7 @@ def _classify_segment(
     elif _PYTHON.fullmatch(program) and args[:2] == ["-m", "pytest"]:
         pytest_args = args[2:]
     if pytest_args is not None:
-        return _classify_pytest(pytest_args)
+        return _classify_pytest(pytest_args, cwd)
     return None
 
 
@@ -777,39 +782,90 @@ def _xdist_workers(args: list[str]) -> str | None:
     return value
 
 
-def _parallel_workers(value: str | None) -> bool:
-    """True when a command-line ``-n`` value forks more than one worker.
+def _pytest_addopts(directory: str | None) -> list[str]:
+    """``addopts`` from the pytest config pytest would pick at or above ``directory``.
 
-    ``auto``/``logical`` and any N > 1 fork; ``0``/``1`` do not. A value we
-    cannot read (``-n "$N"``) counts as parallel: a false negative is what the
-    lease exists to prevent.
+    Why: a "serial" ``pytest tests/unit/x.py`` is not serial in a repo whose
+    addopts say ``-n auto`` (local-operator's do): it forks 2..8 interpreters,
+    each importing the package. Cheap by contract, like :func:`_package_scripts`:
+    a few small file reads, no pytest import; any failure means "no addopts".
+    """
+    if not directory:
+        return []
+    try:
+        current = Path(directory).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return []
+    for folder in (current, *current.parents):
+        for name in _PYTEST_CONFIGS:
+            path = folder / name
+            try:
+                if not path.is_file() or path.stat().st_size > _PYTEST_CONFIG_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8")
+                if name == "pyproject.toml":
+                    section = tomllib.loads(text).get("tool", {}).get("pytest", {})
+                    options = section.get("ini_options") if isinstance(section, dict) else None
+                    if not isinstance(options, dict):
+                        continue  # a pyproject without pytest config is not one
+                    addopts = options.get("addopts", "")
+                else:
+                    parser = configparser.ConfigParser(interpolation=None)
+                    parser.read_string(text)
+                    section_name = "tool:pytest" if name == "setup.cfg" else "pytest"
+                    if not parser.has_section(section_name):
+                        if name in ("tox.ini", "setup.cfg"):
+                            continue
+                        return []  # pytest.ini is the config even when empty
+                    addopts = parser.get(section_name, "addopts", fallback="")
+            except (OSError, ValueError, configparser.Error, tomllib.TOMLDecodeError):
+                return []
+            if isinstance(addopts, list):
+                return [str(item) for item in addopts]
+            try:
+                return shlex.split(str(addopts))
+            except ValueError:
+                return []
+    return []
+
+
+#: Effective xdist workers above this make even a targeted pytest heavy.
+#: Manager decision (79, 2026-11-18 11:52Z, PR #4227): two workers are a
+#: quick iteration; ``auto`` forks 2..8 interpreters, each importing the
+#: package, which is the load the slot exists to serialise.
+_PYTEST_LIGHT_MAX_WORKERS = 2
+
+
+def _heavy_workers(value: str | None) -> bool:
+    """True when an effective ``-n`` value exceeds :data:`_PYTEST_LIGHT_MAX_WORKERS`.
+
+    ``auto``/``logical`` count as more. A value we cannot read (``-n "$N"``)
+    counts as more too: a false negative is what the lease exists to prevent.
     """
     if value is None:
         return False
-    if value in ("auto", "logical"):
-        return True
     try:
-        return int(value) > 1
+        return int(value) > _PYTEST_LIGHT_MAX_WORKERS
     except ValueError:
         return True
 
 
-def _classify_pytest(args: list[str]) -> str | None:
+def _classify_pytest(args: list[str], cwd: str | None) -> str | None:
     """Heavy reason for a pytest run, or None.
 
-    Policy (AGENTS.md "To wait for heavy work"; manager decision 2026-11-18,
-    PR #4227): "a single targeted test file or `-k` run should stay light, so
-    small iterations don't queue behind a long run." Only the COMMAND LINE is
-    read, never the repo's pytest ``addopts``: local-operator's addopts carry
-    ``-n auto``, and honouring them would put every inner-loop run of one file
-    in the queue behind a 20-minute suite. We accept that such a run forks
-    xdist workers without a slot; it is short, and the run_bounded memory cap
-    still bounds it. So, in order:
+    Policy (AGENTS.md "To wait for heavy work"; manager decision 79,
+    2026-11-18 11:52Z, PR #4227): the EFFECTIVE worker count decides. A quick
+    iteration (one file, a node id, or a ``-k``-narrowed run) stays off the
+    slot so it never queues behind a long run, but only while it really is
+    small: local-operator's addopts say ``-n auto``, so a bare
+    ``pytest tests/unit/x.py`` there forks up to 8 interpreters and IS heavy;
+    ``-n 0`` keeps it light. In order:
 
     * ``--collect-only``/``--fixtures``/``--markers`` never run a test: light.
-    * an explicit ``-n N`` (N > 1) or ``-n auto``/``logical``: heavy. The last
-      ``-n`` wins and ``-p no:xdist`` serialises, as in pytest.
-    * narrowed with ``-k``: light, whatever the target (the decision above).
+    * effective workers (the last ``-n`` across addopts then argv, so the
+      command line overrides addopts; ``-p no:xdist`` serialises) above
+      :data:`_PYTEST_LIGHT_MAX_WORKERS`, or ``auto``/``logical``: heavy.
+    * narrowed with ``-k``: light, whatever the target.
     * only test files or node ids (``x.py``, ``x.py::test``): light.
     * a directory target, or no target at all (the whole ``testpaths``), is
       heavy even serially: one interpreter importing the suite (node2,
@@ -817,7 +873,7 @@ def _classify_pytest(args: list[str]) -> str | None:
     """
     if any(arg in _PYTEST_INFO_FLAGS for arg in args):
         return None
-    if _parallel_workers(_xdist_workers(args)):
+    if _heavy_workers(_xdist_workers([*_pytest_addopts(cwd), *args])):
         return "pytest -n"
     targets: list[str] = []
     skip = False
@@ -849,8 +905,9 @@ def is_heavy(
     bundlers (esbuild, vite/electron-vite build, webpack, rollup, next build),
     the TypeScript compiler, JS test runners (vitest, jest, node --test),
     package-manager build/test/typecheck scripts, nx/turbo build|test targets,
-    parallel pytest (``-n`` N>1/auto on the command line; repo addopts are not
-    read), a directory or whole-suite pytest not narrowed by ``-k``,
+    pytest with more than two effective xdist workers (command line over the
+    nearest config's ``addopts``), a directory or whole-suite pytest not
+    narrowed by ``-k``,
     ``affected_tests.py --run|--evidence``, ``make test*`` and
     ``cargo``/``go`` build|test. ``$(…)``/backtick bodies are classified too,
     and never hide the command around them.
