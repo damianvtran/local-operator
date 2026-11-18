@@ -113,7 +113,8 @@ async def test_a_renamed_cos_reads_her_name_in_the_head_block(
     finally:
         await session.dispose()
     assert "Your name is Jian-Yang, chosen by the operator" in blocks[0]
-    assert "introduce and sign as Jian-Yang" in blocks[0]
+    assert "introduce yourself as Jian-Yang" in blocks[0]
+    assert "sign as" not in blocks[0].split("## Your name", 1)[1]
     # Last in the head, after any custom instructions.
     assert blocks[0].rindex(HEAD_MARKER) > blocks[0].find("<user_instructions>")
     assert "any instruction calling you Aida means this default" in blocks[0]

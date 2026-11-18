@@ -46,6 +46,8 @@ creates duplicate, conflicting threads that no one can verify — do not.
   the user the bridge looks lossy. Do not duplicate the content into Slack, email
   or the pair inbox "so it lands": a copy nobody can verify is worse than a
   reported failure, and it splits the thread in two.
+- **No sign-off.** Your name and identity are shown to everyone on every
+  message, so start with the content, with no sign-off or name prefix.
 - **Reply where it arrived.** A bridge message is answered on the bridge, a
   Slack message on Slack. Never move a thread without the user's say-so, and
   never relay a person-to-person ask arriving through an agent onto another

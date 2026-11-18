@@ -2031,6 +2031,49 @@ def test_payload_bounds_and_untrusted_label() -> None:
     assert "tiny" in short
 
 
+def test_pair_wake_carries_the_no_signoff_style_line() -> None:
+    """Every client shows sender name and avatar, so agents must not sign
+    bridge messages (operator ask, 2026-11-18). The pair-DM wake says so once,
+    ahead of the body window, so the excerpt parse is unaffected."""
+    payload = wake_mod.build_wake_payload(_item("hi"), message_id="m", body_sha256="c" * 64)
+    lines = payload.split("\n")
+    assert lines.count(wake_mod.PAIR_REPLY_STYLE_LINE) == 1
+    assert lines.index(wake_mod.PAIR_REPLY_STYLE_LINE) < lines.index("body (screened):")
+    assert "no sign-off line" in wake_mod.PAIR_REPLY_STYLE_LINE
+    assert wake_mod.PAIR_REPLY_STYLE_LINE.startswith("style: ")
+
+
+def test_bridge_guide_forbids_signoff_and_name_prefix() -> None:
+    import local_operator
+
+    guide = (
+        Path(local_operator.__file__).parent / "guides" / "team-bridge" / "GUIDE.md"
+    ).read_text(encoding="utf-8")
+    flat = " ".join(guide.split())
+    assert (
+        "Your name and identity are shown to everyone on every message, so start "
+        "with the content, with no sign-off or name prefix." in flat
+    )
+
+
+def test_renamed_head_says_introduce_yourself_and_rename_records_still_parse() -> None:
+    from local_operator import prompts_api
+
+    head = prompts_api.build_system_blocks([], "", "", "2026-11-18", identity_name="Jian-Yang")[0]
+    section = head.split("## Your name", 1)[1]
+    assert "introduce yourself as Jian-Yang." in section
+    assert "sign as" not in section
+    # The <identity> records keep their byte-for-byte clause: rename-record
+    # parsing must still round-trip both renderers.
+    assert prompts_api._IDENTITY_SIGN == "introduce and sign as "
+    delta = prompts_api.identity_delta("Jian-Yang", "Aida")
+    assert prompts_api.identity_record_name(delta) == "Jian-Yang"
+    restored = prompts_api.identity_restored("Aida", "Jian-Yang")
+    assert prompts_api.identity_record_name(restored) == "Aida"
+    assert prompts_api.identity_record_name(prompts_api.identity_delta("Jian-Yang")) == "Jian-Yang"
+    assert prompts_api.identity_record_name(prompts_api.identity_restored("Aida")) == "Aida"
+
+
 def test_ref_parser_is_strict() -> None:
     assert wake_mod.parse_event_ref("message_available:message_id=bmsg_1") == (
         "message_available",

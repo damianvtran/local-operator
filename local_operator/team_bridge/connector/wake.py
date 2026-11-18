@@ -181,6 +181,15 @@ def _display_fields(item: Mapping[str, Any]) -> dict[str, str] | None:
 EXCERPT_MIN_CHARS = 1200
 EXCERPT_MAX_CHARS = DISPLAY_CONTEXT_BOUNDS["excerpt"]
 
+#: Reply style for the PAIR-DM wake. Agents were opening or closing bridge
+#: messages with their own name although every client already shows sender
+#: name and avatar (operator ask, 2026-11-18), so a sign-off is pure noise the
+#: recipient pays for. Worded in the ``style: …; no sign-off line`` shape of
+#: the conversation card's REPLY_STYLE_LINE so the two lanes read alike; kept
+#: LOCAL (not imported) because that constant lands in a separate PR and a
+#: pair DM has no thread to steer replies into. One line: it rides every wake.
+PAIR_REPLY_STYLE_LINE = "style: start with the content; no sign-off line or name prefix"
+
 #: How long one wake handoff may hold a message claim. Screening + ack +
 #: delivery are bounded by the screening deadline; this lease only needs to
 #: outlive them, and an expired lease is replaceable by a NEW token only
@@ -261,6 +270,9 @@ def build_wake_payload(
         lines.append(f"state: {delivery.get('state')}")
     if message.get("request_state"):
         lines.append(f"request pending: {message.get('request_state')}")
+    # Ahead of the body so the excerpt stays the payload's last free-text run
+    # (the body window is parsed between "screened):" and "body_sha256:").
+    lines.append(PAIR_REPLY_STYLE_LINE)
     if len(text) > EXCERPT_MAX_CHARS:
         lines.append(f"excerpt ({EXCERPT_MAX_CHARS} of {len(text)} chars, screened):")
     else:

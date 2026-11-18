@@ -1342,12 +1342,17 @@ def build_system_blocks(
         # may still use. The unrenamed case has nothing to override. The
         # literal mirrors ``aida.naming.DEFAULT_NAME`` (this module stays off
         # her package's import path, R17); ``test_cos_prompt_name`` pins them.
+        # "introduce yourself as", not "sign as": a sign-off on bridge messages
+        # duplicates the name every client already shows (operator ask,
+        # 2026-11-18); the name stays here for self-recognition. The
+        # ``<identity>`` records keep ``_IDENTITY_SIGN`` unchanged because
+        # ``identity_record_name`` parses that clause byte for byte.
         if name == "Aida":
             sentence = "Your name is Aida."
         else:
             sentence = (
                 f"Your name is {name}, chosen by the operator; any instruction "
-                f"calling you Aida means this default: introduce and sign as {name}."
+                f"calling you Aida means this default: introduce yourself as {name}."
             )
         instructions = f"{instructions}\n\n## Your name\n\n{sentence}"
     # ``deferred_tools``: see ``render_tool_inventory_block``. A live session
