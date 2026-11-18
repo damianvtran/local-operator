@@ -1423,6 +1423,22 @@ async def _direct_message(
     conversation_id = str(view.get("id") or "")
     if _CONVERSATION_ID.fullmatch(conversation_id) is None:
         return _error("the hub opened no usable DM id", code="dm_failed")
+    # REPLY BINDING, DM HALF. ``channel_post`` binds before it writes; ``dm`` did
+    # not, so a run that had received bridge input could answer into ANY DM
+    # without naming what it answered (the 2026-11 incident: a session posted
+    # into a DM it was not woken for). The check needs the RESOLVED DM id — a DM
+    # is addressed by person or endpoint, so the conversation only exists here —
+    # and runs before any upload or reservation so a refusal leaves nothing.
+    refused = _validate_reply_destination(
+        runtime,
+        {
+            "in_reply_to_message_id": params.in_reply_to_message_id,
+            "new_post": params.new_post,
+            "channel_id": conversation_id,
+        },
+    )
+    if refused is not None:
+        return refused
     # Stage the images (the DM now exists, so there is a conversation to stage
     # into) BEFORE the reply guard is touched: a failed upload then never reserves a
     # slot. Every exit below that does not send must discard them.
@@ -1546,6 +1562,7 @@ async def _direct_message(
     if file_batch:
         receipt["file_ids"] = list(file_batch.staged)
     attachment_warning = _annotate_attachments(receipt, staged_images)
+    _note_reply_destination(runtime, receipt)
     # The target's membership state is the server's admission answer: an
     # ``invited`` agent will not be woken until its owner accepts, and the
     # sender must know that rather than assume delivery.
@@ -1744,6 +1761,31 @@ def _posted_message(result: Any) -> tuple[str, int | None]:
     return (
         message_id if isinstance(message_id, str) else "",
         seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+    )
+
+
+def _note_reply_destination(runtime: "BridgeRuntime", receipt: dict[str, Any]) -> None:
+    """Tell a non-designated sender where the answer to this post will land.
+
+    Replies to a conversation post are delivered to the DESIGNATED session, not
+    to the session that posted (the sender may be a task session the owner never
+    sees again). Without this line a task session waits for an answer that was
+    handed to someone else, and the designated session answers a question it did
+    not ask. Silent when the sender IS the designated session, and when the
+    designation cannot be read (store-less runtime, unreadable store): a notice
+    must never fail a send that already landed.
+    """
+    from .store import Store, StoreRefused
+
+    try:
+        designated = Store(Path(runtime.config_dir)).designated_session_for_readonly(runtime.owner)
+    except (StoreRefused, OSError, UnicodeDecodeError, AttributeError):
+        return
+    if not designated or designated == runtime.session_id:
+        return
+    receipt["content"] += (
+        f"; replies go to session {designated}, not to you: read channel_history "
+        "to see what comes back"
     )
 
 
@@ -2037,8 +2079,11 @@ def _validate_reply_destination(
     if not message_id:
         if runtime.bridge_input_presented and not new_post:
             return _error(
-                "this run received bridge input: supply in_reply_to_message_id "
-                "or intentionally declare new_post; thread_root_id is not reply binding",
+                "this run received bridge input: if this post answers a message you "
+                "were delivered, supply its in_reply_to_message_id; only a post that "
+                "answers none of them is a new_post (declare new_post: true, after "
+                "reading the thread with channel_history); thread_root_id is not "
+                "reply binding",
                 code="reply_binding_required",
             )
         return None
@@ -3006,6 +3051,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             receipt["resolved_channel_id"] = channel_id
             receipt["resolved_from_name"] = resolved_from_name
         attachment_warning = _annotate_attachments(receipt, staged_images)
+        _note_reply_destination(runtime, receipt)
         return _with_warnings(
             receipt,
             guard_warning,

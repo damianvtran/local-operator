@@ -939,3 +939,104 @@ def test_a_decoder_recursion_failure_is_the_shape_teaching_not_a_crash(
     with pytest.raises(types_mod.InvalidSendRecipient) as refused:
         types_mod.decode_recipient_argument(_NESTING_BOMB)
     assert "a recipient is exactly one of" in str(refused.value)
+
+
+# -- reply binding and the reply-destination notice (P0) ----------------------
+
+
+def _designated_runtime(
+    tmp_path: Any, client: Any, *, designated: str = "s_designated"
+) -> BridgeRuntime:
+    """A runtime whose store names ``designated`` as the chief-of-staff session."""
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store
+
+    owner = _owner()
+    (tmp_path / "config.yml").write_text("values:\n  team_bridge:\n    enabled: true\n")
+    Store(tmp_path).commit_enrollment(
+        owner, OwnerReceipt("bridge_consent_v1", owner.endpoint_id), cos_session_id=designated
+    )
+    return BridgeRuntime(cast(TeamBridgeClient, client), tmp_path, TENANT, owner, "sess_task")
+
+
+@pytest.mark.asyncio
+async def test_dm_after_bridge_input_needs_a_binding_or_a_declared_new_post() -> None:
+    """The DM half of the reply binding: before this a run that had been handed
+    bridge input could post into any DM without naming what it answered."""
+
+    client = DmClient([_member()])
+    runtime = _runtime(client)
+    runtime.bridge_input_presented = True
+
+    refused = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
+
+    assert refused["ok"] is False and refused["code"] == "reply_binding_required", refused
+    # The wording makes new_post the exception, behind reading the thread.
+    assert "channel_history" in refused["error"] and "new_post" in refused["error"]
+    # Nothing was sent: the refusal comes after the DM resolved, before the write.
+    assert [c["method"] for c in client.calls if c["method"] == "conversation_send"] == []
+
+    declared = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, new_post=True))
+    assert declared["ok"] is True, declared
+
+
+@pytest.mark.asyncio
+async def test_dm_without_bridge_input_is_unchanged() -> None:
+    client = DmClient([_member()])
+    out = await execute_bridge(_runtime(client), _dm(endpoint_id=PEER_ENDPOINT))
+    assert out["ok"] is True, out
+
+
+@pytest.mark.asyncio
+async def test_dm_binding_to_a_message_of_another_conversation_is_refused(tmp_path: Any) -> None:
+    """The binding is compared with the RESOLVED DM id: a reply to a message
+    admitted in some other conversation must not be posted into this DM."""
+
+    from local_operator.team_bridge.store import Store
+
+    client = DmClient([_member()])
+    runtime = _designated_runtime(tmp_path, client, designated="sess_task")
+    Store(tmp_path).record_body_reservation(
+        runtime.owner,
+        conversation_id="bcv_zzzzzzzz",
+        message_id="bcmsg_zzzzzzzz",
+        conversation_seq=1,
+        mention=False,
+        body_sha256="a" * 64,
+        screening_fingerprint="b" * 64,
+        policy_epoch=1,
+        consent_version="bridge_consent_v1",
+        designated_session="sess_task",
+        now=1,
+    )
+
+    out = await execute_bridge(
+        runtime,
+        _dm(endpoint_id=PEER_ENDPOINT, in_reply_to_message_id="bcmsg_zzzzzzzz"),
+    )
+
+    assert out["ok"] is False and out["code"] == "reply_destination_mismatch", out
+    assert not [c for c in client.calls if c["method"] == "conversation_send"]
+
+
+@pytest.mark.asyncio
+async def test_a_non_designated_sender_is_told_where_replies_go(tmp_path: Any) -> None:
+    client = DmClient([_member()])
+    runtime = _designated_runtime(tmp_path, client)
+
+    out = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
+
+    assert out["ok"] is True, out
+    assert "replies go to session s_designated, not to you" in out["content"], out
+    assert "channel_history" in out["content"]
+
+
+@pytest.mark.asyncio
+async def test_the_designated_sender_gets_no_destination_notice(tmp_path: Any) -> None:
+    client = DmClient([_member()])
+    runtime = _designated_runtime(tmp_path, client, designated="sess_task")
+
+    out = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
+
+    assert out["ok"] is True, out
+    assert "replies go to" not in out["content"], out
