@@ -147,9 +147,11 @@ SLICE_S = 10.0
 #:
 #: WHY 60 s: a refused attempt costs one ``ps`` census (``count_owned``). A
 #: parked approval can keep a wake runtime alive for a day, and a census every
-#: slice (10 s) for that day is ~8,600 forks for nothing; at 60 s it is ~1,400,
-#: and the move still follows the last conversation's end within about a
-#: minute. Only consulted while a newer settled build is on disk.
+#: slice (10 s) for that day is ~8,600 forks for nothing; at 60 s it is ~1,400.
+#: The price is latency: a refusal made just before the last owned conversation
+#: ends holds for this whole back-off and the next attempt waits for its slice,
+#: so the move follows that end by up to about 70 s (MOVE_RETRY_S + SLICE_S).
+#: Only consulted while a newer settled build is on disk.
 MOVE_RETRY_S = 60.0
 
 #: Never sleep less than this. A schedule due in the past, or a clock that
@@ -3543,6 +3545,9 @@ class _BuildMove:
 
     FAIL SAFE: a refused or failed attempt logs, keeps serving, and is re-tried
     after :data:`MOVE_RETRY_S`. A move this process cannot prove is never taken.
+    So the move trails the last owned conversation's end by up to about 70 s:
+    the 60 s back-off of the refusal that saw it running, plus one
+    :data:`SLICE_S` before the sleep notices the retry is due.
 
     Collaborators are injected so the gate is testable without forking ``ps`` or
     replacing the test process; production passes none.
@@ -3653,8 +3658,11 @@ class _BuildMove:
         if image is None or not os.access(image, os.X_OK):
             return self._refuse("no stable launcher to move through (%s)", image)
         argv = [str(image), "-m", "local_operator.wakes.supervisor", *self._argv_tail]
+        # Worded as an ATTEMPT: the exec can still fail after this line (the
+        # refusal below then says so), and a past-tense "moved" would read as
+        # done in a log where the old build keeps serving.
         logger.info(
-            "moving the wake supervisor onto build %s (from %s) in place, pid %d: "
+            "exec'ing the wake supervisor onto build %s (from %s) in place, pid %d: "
             "it owns no wake-started conversations",
             getattr(target, "label", lambda: target)(),
             getattr(self.boot, "label", lambda: self.boot)(),
