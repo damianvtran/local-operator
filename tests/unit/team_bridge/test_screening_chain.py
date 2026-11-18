@@ -1757,7 +1757,7 @@ def test_a_verdict_past_the_message_cap_still_stops_the_walk() -> None:
 
     body = {"error": {"message": "x" * 2000 + " Output flagged by moderation"}}
     response = httpx.Response(500, json=body, request=httpx.Request("POST", "https://h/v1"))
-    with pytest.raises(Exception) as raised:
+    with pytest.raises(ProviderError) as raised:
         clients.raise_for_status(response)
     failure = raised.value
     assert "flagged" not in str(getattr(failure, "message", ""))  # the cap cut it off
