@@ -100,6 +100,12 @@ class VerifierEvidence:
 
     def prompt(self) -> str:
         # ONE schema in words and ONE example that is itself a valid answer.
+        # THE EXAMPLE ROW IS ``UNVERIFIED`` ON PURPOSE: it cites a real
+        # supplied ID, so as ``MET`` it decoded to PASS whenever that item
+        # satisfied the required modality -- a capped child that echoed the
+        # prompt back verbatim would have passed the check it never ran
+        # (PR #4236 review m2). ``UNVERIFIED`` is still a well-formed answer
+        # and fails closed (INCONCLUSIVE) if copied.
         # The earlier text carried a pseudo-JSON template and listed evidence
         # as ``- frame:screen: image``; twelve recorded checks show what a
         # model made of that: eight added a ``verdict``/``verdict_line`` key to
@@ -111,7 +117,7 @@ class VerifierEvidence:
             "requirements": [
                 {
                     "requirement": "one requirement from the request",
-                    "status": "MET",
+                    "status": "UNVERIFIED",
                     "modality": cite.modality if cite else "text",
                     # Only an ID this check really holds: an invented one in
                     # the example would be copied into an unresolvable row.
@@ -140,6 +146,10 @@ class VerifierEvidence:
             'Do not add "verdict", "verdict_line", a summary or any other key at either level: '
             "the overall verdict is computed from the rows alone and any other key is ignored.",
             "Example: " + json.dumps(example, separators=(",", ":")),
+            # The example's status is a placeholder (see above); say so, or
+            # the one concrete row in the prompt anchors answers on it.
+            "The example shows the shape only: give each row the status your own "
+            "observation of the evidence supports.",
             "Assess each requirement you identify independently. UNMET means observed failure; "
             "UNVERIFIED means insufficient evidence. A MET row must cite at least one Evidence "
             "ID of its own modality (an image row cites an image ID, not only text ones). "

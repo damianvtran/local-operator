@@ -560,6 +560,15 @@ the declared ones, in the order given (a declared directory can add a tool,
 never shadow a system one). Nothing else of the launching shell's environment
 reaches the worker, and the launching shell's own `PATH` is never read.
 
+The default directories are the interpreter's (`os.defpath`, `/bin:/usr/bin`),
+which is what a directly spawned tool already resolved against. An evaluator
+that goes through a shell (`shell=True`) is different: with no `PATH` the
+shell used its own, wider built-in default (on macOS
+`/usr/gnu/bin:/usr/local/bin:/bin:/usr/bin:.`), and once `PATH` is set it uses
+exactly what is set. So setting this value **removes** `/usr/local/bin` and
+the working directory from a shell-spawned evaluator's search path: declare
+`/usr/local/bin` explicitly if your evaluators relied on it.
+
 Each entry must be an absolute, already-normalised, existing directory, and
 must not be the adapter workspace or the episode's artifact root or sit under
 either (checked after resolving symlinks, at `prepare` and again at
@@ -573,6 +582,14 @@ value is gated like the two above: an adapter build that does not declare it
 fails the episode before `prepare` with `UndeclaredDisclosedInfra`. Scores
 from a run that sets it are comparable to runs disclosing the same
 directories.
+
+A `--engagement session` run builds no evidence manifest, so its record
+carries the same disclosure itself: the `reset` row of `events.jsonl` has a
+`disclosed_infra` object keyed exactly like the manifest metadata
+(`evaluator_tool_path`, `aws_instance_type_override`,
+`aws_root_volume_size_override`, `osworld_enable_proxy_override`,
+`osworld_action_settle_policy`), holding only the overrides that were
+supplied -- `{}` when none were.
 
 ### Explicit system proxy policy
 

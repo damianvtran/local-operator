@@ -4111,6 +4111,8 @@ async def run_session_episode(
     stamp reaches only the reply arm: without the row here, an on-policy and an
     off-policy session run of the same task are evidence-identical and get
     pooled, which is the one thing the opt-in is not allowed to cause.
+    The disclosed infra overrides get the same treatment for the same reason:
+    the ``reset`` row carries ``disclosed_infra`` (:func:`_disclosed_infra_stamp`).
 
     The order of calls mirrors ``EpisodeRunner`` deliberately, comment for
     comment where the two could drift: prepare is allocation-free, the rescue
@@ -4277,7 +4279,17 @@ async def run_session_episode(
                 timeout=config.reset_timeout,
             )
         ).observation
-        record.write("reset", {"observation_id": observation.observation_id})
+        # THE INFRA DISCLOSURE rides the reset row because ``reset_start`` is
+        # the call that built the environment from these values: a row exists
+        # exactly when an environment was provisioned under them. See
+        # ``_disclosed_infra_stamp`` for why this arm has to say it itself.
+        record.write(
+            "reset",
+            {
+                "observation_id": observation.observation_id,
+                "disclosed_infra": _disclosed_infra_stamp(spec),
+            },
+        )
 
         # --- the action server, declared inside the episode scratch ---------
         # A SHORT, session-unique name, deliberately: ``sun_path`` is bounded
@@ -5006,6 +5018,26 @@ async def run_session_episode(
                     secrets=secrets,
                     rescue=rescue,
                 )
+        elif rescue_required and descriptor is not None and not cleanup_done and not exc_retain:
+            # NO CLEANUP COULD RUN, and the descriptor is still owed a
+            # decision. The provisional descriptor is persisted BEFORE
+            # ``prepare`` and ``plan`` is bound only after it returns, so an
+            # ambiguous ``prepare`` (the worker may have allocated before the
+            # reply was lost) arrives here with ``rescue_required`` set by the
+            # supervisor's poison callback and ``plan is None``. There are no
+            # receipts to settle on, so rescue is the only release available:
+            # exactly one attempt, and ``_attempt_rescue`` retires the
+            # descriptor only when that rescue reports complete. Without this
+            # branch the descriptor sat in the inbox with nothing ever tried
+            # (PR #4236 review M1). ``not exc_retain`` is the guard the
+            # pre-#4236 unconditional rescue carried: unverified owned work
+            # retains the worker, so nothing here may release it. (Today it is
+            # always false on this path -- retention needs a session handle,
+            # which is opened after ``prepare`` -- but the rule is stated
+            # rather than left to that ordering.)
+            rescue_complete = await _attempt_rescue(
+                descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
+            )
         # NO SECOND RESCUE BELOW. When the normal path already ran cleanup
         # (``cleanup_done``) and an exception arrived afterwards -- a re-raised
         # score failure is the common one -- that cleanup's receipts were
@@ -5837,6 +5869,44 @@ def _refuse_undeclared_disclosed_infra(
             "recorded run showed it applied; rebuild the adapter workspace and selector, "
             "or drop the value"
         )
+
+
+def _disclosed_infra_stamp(spec: EpisodeSpec) -> dict[str, str]:
+    """The disclosed infra overrides this episode ran under, for its own record.
+
+    WHY THIS ARM STAMPS THEM ITSELF. The launcher discloses these overrides in
+    ``EpisodeSpec.metadata``, and the only thing that ever sealed that mapping
+    is the reply arm's ``EvidenceManifest``. This arm builds no manifest, so a
+    session record could not show that, say, a declared ``EVALUATOR_TOOL_PATH``
+    was in effect: two session runs of one task, one scored with the
+    evaluator's host tools reachable and one without, were evidence-identical
+    (found reading a real session-arm record on PR #4236). That is the same
+    pooling hazard the ``progress_guards`` row closes for the guard policy.
+
+    Derived from ``spec.infra_values`` -- the tuple ``prepare`` was actually
+    handed and ``_refuse_undeclared_disclosed_infra`` actually gated -- rather
+    than from ``spec.metadata``, so a direct caller that never stamped metadata
+    is still recorded truthfully. Keyed through
+    ``DISCLOSED_INFRA_METADATA_KEYS``, the ONE table the gate and the reply
+    arm's manifest stamp both derive from, so a session record and a reply
+    bundle name the same override identically and a value added to that table
+    is disclosed here without a second list to forget.
+
+    Only supplied overrides appear, as in the manifest: an absent key means the
+    hash-pinned task file plus the documented default decided the value. The
+    mapping is written even when empty, so "no override" is a stated fact and
+    not a missing field a reader has to interpret. As with the manifest, this
+    is what was REQUESTED; it is honest because the gate refuses any of these
+    values an adapter build does not declare, before ``prepare``.
+    """
+
+    from local_operator.evaluation.runner.episode import DISCLOSED_INFRA_METADATA_KEYS
+
+    return {
+        DISCLOSED_INFRA_METADATA_KEYS[value.name]: value.value
+        for value in spec.infra_values
+        if value.name in DISCLOSED_INFRA_METADATA_KEYS
+    }
 
 
 def _persist_descriptor(

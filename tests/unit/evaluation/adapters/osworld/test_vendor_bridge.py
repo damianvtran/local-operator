@@ -10,6 +10,7 @@ its decision from the default. These tests pin the distinction.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pytest
 from lop_osworld_v2_adapter import vendor_bridge
@@ -198,6 +199,28 @@ def test_an_undeclared_tool_path_writes_nothing() -> None:
     assert dict(os.environ) == before and "PATH" not in os.environ
 
 
+def test_a_shell_spawned_tool_sees_exactly_the_written_path_not_the_shell_default() -> None:
+    """PR #4236 review m4: "only ever adds" holds for a directly spawned tool
+    and NOT for a ``shell=True`` evaluator. With no PATH the shell substitutes
+    its own wider built-in default; once this value writes PATH, the shell
+    uses precisely what was written, so shell-only defaults such as
+    ``/usr/local/bin`` are gone unless declared. Pinned so the docstring's
+    caveat stays true of the code it describes."""
+    import subprocess
+
+    vendor_bridge.inject_evaluator_tool_path(("/opt/tools/bin",))
+    written = os.environ["PATH"]
+    seen = subprocess.run(
+        ["/bin/sh", "-c", 'printf %s "$PATH"'],
+        env={"PATH": written},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert seen == written == os.pathsep.join((*os.defpath.split(os.pathsep), "/opt/tools/bin"))
+    assert "/usr/local/bin" not in seen.split(os.pathsep)
+
+
 def test_declared_directories_follow_the_default_search_path() -> None:
     """Appended, never prepended: a declared directory cannot shadow a system tool."""
     os.environ["PATH"] = "/parent/shell/bin"
@@ -240,7 +263,7 @@ print(json.dumps(report))
 """
 
 
-def _probe_worker(tmp_path, *tool_path: str) -> dict:
+def _probe_worker(tmp_path, *tool_path: str) -> dict[str, Any]:
     """Run the adapter's own resolve+inject in a child whose environment is
     built the way the supervisor builds the worker's, from a parent that has
     a PATH and a marker the child must never see."""

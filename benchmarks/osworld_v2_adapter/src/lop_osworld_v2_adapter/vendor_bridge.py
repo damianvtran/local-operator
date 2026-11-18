@@ -144,8 +144,20 @@ def inject_evaluator_tool_path(directories: tuple[str, ...] | None) -> None:
     the default directories come FIRST and in their own order: a declared
     directory can add a tool, never shadow a system one. ``os.defpath`` is
     used because it is what ``exec`` already falls back to when PATH is
-    absent, so setting this value only ever ADDS directories to what an
-    evaluator's subprocess could resolve before.
+    absent, so for an evaluator that spawns a program DIRECTLY (an argv list,
+    ``shell=False``) setting this value only ever adds directories to what
+    it could resolve before.
+
+    That is NOT true of a ``shell=True`` evaluator. With no PATH at all, the
+    shell substitutes its OWN built-in default, which is wider than
+    ``os.defpath`` (measured on the macOS campaign host: ``env -i /bin/sh -c
+    'echo $PATH'`` gives ``/usr/gnu/bin:/usr/local/bin:/bin:/usr/bin:.`` where
+    ``os.defpath`` is ``/bin:/usr/bin``). Once PATH is set the shell uses it
+    as given, so setting this value REMOVES the shell-only defaults --
+    ``/usr/local/bin`` and the trailing ``.`` (the working directory, which is
+    the episode scratch) -- for shell-spawned tools. An operator whose
+    evaluators relied on one of those must declare it explicitly; the
+    declared list is disclosed, so the run's record then says so.
 
     Takes already-validated directories (``provisioning
     .resolve_evaluator_tool_path``); this writes, it does not judge.

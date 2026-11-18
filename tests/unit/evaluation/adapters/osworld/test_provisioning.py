@@ -519,7 +519,7 @@ def test_declared_tool_directories_are_returned_in_the_order_given(tmp_path) -> 
     resolved = provisioning.resolve_evaluator_tool_path(
         _INFRA + _with_tool_path(value), forbidden_roots=(str(workspace),)
     )
-    assert resolved == (str(first), str(second))
+    assert resolved is not None and resolved == (str(first), str(second))
     # The stamp records the request, so the two must be the same string.
     assert os.pathsep.join(resolved) == value
 

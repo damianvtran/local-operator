@@ -294,7 +294,13 @@ def test_typed_prompt_asks_for_one_shape_and_its_own_example_decodes():
     examples = [line for line in text.splitlines() if line.startswith("Example: ")]
     assert len(examples) == 1 and text.count('{"requirements"') == 1
     status, findings = assess_completion(examples[0].removeprefix("Example: "), typed)
-    assert "malformed" not in findings and status in ("PASS", "INCONCLUSIVE"), findings
+    # Well-formed, and NEVER a pass: the example cites a real supplied image
+    # ID, so as a ``MET`` row a capped child that echoed the prompt back
+    # verbatim decoded to PASS on the check it never ran (PR #4236 review m2).
+    assert "malformed" not in findings and status == "INCONCLUSIVE", findings
+    assert "UNVERIFIED" in findings
+    # The placeholder status must not read as the expected answer.
+    assert "The example shows the shape only" in text
     # The example cites an ID this check really supplied, never an invented one.
     assert json.loads(examples[0].removeprefix("Example: "))["requirements"][0]["evidence_ids"] == [
         "frame:screen"

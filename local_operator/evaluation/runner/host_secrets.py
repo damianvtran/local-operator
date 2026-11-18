@@ -254,12 +254,22 @@ def _broker_client() -> Any | None:
     return sys.modules.get("local_operator.secrets.client")
 
 
+def _spawn_history(entry: Any) -> tuple[int, ...]:
+    """Every pid a ``client.SpawnedBroker`` record covers, oldest first."""
+
+    return tuple(getattr(entry, "pids", ())) or (entry.pid,)
+
+
 @dataclass
 class OwnedBrokerScope:
     """What :func:`owned_broker_scope` did at exit, for the host's own log."""
 
-    #: ``(broker pid, outcome)`` per broker this scope started; the outcome is
-    #: ``client.stop_spawned_broker``'s token, or ``error: <ExceptionName>``.
+    #: ``(broker pid, outcome)`` per store this scope started a broker for; the
+    #: outcome is ``client.settle_spawned_broker``'s token, or
+    #: ``error: <ExceptionName>``. The pid is the daemon the outcome is ABOUT
+    #: -- the one the socket's holder reported, which after a slow start is
+    #: not necessarily the last one spawned -- and falls back to the latest
+    #: spawn only when none of ours holds the socket any more.
     outcomes: list[tuple[int, str]] = field(default_factory=list)
 
 
@@ -284,7 +294,13 @@ def owned_broker_scope() -> Iterator[OwnedBrokerScope]:
       ``spawned_brokers()`` snapshots). A broker that was already listening --
       the operator's own, or another episode's -- was merely ATTACHED to: it
       never enters the registry, so it is never touched;
-    - the stop itself (``client.stop_spawned_broker``) re-reads the daemon's
+    - EVERY spawn inside the scope counts, not the last one. A daemon slower
+      to listen than ``ensure_broker`` waits makes the next resolve spawn
+      again, and the FIRST usually wins the socket; owning only the latest pid
+      disowned exactly the daemon that then leaked (PR #4236 QA Q1). The claim
+      handed to the stop is the scope's own spawns for that store -- the ones
+      not already on record when it opened;
+    - the stop itself (``client.settle_spawned_broker``) re-reads the daemon's
       live pid, and refuses if another session registered with it meanwhile or
       the store's unlock lives only in its memory. Its refusals are recorded
       as outcomes, not retried.
@@ -303,17 +319,26 @@ def owned_broker_scope() -> Iterator[OwnedBrokerScope]:
         client = _broker_client()
         started = client.spawned_brokers() if client is not None else {}
         for key, entry in started.items():
-            if client is None or before.get(key) == entry:
+            earlier = before.get(key)
+            if client is None or earlier == entry:
                 # Spawned before the scope opened: an outer owner's, not ours.
                 continue
+            # This scope's own spawns for the store: everything on record now
+            # that was not on record when it opened.
+            outer = set(_spawn_history(earlier)) if earlier is not None else set()
+            owned = tuple(pid for pid in _spawn_history(entry) if pid not in outer)
+            pid = entry.pid
             try:
-                outcome = client.stop_spawned_broker(entry.base)
+                stop = client.settle_spawned_broker(entry.base, owned_pids=owned)
+                outcome = stop.outcome
+                if stop.pid is not None:
+                    pid = stop.pid
             except Exception as error:  # noqa: BLE001 - teardown must not mask the episode
                 outcome = f"error: {type(error).__name__}"
-            scope.outcomes.append((entry.pid, outcome))
+            scope.outcomes.append((pid, outcome))
             if outcome != "stopped":
                 logger.warning(
                     "episode-started secret broker (pid %s) was not stopped: %s",
-                    entry.pid,
+                    pid,
                     outcome,
                 )

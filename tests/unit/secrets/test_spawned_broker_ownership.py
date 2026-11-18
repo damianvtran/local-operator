@@ -198,3 +198,128 @@ def test_a_wedged_broker_is_reported_not_claimed_stopped(
 
     assert client.stop_spawned_broker(base, timeout=0.2) == "timeout"
     assert broker.kills == [(FAKE_BROKER_PID, signal.SIGTERM)]
+
+
+def test_a_slow_first_spawn_that_wins_the_socket_is_still_owned(
+    base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4236 QA Q1, on real daemons: ``ensure#1 -> False [83910]``,
+    ``ensure#2 -> False [83911]``, socket then held by 83910, outcome
+    ``replaced`` -- the FIRST spawn left listening with ppid 1.
+
+    A daemon slower to listen than ``ensure_broker`` waits makes the next call
+    spawn again, and the record kept only the latest pid. The first one then
+    bound the socket, so the owner compared the live pid with a daemon that had
+    already exited and disowned the one it leaked.
+    """
+
+    broker = FakeBroker(monkeypatch)
+    spawned = iter((FAKE_BROKER_PID, FAKE_BROKER_PID + 1))
+
+    def slow_spawn(base: Path | None) -> int:
+        del base
+        broker.spawns += 1
+        return next(spawned)  # started, but not listening inside the wait
+
+    monkeypatch.setattr(client, "_spawn_broker", slow_spawn)
+    assert client.ensure_broker(base, timeout=0.01) is False
+    assert client.ensure_broker(base, timeout=0.01) is False
+    assert broker.spawns == 2
+    [entry] = client.spawned_brokers().values()
+    assert entry.pids == (FAKE_BROKER_PID, FAKE_BROKER_PID + 1)
+    assert entry.pid == FAKE_BROKER_PID + 1
+
+    # The FIRST daemon binds; the second exits on the bind.
+    broker.running = True
+    broker.pid = FAKE_BROKER_PID
+
+    stop = client.settle_spawned_broker(base)
+    assert stop == ("stopped", FAKE_BROKER_PID)
+    # Exactly the pid the socket's holder reported -- never the remembered latest.
+    assert broker.kills == [(FAKE_BROKER_PID, signal.SIGTERM)]
+    assert client.spawned_brokers() == {}
+
+
+def test_a_pid_this_process_never_spawned_is_still_a_replacement(
+    base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Widening the record to every spawn must not widen it to anyone's."""
+
+    broker = FakeBroker(monkeypatch)
+    client.ensure_broker(base)
+    client._record_spawn(base, FAKE_BROKER_PID + 1)
+    broker.pid = FAKE_BROKER_PID + 2
+
+    stop = client.settle_spawned_broker(base)
+    # No pid is reported as "ours": the one answering is foreign.
+    assert stop == ("replaced", None)
+    assert broker.kills == []
+
+
+@pytest.mark.parametrize("answer", ["missing", "not-a-list"])
+def test_a_broker_that_cannot_say_who_registered_is_left_running(
+    base: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    """PR #4236 review m1. A version-skewed daemon answers ``status`` with a
+    synthesised ``{"pid", "incompatible": True}`` and NO ``sessions``; reading
+    that as an empty list SIGTERMed a broker without knowing who depended on
+    it. Unknown is not nobody."""
+
+    broker = FakeBroker(monkeypatch)
+    client.ensure_broker(base)
+    status: dict[str, Any] = {"pid": FAKE_BROKER_PID, "incompatible": True}
+    if answer == "not-a-list":
+        status["sessions"] = None
+    monkeypatch.setattr(client, "broker_status", lambda base=None: status)
+
+    assert client.settle_spawned_broker(base) == ("in-use", FAKE_BROKER_PID)
+    assert broker.kills == []
+    assert broker.running is True
+    # Still on record: a later, readable answer may let its owner stop it.
+    assert len(client.spawned_brokers()) == 1
+
+
+def test_a_narrowed_claim_leaves_an_outer_owners_spawn_alone(
+    base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scope that opened AFTER an earlier spawn for the same store owns only
+    its own: the daemon holding the socket is this process's, not this
+    caller's, so it is neither signalled nor dropped from the record."""
+
+    broker = FakeBroker(monkeypatch)
+    client.ensure_broker(base)  # the outer owner's, and the one listening
+    client._record_spawn(base, FAKE_BROKER_PID + 1)  # the scope's own, lost the bind
+
+    stop = client.settle_spawned_broker(base, owned_pids=(FAKE_BROKER_PID + 1,))
+    assert stop == ("not-spawned-here", FAKE_BROKER_PID)
+    assert broker.kills == []
+    assert len(client.spawned_brokers()) == 1
+
+    # The same daemon IS stopped for a caller that claims it.
+    assert client.settle_spawned_broker(base, owned_pids=(FAKE_BROKER_PID,)) == (
+        "stopped",
+        FAKE_BROKER_PID,
+    )
+
+
+def test_the_episode_scope_stops_a_slow_first_spawn_through_the_real_client(
+    base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same Q1 race end to end: the episode host's scope over the REAL
+    client (only the daemon is fake). Before the fix this read
+    ``[(<last pid>, "replaced")]`` with no signal sent."""
+
+    from local_operator.evaluation.runner import host_secrets
+
+    broker = FakeBroker(monkeypatch)
+    spawned = iter((FAKE_BROKER_PID, FAKE_BROKER_PID + 1))
+    monkeypatch.setattr(client, "_spawn_broker", lambda base: next(spawned))
+
+    with host_secrets.owned_broker_scope() as scope:
+        assert client.ensure_broker(base, timeout=0.01) is False
+        assert client.ensure_broker(base, timeout=0.01) is False
+        broker.running = True
+        broker.pid = FAKE_BROKER_PID  # the first spawn bound the socket
+
+    assert scope.outcomes == [(FAKE_BROKER_PID, "stopped")]
+    assert broker.kills == [(FAKE_BROKER_PID, signal.SIGTERM)]

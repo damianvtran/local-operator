@@ -195,9 +195,13 @@ def test_the_cli_runs_the_episode_inside_the_owned_broker_scope(
     @contextmanager
     def recording_scope():
         events.append("scope-open")
+        scope = host_secrets.OwnedBrokerScope()
         try:
-            yield
+            yield scope
         finally:
+            # The real scope fills its outcomes at EXIT, so ``main`` has to
+            # read them after the ``with`` -- which is what this ordering pins.
+            scope.outcomes.extend([(4242, "stopped"), (4343, "in-use")])
             events.append("scope-closed")
 
     async def recording_run(args, **kwargs):
@@ -224,9 +228,56 @@ def test_the_cli_runs_the_episode_inside_the_owned_broker_scope(
             "--no-store",
         ]
     )
-    capsys.readouterr()
+    stderr = capsys.readouterr().err
     assert status == run_episode.EXIT_PREFLIGHT
     assert events == ["scope-open", "run-start", "run-end", "scope-closed"]
+    # PR #4236 review m5: a clean stop used to leave no trace, so a campaign
+    # could not confirm from its own logs that its episodes stopped leaking
+    # daemons. One line per broker the episode started, successes included.
+    assert "episode-started secret broker pid=4242 outcome=stopped" in stderr.splitlines()
+    assert "episode-started secret broker pid=4343 outcome=in-use" in stderr.splitlines()
+
+
+def test_an_episode_that_raises_still_reports_the_broker_it_stopped(
+    capsys, tmp_path, monkeypatch
+) -> None:
+    """Found on the real entry (an ``--infra-ref`` the store does not hold
+    raises ``MissingSecret`` out of ``run``): the scope still stops the broker
+    on the way out, so the outcome line is owed on that exit too."""
+    from contextlib import contextmanager
+
+    from local_operator.evaluation.runner import host_secrets
+
+    @contextmanager
+    def stopping_scope():
+        scope = host_secrets.OwnedBrokerScope()
+        try:
+            yield scope
+        finally:
+            scope.outcomes.append((4242, "stopped"))
+
+    async def raising_run(args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("synthetic episode failure")
+
+    monkeypatch.setattr(host_secrets, "owned_broker_scope", stopping_scope)
+    monkeypatch.setattr(run_episode, "run", raising_run)
+    with pytest.raises(RuntimeError, match="synthetic episode failure"):
+        run_episode.main(
+            [
+                "--selector",
+                str(tmp_path / "nonexistent.json"),
+                "--task-id",
+                "synthetic",
+                "--route",
+                "test/model",
+                "--run-root",
+                str(tmp_path / "must-not-exist"),
+                "--no-store",
+            ]
+        )
+    stderr = capsys.readouterr().err
+    assert "episode-started secret broker pid=4242 outcome=stopped" in stderr.splitlines()
 
 
 def test_the_cloud_lease_is_derived_to_outlast_the_wall_budget() -> None:

@@ -5428,7 +5428,9 @@ class TestSessionAccounting:
         assert payload["steps"] == 0  # retained legacy default, not new telemetry
 
     @staticmethod
-    def _request_row(request_id: str, *, job_id: str | None, role: str | None = None) -> dict:
+    def _request_row(
+        request_id: str, *, job_id: str | None, role: str | None = None
+    ) -> dict[str, Any]:
         return {
             "request_id": request_id,
             "purpose": "turn",
@@ -5703,6 +5705,65 @@ class TestCleanupSettlesTheRescueDescriptor:
         assert outcome.rescue_complete is True
         assert self._descriptors(tmp_path) == []
 
+    @staticmethod
+    def _ambiguous_prepare(adapter: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``prepare`` raises, i.e. the reply is lost and the call is AMBIGUOUS:
+        the supervisor poisons the session and marks rescue required while the
+        provisional descriptor is on disk and no cleanup plan exists yet."""
+
+        original = adapter._call_raw
+
+        async def failing_prepare(method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+            if method == "prepare":
+                raise RuntimeError("synthetic prepare failure")
+            return await original(method, params, result_type, **kwargs)
+
+        monkeypatch.setattr(adapter, "_call_raw", failing_prepare)
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_cleanup_plan_exists_is_rescued_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """PR #4236 review M1. The settlement moved inside the branch that
+        needs a cleanup plan, so an ambiguous ``prepare`` -- rescue required,
+        descriptor persisted, ``plan is None`` -- reached NO decision: zero
+        rescue attempts and ``rescue.json`` left in the inbox, on a path that
+        used to be rescued. There are no receipts to settle on here, so the
+        rescue is the only release: one attempt, and a complete one retires
+        the descriptor."""
+
+        run, adapter, rescued = self._fixture(tmp_path, monkeypatch, short_scratch)
+        self._ambiguous_prepare(adapter, monkeypatch)
+        outcome = await run()
+
+        assert outcome.status == "failed"
+        assert "synthetic prepare failure" in (outcome.diagnostic or "")
+        # Nothing past the failed call ran: no cleanup produced any receipt.
+        assert "reset_start" not in adapter.calls and "cleanup" not in adapter.calls
+        assert outcome.rescue_required is True
+        assert len(rescued) == 1
+        assert outcome.rescue_complete is True
+        assert self._descriptors(tmp_path) == []
+
+    @pytest.mark.asyncio
+    async def test_an_incomplete_rescue_before_the_cleanup_plan_keeps_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """The other half of "settled per its result": a rescue that does not
+        complete leaves the descriptor for the sweep, and is still tried once."""
+
+        run, adapter, rescued = self._fixture(
+            tmp_path, monkeypatch, short_scratch, rescue_complete=False
+        )
+        self._ambiguous_prepare(adapter, monkeypatch)
+        outcome = await run()
+
+        assert outcome.status == "failed"
+        assert outcome.rescue_required is True
+        assert len(rescued) == 1
+        assert outcome.rescue_complete is False
+        assert len(self._descriptors(tmp_path)) == 1
+
     @pytest.mark.asyncio
     async def test_a_failed_episode_with_a_clean_cleanup_discards_the_descriptor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
@@ -5742,6 +5803,124 @@ class TestCleanupSettlesTheRescueDescriptor:
         assert outcome.rescue_required is True
         assert len(rescued) == 1
         assert len(self._descriptors(tmp_path)) == 1
+
+
+#: The conftest builder itself: ``TestDisclosedInfraInTheSessionRecord``
+#: replaces this module's ``build_spec`` global for one fixture and still needs
+#: the original underneath.
+_BUILD_SPEC = build_spec
+
+
+class TestDisclosedInfraInTheSessionRecord:
+    """A session-arm record states the disclosed infra overrides it ran under.
+
+    WHY. The launcher's disclosure lives in ``EpisodeSpec.metadata`` and only
+    the reply arm's ``EvidenceManifest`` ever sealed it. This arm builds no
+    manifest, so a session record could not show that a declared
+    ``EVALUATOR_TOOL_PATH`` was in effect (found reading a real session-arm
+    record on PR #4236): two runs of one task, scored with and without the
+    evaluator's host tools, were evidence-identical. The ``reset`` row now
+    carries ``disclosed_infra``, keyed through the same table as the manifest.
+    """
+
+    @staticmethod
+    def _reset_row(outcome: Any) -> dict[str, Any]:
+        lines = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        [row] = [
+            row
+            for row in (json.loads(line) for line in lines if line.strip())
+            if row["kind"] == "reset"
+        ]
+        return row
+
+    @staticmethod
+    def _infra(name: str, value: str) -> Any:
+        from local_operator.evaluation.adapters.api import ScopedInfraValue
+
+        return ScopedInfraValue(name=name, purpose="benchmark_compute", value=value)
+
+    @staticmethod
+    def _spec_with_infra(episode_id: str, *values: Any) -> Any:
+        # ``EpisodeSpec`` is frozen; same construction as the runner tests'
+        # ``_spec_with_infra`` (bound at import, so the fixture's patched
+        # module global below cannot recurse into this).
+        spec = _BUILD_SPEC(episode_id)
+        object.__setattr__(spec, "infra_values", tuple(values))
+        return spec
+
+    def test_every_disclosed_value_is_stamped_under_its_manifest_key(self) -> None:
+        """ONE table: whatever the reply arm's manifest would name, this names
+        identically -- so adding a disclosed value cannot skip the session arm."""
+
+        from local_operator.evaluation.runner.episode import (
+            DISCLOSED_INFRA_METADATA_KEYS,
+        )
+        from local_operator.evaluation.session_arm import _disclosed_infra_stamp
+
+        supplied = {name: f"value-for-{name.lower()}" for name in DISCLOSED_INFRA_METADATA_KEYS}
+        assert "EVALUATOR_TOOL_PATH" in supplied
+        spec = self._spec_with_infra(
+            "ep-disclose",
+            *(self._infra(name, value) for name, value in supplied.items()),
+            # Ordinary infra is not a disclosed override and stays out.
+            self._infra("OSWORLD_TTL_SECONDS", "900"),
+        )
+
+        assert _disclosed_infra_stamp(spec) == {
+            DISCLOSED_INFRA_METADATA_KEYS[name]: value for name, value in supplied.items()
+        }
+        assert _disclosed_infra_stamp(build_spec("ep-disclose-none")) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_reset_row_carries_the_declared_tool_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """Through the real driver: the value ``prepare`` was handed is the one
+        the sealed record names, in the row written once the environment the
+        value shaped exists."""
+
+        from local_operator.evaluation.adapters.api import Requirement
+
+        tool_path = "/opt/evaluator-tools:/opt/more-tools"
+        value = self._infra("EVALUATOR_TOOL_PATH", tool_path)
+        # The shared fixture builds its own spec through this module's
+        # ``build_spec``; give it one carrying the override.
+        monkeypatch.setattr(
+            sys.modules[__name__],
+            "build_spec",
+            lambda episode_id: self._spec_with_infra(episode_id, value),
+        )
+        run, adapter, _rescued = TestCleanupSettlesTheRescueDescriptor._fixture(
+            tmp_path, monkeypatch, short_scratch
+        )
+        # The gate refuses a disclosed value the adapter build does not declare.
+        adapter.declared_requirements = (
+            Requirement(
+                requirement_id="EVALUATOR_TOOL_PATH",
+                kind="infra",
+                name="EVALUATOR_TOOL_PATH",
+                required=False,
+            ),
+        )
+        outcome = await run()
+
+        assert outcome.score is not None, outcome
+        row = self._reset_row(outcome)
+        assert row["disclosed_infra"] == {"evaluator_tool_path": tool_path}
+
+    @pytest.mark.asyncio
+    async def test_a_run_without_overrides_states_that_it_had_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """An empty mapping is a stated fact; a missing key would leave a
+        reader to guess whether the run predates the stamp."""
+
+        run, _adapter, _rescued = TestCleanupSettlesTheRescueDescriptor._fixture(
+            tmp_path, monkeypatch, short_scratch
+        )
+        outcome = await run()
+
+        assert self._reset_row(outcome)["disclosed_infra"] == {}
 
 
 class TestTheStreamCompletedStopBoundary:
