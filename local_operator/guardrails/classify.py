@@ -1402,9 +1402,7 @@ def _rank(
         # A hidden pid with no evidence is ignored for the PLAIN removal only
         # (git itself still refuses untracked content); ``--force`` keeps the
         # strict rule (review M1, PR #4161).
-        plain_payload: dict[str, bool] | None = (
-            {} if exact_cleanup and not target.forced else None
-        )
+        plain_payload: dict[str, bool] | None = {} if exact_cleanup and not target.forced else None
         state = worktree_state(
             path,
             own=own is not None and (relation == "" or not target.forced),
@@ -1469,7 +1467,10 @@ def _rank(
                     reason = (
                         "could not verify ignored files"
                         if preserved is None
-                        else "preservation check failed; preserve unverified ignored files separately"
+                        else (
+                            "preservation check failed; "
+                            "preserve unverified ignored files separately"
+                        )
                     )
                     return RankedTarget(
                         target, Risk.HIGH, f"linked worktree state: {reason}", cleanup_hold=True
