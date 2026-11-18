@@ -534,6 +534,7 @@ BUILTIN_PASS = "pass"
 BUILTIN_JUDGE = "judge"
 BUILTIN_REFUSE_CRITICAL = "refuse-critical"
 BUILTIN_REFUSE_CREDENTIAL = "refuse-credential"
+BUILTIN_HOLD_CLEANUP = "hold-cleanup"
 
 
 def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
@@ -550,7 +551,16 @@ def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
         return BUILTIN_REFUSE_CRITICAL
     if any(t.target.credential_derived for t in verdict.targets):
         return BUILTIN_REFUSE_CREDENTIAL
+    if any(t.cleanup_hold for t in verdict.targets):
+        return BUILTIN_HOLD_CLEANUP
     return BUILTIN_JUDGE
+
+
+def cleanup_hold_text(verdict: Verdict) -> str:
+    return (
+        f"BLOCKED by guardrail {DANGEROUS_DELETE_RULE}: worktree cleanup could not be verified. "
+        f"Targets: {_targets_text(verdict)}"
+    )
 
 
 def credential_refusal_text(command: str) -> str:
@@ -1869,6 +1879,15 @@ async def _dangerous_delete(
         return GuardOutcome(
             blocked=True,
             text=credential_refusal_text(command),
+            rule=DANGEROUS_DELETE_RULE,
+            risk="high",
+            destructive=True,
+        )
+    if branch == BUILTIN_HOLD_CLEANUP:
+        _journal(DANGEROUS_DELETE_RULE, "high", "block", 0.0, targets, "cleanup preservation")
+        return GuardOutcome(
+            blocked=True,
+            text=cleanup_hold_text(verdict),
             rule=DANGEROUS_DELETE_RULE,
             risk="high",
             destructive=True,

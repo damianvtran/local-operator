@@ -30,6 +30,7 @@ import pytest
 from local_operator.guardrails import provenance as prov
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
+from local_operator.guardrails.preview import BUILTIN_PASS, preview_tool_call
 from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
@@ -165,6 +166,71 @@ async def _check(home: Path, command: str, judge: _Judge, operator: Any = None) 
     return await check_tool_call(
         "bash", {"command": command}, ctx, judge=judge, settings=GuardSettings(), forked_judge=judge
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("creator", [ME, DONE])
+async def test_interrupted_finished_tree_skips_unavailable_judge(
+    home: Path, repo: Path, creator: str
+) -> None:
+    wt = _branch_tree(home, repo, "interrupted")
+    _git("merge", "--ff-only", "fix/interrupted", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+    (home / "excludes").write_text("node_modules/\n")
+    (wt / "node_modules").mkdir()
+    (wt / "node_modules" / "cache.js").write_text("generated\n")
+    (wt / "a.txt").unlink()
+    _record(home, wt, creator=creator)
+    command = f"git -C {repo} worktree remove --force -- {wt}"
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
+    assert report.builtin_effect == BUILTIN_PASS, report.render()
+    judge = _Judge("BLOCK: judge unavailable")
+    result = await _check(home, command, judge)
+    assert not judge.prompts, result
+    assert not result.blocked, result
+    assert _git("status", "--porcelain", "--ignored", cwd=wt).splitlines() == [
+        " D a.txt",
+        "!! node_modules/",
+    ]
+    _git("worktree", "remove", "--force", "--", str(wt), cwd=repo)
+    assert not wt.exists()
+    assert str(wt) not in _git("worktree", "list", "--porcelain", cwd=repo)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("obstacle", ["modified", "unpushed", "nested", "locked", "primary"])
+async def test_exact_cleanup_preserves_unverified_work(
+    home: Path, repo: Path, obstacle: str
+) -> None:
+    wt = _branch_tree(home, repo, "preserve")
+    if obstacle != "unpushed":
+        _git("merge", "--ff-only", "fix/preserve", cwd=repo)
+        _git("push", "-q", "origin", "main", cwd=repo)
+    if obstacle == "modified":
+        (wt / "a.txt").write_text("uncommitted\n")
+    elif obstacle == "unpushed":
+        # A closed PR does not prove that the branch's HEAD was pushed.
+        (wt / "a.txt").unlink()
+    elif obstacle == "nested":
+        (wt / "node_modules").mkdir()
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("node_modules/\n")
+        _git("init", "-q", "--bare", str(wt / "node_modules" / "archive"), cwd=wt)
+    elif obstacle == "locked":
+        _git("worktree", "lock", str(wt), cwd=repo)
+    _record(home, wt, creator=ME)
+    target = repo if obstacle == "primary" else wt
+    command = f"git -C {repo} worktree remove --force -- {target}"
+    context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
+    judge = _Judge("ALLOW ledger")
+    outcome = await _check(home, command, judge)
+    assert outcome.blocked and not judge.prompts
+    assert report.builtin_effect == "hold-cleanup", report.render()
+    assert report.builtin_text == outcome.text
+    assert target.exists()
 
 
 # -- 1. merge proof without gh ------------------------------------------------------------

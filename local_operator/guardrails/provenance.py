@@ -2143,8 +2143,13 @@ def worktree_state(
     session_id: str = "",
     facts: dict[str, bool] | None = None,
     hidden_blocks: bool = False,
+    interrupted_cleanup: bool = False,
 ) -> str:
     """The removal-relevant state of a worktree path.
+
+    ``interrupted_cleanup`` is the stricter payload inventory for an exact
+    removal with separate commit-preservation proof. It accepts deletions of
+    tracked files, but only recognized ignored output, never other changes.
 
     ``own``: the caller proved (creation ledger) that this session or its
     subagent created the tree. Then IGNORED entries never make it dirty —
@@ -2203,6 +2208,10 @@ def worktree_state(
             return "not-linked"
     except OSError:
         return "unknown"
+    if interrupted_cleanup:
+        top = _git(["rev-parse", "--show-toplevel"], real)
+        if not top or top.rstrip("\n") != real:
+            return "unknown"
     dirs = _git(["rev-parse", "--absolute-git-dir", "--git-common-dir"], real)
     if dirs is None:
         return "unknown"
@@ -2216,8 +2225,8 @@ def worktree_state(
     try:
         with open(os.path.join(git_dir, "gitdir"), encoding="utf-8") as fh:
             back = fh.read().strip()
-    except OSError:
-        return "not-linked"
+    except (OSError, UnicodeError):
+        return "unknown" if interrupted_cleanup else "not-linked"
     # Relative when ``worktree.useRelativePaths`` is set (git >= 2.48):
     # relative to the registration directory itself.
     back = os.path.join(git_dir, back)
@@ -2251,12 +2260,21 @@ def worktree_state(
         # ``attr3880-ci``: the creator's eval kernel, bash child or subagent)
         # do not make it busy; any foreign holder, or an inventory or process
         # table that cannot be read (``None``), keeps it busy — fail closed.
-        holders = cwd_holders(real, session_id)
+        holders = (
+            cwd_holders(real, session_id, hidden_blocks=hidden_blocks)
+            if interrupted_cleanup
+            else cwd_holders(real, session_id)
+        )
         live = None if holders is None else any(not h.family for h in holders)
     else:
+        if interrupted_cleanup:
+            global _cwd_inventory_cache
+            _cwd_inventory_cache = None
         live = _live_cwd_inside(real, hidden_blocks=hidden_blocks)
     if live is not False:
         return "busy"  # unknown process inventory also fails closed
+    if interrupted_cleanup:
+        return "locked" if stale_initializing else _interrupted_cleanup_state(real, facts)
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
     # of its history went with it). Only regenerable entries may remain. A
@@ -2313,6 +2331,69 @@ def worktree_state(
         if not (refs or "").strip():
             return "dirty"
     return "stale-initializing" if stale_initializing else "clean"
+
+
+def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
+    # An index entry marked assume-unchanged or skip-worktree can conceal a
+    # modified file from status. Gitlinks can conceal an independent repo.
+    index = _git_quiet(["ls-files", "-v", "--stage", "-z"], real)
+    if index is None:
+        return "unknown"
+    if any(
+        not row.startswith("H ") or row.startswith("H 160000 ") for row in index.split("\0") if row
+    ):
+        return "dirty"
+    status = _git_quiet(
+        [
+            "-c",
+            "core.ignorestat=false",
+            "-c",
+            "core.trustctime=true",
+            "-c",
+            "core.checkStat=default",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=normal",
+            "--ignored=matching",
+            "--ignore-submodules=none",
+        ],
+        real,
+    )
+    if status is None:
+        return "unknown"
+    deleted = False
+    if facts is not None:
+        facts["ignored"] = False
+    for row in status.split("\0"):
+        if not row:
+            continue
+        if row[:3] not in (" D ", "D  ", "!! "):
+            return "dirty"
+        entry = row[3:].rstrip("/")
+        # NUL porcelain preserves literal path names (not C quoting). Only
+        # ignore matches on known output, not a tracked-looking parent or an
+        # ignored secret. Do not descend into symlinks or across mounts.
+        if not entry or os.path.isabs(entry) or ".." in entry.split("/"):
+            return "unknown"
+        physical = os.path.join(real, entry)
+        if row[:3] != "!! ":
+            # A staged deletion may leave a replacement ignored at the same path.
+            if os.path.lexists(physical):
+                return "dirty"
+            deleted = True
+            continue
+        if facts is not None:
+            facts["ignored"] = True
+        # Git unlinks a leaf symlink (e.g. shared node_modules), not its target.
+        if not _regenerable(os.path.basename(entry)) or (
+            os.path.realpath(os.path.dirname(physical)) != os.path.dirname(physical)
+        ):
+            return "dirty"
+    if _nested_repository(real, worktrees=True, linked_root=True) is not None:
+        return "dirty"
+    return "deletions-only" if deleted else "clean"
 
 
 def detached_head(path: str) -> tuple[str, str | None] | None:
@@ -3396,7 +3477,11 @@ _FINISHED_FACTS = (
 
 
 def finished_foreign_worktree(
-    path: str, session_id: str, *, activity: WorktreeActivity | None = None
+    path: str,
+    session_id: str,
+    *,
+    activity: WorktreeActivity | None = None,
+    interrupted_cleanup: bool = False,
 ) -> FinishedForeign:
     """Prove a worktree another (finished) session made is safe to remove, or say why not.
 
@@ -3444,12 +3529,14 @@ def finished_foreign_worktree(
     # Strict on hidden pids (review M1, PR #4161): a ``safe`` answer here
     # ranks ``--force`` and ``rm -rf`` LOW, and neither refuses untracked
     # content the way a plain ``git worktree remove`` does.
-    state = worktree_state(real, facts=facts, hidden_blocks=True)
+    strict = {"interrupted_cleanup": True} if interrupted_cleanup else {}
+    states = ("clean", "deletions-only") if interrupted_cleanup else ("clean",)
+    state = worktree_state(real, facts=facts, hidden_blocks=True, **strict)
     if state in ("not-linked", "dirty", "locked", "stale-initializing", "busy"):
         return no(f"state-{state}", state)
-    if state != "clean":
+    if state not in states:
         return unknown("state-unknown", state)
-    if facts.get("ignored", True):
+    if not interrupted_cleanup and facts.get("ignored", True):
         return no("ignored-content", state)
     ref = (_git(["symbolic-ref", "--quiet", "HEAD"], real) or "").strip()
     if not ref.startswith("refs/heads/"):
@@ -3497,7 +3584,9 @@ def finished_foreign_worktree(
         # Stale or missing local copy of what origin advertises: the caller
         # may fetch and retry; the guard never fetches.
         return unknown("origin-ref-stale", state)
-    proc = _git_proc(["merge-base", "--is-ancestor", head, advertised], real)
+    proc = _git_proc(
+        ["--no-replace-objects", "merge-base", "--is-ancestor", head, advertised], real
+    )
     if proc is None or proc.returncode not in (0, 1):
         return unknown("ancestry-unknown", state)
     merged_fact = "merged-on-origin"
@@ -3507,7 +3596,7 @@ def finished_foreign_worktree(
         # mobility-link-drop #3855 — all squash-merged, so no ancestry). HEAD's
         # CONTENT must already be in the advertised tip, which the local ref
         # was just shown to equal; a local commit after the squash fails it.
-        if content_merged(real, head, advertised):
+        if not interrupted_cleanup and content_merged(real, head, advertised):
             merged_fact = "merged-by-content"
         else:
             # The forge's word, for the squash merge content cannot prove
@@ -3555,8 +3644,8 @@ def finished_foreign_worktree(
     global _cwd_inventory_cache
     _cwd_inventory_cache = None
     again: dict[str, bool] = {}
-    if worktree_state(real, facts=again, hidden_blocks=True) != "clean" or again.get(
-        "ignored", True
+    if worktree_state(real, facts=again, hidden_blocks=True, **strict) not in states or (
+        not interrupted_cleanup and again.get("ignored", True)
     ):
         return unknown("state-moved", state)
     if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
@@ -3566,6 +3655,30 @@ def finished_foreign_worktree(
         for f in _FINISHED_FACTS
     )
     return FinishedForeign("safe", facts_out, state, activity)
+
+
+def pushed_worktree_head(real: str, head: str) -> bool:
+    """Prove an owned HEAD survives on origin, never just a stale local ref."""
+    ref = (_git(["symbolic-ref", "--quiet", "HEAD"], real) or "").strip()
+    refs = ["HEAD"]
+    if ref.startswith("refs/heads/"):
+        refs.append(ref)
+    advert = _git_net(
+        ["-c", "core.sshCommand=ssh -o BatchMode=yes", "ls-remote", "origin", *refs],
+        real,
+        timeout=_LS_REMOTE_TIMEOUT_S,
+    )
+    if advert is None:
+        return False
+    for line in advert.splitlines():
+        tip, _, name = line.partition("\t")
+        if name in refs and re.fullmatch(r"[0-9a-f]{40,64}", tip):
+            proc = _git_proc(
+                ["--no-replace-objects", "merge-base", "--is-ancestor", head, tip], real
+            )
+            if tip == head or (proc is not None and proc.returncode == 0):
+                return True
+    return False
 
 
 def _running_session_ids() -> set[str]:
@@ -3615,7 +3728,9 @@ def _entry_dev(entry: os.DirEntry[str]) -> int:
     return entry.stat(follow_symlinks=False).st_dev
 
 
-def _nested_repository(real: str, *, worktrees: bool = False) -> str | None:
+def _nested_repository(
+    real: str, *, worktrees: bool = False, linked_root: bool = False
+) -> str | None:
     """Why ``real`` may hold a repository of its own (not a linked worktree), or ``None``.
 
     A ``.git`` DIRECTORY anywhere in the bounded walk is a clone or ``git
@@ -3655,12 +3770,21 @@ def _nested_repository(real: str, *, worktrees: bool = False) -> str | None:
         seen += len(entries)
         if seen > _WALK_ENTRIES:
             return "too many entries to rule out a nested repository"
+        if linked_root and current != real and {"HEAD", "objects"} <= {e.name for e in entries}:
+            return f"possible bare repository at {current}"
         for entry in entries:
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
                 dev = _entry_dev(entry) if is_dir else root_dev
             except OSError:
                 return f"unreadable entry {entry.path}"
+            if (
+                linked_root
+                and current == real
+                and entry.name == ".git"
+                and entry.is_file(follow_symlinks=False)
+            ):
+                continue
             if entry.name == ".git" and is_dir:
                 return f"nested repository at {current}"
             if worktrees and entry.name == ".git":

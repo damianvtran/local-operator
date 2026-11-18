@@ -88,6 +88,7 @@ class RankedTarget:
     #: matches were vouched for, the matches — not the directory the glob
     #: lives in, which read as though ``$HOME`` itself were owned (QA Q5).
     shown: str = ""
+    cleanup_hold: bool = False
 
     @property
     def path(self) -> str:
@@ -1265,6 +1266,7 @@ def _rank(
     # ``globstar`` — truthy, so ``foreign`` was silently None and a foreign
     # row ranked LOW. A keyword-only parameter makes that mix-up a TypeError.
     foreign: ForeignCreations | None = None,
+    exact_cleanup: bool = False,
 ) -> RankedTarget:
     if target.landings:
         # An unpinned ``..``: rank the landing its missing and re-linked parts
@@ -1349,6 +1351,14 @@ def _rank(
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
+    if exact_cleanup and target.worktree_remove:
+        if _finished_route_barred(path, prot):
+            return RankedTarget(
+                target, Risk.HIGH, "protected location; cleanup is not permitted", cleanup_hold=True
+            )
+        strict = _exact_linked_cleanup(target, path, prot, session_id, foreign)
+        if strict is not None:
+            return strict
     if target.worktree_remove and target.pattern is None:
         # ``git worktree remove`` without --force: git refuses tracked or
         # untracked changes itself, but deletes IGNORED files and a detached
@@ -2050,6 +2060,123 @@ def _finished_rig_reason(
     return prov.finished_rig(path, session_id)
 
 
+def _literal_worktree_remove(command: str, targets: Sequence[Target]) -> bool:
+    """The new allowance is for one literal command, not a shell program."""
+    if len(targets) != 1:
+        return False
+    target = targets[0]
+    if not target.worktree_remove or not target.path or target.landings or target.empty:
+        return False
+    match = re.fullmatch(
+        r"[ \t]*git[ \t]+(?:-C[ \t]+(?P<basequote>['\"]?)/[A-Za-z0-9_./-]+(?P=basequote)[ \t]+)?"
+        r"worktree[ \t]+remove[ \t]+"
+        r"(?:(?:-f|--force)[ \t]+)?(?:--[ \t]+)?"
+        r"(?P<quote>['\"]?)(?P<path>/[A-Za-z0-9_./-]+)(?P=quote)[ \t]*",
+        command,
+    )
+    if match is None:
+        return False
+    raw = match["path"]
+    return raw == os.path.normpath(raw) == os.path.realpath(raw) == target.path and not (
+        target.pattern or target.opaque or target.climbs or target.unpinned
+    )
+
+
+def _exact_linked_cleanup(
+    target: Target, path: str, prot: _Protected, session_id: str, foreign: ForeignCreations | None
+) -> RankedTarget | None:
+    from local_operator.guardrails import provenance as prov
+
+    own = _owned_by_session(target, path, prot, session_id)
+    if own is not None and own[2] == "kin":
+        own = None
+    # Don't replace the separate, narrowly located detached-scratch policy.
+    if own is not None and _scratch_location(path) and prov.own_detached_scratch(path):
+        return None
+    payload: dict[str, bool] = {}
+    state = prov.worktree_state(
+        path,
+        own=own is not None,
+        session_id=session_id,
+        hidden_blocks=target.forced,
+        interrupted_cleanup=True,
+        facts=payload,
+    )
+
+    # Only a new preservation-proof route for foreign trees. Keep the existing
+    # clean/plain or clean/merged policy and the authenticated ask path for
+    # foreign changes that require consent instead of asserting they are safe.
+    if (
+        own is None
+        and state != "not-linked"
+        and (state != "deletions-only" and not (state == "clean" and payload.get("ignored")))
+    ):
+        return None
+
+    def hold(reason: str) -> RankedTarget:
+        return RankedTarget(
+            target, Risk.HIGH, f"linked worktree state: {reason}", cleanup_hold=True
+        )
+
+    if state == "not-linked":
+        return hold("not a registered linked checkout; verify the exact path and registration")
+    if state == "busy":
+        return hold(prov.state_phrase(path, state, session_id, hidden_blocks=True))
+    if state == "locked":
+        return hold("locked; have the holder finish and unlock it before retrying")
+    if state not in ("clean", "deletions-only", "dirty"):
+        return hold("could not verify the checkout; refresh its Git state before retrying")
+
+    activity = prov.worktree_activity(path, session_id)
+    if activity.pr_state == "open":
+        return RankedTarget(
+            target,
+            Risk.CRITICAL,
+            f"branch {activity.branch} has open {activity.pr_ref}; finish it first",
+        )
+    if activity.owners_running:
+        return hold(f"another session still holds it; {activity.facts()}")
+    if state == "dirty":
+        return hold(
+            "preservation check failed; stash or commit changes and move unverified files out"
+        )
+    if own is None:
+        proof = _no_ledger_inside(
+            foreign,
+            path,
+            prov.finished_foreign_worktree(
+                path, session_id, activity=activity, interrupted_cleanup=True
+            ),
+        )
+        if not proof.safe:
+            return hold(
+                f"finished work not proven ({', '.join(proof.reasons)}); "
+                "push or refresh Git and owner state"
+            )
+        reason = "a finished, merged linked git worktree"
+    else:
+        head = (prov._git(["rev-parse", "--verify", "HEAD"], path) or "").strip()
+        if not head or not prov.pushed_worktree_head(path, head):
+            return hold(
+                "HEAD is not confirmed on origin; push your commits or refresh origin state"
+            )
+        if (
+            prov.worktree_state(
+                path, own=True, session_id=session_id, hidden_blocks=True, interrupted_cleanup=True
+            )
+            not in ("clean", "deletions-only")
+            or (prov._git(["rev-parse", "--verify", "HEAD"], path) or "").strip() != head
+        ):
+            return hold("checkout changed during verification; refresh its status and retry")
+        reason = f"{own[0]}; HEAD preserved on origin"
+    if state == "deletions-only" and not target.forced:
+        return hold(
+            "only tracked deletions and verified ignored output remain; "
+            "Git needs --force for this exact path"
+        )
+    return RankedTarget(target, Risk.LOW, f"{reason}; verified removal payload ({state})")
+
+
 def _finished_route_barred(root: str, prot: _Protected) -> bool:
     """True when a foreign tree sits where a plain directory already ranks HIGH.
 
@@ -2284,6 +2411,7 @@ def classify_targets(
     created: Sequence[Creation] = (),
     blind: Sequence[str] = (),
     globstar: bool = False,
+    exact_cleanup: bool = False,
 ) -> Verdict:
     prot = _protected(env, scratchpad, session_id) if (targets or touched or created) else None
     evidence_hits: list[RankedTarget] = []
@@ -2355,7 +2483,10 @@ def classify_targets(
     # only if some target reaches the LOW fallbacks in ``_rank``).
     foreign = ForeignCreations(session_id)
     try:
-        ranked = [_rank(t, prot, session_id, globstar, foreign=foreign) for t in targets]
+        ranked = [
+            _rank(t, prot, session_id, globstar, foreign=foreign, exact_cleanup=exact_cleanup)
+            for t in targets
+        ]
     finally:
         foreign.close()
     # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
@@ -2453,4 +2584,5 @@ def classify_bash(
         created=resolution.created,
         blind=resolution.blind,
         globstar=resolution.globstar,
+        exact_cleanup=_literal_worktree_remove(command, resolution.targets),
     )
