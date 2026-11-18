@@ -748,7 +748,7 @@ def test_at_the_instance_limit_names_the_biggest_instance_holder(tmp_path, monke
     most inotify fds; restarting 3105 would not free a single instance.
     """
     holders = {3105: [50], 77: [1] * 6, 78: [1]}
-    proc = _fake_proc(tmp_path, holders, (100_000, 8))
+    proc = _fake_proc(tmp_path, holders, (100_000, 8), {77: {"comm": "watchdog\n"}})
     monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
     check = doctor.check_watches(proc)
     assert check["status"] == "fail"
@@ -758,7 +758,7 @@ def test_at_the_instance_limit_names_the_biggest_instance_holder(tmp_path, monke
     assert data["bottleneck"] == "instances"
     assert check["summary"] == doctor._t(
         doctor._md.watches_instances_at_limit(
-            instances="8", instance_limit="8", name="?", pid="77", how="other", command=""
+            instances="8", instance_limit="8", name="watchdog", pid="77", how="program", command=""
         )
     )
 
@@ -775,12 +775,14 @@ def test_at_the_instance_limit_the_row_says_too_many_open_files(tmp_path, monkey
     }
     proc = _fake_proc(tmp_path, {3105: [50], 77: [1] * 6, 78: [1]}, (100_000, 8), files)
     monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    monkeypatch.setattr(doctor, "_unit_main_pid", lambda unit, *, user: 77)  # its main process
     summary = doctor.check_watches(proc)["summary"]
     assert "Too many open files" in summary and "No space left on device" not in summary
     assert "fs.inotify.max_user_instances" in summary
     assert "max_user_watches" not in summary
     assert "used up its watch handles on this computer (8 of 8)" in summary
-    assert "syncthing (process 77) holds the most" in summary
+    # Design D2: the sentence opens with words, not a lowercase program name.
+    assert "Most are held by syncthing (process 77): restart it with" in summary
     assert "restart it with systemctl --user restart syncthing.service" in summary
 
 
@@ -792,11 +794,11 @@ def test_near_the_instance_limit_warns_with_the_instance_wording(tmp_path, monke
     assert check["status"] == "warn"
     assert check["summary"] == doctor._t(
         doctor._md.watches_instances_near(
-            instances="105", instance_limit="128", name="code", pid="10", how="other", command=""
+            instances="105", instance_limit="128", name="code", pid="10", how="program", command=""
         )
     )
     assert "fs.inotify.max_user_instances" in check["summary"]
-    assert "Restart that program" in check["summary"]
+    assert "Most are held by code (process 10): restart that program" in check["summary"]
 
 
 def test_ok_row_calls_instances_watch_handles_not_watchers(tmp_path, monkeypatch):
@@ -808,37 +810,161 @@ def test_ok_row_calls_instances_watch_handles_not_watchers(tmp_path, monkeypatch
     assert "watchers" not in summary
 
 
+_USER_UNIT = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+_WAKES = _USER_UNIT + "local-operator-wakes.service\n"
+_SERVE_UNIT = _USER_UNIT + "local-operator-serve.service\n"
+
+
 @pytest.mark.parametrize(
-    "files,command",
+    "files,main_pid,command",
     [
-        (_SERVE_FILES, "lop services restart"),
+        (_SERVE_FILES, 42, "lop services restart"),
+        # Review n1: `lop serve` from a terminal keeps the console script's argv.
+        (
+            {
+                "cmdline": b"/home/u/.local/bin/lop\0serve\0--port\08977\0",
+                "cgroup": "0::/x.scope\n",
+            },
+            None,
+            "lop services restart",
+        ),
         (
             {"cmdline": b"/x/python3\0-m\0local_operator.mobile.service\0--port\04098\0"},
+            None,
             "lop mobile restart",
         ),
-        (
-            {"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.service\n"},
-            "systemctl --user restart x.service",
-        ),
+        ({"cgroup": _USER_UNIT + "x.service\n"}, 42, "systemctl --user restart x.service"),
         (
             {"cgroup": "0::/system.slice/fluent-bit.service\n"},
+            42,
             "sudo systemctl restart fluent-bit.service",
         ),
         (
             {"cgroup": "1:name=systemd:/system.slice/old.service\n"},
+            42,
             "sudo systemctl restart old.service",
         ),
+        # Review M1: a process in a unit's cgroup that is NOT its MainPID is a
+        # child; restarting the unit would not replace it.
+        ({"cgroup": _USER_UNIT + "x.service\n"}, 7, None),
+        # ... and a tsc --watch from an ssh login on a host without logind, which
+        # stays in sshd.service (KillMode=process would leave it running).
+        (
+            {"cmdline": b"node\0/x/tsc\0--watch\0", "cgroup": "0::/system.slice/sshd.service\n"},
+            1200,
+            None,
+        ),
+        # MainPID unreadable (no systemctl, no user bus, timeout): fail closed.
+        ({"cgroup": "0::/system.slice/fluent-bit.service\n"}, None, None),
+        # A dev server an agent started lives in the wakes unit: restarting it
+        # would end every session. Never systemctl for a lop unit, even if
+        # systemd were to call it the main process.
+        ({"cmdline": b"node\0/x/vite\0", "cgroup": _WAKES}, 42, None),
+        ({"cmdline": b"node\0/x/vite\0", "cgroup": _WAKES}, 3106, None),
+        # A session runtime under the serve unit is not the serve itself.
+        (
+            {
+                "cmdline": b"/x/python3\0-m\0local_operator.session.runtime.process\0",
+                "cgroup": _SERVE_UNIT,
+            },
+            3105,
+            None,
+        ),
         # The user's own service manager: restarting it ends every user service.
-        ({"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"}, None),
-        ({"cgroup": "0::/user.slice/user-1000.slice/user@1000.service\n"}, None),
-        ({"cgroup": "0::/user.slice/user-1000.slice/session-3.scope\n"}, None),  # a terminal
-        ({}, None),  # exited: nothing readable
+        ({"cgroup": "0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"}, 42, None),
+        ({"cgroup": "0::/user.slice/user-1000.slice/user@1000.service\n"}, 42, None),
+        ({"cgroup": "0::/user.slice/user-1000.slice/session-3.scope\n"}, 42, None),  # a terminal
+        ({}, 42, None),  # exited: nothing readable
     ],
 )
-def test_the_restart_command_is_named_only_when_it_is_known(tmp_path, files, command):
-    """Design D3: an exact command for lop's daemons and systemd services only."""
+def test_the_restart_command_is_named_only_when_it_is_known(
+    tmp_path, monkeypatch, files, main_pid, command
+):
+    """Design D3 / review M1: lop's daemons, and a systemd unit's MAIN process only."""
+    asked: list[tuple[str, bool]] = []
+
+    def main(unit: str, *, user: bool) -> int | None:
+        asked.append((unit, user))
+        return main_pid
+
+    monkeypatch.setattr(doctor, "_unit_main_pid", main)
     proc = _fake_proc(tmp_path, {42: [1]}, None, {42: files})
     assert doctor.restart_command(proc, 42) == command
+    if command and command.startswith("systemctl --user"):
+        assert asked == [(command.rsplit(" ", 1)[1], True)]
+    if command and command.startswith("sudo"):
+        assert asked == [(command.rsplit(" ", 1)[1], False)]
+    assert not any(unit.startswith("local-operator-") for unit, _ in asked)
+
+
+class _Ran:
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode, self.stdout = returncode, stdout
+
+
+@pytest.mark.parametrize(
+    "outcome,expected",
+    [
+        (_Ran(0, "4242\n"), 4242),
+        (_Ran(0, "0\n"), None),  # unit not running
+        (_Ran(1, ""), None),  # no such unit / no user bus
+        (_Ran(0, "garbage\n"), None),
+        (FileNotFoundError("systemctl"), None),
+        (doctor.subprocess.TimeoutExpired("systemctl", 2.0), None),
+    ],
+)
+def test_unit_main_pid_fails_closed(monkeypatch, outcome, expected):
+    """Review M1: anything but a clean MainPID answer offers no unit restart."""
+    calls: list[tuple[list[str], float]] = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(doctor.subprocess, "run", run)
+    assert doctor._unit_main_pid("x.service", user=True) == expected
+    assert calls == [
+        (["systemctl", "--user", "show", "-p", "MainPID", "--value", "x.service"], 2.0)
+    ]
+
+
+def test_an_unknown_holder_drops_the_holder_clause(tmp_path, monkeypatch):
+    """Review m1: no "? (process ?)" when the top holder is unknown.
+
+    A zero max_user_instances has no holder at all; a holder that exited
+    before its comm was read has a pid but no name to show.
+    """
+    proc = _fake_proc(tmp_path, {10: []}, (100, 0))  # no inotify fd at all
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "fail"
+    assert check["summary"].endswith(
+        "“Too many open files”. Ask an administrator to raise fs.inotify.max_user_instances."
+    )
+    assert "?" not in check["summary"] and "process" not in check["summary"]
+    assert (check["data"]["top_name"], check["data"]["restart_command"]) == (None, None)
+
+    exited = _fake_proc(tmp_path / "exited", {10: [99]}, (100, 128))  # no comm file
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "exited" / "limits")
+    summary = doctor.check_watches(exited)["summary"]
+    assert summary.endswith("Ask an administrator to raise fs.inotify.max_user_watches.")
+    assert "?" not in summary and "process" not in summary
+
+
+def test_the_pass_row_has_the_problem_rows_json_shape(tmp_path, monkeypatch):
+    """QA Q2: bottleneck/top_name/restart_command are present (null) on pass too."""
+    proc = _fake_proc(tmp_path, {10: [5]}, (100, 128))
+    monkeypatch.setattr(doctor, "_INOTIFY_LIMITS", tmp_path / "limits")
+    check = doctor.check_watches(proc)
+    assert check["status"] == "pass"
+    data = check["data"]
+    assert {k: data[k] for k in ("bottleneck", "top_name", "restart_command")} == {
+        "bottleneck": None,
+        "top_name": None,
+        "restart_command": None,
+    }
 
 
 def test_unreadable_watch_limits_are_unknown_not_a_guess(tmp_path, monkeypatch):

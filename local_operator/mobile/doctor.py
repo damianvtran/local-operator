@@ -418,7 +418,52 @@ def _process_name(proc: Path, pid: int) -> str | None:
 #: The systemd units whose restart is NOT a remedy: the user's own service
 #: manager (restarting it ends every user service at once) and the slices and
 #: scopes a login shell or terminal lives in, which have no restart to name.
-_NOT_RESTARTABLE_UNIT_PREFIXES = ("user@", "user-runtime-dir@", "systemd-")
+#:
+#: ``local-operator-`` (review M1): Local Operator's own units are never named
+#: to ``systemctl``. Their remedies are lop's own commands, matched by argv
+#: before the cgroup is read; anything else in those units is a child, such as a
+#: session runtime, an eval worker or a dev server an agent started. Restarting
+#: ``local-operator-wakes.service`` for one of those would end every running
+#: agent session, and restarting the serve unit would bypass the in-place reload.
+_NOT_RESTARTABLE_UNIT_PREFIXES = ("user@", "user-runtime-dir@", "systemd-", "local-operator-")
+
+#: Upper bound on the one ``systemctl show`` the doctor runs. Measured on this
+#: host on 2026-11-18: n=12 runs (8 user, 4 system), median 0.00 s, max 0.04 s.
+#: Two seconds sits well above that and still fails closed promptly when
+#: the bus is wedged.
+_SYSTEMCTL_TIMEOUT_S = 2.0
+
+
+def _unit_main_pid(unit: str, *, user: bool) -> int | None:
+    """The ``MainPID`` systemd reports for ``unit``, or ``None`` if it can't be read.
+
+    WHY ASK SYSTEMD (review M1). A cgroup names every process in a unit, but
+    ``systemctl restart`` replaces only what the unit started. A child (an ssh
+    login's ``tsc --watch`` under a ``KillMode=process`` sshd) can outlive the
+    restart, and a restart for a child also takes down everything else the unit
+    runs. Only systemd knows which pid is the main one. A cgroup's first pid is
+    not equivalent, because forking services and helpers reorder it. Every
+    failure answers ``None`` (no systemctl, no user bus, timeout, a stopped
+    unit's ``0``), so the caller falls back to "restart that program".
+    """
+    command = ["systemctl", *(["--user"] if user else []), "show", "-p", "MainPID", "--value"]
+    try:
+        result = subprocess.run(
+            [*command, unit],
+            capture_output=True,
+            text=True,
+            timeout=_SYSTEMCTL_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        pid = int(result.stdout.strip())
+    except ValueError:
+        return None
+    return pid or None
 
 
 def restart_command(proc: Path, pid: int) -> str | None:
@@ -427,11 +472,12 @@ def restart_command(proc: Path, pid: int) -> str | None:
     WHY ONLY THESE. A command is named only when restarting through it really
     releases the process's inotify instances: Local Operator's own daemons
     (``lop serve`` reloads in place, and its inotify fd is close-on-exec, so the
-    re-exec drops every watch — #4193), and a process that is the main body of a
-    systemd service, which ``systemctl restart`` replaces outright. Anything
-    else (a terminal's editor, a desktop app) has no restart command a doctor
-    can know, and guessing one would send a non-expert to the wrong program;
-    the summary then names the program and asks for it to be restarted.
+    re-exec drops every watch — #4193), and a process that is its unit's
+    ``MainPID`` (see :func:`_unit_main_pid`), which ``systemctl restart``
+    replaces outright. Anything else (a terminal's editor, a desktop app, a child
+    inside some service) has no restart command a doctor can know, and guessing
+    one would send a non-expert to the wrong program; the summary then names
+    the program and asks for it to be restarted.
     """
     try:
         argv = (proc / str(pid) / "cmdline").read_bytes().split(b"\0")
@@ -441,7 +487,13 @@ def restart_command(proc: Path, pid: int) -> str | None:
     # argv (not comm) is what tells the phone service from the serve daemon.
     if b"local_operator.mobile.service" in argv:
         return "lop mobile restart"
-    if b"local_operator.cli" in argv and b"serve" in argv:
+    # services.is_serve_command is the one owner of "is this a serve daemon":
+    # the module form, the `lop serve` console script started from a terminal
+    # (review n1), and the desktop app's `-c` backend. `lop services restart`
+    # reloads every live serve in the registry, so it is the remedy for each.
+    from local_operator import services
+
+    if services.is_serve_command(" ".join(part.decode(errors="replace") for part in argv)):
         return "lop services restart"
     try:
         cgroup = (proc / str(pid) / "cgroup").read_text()
@@ -461,7 +513,10 @@ def restart_command(proc: Path, pid: int) -> str | None:
             return None
         # Under user@<uid>.service it is the user's own manager's unit; anywhere
         # else it is a system unit, which only an administrator may restart.
-        if any(part.startswith("user@") for part in parts[:-1]):
+        user = any(part.startswith("user@") for part in parts[:-1])
+        if _unit_main_pid(unit, user=user) != pid:
+            return None  # a child, or unknown: fail closed (review M1)
+        if user:
             return f"systemctl --user restart {unit}"
         return f"sudo systemctl restart {unit}"
     return None
@@ -495,16 +550,24 @@ def check_watches(proc: Path = Path("/proc")) -> dict[str, Any]:
         else:
             at_limit = usage["watches"] >= limit
             top = usage["top_pid"]
-        # With either count > 0 its top holder is set, so "?" only survives a
-        # zero limit.
+        # With either count > 0 its top holder is set; it is unknown only at a
+        # zero limit, or when the holder exited before its comm was read.
         name = _process_name(proc, top) if top is not None else None
-        command = restart_command(proc, top) if top is not None else None
+        command = restart_command(proc, top) if top is not None and name is not None else None
         # The problem line counts only the budget that is short; the other one
-        # stays in the check's data (and in the ok line).
+        # stays in the check's data (and in the ok line). Without a known holder
+        # the row drops the holder clause rather than printing "? (process ?)"
+        # (review m1): `other` is "ask an administrator" alone.
+        if command:
+            how = "command"
+        elif name is not None:
+            how = "program"
+        else:
+            how = "other"
         named = {
-            "pid": str(top or "?"),
-            "name": name or "?",
-            "how": "command" if command else "other",
+            "pid": str(top) if top is not None else "",
+            "name": name or "",
+            "how": how,
             "command": command or "",
         }
         if by_instances:
@@ -532,7 +595,18 @@ def check_watches(proc: Path = Path("/proc")) -> dict[str, Any]:
             restart_command=command,
             **usage,
         )
-    return _check("watches", PASS, _t(_md.watches_ok(**args)), ratio=round(ratio, 3), **usage)
+    # The same keys as a problem row, null where nothing is named, so a --json
+    # reader sees one shape whatever the status (QA Q2).
+    return _check(
+        "watches",
+        PASS,
+        _t(_md.watches_ok(**args)),
+        ratio=round(ratio, 3),
+        bottleneck=None,
+        top_name=None,
+        restart_command=None,
+        **usage,
+    )
 
 
 # --- logs ------------------------------------------------------------------------
