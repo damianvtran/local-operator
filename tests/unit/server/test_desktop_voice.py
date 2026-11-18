@@ -187,7 +187,16 @@ async def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         base_url="http://localhost",
         headers={"Authorization": f"Bearer {TOKEN}"},
     ) as client:
-        yield SimpleNamespace(client=client, pool=pool, root=tmp_path)
+        yield SimpleNamespace(client=client, pool=pool, root=tmp_path, app=app)
+
+
+def _choose(rig: Any, provider: str | None) -> None:
+    """Write ``speech.provider`` the way the settings page does (``None`` clears it)."""
+    from local_operator import settings_io
+
+    settings_io.write_setting(
+        ConfigManager(rig.root), settings_io.BY_KEY["speech.provider"], provider
+    )
 
 
 async def _enable(rig: Any, session_id: str) -> Any:
@@ -213,19 +222,24 @@ async def _text(rig: Any, session_id: str, source: dict[str, Any]) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_status_reports_the_slot_the_cap_and_byok_readiness_and_no_key_material(
+async def test_status_reports_the_slot_the_cap_the_choice_and_no_key_material(
     rig: Any,
 ) -> None:
-    """Amended with bring-your-own-key voice: the status used to say nothing about
-    speech. It now says whether the pinned ElevenLabs rung can run (a boolean and
-    the resolver's sentence), and still carries no credential of any kind."""
+    """The slot and cap, plus which provider is chosen and whether each can serve:
+    booleans and the resolver's sentences, and no credential of any kind."""
     result = (await rig.client.get("/v1/desktop/voice")).json()["result"]
     assert result["active"] is None
     assert result["settings"] == {"max_spoken_chars": 800}
+    assert result["provider"] is None, "nothing is chosen until the user picks"
+    assert set(result["providers"]) == {"radient", "elevenlabs"}
+    for state in result["providers"].values():
+        assert set(state) == {"ready", "reason"}
+        assert state["ready"] is False, "the test rig stores no credential"
+        assert isinstance(state["reason"], str) and state["reason"]
+    # Kept for the app that predates the provider choice.
     assert set(result["byok"]) == {"provider", "ready", "reason"}
     assert result["byok"]["provider"] == "elevenlabs"
-    assert result["byok"]["ready"] is False, "the test rig stores no key"
-    assert set(result) == {"active", "settings", "byok"}
+    assert set(result) == {"active", "settings", "byok", "provider", "providers"}
 
 
 @pytest.mark.asyncio
@@ -655,87 +669,313 @@ async def test_a_blocking_ask_still_refuses_speech_when_the_queue_is_off(rig: An
     assert remote.admissions == []
 
 
-# -- bring-your-own-key voice: pin a request to ONE provider ---------------------
+# -- one chosen provider: speech.provider drives every voice route ----------------
 
 
-@pytest.mark.asyncio
-async def test_a_recording_pinned_to_elevenlabs_walks_only_that_rung(
-    rig: Any, cascades: SimpleNamespace
-) -> None:
-    from local_operator.stt import AudioPath
-
-    await _enable(rig, SESSION_A)
-    response = await rig.client.post(
+async def _recording_with(rig: Any, **fields: str) -> Any:
+    return await rig.client.post(
         "/v1/desktop/voice/utterance",
-        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), "provider": "elevenlabs"},
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), **fields},
         files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
     )
-    assert response.status_code == 200, response.text
-    ((_head, kwargs),) = cascades.stt
-    assert kwargs["only"] == AudioPath.PROVIDER_STT_ELEVENLABS
 
 
-@pytest.mark.asyncio
-async def test_an_unpinned_recording_keeps_the_whole_walk(
-    rig: Any, cascades: SimpleNamespace
-) -> None:
-    await _enable(rig, SESSION_A)
-    assert (await _recording(rig)).status_code == 200
-    ((_head, kwargs),) = cascades.stt
-    assert kwargs.get("only") is None
-
-
-@pytest.mark.asyncio
-async def test_an_unknown_provider_is_refused_before_any_work(
-    rig: Any, cascades: SimpleNamespace
-) -> None:
-    await _enable(rig, SESSION_A)
-    response = await rig.client.post(
-        "/v1/desktop/voice/utterance",
-        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), "provider": "radient"},
-        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
-    )
-    assert response.status_code == 422, response.text
-    assert cascades.stt == [] and rig.pool.remote.admissions == []
-
-
-@pytest.mark.asyncio
-async def test_speech_pinned_to_elevenlabs_pins_the_cascade_and_the_phrase_cache(
-    rig: Any, cascades: SimpleNamespace
-) -> None:
-    from local_operator.tts import VoicePath
-
-    await _enable(rig, SESSION_A)
-    response = await rig.client.post(
+async def _phrase_speech(rig: Any, **extra: Any) -> Any:
+    return await rig.client.post(
         "/v1/desktop/voice/speech",
         json={
             "session_id": SESSION_A,
             "source": {"kind": "phrase", "key": "voice_off"},
             "segment": 0,
-            "provider": "elevenlabs",
+            **extra,
         },
     )
-    assert response.status_code == 200, response.text
-    assert cascades.resolve[-1]["only"] == VoicePath.PROVIDER_TTS_ELEVENLABS
-    (_text, kwargs) = cascades.tts[-1]
-    assert kwargs["only"] == VoicePath.PROVIDER_TTS_ELEVENLABS
 
 
 @pytest.mark.asyncio
-async def test_speech_with_an_unknown_provider_is_a_validation_error(
+@pytest.mark.parametrize(
+    ("chosen", "stt_rung", "tts_rung"),
+    [
+        ("elevenlabs", "PROVIDER_STT_ELEVENLABS", "PROVIDER_TTS_ELEVENLABS"),
+        ("radient", "PROVIDER_STT_RADIENT", "PROVIDER_TTS_RADIENT"),
+    ],
+)
+async def test_the_chosen_provider_pins_hearing_and_speaking_to_one_rung(
+    rig: Any, cascades: SimpleNamespace, chosen: str, stt_rung: str, tts_rung: str
+) -> None:
+    from local_operator.stt import AudioPath
+    from local_operator.tts import VoicePath
+
+    _choose(rig, chosen)
+    await _enable(rig, SESSION_A)
+    assert (await _recording_with(rig)).status_code == 200
+    ((_head, stt_kwargs),) = cascades.stt
+    assert stt_kwargs["only"] == AudioPath[stt_rung]
+
+    assert (await _phrase_speech(rig)).status_code == 200
+    assert cascades.resolve[-1]["only"] == VoicePath[tts_rung]
+    assert cascades.tts[-1][1]["only"] == VoicePath[tts_rung]
+
+
+@pytest.mark.asyncio
+async def test_unset_refuses_a_recording_and_costs_nothing(
     rig: Any, cascades: SimpleNamespace
 ) -> None:
+    _choose(rig, None)
     await _enable(rig, SESSION_A)
-    response = await rig.client.post(
-        "/v1/desktop/voice/speech",
-        json={
-            "session_id": SESSION_A,
-            "source": {"kind": "phrase", "key": "voice_off"},
-            "provider": "radient",
-        },
+    response = await _recording_with(rig)
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "voice_provider_unset"
+    assert "Radient" in detail["text"] and "ElevenLabs" in detail["text"]
+    assert cascades.stt == [] and cascades.resolve == [] and cascades.spend == []
+    assert rig.pool.remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_unset_refuses_speech_before_the_phrase_cache_or_any_cascade(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    _choose(rig, None)
+    await _enable(rig, SESSION_A)
+    response = await _phrase_speech(rig)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "voice_provider_unset"
+    assert cascades.tts == [] and cascades.resolve == [] and cascades.spend == []
+
+
+@pytest.mark.asyncio
+async def test_a_client_provider_does_not_stand_in_for_an_unset_choice(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    """The old app pinned ElevenLabs itself. With nothing chosen, that is still
+    nothing chosen: the setting is the one place the choice lives."""
+    _choose(rig, None)
+    await _enable(rig, SESSION_A)
+    heard = await _recording_with(rig, provider="elevenlabs")
+    spoke = await _phrase_speech(rig, provider="elevenlabs")
+    assert heard.status_code == spoke.status_code == 409
+    assert (
+        heard.json()["detail"]["code"] == spoke.json()["detail"]["code"] == "voice_provider_unset"
     )
-    assert response.status_code == 422, response.text
-    assert cascades.tts == []
+    assert cascades.stt == [] and cascades.tts == []
+
+
+@pytest.mark.asyncio
+async def test_the_text_door_needs_no_provider(rig: Any, cascades: SimpleNamespace) -> None:
+    """Typed words involve no hearing and no speaking, so there is nothing to refuse."""
+    _choose(rig, None)
+    await _enable(rig, SESSION_A)
+    assert (await _utter(rig, SESSION_A, "list files")).status_code == 200
+    assert cascades.stt == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chosen", "client_says", "expected_stt", "expected_tts"),
+    [
+        ("radient", "elevenlabs", "PROVIDER_STT_RADIENT", "PROVIDER_TTS_RADIENT"),
+        ("elevenlabs", "radient", "PROVIDER_STT_ELEVENLABS", "PROVIDER_TTS_ELEVENLABS"),
+        ("elevenlabs", "elevenlabs", "PROVIDER_STT_ELEVENLABS", "PROVIDER_TTS_ELEVENLABS"),
+    ],
+)
+async def test_the_setting_wins_over_the_old_client_provider_field(
+    rig: Any,
+    cascades: SimpleNamespace,
+    chosen: str,
+    client_says: str,
+    expected_stt: str,
+    expected_tts: str,
+) -> None:
+    from local_operator.stt import AudioPath
+    from local_operator.tts import VoicePath
+
+    _choose(rig, chosen)
+    await _enable(rig, SESSION_A)
+    assert (await _recording_with(rig, provider=client_says)).status_code == 200
+    assert cascades.stt[-1][1]["only"] == AudioPath[expected_stt]
+    assert (await _phrase_speech(rig, provider=client_says)).status_code == 200
+    assert cascades.tts[-1][1]["only"] == VoicePath[expected_tts]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("not_pinnable", ["openai", "groq", "qwen"])
+async def test_a_client_provider_outside_the_two_is_a_validation_error(
+    rig: Any, cascades: SimpleNamespace, not_pinnable: str
+) -> None:
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    heard = await _recording_with(rig, provider=not_pinnable)
+    spoke = await _phrase_speech(rig, provider=not_pinnable)
+    assert heard.status_code == 422 and spoke.status_code == 422
+    assert cascades.stt == [] and cascades.tts == [] and rig.pool.remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_the_choice_is_read_per_request_from_disk(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    """No restart: a settings write between two requests changes the second."""
+    from local_operator.stt import AudioPath
+
+    await _enable(rig, SESSION_A)
+    _choose(rig, "elevenlabs")
+    assert (await _recording_with(rig)).status_code == 200
+    _choose(rig, "radient")
+    assert (await _recording_with(rig)).status_code == 200
+    assert [kw["only"] for _h, kw in cascades.stt] == [
+        AudioPath.PROVIDER_STT_ELEVENLABS,
+        AudioPath.PROVIDER_STT_RADIENT,
+    ]
+
+
+# -- the real cascades, real credentials: a pin never reaches the other provider ---
+
+
+@pytest.fixture
+def real_cascades(rig: Any, monkeypatch: pytest.MonkeyPatch):
+    """The REAL cascades over a real credential store; only the two network legs
+    are replaced, by recorders. ``legs`` says which provider was actually called."""
+    from datetime import datetime
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.server.dependencies import get_provider_auth_store
+    from local_operator.stt import cascade as stt_cascade
+    from local_operator.tts import cascade as tts_cascade
+
+    store = AuthStore(db_path=rig.root / "auth.db", config_dir=rig.root)
+
+    async def provide() -> AuthStore:
+        return store
+
+    rig.app.dependency_overrides[get_provider_auth_store] = provide
+    # A stored Radient login only counts for the canonical Radient base URL, so
+    # the real resolver needs it here (the stubbed-cascade tests need no URL).
+    rig.app.state.env_config = SimpleNamespace(radient_api_base_url="https://api.radienthq.com/v1")
+    legs = SimpleNamespace(
+        called=[], radient_error=None, spend=[], sign_in=None, elevenlabs_key=None
+    )
+
+    def sign_in_radient() -> None:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "refresh": "r",
+                "access": "a",
+                "expires": int(datetime.now().timestamp() * 1000) + 3_600_000,
+            },
+        )
+
+    def store_elevenlabs_key() -> None:
+        store.upsert_credential(
+            "elevenlabs", {"type": "api_key", "source": "login", "key": "el-test-key"}
+        )
+
+    legs.sign_in = sign_in_radient
+    legs.elevenlabs_key = store_elevenlabs_key
+
+    async def tts_radient(*_a: Any, **_k: Any) -> Any:
+        legs.called.append("tts:radient")
+        raise legs.radient_error
+
+    async def tts_elevenlabs(*_a: Any, **_k: Any) -> Any:
+        legs.called.append("tts:elevenlabs")
+        return (_wav_bytes(), "elevenlabs", [], [])
+
+    async def stt_radient(*_a: Any, **_k: Any) -> Any:
+        legs.called.append("stt:radient")
+        raise legs.radient_error
+
+    async def stt_elevenlabs(*_a: Any, **_k: Any) -> Any:
+        legs.called.append("stt:elevenlabs")
+        raise AssertionError("not reached unless the pin leaks")
+
+    monkeypatch.setattr(tts_cascade, "_run_radient_rung", tts_radient)
+    monkeypatch.setattr(tts_cascade, "_run_elevenlabs_rung", tts_elevenlabs)
+    monkeypatch.setattr(stt_cascade, "_run_radient_rung", stt_radient)
+    monkeypatch.setattr(stt_cascade, "_run_elevenlabs_rung", stt_elevenlabs)
+    monkeypatch.setattr(desktop_voice, "emit_voice_spend", lambda **kw: legs.spend.append(kw))
+    yield legs
+    store.close()
+
+
+def _credit_exhausted() -> Any:
+    from local_operator.clients._http import APIError
+
+    return APIError("insufficient credits", status_code=402)
+
+
+@pytest.mark.asyncio
+async def test_a_radient_402_on_speech_says_so_and_never_reaches_elevenlabs(
+    rig: Any, real_cascades: SimpleNamespace
+) -> None:
+    real_cascades.sign_in()
+    real_cascades.elevenlabs_key()  # a usable key sits right there; the pin forbids it
+    real_cascades.radient_error = _credit_exhausted()
+    _choose(rig, "radient")
+    await _enable(rig, SESSION_A)
+    response = await _phrase_speech(rig)
+    assert response.status_code == 402, response.text
+    assert response.json()["detail"]["text"] == (
+        "Your Radient credit balance is too low for speech. "
+        "Add credits in the Radient Console to continue."
+    )
+    assert real_cascades.called == ["tts:radient"]
+    assert real_cascades.spend == []
+
+
+@pytest.mark.asyncio
+async def test_a_radient_402_on_hearing_says_so_admits_nothing_and_never_reaches_elevenlabs(
+    rig: Any, real_cascades: SimpleNamespace
+) -> None:
+    real_cascades.sign_in()
+    real_cascades.elevenlabs_key()
+    real_cascades.radient_error = _credit_exhausted()
+    _choose(rig, "radient")
+    await _enable(rig, SESSION_A)
+    response = await _recording_with(rig)
+    assert response.status_code == 402, response.text
+    assert "Radient credit balance is too low" in response.json()["detail"]["text"]
+    assert real_cascades.called == ["stt:radient"]
+    assert rig.pool.remote.admissions == [] and real_cascades.spend == []
+
+
+@pytest.mark.asyncio
+async def test_signed_out_of_radient_refuses_with_radients_reason_and_calls_nobody(
+    rig: Any, real_cascades: SimpleNamespace
+) -> None:
+    real_cascades.elevenlabs_key()  # not signed in to Radient, but a key IS stored
+    _choose(rig, "radient")
+    await _enable(rig, SESSION_A)
+    spoke = await _phrase_speech(rig)
+    heard = await _recording_with(rig)
+    assert spoke.status_code == heard.status_code == 409
+    assert spoke.json()["detail"]["code"] == "voice_unavailable"
+    assert heard.json()["detail"]["code"] == "stt_unavailable"
+    assert "Not signed in to Radient." in spoke.json()["detail"]["text"]
+    assert "Not signed in to Radient." in heard.json()["detail"]["text"]
+    assert real_cascades.called == []
+
+
+@pytest.mark.asyncio
+async def test_the_elevenlabs_pin_never_reaches_radient(
+    rig: Any, real_cascades: SimpleNamespace
+) -> None:
+    real_cascades.sign_in()  # signed in to Radient, NO ElevenLabs key
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+    spoke = await _phrase_speech(rig)
+    heard = await _recording_with(rig)
+    assert spoke.status_code == heard.status_code == 409
+    assert "No ElevenLabs API key is stored." in spoke.json()["detail"]["text"]
+    assert "No ElevenLabs API key is stored." in heard.json()["detail"]["text"]
+    assert real_cascades.called == []
+
+    # With the key stored the same pin speaks, and still never touches Radient.
+    real_cascades.elevenlabs_key()
+    assert (await _phrase_speech(rig)).status_code == 200
+    assert real_cascades.called == ["tts:elevenlabs"]
 
 
 @pytest.mark.asyncio
@@ -763,45 +1003,68 @@ async def test_the_audio_is_labelled_with_what_it_actually_is(
 
 
 @pytest.mark.asyncio
-async def test_status_reports_whether_the_elevenlabs_key_is_ready(
-    rig: Any, monkeypatch: pytest.MonkeyPatch
+async def test_status_says_which_provider_is_chosen_and_whether_each_can_serve(
+    rig: Any, real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``GET /voice`` says whether bring-your-own-key voice can run, and why not,
-    so the app can say "No ElevenLabs key" instead of failing on the first take."""
-    from local_operator.tts import RungAvailability, VoicePath, VoicePathResolution
+    """Readiness comes from stored credentials alone: no network call, no spend.
+    Both legs are replaced by recorders that fail the test if they are ever hit."""
+    from local_operator.stt import cascade as stt_cascade
+    from local_operator.tts import cascade as tts_cascade
 
-    seen: list[dict[str, Any]] = []
+    async def never(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("status must not call a provider")
 
-    def answer(ready: bool) -> Any:
-        async def resolve(**kwargs: Any) -> VoicePathResolution:
-            seen.append(kwargs)
-            rung = RungAvailability(
-                VoicePath.PROVIDER_TTS_ELEVENLABS,
-                ready,
-                "An ElevenLabs API key is stored." if ready else "No ElevenLabs API key is stored.",
-            )
-            return VoicePathResolution(
-                path=VoicePath.PROVIDER_TTS_ELEVENLABS if ready else VoicePath.NONE,
-                reason=rung.reason,
-                rungs=(rung,),
-                servable=ready,
-            )
+    monkeypatch.setattr(tts_cascade, "synthesize_speech", never)
+    monkeypatch.setattr(stt_cascade, "transcribe_audio", never)
 
-        return resolve
+    async def status() -> dict[str, Any]:
+        return (await rig.client.get("/v1/desktop/voice")).json()["result"]
 
-    monkeypatch.setattr("local_operator.tts.cascade.resolve_voice_path", answer(False))
-    missing = (await rig.client.get("/v1/desktop/voice")).json()["result"]
-    assert missing["byok"] == {
-        "provider": "elevenlabs",
-        "ready": False,
-        "reason": "No ElevenLabs API key is stored.",
+    nothing = await status()
+    assert nothing["provider"] is None
+    assert nothing["providers"] == {
+        "radient": {"ready": False, "reason": "Not signed in to Radient."},
+        "elevenlabs": {"ready": False, "reason": "No ElevenLabs API key is stored."},
     }
-    assert seen[-1]["only"] == VoicePath.PROVIDER_TTS_ELEVENLABS
+    assert nothing["byok"]["ready"] is False
 
-    monkeypatch.setattr("local_operator.tts.cascade.resolve_voice_path", answer(True))
-    ready = (await rig.client.get("/v1/desktop/voice")).json()["result"]
-    assert ready["byok"]["ready"] is True
-    assert ready["active"] is None, "the slot half of the status is unchanged"
+    real_cascades.sign_in()
+    _choose(rig, "radient")
+    signed_in = await status()
+    assert signed_in["provider"] == "radient"
+    assert signed_in["providers"]["radient"] == {"ready": True, "reason": None}
+    assert signed_in["providers"]["elevenlabs"]["ready"] is False
+
+    real_cascades.elevenlabs_key()
+    _choose(rig, "elevenlabs")
+    both = await status()
+    assert both["provider"] == "elevenlabs"
+    assert both["providers"]["radient"]["ready"] is True
+    assert both["providers"]["elevenlabs"] == {"ready": True, "reason": None}
+    assert both["byok"]["ready"] is True
+    assert both["active"] is None, "the slot half of the status is unchanged"
+    assert real_cascades.called == []
+
+
+@pytest.mark.asyncio
+async def test_status_reports_a_provider_ready_only_when_it_can_both_hear_and_speak(
+    rig: Any, real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One half missing is not ready, and the reason names the half that is."""
+    from local_operator.stt import AudioPath, AudioPathResolution, RungAvailability
+    from local_operator.stt import cascade as stt_cascade
+
+    real_cascades.sign_in()
+
+    async def deaf(**_k: Any) -> AudioPathResolution:
+        rung = RungAvailability(AudioPath.PROVIDER_STT_RADIENT, False, "Hearing is down.")
+        return AudioPathResolution(
+            path=AudioPath.NONE, reason="x", rungs=(rung,), model_audio_capable=False
+        )
+
+    monkeypatch.setattr(stt_cascade, "resolve_audio_path", deaf)
+    radient = (await rig.client.get("/v1/desktop/voice")).json()["result"]["providers"]["radient"]
+    assert radient == {"ready": False, "reason": "Hearing is down."}
 
 
 # -- B3: a deleted conversation leaves the slot ----------------------------------
@@ -980,6 +1243,10 @@ def cascades(rig: Any, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr("local_operator.tts.cascade.resolve_voice_path", resolve)
     monkeypatch.setattr("local_operator.stt.cascade.transcribe_audio", transcribe)
     monkeypatch.setattr(desktop_voice, "emit_voice_spend", lambda **kw: calls.spend.append(kw))
+    # Voice mode refuses until a provider is chosen; these tests are about what
+    # the cascades do once one is, so they choose ElevenLabs (the stubs answer
+    # whatever rung they like). Tests of the unset state clear it.
+    _choose(rig, "elevenlabs")
     return calls
 
 

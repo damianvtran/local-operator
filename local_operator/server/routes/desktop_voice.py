@@ -10,8 +10,10 @@ The frozen contract, which both repositories build against:
                                        EXACTLY ONE of file (a recording) | text,
                                        text_origin? (qwen_s2s; text door only)
         200 {text, path, admission}; 409 voice_not_enabled | approval_pending |
-        stt_unavailable; 413 voice_upload_too_large; 429 voice_rate_limited;
-        422 invalid_voice_request | empty_transcript
+        stt_unavailable | voice_provider_unset (a recording, and no
+        ``speech.provider`` chosen); 413 voice_upload_too_large; 429
+        voice_rate_limited; 402 an out-of-credit provider; 422
+        invalid_voice_request | empty_transcript
     POST /v1/desktop/voice/text        body {session_id, source}
         source {kind: message, message_id} | {kind: gate, request_id}
         200 {text, spoken_chars, truncated, segments}; 409 voice_not_enabled;
@@ -20,8 +22,8 @@ The frozen contract, which both repositories build against:
         source {kind: message, message_id} | {kind: gate, request_id} |
                {kind: phrase, key}
         200 audio/wav (X-Voice-Path, X-Voice-Spoken-Chars); 404 unknown_source |
-        unknown_segment; 409 voice_not_enabled | voice_unavailable;
-        429 voice_rate_limited
+        unknown_segment; 409 voice_not_enabled | voice_unavailable |
+        voice_provider_unset; 429 voice_rate_limited
 
 and the ``type: "voice"`` frame on ``GET /v1/desktop/events`` (published by
 ``server/utils/desktop_feed.py``), ``{active}``, on every slot change.
@@ -35,6 +37,13 @@ and speaking are the harness cascades': ``transcribe_audio`` and
 ``synthesize_speech``, both with ``include_groq=True`` (the Groq rung is opt-in
 so the generic ``/v1/stt/paths`` and ``/v1/tts/paths`` stay unchanged). This
 module adds no rung, no client and no retry of its own.
+
+ONE CHOSEN PROVIDER (qwen-voice V17). Every call is pinned (``only=``) to the
+rung of the user's ``speech.provider`` (``radient`` or ``elevenlabs``), read from
+disk per request. With none chosen the routes refuse ``voice_provider_unset``
+before any credential probe. The old client ``provider`` field is accepted and
+ignored. ``GET /v1/desktop/voice`` reports ``provider`` and, per provider,
+``{ready, reason}`` from stored credentials alone.
 
 ONE SESSION AT A TIME (V3). Every route but the status read refuses a session
 that is not in the slot, so a stale renderer cannot keep talking to the
@@ -119,6 +128,8 @@ from local_operator.server.models.desktop_voice import (
     VoiceByok,
     VoiceControl,
     VoiceControlResult,
+    VoiceProviders,
+    VoiceProviderState,
     VoiceSettings,
     VoiceSpeechRequest,
     VoiceStatus,
@@ -138,7 +149,7 @@ from local_operator.server.routes.desktop_sessions import reply
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath
 from local_operator.stt import audio as stt_audio
-from local_operator.tts import VoicePath
+from local_operator.voice import provider as speech_provider
 from local_operator.voice import segments as voice_segments
 from local_operator.voice import slot as voice_slot
 from local_operator.voice import speakable as voice_speakable
@@ -198,6 +209,7 @@ ACCEPTED_AUDIO = frozenset({"audio/wav", "audio/webm", "audio/ogg", "audio/mp4"}
 
 #: The STT rungs' vendor labels for the spend record.
 _STT_PROVIDERS = {
+    AudioPath.PROVIDER_STT_RADIENT.value: "radient",
     AudioPath.PROVIDER_STT_ELEVENLABS.value: "elevenlabs",
     AudioPath.PROVIDER_STT_OPENAI.value: "openai",
     AudioPath.PROVIDER_STT_GROQ.value: "groq",
@@ -209,12 +221,8 @@ _STT_PROVIDERS = {
 VOICE_AUDIO_FORMAT = "wav"
 VOICE_AUDIO_MIME = "audio/wav"
 
-#: A request PINNED to one provider (bring-your-own-key voice): the wire token ->
-#: the one rung that may serve it. Closed: a new provider is a new line here, in
-#: ``VoiceSpeechRequest.provider`` and in the ``provider`` form field.
-_PINNED_STT = {"elevenlabs": AudioPath.PROVIDER_STT_ELEVENLABS}
-_PINNED_TTS = {"elevenlabs": VoicePath.PROVIDER_TTS_ELEVENLABS}
-
+#: Hearing and speaking are pinned to the user's ONE chosen provider
+#: (``speech.provider``, ``voice/provider.py``): no ordering, no fallthrough.
 #: The fixed spoken phrases: key -> catalogue message. CLOSED: ``/speech``
 #: resolves a phrase only through this table, so any other key (or free text in
 #: its place) is ``unknown_source``. ``truncated`` is ``speakable``'s closing
@@ -241,6 +249,20 @@ def _refuse(status: int, code: str, message: Any) -> HTTPException:
 
 def _config_dir(request: Request) -> Path:
     return Path(request.app.state.config_manager.config_dir)
+
+
+def _chosen_provider(request: Request) -> speech_provider.SpeechProvider:
+    """The provider the user chose, read from disk now; refuse when none is chosen.
+
+    Voice never picks for the user. Nothing chosen is a refusal that costs
+    nothing, and it is checked BEFORE any credential probe or provider call, so
+    a stored Radient login cannot be billed for a request nobody asked it to
+    serve.
+    """
+    chosen = speech_provider.configured_provider(_config_dir(request))
+    if chosen is None:
+        raise _refuse(409, "voice_provider_unset", _wv.provider_unset())
+    return chosen
 
 
 def _max_spoken_chars(config_manager: ConfigManager) -> int:
@@ -316,30 +338,55 @@ async def voice_status(
     env_config: Annotated[EnvConfig, Depends(get_env_config)],
     store: Annotated[AuthStore, Depends(get_provider_auth_store)],
 ) -> CRUDResponse[VoiceStatus]:
-    """The slot, the cap, and whether bring-your-own-key voice can run.
+    """The slot, the cap, the chosen provider, and whether each provider can serve.
 
-    Never writes anything. ``byok`` is the TTS cascade's answer for a request
-    pinned to ElevenLabs; speech-to-text uses the same stored key, so one probe
-    answers for both halves.
+    Never writes anything and never calls a provider: readiness is the cascades'
+    own stored-credential probe, asked PINNED to each provider (``only=``), so a
+    login for the other provider cannot make this one read ready. A provider is
+    ready only when it can both hear and speak. ``byok`` is the older ElevenLabs
+    answer, kept for the app that predates ``provider``/``providers``.
     """
+    from local_operator.stt import cascade as stt_cascade
     from local_operator.tts import cascade as tts_cascade
 
-    pinned = _PINNED_TTS["elevenlabs"]
-    resolution = await tts_cascade.resolve_voice_path(
-        config_dir=_config_dir(request),
-        base_url=env_config.radient_api_base_url,
-        store=store,
-        only=pinned,
+    config_dir = _config_dir(request)
+    speaking = {
+        name: await tts_cascade.resolve_voice_path(
+            config_dir=config_dir,
+            base_url=env_config.radient_api_base_url,
+            store=store,
+            only=speech_provider.PINNED_TTS[name],
+        )
+        for name in speech_provider.PROVIDERS
+    }
+    hearing = await stt_cascade.resolve_audio_path(
+        config_dir=config_dir, base_url=env_config.radient_api_base_url, store=store
     )
+    heard_by = {rung.path: rung for rung in hearing.rungs}
+
+    def state(name: speech_provider.SpeechProvider) -> VoiceProviderState:
+        spoke = speaking[name]
+        if not spoke.servable:
+            return VoiceProviderState(ready=False, reason=str(spoke.reason))
+        heard = heard_by.get(speech_provider.PINNED_STT[name])
+        if heard is None or not heard.available:
+            return VoiceProviderState(
+                ready=False, reason=str(heard.reason if heard is not None else hearing.reason)
+            )
+        return VoiceProviderState(ready=True, reason=None)
+
+    byok = speaking["elevenlabs"]
     return reply(
         VoiceStatus(
-            active=_active(_config_dir(request)),
+            active=_active(config_dir),
             settings=VoiceSettings(max_spoken_chars=_max_spoken_chars(config_manager)),
             byok=VoiceByok(
                 provider="elevenlabs",
-                ready=resolution.servable,
-                reason=str(resolution.reason),
+                ready=byok.servable,
+                reason=str(byok.reason),
             ),
+            provider=speech_provider.configured_provider(config_dir),
+            providers=VoiceProviders(radient=state("radient"), elevenlabs=state("elevenlabs")),
         ),
     )
 
@@ -516,9 +563,12 @@ async def _transcribe(
             if limited is not None:
                 raise limited from None
             if not exc.attempts:
-                raise _refuse(
-                    409, "stt_unavailable", _wv.stt_unavailable(reason=exc.resolution.reason)
-                ) from None
+                # A pinned walk's message IS the pinned rung's own gap ("No
+                # ElevenLabs API key is stored."); ``resolution.reason`` is the
+                # reason of whichever OTHER rung would have won, which would tell
+                # a user who chose ElevenLabs that Radient is signed in.
+                reason = str(exc) if only is not None else exc.resolution.reason
+                raise _refuse(409, "stt_unavailable", _wv.stt_unavailable(reason=reason)) from None
             raise _refuse(
                 exc.status_code or 502,
                 "stt_unavailable",
@@ -551,7 +601,9 @@ async def voice_utterance(
     file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None, max_length=200_000),
     text_origin: Optional[str] = Form(None, max_length=64),
-    provider: Optional[Literal["elevenlabs"]] = Form(None),
+    # LEGACY and IGNORED: kept so an older app that still sends it is not refused
+    # for a field it was told to send. The provider is ``speech.provider``.
+    provider: Optional[Literal["radient", "elevenlabs"]] = Form(None),
 ) -> CRUDResponse[VoiceUtteranceResult]:
     """Transcribe a recording (or take ``text``) and admit it to the slot's session.
 
@@ -578,6 +630,9 @@ async def voice_utterance(
         raise _refuse(409, "approval_pending", _wv.approval_pending())
 
     if file is not None:
+        # Hearing is the chosen provider's alone. Read before the upload is
+        # touched, so a refusal costs nothing; the text door needs no provider.
+        chosen = _chosen_provider(request)
         spoken, path = await _transcribe(
             file,
             session_id=session_id,
@@ -585,7 +640,7 @@ async def voice_utterance(
             config_manager=config_manager,
             env_config=env_config,
             store=store,
-            only=_PINNED_STT[provider] if provider is not None else None,
+            only=speech_provider.PINNED_STT[chosen],
         )
         if await _card_pending(request, session_id):
             raise _refuse(409, "approval_pending", _wv.approval_pending())
@@ -850,7 +905,8 @@ async def voice_speech(
 
     config_dir = _config_dir(request)
     require_slot(config_dir, body.session_id)
-    pinned = _PINNED_TTS[body.provider] if body.provider is not None else None
+    # Before the phrase cache too: a cached phrase is still speech nobody chose.
+    pinned = speech_provider.PINNED_TTS[_chosen_provider(request)]
     source = body.source
     phrase_key: str | None = None
     if source.kind == "phrase":

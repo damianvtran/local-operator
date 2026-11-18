@@ -223,7 +223,7 @@ except where noted.
   Found live: with an ask open, every spoken request was refused until the ask
   was answered (`tests/unit/server/test_desktop_voice.py`, the two
   `..._ask_..._refuse_speech` tests).
-- **V16 — Pinned provider (bring-your-own-key voice, 2026-11-18).** The
+- **V16 — Pinned provider (bring-your-own-key voice, 2026-11-18; the pin now comes from the setting, V17).** The
   voice routes accept an optional `provider` (`elevenlabs` only for now): form
   field on `/voice/utterance`, body field on `/voice/speech`. A pinned request
   walks ONLY that rung: `only=` on `transcribe_audio`, `synthesize_speech` and
@@ -237,6 +237,24 @@ except where noted.
   `audio/wav`. The key stays in the daemon's credential store (`/login
   elevenlabs`); no route accepts, returns or logs one. **Known gap:** only WAV is
   stored in the phrase cache, so an ElevenLabs phrase is paid for each time.
+- **V17 — One chosen provider (`speech.provider`, 2026-11-18; amends V16).** The
+  pin's source is a persisted setting, not a client field: `speech.provider` is
+  `radient` (billed to Radient credit) or `elevenlabs` (the user's own key), absent
+  = none chosen. Hearing and speaking use the same provider; there is no ordering
+  and no fallthrough, and OpenAI/Groq are not choices. The voice routes read it
+  from disk per request. Unset, `/voice/utterance` (a recording) and
+  `/voice/speech` refuse `409 voice_provider_unset` before any credential probe;
+  the text door needs no provider. The V16 `provider` field is still accepted
+  (`radient` or `elevenlabs`) and IGNORED: the setting wins when set, and does not
+  stand in when unset. A pinned provider that cannot serve fails with its own
+  reason (`409 stt_unavailable` / `voice_unavailable`, or a Radient `402` carrying
+  the credit copy) and never reaches the other. `GET /v1/desktop/voice` adds
+  `provider: "radient"|"elevenlabs"|null` and `providers: {radient, elevenlabs}`,
+  each `{ready, reason}` (ready = can both hear and speak; `reason` null when
+  ready), from stored credentials with no network call. `byok` stays for the old
+  app. The Speak button (`/v1/tools/speech` descriptor shape, `/v1/agents/{id}/speech`)
+  follows the same setting when set and keeps the whole cascade when unset; a
+  request that names its own `provider` keeps the legacy pass-through unchanged.
 - **V14 — Binding a take to its turn.** A take binds to the turn whose stream
   carries the user `message_start` with `message.id ==` the take's
   `request_id`, for a prompt, a mid-turn steer and a tail steer, live and on

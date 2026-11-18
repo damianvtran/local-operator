@@ -52,9 +52,11 @@ microphone prompt.
 
 ## What you need
 
-- A speech provider on the backend's account: sign in to Radient, or store an
-  ElevenLabs / OpenAI / Groq key (`/login`). `GROQ_API_KEY` in the environment is
-  deliberately ignored; the key must be stored.
+- A speech provider on the backend's account, and ONE chosen: sign in to Radient
+  or store an ElevenLabs key (`/login`), then set `speech.provider` to `radient`
+  or `elevenlabs` (`lop config edit speech.provider elevenlabs`). Voice uses only
+  that provider for hearing and speaking and refuses (`voice_provider_unset`)
+  until one is chosen. Stored OpenAI / Groq keys are not used by voice.
 - Node 24 for `scripts/i18n/generate.py` if you touch i18n catalogues.
 - Speech spends real credits on the account it uses.
 

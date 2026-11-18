@@ -154,6 +154,8 @@ Groq, read from Groq's docs on 2026-10-18/19:
 calls the cascades again, through the route code `feat/session-voice` already
 had.
 
+> **Superseded in part (qwen-voice V17).** The voice routes still pass `include_groq=True`, but they now pin every request to the user's one `speech.provider` (`radient` or `elevenlabs`), so the Groq rung is never reached from them. The rung and its tests stay.
+
 - STT rung: `OpenAiSttClient(key, base_url="https://api.groq.com/openai/v1", label="Groq")`
   with `model="whisper-large-v3-turbo"` pinned. A pinned model skips the OpenAI
   fallback list (`stt/clients.py:289`). This adds no new HTTP code; it adds

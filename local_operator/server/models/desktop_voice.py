@@ -39,17 +39,37 @@ class VoiceByok(BaseModel):
     reason: str
 
 
+class VoiceProviderState(BaseModel):
+    """Whether one provider can serve voice RIGHT NOW, from stored credentials only.
+
+    ``ready`` needs BOTH halves (hearing and speaking) on that provider. ``reason``
+    is the resolver's own sentence for the half that is missing, and ``null`` when
+    ready. Computed without a network call or any spend.
+    """
+
+    ready: bool
+    reason: str | None
+
+
+class VoiceProviders(BaseModel):
+    radient: VoiceProviderState
+    elevenlabs: VoiceProviderState
+
+
 class VoiceStatus(BaseModel):
     """``GET /v1/desktop/voice``.
 
-    ``byok`` is additive and optional: a client that does not know it ignores it,
-    and a client that reads an absent ``byok`` knows the backend predates pinned
-    voice (it must not offer the bring-your-own-key engine).
+    ``provider`` is the user's ``speech.provider`` choice (``null`` = none chosen
+    yet, which makes the voice routes refuse); ``providers`` says whether each
+    choice could serve. ``byok`` is kept for the app that predates the choice and
+    is additive and optional: a client that does not know it ignores it.
     """
 
     active: VoiceActive | None
     settings: VoiceSettings
     byok: VoiceByok | None = None
+    provider: Literal["radient", "elevenlabs"] | None = None
+    providers: VoiceProviders | None = None
 
 
 class VoiceControl(BaseModel):
@@ -157,6 +177,6 @@ class VoiceSpeechRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     source: SpeechSource
     segment: int = Field(default=0, ge=0, le=1000)
-    #: PIN this request to one provider (bring-your-own-key voice): only that
-    #: rung may serve it, whatever else is stored. Absent = the whole cascade.
-    provider: Literal["elevenlabs"] | None = None
+    #: LEGACY, accepted so an older app keeps working, and IGNORED: the provider
+    #: is the ``speech.provider`` setting, which wins over whatever is sent here.
+    provider: Literal["radient", "elevenlabs"] | None = None
