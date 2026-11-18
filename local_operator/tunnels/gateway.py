@@ -11,6 +11,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
@@ -35,6 +36,27 @@ from local_operator.tunnels.request_log import RequestLog, note_reason
 MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_STREAM_SECONDS = 60
 AUTHORIZATION_LEASE_SECONDS = 30
+#: How long the gateway keeps serving on its LAST POSITIVE authorization while
+#: the control plane gives no definitive answer (a 429, a 5xx, a timeout, no
+#: network): measured from that positive check, never from the failure, so a
+#: run of failures cannot keep extending it.
+#:
+#: Why 600 s: the edge WAF that rate-limited this computer on 2026-11-17
+#: (`rate-backend-edge`, 2000 requests / 5 min per source IP) asks for "retry in
+#: 300 seconds", and that day's 429s ran 08:57:35-08:59:38 in runtime.log (one
+#: incident, ~2 min). Two WAF windows cover a full block plus the check that
+#: observes its end; the 30 s lease alone closed the relay ~30 s into it.
+#:
+#: Why it is safe: the lease is a SECOND fence. Every relayed request must still
+#: carry a fresh Radient-signed origin assertion (`OriginVerifier`: pinned RS256
+#: keys, exp - iat <= 30 s, single-use jti), so a tunnel Radient revoked is not
+#: reachable just because this computer cannot hear the revocation. And the
+#: grace is never granted for a definitive answer: a 401/403/402/404, an
+#: inactive record or a version change still close the relay at once
+#: (`note_authorization_failure`, and the poller's restart branch), and the
+#: grace is not re-earned after one until the next positive check: a transient
+#: failure that follows a refusal leaves the relay shut.
+AUTHORIZATION_GRACE_SECONDS = 600
 
 
 logger = logging.getLogger(__name__)
@@ -157,6 +179,12 @@ CREDENTIAL_STORE_BUSY = "credential_store_busy"
 #: poller's next pass, and the supervisor's documented 10 s restart floor on a
 #: cold start), so no new timing is introduced for it.
 SERVER_UNAVAILABLE = "server_unavailable"
+#: Radient ANSWERED, and asked this computer to slow down (429) or timed the
+#: request out (408). Neither says anything about the login or the plan: on
+#: 2026-11-17 the edge WAF's per-IP rate limit answered the connector's poll with
+#: 429, it fell through to `REFUSED`, and the phone told the operator their login
+#: may have expired or their billing may be inactive while both were fine.
+AUTHORIZATION_UNAVAILABLE = "authorization_unavailable"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
 # The connector's own terminal states, not relay refusals: the connector exited
@@ -223,6 +251,22 @@ BILLING_LAPSED = "billing_lapsed"
 #: (`report.retrying_notice`) raises on exactly these transient causes: each
 #: needs a person (or at least an explanation) yet never parks.
 INACTIVE_REASONS = (TUNNEL_INACTIVE, TUNNEL_DISABLED, BILLING_INACTIVE, BILLING_LAPSED)
+#: The causes that are NOT an answer about this tunnel: Radient could not be
+#: reached, did not answer in time, failed on its side, asked this computer to
+#: slow down, or this computer's own store was busy. The gateway keeps serving
+#: on its last positive check through these (`AUTHORIZATION_GRACE_SECONDS`) and
+#: the poller backs off on them. `AUTHORIZATION_DEFERRED` is deliberately absent:
+#: it is a verdict about the LOGIN (its refresh is unsettled), and the login is
+#: exactly what the lease exists to re-confirm.
+TRANSIENT_REASONS = frozenset(
+    {
+        UNREACHABLE,
+        CONTROL_PLANE_TIMEOUT,
+        CREDENTIAL_STORE_BUSY,
+        SERVER_UNAVAILABLE,
+        AUTHORIZATION_UNAVAILABLE,
+    }
+)
 _INACTIVE_REASONS = INACTIVE_REASONS
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
@@ -400,6 +444,7 @@ TERMINAL_REMEDY = {
     CONTROL_PLANE_TIMEOUT: "lop tunnel status",
     CREDENTIAL_STORE_BUSY: "lop tunnel status",
     SERVER_UNAVAILABLE: "lop tunnel status",
+    AUTHORIZATION_UNAVAILABLE: "lop tunnel status",
     REFUSED: "lop login radient",
     NOT_AUTHORIZED: "lop tunnel connect",
     LEASE_PENDING: "lop tunnel status",
@@ -455,6 +500,7 @@ REMEDY_KIND = {
     CONTROL_PLANE_TIMEOUT: "wait_network",
     CREDENTIAL_STORE_BUSY: "check_status",
     SERVER_UNAVAILABLE: "wait_radient",
+    AUTHORIZATION_UNAVAILABLE: "wait_radient",
     AUTHORIZATION_DEFERRED: "wait_radient",
     LEASE_PENDING: "check_status",
     REFUSED: "sign_in",
@@ -500,6 +546,8 @@ REASON_LABEL = {
     UNREACHABLE: "control plane unreachable",
     CONTROL_PLANE_TIMEOUT: "request to Radient timed out",
     CREDENTIAL_STORE_BUSY: "local credential store busy",
+    # English fallback only; the keyed `tunnel.status` copy wins (`_localized`).
+    AUTHORIZATION_UNAVAILABLE: "Radient asked to slow down",
     REFUSED: "authorization refused",
     AUTHORIZATION_DEFERRED: "sign-in refresh deferred",
     NOT_AUTHORIZED: "not authorized",
@@ -564,12 +612,27 @@ def _localized(reason: str) -> tuple[str, str, str] | None:
     `terminal_detail` and `relay_detail`. Imported lazily to keep this module's
     import graph (pinned in `tests/unit/test_import_graph.py`) unchanged.
     """
-    if reason != SERVER_UNAVAILABLE and reason not in _INACTIVE_REASONS:
+    if (
+        reason not in (SERVER_UNAVAILABLE, AUTHORIZATION_UNAVAILABLE)
+        and reason not in _INACTIVE_REASONS
+    ):
         return None
     from local_operator.i18n.keys import tunnel_status
     from local_operator.i18n.text import tr
 
     _t = tr("tunnel.status")
+    if reason == AUTHORIZATION_UNAVAILABLE:
+        # Its own namespace, not `tunnel.status`: adding keys there would change
+        # the English bytes every locale's `tunnel.status` audit is pinned to and
+        # un-ship all seven translations until each is re-audited.
+        from local_operator.i18n.keys import tunnel_transient
+
+        _tt = tr("tunnel.transient")
+        return (
+            _tt(tunnel_transient.authorization_unavailable_label()),
+            _tt(tunnel_transient.authorization_unavailable_terminal()),
+            _tt(tunnel_transient.authorization_unavailable_relay()),
+        )
     if reason == SERVER_UNAVAILABLE:
         return (
             _t(tunnel_status.server_unavailable_label()),
@@ -780,20 +843,65 @@ class Gateway:
         # The last reason the poller could not renew the lease, as a `reason`
         # code. Every successful renewal clears it.
         self.authorization_failure: str | None = None
+        # When the control plane last said YES (monotonic), or None before the
+        # first positive check. The grace is measured from here and only from
+        # here: the boot lease is not a positive answer, so a gateway whose very
+        # first poll fails never borrows the grace.
+        self.last_authorized_at: float | None = None
+        # When the poller will ask again (monotonic), or None when it has not
+        # said. Read by `refusal_headers` so `Retry-After` is the honest time to
+        # the next check rather than a guess.
+        self.next_check_at: float | None = None
 
     def authorize(self) -> None:
-        self.authorized_until = time.monotonic() + AUTHORIZATION_LEASE_SECONDS
+        now = time.monotonic()
+        self.authorized_until = now + AUTHORIZATION_LEASE_SECONDS
+        self.last_authorized_at = now
         self.authorization_failure = None
+        self.next_check_at = None
 
-    def note_authorization_failure(self, reason: str) -> None:
+    def grace_remaining(self) -> float:
+        """Seconds of grace left from the last positive check (0 when none)."""
+        if self.last_authorized_at is None:
+            return 0.0
+        return max(0.0, self.last_authorized_at + AUTHORIZATION_GRACE_SECONDS - time.monotonic())
+
+    def note_authorization_failure(self, reason: str, *, retry_after: float | None = None) -> None:
         """Record why the poller could not renew the relay lease.
 
         Called only from the poller (`service.authorization_failure_reason`),
         which is the one place the control plane's failure is observable. The
         reason survives until a renewal succeeds, so the phone and
         `lop tunnel status` still name the cause after the fact.
+
+        A TRANSIENT reason (no definitive answer: see `TRANSIENT_REASONS`) keeps
+        the relay open until `AUTHORIZATION_GRACE_SECONDS` after the last
+        positive check; every other reason pulls the lease back to its normal
+        bound from that check, so a definitive refusal that follows a run of
+        429s closes the relay at once instead of riding the grace out. A
+        definitive reason also FORFEITS the grace: it clears
+        ``last_authorized_at``, so a transient failure after it (a network blip,
+        one more 429) finds no positive check to measure from and cannot reopen
+        the relay; only the next successful `authorize()` earns the grace back.
+        ``retry_after`` is when the poller will ask again, in seconds.
         """
         self.authorization_failure = reason
+        now = time.monotonic()
+        self.next_check_at = now + retry_after if retry_after is not None else None
+        if self.last_authorized_at is None:
+            return
+        if reason in TRANSIENT_REASONS:
+            self.authorized_until = max(
+                self.authorized_until, self.last_authorized_at + AUTHORIZATION_GRACE_SECONDS
+            )
+        else:
+            self.authorized_until = min(
+                self.authorized_until, self.last_authorized_at + AUTHORIZATION_LEASE_SECONDS
+            )
+            # Without this, positive -> REFUSED -> UNREACHABLE re-opened the
+            # relay for the rest of the 600 s (PR #4168 review R1): the
+            # transient branch above measures from this timestamp.
+            self.last_authorized_at = None
 
     def refusal_reason(self) -> str:
         """The reason this gateway is refusing relayed requests right now.
@@ -846,9 +954,16 @@ class Gateway:
         to give, and inventing one would be the same promise the copy refuses to
         make.
         """
-        if self.refusal_reason() != AUTHORIZATION_DEFERRED:
-            return {}
-        return {"Retry-After": str(DEFERRAL_WINDOW_S)}
+        reason = self.refusal_reason()
+        if reason == AUTHORIZATION_DEFERRED:
+            return {"Retry-After": str(DEFERRAL_WINDOW_S)}
+        # A transient refusal has an honest number too: when the poller asks
+        # Radient again. A client that waits for it (the phone's reconnect loop)
+        # neither hammers a gateway that cannot change its answer sooner nor
+        # gives up on one that is about to recover.
+        if reason in TRANSIENT_REASONS and self.next_check_at is not None:
+            return {"Retry-After": str(max(1, math.ceil(self.next_check_at - time.monotonic())))}
+        return {}
 
     @staticmethod
     def target(scope: Mapping[str, Any]) -> str:
