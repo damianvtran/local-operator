@@ -54,6 +54,7 @@ __all__ = [
     "CARRIED_TIER_ID_PREFIX",
     "CARRIED_TIER_KEY",
     "is_carried_tier",
+    "is_preserved_replay",
     "RESUME_CARD_ID",
     "RESUME_CARD_KEY",
     "is_resume_card",
@@ -194,6 +195,20 @@ def _is_preserved_user_turn(message: AgentMessage) -> bool:
         isinstance(message, Message)
         and bool(message.provider_payload)
         and bool(message.provider_payload.get(PRESERVED_USER_TURN_KEY))
+    )
+
+
+def is_preserved_replay(message: AgentMessage) -> bool:
+    """True for a row the previous pass's marker re-renders on every request.
+
+    A preserved operator turn, or the notice standing in for the ones the cap
+    elided. Both live in the marker payload and are replayed verbatim outside
+    the archive, so a caller deciding what a pass must still CARRY (rather
+    than what is worth cutting, which is :func:`find_cut_point`'s question)
+    can leave them out without losing anything.
+    """
+    return _is_preserved_user_turn(message) or (
+        isinstance(message, Message) and message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
     )
 
 

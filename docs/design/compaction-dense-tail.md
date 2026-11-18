@@ -67,7 +67,10 @@ of pages, dropped oldest-first.
    quarters of the floor cap), and a tail the bound had to trim, or one chosen
    by a floor that was already clamped, is carried on that pass and recorded as
    `0`: the pass after it is an ordinary recency pass. A new operator turn
-   gives the floor an anchor again and releases the earlier task.
+   gives the floor an anchor again and releases the earlier task. The
+   operator's preserved turns at the head of a continuing pass's span are left
+   out of it: they are replayed verbatim outside the archive already, and
+   counting them put one more copy of each on the tail per pass.
 3. **Tool results keep their end.** The archive serializer cut a long result
    head-only at 2,000 characters. It now keeps the first 1,500 and up to the
    last 500, opening the kept end on a line start (`_truncate_middle`), same
@@ -102,10 +105,9 @@ Everything else in the span is verbatim. Outside it:
 - two pages of the session's oldest archived text leave the verbatim head;
 - when the protected span is wider than the default three-page tail, the text
   just OLDER than the span sits in the middle pages instead of on that tail.
-  The archive therefore reaches about three pages less far back, and that
-  text may replay as an image frame rather than as text. On the two real tasks
-  wider than the floor cap this was 22 of 113 and 18 of 146 steps no longer
-  findable as text (see below).
+  The archive therefore reaches about three pages less far back. On the two
+  real tasks wider than the floor cap, 38 of 259 steps that today's second
+  pass still held are gone from the replayed archive (see below).
 
 The operator's own turns, the carried tier, and the newest `keep_recent_tokens`
 of raw history are unchanged.
@@ -151,30 +153,43 @@ window. Figures are after pass 2; steps are those still findable as text.
 
 | What happened between the passes | n | After, today | After, new | Steps, today | Steps, new |
 |---|---|---|---|---|---|
-| Same task, fitted the floor at pass 1 (continued) | 2 | 136.8k | 108.5k | 284/415 | 284/415 |
-| Not continued (see below) | 7 | 57.8k | 50.1k | 352/1308 | 366/1308 |
-| New operator turn before pass 2 | 5 | 110.5k | 75.4k | 299/351 | 259/351 |
-| All | 14 | 69.4k | 55.0k | 935/2074 | 909/2074 |
+| Same task, fitted the floor at pass 1 (continued) | 2 | 136.8k | 107.0k | 284 (+15) / 415 | 279 (+16) / 415 |
+| Not continued (see below) | 7 | 57.8k | 50.1k | 352 (+47) / 1308 | 366 (+32) / 1308 |
+| New operator turn before pass 2 | 5 | 110.5k | 75.4k | 299 (+27) / 351 | 259 (+29) / 351 |
+| All | 14 | 69.3k | 54.9k | 935 (+89) / 2074 | 904 (+77) / 2074 |
 
-No pass 2 is larger than today's. Without step 2 of the design, the continued
-row was 49.0k with 127/415 steps: the protection lasted one pass.
+Steps are those findable as text; the bracketed figure is steps on pages the
+archive replays as image frames, which a vision model can read and a string
+probe cannot. No pass 2 is larger than today's. Without step 2 of the design,
+the continued row was 49.0k with 127 (+16) of 415 steps: the protection lasted
+one pass.
 
 The seven not continued: in three the floor was already clamped at pass 1, in
 three the task's request had been archived before pass 1, and in one a new
 operator turn arrived inside the recency window. Today's behaviour is plain
 recency at pass 2 in all seven as well.
 
-The tail bound was sized on the continued row. At the full floor cap the pass
-lands where today's does (129k-131k against 135k-139k); at three quarters it
-keeps the same number of steps as today at 108k-109k; at 0.6 and 0.5 it keeps
-fewer than today (258 and 237 of 415).
+The tail bound was sized on the continued row, which is two sessions:
 
-The new-operator-turn row loses 40 steps as text, all in the two tasks wider
-than the floor cap (22 of 113 and 18 of 146). In those two the archive dropped
-about 38k more characters of its oldest text than today's did and replayed 5
-and 8 of its 8 middle pages as image frames, which this probe cannot read. The
-mechanism is the last item under "What is given up"; how much of the 40 is
-dropped text and how much is image-replayed was not separated.
+| Tail bound, as a share of the floor cap | After pass 2 | Steps as text, of 415 |
+|---|---|---|
+| Today (raw floor) | 136.8k | 284 |
+| 1.0 | 130.2k | 348 |
+| 0.75 (shipped) | 107.0k | 279 |
+| 0.6 | 93.1k | 253 |
+| 0.5 | 83.3k | 227 |
+
+Three quarters is the smallest of these that keeps about what today keeps.
+
+**The new-operator-turn row keeps fewer steps than today: 288 of 351 against
+326, counting image-replayed pages.** All 38 are in the two tasks wider than
+the floor cap, in history older than the protected span, and they are gone
+from the replayed archive (their pages are mined into the carry digest, which
+keeps asks, decisions and identifiers, not steps). The mechanism is the last
+item under "What is given up": the wide tail displaces about three pages of
+older text. Giving those pages back would cost roughly 12k tokens on every
+pass with a wide tail, about a third of the saving in that row, and was not
+done.
 
 ### Limits of this evidence
 
@@ -189,11 +204,13 @@ dropped text and how much is image-replayed was not separated.
 
 Context-full (text-only models) keeps the floor's raw window: it has no
 verbatim tail, and an LLM summary would paraphrase the task. An
-advisor-widened window stays raw. The mint site that re-stamps the launch
+advisor-widened window stays raw; an advised pass that archives more of a task
+an earlier pass protected still continues that tail. An idle pass (parked
+session) does not continue it. The mint site that re-stamps the launch
 brief on resume (`harness/subagent.py`) is untouched; the collapse is the
 compaction-side bound that holds whatever the mint site does.
 
-A task that runs across many passes is, from its third pass, at plain recency
-with a default tail, as it is today. Holding more of such a task costs about
-1k tokens of context per 0.7% of its steps on the pairs above (87% of steps at
-130k, 55% at 84k), and is a separate decision.
+A task that outgrows its protection is, from the pass after the one that
+trimmed its tail, at plain recency with a default tail, as it is today.
+Holding more of such a task is the size-for-content trade in the bound table
+above, and a separate decision.

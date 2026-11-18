@@ -82,6 +82,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
+    is_preserved_replay,
     is_resume_card,
 )
 from local_operator.compaction.marker import (
@@ -29235,7 +29236,7 @@ class Session:
             )
 
         # (2b') Dense carry of the live task. Only the automatic task floor
-        # changes carrier: an advisory (live or parked) is a semantic "this
+        # moves the CUT: an advisory (live or parked) is a semantic "this
         # must survive as it is" and keeps its raw window exactly as before, so
         # the advisor's widen-only guarantee and its reclaim bookkeeping mean
         # what they meant. Snapcompact only: context-full has no verbatim tail,
@@ -29243,8 +29244,8 @@ class Session:
         dense_tail_from: int | None = None
         dense_tail_previous_chars = 0
         dense_tail_closed = False
-        if strategy == "snapcompact" and parked_hint is None and advisor_hint is None:
-            if keep_recent > settings.keep_recent_tokens:
+        if strategy == "snapcompact" and parked_hint is None:
+            if advisor_hint is None and keep_recent > settings.keep_recent_tokens:
                 dense_cut = await self._dense_tail_cut(
                     compaction_api, llm_history, cut, settings.keep_recent_tokens
                 )
@@ -29265,6 +29266,15 @@ class Session:
                 # absent once the task has outgrown the bound (see
                 # ``Archive.live_tail_chars``), and this pass is then the
                 # plain recency pass it is today.
+                #
+                # An ADVISED pass takes this branch too. The hint decides the
+                # raw window and that is untouched (the cut is not moved
+                # here); what the pass archives is still the same task, and
+                # being advised is no reason to drop its earlier steps into
+                # the paged middle (agent review round 2, N2). An idle pass
+                # (``parked_hint``) does not: its advisor re-anchored on the
+                # still-open work of a parked session, and the floor is not
+                # computed for it.
                 dense_tail_previous_chars = self._previous_live_tail_chars()
                 if dense_tail_previous_chars > 0:
                     dense_tail_from = 0
@@ -29394,7 +29404,7 @@ class Session:
         bounded by :meth:`_dense_tail_cap`, on the horizon the raw floor has
         (see ``compact_to_archive``). Without that the protection lasted one
         pass: 127 of 415 steps after a second pass of two real tasks, against
-        284 with it and 284 for today's raw floor.
+        279 with it and 284 for today's raw floor.
 
         WHAT IS GIVEN UP, stated because it is the whole trade: inside the
         moved span the serializer keeps the first 1,500 and up to the last
@@ -30830,6 +30840,20 @@ class Session:
                 # the snapcompact half of the lift-XOR-keep rule used below for
                 # context-full, and by compaction.pass_ for both strategies.
                 _, archive_span = compaction_api.split_leading_marker(to_summarize)
+                if dense_previous_chars > 0:
+                    # CONTINUING a task (see ``_plan_compaction`` 2b'): the
+                    # whole span is protected, and its head is the previous
+                    # pass's preserved operator turns re-rendered from the
+                    # marker, the task's own request among them. They are
+                    # replayed verbatim outside the archive on every request,
+                    # so carrying them here as well put one more copy of each
+                    # on the tail per pass, and on a session with a wide
+                    # preserved block the tail bound then trimmed real task
+                    # steps to make room for the copies (agent review round
+                    # 2, N1). Left out, the span is the task's own new steps
+                    # and sits directly after the previous tail.
+                    archive_span = [m for m in archive_span if not is_preserved_replay(m)]
+                    dense_tail = len(archive_span)
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
                     archive_span,
@@ -30918,17 +30942,18 @@ class Session:
         75,000 on the shipped 1M-window default. Derived from the floor cap
         because it bounds the same thing in its new carrier (the floor kept at
         most that many RAW tokens of the live task; the tail holds serialized
-        text, which is denser), and the fraction is a measured calibration,
-        not a preference. Replaying real pairs of consecutive passes
-        (``docs/design/compaction-dense-tail.md``), on the two where today's
-        raw floor still protected the task at the second pass:
+        text, which is denser). The fraction was sized on TWO real pairs of
+        consecutive passes, the only ones in the 14 replayed where today's raw
+        floor still protected the task at the second pass
+        (``docs/design/compaction-dense-tail.md``), so treat it as a starting
+        point with thin support, not a settled constant:
 
-        - at 1.0 the pass lands where today's does (129k-131k against
-          135k-139k local), which defeats the change;
-        - at 0.75 it keeps the SAME steps today's raw floor keeps (143 of 202
-          and 141 of 213, both ways) at 108k-109k, about a fifth smaller;
-        - at 0.6 and 0.5 it keeps fewer steps than today (134/124 and
-          117/120).
+        - at 1.0 the pass lands where today's does (130k against 135k-139k
+          local), which defeats the change;
+        - at 0.75 it keeps about what today's raw floor keeps as text (140
+          of 202 and 139 of 213 steps, against 143 and 141) at 106k-108k,
+          about a fifth smaller;
+        - at 0.6 and 0.5 it keeps clearly fewer (131/122 and 116/111).
 
         One pass on its own never reaches it on the 25 replayed points (the
         widest protected span serialized to 73k tokens), so it binds only on a

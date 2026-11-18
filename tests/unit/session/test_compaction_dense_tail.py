@@ -275,6 +275,93 @@ async def test_a_task_still_running_at_the_next_pass_keeps_its_earlier_steps(tmp
     await session.dispose()
 
 
+#: Operator turns from BEFORE the live task, wide enough that re-serializing
+#: them onto the tail every pass is visible against the tail bound.
+STANDING_RULES = [
+    "STANDING RULE %d: " % n + "never touch the ledger schema. " * 120 for n in range(6)
+]
+
+
+@pytest.mark.asyncio
+async def test_a_continued_tail_does_not_re_carry_the_operators_preserved_turns(tmp_path):
+    """Preserved turns ride the marker verbatim; they must not ALSO ride the tail.
+
+    A continuing pass summarizes ``llm_history[:cut]``, whose head is the
+    previous pass's preserved operator turns re-rendered from the marker --
+    the task's own request among them. Counted into the protected span they
+    were serialized onto the tail once more on every pass (2, 3, 4, 5 copies
+    of the request after passes 2 to 5), and with a wide preserved block the
+    tail bound then trimmed real task steps to make room for the copies and
+    ended the continuation early (agent review round 2, N1).
+    """
+    session = _make_session(tmp_path)
+    await session.seed_history([Message.user(rule) for rule in STANDING_RULES])
+    for index in range(OLD_STEPS):
+        session._context.messages.extend(_step("old", index))
+    session._context.messages.append(Message.user(LIVE_REQUEST))
+    done = 20
+    for index in range(done):
+        session._context.messages.extend(_step("live", index))
+    await session._persist_new_messages(session._context.messages)
+
+    assert (await session.compact_now()).ran
+    assert _archive(session).text_tail.count(LIVE_REQUEST) == 1
+    for _ in range(3):
+        await _more(session, range(done, done + 8))
+        done += 8
+        assert (await session.compact_now()).ran
+        archive = _archive(session)
+        assert archive.live_tail_chars == len(archive.text_tail), "the continuation ended early"
+        assert archive.text_tail.count(LIVE_REQUEST) == 1
+        assert not any(rule[:40] in archive.text_tail for rule in STANDING_RULES)
+        context = archive.text_tail + "\n" + _live_texts(session)
+        assert all(m in context for m in _step_markers("live", range(done)))
+    # ...and the operator's turns are still in context, verbatim, where they belong.
+    live = _live_texts(session)
+    assert LIVE_REQUEST in live and all(rule in live for rule in STANDING_RULES)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_advisor_pass_of_the_same_task_still_continues_the_tail(tmp_path, monkeypatch):
+    """The advisor decides the RAW window; it does not release the archived task.
+
+    An advisor-triggered pass keeps its window exactly as the hint asked. What
+    it archives is still the same task an earlier dense pass protected, so the
+    earlier tail must not fall into the paged middle just because this pass
+    was advised (agent review round 2, N2).
+    """
+    session = _make_session(tmp_path)
+    session._compaction_settings = CompactionSettings(
+        keep_recent_tokens=KEEP_RECENT, advisor_enabled=True, advisor_every_n_turns=1
+    )
+    await _grow(session, FITTING_STEPS)
+    assert (await session.compact_now()).ran
+    first = _archive(session)
+    assert first.live_tail_chars > 0
+    await _more(session, range(FITTING_STEPS, FITTING_STEPS + 12))
+
+    monkeypatch.setattr(api, "messages_tokens_upper_bound", lambda messages: 700_000)
+    monkeypatch.setattr(api, "estimate_messages_tokens", lambda messages: 700_000)
+    history = session._render_for_compaction()
+    advised_keep = KEEP_RECENT + 5_000
+    session._advisor_hint = CompactionHint(
+        preserve_from_id=session._context.messages[-1].id,
+        preserve_tokens=advised_keep,
+        compact_now=True,
+        confidence=0.9,
+        reason="task boundary reached",
+        turn_index=session._generation,
+    )
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan), f"no pass planned: {plan}"
+    assert session._advisor_hint is None, "fixture: the hint must have been consumed"
+    assert plan.cut == api.find_cut_point(history, advised_keep), "the advised window is untouched"
+    assert plan.dense_tail_from == 0
+    assert plan.dense_tail_previous_chars == first.live_tail_chars
+    await session.dispose()
+
+
 @pytest.mark.asyncio
 async def test_a_new_operator_request_releases_the_earlier_task(tmp_path):
     """The earlier tail is protected only while ITS task is the live one."""
