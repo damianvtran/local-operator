@@ -13077,9 +13077,20 @@ class RelayServer:
             # joiner's bounded drain plus its tolerant first-result read absorb a
             # slow frame rather than failing the ceremony.
             from local_operator.network.credentials import offers as offers_mod
+            from local_operator.network.invite import check_offer_policy
 
+            # THE SAVED INVITE IS THE POLICY (``--no-credential-offers``), read
+            # before anything is enumerated: a token holder can re-tag an edited
+            # payload, so the joiner's claim is only COMPARED (a mismatch is a
+            # terminal, consumed refusal through the handler below) and never
+            # decides what this device builds or grants.
+            stored_invite = record.invite(invite_id)
+            if stored_invite is None:
+                raise PairingRefusal("invite_invalid", "that invite was never minted here")
+            check_offer_policy(stored_invite, handshake.join_block)
+            offers_allowed = stored_invite.offers_credentials
             send_offer, offer_items, offer_detail = _pair_offer_for(
-                handshake, self.root, record.network_id
+                handshake, self.root, record.network_id, offers_allowed=offers_allowed
             )
             if send_offer:
                 sock.sendall(
@@ -13213,6 +13224,7 @@ class RelayServer:
                     record,
                     joiner_id=joiner_id,
                     decision=decision,
+                    offers_allowed=offers_allowed,
                     offer_items=offer_items,
                     owner_name=self.identity.name or record.self_device_id,
                     root=self.root,
@@ -14044,6 +14056,7 @@ class RelayServer:
                 or self.advertised_endpoints()
                 or None,
                 device_id=str(frame.get("device_id") or ""),
+                credential_offers=str(frame.get("credential_offers") or ""),
             )
             # MINTING IS WHERE THE LIST GROWS, so it is where the dead entries go:
             # the same locked write that adds a row drops the ones past their own
@@ -14067,6 +14080,7 @@ class RelayServer:
                     "role": minted.record.role,
                     "expires_at": minted.record.expires_at,
                     "bound_device": minted.record.device_id,
+                    "credential_offers": minted.record.credential_offers,
                 },
             )
         )
@@ -14081,6 +14095,7 @@ class RelayServer:
             "hosts": list(minted.record.hosts),
             "network_id": record.network_id,
             "network_name": record.name,
+            "credential_offers": minted.record.credential_offers,
         }
 
     def _ctl_member_rm(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -16251,7 +16266,7 @@ def build_stamp() -> dict[str, str]:
 
 
 def _pair_offer_for(
-    handshake: Handshake, root: Path, network_id: str
+    handshake: Handshake, root: Path, network_id: str, *, offers_allowed: bool = True
 ) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
     """``(send, items, audit detail)`` for the pair ceremony's share list.
 
@@ -16281,6 +16296,15 @@ def _pair_offer_for(
 
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
         return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
+    if not offers_allowed:
+        # ``--no-credential-offers``: the store is NEVER enumerated (``build_items``
+        # reads MCP and provider credentials), and the joiner still gets an
+        # EXPLICIT sealed empty list rather than no frame — an absent frame reads
+        # as an old owner ("did not offer") and costs the joiner its drain wait,
+        # while an empty list is the true statement and parses on every build that
+        # knows the frame. ``offer_policy`` lets the audit say why it was empty.
+        empty = offers_mod.digest_of([])
+        return True, [], {"offer_sent": 0, "offer_digest": empty, "offer_policy": "none"}
     try:
         items = offers_mod.build_items(root, network_id=network_id)
     except offers_mod.OfferEnumerationError:
@@ -16302,6 +16326,7 @@ def _grant_pair_shares(
     owner_name: str,
     root: Path,
     audit: Any,
+    offers_allowed: bool = True,
 ) -> tuple[list[str], list[str]]:
     """Admission's credential grants: ``(granted, reduced)``. Caller holds the lock.
 
@@ -16321,6 +16346,17 @@ def _grant_pair_shares(
     with an audit row and left out of the receipt, which names the remedy. Labels
     and emails never enter the audit (§9: masked is display-level).
     """
+    if not offers_allowed:
+        # INDEPENDENT OF THE OFFER (defence in depth for ``--no-credential-offers``):
+        # the offer was empty, so ``_ctl_pair_confirm`` already refuses any named
+        # share — but a decision written another way must still place nothing and,
+        # above all, never add the broker capability. Nothing was offered, so
+        # nothing is ``reduced`` either.
+        if decision.shares:
+            _audit_pair_grant(
+                audit, record, joiner_id, "", holders=0, skipped="invite_policy_none"
+            )
+        return [], []
     from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers as offers_mod
     from local_operator.network.credentials import placement as placement_mod

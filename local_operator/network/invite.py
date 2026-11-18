@@ -37,6 +37,8 @@ from typing import Any
 
 from local_operator.network.handshake import Credential, pair_timeout_seconds
 from local_operator.network.types import (
+    CREDENTIAL_OFFER_POLICIES,
+    CREDENTIAL_OFFERS_NONE,
     INVITE_ROLES,
     InviteRecord,
     NetworkRecord,
@@ -65,6 +67,14 @@ REASON_EPOCH = "invite_epoch_stale"
 REASON_INVITER = "invite_wrong_inviter"
 REASON_DEVICE = "invite_device_mismatch"
 REASON_TAG = "invite_bad_tag"
+#: The joiner's token and the owner's saved invite disagree about the
+#: credential-offer policy (added, dropped or flipped). See :func:`check_offer_policy`.
+REASON_OFFER_POLICY = "invite_offer_policy_mismatch"
+
+#: The ``join`` block / token payload key carrying the credential-offer policy.
+#: OMITTED when the policy is the default, so a default invite's token bytes and
+#: a default joiner's hello stay byte-identical to builds that predate the field.
+OFFER_POLICY_KEY = "credential_offers"
 
 
 def new_invite_id() -> str:
@@ -91,8 +101,24 @@ class InviteEnvelope:
     device_id: str = ""
     v: int = INVITE_ENVELOPE_VERSION
     kind: str = INVITE_KIND
+    #: ``""`` (default) or ``"none"`` — the JOINER's copy of the policy. It
+    #: tells the joiner to fail closed on a non-empty share list and is echoed in
+    #: the join block; it is NOT what the owner enforces (the saved record is).
+    credential_offers: str = ""
+
+    @property
+    def offers_credentials(self) -> bool:
+        return self.credential_offers != CREDENTIAL_OFFERS_NONE
 
     def payload(self) -> dict[str, Any]:
+        payload = self._base_payload()
+        if self.credential_offers:
+            # Only when set: a default token must not change by a byte (old
+            # joiners, and every existing tag-over-bytes fixture).
+            payload[OFFER_POLICY_KEY] = self.credential_offers
+        return payload
+
+    def _base_payload(self) -> dict[str, Any]:
         return {
             "v": self.v,
             "kind": self.kind,
@@ -131,6 +157,7 @@ class InviteEnvelope:
             capabilities=list(self.capabilities),
             hosts=list(self.hosts),
             device_id=self.device_id,
+            credential_offers=self.credential_offers,
         )
 
 
@@ -158,6 +185,7 @@ def mint(
     device_id: str = "",
     invite_id: str | None = None,
     now: float | None = None,
+    credential_offers: str = "",
 ) -> MintedInvite:
     """Mint one invite token for ``record``.
 
@@ -172,6 +200,11 @@ def mint(
         )
     if ttl_s <= 0:
         raise PairingRefusal("bad_ttl", "an invite must expire; give a positive lifetime")
+    if credential_offers not in CREDENTIAL_OFFER_POLICIES:
+        raise PairingRefusal(
+            "bad_offer_policy",
+            f"unknown credential-offer policy {credential_offers!r}",
+        )
     resolved = sorted(capabilities_for_role(role))
     envelope = InviteEnvelope(
         network_id=record.network_id,
@@ -191,6 +224,7 @@ def mint(
         # have.
         hosts=list(hosts or record.listen.get("advertised") or []),
         device_id=device_id,
+        credential_offers=credential_offers,
     )
     return MintedInvite(
         token=encode(envelope, material), envelope=envelope, record=envelope.to_record(record.epoch)
@@ -247,6 +281,16 @@ def decode(token: str) -> InviteEnvelope:
     ]
     if missing:
         raise PairingRefusal(REASON_INVALID, f"that invite token is missing {', '.join(missing)}")
+    # AN UNKNOWN POLICY IS REFUSED, NEVER DEFAULTED: reading a value this build
+    # does not understand as "" would silently turn a restrictive future policy
+    # into the permissive default on the joiner's screen.
+    policy = payload.get(OFFER_POLICY_KEY, "")
+    if not isinstance(policy, str) or policy not in CREDENTIAL_OFFER_POLICIES:
+        raise PairingRefusal(
+            REASON_INVALID,
+            "that invite carries a credential-offer policy this build does not understand; "
+            "update lop on this device",
+        )
     return InviteEnvelope(
         network_id=str(payload["network_id"]),
         network_name=str(payload.get("network_name") or ""),
@@ -263,6 +307,7 @@ def decode(token: str) -> InviteEnvelope:
         device_id=str(payload.get("device_id") or ""),
         v=int(payload.get("v") or INVITE_ENVELOPE_VERSION),
         kind=str(payload.get("kind") or INVITE_KIND),
+        credential_offers=policy,
     )
 
 
@@ -404,9 +449,41 @@ def claim(
             capabilities=list(stored.capabilities),
             hosts=list(stored.hosts),
             device_id=stored.device_id,
+            credential_offers=stored.credential_offers,
         ),
         record=stored,
         capabilities=frozenset(stored.capabilities),
+    )
+
+
+def check_offer_policy(stored: InviteRecord, join_block: dict[str, Any]) -> None:
+    """Refuse when the joiner's claimed policy differs from the SAVED invite's.
+
+    WHY A COMPARISON AND NOT TRUST: the token's tag is keyed by the network
+    secret the token itself carries, so whoever holds a token can edit its
+    payload and re-tag it — the tag proves "minted for this network", not "not
+    edited by its holder". The owner therefore ENFORCES its saved row (offers
+    and grants read ``stored.credential_offers``, never the wire), and this check
+    turns any disagreement into a named, terminal refusal rather than a ceremony
+    whose two screens describe different invites:
+
+    * dropped (record ``none``, claim absent) — an edited token, OR a joiner build
+      that predates the field and cannot honour a restrictive invite; both get the
+      same sentence (update the joining device), and neither could have received
+      credentials anyway because the owner enforces its row;
+    * added (record default, claim ``none``) — an edited token;
+    * flipped/unknown — anything else.
+
+    The default case (both absent) is the legacy ceremony, unchanged.
+    """
+    claimed = join_block.get(OFFER_POLICY_KEY, "")
+    if claimed == stored.credential_offers:
+        return
+    raise PairingRefusal(
+        REASON_OFFER_POLICY,
+        "the joining device's invite does not match the credential-offer policy this "
+        "device minted it with (an edited token, or a joining lop too old for "
+        "--no-credential-offers); update lop on the joining device and mint a fresh invite",
     )
 
 
