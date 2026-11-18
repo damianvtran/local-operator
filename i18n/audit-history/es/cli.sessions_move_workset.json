@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "cli.sessions_move_workset",
-  "history_sha256": "6ae43fbd93ec9f3b16ea81a45dc575fb079e0549b46e4f1d5a5dfe8877f0543d",
+  "history_sha256": "c2f4e26522f6017a6c9e546e85267b8fda711b7f13b64fa2bc707e8fea23e4b7",
   "entries": [
     {
       "locale": "es",
@@ -35,6 +35,40 @@
         {
           "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw1/audit.log",
           "sha256": "dca225b29f51ee3d74fda00dfd94bce3ed34bc4f9cd7b8b867a69a42c8fbc3ca"
+        }
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "cede2b5900e0a1884b33b2a525a25aac1db76e39962e7b7fe0d8b50a49cac4dd",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5; deepseek/deepseek-flash (round-2 delta, provider fallback)",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "es `cli.sessions_move_workset` round-2 delta audit at 56609fdb9 (delta ca98f3789..56609fdb9): PASS, 0 BLOCKER/0 MAJOR; 1 minor (en context sidecar lacks notes for the new keys). Round-2 delta translated by coder d84367798211 on deepseek/deepseek-flash (provider fallback). No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/es/cli.sessions_move_workset/mw2/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw2/record.json",
+          "sha256": "6fb9c5c090851779b1dff5b1f4e5987d3c4e23c8826b4341682454033627cbca"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw2/report.md",
+          "sha256": "f3b4b1c19c282b81741b17e5d1747dd181e54eb6e2bbfdf58be71918a07c7fdb"
+        },
+        {
+          "path": "i18n/audits/evidence/es/cli.sessions_move_workset/mw2/audit.log",
+          "sha256": "9280dfc40718826d9851c1c49fef2b6bf74e7e75743d81ffb0610a94b7d6a26c"
         }
       ]
     }

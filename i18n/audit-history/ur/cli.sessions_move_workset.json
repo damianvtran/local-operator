@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "cli.sessions_move_workset",
+  "history_sha256": "7565fadcec0636aa78ad052fbf079ab4b808f1cb2fbff4a9a95f8c3b179c377a",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "cli.sessions_move_workset",
+      "source_sha256": "cede2b5900e0a1884b33b2a525a25aac1db76e39962e7b7fe0d8b50a49cac4dd",
+      "translator": {
+        "agent": "coder",
+        "model": "anthropic/claude-opus-5-5; deepseek/deepseek-flash (round-2 delta, provider fallback)",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev task 482db48afe47)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ur `cli.sessions_move_workset` round-2 delta audit at 56609fdb9 (delta ca98f3789..56609fdb9): PASS, 0 BLOCKER/0 MAJOR; 1 minor (en context sidecar lacks notes for the new keys). Round-2 delta translated by coder d84367798211 on deepseek/deepseek-flash (provider fallback). No native review, no rendered frame; second independent safety-copy audit not performed. Evidence: i18n/audits/evidence/ur/cli.sessions_move_workset/mw2/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/mw2/record.json",
+          "sha256": "91a4b4b6a0771457a0165dd49a2983b27dfcd070e30f78d0027ba2f032e02bf4"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/mw2/report.md",
+          "sha256": "9aae976efc4dbac9cdf9f597f961f4130a6433f73e5612c1cd22dbc812f0c34c"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/cli.sessions_move_workset/mw2/audit.log",
+          "sha256": "9280dfc40718826d9851c1c49fef2b6bf74e7e75743d81ffb0610a94b7d6a26c"
+        }
+      ]
+    }
+  ]
+}
