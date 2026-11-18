@@ -3658,7 +3658,14 @@ async def test_conversation_reactions_require_the_owner_receipt(api, put_body, d
 
 @pytest.mark.parametrize(
     "given,canonical",
-    [("thumbsup", "👍"), (":white_check_mark:", "✅"), ("\u2764", "\u2764\ufe0f")],
+    [
+        ("thumbsup", "👍"),
+        (":white_check_mark:", "✅"),
+        ("\u2764", "\u2764\ufe0f"),
+        # The shared table with the hub: CLDR skin-tone names resolve here too.
+        ("thumbs_up_medium_skin_tone", "👍🏽"),
+        (":✅:", "✅"),
+    ],
 )
 async def test_conversation_reactions_canonicalise_shortcodes(api, given, canonical):
     """A UI/relay shortcode reaches the hub as the same key an agent sends."""
@@ -3679,6 +3686,14 @@ async def test_conversation_reactions_refuse_an_unknown_shortcode_before_upstrea
     receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
     response = await client.put(path + "not_an_emoji_name", json=receipt)
     assert response.status_code == 422
+    # QA round 1 Q1: the refusal names the accepted forms (shared wording with
+    # the agent tool), keeps the classifiable code, and never echoes the input.
+    from local_operator.team_bridge.emoji_names import ACCEPTED_FORMS_HINT
+
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_request"
+    assert ACCEPTED_FORMS_HINT in detail["message"]
+    assert "not_an_emoji_name" not in detail["message"]
     assert FakeClient.instances == []
 
 

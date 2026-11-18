@@ -21,11 +21,16 @@ CONSTRAINTS.
   unknown one is refused
   here with a clear message instead of a raw server refusal. Pure-ASCII
   input is always treated as a shortcode, because no RGI emoji is ASCII.
-* Matching: surrounding colons and whitespace are stripped, case is folded,
-  and ``-`` / space fold to ``_`` (``thumbs-up`` == ``thumbs_up``). The
-  generator refuses a table in which that fold makes two emoji share a key.
-* Slack skin-tone suffixes (``:+1::skin-tone-3:``) are deliberately not
-  parsed; a literal skin-toned emoji works.
+* Matching (identical to agent-server ``emoji.foldShortcode``): trim ASCII
+  whitespace, then surrounding colons, then whitespace again; fold case; and
+  collapse each run of ``-`` / ASCII whitespace / ``_`` to one ``_``
+  (``thumbs-up`` == ``Thumbs  up`` == ``: thumbs_up :``). The generator refuses
+  a table in which that fold makes two emoji share a key.
+* The name table is the SAME one the hub resolves (skin-tone CLDR names such as
+  ``thumbs_up_medium_skin_tone`` included), pinned by one shared digest in both
+  repos, so a shortcode the hub accepts from the UI is never refused here.
+  Slack skin-tone suffixes (``:+1::skin-tone-3:``) are deliberately not
+  parsed; a literal skin-toned emoji or the CLDR name works.
 """
 
 from __future__ import annotations
@@ -47,10 +52,16 @@ ACCEPTED_FORMS_HINT = (
 )
 
 
+#: ASCII whitespace exactly as the hub's fold trims it. ``str.strip()`` with no
+#: argument also strips U+001C..U+001F, which Go does not, so the set is explicit.
+_WS = " \t\n\v\f\r"
+_SEPARATORS = re.compile(r"[-_ \t\n\v\f\r]+")
+
+
 def shortcode_key(raw: str) -> str:
     """Fold a shortcode to the table's key grammar (see module docstring)."""
 
-    return re.sub(r"[-\s]+", "_", raw.strip().strip(":").strip().lower())
+    return _SEPARATORS.sub("_", raw.strip(_WS).strip(":").strip(_WS).lower())
 
 
 @lru_cache(maxsize=1)
@@ -83,6 +94,9 @@ def normalize_reaction_emoji(raw: str) -> str | None:
         # than spending a hub round trip on a guaranteed ``not_an_emoji``.
         key = shortcode_key(text)
         return emoji_names().get(key) if key else None
+    # ``:✅:`` is a literal wrapped in shortcode colons; unwrap it so it resolves
+    # here instead of reaching the hub, which would refuse the colons.
+    text = text.strip(":").strip() or text
     key = _table()["qualify"].get(text, text)
     if len(key.encode("utf-8")) > REACTION_EMOJI_MAX_BYTES:
         return None

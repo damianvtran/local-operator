@@ -622,6 +622,16 @@ async def test_react_bad_args_never_dispatch(message_id, emoji):
     assert client.calls == []
 
 
+def test_react_emoji_schema_says_shortcodes_are_accepted():
+    # Operator item 2 / review R1: the wire schema itself (not only the opt-in
+    # tool:// doc) tells the model a shortcode is a valid ``emoji``.
+    from local_operator.team_bridge.tool import BridgeToolParams
+
+    emoji = BridgeToolParams.model_json_schema()["properties"]["emoji"]
+    assert emoji["description"] == "Emoji or :shortcode:"
+    assert emoji["default"] == ""
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "emoji,canonical",

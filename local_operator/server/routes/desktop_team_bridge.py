@@ -108,7 +108,10 @@ from local_operator.server.models.desktop_team_bridge_owner_audit import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.team_bridge.emoji_names import normalize_reaction_emoji
+from local_operator.team_bridge.emoji_names import (
+    ACCEPTED_FORMS_HINT,
+    normalize_reaction_emoji,
+)
 from local_operator.team_bridge.types import (
     _CONVERSATION_MESSAGE_ID,
     ATTACHMENT_ID_PATTERN,
@@ -2245,7 +2248,17 @@ def _require_reaction_emoji(emoji: str) -> str:
 
     key = normalize_reaction_emoji(emoji)
     if key is None:
-        _raise_read("invalid_request")
+        # Same ``code`` the renderer already classifies on, but not the generic
+        # read-surface sentence (this is a write): the message names the
+        # accepted forms in the agent tool's exact wording, so a UI or relay
+        # caller that sent a bad shortcode learns what would have worked.
+        raise HTTPException(
+            422,
+            {
+                "code": "invalid_request",
+                "message": f"a reaction must be one emoji: {ACCEPTED_FORMS_HINT}",
+            },
+        )
     return key
 
 

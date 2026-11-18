@@ -31,12 +31,21 @@ Usage (from the repo root)::
     curl -sSfLo emoji-test.txt https://www.unicode.org/Public/18.0.0/emoji/emoji-test.txt
     python scripts/gen_emoji_names.py --gemoji gemoji.json --emoji-test emoji-test.txt
 
-KEY GRAMMAR (must match ``emoji_names.shortcode_key``): lower-case, and ``-``
-and space fold to ``_``. The generator refuses to write if that fold makes two
-DIFFERENT emoji share a key within gemoji; a CLDR name whose folded key is
-ambiguous across CLDR rows is dropped rather than guessed. Skin-tone variants
-(any sequence holding U+1F3FB..U+1F3FF) are skipped: Slack's ``::skin-tone-N:``
-suffix grammar is a non-goal, and the rows would triple the table.
+KEY GRAMMAR (must match ``emoji_names.shortcode_key``): trim ASCII whitespace,
+then surrounding colons, then whitespace again; lower-case; collapse every run
+of ``-`` / ASCII whitespace / ``_`` to one ``_``. The generator refuses to write
+if that fold makes two DIFFERENT emoji share a key within gemoji; a CLDR name
+whose folded key is ambiguous across CLDR rows is dropped rather than guessed.
+
+ONE SHARED TABLE WITH agent-server. ``internal/bridge/emoji/gen`` builds
+``aliases.txt`` from the same two pinned files by the SAME rules (gemoji wins a
+collision; CLDR names snake_cased with ``#``/``*`` spelled out as
+``number_sign``/``asterisk``; skin-tone rows INCLUDED), so a shortcode the hub
+accepts from the UI/mobile is one the agent tool accepts locally, and the
+reverse. Both repos pin one digest of the name -> emoji table
+(``SHARED_TABLE_SHA256`` in ``tests/unit/team_bridge/test_emoji_names.py`` and
+``sharedTableSHA256`` in agent-server ``emoji_test.go``); the two generators
+and both pins must change together in paired PRs.
 """
 
 from __future__ import annotations
@@ -57,22 +66,30 @@ EMOJI_TEST_URL = "https://www.unicode.org/Public/18.0.0/emoji/emoji-test.txt"
 EMOJI_TEST_SHA256 = "8f3735cda1f92a779d78af67cf86066bb1f07143dc22f2ac29394d9bc57ab21a"
 
 OUT = Path(__file__).resolve().parents[1] / "local_operator/team_bridge/emoji_names.json"
-_SKIN_TONES = {chr(c) for c in range(0x1F3FB, 0x1F400)}
+_WS = " \t\n\v\f\r"
 _ROW = re.compile(r"^([0-9A-F ]+?)\s*;\s*([a-z-]+)\s*#\s*\S+\s+E\d+\.\d+\s+(.+)$")
 
 
 def shortcode_key(raw: str) -> str:
     # Mirrors local_operator.team_bridge.emoji_names.shortcode_key; duplicated
     # here only so the generator runs without importing the package.
-    return re.sub(r"[-\s]+", "_", raw.strip().strip(":").strip().lower())
+    return re.sub(r"[-_ \t\n\v\f\r]+", "_", raw.strip(_WS).strip(":").strip(_WS).lower())
 
 
 def cldr_key(name: str) -> str:
-    # "flag: Côte d’Ivoire" -> "flag_cote_d_ivoire"; "keycap: #" -> "keycap" is
-    # rejected below because the punctuation carried the meaning.
-    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
-    ascii_name = ascii_name.replace("#", " number sign ").replace("*", " asterisk ")
-    return re.sub(r"[^a-z0-9+]+", "_", ascii_name.lower()).strip("_")
+    # A line-for-line port of agent-server gen.snakeName, so both tables carry
+    # the same CLDR keys: '#'/'*' spelled out first ("keycap: #" ->
+    # keycap_number_sign, otherwise both keycaps collapse to an ambiguous
+    # "keycap" and *️⃣/#️⃣ lose their CLDR name), then NFKD with combining marks
+    # and apostrophes dropped ("piñata" -> pinata, "woman’s hat" -> womans_hat),
+    # then every run of non-[a-z0-9] -> '_' ("flag: Canada" -> flag_canada).
+    name = name.replace("#", " number sign ").replace("*", " asterisk ")
+    kept = "".join(
+        ch.lower()
+        for ch in unicodedata.normalize("NFKD", name)
+        if unicodedata.category(ch) != "Mn" and ch not in "'\u2019"
+    )
+    return re.sub(r"[^a-z0-9]+", "_", kept).strip("_")
 
 
 def _sha(path: Path, expected: str) -> bytes:
@@ -128,8 +145,6 @@ def main() -> None:
 
     cldr_keys: dict[str, set[str]] = {}
     for name, seq in cldr:
-        if _SKIN_TONES & set(seq):
-            continue
         key = cldr_key(name)
         if key:
             cldr_keys.setdefault(key, set()).add(seq)

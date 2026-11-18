@@ -466,8 +466,10 @@ class BridgeToolParams(BaseModel):
     members: list[ChannelMemberParams] = Field(default_factory=list)
     body: str = ""
     # A reaction is a write, not a read or an acknowledgement. The actor is the
-    # enrolled endpoint; the model supplies only the message and emoji.
-    emoji: str = ""
+    # enrolled endpoint; the model supplies only the message and emoji. The
+    # description is the operator-requested schema hint that shortcodes work
+    # (kept to a few wire tokens: the tool-surface footprint is capped).
+    emoji: str = Field(default="", description="Emoji or :shortcode:")
     remove: bool = False
     limit: int = 50
     cursor: str | None = None
