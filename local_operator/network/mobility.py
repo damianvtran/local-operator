@@ -620,6 +620,24 @@ class SessionMoveResult(TypedDict):
     #: says ``transferred: false`` and every planned worktree reads
     #: ``left_behind``/``not_transferred``: the move was confirmed knowing that.
     working_set: NotRequired[dict[str, Any]]
+    #: OFFLOAD ONLY, and ABSENT unless a resume on arrival was requested: what this
+    #: (source) device asked the destination to do, because the destination's engage
+    #: outcome never comes back on an offload (see :class:`MoveResumeRequested`). A
+    #: recall carries ``engagement`` (the outcome) instead.
+    resume_requested: NotRequired["MoveResumeRequested"]
+
+
+class MoveResumeRequested(TypedDict):
+    """An offload's honest record of the resume it REQUESTED (UI #1978 QA Q-1).
+
+    ``reason`` is ``"active"`` when the conversation was active at prepare time and
+    the destination resumes it by default, ``"asked"`` for ``--engage-on-arrival``.
+    ``session_id`` is the id the destination engages (the minted one for a keep).
+    A request, not an outcome: the source cannot observe the destination's engage.
+    """
+
+    reason: Literal["active", "asked"]
+    session_id: str
 
 
 class MoveEngagement(TypedDict):
@@ -696,6 +714,7 @@ class _Progress:
         self._events: dict[str, threading.Event] = {}
         self._refusals: dict[str, tuple[str, str, str]] = {}
         self._carry: dict[str, dict[str, Any]] = {}
+        self._arrival_active: dict[str, bool] = {}
 
     def note(self, session_id: str, phase: SessionMovePhase) -> None:
         """Record a phase AND signal its marker.
@@ -780,6 +799,25 @@ class _Progress:
             found = self._carry.get(session_id)
         return dict(found) if found is not None else None
 
+    def note_arrival_active(self, session_id: str, active: bool) -> None:
+        """Record the SOURCE's own "was it active" reading for a move it prepared.
+
+        The offload's receipt is built by ``_offload`` while the reading is taken by
+        ``_source_prepare`` (the destination's pull calls it), so the two halves meet
+        here — the same in-relay channel the phases use. It is the ONLY fact this side
+        has about an active-move resume: the engage runs on the destination AFTER
+        ``done`` and its outcome never comes back (UI #1978 QA Q-1), so the receipt
+        can honestly say a resume was REQUESTED (``resume_requested``) and nothing
+        more.
+        """
+        with self._lock:
+            self._arrival_active[session_id] = bool(active)
+
+    def arrival_active(self, session_id: str) -> bool:
+        """The recorded reading for ``session_id``; ``False`` when none was taken."""
+        with self._lock:
+            return self._arrival_active.get(session_id, False)
+
     def forget(self, session_id: str) -> None:
         """Drop EVERYTHING this relay holds in memory for ``session_id``.
 
@@ -801,6 +839,9 @@ class _Progress:
             # it describes the supervisor state AFTER one promote, and answering a
             # later move with it would be a claim about a stale adoption.
             self._carry.pop(session_id, None)
+            # Same scoping: an earlier move's "was active" must never claim a resume
+            # was requested for this one.
+            self._arrival_active.pop(session_id, None)
             prefix = self._event_key(session_id, "")
             for key in [item for item in self._events if item.startswith(prefix)]:
                 del self._events[key]
@@ -5270,6 +5311,10 @@ def _source_prepare(
     if workset_arrival is not None:
         # ADDITIVE: the destination copies it into its receipt; an older one ignores it.
         answer["working_set"] = workset_arrival
+    # Kept on THIS relay too, for the offload's own receipt (``resume_requested``):
+    # the destination's engage outcome never returns, so this reading is all the
+    # source can report. Recorded for false as well, so the value is this move's.
+    progress_for(server).note_arrival_active(session_id, arrival_active)
     if arrival_active:
         # ADDITIVE and absent when false: an older destination ignores it and keeps
         # today's cold arrival.
@@ -7375,6 +7420,30 @@ def _offload(
             result_doc["carry"] = carry_block
         if offload_workset is not None:
             result_doc["working_set"] = offload_workset
+        # WHAT THIS DEVICE ASKED THE DESTINATION TO DO ON ARRIVAL (UI #1978 QA Q-1).
+        # The engage is the destination's post-``done`` work and its outcome is never
+        # sent back (by design: ``done`` must not wait on a runtime spawn), so an
+        # offload's ``engagement`` stays absent = outcome unknown — never a faked
+        # ``engaged``. Without this block a surface read that absence as "nothing is
+        # running there", which is false for an ACTIVE move the destination resumes by
+        # default. The rule mirrors the destination's own (``_destination_move``:
+        # ``auto_resume = arrival_active and not keep and not no_engage_on_arrival``,
+        # engage when that or ``engage_on_arrival``), fed by the reading this device's
+        # prepare took and sent. A REQUEST receipt: an older destination that ignores
+        # ``arrival_active`` would not resume, and this side cannot tell.
+        arrival_was_active = progress.arrival_active(session_id)
+        resume_reason = (
+            "active"
+            if arrival_was_active and not keep and not no_engage_on_arrival
+            else "asked"
+            if engage_on_arrival
+            else ""
+        )
+        if resume_reason:
+            result_doc["resume_requested"] = {
+                "reason": resume_reason,
+                "session_id": new_id or session_id,
+            }
         return cast(SessionMoveResult, result_doc)
     phases = _move_phases(server, session_id)
     reached = phases[-1]["phase"] if phases else None

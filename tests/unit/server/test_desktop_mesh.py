@@ -2571,3 +2571,14 @@ def test_the_desktop_receipt_carries_the_arrival_engagement() -> None:
     assert TransferReceipt(**receipt).engagement == engagement
     cold = transfer_receipt({**result, "engagement": None}, session_id=MINE, keep=False, to=PEER)
     assert cold["engagement"] is None
+    # No request record on a recall-shaped result; the offload's is passed verbatim.
+    assert receipt["resume_requested"] is None
+    requested = {"reason": "active", "session_id": MINE}
+    offload = transfer_receipt(
+        {**result, "engagement": None, "resume_requested": requested},
+        session_id=MINE,
+        keep=False,
+        to=PEER,
+    )
+    assert offload["resume_requested"] == requested
+    assert TransferReceipt(**offload).resume_requested == requested

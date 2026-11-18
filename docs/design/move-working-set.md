@@ -535,7 +535,12 @@ recipes, withheld files, and toolchains this device lacks. Exactly once per move
 `peer-<hex>` message id the receiving session's duplicate gate refuses twice.
 `keep` copies never resume; `--no-engage-on-arrival` (frame
 `no_engage_on_arrival`) keeps the cold arrival. The receipt line is keyed
-(`cli.sessions_move_workset.receipt_resumed`). PR B replaces "stayed on" with the
+(`cli.sessions_move_workset.receipt_resumed`). On an OFFLOAD the receipt is the
+source's and the destination engages after `done`, so the outcome never comes back:
+`engagement` stays absent (unknown) and the receipt carries
+`resume_requested: {reason: "active" | "asked", session_id}` instead — what the source
+asked for, from its own prepare-time reading (UI #1978 QA Q-1); the CLI prints its
+existing "was asked to start it" line. PR B replaces "stayed on" with the
 restored/remapped paths below.
 
 After restore the destination appends one inbox line

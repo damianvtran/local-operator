@@ -255,3 +255,10 @@ class TransferReceipt(BaseModel):
     #: "it resumed on <device> with a note about what stayed behind" — the CLI's
     #: ``receipt_resumed`` line — rather than leave the user to guess.
     engagement: dict[str, Any] | None = None
+    #: OFFLOAD ONLY: the resume this device REQUESTED of the destination
+    #: (``mobility.MoveResumeRequested``: ``reason`` ``"active"`` | ``"asked"`` and the
+    #: ``session_id`` it engages). An offload's ``engagement`` is ``None`` because the
+    #: destination's engage runs after ``done`` and its outcome never comes back, so
+    #: ``None`` there means "unknown", not "nothing is running" (UI #1978 QA Q-1); this
+    #: is what the source honestly knows. ``None`` when no resume was requested.
+    resume_requested: dict[str, Any] | None = None

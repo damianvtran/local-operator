@@ -684,7 +684,11 @@ def test_the_session_move_contract_is_frozen() -> None:
         # (pinned on a document by test_workset_confirm_gate's empty-manifest cell),
         # so a chat-only session's receipt is unchanged.
         "working_set",
+        # The SIXTH optional member (UI #1978 QA Q-1): an offload's record of the
+        # resume it requested, since the destination's engage outcome never returns.
+        "resume_requested",
     }
+    assert set(mobility.MoveResumeRequested.__annotations__) == {"reason", "session_id"}
     # The queue block's own shape: a projection of the source's record, so a
     # reader tolerates missing keys (``total=False``) rather than re-validating
     # a file another device owns.

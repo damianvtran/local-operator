@@ -10,7 +10,10 @@ source (PR A carries no files), what was left behind, what this device lacks. Ce
 * retry of the same move and a reconcile pass → still ONE row;
 * ``no_engage_on_arrival`` → cold, no row;
 * an idle conversation (last turn outside the window) → cold, no row (today's arrival);
-* a ``keep`` copy of an active conversation → never resumed (the source keeps running).
+* a ``keep`` copy of an active conversation → never resumed (the source keeps running);
+* an OFFLOAD's receipt (the source's) records the resume it REQUESTED in
+  ``resume_requested`` — ``active`` / ``asked`` — because the destination's engage
+  outcome never comes back (UI #1978 QA Q-1); keep and opt-out carry none.
 
 Driven through ``mobility.request_move`` on the in-process two-relay rig (recall: B
 pulls from A, so ``_destination_move`` runs on B and its receipt carries the
@@ -99,6 +102,8 @@ def test_an_active_move_engages_and_hands_exactly_one_note(
     assert engaged == [SESSION]
     assert moved["engagement"]["reason"] == "active"
     assert moved["engagement"]["arrival_note"] == "delivered"
+    # A RECALL carries the outcome itself, so no request record (UI #1978 QA Q-1).
+    assert "resume_requested" not in moved
     rows = _rows(server_b)
     assert len(rows) == 1, rows
     assert rows[0].wake is True
@@ -180,3 +185,114 @@ def test_a_keep_copy_of_an_active_conversation_is_never_resumed(
     assert copied["ok"] is True, copied
     assert "engagement" not in copied
     assert engaged == []
+
+
+# ---------------------------------------------------------------------------
+# The offload's receipt: what the SOURCE requested (UI #1978 QA Q-1)
+# ---------------------------------------------------------------------------
+#
+# On an offload A builds the receipt and B engages AFTER ``done``, so A cannot report
+# the outcome: ``engagement`` stays absent (unknown). The desktop dialog read that
+# absence as "Nothing is running on <B> yet" while B was resuming the conversation.
+# The receipt now says what A asked for, from the reading A's prepare took.
+
+
+def _offload(server_a: Any, server_b: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any):
+    return _move(server_a, monkeypatch, to=server_b.identity.device_id, **kwargs)
+
+
+def test_an_active_offload_through_the_desktop_route_reports_the_requested_resume(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, engaged: list[str]
+) -> None:
+    """The REAL desktop route on A, over the two-relay rig: the dialog's own answer."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from local_operator.config import ConfigManager
+    from local_operator.server.routes import desktop_mesh
+
+    server_a, server_b, _host, _port = pair
+    _session(pair, monkeypatch, ago_s=30)
+    token = "t" * 32
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(Path(server_a.root))
+    app.include_router(desktop_mesh.router)
+
+    with TestClient(app, headers={"Authorization": f"Bearer {token}"}) as client:
+        response = client.post(
+            f"/v1/desktop/sessions/{SESSION}/transfer",
+            json={"to": server_b.identity.device_id},
+        )
+
+    assert response.status_code == 200, response.text
+    receipt = response.json()["result"]
+    assert receipt["state"] == "completed", receipt
+    assert receipt["resume_requested"] == {"reason": "active", "session_id": SESSION}
+    # The OUTCOME stays unknown on the source's receipt — never a faked ``engaged``.
+    assert receipt["engagement"] is None, receipt
+
+
+def test_an_offload_asked_to_engage_records_the_request_as_asked(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, engaged: list[str]
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _session(pair, monkeypatch, ago_s=3600)  # idle: only the flag asks
+
+    moved = _offload(server_a, server_b, monkeypatch, engage_on_arrival=True)
+
+    assert moved["ok"] is True, moved
+    assert moved["resume_requested"] == {"reason": "asked", "session_id": SESSION}
+    assert "engagement" not in moved
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "ago_s"),
+    [
+        ({"keep": True}, 30),  # a keep copy is never resumed
+        ({"no_engage_on_arrival": True}, 30),  # the opt-out
+        ({}, 3600),  # an idle conversation arrives cold
+    ],
+    ids=["keep", "no_engage_on_arrival", "idle"],
+)
+def test_an_offload_that_requested_no_resume_carries_no_request(
+    pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    engaged: list[str],
+    kwargs: dict[str, Any],
+    ago_s: float,
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _session(pair, monkeypatch, ago_s=ago_s)
+
+    moved = _offload(server_a, server_b, monkeypatch, **kwargs)
+
+    assert moved["ok"] is True, moved
+    assert "resume_requested" not in moved, moved
+
+
+def test_the_cli_says_the_requested_resume_on_an_offload_receipt() -> None:
+    """The CLI reuses its ``--engage-on-arrival`` request sentence, no new copy."""
+    from local_operator import cli
+
+    result = {
+        "ok": True,
+        "session_id": SESSION,
+        "new_session_id": SESSION,
+        "mode": "move",
+        "state": "completed",
+        "from_device": {"device_id": "d_source", "name": "this-device"},
+        "to_device": {"device_id": "d_destination", "name": "dest-device"},
+        "phase": "done",
+        "phases": [{"phase": "done", "at": 0.0}],
+        "resume_requested": {"reason": "active", "session_id": SESSION},
+    }
+    asked = "dest-device was asked to start it as soon as it lands"
+
+    lines = cli._sessions_move_words(result, session_id=SESSION, to="dest-device")
+
+    assert any(line.startswith(asked) for line in lines), lines
+    del result["resume_requested"]
+    silent = cli._sessions_move_words(result, session_id=SESSION, to="dest-device")
+    assert not any(line.startswith(asked) for line in silent), silent

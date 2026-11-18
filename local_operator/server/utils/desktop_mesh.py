@@ -1034,4 +1034,12 @@ def transfer_receipt(
         "engagement": (
             result.get("engagement") if isinstance(result.get("engagement"), dict) else None
         ),
+        # Verbatim too: an offload's request record (the outcome is the destination's
+        # and never returns), so the dialog says it was asked to resume, not that
+        # nothing runs there.
+        "resume_requested": (
+            result.get("resume_requested")
+            if isinstance(result.get("resume_requested"), dict)
+            else None
+        ),
     }

@@ -7627,7 +7627,10 @@ def _sessions_move_words(
             # live and that it was handed a note. Keyed, unlike the lines above, because
             # it is new copy (AGENTS.md i18n: new user-visible text is keyed).
             engage_lines.append(render_resolved(_wsh.receipt_resumed(device=target)))
-    elif engage_on_arrival:
+    elif engage_on_arrival or isinstance(result.get("resume_requested"), dict):
+        # ``resume_requested`` covers the ACTIVE-MOVE RESUME on an offload: the
+        # destination engages by default, nobody passed the flag, and saying nothing
+        # read as "nothing is running there" (UI #1978 QA Q-1). Same request, same line.
         # ASKED HERE, ANSWERED THERE. On an offload the receipt is the SOURCE's, and the
         # engage is the destination's own post-move work: this device settles on its own
         # durable progress and does not wait for the peer's runtime to start, so the
