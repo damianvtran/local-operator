@@ -5037,10 +5037,12 @@ async def _decide_card_without_prompt(
     ``None`` — the runtime door stays — for: a ``site:v1:`` card (a node's
     browser extension re-verifies that signature; it is real authority there),
     a peer's conversation (its ask lives on the other device), a holder with no
-    probe (the in-process serving handle, which never signs), a facade that
-    reports the decision would go unsigned anyway (that path also injects the
-    answer into the agent's turn, which the bearer path does not), and a card
-    whose ask is not one of this machine's Team Bridge asks.
+    probe (the in-process serving handle, which never signs), and a facade
+    that reports the decision would go unsigned anyway (that path also injects
+    the answer into the agent's turn, which the bearer path does not). Once the
+    probe says the decision would be signed, a card whose ask is not one of
+    this machine's Team Bridge asks is REFUSED (``no_open_ask``) rather than
+    sent to the signing door (R2-1).
     """
     from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
 
@@ -5054,12 +5056,22 @@ async def _decide_card_without_prompt(
         return None
     # Imported here: desktop_team_bridge imports this module (``reply``).
     from local_operator.server.routes.desktop_team_bridge import (
+        _CARD_REFUSALS,
         decide_request_from_card,
     )
 
-    return await decide_request_from_card(
+    decided = await decide_request_from_card(
         store_root(request), ask_id=ask_id, message_id=question_id, word=word
     )
+    if decided is None:
+        # NEVER FALL THROUGH TO THE SIGNING DOOR HERE (PR #4208 review round 2,
+        # R2-1). The probe already said this backend would sign, and the
+        # runtime mints a ``decide`` challenge without checking the ask is
+        # pending, so a stale card (a lapsed ask beside a re-raised one, or an
+        # ask this machine no longer indexes) would raise Touch ID only to be
+        # refused. No matching ask means the card is not waiting: say so.
+        raise ValueError(_CARD_REFUSALS["no_open_ask"])
+    return decided
 
 
 async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:

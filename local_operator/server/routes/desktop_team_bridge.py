@@ -5138,6 +5138,17 @@ async def decide_requests(
 #: ``_CARD_REFUSAL_DEFAULT``; every one of them means nothing was decided.
 _CARD_REFUSALS: dict[str, str] = {
     "no_open_ask": "this request is no longer waiting for a decision",
+    # The runtime door's own sentence (``Session.bridge_decide``), so a card
+    # reads the same whichever door decides it.
+    "not_a_decision_word": "that is not an answer this request accepts — choose Approve or Deny.",
+    # Sent, but the hub did not confirm it: its answer omitted the item (it
+    # may be committed) or reported a transient per-item error. Answering
+    # again is safe — the recorded intent is reused, and a committed request
+    # answers ``request_already_decided`` (PR #4208 review round 2, R2-2).
+    "sent_unconfirmed": (
+        "the decision was sent but Team Bridge has not confirmed it yet; it may already be "
+        "decided — answering again is safe"
+    ),
     "answered_on_card": "this request was already answered on its card",
     "owner_changed": (
         "Team Bridge was set up again since this request arrived, so it can no longer be "
@@ -5181,13 +5192,15 @@ async def decide_request_from_card(
     the hub call and settles the ask afterwards. The account is the committed
     owner's: the ask was issued under that binding and the decide re-checks it.
 
-    Returns ``None`` when no ask on this machine matches (the caller keeps the
-    runtime door, whose own refusal then stands). Returns ``"decided"`` on
+    Returns ``None`` when no ask on this machine matches; the route then
+    refuses with ``no_open_ask`` rather than falling through to the signing
+    door (R2-1). Returns ``"decided"`` on
     success. Raises ``ValueError`` carrying the card sentence on any refusal.
     """
 
     from local_operator.team_bridge import approvals
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.decide import HUMAN_DECISION_WORDS
     from local_operator.team_bridge.read_context import (
         ReadRefused,
         resolve_read_context,
@@ -5195,6 +5208,11 @@ async def decide_request_from_card(
     )
     from local_operator.team_bridge.store import Store, StoreRefused
 
+    # FIRST, before any store read or intent write (PR #4208 security round 2,
+    # S-4): ``bridge_decision_target`` passes an unrecognised card value through
+    # lower-cased, and a word outside the closed set must never be recorded.
+    if word not in HUMAN_DECISION_WORDS:
+        raise ValueError(_CARD_REFUSALS["not_a_decision_word"])
     ask = approvals.bridge_asks_by_message(config_dir).get(message_id)
     if ask is None or ask.ask_id != ask_id:
         return None
@@ -5228,11 +5246,17 @@ async def decide_request_from_card(
     except (BridgeRefusal, ReadRefused):
         raise ValueError(_CARD_REFUSAL_DEFAULT) from None
     (result,) = outcome["results"]
-    if result.get("status") or (result.get("sent") and not result.get("error")):
-        # A sent item the hub's answer omitted may well be committed (review
-        # R1-2 of PR #4099); the ledger reconciles it on the next list read.
+    if result.get("status"):
         return "decided"
-    raise ValueError(_CARD_REFUSALS.get(str(result.get("error") or ""), _CARD_REFUSAL_DEFAULT))
+    error = str(result.get("error") or "")
+    if result.get("sent") and error not in approvals.TERMINAL_ITEM_ERRORS:
+        # ``decide_selection`` marks a sent item the hub's answer omitted as
+        # ``messaging_unavailable`` (it may be committed; review R1-2 of PR
+        # #4099), and a transient per-item error the same way. Neither is
+        # "nothing was decided" (R2-2): the ledger reconciles a committed one on
+        # the next list read, and a retry reuses the recorded intent.
+        raise ValueError(_CARD_REFUSALS["sent_unconfirmed"])
+    raise ValueError(_CARD_REFUSALS.get(error, _CARD_REFUSAL_DEFAULT))
 
 
 @router.get("/v1/desktop/team-bridge/decisions", response_model=CRUDResponse[Any])

@@ -1096,6 +1096,75 @@ def test_a_card_refusal_is_a_card_sentence_and_nothing_is_decided_twice(world) -
     assert world.signer_calls == []
 
 
+def test_a_card_answer_outside_approve_or_deny_saves_nothing(world) -> None:
+    """S-4 (security round 2): a word outside the closed set is refused BEFORE
+    any intent is recorded, so it cannot wedge the request; approve then decides."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    for word in ("maybe", "dismiss", ""):
+        with pytest.raises(ValueError) as refused:
+            _card(world, ask_id=ask_a, message_id="bmsg_a", word=word)
+        assert str(refused.value) == (
+            "that is not an answer this request accepts — choose Approve or Deny."
+        )
+    assert _intent_states(world.root) == {}  # nothing saved
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+    assert _ask_status(world.root, COS, ask_a) == "open"
+    assert _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve") == "decided"
+    assert _intent_states(world.root) == {"bmsg_a": "sent"}
+    assert world.signer_calls == []
+
+
+def test_decide_selection_never_records_a_word_outside_the_closed_set(world) -> None:
+    """The backstop for any caller that skips the route's ``Literal``."""
+
+    import asyncio
+
+    from local_operator.team_bridge import approvals
+    from local_operator.team_bridge.read_context import resolve_read_context, wire_for
+
+    _raise_ask(world.root, "bmsg_a")
+
+    async def run() -> dict[str, Any]:
+        wire = wire_for(world.root)
+        context = await resolve_read_context(world.root, expected_account_id=ACC, wire=wire)
+        return await approvals.decide_selection(
+            wire,
+            [approvals.Selection("bmsg_a", "maybe")],
+            config_dir=world.root,
+            owner=context.owner,
+            access=context.access,
+            expected_account_id=ACC,
+            batch_ref=f"{approvals.BATCH_INTENT_PREFIX}test",
+        )
+
+    (result,) = asyncio.run(run())["results"]
+    assert result["error"] == "not_a_decision_word" and result["sent"] is False
+    assert _intent_states(world.root) == {}
+    assert _hub_calls(world.hub, "/v1/messaging/requests/decide") == []
+    # And the list stays decidable: no unsent word was frozen on the row.
+    listed = world.http.get(LIST, params={"expected_account_id": ACC}, headers=AUTH)
+    (row,) = listed.json()["result"]["items"]
+    assert row["decidable"] is True and row["unsent_decision"] is None
+
+
+def test_a_card_whose_item_the_hub_omits_reads_as_possibly_committed(world) -> None:
+    """R2-2: sent but unconfirmed is NOT "nothing was decided"; a retry is safe."""
+
+    ask_a = _raise_ask(world.root, "bmsg_a")
+    world.hub.batch_answer = {"bmsg_a": {"omit": "1"}}
+    with pytest.raises(ValueError) as unconfirmed:
+        _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve")
+    assert str(unconfirmed.value) == (
+        "the decision was sent but Team Bridge has not confirmed it yet; it may already be "
+        "decided — answering again is safe"
+    )
+    assert "nothing was decided" not in str(unconfirmed.value)
+    assert len(_hub_calls(world.hub, "/v1/messaging/requests/decide")) == 1
+    world.hub.batch_answer = {}
+    assert _card(world, ask_id=ask_a, message_id="bmsg_a", word="approve") == "decided"
+
+
 def test_a_card_in_a_non_designated_session_is_refused(world) -> None:
     ask_o = _raise_ask(world.root, "bmsg_a", session_id="s-other")
     with pytest.raises(ValueError, match="no longer your Team Bridge session"):

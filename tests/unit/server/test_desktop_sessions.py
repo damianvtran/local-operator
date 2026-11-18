@@ -11016,26 +11016,68 @@ async def test_a_no_prompt_card_refusal_is_a_409_sentence(answers_api, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "signature_free, outcome", [(True, "decided"), (False, None)], ids=["capable", "not-ours"]
-)
-async def test_the_runtime_door_stays_when_no_prompt_is_needed_or_the_ask_is_not_ours(
-    answers_api, monkeypatch, signature_free, outcome
-) -> None:
-    """A capability-bearing backend keeps the runtime door (no prompt, and the
-    answer reaches the agent's turn); a card whose ask is not this machine's
-    Team Bridge ask (``None``) falls back to it too."""
+async def test_the_runtime_door_stays_when_no_prompt_is_needed(answers_api, monkeypatch) -> None:
+    """A capability-bearing backend keeps the runtime door: no prompt there,
+    and the answer reaches the agent's turn."""
     client, app = answers_api
-    remote = _UnsignedCapableRemote(signature_free=signature_free, question_id="bmsg_ab")
+    remote = _UnsignedCapableRemote(signature_free=True, question_id="bmsg_ab")
     _install_ask_remote(app, remote)
-    calls = _card_recorder(monkeypatch, outcome)
+    calls = _card_recorder(monkeypatch)
     result = await client.post(
         "/v1/desktop/sessions/0123456789ab/answers",
         json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
     )
     assert result.status_code == 200, result.text
     assert remote.decisions == [("a-site", "bmsg_ab", "approve")]
-    assert len(calls) == (0 if signature_free else 1)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_team_bridge_card_that_would_be_signed_is_refused_not_signed(
+    answers_api, monkeypatch
+) -> None:
+    """R2-1 (a-856f): no matching local ask on a would-sign backend is the
+    "no longer waiting" refusal, never a fall-through to the signing door."""
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    calls = _card_recorder(monkeypatch, None)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == "this request is no longer waiting for a decision"
+    assert len(calls) == 1
+    assert remote.decisions == []  # the signing door was never reached
+
+
+@pytest.mark.asyncio
+async def test_a_card_answer_that_is_not_approve_or_deny_is_refused_before_anything_is_saved(
+    answers_api, tmp_path, monkeypatch
+) -> None:
+    """S-4 at the route: ``Maybe`` reaches the REAL ``decide_request_from_card``
+    (lower-cased by ``bridge_decision_target``) and is refused with the runtime
+    door's sentence before any store read or intent write."""
+    from local_operator.team_bridge import approvals
+
+    client, app = answers_api
+    remote = _UnsignedCapableRemote(signature_free=False, question_id="bmsg_ab")
+    _install_ask_remote(app, remote)
+    looked_up: list[Any] = []
+    monkeypatch.setattr(
+        approvals, "bridge_asks_by_message", lambda root: looked_up.append(root) or {}
+    )
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Maybe"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == (
+        "that is not an answer this request accepts — choose Approve or Deny."
+    )
+    assert looked_up == []  # refused before the first store read
+    assert remote.decisions == [] and remote.calls == []
 
 
 @pytest.mark.asyncio

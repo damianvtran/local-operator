@@ -598,7 +598,11 @@ async def decide_selection(
 
     from .authority import authority_fence, scope_matches_runtime
     from .client import BridgeRefusal, BridgeSignInRequired
-    from .decide import decide_batch_from_human_selection, human_decision
+    from .decide import (
+        HUMAN_DECISION_WORDS,
+        decide_batch_from_human_selection,
+        human_decision,
+    )
     from .decide_intents import DecideIntents
 
     asks = bridge_asks_by_message(config_dir)
@@ -616,6 +620,16 @@ async def decide_selection(
             "ask_settled": False,
         }
         results[item.message_id] = result
+        # THE WORD IS CHECKED BEFORE ANYTHING IS RECORDED (PR #4208 security
+        # round 2, S-4). ``intents.record`` is first-record-wins and
+        # ``conflicting_selection`` then refuses every other word for that ask,
+        # so a recorded word outside the closed set could never be sent and
+        # would lock the request on every door of this machine. The list route
+        # already narrows the word (``Literal``); this is the backstop for any
+        # other caller (the desktop card path).
+        if item.word not in HUMAN_DECISION_WORDS:
+            result["error"] = "not_a_decision_word"
+            continue
         ask = asks.get(item.message_id)
         if ask is None:
             result["error"] = "no_open_ask"
