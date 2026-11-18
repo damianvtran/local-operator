@@ -138,14 +138,19 @@ class Excluded:
     """A path withheld from the transfer. ``rule`` is a rule id or credential class,
     never the value."""
 
-    path: str  # home-relative (~/...) when under home
+    path: str  # home-relative (~/...) when under home; repo-relative from the history scan
     why: str  # secret_path | secret_content | history_secret_path | history_secret_content
     rule: str = ""
+    #: Blob/tree id a history-scan finding is about (``workset_transfer.history_check``),
+    #: so a finding is addressable by digest. Empty for manifest-time path/content hits.
+    object: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"path": self.path, "why": self.why}
         if self.rule:
             out["rule"] = self.rule
+        if self.object:
+            out["object"] = self.object
         return out
 
 

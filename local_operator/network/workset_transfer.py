@@ -12,9 +12,10 @@ relay, no frames, no audit. The wiring (W1-W5 phases, audit-before-bytes,
 recall routing) lives in ``mobility.py`` and calls these.
 
 WHY A SEPARATE MODULE (not ``workset.py`` as design §13 lists). Two coders
-worked the halves concurrently; this file avoids a merge collision. The local
-``Excluded``/``Recipe`` shapes below mirror the §3.4 manifest items and are meant
-to be unified with ``workset.py``'s types once both land.
+worked the halves concurrently; this file avoids a merge collision. The §3.4
+item shapes (``Excluded``, ``Recipe``) are ``workset.py``'s frozen dataclasses,
+imported rather than mirrored, so a finding the scan produces is the same type
+the manifest renders.
 
 THE INVARIANTS, each with the check that holds it:
 
@@ -74,7 +75,9 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, TypedDict
+from typing import Any, Final
+
+from local_operator.network.workset import Excluded, Recipe
 
 #: Private ref namespace for move snapshots. ``refs/lop/wip`` (subagent WIP
 #: checkpoints) is the precedent; refs here are shared across linked worktrees
@@ -127,29 +130,6 @@ class ContainmentError(MoveWorksetError):
 
     def __init__(self, detail: str) -> None:
         super().__init__("unsafe_path", detail)
-
-
-class Excluded(TypedDict):
-    """One §3.4 ``excluded`` item (to unify with ``workset.py``).
-
-    ``path`` is repository-relative POSIX here; the manifest renders it
-    home-relative. ``rule`` is a denylist rule id, credential CLASS or
-    unscannable cause — never a value. ``object`` is the blob/tree id the
-    finding is about, so a finding is addressable by digest.
-    """
-
-    path: str
-    why: str
-    rule: str
-    object: str
-
-
-class Recipe(TypedDict):
-    """One §3.4 ``recipe``: printed, never run by this module (§9)."""
-
-    kind: str
-    run: str
-    cwd: str
 
 
 class HistoryWithheld(MoveWorksetError):
@@ -593,7 +573,7 @@ def history_check(
         blobs=len(blobs),
         scanned_digest=digest,
         findings=tuple(
-            sorted(findings.values(), key=lambda f: (f["path"], f["why"], f["rule"], f["object"]))
+            sorted(findings.values(), key=lambda f: (f.path, f.why, f.rule, f.object))
         ),
     )
 

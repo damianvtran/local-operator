@@ -48,7 +48,7 @@ def _check(rig, **kw) -> wt.HistoryCheck:
 
 
 def _whys(check: wt.HistoryCheck) -> set[tuple[str, str]]:
-    return {(f["path"], f["why"]) for f in check.findings}
+    return {(f.path, f.why) for f in check.findings}
 
 
 def test_unpushed_commit_adding_env_file_is_withheld_and_nothing_staged(tmp_path: Path) -> None:
@@ -60,8 +60,8 @@ def test_unpushed_commit_adding_env_file_is_withheld_and_nothing_staged(tmp_path
     with pytest.raises(wt.HistoryWithheld) as info:
         wt.stage_bundle(rig.src_primary, snap.refs, have, out)
     assert info.value.reason == "history_secret"
-    hits = [f for f in info.value.check.findings if f["path"] == ".env"]
-    assert hits and hits[0]["why"] == "history_secret_path" and hits[0]["rule"]
+    hits = [f for f in info.value.check.findings if f.path == ".env"]
+    assert hits and hits[0].why == "history_secret_path" and hits[0].rule
     # Withheld means no bytes exist to serve.
     assert list(out.iterdir()) == []
 
@@ -70,12 +70,12 @@ def test_secret_content_under_an_innocent_name_is_withheld(tmp_path: Path) -> No
     rig = make_rig(tmp_path, dirty=False)
     _commit(rig.worktree, {"src/settings.py": f"KEY_ID = '{AWS_KEY_ID}'\n"})
     check = _check(rig)
-    hit = [f for f in check.findings if f["path"] == "src/settings.py"]
+    hit = [f for f in check.findings if f.path == "src/settings.py"]
     assert (
-        hit and hit[0]["why"] == "history_secret_content" and hit[0]["rule"] == "aws-access-key-id"
+        hit and hit[0].why == "history_secret_content" and hit[0].rule == "aws-access-key-id"
     )
     # Class name only, never the value.
-    assert AWS_KEY_ID not in json.dumps(check.findings)
+    assert AWS_KEY_ID not in json.dumps([f.to_dict() for f in check.findings])
 
 
 def test_a_blob_shared_by_a_benign_and_a_secret_name_is_judged_under_both(tmp_path: Path) -> None:
@@ -106,14 +106,14 @@ def test_secret_in_a_commit_message_is_withheld(tmp_path: Path) -> None:
     rig = make_rig(tmp_path, dirty=False)
     _commit(rig.worktree, {"ok.txt": "fine\n"}, message=f"use {AWS_KEY_ID}")
     assert any(
-        f["why"] == "history_secret_content" and f["path"] == "" for f in _check(rig).findings
+        f.why == "history_secret_content" and f.path == "" for f in _check(rig).findings
     )
 
 
 def test_unscannable_blobs_are_withheld_not_skipped(tmp_path: Path) -> None:
     rig = make_rig(tmp_path, dirty=False)
     _commit(rig.worktree, {"logo.png": b"\x89PNG\r\n\x1a\n\x00\x01", "big.txt": "x" * 5000})
-    findings = {(f["path"], f["why"], f["rule"]) for f in _check(rig, max_blob_bytes=4096).findings}
+    findings = {(f.path, f.why, f.rule) for f in _check(rig, max_blob_bytes=4096).findings}
     assert ("logo.png", "history_unscannable", "binary") in findings
     assert ("big.txt", "history_unscannable", "over_scan_limit") in findings
 
