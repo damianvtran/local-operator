@@ -1040,6 +1040,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sync.COPY_SET_NAMES``, so a session moved with an open ask carries the "
         "question with it.",
     ),
+    "local_operator/asks/app_attest.py": (
+        1,
+        "``ATTEST_RUN_DIRNAME`` ('run/attest'): the attestation socket namespace under the "
+        "DEVICE-LEVEL run root (``run_dir(config_root, 'run/attest')`` -> "
+        "<config>/run/attest/<session_id>.sock), beside run/session-host and run/mobile and "
+        "never an entry of a session directory. Each socket is a live unix listener bound by "
+        "THIS machine's runtime process and dialled by THIS machine's signed desktop app; the "
+        "peer's signature is checked against a local process, so a copied socket path would "
+        "point a receiving node at a listener that does not exist there.",
+    ),
     "local_operator/session/attachments.py": (
         1,
         "``attachments``: the content-addressed store at the config root. A copy set "
