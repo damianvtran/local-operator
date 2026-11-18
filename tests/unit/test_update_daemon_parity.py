@@ -82,6 +82,17 @@ def _move(
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_live_wakes_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep status off the developer's real user manager (``systemctl show``).
+
+    ``update.wakes_unit_kill_mode`` reads the LOADED KillMode of the real
+    wakes unit; ``None`` is "the gate does not apply", the macOS/no-unit
+    answer. Tests about that gate inject their own reader.
+    """
+    monkeypatch.setattr(update, "wakes_unit_kill_mode", lambda: None)
+
+
 # --------------------------------------------------------------------------- A
 
 
@@ -497,3 +508,138 @@ def test_r1_4_a_later_manual_move_clears_a_failed_serve_retry_row(
     # ``lop services restart`` moved serve and wrote no run record.
     monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: [])
     assert [line for line in update.background_refresh_lines() if "serve" in line] == []
+
+
+# ----------------------------------------------- #4175 deferred follow-ups
+
+
+def _census_run(table: str, rows: dict[int, str]) -> Any:
+    """A ``ps`` runner: ``-eo`` answers ``table``, ``-p <pid>`` answers ``rows[pid]``."""
+
+    def run(command: Any, timeout_s: float) -> str:
+        if "-eo" in command:
+            return table
+        if "-p" in command:
+            return rows.get(int(command[command.index("-p") + 1]), "")
+        return ""
+
+    return run
+
+
+def _runtime_line(pid: int) -> str:
+    from local_operator.session.runtime.types import RUNTIME_MODULE
+
+    return f"{pid} 1 01:00 00:00:01 /usr/bin/python3 -m {RUNTIME_MODULE}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process census")
+def test_r2_1_an_alive_runtime_whose_probe_fails_makes_the_census_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alive but unreadable is not "zero owned": the census answers ``None``.
+
+    The pid is THIS test process, so ``kill(pid, 0)`` really says alive; the
+    per-pid ``ps -p`` answers ``""`` as the runner does on a timeout.
+    """
+    from local_operator.session.runtime import reclaim
+    from local_operator.wakes import owned_runtimes
+
+    me = os.getpid()
+    run = _census_run(_runtime_line(me) + "\n", {})
+    monkeypatch.setattr(reclaim, "_run_command", run)
+    assert owned_runtimes.count_owned(None) is None
+    # The gate this feeds defers on it rather than restarting.
+    fake = FakeSystemctl([3106, 4200], kill_mode="process")
+    outcome = _move(
+        fake, {3106}, keeps_children=True, child_census=update._wake_owned_runtime_count
+    )
+    assert fake.restarts == 0 and outcome.kind == "stale"
+    assert "could not be counted" in outcome.detail
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process census")
+def test_r2_1_an_alive_runtime_with_no_readable_environment_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.session.runtime import reclaim
+    from local_operator.wakes import owned_runtimes
+
+    me = os.getpid()
+    run = _census_run(_runtime_line(me) + "\n", {me: _runtime_line(me)})
+    monkeypatch.setattr(reclaim, "_run_command", run)
+    monkeypatch.setattr(reclaim, "pid_environment", lambda pid, **_: "")
+    assert owned_runtimes.count_owned(None) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process census")
+def test_r2_1_a_runtime_that_exited_or_belongs_to_another_user_is_not_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a pid our stop could still reach holds the restart off."""
+    from local_operator.session.runtime import reclaim
+    from local_operator.wakes import owned_runtimes
+
+    gone, foreign = 2_000_001, 2_000_002
+    table = _runtime_line(gone) + "\n" + _runtime_line(foreign) + "\n"
+    monkeypatch.setattr(reclaim, "_run_command", _census_run(table, {}))
+
+    def kill(pid: int, sig: int) -> None:
+        assert sig == 0
+        raise ProcessLookupError if pid == gone else PermissionError
+
+    monkeypatch.setattr(owned_runtimes.os, "kill", kill)
+    assert owned_runtimes.count_owned(None) == 0
+
+
+def _running_serve_run(root: Path) -> None:
+    run = root / f"serve-{update._run_stamp(time.time())}-x1"
+    run.mkdir(parents=True)
+    (run / "spec.json").write_text(json.dumps({"started_at": time.time(), "bound_s": 1500.0}))
+
+
+def test_q1_a_running_retry_is_not_pending_once_serve_has_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "refresh"
+    _running_serve_run(root)
+    monkeypatch.setattr(update, "_refresh_runs_root", lambda: root)
+    monkeypatch.setattr(update, "_run_abandoned", lambda run: False)
+
+    monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: [object()])
+    (pending,) = [line for line in update.background_refresh_lines() if "serve" in line]
+    assert pending.startswith("serve move: pending, retrying in the background")
+
+    # No build stamp: not a proof of a move, so the retry row stays.
+    monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: None)
+    assert any("pending" in line for line in update.background_refresh_lines())
+
+    # The retry's attempt moved serve; the worker has not written its result yet.
+    monkeypatch.setattr(services, "stale_serve_daemons", lambda records=None: [])
+    assert [line for line in update.background_refresh_lines() if "serve" in line] == []
+
+
+def test_q2_status_names_the_killmode_for_a_control_group_wakes_unit() -> None:
+    def inventory(count: int | None, kill_mode: str | None) -> services.StaleDaemon:
+        (row,) = services.stale_background_daemons(
+            table=_inventory_table,
+            staleness=lambda pid: pid == 3106,
+            generation=lambda pid: OLD,
+            wake_census=lambda: count,
+            wake_kill_mode=lambda: kill_mode,
+        )
+        return row
+
+    busy = inventory(2, "control-group")
+    assert "KillMode=control-group" in busy.reason
+    assert "`lop wake install`" in busy.reason
+    assert "moves when they end" not in busy.reason
+    # Byte-identical to what the update report says for the same unit.
+    fake = FakeSystemctl([3106, 4200], kill_mode="control-group")
+    report = _move(fake, {3106}, keeps_children=True, child_census=lambda: 2)
+    assert fake.restarts == 0
+    assert report.detail == f"left on {OLD.name}: {busy.reason}"
+    # An unanswered manager is refused as unknown, as the gate refuses it.
+    assert "KillMode=unknown" in inventory(0, "").reason
+    # KillMode=process (and no unit at all) keep the census sentence.
+    assert inventory(2, "process").reason == update.wake_children_deferral(2)
+    assert inventory(2, None).reason == update.wake_children_deferral(2)
