@@ -169,6 +169,10 @@ def test_an_interactive_terminal_is_warned_and_only_y_moves(
     assert still_here
     assert accepted == 0, second
     assert "Working files were not transferred: 1 worktree stays on device-a." in second.out
+    # QA round 1, Q-2: the receipt LISTS what stayed, not only the count.
+    assert "~/proj/.worktrees/feat  stays on device-a:" in second.out
+    assert "withheld (looks like a secret): ~/proj/.worktrees/feat/.env.local" in second.out
+    assert "not copied: ~/proj/.worktrees/feat/node_modules" in second.out
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
 

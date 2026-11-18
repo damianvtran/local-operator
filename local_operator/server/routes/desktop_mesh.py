@@ -39,6 +39,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from local_operator.i18n.keys import cli_sessions_move_workset as _ws
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.network.types import MeshRefusal
 from local_operator.server.desktop import require_desktop
@@ -303,6 +304,18 @@ async def transfer_session(session_id: str, body: TransferSession, request: Requ
         detail = _wd.desktop_refusal(
             error=str(result.get("message") or "the move was refused")
         ).envelope(code=code)
+        block = result.get("working_set")
+        if isinstance(block, dict) and code.startswith("working_set_"):
+            # A SURFACE-NEUTRAL SENTENCE (QA round 1, Q-3): the relay's own message
+            # names CLI flags (`--dry-run`, `--confirm-working-set`), which a desktop
+            # user cannot type. ``code`` + ``working_set`` carry everything the dialog
+            # needs to render its own remedy; ``text`` only says what happened.
+            from local_operator.network import workset_text
+
+            detail = _ws.desktop_refused(
+                device=workset_text.device_label(block, str(body.to)),
+                source=workset_text.source_label(block, "?"),
+            ).envelope(code=code)
         if isinstance(result.get("working_set"), dict):
             # ADDITIVE on the 409 envelope: ``{code, params, text}`` is unchanged for
             # every refusal that is not the working-set gate's.

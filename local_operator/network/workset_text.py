@@ -147,22 +147,30 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
             _ws.warning_sends(session=session, device=label)
             if sends
             else _ws.warning_stays(session=session, device=label, source=keeper)
-        ),
-        "  "
-        + _t(
-            _ws.brings_summary(
-                worktrees=len(worktrees),
-                commits=sum(int(row.get("unpushed_commits") or 0) for row in worktrees),
-                files=sum(
-                    int(row.get("staged") or 0)
-                    + int(row.get("unstaged") or 0)
-                    + int(row.get("untracked") or 0)
-                    for row in worktrees
-                ),
-                size=_size(int(totals.get("bytes") or 0)),
-            )
-        ),
+        )
     ]
+    # THE COUNTS ARE THE PLANNED ROWS', the same definition as the block's ``totals``
+    # that the JSON and the desktop dialog read (QA round 1, Q-1): a row already
+    # ``left_behind`` (a history secret, a contended tree) is listed on its own line
+    # below with its reason, never folded into the numbers.
+    planned = [row for row in worktrees if row.get("state") == "planned"]
+    if planned:
+        lines.append(
+            "  "
+            + _t(
+                _ws.brings_summary(
+                    worktrees=len(planned),
+                    commits=sum(int(row.get("unpushed_commits") or 0) for row in planned),
+                    files=sum(
+                        int(row.get("staged") or 0)
+                        + int(row.get("unstaged") or 0)
+                        + int(row.get("untracked") or 0)
+                        for row in planned
+                    ),
+                    size=_size(int(totals.get("bytes") or 0)),
+                )
+            )
+        )
     # ONE PROBE ANSWER PER REMOTE (review U7, round 1): three worktrees of one
     # repository printed the same cannot-fetch / HTTPS / remedy triple three times,
     # which was most of what pushed the TUI card's controls off screen. The answer is
@@ -287,19 +295,61 @@ def prompt_text(block: Mapping[str, Any], *, session: str, device: str = "") -> 
 
 def receipt_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
     """What the receipt says about the working set after the move. ``source`` is the
-    device the files stayed on (the move's ``from_device`` name)."""
+    device the files stayed on (the move's ``from_device`` name).
+
+    THE LIST, NOT ONLY THE COUNT (QA round 1, Q-2): with ``--yes`` or a passed digest
+    no prompt was shown, so the receipt is the only place a text-mode user learns
+    WHICH worktrees, withheld files and dependency trees stayed. The headline is
+    followed by the same row lines the confirmation summary prints."""
     if block.get("transferred") is not False:
         return []
     consent = str(block.get("consent") or "")
+    keeper = source_label(block, source)
     if consent == "not_applicable_keep":
-        return [
-            _t(_ws.receipt_keep(device=device_label(block), source=source_label(block, source)))
-        ]
-    if consent == "without":
-        return [_t(_ws.receipt_without(device=source))]
-    count = sum(
-        1
-        for row in block.get("worktrees") or []
-        if isinstance(row, dict) and row.get("state") == "left_behind"
-    )
-    return [_t(_ws.receipt_not_transferred(count=count, device=source))]
+        head = _t(_ws.receipt_keep(device=device_label(block), source=keeper))
+    elif consent == "without":
+        head = _t(_ws.receipt_without(device=source))
+    else:
+        count = sum(
+            1
+            for row in block.get("worktrees") or []
+            if isinstance(row, dict) and row.get("state") == "left_behind"
+        )
+        head = _t(_ws.receipt_not_transferred(count=count, device=source))
+    return [head, *_stayed_lines(block, source=keeper)]
+
+
+def _stayed_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
+    """One indented line per worktree, withheld file and dependency tree that stayed."""
+    out: list[str] = []
+    for row in block.get("worktrees") or []:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            "  "
+            + _t(
+                _ws.worktree_left(
+                    path=str(row.get("path") or ""),
+                    source=source,
+                    reason=reason_text(str(row.get("reason") or "not_transferred")),
+                )
+            )
+        )
+    for item in [i for i in block.get("excluded") or [] if isinstance(i, dict)][:_LIST_LIMIT]:
+        path = str(item.get("path") or "")
+        why = str(item.get("why") or "")
+        out.append(
+            "  "
+            + _t(
+                _ws.withheld_history(path=path)
+                if why.startswith("history_")
+                else _ws.withheld_secret(path=path)
+            )
+        )
+    for item in [i for i in block.get("left_behind") or [] if isinstance(i, dict)][:_LIST_LIMIT]:
+        command = str(_member(item, "recipe").get("run") or "")
+        if command:
+            out.append(
+                "  " + _t(_ws.leaves_behind(path=str(item.get("path") or ""), command=command))
+            )
+    return out

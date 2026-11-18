@@ -37622,11 +37622,14 @@ class OperatorApp(App[None]):
                 from local_operator.network import workset_text
 
                 source = result.get("from_device") or {}
-                for line in workset_text.receipt_lines(
+                lines = workset_text.receipt_lines(
                     block,
                     source=str(source.get("name") or source.get("device_id") or ""),
-                ):
-                    self._system_notice(line, "warning")
+                )
+                if lines:
+                    # ONE notice: the headline and its indented rows (QA Q-2) read as
+                    # one receipt, not a stack of separate warnings.
+                    self._system_notice("\n".join(lines), "warning")
 
         self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
 

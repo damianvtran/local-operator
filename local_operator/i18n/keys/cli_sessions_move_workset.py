@@ -66,6 +66,10 @@ def changed() -> Msg:
     return Msg("cli.sessions_move_workset.changed", {})
 
 
+def desktop_refused(*, source: str, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.desktop_refused", {"source": source, "device": device})
+
+
 def digest_mismatch() -> Msg:
     return Msg("cli.sessions_move_workset.digest_mismatch", {})
 

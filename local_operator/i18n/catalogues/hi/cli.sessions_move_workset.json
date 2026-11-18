@@ -59,5 +59,6 @@
   "cli.sessions_move_workset.cause.timeout": "git ने जवाब देने में बहुत देर लगाई",
   "cli.sessions_move_workset.cause.git_error": "git ने एक त्रुटि बताई",
   "cli.sessions_move_workset.mentioned": "इस बातचीत में सिर्फ़ ज़िक्र हुआ, इसलिए शामिल नहीं: {paths}",
-  "cli.sessions_move_workset.digest_mismatch": "वह --confirm-working-set digest इस बातचीत की मौजूदा वर्किंग फ़ाइलों से मेल नहीं खाता (शायद गलत टाइप हुआ है, या --dry-run के बाद फ़ाइलें बदल गई हैं)। मौजूदा सूची यह है।"
+  "cli.sessions_move_workset.digest_mismatch": "वह --confirm-working-set digest इस बातचीत की मौजूदा वर्किंग फ़ाइलों से मेल नहीं खाता (शायद गलत टाइप हुआ है, या --dry-run के बाद फ़ाइलें बदल गई हैं)। मौजूदा सूची यह है।",
+  "cli.sessions_move_workset.desktop_refused": "इस बातचीत को {device} पर ले जाने से पहले {source} पर मौजूद वर्किंग फ़ाइलों के बारे में आपका फ़ैसला ज़रूरी है, इसलिए कुछ नहीं ले जाया गया।"
 }

@@ -59,5 +59,6 @@
   "cli.sessions_move_workset.cause.timeout": "git слишком долго не отвечал",
   "cli.sessions_move_workset.cause.git_error": "git сообщил об ошибке",
   "cli.sessions_move_workset.mentioned": "Только упоминаются в этом разговоре, поэтому не включены: {paths}",
-  "cli.sessions_move_workset.digest_mismatch": "Этот digest для --confirm-working-set не совпадает с текущими рабочими файлами разговора (возможно, он введён с ошибкой или файлы изменились после --dry-run). Вот актуальный список."
+  "cli.sessions_move_workset.digest_mismatch": "Этот digest для --confirm-working-set не совпадает с текущими рабочими файлами разговора (возможно, он введён с ошибкой или файлы изменились после --dry-run). Вот актуальный список.",
+  "cli.sessions_move_workset.desktop_refused": "Прежде чем перенести этот разговор на {device}, нужно ваше решение о рабочих файлах на {source}, поэтому ничего не перенесено."
 }

@@ -59,5 +59,6 @@
   "cli.sessions_move_workset.cause.timeout": "git took too long to answer",
   "cli.sessions_move_workset.cause.git_error": "git reported an error",
   "cli.sessions_move_workset.mentioned": "Only mentioned in this conversation, so not included: {paths}",
-  "cli.sessions_move_workset.digest_mismatch": "That --confirm-working-set digest does not match this conversation's current working files (it may be mistyped, or the files changed since --dry-run). Here is the current list."
+  "cli.sessions_move_workset.digest_mismatch": "That --confirm-working-set digest does not match this conversation's current working files (it may be mistyped, or the files changed since --dry-run). Here is the current list.",
+  "cli.sessions_move_workset.desktop_refused": "The working files on {source} need your decision before this conversation moves to {device}, so nothing was moved."
 }

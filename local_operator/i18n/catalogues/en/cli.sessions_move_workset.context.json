@@ -303,5 +303,10 @@
     "role": "shown when the digest the user passed to --confirm-working-set matches nothing current",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
     "note": "Keep --confirm-working-set and --dry-run verbatim. 'digest' is the scope_digest token; a following list of files is printed after this line."
+  },
+  "cli.sessions_move_workset.desktop_refused": {
+    "role": "desktop dialog refusal text when the working-set gate stops a move (the dialog renders the file list itself)",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{source} = device that keeps the files, {device} = destination; both verbatim. Must NOT mention any command-line flag."
   }
 }

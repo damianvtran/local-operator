@@ -2520,6 +2520,10 @@ async def test_the_transfer_forwards_consent_and_a_gate_refusal_carries_the_mani
     detail = response.json()["detail"]
     assert detail["code"] == "working_set_changed"
     assert detail["working_set"] == _WORKING_SET
+    # QA round 1, Q-3: the desktop text names no CLI flag; the dialog renders its own
+    # remedy from ``code`` + ``working_set``.
+    assert "--" not in detail["text"], detail["text"]
+    assert "peer" in detail["text"] and "nothing was moved" in detail["text"]
     assert seen[0]["confirm_working_set"] == digest
     assert seen[0]["without_working_set"] is False
 

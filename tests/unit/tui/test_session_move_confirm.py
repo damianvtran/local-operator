@@ -413,3 +413,22 @@ def test_move_accepts_without_working_set_and_passes_it_to_the_cli(
     session_move.run_session_move(SESSION, "peer", confirm_working_set="sha256:x")
     assert "--without-working-set" in seen[0]
     assert "--without-working-set" not in seen[1]  # a digest is the consent there
+
+
+def test_the_summary_counts_match_the_blocks_planned_totals() -> None:
+    """QA round 1, Q-1: the text counted every row (5 worktrees) while ``totals`` —
+    what the JSON and the desktop dialog read — counted planned rows only (4)."""
+    left = {
+        **BLOCK["worktrees"][0],
+        "path": "~/hook",
+        "state": "left_behind",
+        "reason": "history_secret",
+        "unpushed_commits": 3,
+        "untracked": 9,
+    }
+    block = {**BLOCK, "worktrees": [BLOCK["worktrees"][0], left]}
+
+    lines = workset_text.summary_lines(block, session=SESSION, device="peer")
+
+    assert "  1 worktree · 1 unpushed commit · 6 uncommitted files · 3.2 MB" in lines, lines
+    assert any(line.strip().startswith("~/hook  stays on laptop:") for line in lines), lines

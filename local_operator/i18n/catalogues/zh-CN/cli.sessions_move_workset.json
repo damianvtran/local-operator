@@ -59,5 +59,6 @@
   "cli.sessions_move_workset.cause.timeout": "git响应超时",
   "cli.sessions_move_workset.cause.git_error": "git报告了一个错误",
   "cli.sessions_move_workset.mentioned": "仅在此对话中被提及，因此未包含：{paths}",
-  "cli.sessions_move_workset.digest_mismatch": "该--confirm-working-set摘要与此对话当前的工作文件不匹配（可能输入有误，或文件在--dry-run之后已更改）。以下是当前列表。"
+  "cli.sessions_move_workset.digest_mismatch": "该--confirm-working-set摘要与此对话当前的工作文件不匹配（可能输入有误，或文件在--dry-run之后已更改）。以下是当前列表。",
+  "cli.sessions_move_workset.desktop_refused": "在将此对话移到{device}之前，需要你对{source}上的工作文件作出决定，因此没有移动任何内容。"
 }

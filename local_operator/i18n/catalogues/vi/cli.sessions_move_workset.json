@@ -59,5 +59,6 @@
   "cli.sessions_move_workset.cause.timeout": "git phản hồi quá lâu",
   "cli.sessions_move_workset.cause.git_error": "git báo lỗi",
   "cli.sessions_move_workset.mentioned": "Chỉ được nhắc đến trong cuộc trò chuyện này nên không được tính vào: {paths}",
-  "cli.sessions_move_workset.digest_mismatch": "Digest --confirm-working-set đó không khớp với các tệp làm việc hiện tại của cuộc trò chuyện này (có thể gõ nhầm, hoặc các tệp đã thay đổi kể từ --dry-run). Đây là danh sách hiện tại."
+  "cli.sessions_move_workset.digest_mismatch": "Digest --confirm-working-set đó không khớp với các tệp làm việc hiện tại của cuộc trò chuyện này (có thể gõ nhầm, hoặc các tệp đã thay đổi kể từ --dry-run). Đây là danh sách hiện tại.",
+  "cli.sessions_move_workset.desktop_refused": "Cần bạn quyết định về các tệp làm việc trên {source} trước khi chuyển cuộc trò chuyện này sang {device}, nên chưa chuyển gì."
 }
