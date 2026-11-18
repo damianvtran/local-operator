@@ -499,12 +499,17 @@ async def test_a_preview_403_answers_offered_false(
         status=403,
         payload={"error": {"code": "preview_not_enabled"}},
     )
+    api.radient.add(
+        "GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": [_run()]}}
+    )
 
     body = (await api.client.get("/v1/desktop/remote-compute")).json()
 
     assert body["offered"] is False
     assert body["capacity"] == []
-    assert body["active"] == []
+    # A run already in flight is still reported, even though the deployment will
+    # admit no new one: it was admitted under the old answer and is spending now.
+    assert [row["id"] for row in body["active"]] == [RUN_ID]
 
 
 @pytest.mark.asyncio
@@ -519,10 +524,14 @@ async def test_a_503_not_configured_answers_offered_false(
         status=503,
         payload={"error": {"code": "not_configured"}},
     )
+    api.radient.add(
+        "GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": [_run()]}}
+    )
 
     body = (await api.client.get("/v1/desktop/remote-compute")).json()
 
     assert body["offered"] is False
+    assert [row["id"] for row in body["active"]] == [RUN_ID]
 
 
 @pytest.mark.asyncio
@@ -533,10 +542,12 @@ async def test_capacity_with_no_ready_tier_answers_offered_false(
     api.configure()
     _network(api.root)
     api.radient.add("GET", "/v1/remote-compute/capacity", payload=_capacity(ready=False))
+    api.radient.add("GET", "/v1/remote-compute/runs", payload={"msg": "ok", "result": {"runs": []}})
 
     body = (await api.client.get("/v1/desktop/remote-compute")).json()
 
     assert body["offered"] is False
+    assert body["active"] == []
     assert len(body["capacity"]) == 1
     # The tier is REPORTED rather than hidden: "capacity unavailable" and "no
     # tiers at all" are different sentences.

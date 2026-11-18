@@ -435,8 +435,11 @@ async def remote_compute(
             offered = True
         else:
             capacity, offered = await _capacity(root, credential_id)
-            if offered:
-                active = await _active_runs(root, credential_id)
+            # THE LIVE RUNS ARE READ EVEN WHEN THE DEPLOYMENT OFFERS NO MORE: a run
+            # already in flight was admitted under the old answer and is still
+            # spending money and time, so hiding it from the dropdown that reports
+            # it would be the one omission this read must never make.
+            active = await _active_runs(root, credential_id)
     return {
         "enabled": True,
         "account": account,
