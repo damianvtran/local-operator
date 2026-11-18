@@ -1096,6 +1096,11 @@ async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
     the work it announces to have started.
     """
     ran = threading.Event()
+    # Set the moment the app STARTS the hop, before the callback runs: "the
+    # receipt waited for the app" is then a fact recorded on the app's side,
+    # not a race with `ran.set()` after the callback has already resolved the
+    # caller's future.
+    hopped = threading.Event()
     app_free = threading.Event()
 
     class Session(FakeSession):
@@ -1120,11 +1125,22 @@ async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
 
         def call_from_thread(self, callback: Any) -> None:
             # The app is busy: the scheduling step is queued, not run until the
-            # test frees the app after the receipt is in hand. 10 s bounds only
-            # a mutant that builds the receipt inside the hop.
-            app_free.wait(10.0)
+            # test frees the app after the receipt is in hand. The bound only
+            # matters to a mutant that builds the receipt inside the hop, and
+            # it is deliberately SHORTER than the 5 s `wait_for` below: the hop
+            # then completes, and that mutant fails by name ("the receipt
+            # waited for the app loop") instead of as a bare TimeoutError
+            # (review round 1, R4).
+            app_free.wait(2.0)
+            hopped.set()
             callback()
             ran.set()
+
+        async def _stop_local_session(self) -> None:
+            # Present so a hop that RUNS `schedule` completes instead of
+            # raising AttributeError: a mutant that awaits the hop must reach
+            # the named assertion below, not die on the fake's missing method.
+            return None
 
         def run_worker(self, coro: Any, **kwargs: Any) -> None:
             # ``_stop_local_session`` is a coroutine the real app owns; the
@@ -1137,11 +1153,11 @@ async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
     # a 100 ms margin any loaded runner eats (docs/TEST_TIME_ASSERTIONS.md).
     try:
         receipt = await asyncio.wait_for(handle.request_stop(), timeout=5)
-        ran_at_receipt = ran.is_set()
+        hopped_at_receipt = hopped.is_set()
     finally:
         app_free.set()
+    assert not hopped_at_receipt, "the receipt waited for the app loop"
     assert receipt == 'stopping "the conversation" — /resume sess reopens it'
-    assert not ran_at_receipt, "the receipt waited for the app loop"
     assert await asyncio.to_thread(ran.wait, 5), "the stop hop never reached the app"
 
 

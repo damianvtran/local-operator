@@ -790,6 +790,12 @@ async def test_r1_a_hung_availability_read_adds_nothing_to_the_turn(
 
     monkeypatch.setattr(gate_mod, "read_availability", blackhole)
     stream = create_stream_fn(_NO_STORE, {"radient": {"saver": {"mode": "auto"}}})
+    # A spawn-time parent value of ON (resolver step 4) makes the best-case
+    # resolution ON, so the turn gets PAST the "cannot turn on" early return and
+    # actually starts the availability read. Without it LO1's `auto` resolves
+    # off (`auto_unavailable`) and returns before the read, so a wait added on
+    # the read path could never fail this test (review round 1, R2).
+    stream._saver_parent_value = True
     try:
         request = ChatRequest(model=MODEL, messages=_history(2))
         # "Adds nothing to the turn" is checked as "the turn never suspended":
@@ -806,9 +812,9 @@ async def test_r1_a_hung_availability_read_adds_nothing_to_the_turn(
         else:
             turn.close()
             raise AssertionError("the turn suspended on the availability read")
-        # No "the read was started" check: in LO1 `auto` resolves off for a
-        # best-case answer (`auto_unavailable`), so this path returns before it
-        # starts a read at all; the never-suspended property holds either way.
+        # The read path was really exercised: the background read is started
+        # (and still unanswered), so "never suspended" covers it.
+        assert stream._saver_availability_read is not None, "the read never started"
     finally:
         read = stream._saver_availability_read
         await stream.close()

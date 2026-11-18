@@ -1875,8 +1875,11 @@ class TestStdioStopIsEventDriven:
             # one directly, so a re-introduced poll cannot dodge the spy.
             monkeypatch.setattr(anyio, "sleep", spy(anyio.sleep))
             monkeypatch.setattr(asyncio, "sleep", spy(asyncio.sleep))
-            if hasattr(manager_mod, "sleep"):
-                monkeypatch.setattr(manager_mod, "sleep", spy(manager_mod.sleep))
+            # getattr, not hasattr: pyright does not narrow a module attribute
+            # on hasattr, and the module has no `sleep` binding today.
+            real_sleep = getattr(manager_mod, "sleep", None)
+            if real_sleep is not None:
+                monkeypatch.setattr(manager_mod, "sleep", spy(real_sleep))
         monkeypatch.undo()
         assert ticks == [], f"teardown slept {ticks}; the polling tick is back"
 
