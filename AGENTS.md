@@ -682,6 +682,19 @@ and quoting one total with the other's percentage is how a number stops being
 evidence.) Prefer the scoped inner loop above, and remember that the scoped `test`
 job narrows for nothing on this tree today.
 
+**To wait for heavy work, take the heavy-job slot (#4104); never loop on
+`pgrep -f <pattern>`, which matches its own command line** (twice on 2026-11-17 a
+waiter matched itself forever and read as a heavy job in another lane's check). No CLI
+waiter exists yet: the `bash` tool takes the slot itself for a heavy command
+(`pytest -n N`, JS builds, `tsc`/`vue-tsc` and `typecheck` scripts; not
+mypy/pyright), queues up to 15 min and names the holder. A serial `python -m
+pytest` takes no slot, so it never queues behind a held one. Otherwise check `lop
+services status` once (it names the holder without waiting), or take a specific
+run's exact pid once and wait with a bounded `kill -0 <pid>` loop. Never wait on any
+`pgrep -f` pattern for test or heavy names: the waiter's shell, its `timeout`
+wrapper and the parent `bash -c` all carry the text, and `[p]ytest` still matches
+a later literal in that same command line.
+
 **A local run now reports on itself, so silence is no longer ambiguous.** With
 `LOCAL_OPERATOR_SHARD_STALL_SECONDS` absent (i.e. anywhere but the CI shard job),
 `tests/shard_stall_watchdog.py` falls back to `LOCAL_DEFAULT_SECONDS` = 900 s on a
