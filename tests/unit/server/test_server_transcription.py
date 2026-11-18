@@ -1104,7 +1104,7 @@ async def _post_named_upload(test_app_client, tmp_path, monkeypatch, filename: s
     scratch = tmp_path / "tmp"
     scratch.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
-    seen: list = []
+    seen: list[tuple[str, bytes]] = []
 
     def fake_create_transcription(**kwargs):
         path = kwargs["file_path"]

@@ -1377,6 +1377,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the subscriber loop answers it with a resync snapshot. It names a message on "
         "the socket, never a file, so it is no entry of a session directory",
     ),
+    "local_operator/server/routes/transcription.py": (
+        1,
+        "``_FALLBACK_SUFFIX`` ('.tmp'): the extension given to an uploaded audio file "
+        "with no usable one, inside a per-request ``tempfile.mkdtemp`` directory the "
+        "route ``rmtree``s when the call returns — a system temp file, never an entry of a "
+        "session directory",
+    ),
     "local_operator/server/utils/desktop_feed.py": (
         4,
         "the agent and team directories the desktop app reads (the profile store), plus "
