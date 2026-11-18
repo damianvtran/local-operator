@@ -73,8 +73,14 @@
   "cli.sessions_move_workset.reason.primary_absent": "thiết bị đích không có bản sao của repository này và không thể clone nó",
   "cli.sessions_move_workset.reason.restore_failed": "các tệp đã đến nhưng chưa thể khôi phục",
   "cli.sessions_move_workset.reason.snapshot_failed": "không thể ghi lại trạng thái của nó trên nguồn (nhánh trống hoặc repository bare)",
-  "cli.sessions_move_workset.reason.restore_path_refused": "thiết bị này không nhận kho mã tại đường dẫn đó (xem mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "thiết bị này không nhận kho mã tại đường dẫn đó (thư mục ẩn, hệ thống, lệnh hoặc phụ thuộc, hoặc nằm ngoài mesh.move.working_set_roots)",
   "cli.sessions_move_workset.reason.url_refused": "remote của nó không phải địa chỉ HTTPS hoặc SSH công khai mà thiết bị này sẽ clone",
   "cli.sessions_move_workset.reason.destination_declined": "thiết bị đích đã từ chối nó",
-  "cli.sessions_move_workset.receipt_branch_moved": "Đã đưa nhánh hiện có {branch} tiến từ {old} lên {new}, đúng như thiết bị này đã để lại."
+  "cli.sessions_move_workset.receipt_branch_moved": "Đã đưa nhánh hiện có {branch} tiến từ {old} lên {new}, đúng như thiết bị này đã để lại.",
+  "cli.sessions_move_workset.import_not_granted": "{device} chưa cho phép thiết bị này gửi tệp làm việc sang, nên các tệp ở lại đây và chỉ cuộc trò chuyện được di chuyển. Để cho phép, hãy chạy lệnh này trên {device}: {command}",
+  "cli.sessions_move_workset.reason.import_not_granted": "thiết bị đích chưa cho phép thiết bị này gửi tệp làm việc sang",
+  "cli.sessions_move_workset.reason.too_many_worktrees": "lần di chuyển có nhiều cây làm việc hơn số thiết bị đích nhận cùng lúc",
+  "cli.sessions_move_workset.reason.clone_parent_refused": "thiết bị đích chỉ sao chép một kho mã còn thiếu vào thư mục đã chứa các kho mã của bạn (hoặc đặt mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.kept_as_confirmed": "nó ở lại trên thiết bị nguồn, như đã xác nhận cho lần di chuyển này",
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} sẽ không kết nối tới {remote}: địa chỉ này bị chính sách từ chối (không phải máy chủ công khai)"
 }

@@ -452,7 +452,9 @@ def test_the_self_decided_set_is_exactly_the_onboarding_scopes_and_update() -> N
     # the two onboarding scopes AND `update` (S1 of the mesh rolling updates, whose
     # decision governs this device's own install — RU §2) are grantable-only, and
     # the set is exactly the three.
-    assert types.SELF_DECIDED_SCOPES == frozenset({"approve", "unattended", "update"})
+    assert types.SELF_DECIDED_SCOPES == frozenset(
+        {"approve", "unattended", "update", "workset_import"}
+    )
     assert types.SELF_DECIDED_SCOPES <= types.GRANTABLE_CAPABILITIES
 
 
@@ -501,6 +503,27 @@ def test_the_deciding_device_may_grant_and_revoke_the_onboarding_scopes(
         assert records[0]["actor"] == server.identity.device_id
         assert records[0]["detail"]["added"] == ["approve", "unattended"]
         assert records[1]["detail"]["removed"] == ["unattended"]
+    finally:
+        server.stop()
+
+
+def test_a_drive_device_records_a_workset_import_grant_for_a_peer(root: Path) -> None:
+    """#4245 round 2 (security-lead ruling): ``workset_import`` is the RECEIVING
+    device's decision ("may this peer send working files into my home"), so a
+    non-admin device records it in the peer's row of its own record, like ``update``."""
+    server = _server(root)
+    try:
+        record = _with_peer(server, role="drive")
+        assert "workset_import" not in _caps(root, record.network_id)
+
+        granted = server.control_dispatch(
+            "net_member_caps",
+            {"req": 1, "network": record.name, "device_id": PEER, "grant": ["workset_import"]},
+        )
+
+        assert granted["op"] == "ack", granted
+        assert granted["detail"]["added"] == ["workset_import"]
+        assert "workset_import" in _caps(root, record.network_id)
     finally:
         server.stop()
 

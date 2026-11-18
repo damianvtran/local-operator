@@ -887,5 +887,5 @@
   "wire.settings.mesh_move_working_set_max_bytes.label": "每次迁移的工作文件上限（字节）",
   "wire.settings.mesh_move_working_set_max_bytes.help": "一次迁移向另一台设备发送或从其接收的工作文件数据上限（打包的提交，加上已暂存、未暂存和未跟踪的文件）。超过上限时迁移会被拒绝，且不做任何更改。默认 256 MiB。",
   "wire.settings.mesh_move_working_set_roots.label": "可接收迁移仓库的文件夹",
-  "wire.settings.mesh_move_working_set_roots.help": "会话迁移可以在本设备的哪些位置创建或恢复仓库：主目录下的文件夹，用 ~ 书写并以逗号分隔（例如 ~/code, ~/work）。从不使用隐藏文件夹和系统文件夹。默认值 ~（主目录中的其他任何位置）。"
+  "wire.settings.mesh_move_working_set_roots.help": "会话迁移可以在本设备的哪些位置创建或恢复仓库：主目录下的文件夹，用 ~ 书写并以逗号分隔（例如 ~/code, ~/work）。从不使用隐藏文件夹、系统文件夹、命令文件夹（PATH 中）和 node_modules。未设置时：仓库在其已有的位置恢复，缺失的仓库只会克隆到已经存放你的仓库的文件夹中；设置此项可允许其他文件夹。"
 }

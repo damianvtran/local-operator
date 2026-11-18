@@ -73,8 +73,14 @@
   "cli.sessions_move_workset.reason.primary_absent": "на устройстве назначения нет копии этого репозитория, и его не удалось клонировать",
   "cli.sessions_move_workset.reason.restore_failed": "файлы получены, но пока не могут быть восстановлены",
   "cli.sessions_move_workset.reason.snapshot_failed": "его состояние не удалось зафиксировать на источнике (пустая ветка или bare-репозиторий)",
-  "cli.sessions_move_workset.reason.restore_path_refused": "это устройство не принимает репозиторий по этому пути (см. mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "это устройство не принимает репозиторий по этому пути (скрытая, системная папка, папка команд или зависимостей либо вне mesh.move.working_set_roots)",
   "cli.sessions_move_workset.reason.url_refused": "его удалённый адрес не является публичным адресом HTTPS или SSH, из которого это устройство клонирует",
   "cli.sessions_move_workset.reason.destination_declined": "устройство назначения отклонило его",
-  "cli.sessions_move_workset.receipt_branch_moved": "Существующая ветка {branch} продвинута с {old} до {new}, как её оставило это устройство."
+  "cli.sessions_move_workset.receipt_branch_moved": "Существующая ветка {branch} продвинута с {old} до {new}, как её оставило это устройство.",
+  "cli.sessions_move_workset.import_not_granted": "{device} не разрешило этому устройству отправлять ему рабочие файлы, поэтому они остаются здесь, а переносится только разговор. Чтобы разрешить, выполните это на {device}: {command}",
+  "cli.sessions_move_workset.reason.import_not_granted": "устройство назначения не разрешило этому устройству отправлять ему рабочие файлы",
+  "cli.sessions_move_workset.reason.too_many_worktrees": "в переносе больше рабочих деревьев, чем устройство назначения принимает за раз",
+  "cli.sessions_move_workset.reason.clone_parent_refused": "устройство назначения клонирует отсутствующий репозиторий только в папку, где уже есть ваши репозитории (или задайте mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.kept_as_confirmed": "остаётся на исходном устройстве, как было подтверждено для этого переноса",
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} не будет обращаться к {remote}: политика отклоняет этот адрес (это не публичный хост)"
 }

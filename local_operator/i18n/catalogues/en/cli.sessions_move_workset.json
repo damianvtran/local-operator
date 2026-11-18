@@ -73,8 +73,14 @@
   "cli.sessions_move_workset.reason.primary_absent": "the destination has no copy of this repository and could not clone it",
   "cli.sessions_move_workset.reason.restore_failed": "the files arrived but could not be restored yet",
   "cli.sessions_move_workset.reason.snapshot_failed": "its state could not be captured on the source (an empty branch or a bare repository)",
-  "cli.sessions_move_workset.reason.restore_path_refused": "this device does not accept a repository at that path (see mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "this device does not accept a repository at that path (a hidden, system, command or dependency folder, or outside mesh.move.working_set_roots)",
   "cli.sessions_move_workset.reason.url_refused": "its remote is not a public HTTPS or SSH address this device will clone from",
   "cli.sessions_move_workset.reason.destination_declined": "the destination declined it",
-  "cli.sessions_move_workset.receipt_branch_moved": "Moved the existing branch {branch} forward from {old} to {new}, as this device had left it."
+  "cli.sessions_move_workset.receipt_branch_moved": "Moved the existing branch {branch} forward from {old} to {new}, as this device had left it.",
+  "cli.sessions_move_workset.import_not_granted": "{device} has not allowed this device to send it working files, so they stay here and only the conversation moves. To allow it, run this on {device}: {command}",
+  "cli.sessions_move_workset.reason.import_not_granted": "the destination has not allowed this device to send it working files",
+  "cli.sessions_move_workset.reason.too_many_worktrees": "the move carried more worktrees than the destination accepts at once",
+  "cli.sessions_move_workset.reason.clone_parent_refused": "the destination clones a missing repository only into a folder that already holds your repositories (or set mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.kept_as_confirmed": "it stays on the source, as confirmed for this move",
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} will not contact {remote}: its address is refused by policy (not a public host)"
 }

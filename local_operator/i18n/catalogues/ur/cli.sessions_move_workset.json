@@ -73,8 +73,14 @@
   "cli.sessions_move_workset.reason.primary_absent": "منزل پر اس repository کی کوئی کاپی نہیں ہے اور وہ اسے clone نہیں کر سکی",
   "cli.sessions_move_workset.reason.restore_failed": "فائلیں آ گئیں، لیکن ابھی بحال نہیں ہو سکیں",
   "cli.sessions_move_workset.reason.snapshot_failed": "ماخذ پر اس کی حالت محفوظ نہیں ہو سکی (خالی branch یا bare repository)",
-  "cli.sessions_move_workset.reason.restore_path_refused": "یہ ڈیوائس اس راستے پر ریپوزٹری قبول نہیں کرتی (دیکھیں mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "یہ ڈیوائس اس راستے پر ریپوزٹری قبول نہیں کرتی (پوشیدہ، سسٹم، کمانڈ یا ڈیپینڈنسی فولڈر، یا mesh.move.working_set_roots سے باہر)",
   "cli.sessions_move_workset.reason.url_refused": "اس کا ریموٹ کوئی عوامی HTTPS یا SSH پتا نہیں جس سے یہ ڈیوائس کلون کرے",
   "cli.sessions_move_workset.reason.destination_declined": "منزل والی ڈیوائس نے اسے مسترد کر دیا",
-  "cli.sessions_move_workset.receipt_branch_moved": "موجودہ برانچ {branch} کو {old} سے {new} تک آگے بڑھایا گیا، جیسا اس ڈیوائس نے اسے چھوڑا تھا۔"
+  "cli.sessions_move_workset.receipt_branch_moved": "موجودہ برانچ {branch} کو {old} سے {new} تک آگے بڑھایا گیا، جیسا اس ڈیوائس نے اسے چھوڑا تھا۔",
+  "cli.sessions_move_workset.import_not_granted": "{device} نے اس ڈیوائس کو اپنی ورکنگ فائلیں بھیجنے کی اجازت نہیں دی، اس لیے وہ یہیں رہیں گی اور صرف گفتگو منتقل ہوگی۔ اجازت دینے کے لیے {device} پر یہ چلائیں: {command}",
+  "cli.sessions_move_workset.reason.import_not_granted": "منزل والی ڈیوائس نے اس ڈیوائس کو ورکنگ فائلیں بھیجنے کی اجازت نہیں دی",
+  "cli.sessions_move_workset.reason.too_many_worktrees": "اس منتقلی میں اس سے زیادہ ورک ٹری تھے جتنے منزل ایک ساتھ قبول کرتی ہے",
+  "cli.sessions_move_workset.reason.clone_parent_refused": "منزل غائب ریپوزٹری کو صرف ایسے فولڈر میں کلون کرتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں (یا mesh.move.working_set_roots سیٹ کریں)",
+  "cli.sessions_move_workset.reason.kept_as_confirmed": "یہ ماخذ پر ہی رہے گا، جیسا کہ اس منتقلی کے لیے تصدیق کی گئی تھی",
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} {remote} سے رابطہ نہیں کرے گی: پالیسی اس کا پتہ مسترد کرتی ہے (یہ عوامی ہوسٹ نہیں ہے)"
 }

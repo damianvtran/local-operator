@@ -103,6 +103,10 @@ LEFT_BEHIND_REASONS = (
     "destination_cannot_clone",
     "unsupported_by_peer",
     "not_transferred",
+    # Why a CONFIRMED move left the files on the source on a build that transfers
+    # (QA Q3 / security-lead ruling, #4245 round 2).
+    "kept_as_confirmed",
+    "import_not_granted",
     # Shared with the transfer half (workset_transfer.py), one spelling each: a path
     # that cannot be recreated safely on the destination, and a destination that
     # lacks the free space the restore needs.
@@ -462,7 +466,9 @@ def restore_roots(root: Path | None = None) -> tuple[str, ...]:
 
     Security review #4245 S1: the destination's own allowlist of ``~``-relative roots
     (default ``("~",)``, i.e. anywhere the path rules in
-    ``workset_transfer.primary_path_refusal`` allow). An absent key is the default.
+    ``workset_transfer.primary_path_refusal`` allow). An absent key is the default;
+    with it, an ABSENT repository is also cloned only beside existing ones (S9, round
+    2: ``restore_roots_configured`` / ``workset_transfer.clone_parent_refusal``).
     A PRESENT value is taken as written, and an unreadable one is the empty tuple,
     which refuses every restore: an allowlist that cannot be read must narrow, never
     widen (unlike the cap, where a typo must not turn every move into a refusal).
@@ -480,6 +486,21 @@ def restore_roots(root: Path | None = None) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(str(item) for item in value if str(item).strip())
+
+
+def restore_roots_configured(root: Path | None = None) -> bool:
+    """Whether the operator SET ``mesh.move.working_set_roots`` (S9, round 2).
+
+    Unset is the default clone policy (``workset_transfer.clone_parent_refusal``: an
+    absent repository is cloned only beside the user's existing repositories); set,
+    the roots themselves decide. Unreadable reads as unset (the stricter policy).
+    """
+    from local_operator.network import store
+
+    try:
+        return store.read_config(RESTORE_ROOTS_CONFIG_PATH, None, root) is not None
+    except Exception:  # noqa: BLE001 — unreadable: the stricter default
+        return False
 
 
 def cap_bytes(root: Path | None = None) -> int:
@@ -1076,6 +1097,11 @@ def classify_exclusions(worktree: Path, entries: Iterable[str], *, home: Path) -
     from local_operator.supplements.denylist import is_sensitive
     from local_operator.team_bridge.secret_guard import credential_classes
 
+    def text_classes(data: bytes | None) -> list[str]:
+        if not data or len(data) > _CONTENT_SCAN_MAX_BYTES or b"\0" in data[:8192]:
+            return []  # absent, over the bound, or binary: the table is text-shaped
+        return list(credential_classes(data.decode("utf-8", "replace")))
+
     out: list[Excluded] = []
     for relative in dict.fromkeys(entries):
         absolute = worktree / relative
@@ -1084,17 +1110,33 @@ def classify_exclusions(worktree: Path, entries: Iterable[str], *, home: Path) -
         if rule:
             out.append(Excluded(shown, "secret_path", rule))
             continue
+        data: bytes | None = None
         try:
-            if not absolute.is_file() or absolute.is_symlink():
-                continue
-            if absolute.stat().st_size > _CONTENT_SCAN_MAX_BYTES:
-                continue
-            data = absolute.read_bytes()
+            if (
+                absolute.is_file()
+                and not absolute.is_symlink()
+                and absolute.stat().st_size <= _CONTENT_SCAN_MAX_BYTES
+            ):
+                data = absolute.read_bytes()
         except OSError:
-            continue
-        if b"\0" in data[:8192]:
-            continue  # binary: the credential table is text-shaped
-        classes = credential_classes(data.decode("utf-8", "replace"))
+            data = None
+        classes = text_classes(data)
+        if not classes:
+            # QA Q4 (#4245): the STAGED copy travels too (the snapshot's index
+            # commit), and it can hold a secret the working file no longer does —
+            # or the working file is gone. Scanned here so the consent screen lists
+            # it withheld; the snapshot then reverts that index entry (``_trees``)
+            # instead of the outgoing-object scan refusing the whole worktree as a
+            # "history" secret with push-or-rewrite advice.
+            staged = _git(
+                worktree,
+                "cat-file",
+                "blob",
+                f":{relative}",
+                binary=True,
+                limit=_CONTENT_SCAN_MAX_BYTES + 1,
+            )
+            classes = text_classes(staged if isinstance(staged, bytes) else None)
         if classes:
             out.append(Excluded(shown, "secret_content", classes[0]))
     return out
@@ -1486,7 +1528,7 @@ def compute_manifest(
     )
 
 
-def arrival_block(manifest: Manifest) -> dict[str, Any]:
+def arrival_block(manifest: Manifest, reason: str = "not_transferred") -> dict[str, Any]:
     """The receipt's ``working_set`` block for a move that did NOT transfer the files.
 
     PR A's honest arrival (brief, 2026-11-18): the user confirmed the manifest, the
@@ -1494,6 +1536,12 @@ def arrival_block(manifest: Manifest) -> dict[str, Any]:
     row is reported ``left_behind``/``not_transferred`` and the block says
     ``transferred: false``. ``scope_digest`` is the CONFIRMED scope (computed before
     the rewrite), so a surface can match the receipt to the dialog it showed.
+
+    ``reason`` (QA Q3, #4245): WHY the rows stayed, from the owner's gate — the user
+    left them (``kept_as_confirmed``), the destination cannot receive files
+    (``unsupported_by_peer``) or has not allowed this device to send them
+    (``import_not_granted``). ``not_transferred`` ("this version does not transfer
+    files yet") is only true of a PR A owner, and stays the default for that reading.
     """
     block = manifest.to_dict()
     block["state"] = "left_behind"
@@ -1501,7 +1549,7 @@ def arrival_block(manifest: Manifest) -> dict[str, Any]:
     for row in block["worktrees"]:
         if row.get("state") == "planned":
             row["state"] = "left_behind"
-            row["reason"] = "not_transferred"
+            row["reason"] = reason if reason in LEFT_BEHIND_REASONS else "not_transferred"
     return block
 
 

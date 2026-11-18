@@ -92,10 +92,95 @@ _SERVE_LOCK = threading.Lock()
 #: policy from the offer alone (path rules, URL rules), not by what exists here;
 #: every state-dependent reason (absent, conflict, unsafe component...) is sent as
 #: ``destination_declined`` and kept precisely in this device's ``pending.json``.
-_COARSE_DECLINE: Final = frozenset({"restore_path_refused", "url_refused"})
+_COARSE_DECLINE: Final = frozenset({"restore_path_refused", "url_refused", "too_many_worktrees"})
 #: Rows of an offer this device considers (the owner's manifest never comes close;
 #: the same bound as the probe's ``MAX_PROBE_ROWS``).
 MAX_OFFER_ROWS: Final = 64
+
+# ------------------------------------------------- destination: import authority
+#
+# SECURITY-LEAD RULING (#4245, 2026-11-18, binding): "require explicit destination
+# authorization for importing the working set, separate from session mobility (a
+# receiver-controlled capability or equivalent narrowly scoped policy). Path
+# allowlists constrain where writes land; they do not grant permission to accept a
+# peer's data and writes. Bind that policy check to the authenticated peer,
+# destination, lease and approved manifest; absent grant should leave the
+# session-only move available without file import."
+#
+# The mechanism is the member capability ``workset_import``, granted ON THIS DEVICE to
+# the SOURCE device (``lop network member grant <network> <source-id> workset_import``,
+# a ``SELF_DECIDED_SCOPES`` write, so the receiving device records it without an admin
+# row). ``move`` never implies it, and neither does ``admin`` (``types.ROLE_CAPABILITIES``).
+# It is read from THIS device's own member row for the AUTHENTICATED link peer — never
+# from a frame — at the probe (so the user is told before consenting), at the prepare
+# (so an honest owner never offers), before every clone/plan/fetch of the transfer, and
+# again at the restore after ``done`` (so a revoke in between stops the writes).
+#
+# THE RECALL IS ITS OWN AUTHORIZATION. ``--to local`` is initiated on THIS device and
+# its manifest is confirmed by the operator sitting at it: the person whose home the
+# files land in read the list and said yes, which is exactly the receiver-side
+# decision the ruling asks for, scoped to that one move. A queued recall resumes
+# through the owner's invite, which this device cannot tell from a push, so it falls
+# back to the grant (fail-closed: without one the session moves and the files stay).
+
+#: The capability name (``types.CAPABILITIES``).
+IMPORT_CAPABILITY: Final = "workset_import"
+#: Why this device accepted a peer's working files, recorded in ``pending.json``.
+IMPORT_BY_GRANT: Final = "grant"
+IMPORT_BY_RECALL: Final = "recall"
+
+
+def import_granted(root: Path | str, device_id: str, *, network_id: str = "") -> bool:
+    """Whether THIS device's own record lets ``device_id`` send it working files.
+
+    Reads every network record this device holds (or just ``network_id``) for an
+    ACTIVE member row of ``device_id`` that carries ``workset_import``. Never raises:
+    an unreadable record grants nothing.
+    """
+    if not device_id:
+        return False
+    from local_operator.network import store
+
+    try:
+        records = store.list_networks(Path(root))
+    except Exception:  # noqa: BLE001 — unreadable authority is no authority
+        return False
+    for record in records:
+        if network_id and str(record.network_id) != network_id:
+            continue
+        member = record.member(device_id)
+        if member is not None and member.active and IMPORT_CAPABILITY in member.capabilities:
+            return True
+    return False
+
+
+def import_authority(
+    root: Path | str, device_id: str, *, recall: bool, network_id: str = ""
+) -> str:
+    """``recall`` / ``grant`` when this device accepts ``device_id``'s files, else ``''``."""
+    if recall:
+        return IMPORT_BY_RECALL
+    return IMPORT_BY_GRANT if import_granted(root, device_id, network_id=network_id) else ""
+
+
+def import_remedy(network_id: str, device_id: str) -> str:
+    """The exact command, run ON THE DESTINATION, that lets ``device_id`` send files.
+
+    Ids only (``member grant`` resolves a network id and a device id; a name can be
+    ambiguous or renamed), each shell-quoted because both arrive from a peer's frame.
+    """
+    import shlex
+
+    return " ".join(
+        [
+            "lop network member grant",
+            shlex.quote(network_id or "<network>"),
+            shlex.quote(device_id or "<device>"),
+            IMPORT_CAPABILITY,
+        ]
+    )
+
+
 #: ``staging/<sid>.workset/cloned.json``: the primaries THIS move cloned (S1c).
 CLONED_JOURNAL: Final = "cloned.json"
 #: Security review #4245 S4: the ``prefix`` resume check is a byte-granular content
@@ -1012,8 +1097,26 @@ def destination_transfer(
     lease_epoch: str,
     offer: Mapping[str, Any],
     owner_device: str,
+    authority: str = "",
+    recheck: Any = None,
+    approved_scope: str = "",
+    self_device: str = "",
+    network_id: str = "",
 ) -> str:
     """W1–W5 on the destination. Returns the ``workset_digest`` for ``ready``.
+
+    IMPORT AUTHORITY FIRST (security-lead ruling, see ``IMPORT_CAPABILITY``).
+    ``authority`` is the caller's reading for the AUTHENTICATED owner: ``recall`` (this
+    device asked and its operator confirmed) or ``grant`` (``workset_import`` on this
+    device's row for it); anything else refuses before a single clone, plan or fetch.
+    A ``grant`` is re-read through ``recheck()`` (default: :func:`import_granted`)
+    before W1, after each W1 row, before each plan and before each fetch, so a revoke
+    mid-transfer stops it. ``approved_scope`` + ``self_device``: the confirmed scope
+    digest and this device's id; the offer's ``binding`` must equal
+    ``workset.transfer_binding`` over them, this lease and the offered snapshot ids, so
+    the decision is bound to the approved manifest for THIS destination and lease. It
+    is journaled with them in ``pending.json`` for the restore's re-check
+    (:func:`restore_arrived`).
 
     Raises :class:`WorksetTransferRefused` (the caller rolls the move back exactly as a
     failed session copy: nothing committed, ``changed: False``). Writes
@@ -1033,25 +1136,68 @@ def destination_transfer(
     * S1c — a clone this move makes is journaled in ``cloned.json`` as soon as it
       exists, so the rollback (``discard_incoming``) removes it, and only it.
     * S8 — what goes back to the source is coarse (``_COARSE_DECLINE``); the precise
-      reason stays in this device's ``pending.json``.
+      reason stays in this device's ``pending.json``. S12 (round 2), accepted residual:
+      whether a home path exists is still observable (an absent path may be cloned, an
+      existing foreign one is declined), but only to a peer this device granted
+      ``workset_import`` — the receiver-side consent the review named as the fix —
+      and the default clone policy limits clones to folders already holding
+      repositories, so the observable set is those folders' direct children.
     * S6/R3/R4 — the cap and free space are checked on the first plan AND after a
       re-plan, and the checkout's measured size is checked against the home
       filesystem before ``ready``.
     """
-    from local_operator.network import workset
-    from local_operator.network import workset_probe
+    from local_operator.network import workset, workset_probe
     from local_operator.network import workset_transfer as engine
 
+    def authorised() -> None:
+        if authority == IMPORT_BY_RECALL:
+            return
+        ok = authority == IMPORT_BY_GRANT and bool(
+            recheck() if recheck is not None else import_granted(server.root, owner_device)
+        )
+        if not ok:
+            raise WorksetTransferRefused(
+                "working_set_import_not_granted",
+                "this device has not allowed that device to send it working files "
+                f"(run `{import_remedy(network_id, owner_device)}` here to allow it)",
+            )
+
+    authorised()
+    all_rows = [r for r in offer.get("worktrees") or [] if isinstance(r, Mapping)]
+    if approved_scope and self_device:
+        expected = workset.transfer_binding(
+            approved_scope,
+            lease_epoch=lease_epoch,
+            to_device=self_device,
+            snapshots=[
+                {k: r.get(k) for k in ("path", "head", "index", "worktree")} for r in all_rows
+            ],
+        )
+        if str(offer.get("binding") or "") != expected:
+            raise WorksetTransferRefused(
+                "working_set_transfer_failed",
+                "the files offered are not the ones confirmed for this move",
+            )
     home = home_of(server)
     into = _private_dir(incoming_staging(server.root, session_id))
     roots = workset.restore_roots(Path(server.root))
     forbid = [Path(server.root)]
-    rows = [r for r in offer.get("worktrees") or [] if isinstance(r, Mapping)][:MAX_OFFER_ROWS]
+    rows = all_rows[:MAX_OFFER_ROWS]
     rewrite_notes: list[str] = []
     have: dict[str, list[str]] = {}
     decline: dict[str, str] = {}
     local_reason: dict[str, str] = {}
+    # Review N2: rows past the bound are DECLINED by name, so the owner never bundles
+    # them and the ready digests still agree; a silent cut rolled the whole move back
+    # with a generic failure.
+    for row in all_rows[MAX_OFFER_ROWS:]:
+        decline[str(row.get("n"))] = "too_many_worktrees"
+        local_reason[str(row.get("n"))] = "too_many_worktrees"
+    by_n_all = {str(r.get("n")): r for r in all_rows}
     primaries: dict[str, dict[str, Any]] = {}
+    # S9 (round 2): with ``mesh.move.working_set_roots`` unset, an absent repository is
+    # cloned only beside repositories the user already keeps (``clone_parent_refusal``).
+    explicit_roots = workset.restore_roots_configured(Path(server.root))
     for row in rows:
         n = str(row.get("n"))
         remote_url = str(row.get("remote_url") or "")
@@ -1078,6 +1224,11 @@ def destination_transfer(
             res = engine.PrimaryResolution(
                 "absent", None, reason="destination_cannot_clone" if allowed else "url_refused"
             )
+            if allowed and not explicit_roots and engine.clone_parent_refusal(home, repo_rel):
+                # State-dependent (what the parent holds), so the owner hears only
+                # ``destination_declined`` (S8); the precise reason stays here.
+                res = engine.PrimaryResolution("absent", None, reason="clone_parent_refused")
+                allowed = []
             for candidate in allowed:
                 try:
                     got = engine.clone_primary(
@@ -1087,6 +1238,7 @@ def destination_transfer(
                         pack_bytes=int(row.get("pack_bytes") or 0),
                         session_id=session_id,
                         lease_epoch=lease_epoch,
+                        make_parents=explicit_roots,
                     )
                 except engine.MoveWorksetError as exc:
                     if exc.reason == "insufficient_space":
@@ -1104,6 +1256,7 @@ def destination_transfer(
                         rewrite_notes.append(f"{repo_rel}: {remote_url} -> {candidate}")
                     break
         primaries[n] = {"res": res, "url": use_url, "cloned": cloned}
+        authorised()
         if res is not None and res.state == "present" and res.path is not None:
             tips = [str(t) for t in row.get("tips") or [] if _SHA.match(str(t))][:64]
             have[n] = engine.compute_have(res.path, tips, remote=res.remote, session_id=session_id)
@@ -1111,6 +1264,7 @@ def destination_transfer(
             reason = (res.reason if res is not None else "") or "destination_cannot_clone"
             local_reason[n] = reason
             decline[n] = reason if reason in _COARSE_DECLINE else "destination_declined"
+    authorised()
     planned = _plan(transport, session_id, lease_epoch, have, decline)
     artifacts = {
         str(a.get("n")): a for a in planned.get("artifacts") or [] if isinstance(a, Mapping)
@@ -1133,6 +1287,7 @@ def destination_transfer(
             )
         info = primaries.get(n) or {}
         res = info.get("res")
+        authorised()
         fetched = _fetch_artifact(
             transport,
             session_id=session_id,
@@ -1152,6 +1307,7 @@ def destination_transfer(
                         f"the bundle for {row.get('path')} did not verify here",
                     )
                 replanned = True
+                authorised()
                 again_plan = _plan(transport, session_id, lease_epoch, {**have, n: []}, decline)
                 replanned_artifacts = {
                     str(a.get("n")): a
@@ -1233,7 +1389,7 @@ def destination_transfer(
         )
     # S8: the owner was told only a coarse reason; this device keeps the precise one.
     # Every declined row is recorded here even if the owner's reply omitted it.
-    by_n = {str(r.get("n")): r for r in rows}
+    by_n = by_n_all
     for item in left:
         n = str(item.get("n"))
         if n in local_reason:
@@ -1259,6 +1415,16 @@ def destination_transfer(
             "notes": rewrite_notes,
             "cwd": str(offer.get("cwd") or ""),
             "restored": {},
+            # What authorised these writes, bound to this owner, this device, this
+            # lease and the offer's binding; ``restore_arrived`` re-checks it.
+            "import": {
+                "authority": authority,
+                "from_device": owner_device,
+                "to_device": self_device,
+                "network_id": network_id,
+                "lease_epoch": lease_epoch,
+                "binding": str(offer.get("binding") or ""),
+            },
         },
     )
     return digest_all
@@ -1366,11 +1532,21 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
     home = home_of(server)
     roots = workset.restore_roots(Path(server.root))
     restored: dict[str, Any] = dict(pending.get("restored") or {})
+    allowed = _import_still_authorised(server, pending)
     for raw in pending.get("plans") or []:
         key = str(raw.get("n"))
         if key in restored and restored[key].get("state") != "pending_restore":
             continue
         plan = engine.RestorePlan(**raw)
+        if not allowed:
+            # A revoke between the fetch and the restore stops the writes; the bundle
+            # stays staged, so a re-grant and the next resume restore it.
+            restored[key] = asdict(
+                engine.RestoreReport("pending_restore", plan.path, reason="import_not_granted")
+            )
+            pending["restored"] = restored
+            _write_json(directory / "pending.json", pending)
+            continue
         try:
             report = engine.restore(
                 directory, plan, home=home, config=Path(server.root), roots=roots
@@ -1420,6 +1596,33 @@ def restore_arrived(server: Any, session_id: str) -> dict[str, Any] | None:
         "left_behind": list(pending.get("left_behind") or []),
         "notes": list(pending.get("notes") or []),
     }
+
+
+def _import_still_authorised(server: Any, pending: Mapping[str, Any]) -> bool:
+    """The restore's re-check of what authorised the transfer (``pending["import"]``).
+
+    The record must name the same owner and lease as the plan it rides with; a
+    ``grant`` must still be on this device's row for that owner (a revoke after the
+    fetch stops the writes), a ``recall`` stands (this device's operator confirmed it).
+    A pending journal without the record authorises nothing.
+    """
+    stamp = pending.get("import")
+    if not isinstance(stamp, Mapping):
+        return False
+    if str(stamp.get("from_device") or "") != str(pending.get("from_device") or ""):
+        return False
+    if str(stamp.get("lease_epoch") or "") != str(pending.get("lease_epoch") or ""):
+        return False
+    authority = str(stamp.get("authority") or "")
+    if authority == IMPORT_BY_RECALL:
+        return True
+    if authority != IMPORT_BY_GRANT:
+        return False
+    return import_granted(
+        server.root,
+        str(stamp.get("from_device") or ""),
+        network_id=str(stamp.get("network_id") or ""),
+    )
 
 
 def _retarget_cwd(
@@ -1496,9 +1699,14 @@ def arrival_receipt(
             row.pop("reason", None)
             if hit.get("reason"):
                 row["reason"] = str(hit["reason"])
-            for key in ("dest_path", "branch", "mode", "recipes", "branch_moved"):
+            for key in ("dest_path", "branch", "mode", "recipes", "branch_moved", "remapped"):
                 if hit.get(key):
                     row[key] = hit[key]
+            # QA Q1: a row that landed elsewhere (beside an occupied path, under the
+            # primary's ``.worktrees``) says so, whichever restore path produced it.
+            dest = str(row.get("dest_path") or "")
+            if dest and dest != str(row.get("path") or "") and not row.get("remapped"):
+                row["remapped"] = [str(row.get("path") or ""), dest]
         elif str(row.get("path")) in left:
             row["state"] = "left_behind"
             row["reason"] = str(left[str(row.get("path"))].get("reason") or "not_transferred")

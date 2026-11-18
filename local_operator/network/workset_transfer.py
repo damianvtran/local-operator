@@ -69,6 +69,7 @@ import ctypes.util
 import errno
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -85,6 +86,8 @@ from pathlib import Path
 from typing import Any, Final
 
 from local_operator.network.workset import Excluded, Recipe
+
+logger = logging.getLogger(__name__)
 
 #: Private ref namespace for move snapshots. ``refs/lop/wip`` (subagent WIP
 #: checkpoints) is the precedent; refs here are shared across linked worktrees
@@ -214,13 +217,70 @@ def _environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def _git_argv(cwd: Path | str, args: Sequence[str], *, credentials: bool) -> list[str]:
+def _git_argv(
+    cwd: Path | str, args: Sequence[str], *, credentials: bool, config: Sequence[str] = ()
+) -> list[str]:
     argv = ["git", "-c", "core.quotepath=false"]
     if not credentials:
         # An empty value resets the helper list: no keychain/osxkeychain prompt
         # can appear on the operator's screen from a bundle or restore step.
         argv += ["-c", "credential.helper="]
+    for pair in config:
+        argv += ["-c", pair]
     return [*argv, "-C", str(cwd), *args]
+
+
+#: Security review #4245 S10: no git filter driver runs on ARRIVAL content. The
+#: source chose every byte a clone or restore writes, including ``.gitattributes``
+#: (``* filter=lfs``) and ``.lfsconfig`` (``lfs.url`` = a host of its choosing), and
+#: git would hand each path to the DESTINATION user's configured drivers (git-lfs's
+#: ``process``/``smudge`` with ``required=true`` after ``git lfs install``) inside the
+#: checkout — a driver call, and a network call, on the peer's say-so. Chosen
+#: mechanism: per-command ``-c`` overrides that blank ``smudge``/``clean``/``process``
+#: and set ``required=false`` for EVERY driver this repository's resolved config
+#: names (``_no_filters``), plus ``GIT_LFS_SKIP_SMUDGE=1``. Rejected alternative: an
+#: isolated ``GIT_CONFIG_GLOBAL``/``SYSTEM`` env, which would also drop the user's
+#: ``safe.directory`` and core settings the restore relies on, and still leave filters
+#: defined in an existing primary's own ``.git/config``. git skips a driver whose
+#: command is empty (``convert.c apply_filter``), and an unconfigured driver name in
+#: ``.gitattributes`` is already a pass-through. LFS content arrives as pointers; the
+#: ``git_lfs`` recipe tells the user to run ``git lfs pull`` after reading ``.lfsconfig``.
+_FILTERS_OFF_ENV: Final = {"GIT_LFS_SKIP_SMUDGE": "1"}
+
+
+def _no_filters(cwd: Path | str) -> list[str]:
+    """``key=value`` overrides that disable every filter driver ``cwd``'s config names."""
+    proc = subprocess.run(
+        _git_argv(cwd, ["config", "--get-regexp", r"^filter\."], credentials=False),
+        env=_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    names: list[str] = []
+    for line in proc.stdout.splitlines():
+        key = line.split(" ", 1)[0]
+        name = key[len("filter.") :].rpartition(".")[0]
+        if name and name not in names:
+            names.append(name)
+    # ``lfs`` always: a driver configured by an include git did not resolve here, or
+    # added between this read and the checkout, still gets no say.
+    if "lfs" not in names:
+        names.append("lfs")
+    out: list[str] = []
+    for name in names:
+        out += [
+            f"filter.{name}.smudge=",
+            f"filter.{name}.clean=",
+            f"filter.{name}.process=",
+            f"filter.{name}.required=false",
+        ]
+    return out
+
+
+def _arrival_git(cwd: Path | str, *args: str, **kw: Any) -> subprocess.CompletedProcess[str]:
+    """``_git`` for a step that writes or re-reads ARRIVED content: filters off (S10)."""
+    return _git(cwd, *args, config=_no_filters(cwd), env=_environment(dict(_FILTERS_OFF_ENV)), **kw)
 
 
 def _git(
@@ -231,12 +291,13 @@ def _git(
     timeout: float | None = None,
     credentials: bool = False,
     input_bytes: bytes | None = None,
+    config: Sequence[str] = (),
 ) -> subprocess.CompletedProcess[str]:
     # Local git steps carry no timeout: prompts are disabled and no network is
     # touched, and the move phase that calls them owns the wall-clock bound.
     # Only the two network steps (origin fetch/clone) pass one.
     proc = subprocess.run(
-        _git_argv(cwd, args, credentials=credentials),
+        _git_argv(cwd, args, credentials=credentials, config=config),
         env=env if env is not None else _environment(),
         capture_output=True,
         input=input_bytes.decode() if input_bytes is not None else None,
@@ -999,12 +1060,13 @@ def primary_path_refusal(
     * it lies under one of ``roots`` (``mesh.move.working_set_roots``, default ``~``);
     * it is not inside any ``forbid`` path (this device's config root);
     * every EXISTING parent is a real directory owned by this user (a directory
-      someone else controls could be swapped under the restore).
+      someone else controls could be swapped under the restore);
+    * (round 2, S9) no component is ``node_modules``, and the target neither is, is
+      inside, nor contains a directory on this user's PATH (``command_dirs``).
 
-    A separate receive permission (a grant distinct from ``move``) was considered
-    (security review S1 part 1) and deliberately NOT added here: whether receiving
-    files needs its own capability is the security lead's decision. This policy holds
-    either way.
+    This decides WHERE writes land; it is not permission to accept them. That is the
+    separate ``workset_import`` grant (security-lead ruling, ``workset_move``), checked
+    before this policy is ever consulted.
     """
     if not isinstance(home_rel, str) or not home_rel.startswith("~/"):
         return "not home-relative"
@@ -1015,6 +1077,10 @@ def primary_path_refusal(
         p.casefold() in _RESTORE_DENY_ANY for p in parts
     ):
         return "system directory"
+    # S9 (round 2): a ``node_modules`` at any depth is resolved by Node for every
+    # project below it that misses a dependency, so a planted package there runs.
+    if any(p.casefold() == "node_modules" for p in parts):
+        return "dependency directory"
     prefixes = [p for p in (_root_prefix(r) for r in roots) if p]
     if not any(p == "~" or home_rel == p or home_rel.startswith(p + "/") for p in prefixes):
         return "outside mesh.move.working_set_roots"
@@ -1026,6 +1092,16 @@ def primary_path_refusal(
         base = os.path.realpath(other)
         if str(target) == base or str(target).startswith(base.rstrip("/") + "/"):
             return "inside the lop config directory"
+    # S9 (round 2, BLOCKER): a repository AT, INSIDE or ABOVE a directory on this
+    # user's PATH puts the source's executables on it — ``~/bin/ls`` ran on the
+    # victim's next ``ls`` (Fedora/RHEL/Amazon Linux ``.bashrc`` prepend ``~/bin`` and
+    # ``~/.local/bin`` unconditionally; Debian's ``.profile`` once ``~/bin`` exists).
+    real = os.path.realpath(target)
+    for command_dir in command_dirs(home):
+        if real == command_dir or command_dir.startswith(real.rstrip("/") + "/"):
+            return "a command directory on PATH"
+        if real.startswith(command_dir.rstrip("/") + "/"):
+            return "a command directory on PATH"
     getuid = getattr(os, "getuid", None)
     current = Path(os.path.realpath(home))
     for part in parts[:-1]:
@@ -1036,6 +1112,77 @@ def primary_path_refusal(
         if not stat.S_ISDIR(st.st_mode) or (getuid is not None and st.st_uid != getuid()):
             return "a parent is not a directory owned by this user"
     return ""
+
+
+#: Directories under home that login shells commonly put on PATH even when THIS
+#: process's PATH lacks them (lop may run under launchd/systemd with a minimal PATH):
+#: the stock Fedora/RHEL ``.bashrc`` and Debian ``.profile`` entries, Go and Cargo.
+_RC_COMMAND_DIRS: Final = ("bin", ".local/bin", "go/bin", ".cargo/bin")
+
+
+def command_dirs(home: Path) -> list[str]:
+    """S9: every directory under ``home`` this user's commands may be found in.
+
+    ``$PATH``'s entries that resolve under home, plus :data:`_RC_COMMAND_DIRS`, each
+    as a ``realpath`` (existing or not) so a symlinked entry compares by target.
+    """
+    base = os.path.realpath(home)
+    out: list[str] = []
+    entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if e]
+    entries += [os.path.join(base, rel) for rel in _RC_COMMAND_DIRS]
+    for entry in entries:
+        entry = os.path.expanduser(entry) if entry.startswith("~") else entry
+        if not os.path.isabs(entry):
+            continue
+        real = os.path.realpath(entry)
+        # ``~`` itself on PATH is skipped: a repository at ``~/x`` adds no file to
+        # ``~``, and keeping it would refuse every path in home.
+        if real.startswith(base.rstrip("/") + "/") and real not in out:
+            out.append(real)
+    return out
+
+
+#: Bound on the entries ``clone_parent_refusal`` reads in one directory.
+_CLONE_PARENT_SCAN: Final = 4096
+
+
+def clone_parent_refusal(home: Path, home_rel: str) -> str:
+    """S9 (round 2): ``""`` when an ABSENT primary may be cloned at ``home_rel``.
+
+    The default clone policy (``mesh.move.working_set_roots`` unset): clone only into
+    a parent directory that already exists, is a real directory this user owns, and
+    already holds at least one git repository as a direct child — a code directory
+    the user keeps repositories in (``~/src``, or ``~`` itself when that is where
+    they live). Nothing is created above the clone. A peer can then only add a
+    repository beside the user's own repositories, where it is seen, never invent a
+    new directory of its choosing anywhere in home (``~/bin``, ``~/go``, ...). An
+    operator who wants more sets ``mesh.move.working_set_roots``: under explicit roots
+    the old rule applies (any allowed path, parents created).
+    """
+    try:
+        target = contained_path(home, home_rel)
+    except ContainmentError as exc:
+        return exc.detail
+    parent = target.parent
+    try:
+        st = os.lstat(parent)
+    except OSError:
+        return "the parent directory does not exist"
+    getuid = getattr(os, "getuid", None)
+    if not stat.S_ISDIR(st.st_mode) or (getuid is not None and st.st_uid != getuid()):
+        return "the parent is not a directory owned by this user"
+    try:
+        with os.scandir(parent) as entries:
+            for count, entry in enumerate(entries):
+                if count >= _CLONE_PARENT_SCAN:
+                    break
+                if entry.is_dir(follow_symlinks=False) and os.path.lexists(
+                    os.path.join(entry.path, ".git")
+                ):
+                    return ""
+    except OSError:
+        return "the parent directory cannot be read"
+    return "the parent holds no repository"
 
 
 def worktree_target(primary_rel: str, path_rel: str, *, session_id: str, n: int) -> str:
@@ -1187,7 +1334,19 @@ def _run_clone(
     argv = ["git", "-c", "core.quotepath=false", *pin]
     for pair in (*_CLONE_HARDENING, *_CLONE_TEST_CONFIG):
         argv += ["-c", pair]
-    argv += ["-C", str(staging), "clone", "--quiet", "--no-tags", "--", url, str(dest)]
+    # ``--no-checkout`` (S10): the files are written afterwards by ``_checkout_clone``
+    # with every filter driver off; a plain clone's checkout would run them.
+    argv += [
+        "-C",
+        str(staging),
+        "clone",
+        "--quiet",
+        "--no-tags",
+        "--no-checkout",
+        "--",
+        url,
+        str(dest),
+    ]
     extra = {"SSH_ASKPASS_REQUIRE": "never"}
     if not os.environ.get("GIT_SSH_COMMAND"):
         extra["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
@@ -1236,8 +1395,12 @@ def clone_primary(
     timeout: float = CLONE_TIMEOUT_S,
     session_id: str = "",
     lease_epoch: str = "",
+    make_parents: bool = True,
 ) -> PrimaryResolution:
     """W1 / manager Q1: clone the absent primary from its origin, no-clobber.
+
+    ``make_parents=False`` (the default clone policy, ``clone_parent_refusal``): the
+    parent must already exist as a real directory; nothing is created above it.
 
     Only for a primary the user confirmed in the manifest, and only after the caller
     applied ``primary_path_refusal``. ``remote_url`` must pass ``clone_url_refusal``
@@ -1253,12 +1416,19 @@ def clone_primary(
     if clone_url_refusal(remote_url):
         raise MoveWorksetError("url_refused", "not an allowed public https/ssh remote")
     # The vetted addresses, pinned for an https clone (``http.curloptResolve``), so git
-    # connects to what the policy checked rather than to a second DNS answer.
-    _allowed, pin = workset_probe.host_policy(remote_url)
+    # connects to what the policy checked rather than to a second DNS answer. S11: THIS
+    # answer is the one honoured — a refusal here (a rebinding second lookup) refuses
+    # the clone instead of letting git resolve a third time unpinned.
+    allowed, pin = workset_probe.host_policy(remote_url)
+    if not allowed:
+        raise MoveWorksetError("url_refused", "the host's address is not allowed")
     target = contained_path(home, home_rel)
     if os.path.lexists(target):
         return resolve_primary(remote_url, home_rel, home=home)
-    _make_dirs(home, target)
+    if make_parents:
+        _make_dirs(home, target)
+    elif not target.parent.is_dir() or target.parent.is_symlink():
+        raise MoveWorksetError("clone_parent_refused", "the parent directory does not exist")
     need = max(pack_bytes, 0) * 2 + CLONE_HEADROOM_BYTES
     if shutil.disk_usage(target.parent).free < need:
         raise MoveWorksetError("insufficient_space", f"need {need} bytes")
@@ -1266,6 +1436,7 @@ def clone_primary(
     try:
         dest = staging / target.name
         _run_clone(staging, remote_url, dest, timeout=timeout, pin=pin)
+        _checkout_clone(dest)
         if session_id:
             # Marked BEFORE the publish, so a published clone always carries it.
             _write_json_atomic(
@@ -1281,6 +1452,21 @@ def clone_primary(
     # ``cloned`` = this call PUBLISHED a tree (whatever it resolves as), so the caller
     # journals it for the rollback even in the unlikely case it is not ``present``.
     return PrimaryResolution(res.state, res.path, res.remote, res.reason, cloned=True)
+
+
+def _checkout_clone(dest: Path) -> None:
+    """Write a ``--no-checkout`` clone's files with every filter driver off (S10).
+
+    ``read-tree`` + ``checkout-index``, the same pair ``restore`` uses: no hook runs
+    (``checkout`` would run ``post-checkout``) and git refuses to write through a
+    symlinked leading path. An empty repository (no ``HEAD`` commit) has nothing to
+    write.
+    """
+    if _git(dest, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False).returncode != 0:
+        return
+    _arrival_git(dest, "read-tree", "HEAD")
+    _arrival_git(dest, "checkout-index", "-a", "-f")
+    _arrival_git(dest, "update-index", "-q", "--refresh", check=False)
 
 
 def _clone_marker(target: Path) -> dict[str, Any] | None:
@@ -1495,9 +1681,26 @@ def _choose_branch(
     return pick
 
 
-def _departed_branch_tip(config: Path | None, session_id: str, branch: str) -> str | None:
-    """The tip this device's TRUSTED departure journal recorded for ``branch`` (S3)."""
-    if config is None:
+def _common_dir(repo: Path | str) -> str:
+    """The realpath of ``repo``'s shared git directory: one repository's identity."""
+    proc = _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir", check=False)
+    return os.path.realpath(proc.stdout.strip()) if proc.returncode == 0 else ""
+
+
+def _departed_branch_tip(
+    config: Path | None, session_id: str, branch: str, primary: Path | None = None
+) -> str | None:
+    """The tip this device's TRUSTED departure journal recorded for ``branch`` (S3).
+
+    Security nit N2 (round 2): matched on the REPOSITORY as well as the branch name,
+    so a ``main`` departed from one repository never authorises a fast-forward of
+    another's ``main``. An entry without the identity (or no ``primary``) matches
+    nothing, which lands the arrival as a new branch rather than moving one.
+    """
+    if config is None or primary is None:
+        return None
+    identity = _common_dir(primary)
+    if not identity:
         return None
     path = Path(config) / "network" / "workset-departed" / f"{session_id}.json"
     try:
@@ -1509,7 +1712,12 @@ def _departed_branch_tip(config: Path | None, session_id: str, branch: str) -> s
     if not isinstance(record, dict) or record.get("session_id") != session_id:
         return None
     for entry in record.get("worktrees") or []:
-        if isinstance(entry, dict) and entry.get("branch") == branch and entry.get("head"):
+        if (
+            isinstance(entry, dict)
+            and entry.get("branch") == branch
+            and entry.get("head")
+            and entry.get("common_dir") == identity
+        ):
             return str(entry["head"])
     return None
 
@@ -1573,9 +1781,10 @@ def _update_in_place(
         # read-tree drops stat data; refresh re-stats the (verified equal)
         # files so the two-tree switch sees them up to date. Exit status is
         # ignored: an entry still stale (an excluded, locally edited file) makes
-        # the switch below refuse rather than overwrite it.
-        _git(target, "update-index", "-q", "--refresh", check=False)
-        _git(target, "read-tree", "-m", "-u", from_tree, plan.worktree)
+        # the switch below refuse rather than overwrite it. Filters off (S10): the
+        # refresh can clean, and the switch smudges, the source's content.
+        _arrival_git(target, "update-index", "-q", "--refresh", check=False)
+        _arrival_git(target, "read-tree", "-m", "-u", from_tree, plan.worktree)
     except MoveWorksetError:
         _git(target, "read-tree", restore_index, check=False)
         raise
@@ -1588,7 +1797,7 @@ def _update_in_place(
     else:
         _git(target, "update-ref", "--no-deref", "HEAD", plan.head)
     _git(target, "read-tree", plan.index)
-    _git(target, "update-index", "-q", "--refresh", check=False)
+    _arrival_git(target, "update-index", "-q", "--refresh", check=False)
     return pick
 
 
@@ -1732,7 +1941,9 @@ def restore(
         return RestoreReport("pending_restore", plan.path, reason="snapshot_mismatch")
     want_idx_tree = _out(primary, "rev-parse", f"{plan.index}^{{tree}}")
     want_wt_tree = _out(primary, "rev-parse", f"{plan.worktree}^{{tree}}")
-    recall_at = _departed_branch_tip(config, plan.session_id, plan.branch) if plan.branch else None
+    recall_at = (
+        _departed_branch_tip(config, plan.session_id, plan.branch, primary) if plan.branch else None
+    )
 
     if plan.is_primary and plan.fresh_clone:
         if _state(primary, ()) == (plan.head, want_idx_tree, want_wt_tree):
@@ -1850,17 +2061,23 @@ def restore(
         _git(staged, "read-tree", plan.worktree)
         # checkout-index writes the worktree snapshot's files — untracked ones
         # included, exec bits and symlinks as recorded — into the empty tree;
-        # git refuses to write through a symlinked leading path.
-        _git(staged, "checkout-index", "-a", "-f")
+        # git refuses to write through a symlinked leading path. Filters off (S10).
+        _arrival_git(staged, "checkout-index", "-a", "-f")
         _git(staged, "read-tree", plan.index)
-        _git(staged, "update-index", "-q", "--refresh", check=False)
+        _arrival_git(staged, "update-index", "-q", "--refresh", check=False)
         _write_json_atomic(
             Path(_out(staged, "rev-parse", "--absolute-git-dir")) / ARRIVED_MARKER,
             {"session_id": plan.session_id, "n": plan.n, "bundle": plan.bundle_digest},
         )
         _rename_noreplace(staged, target)
         published = True
-        _git(primary, "worktree", "repair", str(target))
+        # Review M1: once published the files are in place, so a failed repair is NOT
+        # a failed restore (that sent the retry ``beside`` and left this tree on a
+        # prunable entry). Retry from the worktree's side, whose ``.git`` file still
+        # names the admin directory; ``_own_prior_restore`` then finds the marker.
+        if _git(primary, "worktree", "repair", str(target), check=False).returncode != 0:
+            if _git(target, "worktree", "repair", check=False).returncode != 0:
+                logger.warning("workset: worktree repair of %s failed after publish", target)
     except FileExistsError:
         return RestoreReport("pending_restore", plan.path, reason="destination_conflict")
     finally:
@@ -1952,6 +2169,14 @@ def recipes_for(worktree: Path, primary: Path, *, home: Path | None = None) -> l
                 else "yarn install --frozen-lockfile"
             ),
         )
+    # S10: arrival checkouts run no filter driver, so LFS content is still pointers.
+    # Fetching it is the user's call, after they have read ``.lfsconfig``.
+    try:
+        attributes = (wt / ".gitattributes").read_text("utf-8", "replace")
+    except OSError:
+        attributes = ""
+    if "filter=lfs" in attributes:
+        add("git_lfs", "git lfs pull")
     if (wt / "uv.lock").is_file():
         add("uv", "uv venv && uv sync --frozen")
     else:
@@ -2013,6 +2238,8 @@ def mark_departed(
                 "worktree_tree": snap.worktree_tree,
                 "excludes": list(snap.excludes),
                 "refs": list(snap.refs),
+                # The repository's identity for the recall's fast-forward (N2).
+                "common_dir": _common_dir(snap.worktree_path),
             }
         )
         _write_json_atomic(

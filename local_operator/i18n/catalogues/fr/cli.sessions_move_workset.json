@@ -73,8 +73,14 @@
   "cli.sessions_move_workset.reason.primary_absent": "la destination n’a pas de copie de ce dépôt et n’a pas pu le cloner",
   "cli.sessions_move_workset.reason.restore_failed": "les fichiers sont arrivés mais n’ont pas encore pu être restaurés",
   "cli.sessions_move_workset.reason.snapshot_failed": "son état n’a pas pu être capturé sur la source (une branche vide ou un dépôt bare)",
-  "cli.sessions_move_workset.reason.restore_path_refused": "cet appareil n’accepte pas de dépôt à cet emplacement (voir mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "cet appareil n’accepte pas de dépôt à cet emplacement (dossier caché, système, de commandes ou de dépendances, ou hors de mesh.move.working_set_roots)",
   "cli.sessions_move_workset.reason.url_refused": "son dépôt distant n’est pas une adresse HTTPS ou SSH publique que cet appareil accepte de cloner",
   "cli.sessions_move_workset.reason.destination_declined": "l’appareil de destination l’a refusé",
-  "cli.sessions_move_workset.receipt_branch_moved": "La branche existante {branch} a été avancée de {old} à {new}, là où cet appareil l’avait laissée."
+  "cli.sessions_move_workset.receipt_branch_moved": "La branche existante {branch} a été avancée de {old} à {new}, là où cet appareil l’avait laissée.",
+  "cli.sessions_move_workset.import_not_granted": "{device} n’a pas autorisé cet appareil à lui envoyer des fichiers de travail : ils restent ici et seule la conversation est déplacée. Pour l’autoriser, exécutez ceci sur {device} : {command}",
+  "cli.sessions_move_workset.reason.import_not_granted": "l’appareil de destination n’a pas autorisé cet appareil à lui envoyer des fichiers de travail",
+  "cli.sessions_move_workset.reason.too_many_worktrees": "le déplacement comptait plus d’arbres de travail que la destination n’en accepte en une fois",
+  "cli.sessions_move_workset.reason.clone_parent_refused": "la destination ne clone un dépôt manquant que dans un dossier qui contient déjà vos dépôts (ou définissez mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.kept_as_confirmed": "il reste sur l’appareil d’origine, comme confirmé pour ce déplacement",
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} ne contactera pas {remote} : son adresse est refusée par la politique (ce n’est pas un hôte public)"
 }

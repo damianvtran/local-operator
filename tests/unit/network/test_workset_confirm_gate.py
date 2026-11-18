@@ -131,8 +131,9 @@ def test_a_confirmed_move_proceeds_and_says_the_work_was_not_transferred(
     assert block["transferred"] is False
     assert block["consent"] == "confirmed"
     assert block["scope_digest"] == digest
+    # QA Q3 (#4245): the reason names THIS case — the destination cannot receive files.
     assert [(row["state"], row["reason"]) for row in block["worktrees"]] == [
-        ("left_behind", "not_transferred")
+        ("left_behind", "unsupported_by_peer")
     ]
     # Never deletes: the worktree on the source is exactly as it was.
     assert (rig.feat / "b.txt").read_bytes() == status_before

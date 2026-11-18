@@ -1228,7 +1228,8 @@ def _audit(server: "RelayServer", event: str, session_id: str, peer: str, **deta
                 event=event,
                 actor=server.identity.device_id,
                 subject=session_id,
-                outcome="ok",
+                # QA Q7: a refusal recorded through here says so in ``outcome``.
+                outcome=str(detail.pop("outcome", "ok")),
                 network_id=detail.pop("network_id", ""),
                 detail={"peer": peer, **detail},
             )
@@ -1756,6 +1757,22 @@ def _queued_receipt(
     return cast(SessionMoveResult, result)
 
 
+def _approved_scope(
+    consent: Mapping[str, Any] | None, arrival: Mapping[str, Any] | None, *, recall: bool
+) -> str:
+    """The scope digest the transfer binding must cover (``destination_transfer``).
+
+    On a recall the operator HERE confirmed a digest, so that is the approved
+    manifest; on an invite the confirmation happened on the owner and the arrival
+    block it sent states the digest the gate admitted.
+    """
+    if recall and isinstance(consent, Mapping) and consent.get("confirm"):
+        return str(consent.get("confirm") or "")
+    if isinstance(arrival, Mapping):
+        return str(arrival.get("scope_digest") or "")
+    return ""
+
+
 def _destination_move(
     server: "RelayServer",
     session_id: str,
@@ -1820,6 +1837,16 @@ def _destination_move(
     progress = progress_for(server)
     me = server.identity.device_id
     phases: list[MovePhaseStamp] = []
+    # MAY THE OWNER SEND ITS WORKING FILES HERE (security-lead ruling, #4245)? A
+    # recall (not ``asked``) is this device's own operator asking; an invite needs
+    # ``workset_import`` on THIS device's row for the authenticated owner. Read now
+    # for the prepare's ``import`` flag; ``destination_transfer`` re-reads it.
+    from local_operator.network import workset_move as _ws_move
+
+    link_network_id = str(getattr(getattr(transport, "link", None), "network_id", "") or "")
+    import_authority = _ws_move.import_authority(
+        server.root, owner_device, recall=not asked, network_id=link_network_id
+    )
 
     def note(phase: SessionMovePhase) -> None:
         if phase not in [item["phase"] for item in phases]:
@@ -1928,7 +1955,11 @@ def _destination_move(
                     # it computes for THIS device's authenticated id. Sent on every
                     # prepare — ``confirm: None`` is "nothing confirmed", which is
                     # what an old requester's missing key also reads as.
-                    "working_set": _consent_frame(working_set),
+                    "working_set": {
+                        **_consent_frame(working_set),
+                        # ``False`` → the owner keeps the files (session-only move).
+                        "import": bool(import_authority),
+                    },
                 }
             )
         except Moved as refusal:
@@ -2177,6 +2208,15 @@ def _destination_move(
                 lease_epoch=lease_epoch,
                 offer=workset_offer,
                 owner_device=owner_device,
+                authority=import_authority,
+                recheck=lambda: workset_move.import_granted(
+                    server.root, owner_device, network_id=link_network_id
+                ),
+                # The manifest the consent bound: on a recall the digest THIS device's
+                # operator confirmed; on an invite the owner's arrival block's.
+                approved_scope=_approved_scope(working_set, arrival_workset, recall=not asked),
+                self_device=me,
+                network_id=link_network_id,
             )
         except Exception as failure:  # noqa: BLE001 — every failure is the same rollback
             if isinstance(failure, workset_move.WorksetTransferRefused):
@@ -4372,13 +4412,21 @@ def _workset_refusal(
     render their own localized text from ``code`` + the ``working_set`` numbers.
     """
     totals = block.get("totals") or {}
-    count = len(block.get("worktrees") or [])
+    # QA Q5: the PLANNED count (``totals.worktrees``, what the summary shows), not every
+    # row — a left-behind row is listed but is not one the move has to carry.
+    count = (
+        int(totals.get("worktrees") or 0)
+        if "worktrees" in totals
+        else sum(1 for row in block.get("worktrees") or [] if row.get("state") == "planned")
+    )
+    commits = int(totals.get("unpushed_commits") or 0)
+    dirty = int(totals.get("dirty_files") or 0)
     messages = {
         "working_set_unconfirmed": (
             f"this conversation worked in {count} git "
             f"{'worktree' if count == 1 else 'worktrees'} on this device "
-            f"({int(totals.get('unpushed_commits') or 0)} unpushed commits, "
-            f"{int(totals.get('dirty_files') or 0)} uncommitted files) that the move has "
+            f"({commits} unpushed {'commit' if commits == 1 else 'commits'}, "
+            f"{dirty} uncommitted {'file' if dirty == 1 else 'files'}) that the move has "
             f"to account for before it goes to {to_label}. Nothing was moved. Review them "
             "with `lop sessions move <id> --to <device> --dry-run`, then confirm with "
             "--confirm-working-set <scope_digest> or leave them here with "
@@ -4423,6 +4471,7 @@ def _workset_gate(
     to_name: str = "",
     consent_present: bool = True,
     transfer: bool = False,
+    stays_reason: str = "kept_as_confirmed",
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """``(refusal, arrival_block)`` for a ``move`` of ``session_id`` to ``to_device``.
 
@@ -4437,6 +4486,7 @@ def _workset_gate(
         to_name=to_name,
         consent_present=consent_present,
         transfer=transfer,
+        stays_reason=stays_reason,
     )
     return refusal, arrival
 
@@ -4450,6 +4500,7 @@ def _workset_gate_full(
     to_name: str = "",
     consent_present: bool = True,
     transfer: bool = False,
+    stays_reason: str = "kept_as_confirmed",
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, Any]:
     """``(refusal, arrival_block, manifest_to_transfer)`` for a move to ``to_device``.
 
@@ -4520,7 +4571,9 @@ def _workset_gate_full(
     if not consent_present:
         return _workset_outdated_peer(session_id, block, to_device=to_device), None, None
     if given["without"]:
-        arrival = workset.arrival_block(replace(manifest, carries_files=False))
+        arrival = workset.arrival_block(
+            replace(manifest, carries_files=False), reason="kept_as_confirmed"
+        )
         arrival["consent"] = "without"
         return None, arrival, None
     if not given["confirm"]:
@@ -4545,7 +4598,7 @@ def _workset_gate_full(
         arrival["transferred"] = False
         arrival["state"] = "transferring"
         return None, arrival, manifest
-    arrival = workset.arrival_block(manifest)
+    arrival = workset.arrival_block(manifest, reason=stays_reason)
     arrival["consent"] = "confirmed"
     return None, arrival, None
 
@@ -4669,14 +4722,36 @@ def _destination_workset_probe(
             "message": "this device holds that conversation; only its owner may ask",
         }
     if workset_probe.rate_limited(link.device_id):
-        _audit(server, AUDIT_WORKSET_PROBE, session_id, link.device_id, refused="rate_limited")
+        _audit(
+            server,
+            AUDIT_WORKSET_PROBE,
+            session_id,
+            link.device_id,
+            refused="rate_limited",
+            outcome="rate_limited",
+        )
         return {"result": "refused", "code": "rate_limited", "message": "too many probes"}
     try:
         answer = workset_probe.run_probe(Path(server.root), frame)
     except Exception:  # noqa: BLE001 — a probe bug reads as "could not check"
         logger.warning("mobility: the working-set probe failed", exc_info=True)
-        _audit(server, AUDIT_WORKSET_PROBE, session_id, link.device_id, refused="probe_error")
+        _audit(
+            server,
+            AUDIT_WORKSET_PROBE,
+            session_id,
+            link.device_id,
+            refused="probe_error",
+            outcome="error",
+        )
         return {"result": "refused", "code": "refused", "message": "probe failed"}
+    # IMPORT AUTHORITY, STATED BEFORE CONSENT (security-lead ruling, #4245): whether
+    # THIS device's row for the authenticated asker carries ``workset_import``. The
+    # asker's manifest then says the files will NOT be imported when it is absent.
+    from local_operator.network import workset_move
+
+    answer["import_granted"] = workset_move.import_granted(
+        server.root, link.device_id, network_id=str(getattr(link, "network_id", "") or "")
+    )
     _audit(
         server,
         AUDIT_WORKSET_PROBE,
@@ -4695,8 +4770,14 @@ def _probe_destination(
     target_device: str,
     target_name: str,
     here: bool,
+    asked: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fold the destination's reachability/prerequisite answer into ``block``.
+
+    ``asked`` (QA Q7, #4245): a dict shared by the calls of ONE preflight. The first
+    call stores the destination's answer (or its absence) there and a recompute of the
+    same manifest reuses it, so the destination is asked once per preflight — a
+    refused or rate-limited answer used to be asked again, and audited twice.
 
     ``here`` is the recall: THIS device is the destination, so it probes itself.
     Otherwise the peer is asked over its link. Any failure to get an answer (an older
@@ -4712,11 +4793,19 @@ def _probe_destination(
     frame = workset_probe.probe_request(
         block, session_id=session_id, team_bridge=bool(block.get("team_bridge_used"))
     )
-    if here:
+    network_id = ""
+    if asked is not None and "answer" in asked:
+        answer = asked["answer"]
+        network_id = str(asked.get("network_id") or "")
+    elif here:
         answer: dict[str, Any] | None = workset_probe.run_probe(Path(server.root), frame)
+        # THE RECALL IS ITS OWN IMPORT AUTHORITY (``workset_move.IMPORT_CAPABILITY``):
+        # the operator confirming this manifest is at the device the files land on.
+        answer["import_granted"] = True
     else:
         try:
             link = _link_for_move(server, target_device, target_name)
+            network_id = str(getattr(link, "network_id", "") or "")
             answer = LinkTransport(server, link, session_id).ask(
                 frame, timeout=workset_probe.ASK_TIMEOUT_S
             )
@@ -4732,12 +4821,45 @@ def _probe_destination(
             answer = None
         if answer is not None and answer.get("result") != "probed":
             answer = None
+    if asked is not None and "answer" not in asked:
+        asked["answer"] = dict(answer) if isinstance(answer, dict) else None
+        asked["network_id"] = network_id
+    if isinstance(answer, dict):
+        # ``apply_probe`` reads the answer; a fresh copy keeps the cached one intact.
+        answer = dict(answer)
     # The remedy names the DESTINATION (``share github --with <it>``): the peer on an
     # offload, this device on a recall. Built here, never taken from the answer (S3),
     # and by DEVICE ID, never the peer-chosen name (S10: a name is shell input).
     own = str(server.identity.device_id)
     destination = own if here else target_device
-    return workset_probe.apply_probe(block, answer, device_id=destination)
+    block = workset_probe.apply_probe(block, answer, device_id=destination)
+    probe = block.get("destination_probe")
+    if (
+        not here
+        and isinstance(probe, dict)
+        and probe.get("state") == "answered"
+        # Only a destination that CAN receive files is told it has not been allowed
+        # to; an older one's "files stay" is already its protocol version's answer.
+        and int(probe.get("working_set_version") or 0) >= _workset_min_version()
+        and probe.get("import_granted") is not True
+    ):
+        # THE DESTINATION HAS NOT ALLOWED THIS DEVICE TO SEND IT FILES (security-lead
+        # ruling, #4245): the user is told BEFORE consenting, with the one command
+        # that changes it — run ON THE DESTINATION, naming this device by id. Built
+        # here from ids this device knows, never from the answer.
+        from local_operator.network import workset_move
+
+        block["import"] = {
+            "granted": False,
+            "remedy": workset_move.import_remedy(network_id, own),
+        }
+    return block
+
+
+def _workset_min_version() -> int:
+    from local_operator.network import workset
+
+    return int(workset.WORKSET_TRANSFER_MIN_VERSION)
 
 
 def _ask_workset_preflight(
@@ -4840,6 +4962,7 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
     # 2026-11-18): the destination answers for its own credentials and toolchains;
     # the flags ride the block the user confirms. Not a digest input (see
     # ``workset_probe``), so a probe that flaps never refuses a confirmed move.
+    asked: dict[str, Any] = {}
     block = _probe_destination(
         server,
         block,
@@ -4847,6 +4970,7 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
         target_device=target_device,
         target_name=target_name,
         here=to == "local",
+        asked=asked,
     )
     if to != "local" and block.get("carries_files"):
         from local_operator.network import workset as _ws_mod
@@ -4855,7 +4979,11 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
         spoken = (
             int((probe or {}).get("working_set_version") or 0) if isinstance(probe, dict) else 0
         )
-        if spoken < _ws_mod.WORKSET_TRANSFER_MIN_VERSION:
+        # No ``workset_import`` grant for this device on the destination: the files
+        # cannot be imported there, so the manifest the user confirms says they stay
+        # (the session-only move stays available, security-lead ruling #4245).
+        granted = isinstance(probe, dict) and probe.get("import_granted") is True
+        if spoken < _ws_mod.WORKSET_TRANSFER_MIN_VERSION or not granted:
             block = _workset_block(
                 server, session_id, to_device=target_device, to_name=target_name, carries=False
             )
@@ -4867,6 +4995,7 @@ def _workset_preflight_local(server: "RelayServer", session_id: str, *, to: str)
                 target_device=target_device,
                 target_name=target_name,
                 here=False,
+                asked=asked,
             )
     # ``unknown`` and ``unsupported`` need a decision too: only --without-working-set
     # proceeds past either, so the surface must show them rather than "nothing here".
@@ -5238,9 +5367,24 @@ def _source_prepare(
     # consent frame above re-stamped it (``_peer_workset_version``).
     from local_operator.network import workset as _workset_mod
 
+    # ...and whether it ACCEPTS them from this device: a destination without a
+    # ``workset_import`` grant for us says ``import: false`` on its prepare, and the
+    # files then stay here (the narrowing rule in ``_workset_gate``). The destination
+    # enforces this itself (``workset_move.destination_transfer``); reading it here
+    # only keeps an honest owner from offering what will be refused.
+    raw_frame_ws = frame.get("working_set")
+    raw_ws: dict[str, Any] = raw_frame_ws if isinstance(raw_frame_ws, dict) else {}
     workset_transfer = (
         _peer_workset_version(frame.get("working_set")) >= _workset_mod.WORKSET_TRANSFER_MIN_VERSION
+        and raw_ws.get("import") is not False
     )
+    # QA Q3: when the files stay, the receipt says WHY in this build's terms.
+    if _peer_workset_version(frame.get("working_set")) < _workset_mod.WORKSET_TRANSFER_MIN_VERSION:
+        workset_stays_reason = "unsupported_by_peer"
+    elif raw_ws.get("import") is False:
+        workset_stays_reason = "import_not_granted"
+    else:
+        workset_stays_reason = "kept_as_confirmed"
     workset_arrival: dict[str, Any] | None = None
     if not keep:
         refused_ws, workset_arrival = _workset_gate(
@@ -5250,6 +5394,7 @@ def _source_prepare(
             consent=workset_consent,
             consent_present=consent_present,
             transfer=workset_transfer,
+            stays_reason=workset_stays_reason,
         )
         if refused_ws is not None:
             return refused_ws
@@ -5567,6 +5712,7 @@ def _source_prepare(
         consent=workset_consent,
         consent_present=consent_present,
         transfer=workset_transfer,
+        stays_reason=workset_stays_reason,
     )
     if refused_ws is not None:
         return refused_ws

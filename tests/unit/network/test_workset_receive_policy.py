@@ -43,6 +43,11 @@ from tests.unit.network.workset_git_fixtures import (  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("git_env")
 
+#: The destination's import authority for these cells (security-lead ruling, #4245
+#: round 2): a ``workset_import`` grant that holds for the whole transfer. The cells
+#: that exercise the authority itself live in ``test_workset_import_grant``.
+GRANT: dict[str, Any] = {"authority": "grant", "recheck": lambda: True}
+
 SID = "0a1b2c3d4e5f6789"
 EPOCH = "e1"
 NOW = time.mktime((2026, 11, 18, 9, 30, 0, 0, 0, -1))
@@ -114,7 +119,13 @@ def test_s1_a_hostile_offer_cannot_plant_a_repository_under_dot_config(tmp_path:
     transport = _PlanOnly()
 
     workset_move.destination_transfer(
-        server, transport, SID, lease_epoch=EPOCH, offer=offer, owner_device="d_src"
+        server,
+        transport,
+        SID,
+        lease_epoch=EPOCH,
+        offer=offer,
+        owner_device="d_src",
+        **GRANT,
     )
 
     assert not (home / ".config").exists()
@@ -371,7 +382,13 @@ def test_s2_the_destination_dials_no_source_chosen_address(tmp_path: Path) -> No
         }
         transport = _PlanOnly()
         workset_move.destination_transfer(
-            server, transport, SID, lease_epoch=EPOCH, offer=offer, owner_device="d_src"
+            server,
+            transport,
+            SID,
+            lease_epoch=EPOCH,
+            offer=offer,
+            owner_device="d_src",
+            **GRANT,
         )
     finally:
         httpd.shutdown()
@@ -384,7 +401,9 @@ def test_s2_the_destination_dials_no_source_chosen_address(tmp_path: Path) -> No
 def test_s2_only_the_locally_derived_https_form_is_tried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    server, _home = _dest(tmp_path)
+    server, home = _dest(tmp_path)
+    # The default clone policy (S9, round 2) clones only beside an existing repository.
+    git(home, "init", "-q", str(home / "other"))
     monkeypatch.setattr(workset_probe, "_ALLOWED_HOSTS", ("git.test",))
     tried: list[str] = []
 
@@ -406,7 +425,13 @@ def test_s2_only_the_locally_derived_https_form_is_tried(
     }
     transport = _PlanOnly()
     workset_move.destination_transfer(
-        server, transport, SID, lease_epoch=EPOCH, offer=offer, owner_device="d_src"
+        server,
+        transport,
+        SID,
+        lease_epoch=EPOCH,
+        offer=offer,
+        owner_device="d_src",
+        **GRANT,
     )
     assert tried == ["git@git.test:a/b.git", "https://git.test/a/b.git"]
     # S8: the precise reason stays here; the source learns a coarse one.
@@ -456,7 +481,15 @@ def test_s3_a_recalled_branch_advances_and_says_from_and_to(tmp_path: Path) -> N
         json.dumps(
             {
                 "session_id": SID,
-                "worktrees": [{"path": "~/elsewhere", "branch": "feat", "head": before}],
+                "worktrees": [
+                    {
+                        "path": "~/elsewhere",
+                        "branch": "feat",
+                        "head": before,
+                        # Round 2 N2: the journal names the repository too.
+                        "common_dir": wt._common_dir(rig.dst_primary),
+                    }
+                ],
             }
         )
     )
@@ -613,7 +646,13 @@ def test_r6_the_inline_replan_fetches_the_full_bundle_once(tmp_path: Path) -> No
     owner = _LocalOwner(out, [[thin], [full]])
 
     workset_move.destination_transfer(
-        server, owner, SID, lease_epoch=EPOCH, offer=_offer_for(rig, snap), owner_device="d_src"
+        server,
+        owner,
+        SID,
+        lease_epoch=EPOCH,
+        offer=_offer_for(rig, snap),
+        owner_device="d_src",
+        **GRANT,
     )
 
     plans = [f for f in owner.frames if f["phase"] == "workset_plan"]
@@ -636,7 +675,13 @@ def test_r3_the_replan_rechecks_this_devices_cap(
 
     with pytest.raises(workset_move.WorksetTransferRefused) as info:
         workset_move.destination_transfer(
-            server, owner, SID, lease_epoch=EPOCH, offer=_offer_for(rig, snap), owner_device="d"
+            server,
+            owner,
+            SID,
+            lease_epoch=EPOCH,
+            offer=_offer_for(rig, snap),
+            owner_device="d",
+            **GRANT,
         )
 
     assert info.value.code == "working_set_over_cap"
@@ -669,6 +714,7 @@ def test_r4_the_checkout_size_is_checked_before_ready(
             lease_epoch=EPOCH,
             offer=_offer_for(rig, snap),
             owner_device="d",
+            **GRANT,
         )
     assert info.value.code == "insufficient_space"
 
@@ -708,7 +754,13 @@ def test_s8_state_dependent_declines_reach_the_source_coarse(tmp_path: Path) -> 
     }
     transport = _PlanOnly()
     workset_move.destination_transfer(
-        server, transport, SID, lease_epoch=EPOCH, offer=offer, owner_device="d_src"
+        server,
+        transport,
+        SID,
+        lease_epoch=EPOCH,
+        offer=offer,
+        owner_device="d_src",
+        **GRANT,
     )
     assert transport.frames[0]["decline"] == {"0": "destination_declined"}
     assert _pending(server)["left_behind"][0]["reason"] == "destination_conflict"
@@ -886,7 +938,17 @@ def test_r6_a_crash_after_restore_is_resumed_as_idempotent(tmp_path: Path) -> No
         "fresh_clone": False,
     }
     (staging / "pending.json").write_text(
-        json.dumps({"session_id": SID, "from_device": "d", "plans": [raw], "restored": {}})
+        json.dumps(
+            {
+                "session_id": SID,
+                "from_device": "d",
+                "plans": [raw],
+                "restored": {},
+                # What ``destination_transfer`` journals (round 2, the import grant):
+                # a recall's authority, so the restore's re-check admits it.
+                "import": {"authority": "recall", "from_device": "d"},
+            }
+        )
     )
     assert workset_move.promote_incoming(server.root, SID) is True
     arrived = workset_move.arrived_dir(server.root, SID)

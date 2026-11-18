@@ -50,6 +50,11 @@ _REASONS = {
     "restore_path_refused": _ws.reason_restore_path_refused,
     "url_refused": _ws.reason_url_refused,
     "destination_declined": _ws.reason_destination_declined,
+    # The destination's import authority and offer bounds (#4245 round 2).
+    "import_not_granted": _ws.reason_import_not_granted,
+    "too_many_worktrees": _ws.reason_too_many_worktrees,
+    "clone_parent_refused": _ws.reason_clone_parent_refused,
+    "kept_as_confirmed": _ws.reason_kept_as_confirmed,
 }
 
 #: Engine reason codes that share one sentence: the user-facing distinction is "the
@@ -286,12 +291,20 @@ _CLONE_CHECKS = {
 }
 
 
+#: ``clone_detail`` codes that mean "refused by the destination's address policy".
+_POLICY_DETAILS = frozenset({"host_refused", "url_refused"})
+
+
 def probe_row_lines(row: Mapping[str, Any], *, device: str) -> list[str]:
     """The destination's answer for one worktree (``workset_probe.apply_probe``):
     what it cannot do with the remote, the offered HTTPS spelling, the exact remedy."""
     out: list[str] = []
     remote = str(row.get("remote_url") or "")
     builder = _CLONE_CHECKS.get(str(row.get("clone_check") or ""))
+    if str(row.get("clone_detail") or "") in _POLICY_DETAILS:
+        # QA Q6 (#4245): a host the destination's policy refuses is not a missing
+        # credential; "cannot fetch with its own access" sent people to share one.
+        builder = _ws.probe_refused_by_policy
     if builder is not None:
         out.append(_t(builder(device=device, remote=remote)))
     rewrite = _member(row, "https_rewrite")
@@ -308,9 +321,19 @@ def probe_block_lines(block: Mapping[str, Any], *, device: str) -> list[str]:
     toolchains the destination lacks, Team Bridge enrolment the session needs."""
     probe = _member(block, "destination_probe")
     state = str(probe.get("state") or "")
+    # FIRST, because it decides whether anything else here matters: the destination
+    # has not granted this device ``workset_import``, so the files stay here. The
+    # command was built on THIS device from ids (``mobility._probe_destination``).
+    grant = _member(block, "import")
+    remedy = str(grant.get("remedy") or "")
+    lead = (
+        [_t(_ws.import_not_granted(device=device, command=remedy))]
+        if grant.get("granted") is False and remedy
+        else []
+    )
     if state == "unknown_destination":
-        return [_t(_ws.probe_unknown(device=device))]
-    out: list[str] = []
+        return [*lead, _t(_ws.probe_unknown(device=device))]
+    out: list[str] = list(lead)
     if state == "answered":
         # WHAT THE DESTINATION WAS TOLD (security S6, round 2): the probe runs during
         # the dry run, before the user has decided to trust the destination, so the

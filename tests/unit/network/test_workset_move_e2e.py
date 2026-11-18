@@ -99,6 +99,17 @@ def _state(tree: Path) -> dict[str, Any]:
     }
 
 
+def _grant_import(dest: Any, src: Any, *, revoke: bool = False) -> None:
+    """``lop network member grant <net> <src> workset_import`` run ON ``dest``."""
+    from local_operator.network import relay, store
+
+    change = {"revoke" if revoke else "grant": [workset_move.IMPORT_CAPABILITY]}
+    for record in store.list_networks(dest.root):
+        with store.mutate(record.network_id, dest.root) as fresh:
+            relay.set_member_capabilities(fresh, device_id=src.identity.device_id, **change)
+            store.save(fresh, dest.root)
+
+
 def _audit_events(root: Path) -> list[dict[str, Any]]:
     path = root / "network" / "audit.jsonl"
     if not path.is_file():
@@ -267,7 +278,7 @@ def test_an_older_destination_keeps_the_files_on_the_source(
 
     assert moved["ok"] is True, moved
     assert moved["working_set"]["transferred"] is False
-    assert [r["reason"] for r in moved["working_set"]["worktrees"]] == ["not_transferred"]
+    assert [r["reason"] for r in moved["working_set"]["worktrees"]] == ["unsupported_by_peer"]
     assert not (bhome / "proj" / ".worktrees" / "feat").exists()
 
 
@@ -281,6 +292,9 @@ def test_a_destination_without_the_repository_clones_it_with_its_own_credentials
     url = serve_origin_as_https(monkeypatch, rig.origin, rig.primary)
     empty_home = tmp_path / "empty-bhome"
     empty_home.mkdir()
+    # The default clone policy (S9, round 2): B clones a missing repository only into a
+    # folder that already holds one of its repositories, which ``~`` does here.
+    git(empty_home, "init", "-q", str(empty_home / "mine"))
     _server_a, server_b, _host, _port = pair
     _setup(pair, monkeypatch, rig, empty_home)
     block = _confirmed(server_b, monkeypatch)
@@ -305,6 +319,7 @@ def test_an_offload_to_an_older_destination_is_shown_as_staying(
     server_a, server_b, _host, _port = pair
     _setup(pair, monkeypatch, rig, bhome)
     target = server_b.identity.device_id
+    _grant_import(server_b, server_a)
     sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
     assert sends["carries_files"] is True, sends
     monkeypatch.setattr(workset, "WORKSET_TRANSFER_VERSION", 1)
@@ -386,3 +401,103 @@ def test_dirty_bytes_crossing_a_size_bucket_after_consent_still_carry_the_files(
     assert moved["working_set"]["transferred"] is True, moved["working_set"]
     landed = bhome / "proj" / ".worktrees" / "feat"
     assert (landed / "grown.txt").stat().st_size == (rig.feat / "grown.txt").stat().st_size
+
+
+def test_an_offload_without_the_import_grant_moves_only_the_conversation(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """Security-lead ruling (#4245 round 2): ``move`` alone never lets a source write
+    files on the destination. Without ``workset_import`` on B for A, the dry run says
+    the files stay (with the exact grant command, run on B), the move carries the
+    conversation only, and nothing lands in B's home. After the grant, they travel."""
+    from local_operator.network import store
+
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    target = server_b.identity.device_id
+    (record,) = store.list_networks(server_b.root)
+
+    stays = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+
+    assert stays["carries_files"] is False, stays
+    assert stays["destination_probe"]["import_granted"] is False
+    assert stays["import"] == {
+        "granted": False,
+        "remedy": (
+            f"lop network member grant {record.network_id} "
+            f"{server_a.identity.device_id} workset_import"
+        ),
+    }
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=stays["scope_digest"])
+    assert moved["ok"] is True, moved
+    assert moved["working_set"]["transferred"] is False
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+
+
+def test_the_grant_makes_the_offload_carry_the_files(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    assert sends["carries_files"] is True, sends
+    assert sends["destination_probe"]["import_granted"] is True
+    assert "import" not in sends
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    # The files are on B. (The OFFLOAD receipt on A carries A's pre-invite block, not
+    # B's restore outcome — pre-existing, outside this change.)
+    # B restores after ``done`` on its own pull thread, so A's answer can come first.
+    import time
+
+    landed = bhome / "proj" / ".worktrees" / "feat"
+    deadline = time.monotonic() + 30
+    while not (landed / ".git").exists() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert "unpushed work" in git(landed, "log", "-1", "--format=%s")
+
+
+def test_a_grant_revoked_after_consent_refuses_the_transfer_on_the_destination(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """The DESTINATION enforces the grant, whatever its prepare said: the owner is made
+    to offer anyway (a stale prepare, or a hostile owner), and B, re-reading its own
+    member row before the first clone or plan, refuses. Nothing moves."""
+    server_a, server_b, _host, _port = pair
+    source = _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    assert sends["carries_files"] is True, sends
+    _grant_import(server_b, server_a, revoke=True)
+    monkeypatch.setattr(
+        workset_move, "import_authority", lambda *_a, **_k: workset_move.IMPORT_BY_GRANT
+    )
+
+    refused = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert refused["ok"] is False and refused["code"] == "working_set_import_not_granted", refused
+    assert source.exists()
+    assert not (bhome / "proj" / ".worktrees" / "feat").exists()
+    assert not workset_move.incoming_staging(server_b.root, SESSION).exists()
+
+
+def test_without_the_working_set_the_receipt_says_they_stayed_as_asked(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """QA Q3 (#4245): ``--without-working-set`` on a build that transfers used to say
+    "this version of lop does not transfer working files yet"."""
+    from local_operator.network import workset_text
+
+    _server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+
+    moved = _move(server_b, monkeypatch, to="local", without_working_set=True)
+
+    assert moved["ok"] is True, moved
+    assert {r["reason"] for r in moved["working_set"]["worktrees"]} == {"kept_as_confirmed"}
+    assert "does not transfer" not in workset_text.reason_text("kept_as_confirmed")

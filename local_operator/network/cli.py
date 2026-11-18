@@ -339,7 +339,13 @@ def add_parser(
     # the default `drive` role cannot move, delete or borrow a login, and the only
     # other way to widen it is a re-pair that burns the device id.
     for verb, words in (
-        ("grant", "Allow a peer more on this device (move, delete, broker_credential, ...)"),
+        # ``workset_import`` is named here because ``move`` does not imply it: without
+        # it a move onto this device carries the conversation and leaves the files.
+        (
+            "grant",
+            "Allow a peer more on this device (move, workset_import, delete, "
+            "broker_credential, ...)",
+        ),
         ("revoke", "Take capabilities back from a peer on this device"),
     ):
         caps = member_actions.add_parser(verb, help=words)

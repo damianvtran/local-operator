@@ -73,8 +73,14 @@
   "cli.sessions_move_workset.reason.primary_absent": "गंतव्य पर इस repository की कोई कॉपी नहीं है और वह इसे clone नहीं कर सका",
   "cli.sessions_move_workset.reason.restore_failed": "फ़ाइलें आ गईं, पर अभी रीस्टोर नहीं हो सकीं",
   "cli.sessions_move_workset.reason.snapshot_failed": "स्रोत पर इसकी स्थिति कैप्चर नहीं हो सकी (खाली branch या bare repository)",
-  "cli.sessions_move_workset.reason.restore_path_refused": "यह डिवाइस उस पाथ पर रिपॉज़िटरी स्वीकार नहीं करता (देखें mesh.move.working_set_roots)",
+  "cli.sessions_move_workset.reason.restore_path_refused": "यह डिवाइस उस पाथ पर रिपॉज़िटरी स्वीकार नहीं करता (छिपा, सिस्टम, कमांड या डिपेंडेंसी फ़ोल्डर, या mesh.move.working_set_roots से बाहर)",
   "cli.sessions_move_workset.reason.url_refused": "इसका रिमोट कोई सार्वजनिक HTTPS या SSH पता नहीं है जिससे यह डिवाइस क्लोन करे",
   "cli.sessions_move_workset.reason.destination_declined": "गंतव्य डिवाइस ने इसे अस्वीकार कर दिया",
-  "cli.sessions_move_workset.receipt_branch_moved": "मौजूदा ब्रांच {branch} को {old} से {new} तक आगे बढ़ाया गया, जहाँ इस डिवाइस ने उसे छोड़ा था।"
+  "cli.sessions_move_workset.receipt_branch_moved": "मौजूदा ब्रांच {branch} को {old} से {new} तक आगे बढ़ाया गया, जहाँ इस डिवाइस ने उसे छोड़ा था।",
+  "cli.sessions_move_workset.import_not_granted": "{device} ने इस डिवाइस को अपनी वर्किंग फ़ाइलें भेजने की अनुमति नहीं दी है, इसलिए वे यहीं रहेंगी और सिर्फ़ बातचीत मूव होगी। अनुमति देने के लिए, {device} पर यह चलाएँ: {command}",
+  "cli.sessions_move_workset.reason.import_not_granted": "गंतव्य डिवाइस ने इस डिवाइस को वर्किंग फ़ाइलें भेजने की अनुमति नहीं दी है",
+  "cli.sessions_move_workset.reason.too_many_worktrees": "इस मूव में उससे ज़्यादा वर्कट्री थीं जितनी गंतव्य एक बार में स्वीकार करता है",
+  "cli.sessions_move_workset.reason.clone_parent_refused": "गंतव्य किसी गायब रिपॉज़िटरी को सिर्फ़ ऐसे फ़ोल्डर में क्लोन करता है जिसमें पहले से आपकी रिपॉज़िटरी हों (या mesh.move.working_set_roots सेट करें)",
+  "cli.sessions_move_workset.reason.kept_as_confirmed": "यह स्रोत पर ही रहेगा, जैसा इस मूव के लिए कन्फ़र्म किया गया था",
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} {remote} से संपर्क नहीं करेगा: नीति इसके पते को अस्वीकार करती है (यह सार्वजनिक होस्ट नहीं है)"
 }

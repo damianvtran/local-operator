@@ -73,8 +73,14 @@
   "cli.sessions_move_workset.reason.primary_absent": "目标设备上没有此仓库的副本，也无法克隆它",
   "cli.sessions_move_workset.reason.restore_failed": "文件已到达，但暂时无法恢复",
   "cli.sessions_move_workset.reason.snapshot_failed": "无法在源设备上记录其状态（空分支或 bare 仓库）",
-  "cli.sessions_move_workset.reason.restore_path_refused": "本设备不接受在该路径放置仓库（参见 mesh.move.working_set_roots）",
+  "cli.sessions_move_workset.reason.restore_path_refused": "本设备不接受在该路径放置仓库（隐藏、系统、命令或依赖文件夹，或在 mesh.move.working_set_roots 之外）",
   "cli.sessions_move_workset.reason.url_refused": "它的远程地址不是本设备会从中克隆的公共 HTTPS 或 SSH 地址",
   "cli.sessions_move_workset.reason.destination_declined": "目标设备拒绝了它",
-  "cli.sessions_move_workset.receipt_branch_moved": "已将现有分支 {branch} 从 {old} 前移到 {new}，即本设备离开时的位置。"
+  "cli.sessions_move_workset.receipt_branch_moved": "已将现有分支 {branch} 从 {old} 前移到 {new}，即本设备离开时的位置。",
+  "cli.sessions_move_workset.import_not_granted": "{device}尚未允许本设备向其发送工作文件，因此这些文件留在这里，只迁移对话。要允许，请在{device}上运行：{command}",
+  "cli.sessions_move_workset.reason.import_not_granted": "目标设备尚未允许本设备向其发送工作文件",
+  "cli.sessions_move_workset.reason.too_many_worktrees": "本次迁移包含的工作树数量超过目标设备一次可接受的数量",
+  "cli.sessions_move_workset.reason.clone_parent_refused": "目标设备只会把缺失的仓库克隆到已经存放你的仓库的文件夹中（或设置 mesh.move.working_set_roots）",
+  "cli.sessions_move_workset.reason.kept_as_confirmed": "按本次迁移的确认，它留在源设备上",
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device}不会连接{remote}：该地址被策略拒绝（不是公共主机）"
 }

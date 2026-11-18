@@ -94,6 +94,13 @@ def help_yes() -> Msg:
     return Msg("cli.sessions_move_workset.help_yes", {})
 
 
+def import_not_granted(*, device: str, command: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.import_not_granted",
+        {"device": device, "command": command},
+    )
+
+
 def leaves_behind(*, path: str, command: str) -> Msg:
     return Msg("cli.sessions_move_workset.leaves_behind", {"path": path, "command": command})
 
@@ -138,6 +145,13 @@ def probe_https_rewrite(*, device: str, url: str) -> Msg:
     return Msg("cli.sessions_move_workset.probe_https_rewrite", {"device": device, "url": url})
 
 
+def probe_refused_by_policy(*, device: str, remote: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.probe_refused_by_policy",
+        {"device": device, "remote": remote},
+    )
+
+
 def probe_remedy(*, device: str, command: str) -> Msg:
     return Msg("cli.sessions_move_workset.probe_remedy", {"device": device, "command": command})
 
@@ -155,6 +169,10 @@ def prompt_stays(*, session: str, device: str, source: str) -> Msg:
         "cli.sessions_move_workset.prompt_stays",
         {"session": session, "device": device, "source": source},
     )
+
+
+def reason_clone_parent_refused() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.clone_parent_refused", {})
 
 
 def reason_contended() -> Msg:
@@ -181,12 +199,20 @@ def reason_history_unscannable() -> Msg:
     return Msg("cli.sessions_move_workset.reason.history_unscannable", {})
 
 
+def reason_import_not_granted() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.import_not_granted", {})
+
+
 def reason_in_progress_operation() -> Msg:
     return Msg("cli.sessions_move_workset.reason.in_progress_operation", {})
 
 
 def reason_insufficient_space() -> Msg:
     return Msg("cli.sessions_move_workset.reason.insufficient_space", {})
+
+
+def reason_kept_as_confirmed() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.kept_as_confirmed", {})
 
 
 def reason_lfs() -> Msg:
@@ -223,6 +249,10 @@ def reason_snapshot_failed() -> Msg:
 
 def reason_submodule() -> Msg:
     return Msg("cli.sessions_move_workset.reason.submodule", {})
+
+
+def reason_too_many_worktrees() -> Msg:
+    return Msg("cli.sessions_move_workset.reason.too_many_worktrees", {})
 
 
 def reason_unmerged() -> Msg:
