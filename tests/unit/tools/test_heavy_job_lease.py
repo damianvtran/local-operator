@@ -296,6 +296,119 @@ def test_a_large_memory_request_is_heavy_on_its_own() -> None:
     assert heavy_lease.is_heavy("printf x", None) is None
 
 
+def _pytest_repo(root: Path, addopts: str | None) -> Path:
+    """A repo whose pyproject carries pytest ``addopts`` (None: no pytest section)."""
+    repo = root / "repo"
+    (repo / "tests" / "unit").mkdir(parents=True)
+    body = '[project]\nname = "x"\n'
+    if addopts is not None:
+        body += f"[tool.pytest.ini_options]\naddopts = {json.dumps(addopts)}\n"
+    (repo / "pyproject.toml").write_text(body)
+    return repo
+
+
+#: node2, 2026-11-18 (installed 0.107.1): heavy pytest runs that returned
+#: ``is_heavy(...) is None`` and so ran with no slot. Run inside a repo whose
+#: addopts are this repo's own (`-n auto`), as they were measured.
+NODE2_UNCLASSIFIED = [
+    (
+        "cd . && env $(env | grep -o '^CMUX_[A-Z_]*' | sed 's/^/-u /') -u NO_COLOR"
+        " make test-affected > log 2>&1; echo rc=$?",
+        "make test",
+    ),
+    (
+        ".venv/bin/python scripts/affected_tests.py --since origin/main"
+        " --python .venv/bin/python --evidence --workers 2 --chunk",
+        "affected_tests --run",
+    ),
+    (
+        "python scripts/run_bounded.py --timeout 600 -- python -m pytest tests/unit/x.py",
+        "pytest -n",
+    ),
+    ("PYTHONPATH=$PWD .venv/bin/python -m pytest -q tests/unit", "pytest -n"),
+]
+
+
+@pytest.mark.parametrize("command,reason", NODE2_UNCLASSIFIED)
+def test_node2_unclassified_heavy_runs_take_the_slot(
+    tmp_path: Path, command: str, reason: str
+) -> None:
+    cwd = str(_pytest_repo(tmp_path, "-n auto --dist worksteal"))
+    assert heavy_lease.is_heavy(command, cwd=cwd) == heavy_lease.HeavyClass(reason)
+
+
+def test_this_repos_own_addopts_make_a_targeted_file_parallel() -> None:
+    """The real pyproject: `-n auto` there is why case 3 above is not serial."""
+    heavy = heavy_lease.is_heavy("python -m pytest tests/unit/x.py", cwd=str(ROOT))
+    assert heavy == heavy_lease.HeavyClass("pytest -n")
+
+
+def test_a_command_substitution_never_hides_what_follows_or_what_it_runs() -> None:
+    env_wrapped = "env $(env | grep -o '^CMUX_[A-Z_]*' | sed 's/^/-u /') -u NO_COLOR make test"
+    assert heavy_lease.is_heavy(env_wrapped) == heavy_lease.HeavyClass("make test")
+    assert heavy_lease.is_heavy("echo $(pnpm build)") == heavy_lease.HeavyClass("pnpm build")
+    assert heavy_lease.is_heavy("x=`pnpm build`") == heavy_lease.HeavyClass("pnpm build")
+    assert heavy_lease.is_heavy("echo $(echo $(pnpm build))") == heavy_lease.HeavyClass(
+        "pnpm build"
+    )
+    # Single quotes are literal: nothing runs.
+    assert heavy_lease.is_heavy("echo '$(pnpm build)'") is None
+    assert heavy_lease.is_heavy("env $(cat flags) ls") is None
+
+
+def test_serial_pytest_broad_runs_are_heavy_without_addopts(tmp_path: Path) -> None:
+    cwd = str(_pytest_repo(tmp_path, None))
+    assert heavy_lease.is_heavy("pytest -q tests/unit", cwd=cwd) == heavy_lease.HeavyClass(
+        "pytest <directory>"
+    )
+    assert heavy_lease.is_heavy("python -m pytest -q", cwd=cwd) == heavy_lease.HeavyClass(
+        "pytest (whole suite)"
+    )
+    wrapped = "python scripts/run_bounded.py --timeout 600 -- python -m pytest tests/unit"
+    assert heavy_lease.is_heavy(wrapped, cwd=cwd) == heavy_lease.HeavyClass("pytest <directory>")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Policy (AGENTS.md): a serial targeted file takes no slot, `-k` or not.
+        "pytest tests/unit/x.py -q",
+        "pytest tests/unit/x.py -k 'slot and not stale'",
+        "python -m pytest tests/unit/x.py::test_one --deselect tests/unit/x.py::test_two",
+        "python scripts/run_bounded.py --timeout 600 -- python -m pytest tests/unit/x.py",
+        # Informational: nothing runs a test.
+        "pytest --version",
+        "python -m pytest --collect-only -q tests/unit",
+        "pytest --co",
+        ".venv/bin/python scripts/affected_tests.py --since origin/main",
+    ],
+)
+def test_targeted_and_informational_pytest_stay_light(tmp_path: Path, command: str) -> None:
+    assert heavy_lease.is_heavy(command, cwd=str(_pytest_repo(tmp_path, None))) is None
+
+
+def test_explicit_serial_overrides_parallel_addopts(tmp_path: Path) -> None:
+    cwd = str(_pytest_repo(tmp_path, "-n auto"))
+    assert heavy_lease.is_heavy("pytest tests/unit/x.py", cwd=cwd) is not None
+    for serial in ("-n 0", "-n0", "-p no:xdist"):
+        assert heavy_lease.is_heavy(f"pytest {serial} tests/unit/x.py", cwd=cwd) is None, serial
+    # The info flags win over addopts too.
+    assert heavy_lease.is_heavy("pytest --version", cwd=cwd) is None
+    assert heavy_lease.is_heavy("pytest --collect-only", cwd=cwd) is None
+
+
+def test_pytest_ini_and_setup_cfg_addopts_are_read(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "pytest.ini").write_text("[pytest]\naddopts = -n 4\n")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path / "a")) is not None
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "setup.cfg").write_text("[tool:pytest]\naddopts = -n 2\n")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path / "b")) is not None
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "pyproject.toml").write_text("[tool.pytest.ini_options\nbroken")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path / "c")) is None
+
+
 # -- slot sizing ----------------------------------------------------------------
 
 

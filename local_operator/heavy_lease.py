@@ -70,12 +70,14 @@ from and never capped by the command's own ``timeout``).
 from __future__ import annotations
 
 import asyncio
+import configparser
 import json
 import math
 import os
 import re
 import shlex
 import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -271,7 +273,73 @@ _SHALLOW_HEAVY_TOOLS = {"esbuild", "tsc", "vue-tsc", "vitest", "jest", "electron
     "rollup",
 }
 
+#: Placeholder for a ``$(…)``/backtick substitution, masked out of the line
+#: before tokenising. Why (node2, 2026-11-18): ``env $(env | grep -o
+#: '^CMUX_[A-Z_]*' | sed 's/^/-u /') -u NO_COLOR make test-affected`` split
+#: on the substitution's own ``(``/``|``/``)``, so the segment that held
+#: ``make test-affected`` began with ``-u`` and the whole line came back
+#: unclassified: a heavy run with no slot, which is how node2 OOM'd before the
+#: lease existed. The substitution's body is classified on its own instead.
+_SUBST = "__lop_subst__"
+
+#: pytest options that consume the NEXT argument, so it is not a test target
+#: (``-k expr``, ``--deselect x``). The ``--opt=value`` form needs no entry.
+_PYTEST_VALUE_OPTS = frozenset(
+    {"-k", "-m", "-p", "-c", "-o", "-W", "-r", "--rootdir", "--confcutdir", "--deselect"}
+    | {"--ignore", "--ignore-glob", "--durations", "--maxfail", "--tb", "--junitxml"}
+    | {"--basetemp", "--timeout", "--dist", "--log-level", "--override-ini", "--import-mode"}
+    | {"--cov", "--cov-report", "--max-worker-restart", "--config-file", "--capture"}
+)
+#: Calls that never run a test: collection listings and plugin/fixture docs.
+_PYTEST_INFO_FLAGS = frozenset({"--collect-only", "--co", "--fixtures", "--markers"})
+#: pytest config files, in pytest's own precedence order per directory.
+_PYTEST_CONFIGS = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+_PYTEST_CONFIG_MAX_BYTES = 1_000_000
+
 _Seen = frozenset[tuple[str | None, str]]
+
+
+def _mask_substitutions(command: str) -> tuple[str, list[str]]:
+    """``command`` with each top-level ``$(…)``/backtick body replaced by
+    :data:`_SUBST`, plus those bodies.
+
+    Single-quoted text is literal in the shell (``echo '$(pnpm build)'`` runs
+    nothing), so it is left alone. Parentheses nest (``$(a $(b))``); an
+    unbalanced one masks to the end of the line, which errs toward classifying
+    the body rather than hiding what follows it. Linear, no subprocess.
+    """
+    out: list[str] = []
+    bodies: list[str] = []
+    i, n = 0, len(command)
+    in_single = in_double = False
+    while i < n:
+        char = command[i]
+        if char == "\\" and not in_single:
+            out.append(command[i : i + 2])
+            i += 2
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single and (char == "`" or command.startswith("$(", i)):
+            if char == "`":
+                end = command.find("`", i + 1)
+                end = n if end < 0 else end
+                bodies.append(command[i + 1 : end])
+                i = end + 1
+            else:
+                depth, j = 1, i + 2
+                while j < n and depth:
+                    depth += {"(": 1, ")": -1}.get(command[j], 0)
+                    j += 1
+                bodies.append(command[i + 2 : j - 1 if depth == 0 else j])
+                i = j
+            out.append(_SUBST)
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out), bodies
 
 
 def _unpack(verdict: str | None) -> tuple[str | None, bool]:
@@ -370,7 +438,9 @@ def _strip_wrappers(tokens: list[str]) -> list[str]:
                 if tokens[i].startswith("-") and tokens[i] != "-":
                     i += 2 if tokens[i] in value_opts else 1
                     continue
-                if base == "env" and _ENV_ASSIGNMENT.match(tokens[i]):
+                if base == "env" and (_ENV_ASSIGNMENT.match(tokens[i]) or tokens[i] == _SUBST):
+                    # A substitution in env's argument position expands to
+                    # flags/assignments (`env $(… sed 's/^/-u /') make test`).
                     i += 1
                     continue
                 if positionals > 0:
@@ -463,6 +533,11 @@ def _classify_command(
         return _shallow_guess(command)
     heavy: str | None = None
     long_lived = False
+    command, bodies = _mask_substitutions(command)
+    for body in bodies:
+        # `$(pnpm build)` still runs the build; only its heaviness counts, since
+        # a watcher's output can never be substituted (it would never end).
+        heavy = heavy or _unpack(_classify_command(body, cwd, depth + 1, seen))[0]
     for segment in _segments(command):
         if segment[0] in ("cd", "pushd"):
             cwd = _cd(cwd, segment[1:])
@@ -667,25 +742,116 @@ def _classify_segment(
         return f"{program} {args[0]}"
     if program == "make" and any(a.startswith("test") for a in args if not a.startswith("-")):
         return "make test"
+    if program == "affected_tests.py" or (
+        _PYTHON.fullmatch(program) and args[:1] and os.path.basename(args[0]) == "affected_tests.py"
+    ):
+        # `make test-affected`'s engine: `--run`/`--evidence` run the selection
+        # (node2 measured 1139 s / 6720 tests with no slot); bare, it only lists.
+        return "affected_tests --run" if {"--run", "--evidence"} & set(args) else None
     pytest_args: list[str] | None = None
     if program in ("pytest", "py.test"):
         pytest_args = args
     elif _PYTHON.fullmatch(program) and args[:2] == ["-m", "pytest"]:
         pytest_args = args[2:]
     if pytest_args is not None:
-        # Only a PARALLEL pytest is heavy: `-n 8` forks eight interpreters,
-        # each importing the whole package. A single targeted file is not.
-        for index, arg in enumerate(pytest_args):
-            if arg in ("-n", "--numprocesses"):
-                value = pytest_args[index + 1] if index + 1 < len(pytest_args) else ""
-            elif match := re.fullmatch(r"-n(\S+)|--numprocesses=(\S+)", arg):
-                value = match.group(1) or match.group(2)
-            else:
-                continue
-            # `-n 0` is xdist's "run in-process": one interpreter, not heavy.
-            if value != "0":
-                return "pytest -n"
+        return _classify_pytest(pytest_args, cwd)
+    return None
+
+
+def _xdist_workers(args: list[str]) -> str | None:
+    """The LAST ``-n`` value in ``args`` (pytest lets the last one win), or None."""
+    value: str | None = None
+    for index, arg in enumerate(args):
+        if arg in ("-n", "--numprocesses"):
+            value = args[index + 1] if index + 1 < len(args) else ""
+        elif match := re.fullmatch(r"-n(\S+)|--numprocesses=(\S+)", arg):
+            value = match.group(1) or match.group(2)
+        elif arg in ("-p", "no:xdist") and "no:xdist" in args[index : index + 2]:
+            return "0"
+    return value
+
+
+def _pytest_addopts(directory: str | None) -> list[str]:
+    """``addopts`` from the pytest config pytest would pick at or above ``directory``.
+
+    Why: a "serial" ``pytest tests/unit/x.py`` is not serial in a repo whose
+    addopts say ``-n auto`` (local-operator's do): it forks 2..8 interpreters,
+    each importing the package. Cheap by contract, like :func:`_package_scripts`:
+    a few small file reads, no pytest import; any failure means "no addopts".
+    """
+    if not directory:
+        return []
+    try:
+        current = Path(directory).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return []
+    for folder in (current, *current.parents):
+        for name in _PYTEST_CONFIGS:
+            path = folder / name
+            try:
+                if not path.is_file() or path.stat().st_size > _PYTEST_CONFIG_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8")
+                if name == "pyproject.toml":
+                    section = tomllib.loads(text).get("tool", {}).get("pytest", {})
+                    options = section.get("ini_options") if isinstance(section, dict) else None
+                    if not isinstance(options, dict):
+                        continue  # a pyproject without pytest config is not one
+                    addopts = options.get("addopts", "")
+                else:
+                    parser = configparser.ConfigParser(interpolation=None)
+                    parser.read_string(text)
+                    section_name = "tool:pytest" if name == "setup.cfg" else "pytest"
+                    if not parser.has_section(section_name):
+                        if name in ("tox.ini", "setup.cfg"):
+                            continue
+                        return []  # pytest.ini is the config even when empty
+                    addopts = parser.get(section_name, "addopts", fallback="")
+            except (OSError, ValueError, configparser.Error, tomllib.TOMLDecodeError):
+                return []
+            if isinstance(addopts, list):
+                return [str(item) for item in addopts]
+            try:
+                return shlex.split(str(addopts))
+            except ValueError:
+                return []
+    return []
+
+
+def _classify_pytest(args: list[str], cwd: str | None) -> str | None:
+    """Heavy reason for a pytest run, or None.
+
+    Policy (AGENTS.md "To wait for heavy work"): a serial run of a targeted
+    FILE takes no slot, so the inner loop never queues behind a build. What is
+    heavy is a run that forks or loads the whole suite. Before node2's
+    2026-11-18 measurement only an explicit ``-n`` counted, and these ran with
+    no slot: ``pytest -q tests/unit`` (a directory), and any targeted file in a
+    repo whose ``addopts`` already say ``-n auto``. So:
+
+    * ``--collect-only``/``--fixtures``/``--markers`` never run a test: light.
+    * the effective worker count is the last ``-n`` across addopts then argv;
+      non-zero is heavy (``-n 0``/``-p no:xdist`` serialise).
+    * a directory target, or no target at all (the whole ``testpaths``), is
+      heavy even serially: one interpreter importing the suite.
+    """
+    if any(arg in _PYTEST_INFO_FLAGS for arg in args):
         return None
+    workers = _xdist_workers([*_pytest_addopts(cwd), *args])
+    if workers is not None and workers != "0":
+        return "pytest -n"
+    targets: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg.startswith("-"):
+            skip = arg in _PYTEST_VALUE_OPTS or arg in ("-n", "--numprocesses")
+        else:
+            targets.append(arg)
+    if not targets:
+        return "pytest (whole suite)"
+    if any(not (t.split("::", 1)[0].endswith(".py")) for t in targets):
+        return "pytest <directory>"
     return None
 
 
@@ -701,7 +867,11 @@ def is_heavy(
     bundlers (esbuild, vite/electron-vite build, webpack, rollup, next build),
     the TypeScript compiler, JS test runners (vitest, jest, node --test),
     package-manager build/test/typecheck scripts, nx/turbo build|test targets,
-    parallel pytest (``-n``), ``make test*`` and ``cargo``/``go`` build|test.
+    parallel pytest (``-n`` on the command line or in the nearest pytest
+    config's ``addopts``), a directory or whole-suite pytest,
+    ``affected_tests.py --run|--evidence``, ``make test*`` and
+    ``cargo``/``go`` build|test. ``$(…)``/backtick bodies are classified too,
+    and never hide the command around them.
 
     Classified by what actually runs: wrappers (``cd x &&``, env assignments,
     ``timeout N``, ``nice``, ``taskset``, ``chrt``, ``prlimit``, ``xvfb-run``,
