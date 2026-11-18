@@ -682,11 +682,17 @@ async def transcribe_audio(
     cleanup: str | None = None,
     include_groq: bool = False,
     groq_client: Any | None = None,
+    only: AudioPath | None = None,
 ) -> SttOutcome:
     """Run the STT cascade over one audio file. See module docstring.
 
     ``include_groq`` adds rung 4 (Groq) to the walk; ``groq_client`` is the
     test seam that attaches ``httpx.MockTransport``.
+
+    ``only`` PINS the walk to one rung (bring-your-own-key voice): every other
+    rung is skipped even when available, and a pinned rung with no key is
+    :class:`SttUnavailable` with no attempt made, so a stored Radient login can
+    never serve (or be billed for) a request pinned to the user's own key.
 
     ``correlation_session_id`` (PR-3) is the CALLER's conversation id for the
     hub's client correlation header and the emitted spend record — deliberately
@@ -712,10 +718,16 @@ async def transcribe_audio(
         )
         walkable = (*STT_RUNG_PATHS, GROQ_STT_RUNG) if include_groq else STT_RUNG_PATHS
         candidates = [
-            rung.path for rung in resolution.rungs if rung.available and rung.path in walkable
+            rung.path
+            for rung in resolution.rungs
+            if rung.available and rung.path in walkable and (only is None or rung.path == only)
         ]
         if not candidates:
-            raise SttUnavailable(str(resolution.reason), resolution=resolution)
+            pinned = next((r for r in resolution.rungs if r.path == only), None) if only else None
+            raise SttUnavailable(
+                str(pinned.reason if pinned is not None else resolution.reason),
+                resolution=resolution,
+            )
 
         deadline = time.monotonic() + STT_OVERALL_TIMEOUT_S
         attempts: list[SttAttempt] = []

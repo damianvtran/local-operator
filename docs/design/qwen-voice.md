@@ -223,6 +223,20 @@ except where noted.
   Found live: with an ask open, every spoken request was refused until the ask
   was answered (`tests/unit/server/test_desktop_voice.py`, the two
   `..._ask_..._refuse_speech` tests).
+- **V16 — Pinned provider (bring-your-own-key voice, 2026-11-18).** The
+  voice routes accept an optional `provider` (`elevenlabs` only for now): form
+  field on `/voice/utterance`, body field on `/voice/speech`. A pinned request
+  walks ONLY that rung: `only=` on `transcribe_audio`, `synthesize_speech` and
+  `resolve_voice_path`. A stored Radient login or a Groq/OpenAI key never serves
+  or bills it, and a missing key is `409` with that rung's own sentence ("No
+  ElevenLabs API key is stored."), never a quiet fall-through. Absent
+  `provider` keeps the whole cascade. `GET /v1/desktop/voice` adds an optional
+  `byok: {provider, ready, reason}` (additive; `features.voice` stays 2): an
+  absent `byok` means the backend predates pinning. `/voice/speech` labels the
+  audio from its bytes (ElevenLabs answers MP3, Groq WAV) instead of always
+  `audio/wav`. The key stays in the daemon's credential store (`/login
+  elevenlabs`); no route accepts, returns or logs one. **Known gap:** only WAV is
+  stored in the phrase cache, so an ElevenLabs phrase is paid for each time.
 - **V14 — Binding a take to its turn.** A take binds to the turn whose stream
   carries the user `message_start` with `message.id ==` the take's
   `request_id`, for a prompt, a mid-turn steer and a tail steer, live and on

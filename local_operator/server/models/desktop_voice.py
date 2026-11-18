@@ -25,11 +25,31 @@ class VoiceSettings(BaseModel):
     max_spoken_chars: int
 
 
+class VoiceByok(BaseModel):
+    """Whether bring-your-own-key voice can run, for the one provider supported.
+
+    ``ready`` is the cascade's own answer for a request PINNED to ``provider``
+    (``only=``), so it is false when only another rung (a Radient login, a Groq
+    key) is stored: pinned voice never falls through to those. ``reason`` is the
+    resolver's sentence for the pinned rung, ready or not.
+    """
+
+    provider: Literal["elevenlabs"]
+    ready: bool
+    reason: str
+
+
 class VoiceStatus(BaseModel):
-    """``GET /v1/desktop/voice``."""
+    """``GET /v1/desktop/voice``.
+
+    ``byok`` is additive and optional: a client that does not know it ignores it,
+    and a client that reads an absent ``byok`` knows the backend predates pinned
+    voice (it must not offer the bring-your-own-key engine).
+    """
 
     active: VoiceActive | None
     settings: VoiceSettings
+    byok: VoiceByok | None = None
 
 
 class VoiceControl(BaseModel):
@@ -137,3 +157,6 @@ class VoiceSpeechRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     source: SpeechSource
     segment: int = Field(default=0, ge=0, le=1000)
+    #: PIN this request to one provider (bring-your-own-key voice): only that
+    #: rung may serve it, whatever else is stored. Absent = the whole cascade.
+    provider: Literal["elevenlabs"] | None = None

@@ -213,9 +213,19 @@ async def _text(rig: Any, session_id: str, source: dict[str, Any]) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_status_reports_the_slot_and_cap_and_nothing_about_speech(rig: Any) -> None:
+async def test_status_reports_the_slot_the_cap_and_byok_readiness_and_no_key_material(
+    rig: Any,
+) -> None:
+    """Amended with bring-your-own-key voice: the status used to say nothing about
+    speech. It now says whether the pinned ElevenLabs rung can run (a boolean and
+    the resolver's sentence), and still carries no credential of any kind."""
     result = (await rig.client.get("/v1/desktop/voice")).json()["result"]
-    assert result == {"active": None, "settings": {"max_spoken_chars": 800}}
+    assert result["active"] is None
+    assert result["settings"] == {"max_spoken_chars": 800}
+    assert set(result["byok"]) == {"provider", "ready", "reason"}
+    assert result["byok"]["provider"] == "elevenlabs"
+    assert result["byok"]["ready"] is False, "the test rig stores no key"
+    assert set(result) == {"active", "settings", "byok"}
 
 
 @pytest.mark.asyncio
@@ -643,6 +653,155 @@ async def test_a_blocking_ask_still_refuses_speech_when_the_queue_is_off(rig: An
     assert refused.status_code == 409, refused.text
     assert refused.json()["detail"]["code"] == "approval_pending"
     assert remote.admissions == []
+
+
+# -- bring-your-own-key voice: pin a request to ONE provider ---------------------
+
+
+@pytest.mark.asyncio
+async def test_a_recording_pinned_to_elevenlabs_walks_only_that_rung(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    from local_operator.stt import AudioPath
+
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), "provider": "elevenlabs"},
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 200, response.text
+    ((_head, kwargs),) = cascades.stt
+    assert kwargs["only"] == AudioPath.PROVIDER_STT_ELEVENLABS
+
+
+@pytest.mark.asyncio
+async def test_an_unpinned_recording_keeps_the_whole_walk(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    assert (await _recording(rig)).status_code == 200
+    ((_head, kwargs),) = cascades.stt
+    assert kwargs.get("only") is None
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_provider_is_refused_before_any_work(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), "provider": "radient"},
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 422, response.text
+    assert cascades.stt == [] and rig.pool.remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_speech_pinned_to_elevenlabs_pins_the_cascade_and_the_phrase_cache(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    from local_operator.tts import VoicePath
+
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/speech",
+        json={
+            "session_id": SESSION_A,
+            "source": {"kind": "phrase", "key": "voice_off"},
+            "segment": 0,
+            "provider": "elevenlabs",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert cascades.resolve[-1]["only"] == VoicePath.PROVIDER_TTS_ELEVENLABS
+    (_text, kwargs) = cascades.tts[-1]
+    assert kwargs["only"] == VoicePath.PROVIDER_TTS_ELEVENLABS
+
+
+@pytest.mark.asyncio
+async def test_speech_with_an_unknown_provider_is_a_validation_error(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/speech",
+        json={
+            "session_id": SESSION_A,
+            "source": {"kind": "phrase", "key": "voice_off"},
+            "provider": "radient",
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert cascades.tts == []
+
+
+@pytest.mark.asyncio
+async def test_the_audio_is_labelled_with_what_it_actually_is(
+    rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ElevenLabs answers MP3, Groq answers WAV: the label follows the bytes, so
+    the page never decodes an MP3 believing it is PCM."""
+    from local_operator.tts import TtsOutcome, VoicePath
+
+    mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\xff\xfb\x90\x00" * 8
+
+    async def synthesize(text: str, **kwargs: Any) -> TtsOutcome:
+        return TtsOutcome(
+            audio=mp3, path=VoicePath.PROVIDER_TTS_ELEVENLABS, attempts=(), provider="elevenlabs"
+        )
+
+    monkeypatch.setattr("local_operator.tts.cascade.synthesize_speech", synthesize)
+    await _enable(rig, SESSION_A)
+    body = {"session_id": SESSION_A, "source": {"kind": "phrase", "key": "voice_off"}}
+    response = await rig.client.post("/v1/desktop/voice/speech", json=body)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("audio/mpeg")
+    assert response.headers["x-voice-path"] == "provider_tts_elevenlabs"
+
+
+@pytest.mark.asyncio
+async def test_status_reports_whether_the_elevenlabs_key_is_ready(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``GET /voice`` says whether bring-your-own-key voice can run, and why not,
+    so the app can say "No ElevenLabs key" instead of failing on the first take."""
+    from local_operator.tts import RungAvailability, VoicePath, VoicePathResolution
+
+    seen: list[dict[str, Any]] = []
+
+    def answer(ready: bool) -> Any:
+        async def resolve(**kwargs: Any) -> VoicePathResolution:
+            seen.append(kwargs)
+            rung = RungAvailability(
+                VoicePath.PROVIDER_TTS_ELEVENLABS,
+                ready,
+                "An ElevenLabs API key is stored." if ready else "No ElevenLabs API key is stored.",
+            )
+            return VoicePathResolution(
+                path=VoicePath.PROVIDER_TTS_ELEVENLABS if ready else VoicePath.NONE,
+                reason=rung.reason,
+                rungs=(rung,),
+                servable=ready,
+            )
+
+        return resolve
+
+    monkeypatch.setattr("local_operator.tts.cascade.resolve_voice_path", answer(False))
+    missing = (await rig.client.get("/v1/desktop/voice")).json()["result"]
+    assert missing["byok"] == {
+        "provider": "elevenlabs",
+        "ready": False,
+        "reason": "No ElevenLabs API key is stored.",
+    }
+    assert seen[-1]["only"] == VoicePath.PROVIDER_TTS_ELEVENLABS
+
+    monkeypatch.setattr("local_operator.tts.cascade.resolve_voice_path", answer(True))
+    ready = (await rig.client.get("/v1/desktop/voice")).json()["result"]
+    assert ready["byok"]["ready"] is True
+    assert ready["active"] is None, "the slot half of the status is unchanged"
 
 
 # -- B3: a deleted conversation leaves the slot ----------------------------------

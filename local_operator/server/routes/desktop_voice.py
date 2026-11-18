@@ -94,7 +94,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
@@ -116,6 +116,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import MessageAdmission
 from local_operator.server.models.desktop_voice import (
     VoiceActive,
+    VoiceByok,
     VoiceControl,
     VoiceControlResult,
     VoiceSettings,
@@ -137,6 +138,7 @@ from local_operator.server.routes.desktop_sessions import reply
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath
 from local_operator.stt import audio as stt_audio
+from local_operator.tts import VoicePath
 from local_operator.voice import segments as voice_segments
 from local_operator.voice import slot as voice_slot
 from local_operator.voice import speakable as voice_speakable
@@ -206,6 +208,12 @@ _STT_PROVIDERS = {
 #: carries no format, so the route fixes it rather than guessing from the rung.
 VOICE_AUDIO_FORMAT = "wav"
 VOICE_AUDIO_MIME = "audio/wav"
+
+#: A request PINNED to one provider (bring-your-own-key voice): the wire token ->
+#: the one rung that may serve it. Closed: a new provider is a new line here, in
+#: ``VoiceSpeechRequest.provider`` and in the ``provider`` form field.
+_PINNED_STT = {"elevenlabs": AudioPath.PROVIDER_STT_ELEVENLABS}
+_PINNED_TTS = {"elevenlabs": VoicePath.PROVIDER_TTS_ELEVENLABS}
 
 #: The fixed spoken phrases: key -> catalogue message. CLOSED: ``/speech``
 #: resolves a phrase only through this table, so any other key (or free text in
@@ -305,12 +313,33 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
 async def voice_status(
     request: Request,
     config_manager: Annotated[ConfigManager, Depends(get_config_manager)],
+    env_config: Annotated[EnvConfig, Depends(get_env_config)],
+    store: Annotated[AuthStore, Depends(get_provider_auth_store)],
 ) -> CRUDResponse[VoiceStatus]:
-    """The slot and the cap. Never writes anything."""
+    """The slot, the cap, and whether bring-your-own-key voice can run.
+
+    Never writes anything. ``byok`` is the TTS cascade's answer for a request
+    pinned to ElevenLabs; speech-to-text uses the same stored key, so one probe
+    answers for both halves.
+    """
+    from local_operator.tts import cascade as tts_cascade
+
+    pinned = _PINNED_TTS["elevenlabs"]
+    resolution = await tts_cascade.resolve_voice_path(
+        config_dir=_config_dir(request),
+        base_url=env_config.radient_api_base_url,
+        store=store,
+        only=pinned,
+    )
     return reply(
         VoiceStatus(
             active=_active(_config_dir(request)),
             settings=VoiceSettings(max_spoken_chars=_max_spoken_chars(config_manager)),
+            byok=VoiceByok(
+                provider="elevenlabs",
+                ready=resolution.servable,
+                reason=str(resolution.reason),
+            ),
         ),
     )
 
@@ -456,8 +485,11 @@ async def _transcribe(
     config_manager: ConfigManager,
     env_config: EnvConfig,
     store: AuthStore,
+    only: AudioPath | None = None,
 ) -> tuple[str, str]:
     """Run the STT cascade over the upload; ``(text, path token)``.
+
+    ``only`` pins the walk to one rung (bring-your-own-key voice).
 
     The walk includes the Groq rung (``include_groq=True``). Refuses with
     ``voice_rate_limited`` (429) when the chosen failure is a 429, with
@@ -477,6 +509,7 @@ async def _transcribe(
                 store=store,
                 correlation_session_id=session_id,
                 include_groq=True,
+                only=only,
             )
         except SttUnavailable as exc:
             limited = _rate_limited(exc.error, exc.attempts[-1].path if exc.attempts else None)
@@ -518,6 +551,7 @@ async def voice_utterance(
     file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None, max_length=200_000),
     text_origin: Optional[str] = Form(None, max_length=64),
+    provider: Optional[Literal["elevenlabs"]] = Form(None),
 ) -> CRUDResponse[VoiceUtteranceResult]:
     """Transcribe a recording (or take ``text``) and admit it to the slot's session.
 
@@ -551,6 +585,7 @@ async def voice_utterance(
             config_manager=config_manager,
             env_config=env_config,
             store=store,
+            only=_PINNED_STT[provider] if provider is not None else None,
         )
         if await _card_pending(request, session_id):
             raise _refuse(409, "approval_pending", _wv.approval_pending())
@@ -815,6 +850,7 @@ async def voice_speech(
 
     config_dir = _config_dir(request)
     require_slot(config_dir, body.session_id)
+    pinned = _PINNED_TTS[body.provider] if body.provider is not None else None
     source = body.source
     phrase_key: str | None = None
     if source.kind == "phrase":
@@ -850,6 +886,7 @@ async def voice_speech(
             base_url=env_config.radient_api_base_url,
             store=store,
             include_groq=True,
+            only=pinned,
         )
         if resolution.servable:
             cache_file = _phrase_cache_file(
@@ -886,6 +923,7 @@ async def voice_speech(
             correlation_session_id=body.session_id,
             client_request_id=request_id,
             include_groq=True,
+            only=pinned,
         )
     except tts_cascade.TtsUnavailable as unavailable:
         if unavailable.error is None:
@@ -921,8 +959,12 @@ async def voice_speech(
                 config_dir, outcome.path.value, descriptor.resolved_gender(), phrase_key or ""
             )
             await asyncio.to_thread(_store_phrase, served, outcome.audio)
+    # The label follows the bytes: a Groq answer is WAV but ElevenLabs answers
+    # MP3, and calling an MP3 "audio/wav" is how a page ends up decoding it as
+    # PCM. An unrecognised container keeps the contract's WAV label.
+    sniffed = stt_audio.sniff_audio(outcome.audio)
     return Response(
         content=outcome.audio,
-        media_type=VOICE_AUDIO_MIME,
+        media_type=sniffed.mime_type if sniffed is not None else VOICE_AUDIO_MIME,
         headers=_audio_headers(outcome.path.value, len(text)),
     )

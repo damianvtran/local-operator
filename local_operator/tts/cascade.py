@@ -257,11 +257,18 @@ async def resolve_voice_path(
     session_id: str | None = None,
     store: AuthStore | None = None,
     include_groq: bool = False,
+    only: VoicePath | None = None,
 ) -> VoicePathResolution:
     """Decide which text-to-speech path a request would take. See the module docstring.
 
     ``include_groq`` adds the Groq rung (rung 4). It defaults off so the
     generic paths route keeps its exact payload.
+
+    ``only`` PINS the request to one rung (bring-your-own-key voice): the answer
+    is that rung if it is available and "unavailable" otherwise, whatever else
+    is stored. A Radient login that happens to be signed in must not serve, or
+    be billed for, a request the user pinned to their own ElevenLabs key.
+    ``rungs`` still reports every rung, so a surface can say what is missing.
     """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
@@ -333,7 +340,9 @@ async def resolve_voice_path(
             else ()
         ),
     )
-    available = next((rung for rung in rungs if rung.available), None)
+    available = next(
+        (rung for rung in rungs if rung.available and (only is None or rung.path == only)), None
+    )
     if available is not None:
         return VoicePathResolution(
             path=available.path,
@@ -341,9 +350,12 @@ async def resolve_voice_path(
             rungs=rungs,
             servable=True,
         )
+    pinned = next((rung for rung in rungs if rung.path == only), None) if only else None
     return VoicePathResolution(
         path=VoicePath.NONE,
-        reason=render_resolved(_vk.no_tts_provider()),
+        # A pinned request names the pinned rung's own gap ("No ElevenLabs key
+        # is stored"), not the generic "no provider": the user chose it.
+        reason=pinned.reason if pinned is not None else render_resolved(_vk.no_tts_provider()),
         rungs=rungs,
         servable=False,
     )
@@ -611,6 +623,7 @@ async def synthesize_speech(
     client_request_id: str | None = None,
     include_groq: bool = False,
     groq_client: Optional[Any] = None,
+    only: VoicePath | None = None,
 ) -> TtsOutcome:
     """Synthesize ``text`` down the cascade. See the module docstring.
 
@@ -628,6 +641,10 @@ async def synthesize_speech(
 
     ``include_groq`` adds rung 4 (Groq) to the walk; ``groq_client`` is the test
     seam. With the default ``False`` the Groq rung is never probed or reached.
+
+    ``only`` pins the walk to that one rung (see :func:`resolve_voice_path`):
+    every other rung is skipped even when available, and a pinned rung with no
+    key is :class:`TtsUnavailable` with no attempt made.
     """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
@@ -640,6 +657,7 @@ async def synthesize_speech(
                 session_id=session_id,
                 store=store,
                 include_groq=include_groq,
+                only=only,
             )
 
         attempts: list[TtsAttempt] = []
@@ -652,6 +670,8 @@ async def synthesize_speech(
         deadline = asyncio.get_running_loop().time() + timeout_s
 
         walk = (*TTS_RUNG_PATHS, GROQ_TTS_RUNG) if include_groq else TTS_RUNG_PATHS
+        if only is not None:
+            walk = tuple(path for path in walk if path == only)
         for path in walk:
             rung = next((r for r in resolution.rungs if r.path == path), None)
             if rung is None or not rung.available:
