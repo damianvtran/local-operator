@@ -11220,14 +11220,6 @@ class OperatorApp(App[None]):
         state ever reached, which is an infinite reconnect loop rather than a
         shortened one. The distinction is what makes the reset safe.
         """
-        if source.connection_task is not None and not source.connection_task.done():
-            return
-        source.connection_error = ""
-        # Cleared with the error text it qualifies, never independently: a stale
-        # verdict here would keep the band saying "this session was stopped" over
-        # a source whose next verdict is an ordinary retryable one (U3's class of
-        # stale verdict, one surface over).
-        source.can_never_bind = False
         if not continues_retry:
             # THE BUDGET BELONGS TO AN ATTEMPT THE USER ASKED FOR. A source that
             # was navigated away from mid-retry keeps its spent counter — the
@@ -11240,7 +11232,29 @@ class OperatorApp(App[None]):
             # independently by review (F2) and QA (Q1), the latter reproducing a
             # real eviction that failed on a carried budget where the same
             # eviction healed from a fresh one.
+            #
+            # BEFORE THE IN-FLIGHT RETURN BELOW, NOT AFTER IT. A user who comes
+            # back while the old chain still has a round in flight (its backoff
+            # is still sleeping, or a bind is still out) hits that early return;
+            # with the refill after it, the round then saw the source current
+            # again and re-armed `continues_retry` on the SPENT counter — the
+            # same inherited budget through a shorter window (up to one backoff,
+            # 3 s at the ceiling). Surfaced by the flaky
+            # `test_a_reselect_after_navigating_away_gets_a_full_budget`, pinned
+            # by `test_a_reselect_while_a_round_is_in_flight_refills_the_budget`.
+            # Safe against the unexhaustible-budget loop because every caller
+            # that omits `continues_retry` is user intent (a sidebar click, a
+            # navigation commit, a notification open); the loop's own re-arm
+            # passes the flag and never lands here.
             source.connect_attempts = 0
+        if source.connection_task is not None and not source.connection_task.done():
+            return
+        source.connection_error = ""
+        # Cleared with the error text it qualifies, never independently: a stale
+        # verdict here would keep the band saying "this session was stopped" over
+        # a source whose next verdict is an ordinary retryable one (U3's class of
+        # stale verdict, one surface over).
+        source.can_never_bind = False
         source.connection_task = asyncio.create_task(self._connect_sidebar_source(source))
 
         def settled(task: asyncio.Task[None]) -> None:
