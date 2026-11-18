@@ -1,0 +1,7 @@
+{
+  "network.pairing.refusal.expired": "Esta vinculación ya no está abierta, así que no se aprobó nada. Inicia una nueva vinculación desde el otro dispositivo.",
+  "network.pairing.refusal.mismatch": "{count, plural, =0 {Ese código no coincide con el del otro dispositivo y no quedan intentos.} one {Ese código no coincide con el del otro dispositivo. Queda # intento.} other {Ese código no coincide con el del otro dispositivo. Quedan # intentos.}}",
+  "network.pairing.refusal.needs_app": "Para aprobar aquí la vinculación de un dispositivo hace falta la app firmada de Local Operator en un Mac. No se aprobó nada. Aún puedes responder desde una terminal en este dispositivo.",
+  "network.pairing.refusal.no_pending": "Ningún dispositivo está esperando para vincularse con este mediante esa invitación.",
+  "network.pairing.refusal.not_ready": "El otro dispositivo todavía no ha introducido el código de este, así que no hay nada que confirmar. Espera a que lo haga y vuelve a intentarlo."
+}

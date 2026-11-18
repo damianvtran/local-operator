@@ -1050,6 +1050,12 @@ def static_feature_flags() -> dict[str, Any]:
         # /v1/desktop/devices`, and the feed's `approvals.pair_request`. Its own key so
         # a renderer that lacks it never posts a pair-ack body an older backend 404s.
         "phone_pairing": 1,
+        # MESH PAIRING FROM THE MESH APPROVALS (design mesh-pairing-approvals §3.3):
+        # `GET /v1/desktop/mesh/pairings`, `POST .../{side}/{invite_id}/answer` (app
+        # attestation required; 403 `pairing_needs_app` otherwise), and the feed's
+        # `approvals.pairing_id`. Its own key so a renderer without it never shows a
+        # card an older backend cannot serve.
+        "mesh_pairing": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
         "profile_proposals": 1,

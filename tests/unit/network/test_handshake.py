@@ -575,7 +575,7 @@ def test_pair_frames_carry_no_sas_value_from_the_peer() -> None:
 
 def test_pair_confirm_timeout_is_bounded_by_the_invite() -> None:
     assert hs_mod.pair_timeout_seconds(60.0) == 60.0
-    assert hs_mod.pair_timeout_seconds(9999.0) == hs_mod.PAIR_CONFIRM_TIMEOUT_S
+    assert hs_mod.pair_timeout_seconds(9999.0) == hs_mod.PAIR_PARK_CEILING_S
 
 
 def test_a_frame_over_the_line_budget_is_never_sent(

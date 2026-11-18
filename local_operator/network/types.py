@@ -1574,6 +1574,31 @@ class MemberRecord:
         return MemberRecord(**fields)
 
 
+#: The two stages of an INVITER's pairing record (the Mesh approvals card, design §3.1).
+#: ``awaiting_joiner``: the ceremony is parked but the joiner's person has not yet
+#: typed this device's code there, so the inviter's person has nothing to answer
+#: (the card shows the code and a Decline only). ``awaiting_confirmation``: the
+#: joiner's transcription arrived and matched; this side's person may now answer.
+#: A record written before stages existed reads as ``awaiting_confirmation``, which
+#: is exactly what it was.
+PAIR_STAGE_AWAITING_JOINER = "awaiting_joiner"
+PAIR_STAGE_AWAITING_CONFIRMATION = "awaiting_confirmation"
+
+
+def new_pairing_nonce() -> str:
+    """A fresh per-ceremony (and per-stage) nonce for a pairing card.
+
+    WHY. An app attestation for a pairing answer binds this value (see
+    ``network.pairing_attest``), so an attestation made for one ceremony — or for
+    the stage-1 card of this one — can never answer another: a retry of the same
+    invite parks a new record with a new nonce. It is not a secret; it is a
+    freshness tag the desktop API exposes on the card row.
+    """
+    import secrets
+
+    return secrets.token_hex(16)
+
+
 @dataclass
 class PendingPairing:
     """An inbound pairing waiting for the INVITER's human to confirm the code.
@@ -1621,7 +1646,16 @@ class PendingPairing:
     #: or ``""`` for a record from before this field — read as "no list to show".
     offer: list[dict[str, Any]] = field(default_factory=list)
     offer_state: str = ""
-    schema: int = 2
+    #: Which card stage this is (``PAIR_STAGE_*`` above). Schema 3; ``_known`` keeps
+    #: an older reader tolerant of the new keys, and an older record (no key) is
+    #: stage 2, which is what every pre-stage record was.
+    stage: str = PAIR_STAGE_AWAITING_CONFIRMATION
+    #: The invite's role, so the card can say "as <role>" without a second read.
+    role: str = ""
+    #: Per-ceremony, per-stage freshness tag an app attestation binds
+    #: (:func:`new_pairing_nonce`). ``""`` on a pre-schema-3 record.
+    nonce: str = ""
+    schema: int = 3
 
     def seconds_left(self, now: float | None = None) -> float:
         return max(0.0, self.expires_at - (time.time() if now is None else now))
@@ -1741,6 +1775,10 @@ class PendingJoin:
     offer_state: str = ""
     error_code: str = ""
     message: str = ""
+    #: Per-ceremony freshness tag an app attestation for this card binds
+    #: (:func:`new_pairing_nonce`); ``""`` on a record parked by an older build,
+    #: which the Mesh approvals card then shows but cannot answer.
+    nonce: str = ""
     schema: int = 2
 
     def seconds_left(self, now: float | None = None) -> float:

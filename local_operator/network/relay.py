@@ -104,6 +104,7 @@ from local_operator.network.handshake import (
     pair_result_frame,
     pair_timeout_seconds,
     sas_matches,
+    set_pair_keepalive,
 )
 from local_operator.network.identity import (
     DeviceIdentity,
@@ -130,6 +131,8 @@ from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NET_PAIR_OPS,
+    PAIR_STAGE_AWAITING_CONFIRMATION,
+    PAIR_STAGE_AWAITING_JOINER,
     ControlRequestTimeout,
     Granted,
     LinkContext,
@@ -144,6 +147,7 @@ from local_operator.network.types import (
     Refusal,
     SecretState,
     capabilities_for_role,
+    new_pairing_nonce,
     trust_state,
 )
 from local_operator.notifications.remote_attention import (
@@ -5861,6 +5865,12 @@ class RelayServer:
         self._refusal_rows = redial.RefusalCoalescer()
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
+        #: How many inviter ceremonies are PARKED on this relay right now (from the
+        #: listener's entry to its exit) — the count :data:`PAIR_PARKED_CEREMONY_CAP`
+        #: bounds. A plain int under its own lock: the listener runs one thread per
+        #: accepted pair socket, so the check-and-increment must be one step.
+        self._pair_parked = 0
+        self._pair_parked_lock = threading.Lock()
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
         self._control_key = wire.b64u(os.urandom(32))
@@ -12916,8 +12926,20 @@ class RelayServer:
             ),
             offer=list(offer),
             offer_state=offer_state,
+            stage=PAIR_STAGE_AWAITING_CONFIRMATION,
+            role=role,
+            nonce=new_pairing_nonce(),
         )
-        store.save_pending_pairing(pending, self.root)
+        # THE STALE-DECISION RACE GUARD. The decision poll below reads ANY decision
+        # file for this invite, so a decision written while the row was still stage 1
+        # (an out-of-band file write, or a confirm racing the flip) would admit a
+        # device whose person never compared the transcription. The clear runs BEFORE
+        # the record flips, and both run under the network record's write lock — the
+        # same lock ``_ctl_pair_confirm`` holds while it checks the stage and writes —
+        # so no answer can land between "cleared" and "now stage 2" and survive.
+        with store.mutate(record.network_id, self.root):
+            store.clear_pair_decision(invite_id, self.root)
+            store.save_pending_pairing(pending, self.root)
         self.audit.record(
             AuditEvent(
                 event="pairing_awaiting_confirmation",
@@ -13063,13 +13085,33 @@ class RelayServer:
         # one ceremony disagreed about how long a human has. `pair_timeout_seconds`
         # is the one owner of that number, and `invite.joiner_prompt` prints the same
         # number to the person, so the promise and the wait cannot drift again.
-        deadline = wire.deadline_in(pair_timeout_seconds(_remaining_of(record, invite_id)))
+        window = pair_timeout_seconds(_remaining_of(record, invite_id))
+        deadline = wire.deadline_in(window)
+        # KERNEL KEEPALIVE ON THE PARKED SOCKET (see ``set_pair_keepalive``): the window
+        # above can now be ten minutes, which outlives many NAT idle timers. No app-level
+        # heartbeat — an older joiner would not expect one.
+        set_pair_keepalive(sock)
+        holds_slot = False
         member_row: MemberRecord | None = None
         #: WHICH STATEMENT BOUNDARY THE PAIR LISTENER WAS AT when a socket-class
         #: failure landed — the field that turns "the pairing was refused" into
         #: "the first sealed read failed". Local record only, never on the wire.
         stage = "offer_send"
         try:
+            # THE PARKED-CEREMONY CAP, checked before anything is sent or parked. A
+            # pairing can now hold a socket (and a thread) for up to the whole invite
+            # life, so an unbounded number of token holders dialling at once would be
+            # an unbounded number of parked threads and Mesh approvals cards. The
+            # refusal is ``pairing_busy``: retryable, spends no attempt and does not
+            # consume the invite (``_RETRYABLE_PAIRING_REASONS``), so an honest joiner
+            # simply tries again.
+            holds_slot = self._take_pair_slot()
+            if not holds_slot:
+                raise PairingRefusal(
+                    "pairing_busy",
+                    "the inviting device is already handling as many pairings as it allows "
+                    "at once; nothing was spent — try again in a minute with the same token",
+                )
             # THE SHARE LIST IS THE FIRST SEALED RECORD (§2.3): sent before anything
             # waits on a human, so both ends can show the same list before either
             # person commits. Inside this try on purpose — a socket that dies sending
@@ -13100,6 +13142,28 @@ class RelayServer:
                         )
                     )
                 )
+            # STAGE 1 OF THE MESH APPROVALS CARD (``awaiting_joiner``). The inviter's
+            # person has nothing to type yet — the joiner's person must first type the
+            # code THIS card shows — so the record exists only so the app can show the
+            # code ("type this on <joiner>") and a Decline. ``_ctl_pair_confirm``
+            # refuses any answer to a stage-1 row (``pairing_not_ready``), and the
+            # stage-2 flip in ``_inviter_human_step`` clears any decision written in
+            # the meantime, so an early answer can never admit.
+            self._save_awaiting_joiner(
+                record=record,
+                invite_id=invite_id,
+                result=result,
+                joiner_id=joiner_id,
+                joiner_name=joiner_name,
+                peer_addr=peer_addr,
+                window=window,
+                offer=list(offer_items) if send_offer else [],
+                offer_state=(
+                    offers_mod.OWNER_SKIPPED
+                    if str(offer_detail.get("offer_skip") or "") == offers_mod.OWNER_SKIPPED
+                    else offers_mod.OWNER_SENT
+                ),
+            )
             stage = "ready_read"
             try:
                 ready = codec.open(reader.read_record_payload(deadline))
@@ -13149,6 +13213,17 @@ class RelayServer:
                 offer=offer_items,
                 offer_detail=offer_detail,
             )
+            if decision.reason == "sas_mismatch" and decision.decision != "admit":
+                # THE CARD'S LAST WRONG CODE. ``_ctl_pair_confirm`` only writes this
+                # decision once the invite's attempt budget is spent, so it refuses by
+                # the wire's own name and the handler below CONSUMES (the budget is
+                # exhausted, so ``_pairing_retryable`` is false) — no second attempt is
+                # charged, because the confirm op already counted this one.
+                raise PairingRefusal(
+                    "sas_mismatch",
+                    "the code typed on the inviting device did not match, and the "
+                    "invitation's attempts are spent",
+                )
             if not (decision.decision == "admit" and decision.matched):
                 # A timeout and a decline are both refusals: an unanswered question
                 # must never admit a device, and §5.4 makes every one of these
@@ -13412,6 +13487,71 @@ class RelayServer:
             # cannot silently reintroduce the batching lag.
             self.audit.flush()
             _close_quietly(sock)
+        finally:
+            # EVERY EXIT CLEARS THE CARD AND FREES THE SLOT: an expiry (``timeout``),
+            # a refusal, an admission. The record must not outlive its socket — the app
+            # would show a card nobody can answer — and a decision left behind must never
+            # be read by the next ceremony on this invite. Idempotent with the stage-2
+            # ``finally`` in ``_inviter_human_step``. Membership is untouched here: only
+            # the admission block above writes members.
+            if holds_slot:
+                store.clear_pending_pairing(invite_id, self.root)
+                store.clear_pair_decision(invite_id, self.root)
+                self._free_pair_slot()
+
+    def _take_pair_slot(self) -> bool:
+        """Reserve one parked-ceremony slot; ``False`` when the cap is reached."""
+        with self._pair_parked_lock:
+            if self._pair_parked >= PAIR_PARKED_CEREMONY_CAP:
+                return False
+            self._pair_parked += 1
+            return True
+
+    def _free_pair_slot(self) -> None:
+        with self._pair_parked_lock:
+            self._pair_parked = max(0, self._pair_parked - 1)
+
+    def _save_awaiting_joiner(
+        self,
+        *,
+        record: NetworkRecord,
+        invite_id: str,
+        result: Any,
+        joiner_id: str,
+        joiner_name: str,
+        peer_addr: str,
+        window: float,
+        offer: list[dict[str, Any]],
+        offer_state: str,
+    ) -> None:
+        """Write the stage-1 (``awaiting_joiner``) record the Mesh approvals card reads.
+
+        ``transcribed`` is empty and ``prompt`` is empty on purpose: there is nothing
+        to compare yet, and every CLI surface (``net_pair_pending`` without
+        ``include_stages``) filters this stage out, so an older ``lop network confirm``
+        never sees a row it could not answer. A FRESH nonce: the stage-2 flip mints
+        another, so an attestation made against this card can never answer the next.
+        """
+        invite = record.invite(invite_id)
+        store.save_pending_pairing(
+            PendingPairing(
+                invite_id=invite_id,
+                network_id=record.network_id,
+                network_name=record.name,
+                joiner_device_id=joiner_id,
+                joiner_name=joiner_name,
+                sas=result.sas,
+                fingerprint=wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash)),
+                peer_addr=peer_addr,
+                expires_at=time.time() + window,
+                offer=offer,
+                offer_state=offer_state,
+                stage=PAIR_STAGE_AWAITING_JOINER,
+                role=(invite.role if invite is not None else "read") or "read",
+                nonce=new_pairing_nonce(),
+            ),
+            self.root,
+        )
 
     # -- fan-out and the durable outbox -------------------------------------
 
@@ -14270,15 +14410,24 @@ class RelayServer:
             )
         return {"network_id": record.network_id, "trust": record.trust}
 
-    def _ctl_pair_pending(self, _frame: dict[str, Any]) -> list[dict[str, Any]]:
+    def _ctl_pair_pending(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
         """The pairings parked for a human, oldest first. A list is the answer.
 
         A method rather than a lambda in the handler table: the CLI and the harness
         drive this path, and a missing method would fail as an `AttributeError`
         inside whatever is waiting for the answer — which is how a two-sided test
         ends up waiting for a timeout instead of reporting the real fault.
+
+        STAGE FILTER (version skew). Only stage-2 rows (``awaiting_confirmation``)
+        are returned unless the caller sends ``include_stages: true`` — the desktop
+        server's Mesh approvals read does. An older ``lop network confirm`` would
+        otherwise list a stage-1 row whose transcription is empty and offer a y/N
+        nobody can meaningfully answer (and that this op now refuses anyway).
         """
-        return [pending.to_json() for pending in store.pending_pairings(self.root)]
+        rows = store.pending_pairings(self.root)
+        if not bool((frame or {}).get("include_stages")):
+            rows = [row for row in rows if row.stage == PAIR_STAGE_AWAITING_CONFIRMATION]
+        return [pending.to_json() for pending in rows]
 
     def _ctl_pair_confirm(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Record the inviter's human answer to a parked pairing.
@@ -14291,8 +14440,20 @@ class RelayServer:
         """
         invite_id = str(frame.get("invite_id") or "")
         pending = store.pending_pairing(invite_id, self.root) if invite_id else None
+        if pending is None and "code" in frame:
+            # A CODE-CARRYING ANSWER NAMES ITS CEREMONY. The fallback below (answer
+            # the oldest open pairing) is the legacy CLI's convenience; a card answer
+            # for an invite that is no longer parked must not land on another one.
+            raise MeshRefusal(
+                "no_pending_pairing",
+                "that pairing is no longer waiting on this device, so nothing was answered",
+            )
         if pending is None:
-            open_pairings = store.pending_pairings(self.root)
+            open_pairings = [
+                row
+                for row in store.pending_pairings(self.root)
+                if row.stage == PAIR_STAGE_AWAITING_CONFIRMATION
+            ]
             if not open_pairings:
                 raise MeshRefusal(
                     "no_pending_pairing",
@@ -14302,6 +14463,18 @@ class RelayServer:
                 )
             pending = open_pairings[0]
         admit = str(frame.get("decision") or "admit") == "admit"
+        if "code" in frame:
+            return self._pair_confirm_by_code(pending, frame, admit=admit)
+        # A LEGACY FRAME (no ``code``): ``lop network confirm``'s y/N, which asserts
+        # ``matched`` itself after its person compared the two codes on screen. Kept
+        # byte-compatible as the same-user terminal fallback; it is only refused on a
+        # stage-1 row, where there is nothing to have compared yet.
+        if pending.stage != PAIR_STAGE_AWAITING_CONFIRMATION:
+            raise MeshRefusal(
+                "pairing_not_ready",
+                "the joining device has not typed this device's code yet, so there is "
+                "nothing to confirm; wait until it has",
+            )
         matched = bool(frame.get("matched")) and admit
         # THE SHARE DECISION, REDUCE-ONLY (§3.3). The offered set is the list this
         # relay SENT (``PendingPairing.offer``, state ``"sent"``); a frame with no
@@ -14347,6 +14520,145 @@ class RelayServer:
             # answers without this key, and the CLI says so by name rather than
             # silently admitting more than the operator chose.
             "shares": list(decision.shares),
+        }
+
+    def _pair_confirm_by_code(
+        self, pending: PendingPairing, frame: dict[str, Any], *, admit: bool
+    ) -> dict[str, Any]:
+        """A code-carrying answer (the Mesh approvals card): the RELAY compares.
+
+        WHY THE RELAY OWNS THE COMPARISON. A caller-asserted ``matched`` is a claim,
+        and the desktop route that relays the card's answer is reachable by anything
+        holding the desktop bearer. With a ``code`` present this compares it against
+        THIS relay's own derivation (``pending.sas``) and ignores ``matched``
+        entirely, so the strongest thing a caller can do is type digits.
+
+        ONE TRANSACTION. Re-reading the pending record, checking its stage and nonce,
+        comparing, spending an attempt and writing the decision all happen under the
+        network record's write lock — the same lock the stage-2 flip in
+        ``_inviter_human_step`` takes — so a mismatch is counted exactly once, cannot
+        interleave with the flip, and survives a relay restart (the count lives on
+        the invite row: ``invite.attempts``, the 3-budget the wire path spends).
+
+        A mismatch writes NO decision: the listener keeps polling and the socket stays
+        open while attempts and time remain. The attempt that exhausts the budget
+        writes a ``decline`` with reason ``sas_mismatch``, which the listener turns
+        into today's consuming refusal. A decline (``decision: "decline"``) is never
+        compared and spends nothing.
+        """
+        from local_operator.network.credentials import offers as offers_mod
+
+        invite_id = pending.invite_id
+        typed = str(frame.get("code") or "")
+        nonce = str(frame.get("nonce") or "")
+        with store.mutate(pending.network_id, self.root) as record:
+            live = store.pending_pairing(invite_id, self.root)
+            if live is None or not live.is_open():
+                raise MeshRefusal(
+                    "pairing_expired",
+                    "that pairing ran out of time before it was answered, so nothing was "
+                    "admitted",
+                )
+            if nonce and nonce != live.nonce:
+                # The card answered is not the ceremony now parked (a retry re-parked
+                # the invite, or stage 1 became stage 2): never let it answer this one.
+                raise MeshRefusal(
+                    "pairing_expired",
+                    "that pairing card is out of date; reopen Mesh approvals and answer "
+                    "the current one",
+                )
+            if live.stage != PAIR_STAGE_AWAITING_CONFIRMATION:
+                raise MeshRefusal(
+                    "pairing_not_ready",
+                    "the joining device has not typed this device's code yet, so there is "
+                    "nothing to confirm; wait until it has",
+                )
+            invite = record.invite(invite_id)
+            if invite is None:
+                raise MeshRefusal("no_pending_pairing", "that invite was never minted here")
+            if not admit:
+                decision = PairDecision(
+                    invite_id=invite_id,
+                    decision="decline",
+                    matched=False,
+                    reason=str(frame.get("reason") or "declined"),
+                    answered_by=str(frame.get("answered_by") or "human"),
+                )
+                store.save_pair_decision(decision, self.root)
+                return self._pair_confirm_reply(live, decision, record)
+            if not sas_matches(live.sas, typed):
+                invite.attempts += 1
+                exhausted = failures_exhausted(record, invite_id)
+                store.save(record, self.root)
+                if exhausted:
+                    decision = PairDecision(
+                        invite_id=invite_id,
+                        decision="decline",
+                        matched=False,
+                        reason="sas_mismatch",
+                        answered_by=str(frame.get("answered_by") or "human"),
+                    )
+                    store.save_pair_decision(decision, self.root)
+                    reply = self._pair_confirm_reply(live, decision, record)
+                    reply["status"] = "refused"
+                    return reply
+                # A REPLY, NOT A REFUSAL: the ceremony and its socket stay open, and the
+                # caller needs ``attempts_left`` to say so — a control refusal carries
+                # only a code and a sentence.
+                return {
+                    "invite_id": invite_id,
+                    "decision": "",
+                    "matched": False,
+                    "joiner_device_id": live.joiner_device_id,
+                    "shares": [],
+                    "status": "sas_mismatch",
+                    "attempts_left": self._attempts_left(record, invite_id),
+                }
+            offered = list(live.offer) if live.offer_state == offers_mod.OWNER_SENT else []
+            servable = offers_mod.served_keys(offered)
+            wanted = frame.get("shares")
+            if wanted is None:
+                shares = sorted(servable)
+            elif not isinstance(wanted, list):
+                raise MeshRefusal("bad_request", "shares must be a list of credential keys")
+            else:
+                shares = sorted(str(key) for key in wanted)
+                unoffered = [key for key in shares if key not in servable]
+                if unoffered:
+                    raise MeshRefusal(
+                        "shares_not_offered",
+                        f"{unoffered[0]!r} is not being served in this ceremony, so it cannot "
+                        "be granted by it — the list can only be reduced here",
+                    )
+            decision = PairDecision(
+                invite_id=invite_id,
+                decision="admit",
+                matched=True,
+                answered_by=str(frame.get("answered_by") or "human"),
+                shares=shares,
+            )
+            store.save_pair_decision(decision, self.root)
+            return self._pair_confirm_reply(live, decision, record)
+
+    @staticmethod
+    def _attempts_left(record: NetworkRecord, invite_id: str) -> int:
+        from local_operator.network.invite import PAIRING_MAX_FORGIVEN_FAILURES
+
+        invite = record.invite(invite_id)
+        spent = invite.attempts if invite is not None else PAIRING_MAX_FORGIVEN_FAILURES
+        return max(0, PAIRING_MAX_FORGIVEN_FAILURES - spent)
+
+    def _pair_confirm_reply(
+        self, pending: PendingPairing, decision: PairDecision, record: NetworkRecord
+    ) -> dict[str, Any]:
+        return {
+            "invite_id": pending.invite_id,
+            "decision": decision.decision,
+            "matched": decision.matched,
+            "joiner_device_id": pending.joiner_device_id,
+            "shares": list(decision.shares),
+            "status": "sent",
+            "attempts_left": self._attempts_left(record, pending.invite_id),
         }
 
     # -- incident fan-out: what the PEERS report -----------------------------
@@ -16561,13 +16873,30 @@ def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
 #: ``timeout`` is bounded instead by what remains of the invite's own life — the
 #: listener and the parked question both wait `_remaining_of`, and the join path
 #: refuses an expired token locally before it dials anything.
-_RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch"})
+#:
+#: ``pairing_busy`` (the parked-ceremony cap, :data:`PAIR_PARKED_CEREMONY_CAP`) is a
+#: refusal about THIS relay's load, decided before any code was shown, so it spends
+#: nothing and leaves the token standing exactly like a delay.
+_RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch", "pairing_busy"})
+
+#: At most this many inviter ceremonies parked on one relay at once (stage 1 or 2).
+#: WHY A CAP: the person window is now up to ``PAIR_PARK_CEILING_S`` (ten minutes)
+#: per ceremony, and each parked ceremony holds a thread, a socket and a Mesh
+#: approvals card; a token holder (or several) dialling repeatedly must not turn that
+#: into unbounded parked state. WHY 4: a person answers one pairing at a time, and
+#: the realistic concurrent case is "a couple of devices joining the same afternoon";
+#: the security review (60334a0b4c12) set four, the same depth the attestation table
+#: keeps per card (``asks.app_attest.MAX_PENDING_PER_ASK``). The fifth gets
+#: ``pairing_busy``, which spends nothing.
+PAIR_PARKED_CEREMONY_CAP = 4
 
 
 def _pairing_retryable(reason: str, record: NetworkRecord, invite_id: str) -> bool:
     """Whether a pairing refusal may leave its invite usable. See the table above."""
     if reason not in _RETRYABLE_PAIRING_REASONS:
         return False
+    if reason == "pairing_busy":
+        return True
     if reason == "timeout":
         # A delay is bounded by the invite's OWN REMAINING life: the listener's wait and
         # the parked question's window are both `pair_timeout_seconds(_remaining_of(...))`,
@@ -16584,6 +16913,7 @@ def acquire_invite(record: NetworkRecord, invite_id: str) -> bool:
 
 _PAIR_CAUSE: dict[str, str] = {
     "sas_mismatch": "sas_mismatch",
+    "pairing_busy": "busy",
     "declined_local": "policy",
     "timeout": "timeout",
     "invite_already_used": "policy",

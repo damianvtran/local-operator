@@ -6205,6 +6205,12 @@ def _join_one(
         attempt.note("dial", exc.__class__.__name__)
         _record_join_attempt(attempt, envelope, store, ok=False)
         return f"nothing was listening at {host} ({exc.__class__.__name__})"
+    # The joiner's end of a pair socket may now park for up to the whole invite life
+    # (``handshake.PAIR_PARK_CEILING_S``) while a person types the code in the app;
+    # kernel keepalive keeps NAT/tunnel mappings warm without any new wire frame.
+    from local_operator.network.handshake import set_pair_keepalive
+
+    set_pair_keepalive(sock)
     deadline = wire.deadline_in(settings.handshake_timeout_s)
     # ONE ANSWER, used for the hello we send AND for our own durable record: the
     # inviter copies the hello's list onto our member row, and `listen` is what
@@ -6819,10 +6825,24 @@ def _awaiting_payload(pending: Any) -> dict[str, Any]:
         # An owner-side state must never leak into a joiner payload: this record is
         # a PendingJoin, whose states are the three below.
         state = offers_mod.OFFER_EMPTY
-    sentence = (
-        f"Ask the user to read back the {what} {shown} from the other device, then "
-        f"confirm it with `lop network join --confirm <{what}>`."
-    )
+    if pending.verify:
+        # ``--verify`` asks for the 160-bit FINGERPRINT, which the Mesh approvals card's
+        # six-digit input cannot carry, so this mode stays on the terminal path.
+        sentence = (
+            f"Ask the user to read back the {what} {shown} from the other device, then "
+            f"confirm it with `lop network join --confirm <{what}>`."
+        )
+    else:
+        # APP FIRST (operator request: pairing must not require terminal commands). The
+        # person approves it in the app's Mesh approvals by typing the code the OTHER
+        # device shows; the agent relays nothing back. The terminal path still exists
+        # as a same-user fallback (GUIDE "Without the app") and is not named here, so
+        # an agent reading this sentence is never handed a command to run itself.
+        sentence = (
+            f"This device's code is {shown}: the person on the other device types it "
+            "there. Ask the user to approve this pairing in the app's Mesh approvals by "
+            "typing the code the other device shows. An agent cannot answer a pairing."
+        )
     clause = offers_mod.sentence_clause(
         state, items, inviter=pending.inviter_name or pending.inviter_device_id
     )
@@ -6950,6 +6970,8 @@ def _park_join(
         # printed, not a re-enumeration that could have drifted.
         offers=[dict(item) for item in offer_view["items"]],
         offer_state=str(offer_view["state"]),
+        # The Mesh approvals card's attestation binds this (``pairing_attest``).
+        nonce=types.new_pairing_nonce(),
     )
     # A leftover answer from an earlier ceremony would answer THIS one: the record is
     # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is
@@ -6976,7 +6998,8 @@ def _park_join(
             )
         )
         print(
-            f"waiting up to {int(window)}s for the code from the other device: answer it with "
+            f"waiting up to {int(window)}s for the code from the other device: type it in "
+            "the app's Mesh approvals, or answer it with "
             "`lop network join --confirm <code>`, run wherever the person reading that "
             "screen is."
         )
@@ -7087,11 +7110,11 @@ def _live_parked_joins(store: Any) -> list[Any]:
     that knows the difference between "that ceremony has an outcome, report it" and
     "that ceremony is gone", and it is the only place both are asked at once.
     """
-    return [
-        row
-        for row in store.pending_joins()
-        if row.status == "awaiting_confirmation" and row.is_open() and _process_alive(row.pid)
-    ]
+    # ONE implementation shared with the Mesh approvals card (``pairing_answers``);
+    # the probe stays this module's ``_process_alive`` so callers can patch it here.
+    from local_operator.network import pairing_answers
+
+    return pairing_answers.live_parked_joins(store, alive=_process_alive)
 
 
 def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
@@ -7111,7 +7134,7 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
     through its outcome, so answering one twice reports the same receipt instead of
     inventing a second pairing.
     """
-    from local_operator.network import store, types
+    from local_operator.network import store
     from local_operator.network.types import MeshRefusal
 
     records = store.pending_joins()
@@ -7137,13 +7160,12 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
     live_ids = {row.invite_id for row in live}
     chosen = next((row for row in reversed(matches) if row.invite_id in live_ids), None)
     if chosen is not None:
-        answer = types.JoinAnswer(
-            invite_id=chosen.invite_id,
-            decision="admit",
-            code=typed,
-            answered_by=_answered_by(args),
+        # The ONE writer of a joiner answer, shared with the Mesh approvals card.
+        from local_operator.network import pairing_answers
+
+        pairing_answers.submit(
+            store, chosen, decision="admit", code=typed, answered_by=_answered_by(args)
         )
-        store.save_join_answer(answer)
         outcome = _await_join_result(chosen, store)
         store.clear_pending_join(chosen.invite_id)
         store.clear_join_answer(chosen.invite_id)
@@ -7200,20 +7222,12 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
 def _parked_code_matches(pending: Any, typed: str) -> bool:
     """Whether the human's value is this ceremony's own derivation.
 
-    ``--verify`` compares the 160-bit fingerprint as the prompt path does, and strips
-    the same separators; otherwise it is the six digits through the shared
-    ``sas_matches`` (constant time, and a value that is not six digits is a mismatch
-    rather than a near miss).
+    Delegates to ``pairing_answers.parked_code_matches`` — the one checker the CLI
+    and the Mesh approvals card share, so the two doors cannot drift.
     """
-    import hmac
+    from local_operator.network import pairing_answers
 
-    from local_operator.network.handshake import sas_matches
-
-    if pending.verify:
-        typed_fp = typed.replace("-", "").replace(" ", "").upper()
-        derived_fp = str(pending.fingerprint).replace("-", "").upper()
-        return bool(typed_fp) and hmac.compare_digest(derived_fp, typed_fp)
-    return sas_matches(str(pending.sas), typed)
+    return pairing_answers.parked_code_matches(pending, typed)
 
 
 def _await_join_result(pending: Any, store: Any) -> Any:
@@ -10575,7 +10589,16 @@ def _pending_pairings() -> list[dict[str, Any]]:
     rows = live.get("value") if isinstance(live, dict) else None
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
-    return [pending.to_json() for pending in store.pending_pairings()]
+    # Stage-1 rows (``awaiting_joiner``) are the Mesh approvals card's "waiting for
+    # the joiner" state: nothing to compare yet, so the y/N never lists them —
+    # the same filter the relay's ``net_pair_pending`` applies for this caller.
+    from local_operator.network.types import PAIR_STAGE_AWAITING_CONFIRMATION
+
+    return [
+        pending.to_json()
+        for pending in store.pending_pairings()
+        if pending.stage == PAIR_STAGE_AWAITING_CONFIRMATION
+    ]
 
 
 def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tuple[str, list[str]]:

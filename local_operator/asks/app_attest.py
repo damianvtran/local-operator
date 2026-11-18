@@ -830,8 +830,45 @@ class AttestationTable:
                 self._rows.pop(key, None)
             return hit is not None
 
+    def discard(self, scope: str, target_prefix: str) -> int:
+        """Drop every pending row under ``scope`` whose target starts with the prefix.
+
+        For a consumer whose subject can END before its attestation is spent (a mesh
+        pairing that expired): its own binding already makes such a row unspendable,
+        and this makes it gone. Returns how many keys were dropped.
+        """
+        with self._lock:
+            doomed = [k for k in self._rows if k[0] == scope and k[1].startswith(target_prefix)]
+            for key in doomed:
+                del self._rows[key]
+        return len(doomed)
+
 
 # -- the listener --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AttestedRow:
+    """What ONE validated attestation frame may record: the table key and its content.
+
+    The table is keyed ``(scope, target, act)``. For a session ask that is
+    ``(session_id, ask_id, act)``; another consumer (the mesh pairing card,
+    ``network.pairing_attest``) supplies its own scope and target and binds its
+    own content in ``answers`` — the table compares content, never meaning.
+    """
+
+    scope: str
+    target: str
+    act: str
+    answers: Any
+    images: list[ImageKey] = field(default_factory=list)
+    reason: str = ""
+
+
+#: Turns one parsed frame into the row it may record, or a refusal reason string.
+#: It runs BEFORE the per-frame peer re-verification, and must be pure (no I/O):
+#: it only decides shape. A raise is a ``bad-frame`` refusal (``_frame``).
+FrameValidator = Callable[[dict[str, Any]], "AttestedRow | str"]
 
 
 def socket_path(attest_dir: Path, session_id: str) -> Path:
@@ -865,8 +902,17 @@ class AttestService:
         verifier: PeerVerifier | None = None,
         table: AttestationTable | None = None,
         token_of: Callable[[socket.socket], bytes] = peer_audit_token,
+        validator: FrameValidator | None = None,
     ) -> None:
+        # ``session_id`` doubles as the LISTENER NAME (``<name>.sock``): a runtime
+        # passes its session id; a non-session consumer (``lop serve``'s mesh-pairing
+        # listener) passes its own fixed name together with its own ``validator``.
         self.session_id = session_id
+        #: How a frame becomes a table row. ``None`` is the original ask contract
+        #: (``op == "ask_attest"`` for THIS session), byte-for-byte as before; the
+        #: generalisation exists so a second consumer reuses the verifier, the
+        #: socket discipline and the single-use table rather than copying them.
+        self._validator: FrameValidator = validator or self._ask_frame
         self.table = table or AttestationTable()
         self._verifier: PeerVerifier = verifier or AppAttestVerifier()
         self._token_of = token_of
@@ -988,26 +1034,36 @@ class AttestService:
             frame = json.loads(line)
         except ValueError:
             return {"ok": False, "reason": "bad-json"}
-        if not isinstance(frame, dict) or frame.get("op") != "ask_attest":
+        if not isinstance(frame, dict):
             return {"ok": False, "reason": "bad-op"}
-        if str(frame.get("session_id") or "") != self.session_id:
-            return {"ok": False, "reason": "wrong-session"}
-        ask_id, act = str(frame.get("ask_id") or ""), str(frame.get("act") or "")
-        if not ask_id or act not in ATTEST_ACTS:
-            return {"ok": False, "reason": "bad-frame"}
-        images = attested_images(frame.get("images"))
-        reason = frame.get("reason")
-        if images is None or not (reason is None or isinstance(reason, str)):
-            return {"ok": False, "reason": "bad-frame"}
-        if not isinstance(frame.get("answers", {}), (dict, type(None))):
-            return {"ok": False, "reason": "bad-frame"}
+        row = self._validator(frame)
+        if isinstance(row, str):
+            return {"ok": False, "reason": row}
         # RE-VERIFIED PER FRAME, not trusted from the accept: the process could
         # have changed state since (it is cheap; the static half is cached).
         verdict = await self._verdict(token)
         if not verdict.ok:
             logger.info("attest: peer=%s verdict=refused reason=%s", verdict.pid, verdict.reason)
             return {"ok": False, "reason": f"peer:{verdict.reason}"}
-        self.table.record(
+        self.table.record(row.scope, row.target, row.act, row.answers, row.images, row.reason)
+        return {"ok": True}
+
+    def _ask_frame(self, frame: dict[str, Any]) -> AttestedRow | str:
+        """The original ``ask_attest`` contract (#4132), as a :data:`FrameValidator`."""
+        if frame.get("op") != "ask_attest":
+            return "bad-op"
+        if str(frame.get("session_id") or "") != self.session_id:
+            return "wrong-session"
+        ask_id, act = str(frame.get("ask_id") or ""), str(frame.get("act") or "")
+        if not ask_id or act not in ATTEST_ACTS:
+            return "bad-frame"
+        images = attested_images(frame.get("images"))
+        reason = frame.get("reason")
+        if images is None or not (reason is None or isinstance(reason, str)):
+            return "bad-frame"
+        if not isinstance(frame.get("answers", {}), (dict, type(None))):
+            return "bad-frame"
+        return AttestedRow(
             self.session_id,
             ask_id,
             act,
@@ -1017,4 +1073,3 @@ class AttestService:
             # ``str(reason)`` when truthy, so ``""`` and ``None`` both mean none.
             str(reason or "") if act == "dismiss" else "",
         )
-        return {"ok": True}

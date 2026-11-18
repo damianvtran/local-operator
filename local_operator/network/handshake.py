@@ -89,9 +89,18 @@ HANDSHAKE_TIMEOUT_S = 10.0
 
 TRANSCRIPT_PREFIX = b"lop-mesh-v1\x00"
 
-#: How long both humans have to compare and confirm. Bounded also by the
-#: invite's own ``ttl_s``; whichever fires first consumes the invite.
-PAIR_CONFIRM_TIMEOUT_S = 180.0
+#: The longest a person may take to compare and confirm, as a ceiling on the
+#: invite's own remaining life (``pair_timeout_seconds``). It was 180 s: a pairing
+#: answered from the app's Mesh approvals routinely needs the person to walk to
+#: the other device, and the old cap lapsed under the operator while the invite
+#: itself still had minutes left. 600 s equals the default invite TTL
+#: (``invite.DEFAULT_TTL_S``), so a default invite now gets its whole life, while a
+#: ``--expires 24h`` token still cannot hold a pre-admission sealed socket open for
+#: hours. The anti-grind property rests on the 3-attempt budget
+#: (``invite.PAIRING_MAX_FORGIVEN_FAILURES``), not on this time — a longer window
+#: buys no extra guesses. Rename from ``PAIR_CONFIRM_TIMEOUT_S`` keeps ONE owner:
+#: every wait that involves a person reads ``pair_timeout_seconds``.
+PAIR_PARK_CEILING_S = 600.0
 
 #: How long the JOINER waits for the share list before it shows its screens
 #: without one (``handshake.pair_offer_frame``). The owner sends the offer
@@ -1090,7 +1099,55 @@ def pair_timeout_seconds(remaining_s: float) -> float:
     parameter named ``ttl_s`` invited a reader to assume the MINTED duration was still
     being passed, which is exactly the confusion that produced the overstated prompt.
     """
-    return min(remaining_s, PAIR_CONFIRM_TIMEOUT_S)
+    return min(remaining_s, PAIR_PARK_CEILING_S)
+
+
+#: TCP keepalive timing for a socket a pairing ceremony parks on (see
+#: :func:`set_pair_keepalive`): first probe after 60 s idle, then every 20 s.
+PAIR_KEEPALIVE_IDLE_S = 60
+PAIR_KEEPALIVE_INTERVAL_S = 20
+PAIR_KEEPALIVE_PROBES = 3
+
+
+def set_pair_keepalive(sock: Any) -> bool:
+    """Turn on ``SO_KEEPALIVE`` (idle 60 s / interval 20 s where supported) for a pair socket.
+
+    WHY. A pairing answered from the app's Mesh approvals can park its sealed socket
+    for up to :data:`PAIR_PARK_CEILING_S` while a person walks between devices, and
+    NAT / tunnel idle timers on the path routinely drop a silent flow well inside ten
+    minutes. Kernel keepalive probes keep the mapping warm without putting anything
+    on the wire protocol.
+
+    WHY NOT AN APP-LEVEL HEARTBEAT FRAME. An inviter running an older build reads
+    the first sealed frame after its offer as ``net_pair_ready`` and treats any other
+    op as ``protocol_error`` — which CONSUMES the invite. Keepalive is invisible to
+    the peer's code, so it is the only liveness signal that is safe across versions.
+
+    GUARDED PER PLATFORM: ``TCP_KEEPIDLE`` is Linux (and newer macOS), macOS spells
+    the idle knob ``TCP_KEEPALIVE``; a platform or socket type that refuses one of
+    them still gets whatever it accepted. Never raises: a missing knob must not be
+    the reason a pairing fails. Returns whether ``SO_KEEPALIVE`` itself was set.
+    """
+    socket_mod = socket
+    try:
+        sock.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_KEEPALIVE, 1)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+    idle_opt = getattr(socket_mod, "TCP_KEEPIDLE", None) or getattr(
+        socket_mod, "TCP_KEEPALIVE", None
+    )
+    for option, value in (
+        (idle_opt, PAIR_KEEPALIVE_IDLE_S),
+        (getattr(socket_mod, "TCP_KEEPINTVL", None), PAIR_KEEPALIVE_INTERVAL_S),
+        (getattr(socket_mod, "TCP_KEEPCNT", None), PAIR_KEEPALIVE_PROBES),
+    ):
+        if option is None:
+            continue
+        try:
+            sock.setsockopt(socket_mod.IPPROTO_TCP, option, value)
+        except (OSError, AttributeError, TypeError, ValueError):
+            continue
+    return True
 
 
 #: How much of a refusing device's own sentence travels in ``net_pair_abort``. The
