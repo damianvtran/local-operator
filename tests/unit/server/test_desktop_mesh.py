@@ -137,7 +137,11 @@ def _join(monkeypatch: pytest.MonkeyPatch, relay: FakeRelay | None = None) -> No
     monkeypatch.setattr(
         network_store,
         "find_own_relay",
-        lambda root=None: SimpleNamespace(control_port=1, control_key="k"),
+        # Advertises the working-set gate like a current relay: a record without
+        # it is refused before any control request (review R9, round 2).
+        lambda root=None: SimpleNamespace(
+            control_port=1, control_key="k", capabilities=list(relay_mod.wire.LINK_CAPABILITIES)
+        ),
     )
 
 

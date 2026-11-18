@@ -8,5 +8,6 @@
   "tui.session_move_workset.loading": "Vérification des fichiers de travail de cette conversation…",
   "tui.session_move_workset.cancelled": "Déplacement annulé — rien n’a été déplacé.",
   "tui.session_move_workset.confirm_without": "Déplacer sans les fichiers de travail",
-  "tui.session_move_workset.checkbox_without": "Je comprends que les fichiers de travail restent sur {source}"
+  "tui.session_move_workset.checkbox_without": "Je comprends que les fichiers de travail restent sur {source}",
+  "tui.session_move_workset.title_blocked": "Déplacement impossible pour l’instant"
 }

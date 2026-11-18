@@ -14,7 +14,7 @@
   "cli.sessions_move_workset.aborted": "未移动：工作文件未获确认。",
   "cli.sessions_move_workset.needs_confirmation": "此对话在{source}上有工作文件。请先用--dry-run查看，然后使用--confirm-working-set {digest}（或--yes）重新运行，或使用--without-working-set将它们留在原处。",
   "cli.sessions_move_workset.changed": "工作文件在显示后已发生变化；以下是当前列表。",
-  "cli.sessions_move_workset.unknown": "无法读取{source}上的工作文件（步骤：{step}，仓库：{repo}），因此没有移动任何内容。请修复该仓库，或使用--without-working-set重新运行，把所有工作文件留在原处。",
+  "cli.sessions_move_workset.unknown": "无法读取{source}上的工作文件（仓库：{repo}），因此没有移动任何内容。请修复该仓库，或使用--without-working-set重新运行，把所有工作文件留在原处。",
   "cli.sessions_move_workset.unsupported": "{device}上的lop版本过旧，无法列出此对话的工作文件。请在该设备上更新lop，或使用--without-working-set重新运行，将它们留在该设备上。",
   "cli.sessions_move_workset.none": "没有工作文件：此次移动无需确认。",
   "cli.sessions_move_workset.receipt_not_transferred": "工作文件未被传输：{count, plural, other {#个worktree留在}}{device}上。",
@@ -60,5 +60,8 @@
   "cli.sessions_move_workset.cause.git_error": "git报告了一个错误",
   "cli.sessions_move_workset.mentioned": "仅在此对话中被提及，因此未包含：{paths}",
   "cli.sessions_move_workset.digest_mismatch": "该--confirm-working-set摘要与此对话当前的工作文件不匹配（可能输入有误，或文件在--dry-run之后已更改）。以下是当前列表。",
-  "cli.sessions_move_workset.desktop_refused": "在将此对话移到{device}之前，需要你对{source}上的工作文件作出决定，因此没有移动任何内容。"
+  "cli.sessions_move_workset.desktop_refused": "{source}上的工作文件需要你先作出决定，才能将此对话移到{device}，因此没有移动任何内容。",
+  "cli.sessions_move_workset.unknown_card": "无法读取{source}上的工作文件（仓库：{repo}），因此没有移动任何内容。请修复该仓库，或选择下方的“{button}”，把所有工作文件留在原处。",
+  "cli.sessions_move_workset.unsupported_card": "{device}上的lop版本过旧，无法列出此对话的工作文件。请在该设备上更新lop，或选择下方的“{button}”，将它们留在该设备上。",
+  "cli.sessions_move_workset.probe_asked": "已询问{device}能否访问这些远程仓库；只发送了它们的地址和构建文件名，不含路径或分支。"
 }

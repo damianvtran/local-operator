@@ -2049,6 +2049,61 @@ async def test_an_unconfirmed_recall_keeps_the_local_copy_and_says_so(
 
 
 @pytest.mark.asyncio
+async def test_a_stale_relay_stops_the_move_before_the_leave(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9 (review round 2): the preflight's ``relay_restart_required`` was discarded and
+    a plain move sent anyway. On an offload the stale relay IS the owner and has no
+    gate, so the conversation left its worktrees with no card and no warning."""
+
+    moved: list[dict[str, Any]] = []
+
+    def stale(session_id: str, to: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "relay_restart_required",
+            "session_id": session_id,
+            "changed": False,
+            "message": (
+                "this device's relay is older than this lop and cannot check working "
+                "files safely, so nothing was moved; restart it with `lop network restart`, "
+                "then try again"
+            ),
+        }
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        moved.append({"session_id": session_id, "to": to, **kwargs})
+        return {"ok": True, "session_id": session_id}
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move_preflight", stale)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(60):
+            await pilot.pause()
+            if any("restart" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        # THE REFUSAL IS SHOWN, WITH THE RELAY REMEDY — not "update lop", which is the
+        # wrong action for a relay that is a long-lived process on THIS device.
+        assert "restart it with `lop network restart`" in shown, shown
+        assert "update lop" not in shown, shown
+        # AND NOTHING HAPPENED: no move was asked, and the user was not moved off the
+        # conversation to watch it fail from somewhere else.
+        assert moved == [], moved
+        assert reopened == [], reopened
+
+
+@pytest.mark.asyncio
 async def test_an_in_progress_move_after_the_leave_says_where_the_composer_points(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -56,6 +56,7 @@ import ipaddress
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -587,21 +588,37 @@ def _can_push(url: str, env: Mapping[str, str], scratch: Path) -> tuple[bool, st
     )
 
 
-def _remedy(url: str, *, device: str, borrowing_github: bool) -> dict[str, str] | None:
+#: The shape :func:`local_operator.network.identity.device_id_for` mints. The remedy
+#: names the destination by this id and nothing else (security S10, round 2).
+_DEVICE_ID = re.compile(r"d_[0-9a-f]{32}")
+
+
+def _remedy(url: str, *, device_id: str, borrowing_github: bool) -> dict[str, str] | None:
     """The exact command that grants this destination access, when lop has one.
 
     Only ``github.com`` remotes have a mesh remedy (the lent ``github`` credential,
     guide ``network`` "GitHub push and PR-write"). With a share already in place the
     repository is opted out or not lent -> ``include``; with none -> ``share``. Both
     run on the LENDING device (the one whose GitHub login is shared), never here.
+
+    THE COMMAND NAMES THE DESTINATION BY ITS DEVICE ID, NEVER ITS NAME (security S10,
+    round 2). A member name is the peer's own choice and ``validate_member_name``
+    admits shell metacharacters, so ``--with {name}`` let a hostile destination named
+    ``node2 $(curl …|sh)`` write the command a user is told to paste on the device
+    holding their GitHub login. The id is minted from a public key, is accepted by
+    ``--with``, and is checked against its exact shape here; anything else gets no
+    command at all. Every token is ``shlex.quote``d as well, so a future input
+    cannot reopen this. The surrounding sentence still shows the readable name.
     """
     repository = github_repository(url) or github_repository(https_rewrite(url))
     if not repository:
         return None
     if borrowing_github:
-        command = f"lop network credential github include {repository}"
+        command = f"lop network credential github include {shlex.quote(repository)}"
     else:
-        command = f"lop network credential share github --with {device}"
+        if not _DEVICE_ID.fullmatch(device_id):
+            return None
+        command = f"lop network credential share github --with {shlex.quote(device_id)}"
     return {"run_on": "lending_device", "command": command}
 
 
@@ -774,7 +791,7 @@ def audit_summary(frame: Mapping[str, Any], answer: Mapping[str, Any] | None) ->
 
 
 def apply_probe(
-    block: dict[str, Any], answer: Mapping[str, Any] | None, *, device: str = ""
+    block: dict[str, Any], answer: Mapping[str, Any] | None, *, device_id: str = ""
 ) -> dict[str, Any]:
     """Fold the destination's answer into ``block`` in place (and return it).
 
@@ -788,8 +805,8 @@ def apply_probe(
     from :data:`CLONE_CHECKS`, a detail from :data:`DETAIL_CODES`, the ``fetch`` /
     ``push`` / ``borrowing_github`` booleans and tool names that are values of
     :data:`TOOLCHAIN_MARKERS` are kept. The HTTPS spelling and the remedy command are
-    rebuilt HERE from the URL this device sent and ``device`` (the destination's
-    name), so a hostile destination cannot write a command, markup or a terminal
+    rebuilt HERE from the URL this device sent and ``device_id`` (the destination's
+    mesh id — never its self-chosen name, security S10), so a hostile destination cannot write a command, markup or a terminal
     escape onto the consent screen.
     """
     rows = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
@@ -828,7 +845,7 @@ def apply_probe(
         else:
             needs_remedy = check in ("destination_cannot_fetch", "destination_cannot_push")
         if needs_remedy:
-            remedy = _remedy(remedy_url, device=device, borrowing_github=borrowing)
+            remedy = _remedy(remedy_url, device_id=device_id, borrowing_github=borrowing)
             if remedy:
                 row["remedy"] = remedy
         tools = sorted(

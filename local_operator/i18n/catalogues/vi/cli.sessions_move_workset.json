@@ -14,7 +14,7 @@
   "cli.sessions_move_workset.aborted": "Chưa chuyển: các tệp làm việc chưa được xác nhận.",
   "cli.sessions_move_workset.needs_confirmation": "Cuộc trò chuyện này có tệp làm việc trên {source}. Xem lại bằng --dry-run, rồi chạy lại với --confirm-working-set {digest} (hoặc --yes), hoặc với --without-working-set để giữ chúng lại ở đó.",
   "cli.sessions_move_workset.changed": "Các tệp làm việc đã thay đổi kể từ khi được hiển thị; đây là danh sách hiện tại.",
-  "cli.sessions_move_workset.unknown": "Không đọc được các tệp làm việc trên {source} (bước: {step}, kho: {repo}) nên chưa chuyển gì. Hãy sửa kho đó, hoặc chạy lại với --without-working-set để giữ mọi tệp làm việc lại ở đó.",
+  "cli.sessions_move_workset.unknown": "Không đọc được các tệp làm việc trên {source} (kho: {repo}) nên chưa chuyển gì. Hãy sửa kho đó, hoặc chạy lại với --without-working-set để giữ mọi tệp làm việc lại ở đó.",
   "cli.sessions_move_workset.unsupported": "{device} đang chạy bản lop cũ, không liệt kê được tệp làm việc của cuộc trò chuyện này. Hãy cập nhật lop ở đó, hoặc chạy lại với --without-working-set để giữ chúng lại trên thiết bị đó.",
   "cli.sessions_move_workset.none": "Không có tệp làm việc: lần chuyển này không cần xác nhận.",
   "cli.sessions_move_workset.receipt_not_transferred": "Các tệp làm việc chưa được chuyển: {count, plural, other {# worktree vẫn ở}} trên {device}.",
@@ -60,5 +60,8 @@
   "cli.sessions_move_workset.cause.git_error": "git báo lỗi",
   "cli.sessions_move_workset.mentioned": "Chỉ được nhắc đến trong cuộc trò chuyện này nên không được tính vào: {paths}",
   "cli.sessions_move_workset.digest_mismatch": "Digest --confirm-working-set đó không khớp với các tệp làm việc hiện tại của cuộc trò chuyện này (có thể gõ nhầm, hoặc các tệp đã thay đổi kể từ --dry-run). Đây là danh sách hiện tại.",
-  "cli.sessions_move_workset.desktop_refused": "Cần bạn quyết định về các tệp làm việc trên {source} trước khi chuyển cuộc trò chuyện này sang {device}, nên chưa chuyển gì."
+  "cli.sessions_move_workset.desktop_refused": "Cần bạn quyết định về các tệp làm việc trên {source} trước khi chuyển cuộc trò chuyện này sang {device}, nên chưa chuyển gì.",
+  "cli.sessions_move_workset.unknown_card": "Không đọc được các tệp làm việc trên {source} (kho: {repo}) nên chưa chuyển gì. Hãy sửa kho đó, hoặc chọn “{button}” bên dưới để giữ mọi tệp làm việc lại ở đó.",
+  "cli.sessions_move_workset.unsupported_card": "{device} đang chạy bản lop cũ, không liệt kê được tệp làm việc của cuộc trò chuyện này. Hãy cập nhật lop ở đó, hoặc chọn “{button}” bên dưới để giữ chúng lại trên thiết bị đó.",
+  "cli.sessions_move_workset.probe_asked": "Đã hỏi {device} có truy cập được các kho từ xa này hay không; chỉ gửi địa chỉ của chúng và tên các tệp build, không gửi đường dẫn hay nhánh."
 }

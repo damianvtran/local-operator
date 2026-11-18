@@ -14,7 +14,7 @@
   "cli.sessions_move_workset.aborted": "Not moved: the working files were not confirmed.",
   "cli.sessions_move_workset.needs_confirmation": "This conversation has working files on {source}. Review them with --dry-run, then re-run with --confirm-working-set {digest} (or --yes), or with --without-working-set to leave them there.",
   "cli.sessions_move_workset.changed": "The working files changed since they were shown; here is the current list.",
-  "cli.sessions_move_workset.unknown": "The working files on {source} could not be read (step: {step}, repository: {repo}), so nothing was moved. Fix that repository, or re-run with --without-working-set to leave every working file there.",
+  "cli.sessions_move_workset.unknown": "The working files on {source} could not be read (repository: {repo}), so nothing was moved. Fix that repository, or re-run with --without-working-set to leave every working file there.",
   "cli.sessions_move_workset.unsupported": "{device} runs an older lop that cannot list this conversation's working files. Update lop there, or re-run with --without-working-set to leave them on that device.",
   "cli.sessions_move_workset.none": "No working files: this move needs no confirmation.",
   "cli.sessions_move_workset.receipt_not_transferred": "Working files were not transferred: {count, plural, one {# worktree stays} other {# worktrees stay}} on {device}.",
@@ -60,5 +60,8 @@
   "cli.sessions_move_workset.cause.git_error": "git reported an error",
   "cli.sessions_move_workset.mentioned": "Only mentioned in this conversation, so not included: {paths}",
   "cli.sessions_move_workset.digest_mismatch": "That --confirm-working-set digest does not match this conversation's current working files (it may be mistyped, or the files changed since --dry-run). Here is the current list.",
-  "cli.sessions_move_workset.desktop_refused": "The working files on {source} need your decision before this conversation moves to {device}, so nothing was moved."
+  "cli.sessions_move_workset.desktop_refused": "The working files on {source} need your decision before this conversation moves to {device}, so nothing was moved.",
+  "cli.sessions_move_workset.unknown_card": "The working files on {source} could not be read (repository: {repo}), so nothing was moved. Fix that repository, or choose “{button}” below to leave every working file there.",
+  "cli.sessions_move_workset.unsupported_card": "{device} runs an older lop that cannot list this conversation's working files. Update lop there, or choose “{button}” below to leave them on that device.",
+  "cli.sessions_move_workset.probe_asked": "{device} was asked whether it can reach these remotes; it was sent only their addresses and build-file names, no paths or branches."
 }

@@ -14,7 +14,7 @@
   "cli.sessions_move_workset.aborted": "منتقل نہیں ہوا: ورکنگ فائلوں کی تصدیق نہیں ہوئی۔",
   "cli.sessions_move_workset.needs_confirmation": "اس گفتگو کی ورکنگ فائلیں {source} پر ہیں۔ انہیں --dry-run سے دیکھیں، پھر --confirm-working-set {digest} (یا --yes) کے ساتھ دوبارہ چلائیں، یا انہیں وہیں چھوڑنے کے لیے --without-working-set کے ساتھ۔",
   "cli.sessions_move_workset.changed": "دکھائے جانے کے بعد ورکنگ فائلیں بدل گئی ہیں؛ موجودہ فہرست یہ ہے۔",
-  "cli.sessions_move_workset.unknown": "{source} پر ورکنگ فائلیں پڑھی نہیں جا سکیں (مرحلہ: {step}، ریپوزیٹری: {repo})، اس لیے کچھ منتقل نہیں ہوا۔ اس ریپوزیٹری کو ٹھیک کریں، یا تمام ورکنگ فائلیں وہیں چھوڑنے کے لیے --without-working-set کے ساتھ دوبارہ چلائیں۔",
+  "cli.sessions_move_workset.unknown": "{source} پر ورکنگ فائلیں پڑھی نہیں جا سکیں (ریپوزیٹری: {repo})، اس لیے کچھ منتقل نہیں ہوا۔ اس ریپوزیٹری کو ٹھیک کریں، یا تمام ورکنگ فائلیں وہیں چھوڑنے کے لیے --without-working-set کے ساتھ دوبارہ چلائیں۔",
   "cli.sessions_move_workset.unsupported": "{device} پر lop کا پرانا ورژن ہے جو اس گفتگو کی ورکنگ فائلوں کی فہرست نہیں بنا سکتا۔ وہاں lop اپ ڈیٹ کریں، یا انہیں اسی ڈیوائس پر چھوڑنے کے لیے --without-working-set کے ساتھ دوبارہ چلائیں۔",
   "cli.sessions_move_workset.none": "کوئی ورکنگ فائل نہیں: اس منتقلی کے لیے تصدیق کی ضرورت نہیں۔",
   "cli.sessions_move_workset.receipt_not_transferred": "ورکنگ فائلیں منتقل نہیں ہوئیں: {count, plural, one {# worktree {device} پر ہی ہے} other {# worktrees {device} پر ہی ہیں}}۔",
@@ -60,5 +60,8 @@
   "cli.sessions_move_workset.cause.git_error": "git نے ایک خرابی بتائی",
   "cli.sessions_move_workset.mentioned": "اس گفتگو میں صرف ذکر ہوا، اس لیے شامل نہیں: {paths}",
   "cli.sessions_move_workset.digest_mismatch": "یہ --confirm-working-set digest اس گفتگو کی موجودہ ورکنگ فائلوں سے میل نہیں کھاتا (شاید غلط ٹائپ ہوا ہے، یا --dry-run کے بعد فائلیں بدل گئی ہیں)۔ موجودہ فہرست یہ ہے۔",
-  "cli.sessions_move_workset.desktop_refused": "اس گفتگو کو {device} پر منتقل کرنے سے پہلے {source} پر موجود ورکنگ فائلوں کے بارے میں آپ کا فیصلہ ضروری ہے، اس لیے کچھ منتقل نہیں ہوا۔"
+  "cli.sessions_move_workset.desktop_refused": "{source} پر موجود ورکنگ فائلوں کے بارے میں پہلے آپ کا فیصلہ ضروری ہے، تبھی یہ گفتگو {device} پر منتقل ہو سکتی ہے، اس لیے کچھ منتقل نہیں ہوا۔",
+  "cli.sessions_move_workset.unknown_card": "{source} پر ورکنگ فائلیں پڑھی نہیں جا سکیں (ریپوزیٹری: {repo})، اس لیے کچھ منتقل نہیں ہوا۔ اس ریپوزیٹری کو ٹھیک کریں، یا تمام ورکنگ فائلیں وہیں چھوڑنے کے لیے نیچے “{button}” منتخب کریں۔",
+  "cli.sessions_move_workset.unsupported_card": "{device} پر lop کا پرانا ورژن ہے جو اس گفتگو کی ورکنگ فائلوں کی فہرست نہیں بنا سکتا۔ وہاں lop اپ ڈیٹ کریں، یا انہیں اسی ڈیوائس پر چھوڑنے کے لیے نیچے “{button}” منتخب کریں۔",
+  "cli.sessions_move_workset.probe_asked": "{device} سے پوچھا گیا کہ کیا وہ ان ریموٹ ریپوزیٹریز تک پہنچ سکتا ہے؛ اسے صرف ان کے ایڈریس اور بلڈ فائلوں کے نام بھیجے گئے، کوئی پاتھ یا برانچ نہیں۔"
 }

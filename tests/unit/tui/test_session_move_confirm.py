@@ -30,6 +30,8 @@ from local_operator.tui.widgets.move_workset_confirm import MoveWorkingSetConfir
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 SESSION = "9f3ac1e0b7d2"
+#: The destination's mesh id: the remedy command names it, never its chosen name (S10).
+DEST_ID = "d_82b36b3c77a7b799f694f5cdd3dfe4d0"
 
 BLOCK: dict[str, Any] = {
     "version": 1,
@@ -187,11 +189,56 @@ async def test_an_unreadable_working_set_offers_move_without_behind_the_checkbox
         await pilot.click("#move-workset-without")
         await pilot.pause()
     assert results == ["without"]
-    assert "--without-working-set" in summary
+    # U12: the card HAS the button, so the summary points at it instead of at the CLI
+    # flag — the flag is only a way forward from a shell.
+    assert "--without-working-set" not in summary
+    assert "choose “Move without the working files” below" in summary, summary
     if state == "unknown":
         # U6: the cause is named in words, with the command that shows it.
         assert "its index file is damaged" in summary
         assert "git -C ~/proj/.worktrees/feat status" in summary
+        # U6: the internal step name is not a person's word for anything.
+        assert "step:" not in summary, summary
+
+
+@pytest.mark.asyncio
+async def test_an_old_owner_card_names_the_owner_on_the_checkbox() -> None:
+    """U11: ``_source_workset_preflight`` set ``owner`` but not ``source``, so the
+    consent label read "I understand any working files stay on ?"."""
+    block = {
+        **UNKNOWN,
+        "state": "unsupported",
+        "owner": {"device_id": "d_a", "name": "laptop"},
+    }
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, block, [])
+        await pilot.pause()
+        check = screen.query_one("#move-workset-check", Checkbox)
+        summary = _summary(screen)
+    assert str(check.label) == "I understand any working files stay on laptop"
+    assert "?" not in str(check.label), check.label
+    assert "laptop" in summary
+
+
+@pytest.mark.asyncio
+async def test_the_outdated_destination_card_states_it_and_asks_nothing() -> None:
+    """D9: "Move without the working files?" above Cancel only asks a question the card
+    cannot act on; it has no move control at all."""
+    block = {
+        **UNKNOWN,
+        "state": "unsupported",
+        "update_device": {"device_id": "d_b", "name": "lop-remote-node-2", "role": "destination"},
+    }
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 32)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, block, [])
+        await pilot.pause()
+        title = str(screen.query_one("#move-workset-title", Static).render())
+    assert title == "Can't move yet", title
+    assert "?" not in title, title
 
 
 @pytest.mark.asyncio
@@ -232,7 +279,7 @@ def _probed_block(count: int = 3) -> dict[str, Any]:
                 },
                 "remedy": {
                     "run_on": "lending_device",
-                    "command": "lop network credential share github --with lop-remote-node-2",
+                    "command": f"lop network credential share github --with {DEST_ID}",
                 },
             }
         )
@@ -248,19 +295,24 @@ def _probed_block(count: int = 3) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(80, 24), (100, 24), (60, 32)])
+@pytest.mark.parametrize("size", [(60, 24), (80, 24), (100, 24), (60, 32)])
 async def test_the_consent_controls_stay_on_screen_with_a_long_summary(
     size: tuple[int, int],
 ) -> None:
     """D1/U1: at 80x24 the buttons were painted below the card; with three probed
-    worktrees the checkbox too, and the user ticked and confirmed blind."""
+    worktrees the checkbox too, and the user ticked and confirmed blind.
+
+    Round 2: asserted against the card's CONTENT region, not its region (which
+    includes the padding row a clipped button still paints into). At 60x24 the
+    budget came from the app size rather than the screen's content box, the
+    checkbox wrapped to two rows, and Move/Cancel fell out of the content box."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
         screen = await _open(app, _probed_block(), [])
         await pilot.pause()
         region = screen.region
-        card = screen.query_one(".move-workset").region
+        card = screen.query_one(".move-workset").content_region
         scroll = screen.query_one("#move-workset-summary")
         for selector in ("#move-workset-title", "#move-workset-check", "#move-workset-confirm",
                          "#move-workset-cancel"):
@@ -290,7 +342,7 @@ async def test_wrapped_lines_keep_their_indent_and_probe_lines_print_once_per_re
     # U7: the destination's answer is per remote, printed once for three worktrees.
     summary = "\n".join(indents)
     assert summary.count("cannot fetch git@github.com:owner/proj.git") == 1
-    assert summary.count("share github --with lop-remote-node-2") == 1
+    assert summary.count(f"share github --with {DEST_ID}") == 1
 
 
 @pytest.mark.asyncio

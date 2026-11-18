@@ -109,9 +109,18 @@ def source_label(block: Mapping[str, Any], fallback: str = "") -> str:
     return str(source.get("name") or source.get("device_id") or fallback)
 
 
-def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -> list[str]:
+def summary_lines(
+    block: Mapping[str, Any], *, session: str, device: str = "", without_button: str = ""
+) -> list[str]:
     """The confirmation summary: warning, counts, one line per worktree, withheld
-    files, what is never copied, and the closing advice (design §11.2 text shape)."""
+    files, what is never copied, and the closing advice (design §11.2 text shape).
+
+    ``without_button`` is the label of a "Move without the working files" control the
+    surface shows next to this text (the TUI card). With it, the ``unknown`` and
+    ``unsupported`` summaries point at that control instead of telling the user to
+    re-run with ``--without-working-set`` (review U12, round 2): a flag is the CLI's
+    way forward, and the card has a button for it.
+    """
     state = str(block.get("state") or "")
     label = device_label(block, device)
     keeper = source_label(block, "?")
@@ -119,10 +128,14 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
         failure = _member(block, "failure")
         repo = str(failure.get("repo") or "?")
         cause = _CAUSES.get(str(failure.get("cause") or ""), _ws.cause_git_error)
-        return [
-            _t(_ws.unknown(source=keeper, step=str(failure.get("step") or "?"), repo=repo)),
-            "  " + _t(_ws.unknown_cause(cause=_t(cause()), repo=repo)),
-        ]
+        # No internal ``step`` (review U6): git's reason class and the command that
+        # shows it are what a person can act on.
+        lead = (
+            _ws.unknown_card(source=keeper, repo=repo, button=without_button)
+            if without_button
+            else _ws.unknown(source=keeper, repo=repo)
+        )
+        return [_t(lead), "  " + _t(_ws.unknown_cause(cause=_t(cause()), repo=repo))]
     if state == "unsupported" and _member(block, "update_device").get("role") == "destination":
         # The DESTINATION dropped the consent on its way (review R3): only updating it
         # helps, so the copy names it and offers no flag.
@@ -130,9 +143,10 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
         return [_t(_ws.unsupported_destination(device=str(peer.get("name") or label)))]
     if state == "unsupported":
         owner = _member(block, "owner")
-        return [
-            _t(_ws.unsupported(device=str(owner.get("name") or owner.get("device_id") or label)))
-        ]
+        who = str(owner.get("name") or owner.get("device_id") or label)
+        if without_button:
+            return [_t(_ws.unsupported_card(device=who, button=without_button))]
+        return [_t(_ws.unsupported(device=who))]
     worktrees = [row for row in block.get("worktrees") or [] if isinstance(row, dict)]
     mentioned = [str(p) for p in block.get("mentioned") or [] if isinstance(p, str)]
     if not worktrees:
@@ -277,6 +291,11 @@ def probe_block_lines(block: Mapping[str, Any], *, device: str) -> list[str]:
     if state == "unknown_destination":
         return [_t(_ws.probe_unknown(device=device))]
     out: list[str] = []
+    if state == "answered":
+        # WHAT THE DESTINATION WAS TOLD (security S6, round 2): the probe runs during
+        # the dry run, before the user has decided to trust the destination, so the
+        # summary says that it was asked and what it was sent (``probe_request``).
+        out.append(_t(_ws.probe_asked(device=device)))
     tools = [str(tool) for tool in probe.get("missing_tools") or [] if isinstance(tool, str)]
     if tools:
         out.append(_t(_ws.prereq_missing_tools(device=device, tools=", ".join(tools))))

@@ -755,7 +755,8 @@ DESTINATION before the confirmation (`network/workset_probe.py`):
 - **Failure flags, never re-states** (decision): the row stays `planned` with the
   `clone_check` code, `clone_detail`, and a `remedy` when lop has one —
   `lop network credential github include <owner/repo>` when the device already
-  borrows a `github` share, else `lop network credential share github --with <device>`,
+  borrows a `github` share, else `lop network credential share github --with <device id>` (the id, never the
+  peer-chosen name — security S10),
   both run on the LENDING device. Not a digest input: the gate recomputes the
   manifest without re-probing, so a probe-derived state would refuse every confirmed
   move `working_set_changed`; and PR B's bundle still carries commits a

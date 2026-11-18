@@ -4129,8 +4129,10 @@ def _workset_refusal(
         ),
         "working_set_unknown": (
             "this device could not read the git state of the working files this "
-            f"conversation uses (step: {(block.get('failure') or {}).get('step', '?')}, "
-            f"repository: {(block.get('failure') or {}).get('repo') or 'unknown'}), so it "
+            # No internal ``step`` here (review U6): the repository and git's
+            # reason class are what a person can act on; the step stays in the block.
+            f"conversation uses (repository: "
+            f"{(block.get('failure') or {}).get('repo') or 'unknown'}), so it "
             f"cannot say what a move to {to_label} would leave behind and nothing was "
             "moved. Fix that repository, or re-run with --without-working-set to move "
             "the conversation and leave every working file on this device."
@@ -4394,10 +4396,11 @@ def _probe_destination(
         if answer is not None and answer.get("result") != "probed":
             answer = None
     # The remedy names the DESTINATION (``share github --with <it>``): the peer on an
-    # offload, this device on a recall. Built here, never taken from the answer (S3).
-    own = str(server._own_label())  # noqa: SLF001
-    destination = own if here else (target_name or target_device)
-    return workset_probe.apply_probe(block, answer, device=destination)
+    # offload, this device on a recall. Built here, never taken from the answer (S3),
+    # and by DEVICE ID, never the peer-chosen name (S10: a name is shell input).
+    own = str(server.identity.device_id)
+    destination = own if here else target_device
+    return workset_probe.apply_probe(block, answer, device_id=destination)
 
 
 def _ask_workset_preflight(
@@ -4423,6 +4426,12 @@ def _ask_workset_preflight(
                 to_device=transport.server.identity.device_id,
                 to_name=str(transport.server._own_label()),  # noqa: SLF001
                 state="unsupported",
+                # THE KEEPER IS NAMED AS ``source`` too (review U11, round 2): every
+                # surface reads the device that keeps the files from ``source``
+                # (``workset_text.source_label``), so a block naming only ``owner``
+                # rendered the consent checkbox as "stay on ?".
+                from_device=owner_device,
+                from_name=owner_name,
             ).to_dict()
             block["owner"] = {"device_id": owner_device, "name": owner_name}
             raise Moved(
@@ -7806,11 +7815,21 @@ def request_move(
     # and one that predates the working-set gate reads neither ``dry_run`` nor
     # ``working_set``: a preflight sent to it MOVED the conversation, ungated, away
     # from its worktrees. Same shape as ``_EXCLUSIVE_MOVE_CAPABILITY``: refuse, and
-    # name the restart. A plain move (no dry run, no consent) is forwarded as
-    # before — it is exactly what that relay already did for every caller.
+    # name the restart.
+    #
+    # EVERY GATED MOVE, NOT ONLY ONE CARRYING A DRY RUN OR A CONSENT (review R9,
+    # round 2). Forwarding a plain move "because that relay always did" let the TUI
+    # discard this refusal from its preflight and then send exactly that plain move:
+    # on an offload the owner IS this stale relay, which has no gate, so the
+    # conversation left its worktrees with no card and no warning — the loss the gate
+    # exists to prevent. Two shapes are not gated and still go through: a ``keep``
+    # copy (the source keeps everything) and a recovery (``from_replica`` promotes
+    # bytes already on this disk; no owner's worktrees are involved, and a current
+    # relay does not gate it either).
     consenting = bool(dry_run or confirm_working_set or without_working_set)
+    gated = consenting or not (keep or from_replica)
     advertised = tuple(getattr(record, "capabilities", None) or ())
-    if consenting and WORKSET_MOVE_CAPABILITY not in advertised:
+    if gated and WORKSET_MOVE_CAPABILITY not in advertised:
         return _relay_refusal(
             session_id,
             "relay_restart_required",

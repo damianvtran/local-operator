@@ -37562,6 +37562,15 @@ class OperatorApp(App[None]):
                         run_session_move_preflight, target_id, request.to
                     )
                     block = preflight.get("working_set")
+                    if preflight.get("code") == "relay_restart_required":
+                        # A STALE RELAY IS A STOP, NOT A FALL-THROUGH (review R9): it
+                        # cannot run the gate, and ``request_move`` refuses the move
+                        # itself for the same reason — so stop BEFORE the leave, with
+                        # the refusal's own "restart the relay" remedy, rather than
+                        # detach the user and only then report it.
+                        drop_checking()
+                        self._system_notice(str(preflight.get("message") or ""), "warning")
+                        return
                     if (
                         preflight.get("ok")
                         and preflight.get("confirmation_required")

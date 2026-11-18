@@ -41,6 +41,10 @@ def loading() -> Msg:
     return Msg("tui.session_move_workset.loading", {})
 
 
+def title_blocked() -> Msg:
+    return Msg("tui.session_move_workset.title_blocked", {})
+
+
 def title_sends(*, device: str) -> Msg:
     return Msg("tui.session_move_workset.title_sends", {"device": device})
 

@@ -113,11 +113,23 @@ class MoveWorkingSetConfirmScreen(ModalScreen[str]):
     def title_text(self) -> str:
         if self._sends and self._consentable:
             return _t(_keys.title_sends(device=self._device))
+        if not self._consentable and not self._without:
+            # NOTHING TO ANSWER HERE (review D9): the outdated-destination card offers
+            # only Cancel, so a question it cannot act on ("Move without the working
+            # files?") misread as a choice. A statement instead.
+            return _t(_keys.title_blocked())
         return _t(_keys.title_stays())
 
     def summary_lines(self) -> list[str]:
+        # THE CARD HAS THE BUTTON, SO IT NAMES THE BUTTON (review U12, round 2): on an
+        # ``unknown`` / ``unsupported`` card the summary used to tell the user to
+        # re-run with --without-working-set, while the control for exactly that sat
+        # an inch below it. The CLI's own text keeps the flag — it has no button.
         return workset_text.summary_lines(
-            self._block, session=self._session_id, device=self._device
+            self._block,
+            session=self._session_id,
+            device=self._device,
+            without_button=_t(_keys.confirm_without()) if self._without else "",
         )
 
     def summary_text(self) -> str:
@@ -188,14 +200,26 @@ class MoveWorkingSetConfirmScreen(ModalScreen[str]):
         at the card's actual inner width, since both may wrap — and the summary is
         ``height: auto`` up to that, scrolling beyond it. Computed before the first
         paint and on every resize, so no frame shows the controls off screen.
+
+        THE PERCENTAGES RESOLVE AGAINST THE SCREEN'S CONTENT BOX, NOT THE APP (review
+        D1, round 2). ``size`` is the whole screen, but the card's ``95%`` / ``90%``
+        caps are taken from inside the modal screen's own padding (its gutter): at
+        60x24 the card resolved to 55x19, while a budget from 60x24 assumed 57x21. One
+        row too many went to the summary at every 24-row size, and at 60 columns the
+        checkbox label measured at 47 columns fit one row but wrapped to two at the
+        real 45 — pushing Move and Cancel out of the card. So the budget starts from
+        exactly the box the card is laid out in.
         """
-        inner = max(10, min(_CARD_WIDTH, int(size.width * 0.95)) - _CARD_PAD_X)
+        gutter = self.styles.gutter
+        width = max(1, size.width - gutter.width)
+        height = max(1, size.height - gutter.height)
+        inner = max(10, min(_CARD_WIDTH, int(width * 0.95)) - _CARD_PAD_X)
         rows = _CARD_PAD_Y + _FIXED_ROWS
         rows += len(Content(self.title_text()).wrap(inner))
         if self._consentable or self._without:
             label = Content(self.checkbox_text()).wrap(max(1, inner - _CHECK_CHROME_X))
             rows += len(label) + 1  # its margin-bottom
-        budget = max(3, int(size.height * _CARD_SHARE) - rows)
+        budget = max(3, int(height * _CARD_SHARE) - rows)
         self.query_one("#move-workset-summary").styles.max_height = budget
 
     # -- behaviour -----------------------------------------------------------

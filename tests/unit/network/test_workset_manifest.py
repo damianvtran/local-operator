@@ -134,6 +134,39 @@ def test_a_subagent_childs_mention_alone_is_mentioned_too(root: Path, rig: Rig) 
     assert manifest.mentioned == ("~/proj/.worktrees/other",)
 
 
+def test_strictness_is_decided_per_repository_not_by_its_first_top(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R10 (round 2): seeds are ordered cwd, provenance, then mentions, so a
+    root's mention of worktree A could be read before a subagent child's cwd in
+    worktree B of the SAME repository. Listing that repository quietly because A came
+    first meant a failing ``git worktree list`` left ``worktrees == [A]`` and B was
+    dropped without a word — a fail-open on the one path the gate exists to close."""
+    other = rig.primary / ".worktrees" / "other"
+    assert other.is_dir(), other
+    real_git = workset._git
+
+    def fail_on_other(top: Path, *args: str, **kwargs: object) -> object:
+        # The quiet listing asks the top it was handed; make that one fail, so only a
+        # strict listing taken from the top the session WORKED IN can list the repo.
+        if args[:2] == ("worktree", "list") and Path(top) == other:
+            raise workset.WorksetUnknown("worktree_list", str(top), "git failed")
+        return real_git(top, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workset, "_git", fail_on_other)
+
+    candidates = workset.discover_worktrees(
+        [
+            workset.Seed(str(other / "README.md"), "mention"),  # first: mention-only
+            workset.Seed(str(rig.feat), "subagent:child1"),  # then: a real cwd
+        ]
+    )
+
+    paths = sorted(str(candidate.path) for candidate in candidates)
+    assert paths == sorted([str(other), str(rig.feat)]), paths
+    assert rig.feat in [candidate.path for candidate in candidates]
+
+
 def test_a_provenance_record_seeds_its_worktree(root: Path, rig: Rig) -> None:
     session = root / "sessions" / SID
     point_session_at(session, rig.home)
@@ -224,10 +257,16 @@ def test_a_primarys_nested_worktrees_are_not_its_untracked_files(root: Path, rig
     assert primary.is_primary is True
 
 
-def test_a_size_crossing_a_power_of_two_keeps_a_files_stay_digest(root: Path, rig: Rig) -> None:
-    """Review R2 (round 1): an active session writing while queued crossed 512/1024
-    bytes and every resume refused ``working_set_changed``. No size input while the
-    move carries no files; the bucket binds only once files travel."""
+def test_a_size_crossing_a_power_of_two_keeps_its_digest(root: Path, rig: Rig) -> None:
+    """Review R2 (round 1) then R11 (round 2): an active session writing while queued
+    crossed 512/1024 bytes and every resume refused ``working_set_changed``.
+
+    R2 took the bucket out while the move carried no files; R11 takes it out when it
+    DOES carry them, because the transfer half (#4245) re-checks the cap against the
+    current manifest and the gate re-checks ``over_cap`` — so the bucket only brought
+    the queued-move refusal back. What binds a sends-consent is ``carries_files``, and
+    nothing about the size.
+    """
     from dataclasses import replace
 
     point_session_at(root / "sessions" / SID, rig.feat)
@@ -239,11 +278,12 @@ def test_a_size_crossing_a_power_of_two_keeps_a_files_stay_digest(root: Path, ri
     assert large.total_bytes > 2 * small.total_bytes
 
     assert workset.scope_digest(large) == workset.scope_digest(small)
-    # ...but a consent to SEND files is bound to the payload's order of magnitude.
     sends_small = workset.scope_digest(replace(small, carries_files=True))
     sends_large = workset.scope_digest(replace(large, carries_files=True))
-    assert sends_small != sends_large
+    assert sends_small == sends_large  # R11: no size input at all
+    # ...while a "they stay" consent still cannot authorise a move that sends them.
     assert sends_small != workset.scope_digest(small)
+    assert workset._artifact_binding(replace(small, carries_files=True)) == {"carries_files": True}
 
 
 def test_a_broken_gitdir_pointer_fails_closed(root: Path, rig: Rig, tmp_path: Path) -> None:

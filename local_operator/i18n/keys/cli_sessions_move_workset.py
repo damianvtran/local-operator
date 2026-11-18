@@ -118,6 +118,10 @@ def prereq_team_bridge(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.prereq_team_bridge", {"device": device})
 
 
+def probe_asked(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.probe_asked", {"device": device})
+
+
 def probe_cannot_clone(*, device: str, remote: str) -> Msg:
     return Msg("cli.sessions_move_workset.probe_cannot_clone", {"device": device, "remote": remote})
 
@@ -232,8 +236,15 @@ def receipt_without(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_without", {"device": device})
 
 
-def unknown(*, source: str, step: str, repo: str) -> Msg:
-    return Msg("cli.sessions_move_workset.unknown", {"source": source, "step": step, "repo": repo})
+def unknown(*, source: str, repo: str) -> Msg:
+    return Msg("cli.sessions_move_workset.unknown", {"source": source, "repo": repo})
+
+
+def unknown_card(*, source: str, repo: str, button: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.unknown_card",
+        {"source": source, "repo": repo, "button": button},
+    )
 
 
 def unknown_cause(*, cause: str, repo: str) -> Msg:
@@ -242,6 +253,10 @@ def unknown_cause(*, cause: str, repo: str) -> Msg:
 
 def unsupported(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.unsupported", {"device": device})
+
+
+def unsupported_card(*, device: str, button: str) -> Msg:
+    return Msg("cli.sessions_move_workset.unsupported_card", {"device": device, "button": button})
 
 
 def unsupported_destination(*, device: str) -> Msg:

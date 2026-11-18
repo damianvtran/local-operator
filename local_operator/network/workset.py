@@ -39,7 +39,6 @@ import gzip
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import subprocess
@@ -355,7 +354,7 @@ def scope_digest(manifest: Manifest) -> str:
     case this digest exists to avoid. With ``carries_files`` false (PR A) the size
     describes nothing the user is consenting to send, and the gate re-checks
     ``over_cap`` against the current manifest on its own, so the bucket bought
-    nothing. It is bound in ``_artifact_binding`` ONLY when files are carried.
+    nothing, and it is not bound when files are carried either (``_artifact_binding``).
 
     NOT AN AUTHENTICATOR (security S9). The digest binds user intent and staleness:
     any ``move``-capable destination can read it from ``workset_preflight`` for
@@ -387,18 +386,21 @@ def _artifact_binding(manifest: Manifest) -> dict[str, Any]:
     """Extra digest inputs that exist only when the move SENDS files.
 
     Empty while ``carries_files`` is false, so a "files stay" consent is immune to
-    the session's own edits (see ``scope_digest``). When files are carried, the
-    payload's power-of-two size bucket is bound — a consent to send ~1 MiB must not
-    authorise sending ~1 GiB — together with ``carries_files`` itself, which the
-    transfer half (PR B) relies on to keep a "they stay" consent from authorising a
-    move that sends them.
+    the session's own edits (see ``scope_digest``). When files are carried, only
+    ``carries_files`` itself is bound, which the transfer half (PR B) relies on to
+    keep a "they stay" consent from authorising a move that sends them.
+
+    NO SIZE BUCKET, EVEN WHEN FILES TRAVEL (review R11, round 2). A bucket here would
+    bring R2 back for every move that carries files: an active session crosses
+    512/1024/2048… bytes while it waits at a queued or ``--wait`` safe point, and the
+    resume would refuse ``working_set_changed``. Size is bounded where it is real —
+    the gate re-checks ``over_cap`` against the current manifest, and the transfer
+    enforces the cap on the bytes it stages — so the consent binds only that files
+    travel at all.
     """
     if not manifest.carries_files:
         return {}
-    return {
-        "carries_files": True,
-        "bytes_bucket": math.ceil(math.log2(max(manifest.total_bytes, 1))),
-    }
+    return {"carries_files": True}
 
 
 # ---------------------------------------------------------------------------
@@ -728,8 +730,18 @@ def discover_worktrees(seeds: Iterable[Seed]) -> list[Candidate]:
     # through transcript mentions is the exception: it is never planned
     # (``mention_only``), so an unreadable one is simply not listed rather than
     # refusing a move over a repository the session merely read about.
+    #
+    # STRICTNESS IS DECIDED PER REPOSITORY, NOT BY ITS FIRST TOP (review R10, round
+    # 2). Seeds arrive cwd, provenance, then mentions, per session, so a root's
+    # mention of worktree A could be seen before a subagent's cwd in worktree B of
+    # the same repository. Listing that repository quietly because A came first meant
+    # a failing ``git worktree list`` left ``worktrees == [A]`` and B was dropped
+    # without a word. So every top is resolved to its repository first, and the
+    # repository is listed strictly from a top the session worked in whenever it has
+    # one.
     by_repo: dict[Path, tuple[Path, list[Path]]] = {}
     commons: dict[Path, Path] = {}
+    members: dict[Path, list[tuple[Path, bool]]] = {}
     for top, tagged in tops.items():
         passive = mention_only(item.split("\0", 1)[0] for item in tagged)
         common = _git(
@@ -745,10 +757,16 @@ def discover_worktrees(seeds: Iterable[Seed]) -> list[Candidate]:
             raise WorksetUnknown("discover", str(top), "empty git-common-dir")
         common_dir = Path(common)
         commons[top] = common_dir
-        if common_dir not in by_repo:
-            worktrees = (_worktree_list_quiet(top) or [top]) if passive else _worktree_list(top)
-            primary = worktrees[0] if worktrees else top
-            by_repo[common_dir] = (primary, worktrees)
+        members.setdefault(common_dir, []).append((top, passive))
+    for common_dir, repo_tops in members.items():
+        worked_in = [top for top, passive in repo_tops if not passive]
+        if worked_in:
+            worktrees = _worktree_list(worked_in[0])
+        else:
+            first = repo_tops[0][0]
+            worktrees = _worktree_list_quiet(first) or [first]
+        primary = worktrees[0] if worktrees else repo_tops[0][0]
+        by_repo[common_dir] = (primary, worktrees)
     found: dict[Path, Candidate] = {}
     for top, tagged in tops.items():
         common_path = commons.get(top)

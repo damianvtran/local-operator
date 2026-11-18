@@ -14,7 +14,7 @@
   "cli.sessions_move_workset.aborted": "नहीं ले जाया गया: वर्किंग फ़ाइलों की पुष्टि नहीं हुई।",
   "cli.sessions_move_workset.needs_confirmation": "इस बातचीत की वर्किंग फ़ाइलें {source} पर हैं। उन्हें --dry-run से देखें, फिर --confirm-working-set {digest} (या --yes) के साथ दोबारा चलाएँ, या उन्हें वहीं छोड़ने के लिए --without-working-set के साथ।",
   "cli.sessions_move_workset.changed": "दिखाए जाने के बाद वर्किंग फ़ाइलें बदल गई हैं; मौजूदा सूची यह है।",
-  "cli.sessions_move_workset.unknown": "{source} पर वर्किंग फ़ाइलें पढ़ी नहीं जा सकीं (चरण: {step}, रिपॉज़िटरी: {repo}), इसलिए कुछ नहीं ले जाया गया। उस रिपॉज़िटरी को ठीक करें, या सभी वर्किंग फ़ाइलें वहीं छोड़ने के लिए --without-working-set के साथ दोबारा चलाएँ।",
+  "cli.sessions_move_workset.unknown": "{source} पर वर्किंग फ़ाइलें पढ़ी नहीं जा सकीं (रिपॉज़िटरी: {repo}), इसलिए कुछ नहीं ले जाया गया। उस रिपॉज़िटरी को ठीक करें, या सभी वर्किंग फ़ाइलें वहीं छोड़ने के लिए --without-working-set के साथ दोबारा चलाएँ।",
   "cli.sessions_move_workset.unsupported": "{device} पर lop का पुराना संस्करण है, जो इस बातचीत की वर्किंग फ़ाइलों की सूची नहीं बना सकता। वहाँ lop अपडेट करें, या उन्हें उसी डिवाइस पर छोड़ने के लिए --without-working-set के साथ दोबारा चलाएँ।",
   "cli.sessions_move_workset.none": "कोई वर्किंग फ़ाइल नहीं: इस मूव के लिए पुष्टि की ज़रूरत नहीं।",
   "cli.sessions_move_workset.receipt_not_transferred": "वर्किंग फ़ाइलें ट्रांसफ़र नहीं हुईं: {count, plural, one {# worktree {device} पर ही है} other {# worktrees {device} पर ही हैं}}।",
@@ -60,5 +60,8 @@
   "cli.sessions_move_workset.cause.git_error": "git ने एक त्रुटि बताई",
   "cli.sessions_move_workset.mentioned": "इस बातचीत में सिर्फ़ ज़िक्र हुआ, इसलिए शामिल नहीं: {paths}",
   "cli.sessions_move_workset.digest_mismatch": "वह --confirm-working-set digest इस बातचीत की मौजूदा वर्किंग फ़ाइलों से मेल नहीं खाता (शायद गलत टाइप हुआ है, या --dry-run के बाद फ़ाइलें बदल गई हैं)। मौजूदा सूची यह है।",
-  "cli.sessions_move_workset.desktop_refused": "इस बातचीत को {device} पर ले जाने से पहले {source} पर मौजूद वर्किंग फ़ाइलों के बारे में आपका फ़ैसला ज़रूरी है, इसलिए कुछ नहीं ले जाया गया।"
+  "cli.sessions_move_workset.desktop_refused": "{source} पर मौजूद वर्किंग फ़ाइलों के बारे में पहले आपका फ़ैसला ज़रूरी है, तभी यह बातचीत {device} पर जा सकती है, इसलिए कुछ नहीं ले जाया गया।",
+  "cli.sessions_move_workset.unknown_card": "{source} पर वर्किंग फ़ाइलें पढ़ी नहीं जा सकीं (रिपॉज़िटरी: {repo}), इसलिए कुछ नहीं ले जाया गया। उस रिपॉज़िटरी को ठीक करें, या सभी वर्किंग फ़ाइलें वहीं छोड़ने के लिए नीचे “{button}” चुनें।",
+  "cli.sessions_move_workset.unsupported_card": "{device} पर lop का पुराना संस्करण है, जो इस बातचीत की वर्किंग फ़ाइलों की सूची नहीं बना सकता। वहाँ lop अपडेट करें, या उन्हें उसी डिवाइस पर छोड़ने के लिए नीचे “{button}” चुनें।",
+  "cli.sessions_move_workset.probe_asked": "{device} से पूछा गया कि क्या वह इन रिमोट रिपॉज़िटरी तक पहुँच सकता है; उसे सिर्फ़ उनके पते और बिल्ड फ़ाइलों के नाम भेजे गए, कोई पाथ या ब्रांच नहीं।"
 }

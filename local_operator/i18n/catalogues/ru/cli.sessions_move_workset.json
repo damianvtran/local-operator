@@ -14,7 +14,7 @@
   "cli.sessions_move_workset.aborted": "Не перенесено: рабочие файлы не подтверждены.",
   "cli.sessions_move_workset.needs_confirmation": "У этого разговора есть рабочие файлы на {source}. Просмотрите их с --dry-run, затем запустите снова с --confirm-working-set {digest} (или --yes) либо с --without-working-set, чтобы оставить их там.",
   "cli.sessions_move_workset.changed": "Рабочие файлы изменились после показа; вот актуальный список.",
-  "cli.sessions_move_workset.unknown": "Не удалось прочитать рабочие файлы на {source} (шаг: {step}, репозиторий: {repo}), поэтому ничего не перенесено. Исправьте этот репозиторий или запустите снова с --without-working-set, чтобы оставить там все рабочие файлы.",
+  "cli.sessions_move_workset.unknown": "Не удалось прочитать рабочие файлы на {source} (репозиторий: {repo}), поэтому ничего не перенесено. Исправьте этот репозиторий или запустите снова с --without-working-set, чтобы оставить там все рабочие файлы.",
   "cli.sessions_move_workset.unsupported": "На {device} установлена старая версия lop, которая не может перечислить рабочие файлы этого разговора. Обновите там lop или запустите снова с --without-working-set, чтобы оставить их на том устройстве.",
   "cli.sessions_move_workset.none": "Рабочих файлов нет: этот перенос не требует подтверждения.",
   "cli.sessions_move_workset.receipt_not_transferred": "Рабочие файлы не переданы: {count, plural, one {# worktree остаётся} few {# worktree остаются} many {# worktree остаются} other {# worktree остаются}} на {device}.",
@@ -60,5 +60,8 @@
   "cli.sessions_move_workset.cause.git_error": "git сообщил об ошибке",
   "cli.sessions_move_workset.mentioned": "Только упоминаются в этом разговоре, поэтому не включены: {paths}",
   "cli.sessions_move_workset.digest_mismatch": "Этот digest для --confirm-working-set не совпадает с текущими рабочими файлами разговора (возможно, он введён с ошибкой или файлы изменились после --dry-run). Вот актуальный список.",
-  "cli.sessions_move_workset.desktop_refused": "Прежде чем перенести этот разговор на {device}, нужно ваше решение о рабочих файлах на {source}, поэтому ничего не перенесено."
+  "cli.sessions_move_workset.desktop_refused": "Рабочие файлы на {source} требуют вашего решения, прежде чем этот разговор будет перенесён на {device}, поэтому ничего не перенесено.",
+  "cli.sessions_move_workset.unknown_card": "Не удалось прочитать рабочие файлы на {source} (репозиторий: {repo}), поэтому ничего не перенесено. Исправьте этот репозиторий или выберите ниже «{button}», чтобы оставить там все рабочие файлы.",
+  "cli.sessions_move_workset.unsupported_card": "На {device} установлена старая версия lop, которая не может перечислить рабочие файлы этого разговора. Обновите там lop или выберите ниже «{button}», чтобы оставить их на том устройстве.",
+  "cli.sessions_move_workset.probe_asked": "У {device} спросили, есть ли у него доступ к этим удалённым репозиториям; туда отправлены только их адреса и имена файлов сборки, без путей и веток."
 }

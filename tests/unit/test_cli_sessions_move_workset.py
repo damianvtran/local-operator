@@ -245,6 +245,10 @@ def test_the_summary_renders_the_destinations_probe_answer(
     assert "lop network credential github include owner/proj" in text
     assert "node2 is missing: go, pnpm" in text
     assert "Team Bridge" in text
+    # S6 (round 2): the dry-run copy says the destination was ASKED, and what it was
+    # sent — the probe runs before the user has decided to trust it.
+    assert "node2 was asked whether it can reach these remotes" in text
+    assert "no paths or branches" in text
     unknown = dict(block, destination_probe={"state": "unknown_destination"})
     assert "Could not check whether node2" in "\n".join(
         workset_text.summary_lines(unknown, session=SESSION)
@@ -372,12 +376,20 @@ def test_a_scripted_refusal_speaks_once_and_names_the_keeper(
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"dry_run": True}, {"confirm_working_set": "sha256:x"}, {"without_working_set": True}],
+    [
+        {"dry_run": True},
+        {"confirm_working_set": "sha256:x"},
+        {"without_working_set": True},
+        {},  # R9: the plain move the TUI sent after discarding its preflight refusal
+        {"to": "local"},
+    ],
 )
-def test_a_relay_older_than_the_gate_is_never_sent_a_dry_run_or_a_consent(
+def test_a_relay_older_than_the_gate_is_never_sent_a_gated_move(
     monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]
 ) -> None:
-    """R1: a pre-gate relay ignored ``dry_run`` and MOVED the conversation."""
+    """R1: a pre-gate relay ignored ``dry_run`` and MOVED the conversation. R9: a plain
+    move to it was still forwarded, and on an offload that relay IS the owner, with no
+    gate, so the conversation left its worktrees without a word."""
     from types import SimpleNamespace
 
     from local_operator.network import mobility, relay, store
@@ -387,11 +399,15 @@ def test_a_relay_older_than_the_gate_is_never_sent_a_dry_run_or_a_consent(
     monkeypatch.setattr(store, "find_own_relay", lambda root=None: old)
     monkeypatch.setattr(relay, "control_request", lambda *a, **k: sent.append(k) or None)
 
-    refused: dict[str, Any] = dict(mobility.request_move(SESSION, to="peer", **kwargs))
+    args = {"to": "peer", **kwargs}
+    refused: dict[str, Any] = dict(mobility.request_move(SESSION, **args))
 
     assert refused["code"] == "relay_restart_required", refused
+    assert "restart" in refused["message"] and "update lop" not in refused["message"]
     assert sent == []
-    # Control: the same relay is still asked a plain move, which is all it ever did.
-    mobility.request_move(SESSION, to="peer")
-    assert len(sent) == 1
+    # Controls: the two ungated shapes still reach the same relay — a ``keep`` copy
+    # (the source keeps everything) and a recovery from a local replica.
+    mobility.request_move(SESSION, to="peer", keep=True)
+    mobility.request_move(SESSION, to="", from_replica=True)
+    assert len(sent) == 2
     assert mobility.WORKSET_MOVE_CAPABILITY in relay.wire.LINK_CAPABILITIES
