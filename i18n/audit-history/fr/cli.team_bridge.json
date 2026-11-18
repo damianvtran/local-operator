@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "cli.team_bridge",
-  "history_sha256": "ace54e11ddb072e31451a8290d45e44816e1a85e5a878f40077d2be25a4f45e8",
+  "history_sha256": "8eade90820a1de4081a53f73f81693d6232569b89e88c96c63d798ff29a80bd4",
   "entries": [
     {
       "locale": "fr",
@@ -103,6 +103,36 @@
       },
       "status": "passed",
       "note": "Merged-source audit, PR #4096 round 3 (convergence), head 908660b7aadb on main 72dd603f, scope cf62fdda6b1a..908660b7aadb; en source_sha256 bc305b44083685109f05166df42eec6cc2cd3eeaaf2b86848def36bad7dd544a = main's 20ff80eb text plus the PR's 25552503 status keys, no key changed on both sides. Audited keys: notify.screening_model_unavailable_body (main's 'Radient Console' value and its context note) and the PR's status.running, status.running_none, status.running_unrecorded, status.running_exited, status.running_detail, status.restart_needed, status.restart_needed_replaced, each read against its en context note. Other keys unchanged since their passed rows and not re-audited. Mechanical: key parity 66/66; placeholders identical to en in every audited key ({pid},{version},{started},{generation},{versions},{installed}); no plural/select in scope; NFC; no Cf/bidi controls. fr: vous register; U+202F before every ':' and ';' verified by codepoint in all 7 status.* keys and in screening_model_unavailable_body; 'dans Radient Console' keeps the product name unarticled per main's audited canonicalisation; restart_needed_replaced says 'code antérieur à la dernière mise à jour' and does not claim a version difference. No findings. Auditor edits: none. Unresolved blocker/major: 0. Audit performed by reading under a fleet load hold: no in-locale render through messages.render_record and no check.py --audit-base sweep were run this round. Single independent semantic audit; not a second high-visibility audit; native-speaker review not claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "61f9455c03c38d428f2ae5a1df169ec5f00f29995ae843660bda7874fe6c0059",
+      "translator": {
+        "agent": "coder — PR #4246 translator (lopdev team; round-1 values at 7dac6d31a, remediation at 73dc05353 applying the round-1 auditor corrections byte-for-byte plus the QA Q1 `peer` literal)",
+        "model": "unrecorded — the translator's serving model is not stated in the PR or commits; not inferred",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 2 (lopdev team reviewer, task 4246-i18n-audit-r2), independent of the translator; did not edit any value",
+        "session": "610af24653b9",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback observed)",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "N1"
+        ]
+      },
+      "status": "passed",
+      "note": "PR #4246 round 2, head 73dc05353 on base b941eb9dc, scope 7dac6d31a..73dc05353. Audited key: cli.team_bridge.setup.mesh_node_relay (en changed for QA Q1: 'with no `peer` field'), read against its en context note; other cli.team_bridge keys unchanged since their passed rows and not re-audited. Mechanical: no placeholders/ICU in en or locale; code spans `send` and `peer` byte-identical and untranslated; 'Team Bridge' verbatim; NFC; no Cf/bidi controls. fr: vous register; no ':'/';'/'?' needing U+202F in this key; cheffe de cabinet matches setup.designation_missing; open NIT N1 (round 1, non-gating): 'adressez-la' could read 'désignez-la'. Single independent semantic audit by reading; no rendered-frame or native-speaker review claimed."
     }
   ]
 }
