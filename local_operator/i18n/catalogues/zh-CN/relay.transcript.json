@@ -20,5 +20,9 @@
   "relay.transcript.label.ask": "提问",
   "relay.transcript.label.messages": "消息",
   "relay.transcript.composer.queued": "{count, plural, other {# 条已排队}}",
-  "relay.transcript.session.unread_refused": "无法读取未读状态，未清除任何内容。请重试。"
+  "relay.transcript.session.unread_refused": "无法读取未读状态，未清除任何内容。请重试。",
+  "relay.transcript.message.show_more": "展开",
+  "relay.transcript.message.show_less": "收起",
+  "relay.transcript.message.show_more_label": "展开消息",
+  "relay.transcript.message.show_less_label": "收起消息"
 }
