@@ -22,6 +22,7 @@ import errno
 import inspect
 import logging
 import random
+import re
 import ssl
 import time
 from collections.abc import (
@@ -833,6 +834,11 @@ class ProviderError(RenderedStreamError):
     the wait are composed in only on the way out.
     """
 
+    #: Set by ``clients.raise_for_status`` when the provider's JSON error fields
+    #: name a CONTENT verdict (PR #4212, S-7/S-12), read before ``message`` is
+    #: capped. Declared here so the stamp is a typed attribute, not a monkey-patch.
+    content_verdict_seen: bool = False
+
     def __init__(
         self,
         status: int | None,
@@ -1274,6 +1280,46 @@ _INPUT_REFUSAL_MARKERS = (
     "datainspectionfailed",
     "data_inspection_failed",
 )
+
+#: Wording by which providers report a CONTENT verdict (moderation, safety or
+#: guardrail refusal), on any status. ONE pattern for every consumer so they
+#: cannot drift (PR #4212, S-7): Team Bridge screening reads it to keep a
+#: content-verdict 5xx from failing over to another screener
+#: (``model_boundary._sender_cannot_cause``), and the HTTP client stamps
+#: ``ProviderError.content_verdict_seen`` from the JSON error FIELDS before the
+#: message is capped at ``clients.MAX_ERROR_MESSAGE_CHARS``.
+#:
+#: Round 3 (S-12 / m2): bare substrings over-matched ordinary outage wording
+#: ("harmony" output parsers, "blocked by egress policy", "violates unique
+#: constraint", "safety maintenance"), stopping a real outage at hop 0. Short
+#: stems are therefore word-bounded and must sit next to a verdict word; the
+#: distinctive phrases stay plain. Consumers use it ONE-WAY (a match only turns
+#: an advance into a hold), so a miss costs a fallback hop and a false match a
+#: held message — never a weaker screener on a verdict the regex DID see.
+_CONTENT_VERDICT_PATTERNS = (
+    *(re.escape(marker) for marker in _INPUT_REFUSAL_MARKERS),
+    r"inappropriate content",
+    r"\bmoderation\b",
+    r"\bflagged\b",
+    r"\bcontent[ _]polic",
+    r"\bcontent[ _]filter",
+    r"\bcontent exists risk\b",  # DeepSeek
+    r"\bguardrail",
+    r"\bprohibited[ _]content\b",  # Gemini PROHIBITED_CONTENT
+    r"\bsafety\b[^.\n]{0,40}\b(?:block|filter|flag|refus|violat|prohibit)",  # Gemini SAFETY
+    r"\b(?:block|filter|flag|refus)\w*\b[^.\n]{0,40}\bsafety\b",
+    r"\bviolat\w*\b[^.\n]{0,40}\b(?:usage|content|acceptable|safety)?[ _]?polic",
+    r"\bharm(?:ful)?\b",
+    r"\bblocked\b[^.\n]{0,20}\b(?:content|safety|moderation)\b",
+)
+CONTENT_VERDICT_RE = re.compile("|".join(_CONTENT_VERDICT_PATTERNS), re.IGNORECASE)
+
+
+def names_content_verdict(text: str) -> bool:
+    """Whether ``text`` reports a provider CONTENT verdict (see the pattern above)."""
+
+    return bool(text) and CONTENT_VERDICT_RE.search(text) is not None
+
 
 #: The INPUT-side sentences the guardrail publishes, matched as whole PHRASES
 #: rather than as loose words. The loose form ("inappropriate content" and

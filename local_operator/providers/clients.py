@@ -1156,13 +1156,51 @@ def raise_for_status(response: httpx.Response) -> None:
     # bad-request 404 stays a request defect.
     if _openrouter_no_route(status, message):
         retryable = True
-    raise ProviderError(
+    error = ProviderError(
         status,
         message,
         retryable=retryable,
         retry_after_ms=_parse_retry_after(response, payload),
         auth_error=auth_error,
     )
+    # Verdict match on the error's own FIELDS, uncapped (PR #4212, S-7 / S-12):
+    # an upstream echoing the input ahead of its verdict must not push the
+    # verdict past the message cap, and an HTML error page's scripts or a JSON
+    # key elsewhere in the body must not stop a real outage at hop 0.
+    error.content_verdict_seen = _names_content_verdict(payload)
+    raise error
+
+
+#: Bound on each error field scanned for content-verdict wording.
+_CONTENT_VERDICT_SCAN_CHARS = 64 * 1024
+
+
+def _error_fields(payload: Any) -> list[str]:
+    """The provider's error TEXT fields: ``error`` (string, or its ``message``,
+    ``code``, ``type`` and a relayed ``metadata.raw``), top-level ``message`` /
+    ``detail``. Nothing else in the body is read."""
+
+    fields: list[Any] = []
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            fields += [error.get("message"), error.get("code"), error.get("type")]
+            metadata = error.get("metadata")
+            if isinstance(metadata, Mapping):
+                fields.append(metadata.get("raw"))
+        else:
+            fields.append(error)
+        fields += [payload.get("message"), payload.get("detail")]
+    return [str(f)[:_CONTENT_VERDICT_SCAN_CHARS] for f in fields if isinstance(f, (str, int))]
+
+
+def _names_content_verdict(payload: Any) -> bool:
+    from local_operator.providers.failover import names_content_verdict
+
+    try:
+        return any(names_content_verdict(text) for text in _error_fields(payload))
+    except Exception:  # noqa: BLE001 — an unreadable body is simply not evidence
+        return False
 
 
 def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
