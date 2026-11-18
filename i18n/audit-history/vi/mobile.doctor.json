@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "mobile.doctor",
-  "history_sha256": "cde8dd0057704eec49fb09c1e14ab03284a27372d138f105b9c1908c3ef372d2",
+  "history_sha256": "e7867f6fc191e5074d2e910a884ec2ea7c20a8ac385633e54c4b2b01a12b6149",
   "entries": [
     {
       "locale": "vi",
@@ -118,6 +118,29 @@
       "evidence": "i18n/audits/evidence/vi/mobile.doctor/a5/record.json",
       "round": "a5",
       "keys_audited": 6
+    },
+    {
+      "locale": "vi",
+      "namespace": "mobile.doctor",
+      "source_sha256": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+      "translator": {
+        "agent": "coder subagent of PR #4216 round-1 remediation (commit 193e08e33; rewrote the English source and all 7 translations of the 4 keys)",
+        "model": "not reported in the commit; served model of the coder child unverified",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "copy-reviewer acting as independent i18n re-auditor, lopdev team member (`task` subagent), session 1689332f69cf; did not write or audit-correct these translations in any earlier round and edited no locale value",
+        "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4216 audit a6 PASSED (re-audit of remediation 193e08e33): 4 keys mobile.doctor.watches.{near,at_limit,instances_near,instances_at_limit} changed to a three-arm {how} select (command/program/other), 0 blocker / 0 major / 0 minor / 0 nit for vi. All 12 arm renders checked. Translator and auditor share model family anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/vi/mobile.doctor/a6/record.json",
+      "evidence": "i18n/audits/evidence/vi/mobile.doctor/a6/record.json",
+      "round": "a6",
+      "keys_audited": 4
     }
   ]
 }
