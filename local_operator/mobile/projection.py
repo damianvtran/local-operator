@@ -27,7 +27,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
@@ -2391,6 +2391,44 @@ class ProjectionFold:
             call_id: args for call_id, args in self._tool_args.items() if call_id in live_call_ids
         }
         self._bump()
+
+    def fold_supplement_rows(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        """Seed ``projection.supplements`` from journalled ``supplement_v1`` rows.
+
+        An owner that did NOT run the turn (a resumed or restarted session) folds
+        its history from messages only, which carry no supplement, so every pin and
+        card journalled before this process started would be absent from the live
+        projection the relay serves. ``rows`` are the journal's newest row per
+        anchor (``contract.newest_per_anchor``), the same rule a cold open applies.
+
+        Keep-newest against what the live fold already holds, with the LIVE beat
+        winning a tie: a seeded row replaces nothing at an equal version, because a
+        beat that arrived first carries the generator's progress fields the durable
+        row lacks. Only anchors that are rows of the current tail are taken, which
+        bounds the seed at ``PROJECTION_TRANSCRIPT_LIMIT`` rows: an old turn's row
+        never rides every frame for a window the phone cannot show. A seed that
+        changes nothing does not bump the version, which keeps a supplement-free
+        projection byte-identical.
+        """
+        p = self.projection
+        visible = {entry.id for entry in p.transcript}
+        changed = False
+        for row in rows:
+            anchor, version = row.get("anchor"), row.get("version")
+            if (
+                not isinstance(anchor, str)
+                or anchor not in visible
+                or not isinstance(version, int)
+                or isinstance(version, bool)
+            ):
+                continue
+            held = p.supplements.get(anchor)
+            if held is not None and version <= int(held.get("version") or 0):
+                continue
+            p.supplements[anchor] = dict(row)
+            changed = True
+        if changed:
+            self._bump()
 
     # -- events ------------------------------------------------------------
 
