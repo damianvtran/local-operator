@@ -1400,6 +1400,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "root — install-level state, never an entry of a session directory",
     ),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),
+    "local_operator/tui/community_backend.py": (
+        1,
+        "``SELECTION_FILE`` ('org_selection.json'): the /community page's last-viewed org, "
+        "at <config>/community/ — install-level UI state, never an entry of a session "
+        "directory, so no session copy carries or excludes it",
+    ),
+    "local_operator/community/taint.py": (
+        1,
+        "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, matched "
+        "against a journal row's ``tool_name`` to derive community taint (the same shape "
+        "as harness/bridge_egress.py) -- not a file or directory name; the taint is "
+        "re-derived from the session's own journal, which already travels",
+    ),
     "local_operator/tui/resume_click.py": (1, "the desktop app's bundle/binary name"),
     "local_operator/tui/input_decode.py": (
         1,

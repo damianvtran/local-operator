@@ -164,8 +164,8 @@ def _agent_shell_refusal(command: str) -> str | None:
     )
 
 
-#: C1 controls survive ``json.dumps(ensure_ascii=False)`` as raw code points
-#: (C0 and DEL are escaped already); a terminal may act on them, so ``--json``
+#: DEL and C1 controls survive ``json.dumps(ensure_ascii=False)`` as raw code
+#: points (C0 is escaped already); a terminal may act on them, so ``--json``
 #: escapes them losslessly. A script still gets the exact server string back.
 _C1 = {code: f"\\u{code:04x}" for code in range(0x7F, 0xA0)}
 

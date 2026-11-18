@@ -1102,6 +1102,34 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
                 tool_name,
             )
             return False
+        from local_operator.harness.approval import COMMUNITY_POST_GATE
+
+        if tool_name == COMMUNITY_POST_GATE:
+            # A community post card is approved for its EXACT text, so the
+            # one-line prompt below cannot carry it: ``sanitize_prompt_line``
+            # flattens and cuts at 500 characters with no marker, and a ``y``
+            # would then publish text the person never saw (review R2-1, a
+            # 3,689-character post). Print the whole card, line by line, BEFORE
+            # the question instead. Each line is still sanitised (escapes, Cf
+            # characters), but its limit is its own length — nothing is cut.
+            # The post is bounded by ``community.limits.MAX_TEXT_CHARS`` and
+            # the terminal's scrollback is the pager; the question itself stays
+            # short so it is the last thing on screen.
+            card_lines = [
+                sanitize_prompt_line(line, limit=max(len(line), 1))
+                for line in description.splitlines()
+            ]
+            try:
+                await asyncio.to_thread(print, "\n".join(card_lines), flush=True)
+                answer = await asyncio.to_thread(
+                    input,
+                    "{}Publish the community post shown above in full? [y/N] ".format(
+                        _bridge_notice_prefix(bridge_latched)
+                    ),
+                )
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return answer.strip().lower() in ("y", "yes")
         try:
             # Sanitised HERE as well as at the source. This is a second
             # human-facing approval surface, it renders onto a real terminal

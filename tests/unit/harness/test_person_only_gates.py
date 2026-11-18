@@ -100,3 +100,52 @@ async def test_declared_unattended_inventory_forwards_person_only_gates(gate: st
     assert await ask_approval(gate_fn, "bash", "run: ls", None) is True
     assert await ask_approval(gate_fn, gate, "card", None) is False
     assert asked == [gate]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("yolo", [False, True])
+async def test_terminal_prompt_shows_the_whole_community_post_before_asking(
+    yolo: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2-1: the plain-terminal y/N never approves post text it did not display.
+
+    The generic one-line prompt flattens the card and cuts it at 500 characters
+    with no marker, so a ``y`` there would publish text the person never saw.
+    Driven with the real card builder and a 3,689-character post whose markers
+    sit far past that cut; ``--yolo`` reaches the same prompt (R1-4).
+    """
+    from local_operator.ansi import sanitize_prompt_line
+    from local_operator.community.agent_ops import post_card
+
+    body = "x" * 300 + " MARK-300 " + ("filler " * 480) + "\x1b[2J MARK-END"
+    lines = [body[i : i + 600] for i in range(0, len(body), 600)]
+    text = "\n".join(lines)
+    assert len(text) == 3689  # the round-2 repro's size
+    card = post_card(community="Tran Robotics", channel="#help", text=text, tainted=True)
+    # Negative control: the generic one-line rendering loses the tail.
+    assert "MARK-300" not in sanitize_prompt_line(card)
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    prompts: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        # Everything printed before the question is what the person saw.
+        prompts.append(prompt)
+        return "y"
+
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    monkeypatch.setattr(session_factory, "_fullscreen_app_owns_terminal", lambda: False)
+    monkeypatch.setattr("builtins.input", fake_input)
+    gate = session_factory._make_request_approval(yolo)
+    assert await gate(COMMUNITY_POST_GATE, card) is True
+    shown = capsys.readouterr().out
+    assert "MARK-300" in shown and "MARK-END" in shown
+    assert "\x1b" not in shown and "\x1b" not in prompts[0]
+    # Every post line reached the screen, uncut, before the question.
+    for line in lines:
+        assert sanitize_prompt_line(f"┊ {line}", limit=len(line) + 2) in shown
+    assert "shown above in full" in prompts[0]
+    assert len(prompts[0]) < 200
