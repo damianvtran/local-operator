@@ -15,7 +15,7 @@ from local_operator.browser_bridge.resources import RESOURCE_NAME, BrowserResour
 from local_operator.server import desktop
 from local_operator.server.app import app
 from local_operator.server.utils import browser_owner_status
-from local_operator.session.retention import claim_session, release_session
+from local_operator.session.retention import LIVE_MARKER_NAME, claim_session, release_session
 from local_operator.session_lease import LEASE_NAME, acquire_session_lease
 
 ROUTE = "/v1/desktop/browser/owner-status"
@@ -89,7 +89,7 @@ async def test_live_parent_completed_child_then_same_generation_resume(client, t
         receipt = child / RESOURCE_NAME
         original = receipt.read_bytes(), receipt.stat().st_mtime_ns
         assert _post(client, CHILD, PARENT, MISSING) == [
-            _row(CHILD, "ended", False, "browser_terminal", resource.execution_generation),
+            _row(CHILD),
             _row(PARENT, "live", None, "execution_lease", lease.generation),
             _row(MISSING),
         ]
@@ -112,15 +112,53 @@ async def test_live_parent_completed_child_then_same_generation_resume(client, t
 
 
 @pytest.mark.asyncio
+async def test_failed_resume_claim_cannot_promote_old_child_receipt(client, tmp_path, monkeypatch):
+    directory = tmp_path / "sessions" / CHILD
+    marker = directory / LIVE_MARKER_NAME
+    claim_session(directory)
+    resource = await _finish(directory)
+    release_session(directory)
+    assert not marker.exists()
+    receipt = directory / RESOURCE_NAME
+    original = receipt.read_bytes()
+    terminal = json.loads(original)
+    assert (terminal["terminal"], terminal["state"]) == ("completed", "closed")
+    real_write = Path.write_text
+    attempted = []
+
+    def refuse_marker_write(path, *args, **kwargs):
+        if path == marker:
+            attempted.append(path)
+            raise PermissionError("synthetic resume claim failure")
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_marker_write)
+    # Child resume uses this best-effort writer, then constructs the browser
+    # resource without initializing it. Neither action retires the old receipt.
+    claim_session(directory)
+    resumed = BrowserResource(directory, CHILD)
+    assert attempted == [marker]
+    assert not marker.exists()
+    assert resumed.execution_generation == resource.execution_generation
+    assert _post(client, CHILD) == [_row(CHILD)]
+    assert receipt.read_bytes() == original
+
+
+@pytest.mark.asyncio
 async def test_new_lease_does_not_reuse_stale_browser_receipt(client, tmp_path):
     directory = tmp_path / "sessions" / PARENT
     old = acquire_session_lease(directory)
     try:
-        await _finish(directory, "disposed")
+        resource = await _finish(directory, "disposed")
+        assert resource.execution_generation == old.generation
+        assert _post(client, PARENT) == [
+            _row(PARENT, "live", False, "execution_lease", old.generation)
+        ]
     finally:
         old.release()
-    original = _post(client, PARENT)
-    assert original == [_row(PARENT, "ended", False, "browser_terminal", old.generation)]
+    # Even a settled lease-backed browser scope loses its execution witness
+    # once the lease is released; its old receipt isn't current execution proof.
+    assert _post(client, PARENT) == [_row(PARENT)]
     new = acquire_session_lease(directory)
     try:
         assert _post(client, PARENT) == [_row(PARENT, "live", None, "execution_lease", new.generation)]

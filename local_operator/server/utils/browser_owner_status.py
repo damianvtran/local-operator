@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from local_operator.browser_bridge.resources import HOST_UI, RESOURCE_NAME
+from local_operator.browser_bridge.resources import RESOURCE_NAME
 from local_operator.session.retention import SESSIONS_DIRNAME
 from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, _read_claim, lease_holder
 
@@ -20,7 +20,6 @@ OwnerID = Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]
 # The current writers use token_hex(16) for leases and token_urlsafe(24) for
 # unleased browser owners. Neither token is a public session identifier.
 _GENERATION = re.compile(r"[A-Za-z0-9_-]{32}")
-_TERMINAL_OUTCOMES = frozenset({"completed", "failed", "cancelled", "disposed", "succeeded"})
 # Match the existing BrowserResource.inspect_ownership sidecar read bound.
 _MAX_WITNESS_BYTES = 65536
 
@@ -40,6 +39,7 @@ class BrowserOwnerQuery(BaseModel):
 
 class BrowserOwnerRow(BaseModel):
     session_id: str
+    # Keep the protocol's terminal verdict reserved for execution-fenced proof.
     verdict: Literal["live", "ended", "unknown"] = "unknown"
     # Discovery/roster turn flags don't carry the browser generation; a fresh
     # lease proves a writer, not its turn state. In particular, never guess idle.
@@ -143,29 +143,14 @@ def _read_owner(sessions: Path, session_id: str) -> BrowserOwnerRow:
                     provenance="execution_lease" if has_lease else "session_claim",
                     retained=retained if scope and scope == owner_generation else None,
                 )
-        elif (
-            scope
-            and receipt.get("terminal") in _TERMINAL_OUTCOMES
-            and receipt.get("state") == "closed"
-            and receipt.get("host") == HOST_UI
-            and not retained
-            and not receipt.get("ownership")
-            and not receipt.get("surface_id")
-            and not receipt.get("unresolved_surface_id")
-            and not receipt.get("resumed_scope")
-        ):
-            # Only the acknowledged close from the browser finalizer is a
-            # terminal receipt. Ordinary closes don't write terminal; pending,
-            # degraded and partial handoffs don't prove the scope settled. An
-            # extension ACK cannot settle a desktop scope on the same generation.
-            row = BrowserOwnerRow(
-                session_id=session_id,
-                verdict="ended",
-                retained=False,
-                provenance="browser_terminal",
-            )
         elif retained:
             row = BrowserOwnerRow(session_id=session_id, retained=True)
+
+        # A browser close ACK settles that scope, not the latest execution.
+        # A child can resume on the old generation after a failed marker write,
+        # before browser initialization touches the receipt. Once a lease is
+        # removed, a markerless receipt cannot prove it came from a leased run
+        # either. Leave these receipts unknown, including legacy orphaned owners.
 
         # Re-sample the witnesses as a set: an atomic replacement or a new claim
         # during this read invalidates the observation. This remains a sample;
