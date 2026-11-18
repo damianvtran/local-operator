@@ -249,6 +249,11 @@ class Manifest:
     #: source and the receipt says so); the transfer half flips it. Surfaces branch on
     #: it for their sentence: "sends its working files there" vs "they stay here".
     carries_files: bool = False
+    #: The OWNER (the device that keeps the files when they do not travel). Named on
+    #: the block because a recall's surfaces run on the DESTINATION, where "this
+    #: device" would name the wrong machine. Not a digest input.
+    from_device: str = ""
+    from_name: str = ""
 
     @property
     def empty(self) -> bool:
@@ -284,6 +289,7 @@ class Manifest:
             "state": self.state,
             "carries_files": self.carries_files,
             "destination": {"device_id": self.to_device, "name": self.to_name},
+            "source": {"device_id": self.from_device, "name": self.from_name},
             "totals": {
                 "worktrees": len(planned),
                 "unpushed_commits": sum(w.unpushed_commits for w in planned),
@@ -1049,6 +1055,8 @@ def compute_manifest(
     home: Path | None = None,
     cap: int = DEFAULT_CAP_BYTES,
     cwd_hint: str = "",
+    from_device: str = "",
+    from_name: str = "",
 ) -> Manifest:
     """The owner's read-only manifest for moving ``session_id`` to ``to_device``.
 
@@ -1084,6 +1092,8 @@ def compute_manifest(
         to_name=to_name,
         worktrees=tuple(facts),
         cap_bytes=int(cap),
+        from_device=from_device,
+        from_name=from_name,
     )
 
 
@@ -1114,7 +1124,8 @@ def facts_to_json(facts: WorktreeFacts) -> dict[str, Any]:
 
 def manifest_summary(block: Mapping[str, Any]) -> dict[str, int]:
     """Counts a log line or audit row may carry (no paths)."""
-    totals = block.get("totals") if isinstance(block.get("totals"), dict) else {}
+    raw = block.get("totals")
+    totals: dict[str, Any] = raw if isinstance(raw, dict) else {}
     return {
         "worktrees": len(block.get("worktrees") or []),
         "planned": int(totals.get("worktrees") or 0),

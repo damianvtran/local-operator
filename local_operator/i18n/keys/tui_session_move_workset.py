@@ -17,8 +17,8 @@ def checkbox_sends(*, device: str) -> Msg:
     return Msg("tui.session_move_workset.checkbox_sends", {"device": device})
 
 
-def checkbox_stays() -> Msg:
-    return Msg("tui.session_move_workset.checkbox_stays", {})
+def checkbox_stays(*, source: str) -> Msg:
+    return Msg("tui.session_move_workset.checkbox_stays", {"source": source})
 
 
 def confirm() -> Msg:

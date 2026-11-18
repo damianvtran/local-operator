@@ -155,6 +155,13 @@ def test_an_interactive_terminal_is_warned_and_only_y_moves(
     # files do not travel yet (PR A), and lists the worktree and the withheld secret.
     assert f"Moving {SESSION} to device-b mid-conversation" in first.out
     assert "does not bring its working files yet" in first.out
+    # A RECALL runs this prompt on the DESTINATION: the files stay on the owner, which
+    # is named — never "this device", which here would be the wrong machine.
+    assert "They stay on device-a:" in first.out
+    assert (
+        prompts[0]
+        == f"Move {SESSION} to device-b and leave these working files on device-a? [y/N] "
+    )
     assert "~/proj/.worktrees/feat" in first.out
     assert "withheld (looks like a secret): ~/proj/.worktrees/feat/.env.local" in first.out
     assert prompts[0].endswith("[y/N] ")

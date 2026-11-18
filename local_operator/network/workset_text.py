@@ -49,6 +49,13 @@ _REASONS = {
 _LIST_LIMIT = 20
 
 
+def _member(block: Mapping[str, Any], key: str) -> dict[str, Any]:
+    """``block[key]`` when it is an object, else ``{}`` — a block from an older or
+    newer owner may omit or reshape any member, and a summary must still render."""
+    value = block.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _t(message: Msg) -> str:
     return render_resolved(message)
 
@@ -66,8 +73,15 @@ def reason_text(code: str) -> str:
 
 
 def device_label(block: Mapping[str, Any], fallback: str = "") -> str:
-    destination = block.get("destination") if isinstance(block.get("destination"), dict) else {}
+    destination = _member(block, "destination")
     return str(destination.get("name") or destination.get("device_id") or fallback)
+
+
+def source_label(block: Mapping[str, Any], fallback: str = "") -> str:
+    """The device that KEEPS the files (the owner). Never "this device": a recall's
+    surfaces run on the destination, where that phrase names the wrong machine."""
+    source = _member(block, "source")
+    return str(source.get("name") or source.get("device_id") or fallback)
 
 
 def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -> list[str]:
@@ -75,17 +89,20 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
     files, what is never copied, and the closing advice (design §11.2 text shape)."""
     state = str(block.get("state") or "")
     label = device_label(block, device)
+    keeper = source_label(block, "?")
     if state == "unknown":
-        failure = block.get("failure") if isinstance(block.get("failure"), dict) else {}
+        failure = _member(block, "failure")
         return [
             _t(
                 _ws.unknown(
-                    step=str(failure.get("step") or "?"), repo=str(failure.get("repo") or "?")
+                    source=keeper,
+                    step=str(failure.get("step") or "?"),
+                    repo=str(failure.get("repo") or "?"),
                 )
             )
         ]
     if state == "unsupported":
-        owner = block.get("owner") if isinstance(block.get("owner"), dict) else {}
+        owner = _member(block, "owner")
         return [
             _t(_ws.unsupported(device=str(owner.get("name") or owner.get("device_id") or label)))
         ]
@@ -93,12 +110,12 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
     if not worktrees:
         return [_t(_ws.none())]
     sends = bool(block.get("carries_files"))
-    totals = block.get("totals") if isinstance(block.get("totals"), dict) else {}
+    totals = _member(block, "totals")
     lines = [
         _t(
             _ws.warning_sends(session=session, device=label)
             if sends
-            else _ws.warning_stays(session=session, device=label)
+            else _ws.warning_stays(session=session, device=label, source=keeper)
         ),
         "  "
         + _t(
@@ -129,10 +146,10 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
                 _ws.worktree_line(
                     path=path,
                     branch=str(row.get("branch") or "HEAD"),
-                    unpushed=int(row.get("unpushed_commits") or 0),
-                    staged=int(row.get("staged") or 0),
-                    unstaged=int(row.get("unstaged") or 0),
-                    untracked=int(row.get("untracked") or 0),
+                    unpushed=str(int(row.get("unpushed_commits") or 0)),
+                    staged=str(int(row.get("staged") or 0)),
+                    unstaged=str(int(row.get("unstaged") or 0)),
+                    untracked=str(int(row.get("untracked") or 0)),
                 )
             )
         )
@@ -150,13 +167,19 @@ def summary_lines(block: Mapping[str, Any], *, session: str, device: str = "") -
         )
     left = [item for item in block.get("left_behind") or [] if isinstance(item, dict)]
     for item in left[:_LIST_LIMIT]:
-        recipe = item.get("recipe") if isinstance(item.get("recipe"), dict) else {}
+        recipe = _member(item, "recipe")
         command = str(recipe.get("run") or "")
         if command:
             lines.append(
                 "  " + _t(_ws.leaves_behind(path=str(item.get("path") or ""), command=command))
             )
-    lines.append(_t(_ws.advice_sends(device=label) if sends else _ws.advice_stays(device=label)))
+    lines.append(
+        _t(
+            _ws.advice_sends(device=label)
+            if sends
+            else _ws.advice_stays(source=keeper, device=label)
+        )
+    )
     return lines
 
 
@@ -164,7 +187,7 @@ def prompt_text(block: Mapping[str, Any], *, session: str, device: str = "") -> 
     label = device_label(block, device)
     if block.get("carries_files"):
         return _t(_ws.prompt_sends(device=label))
-    return _t(_ws.prompt_stays(session=session, device=label))
+    return _t(_ws.prompt_stays(session=session, device=label, source=source_label(block, "?")))
 
 
 def receipt_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
@@ -174,7 +197,9 @@ def receipt_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
         return []
     consent = str(block.get("consent") or "")
     if consent == "not_applicable_keep":
-        return [_t(_ws.receipt_keep(device=device_label(block)))]
+        return [
+            _t(_ws.receipt_keep(device=device_label(block), source=source_label(block, source)))
+        ]
     if consent == "without":
         return [_t(_ws.receipt_without(device=source))]
     count = sum(

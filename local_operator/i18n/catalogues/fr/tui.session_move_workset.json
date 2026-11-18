@@ -1,8 +1,8 @@
 {
-  "tui.session_move_workset.title_sends": "Envoyer les fichiers de travail à {device} ?",
-  "tui.session_move_workset.title_stays": "Déplacer sans les fichiers de travail ?",
-  "tui.session_move_workset.checkbox_sends": "Je suis sûr que {device} doit recevoir ces fichiers",
-  "tui.session_move_workset.checkbox_stays": "Je comprends que ces fichiers de travail restent sur cet appareil",
+  "tui.session_move_workset.title_sends": "Envoyer les fichiers de travail à {device} ?",
+  "tui.session_move_workset.title_stays": "Déplacer sans les fichiers de travail ?",
+  "tui.session_move_workset.checkbox_sends": "Je confirme que {device} doit recevoir ces fichiers",
+  "tui.session_move_workset.checkbox_stays": "Je comprends que ces fichiers de travail restent sur {source}",
   "tui.session_move_workset.confirm": "Déplacer",
   "tui.session_move_workset.cancel": "Annuler",
   "tui.session_move_workset.loading": "Vérification des fichiers de travail de cette conversation…"

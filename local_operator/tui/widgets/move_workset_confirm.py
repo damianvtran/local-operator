@@ -64,7 +64,7 @@ class MoveWorkingSetConfirmScreen(ModalScreen[bool]):
     def checkbox_text(self) -> str:
         if self._sends:
             return _t(_keys.checkbox_sends(device=self._device))
-        return _t(_keys.checkbox_stays())
+        return _t(_keys.checkbox_stays(source=workset_text.source_label(self._block, "?")))
 
     # -- layout --------------------------------------------------------------
 

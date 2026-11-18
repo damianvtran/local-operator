@@ -2,7 +2,7 @@
   "tui.session_move_workset.title_sends": "Send working files to {device}?",
   "tui.session_move_workset.title_stays": "Move without the working files?",
   "tui.session_move_workset.checkbox_sends": "I'm confident {device} should receive these files",
-  "tui.session_move_workset.checkbox_stays": "I understand these working files stay on this device",
+  "tui.session_move_workset.checkbox_stays": "I understand these working files stay on {source}",
   "tui.session_move_workset.confirm": "Move",
   "tui.session_move_workset.cancel": "Cancel",
   "tui.session_move_workset.loading": "Checking this conversation's working files…"

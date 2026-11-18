@@ -3885,6 +3885,8 @@ def _workset_manifest(
             to_device=to_device,
             to_name=to_name or server._member_name(to_device),  # noqa: SLF001
             cwd_hint=_source_session_cwd(server, session_id),
+            from_device=server.identity.device_id,
+            from_name=str(server._own_label()),  # noqa: SLF001
         )
     except workset.WorksetUnknown:
         logger.warning(
@@ -3954,6 +3956,10 @@ def _workset_unknown_block(
         "destination": {
             "device_id": to_device,
             "name": to_name or server._member_name(to_device),  # noqa: SLF001
+        },
+        "source": {
+            "device_id": server.identity.device_id,
+            "name": str(server._own_label()),  # noqa: SLF001
         },
         "failure": {
             "step": str(getattr(failure, "step", "") or "manifest"),

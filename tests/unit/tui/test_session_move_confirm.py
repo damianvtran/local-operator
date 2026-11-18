@@ -31,6 +31,9 @@ BLOCK: dict[str, Any] = {
     "state": "preflight",
     "carries_files": False,
     "destination": {"device_id": "d_b", "name": "lop-remote-node-2"},
+    # The OWNER, named: on a recall this card runs on the destination, so the files
+    # staying on "this device" would name the wrong machine.
+    "source": {"device_id": "d_a", "name": "laptop"},
     "totals": {"worktrees": 1, "unpushed_commits": 1, "dirty_files": 6, "bytes": 3_200_000},
     "worktrees": [
         {
@@ -85,7 +88,8 @@ async def test_the_card_renders_the_summary_and_names_the_destination() -> None:
     assert "~/proj/.worktrees/feat  feat (1 unpushed, 2 staged, 2 unstaged, 2 untracked)" in summary
     assert "withheld (looks like a secret): ~/proj/.worktrees/feat/.env.local" in summary
     assert "pnpm install --frozen-lockfile" in summary
-    assert "I understand these working files stay on this device" in str(check.label)
+    assert "They stay on laptop:" in summary
+    assert str(check.label) == "I understand these working files stay on laptop"
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@
   "tui.session_move_workset.checkbox_stays": {
     "role": "TUI checkbox label (files stay)",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "First person, the user's own statement."
+    "note": "First person, the user's own statement. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
   },
   "tui.session_move_workset.confirm": {
     "role": "TUI button",

@@ -17,8 +17,8 @@ def advice_sends(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.advice_sends", {"device": device})
 
 
-def advice_stays(*, device: str) -> Msg:
-    return Msg("cli.sessions_move_workset.advice_stays", {"device": device})
+def advice_stays(*, source: str, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.advice_stays", {"source": source, "device": device})
 
 
 def brings_summary(
@@ -58,8 +58,8 @@ def leaves_behind(*, path: str, command: str) -> Msg:
     return Msg("cli.sessions_move_workset.leaves_behind", {"path": path, "command": command})
 
 
-def needs_confirmation(*, digest: str) -> Msg:
-    return Msg("cli.sessions_move_workset.needs_confirmation", {"digest": digest})
+def needs_confirmation(*, source: str, digest: str) -> Msg:
+    return Msg("cli.sessions_move_workset.needs_confirmation", {"source": source, "digest": digest})
 
 
 def none() -> Msg:
@@ -70,8 +70,11 @@ def prompt_sends(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.prompt_sends", {"device": device})
 
 
-def prompt_stays(*, session: str, device: str) -> Msg:
-    return Msg("cli.sessions_move_workset.prompt_stays", {"session": session, "device": device})
+def prompt_stays(*, session: str, device: str, source: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.prompt_stays",
+        {"session": session, "device": device, "source": source},
+    )
 
 
 def reason_contended() -> Msg:
@@ -134,8 +137,8 @@ def reason_unsupported_by_peer() -> Msg:
     return Msg("cli.sessions_move_workset.reason.unsupported_by_peer", {})
 
 
-def receipt_keep(*, device: str) -> Msg:
-    return Msg("cli.sessions_move_workset.receipt_keep", {"device": device})
+def receipt_keep(*, device: str, source: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_keep", {"device": device, "source": source})
 
 
 def receipt_not_transferred(*, count: int | float, device: str) -> Msg:
@@ -149,8 +152,8 @@ def receipt_without(*, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_without", {"device": device})
 
 
-def unknown(*, step: str, repo: str) -> Msg:
-    return Msg("cli.sessions_move_workset.unknown", {"step": step, "repo": repo})
+def unknown(*, source: str, step: str, repo: str) -> Msg:
+    return Msg("cli.sessions_move_workset.unknown", {"source": source, "step": step, "repo": repo})
 
 
 def unsupported(*, device: str) -> Msg:
@@ -161,8 +164,11 @@ def warning_sends(*, session: str, device: str) -> Msg:
     return Msg("cli.sessions_move_workset.warning_sends", {"session": session, "device": device})
 
 
-def warning_stays(*, session: str, device: str) -> Msg:
-    return Msg("cli.sessions_move_workset.warning_stays", {"session": session, "device": device})
+def warning_stays(*, session: str, device: str, source: str) -> Msg:
+    return Msg(
+        "cli.sessions_move_workset.warning_stays",
+        {"session": session, "device": device, "source": source},
+    )
 
 
 def withheld_history(*, path: str) -> Msg:

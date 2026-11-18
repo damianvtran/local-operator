@@ -7,7 +7,7 @@
   "cli.sessions_move_workset.warning_stays": {
     "role": "CLI/TUI heading line of the move confirmation when this version cannot transfer the files",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "{session} conversation id, {device} device name: keep verbatim. Must say clearly that the files do NOT travel and remain on the current device."
+    "note": "{session} conversation id, {device} device name: keep verbatim. Must say clearly that the files do NOT travel and remain on the current device. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
   },
   "cli.sessions_move_workset.brings_summary": {
     "role": "one summary line of counts under the warning",
@@ -47,7 +47,7 @@
   "cli.sessions_move_workset.advice_stays": {
     "role": "closing advice before the yes/no prompt (files stay here)",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "{device} device name verbatim."
+    "note": "{device} device name verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
   },
   "cli.sessions_move_workset.prompt_sends": {
     "role": "interactive yes/no prompt",
@@ -57,7 +57,7 @@
   "cli.sessions_move_workset.prompt_stays": {
     "role": "interactive yes/no prompt (files stay)",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "Keep '[y/N] ' exactly, including the trailing space."
+    "note": "Keep '[y/N] ' exactly, including the trailing space. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
   },
   "cli.sessions_move_workset.aborted": {
     "role": "CLI result after the user declined",
@@ -67,7 +67,7 @@
   "cli.sessions_move_workset.needs_confirmation": {
     "role": "CLI error when a script moved a conversation with working files without confirming",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "Keep --dry-run, --confirm-working-set, --yes, --without-working-set verbatim; {digest} is a sha256: token, verbatim."
+    "note": "Keep --dry-run, --confirm-working-set, --yes, --without-working-set verbatim; {digest} is a sha256: token, verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
   },
   "cli.sessions_move_workset.changed": {
     "role": "CLI notice: the list changed between showing and confirming",
@@ -77,7 +77,7 @@
   "cli.sessions_move_workset.unknown": {
     "role": "CLI error: the git state could not be read, so the move was refused",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "{step} is a machine word (e.g. status), {repo} a ~/ path: verbatim. Keep --without-working-set verbatim."
+    "note": "{step} is a machine word (e.g. status), {repo} a ~/ path: verbatim. Keep --without-working-set verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
   },
   "cli.sessions_move_workset.unsupported": {
     "role": "CLI error: the other device is too old",
@@ -102,7 +102,7 @@
   "cli.sessions_move_workset.receipt_keep": {
     "role": "CLI line after a --keep copy",
     "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
-    "note": "{device} = where the copy now is; verbatim."
+    "note": "{device} = where the copy now is; verbatim. {source} is the name of the device that keeps the working files (the conversation's current owner), verbatim; it is NOT necessarily the device the user is typing on."
   },
   "cli.sessions_move_workset.help_dry_run": {
     "role": "argparse help for --dry-run",

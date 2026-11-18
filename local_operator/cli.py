@@ -7801,14 +7801,15 @@ def _sessions_move_dry_run(session_id: str, *, to: str, as_json: bool) -> int:
 
     from local_operator.network import mobility, workset_text
 
-    answer = dict(mobility.request_move(session_id, to=to, dry_run=True))
+    answer: dict[str, Any] = dict(mobility.request_move(session_id, to=to, dry_run=True))
     if as_json:
         print(_json.dumps(answer, indent=2, sort_keys=True, default=str))
         return 0 if answer.get("ok") else 1
     if not answer.get("ok"):
         print(str(answer.get("message") or ""), file=sys.stderr)
         return 1
-    block = answer.get("working_set") if isinstance(answer.get("working_set"), dict) else {}
+    raw = answer.get("working_set")
+    block: dict[str, Any] = raw if isinstance(raw, dict) else {}
     for line in workset_text.summary_lines(block, session=session_id, device=to):
         print(line)  # i18n: ignore rendered from cli.sessions_move_workset keys
     if answer.get("confirmation_required") and block.get("scope_digest"):
@@ -7839,7 +7840,8 @@ def _sessions_move_workset_words(result: dict[str, Any], *, session_id: str, to:
     if not isinstance(block, dict):
         return []
     if result.get("ok"):
-        source = result.get("from_device") if isinstance(result.get("from_device"), dict) else {}
+        sender = result.get("from_device")
+        source: dict[str, Any] = sender if isinstance(sender, dict) else {}
         return workset_text.receipt_lines(
             block, source=str(source.get("name") or source.get("device_id") or "")
         )
@@ -7847,7 +7849,8 @@ def _sessions_move_workset_words(result: dict[str, Any], *, session_id: str, to:
     lines = workset_text.summary_lines(block, session=session_id, device=to)
     if code in ("working_set_unconfirmed", "working_set_changed"):
         digest = str(block.get("scope_digest") or "")
-        lines.append(render_resolved(_wsh.needs_confirmation(digest=digest)))
+        keeper = workset_text.source_label(block, "?")
+        lines.append(render_resolved(_wsh.needs_confirmation(source=keeper, digest=digest)))
     return lines
 
 
