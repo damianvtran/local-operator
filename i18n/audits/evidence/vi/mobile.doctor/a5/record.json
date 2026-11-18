@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "audit_id": "a5",
+  "audit_kind": "independent_translation_audit_new_keys",
+  "locale": "vi",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-18",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #4216: 4 changed + 2 new mobile.doctor.watches keys judged side by side with English and en/mobile.doctor.context.json; other keys unchanged from the base and not re-audited",
+  "key_count": 37,
+  "keys_audited": 6,
+  "changed_keys": [
+    "mobile.doctor.watches.ok",
+    "mobile.doctor.watches.near",
+    "mobile.doctor.watches.at_limit",
+    "mobile.doctor.watches.unknown",
+    "mobile.doctor.watches.instances_near",
+    "mobile.doctor.watches.instances_at_limit"
+  ],
+  "source_sha256": "322230f946a1ac493499986fba909735071e13415791de3dbbbb1c686e83c9fb",
+  "target_sha256": "a0cd4bdf61d5eeeb47330b3ba2ccf590c16958aab493fd84792e5dbef6524ae1",
+  "source_audit_revision": "4e6a954306b5bf8e42778e24b389007ced2ca6ae",
+  "branch": "fix/inotify-followups",
+  "worktree": "~/local-operator/.worktrees/inotify-followups",
+  "translator": {
+    "agent": "coder subagent of PR #4216 (commit 4e6a95430; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; served model of the coder child unverified",
+    "date": "2026-11-18"
+  },
+  "auditor": {
+    "agent": "copy-reviewer acting as independent i18n auditor, lopdev team member (`task` subagent), session 760414253f82; did not write the translations; corrected the values listed in findings",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-18",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "322230f946a1ac493499986fba909735071e13415791de3dbbbb1c686e83c9fb",
+    "context": "95ebf1639cad50331de63d0401956a13535d7ae1ad0e9cd11ba959dae1397ce5",
+    "glossary": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "style_guide": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "VI-W1",
+      "severity": "minor",
+      "keys": [
+        "near",
+        "at_limit",
+        "instances_near",
+        "instances_at_limit"
+      ],
+      "change": "khởi động lại bằng {command} → khởi động lại nó bằng {command}: the restart had no object; the #4193 base copy said 'hãy khởi động lại nó'",
+      "status": "corrected in catalogue"
+    },
+    {
+      "id": "VI-W2",
+      "severity": "minor",
+      "keys": [
+        "ok",
+        "instances_near",
+        "instances_at_limit"
+      ],
+      "change": "bộ theo dõi → handle theo dõi: the English source renamed 'watchers' to 'watch handles' (#4193 D5) so the two budgets stop reading as one thing; 'bộ theo dõi' (watcher) kept the old term next to 'lượt theo dõi tệp'. vi already uses the English 'handle' (cli.browser.handles_redacted: 'Các handle')",
+      "status": "corrected in catalogue"
+    }
+  ],
+  "checks": [
+    "placeholder multiset identical to English for all 6 keys (runtime message_arguments)",
+    "{how} select parsed by local_operator.i18n.runtime and rendered in both arms (command, other) with synthetic params; no unrendered braces",
+    "fs.inotify.max_user_watches / fs.inotify.max_user_instances, {command} and the OS errors “No space left on device” / “Too many open files” byte-identical English inside the locale's quotation marks, as the existing #4193 rows treat them",
+    "'file watch' term unchanged from #4193; 'watch handle' term used identically in ok, instances_near and instances_at_limit and distinct from it",
+    "NFC, no bidi control characters",
+    "copy_scan.py (design-qa): 0 findings"
+  ],
+  "limits": "LLM audit, same model family as the translator (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}
