@@ -16,7 +16,7 @@ from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from local_operator import settings_io
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
@@ -246,6 +246,18 @@ def test_managed_gate_covers_every_legacy_route() -> None:
     stale = set(_LEGACY_GATE_EXCEPTIONS) - live
     assert not stale, f"exception list names routes that no longer exist: {sorted(stale)}"
     assert all(reason.strip() for reason in _LEGACY_GATE_EXCEPTIONS.values())
+
+
+def _agent_edit_fields(**overrides: Any) -> AgentEditFields:
+    """An ``AgentEditFields`` with every field spelled out, unset ones ``None``.
+
+    The model's runtime defaults are all ``None``, but pyright treats each
+    ``Field(None, ...)`` as a required parameter; passing the full field map
+    (the ``tests/unit/test_delivery_guidance.py`` pattern) keeps the call
+    sites type-clean without changing what the registry receives.
+    """
+    names = AgentEditFields.model_fields
+    return AgentEditFields(**{name: overrides.get(name) for name in names})
 
 
 def _apiroutes(routes: Iterable[Any]) -> Iterator[APIRoute]:
@@ -2553,7 +2565,9 @@ async def test_managed_gate_covers_every_route_that_can_start_an_agent_turn() ->
         namespace = vars(sys.modules[route.endpoint.__module__])
         if not _TURN_STARTERS & set(namespace):
             continue
-        for method in route.methods:
+        # APIRoute.methods is typed Optional; FastAPI always fills it for a
+        # published route, so an empty fallback only satisfies the checker.
+        for method in route.methods or ():
             turn_routes.append((method, route.path))
     # Guards the inspection itself: the chat family alone publishes five.
     assert len(turn_routes) >= 5, f"found only {turn_routes}; the module inspection is wrong"
@@ -2642,7 +2656,6 @@ async def test_inline_edit_exception_cannot_reach_tool_execution(
 
     import local_operator.model.configure as configure_module
     import local_operator.session.session as session_module
-    from local_operator.agents import AgentEditFields
     from local_operator.harness.types import (
         StreamEndEvent,
         StreamTextDelta,
@@ -2655,7 +2668,7 @@ async def test_inline_edit_exception_cannot_reach_tool_execution(
     open_store(tmp_path, create=True)
     store_provider_key("OPENAI_API_KEY", "sk-test-not-real", base=tmp_path)
     agent = app.state.agent_registry.create_agent(
-        AgentEditFields(name="editor", current_working_directory=str(tmp_path))
+        _agent_edit_fields(name="editor", current_working_directory=str(tmp_path))
     )
     sentinel = tmp_path / "edit-sentinel.txt"
     requests: list[Any] = []
@@ -2717,7 +2730,6 @@ def _edit_rig(app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
     from fastapi.middleware.cors import CORSMiddleware
 
     import local_operator.model.configure as configure_module
-    from local_operator.agents import AgentEditFields
     from local_operator.harness.types import StreamEndEvent, StreamTextDelta
     from local_operator.providers.registry import store_provider_key
     from local_operator.secrets.access import open_store
@@ -2738,7 +2750,7 @@ def _edit_rig(app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
     open_store(tmp_path, create=True)
     store_provider_key("OPENAI_API_KEY", "sk-test-not-real", base=tmp_path)
     agent = app.state.agent_registry.create_agent(
-        AgentEditFields(name="editor", current_working_directory=str(workspace))
+        _agent_edit_fields(name="editor", current_working_directory=str(workspace))
     )
     requests: list[Any] = []
 
