@@ -26,7 +26,7 @@ from typing import Any, Optional
 
 import httpx
 
-from local_operator.clients._http import APIError
+from local_operator.clients._http import APIError, scrub_secrets
 from local_operator.stt import audio as stt_audio
 from local_operator.stt.cleanup import RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM
 from local_operator.stt.errors import api_error_from_httpx_response
@@ -106,8 +106,12 @@ async def _post(
         )
     except httpx.HTTPError as exc:
         # A transport failure never reached the upstream: no status, no body;
-        # the client's own text is the whole diagnostic (legacy shape).
-        raise APIError(f"{label} request failed: {exc}", status_code=None) from exc
+        # the client's own text is the whole diagnostic (legacy shape). h11 quotes
+        # the WHOLE header value in its "Illegal header value" message, so the
+        # text is scrubbed of the key like a body.
+        raise APIError(
+            scrub_secrets(f"{label} request failed: {exc}", secrets), status_code=None
+        ) from exc
     if response.status_code >= 400:
         raise api_error_from_httpx_response(
             response,

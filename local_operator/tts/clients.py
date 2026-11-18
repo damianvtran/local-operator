@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 import httpx
 
-from local_operator.clients._http import APIError
+from local_operator.clients._http import APIError, scrub_secrets
 from local_operator.stt.errors import api_error_from_httpx_response
 from local_operator.tts.adapters import Params
 from local_operator.tts.output_format import PREFERRED_OUTPUT_FORMAT
@@ -95,8 +95,11 @@ async def _post_audio(
             )
         except httpx.HTTPError as exc:
             # A transport failure never reached the upstream: no status, no
-            # body; the client's own text is the whole diagnostic.
-            raise APIError(f"{label} request failed: {exc}", status_code=None) from exc
+            # body; the client's own text is the whole diagnostic, scrubbed of
+            # the key because h11 quotes a whole illegal header value in it.
+            raise APIError(
+                scrub_secrets(f"{label} request failed: {exc}", secrets), status_code=None
+            ) from exc
         if response.status_code >= 400:
             raise api_error_from_httpx_response(
                 response, fallback_message=f"{label} refused the request", secrets=secrets

@@ -856,21 +856,19 @@ def real_cascades(rig: Any, monkeypatch: pytest.MonkeyPatch):
         called=[], formats=[], radient_error=None, spend=[], sign_in=None, elevenlabs_key=None
     )
 
-    def sign_in_radient() -> None:
+    def sign_in_radient(access: str = "a") -> None:
         store.upsert_credential(
             "radient",
             {
                 "type": "oauth",
                 "refresh": "r",
-                "access": "a",
+                "access": access,
                 "expires": int(datetime.now().timestamp() * 1000) + 3_600_000,
             },
         )
 
-    def store_elevenlabs_key() -> None:
-        store.upsert_credential(
-            "elevenlabs", {"type": "api_key", "source": "login", "key": "el-test-key"}
-        )
+    def store_elevenlabs_key(key: str = "el-test-key") -> None:
+        store.upsert_credential("elevenlabs", {"type": "api_key", "source": "login", "key": key})
 
     legs.sign_in = sign_in_radient
     legs.elevenlabs_key = store_elevenlabs_key
@@ -2083,3 +2081,204 @@ async def test_an_stt_502_quotes_the_providers_own_sentence_and_is_logged(
     assert any(
         "status=400" in r.getMessage() and sentence in r.getMessage() for r in caplog.records
     )
+
+
+# -- a provider's PARTIAL echo of a key never reaches the app or the log ----------
+#
+# The exact-key scrub only knows the whole value. A provider that echoes the first
+# characters, a masked "abcd...wxyz" form, or the key with spaces/hyphens in it
+# slipped past it, and the voice routes now put the provider's sentence in the
+# response body and the log. The keys below are synthetic.
+
+_SYNTH_KEY = "xk9Q7m2ZrTb4WcL8vNd3Hs5Yp"
+
+
+def _chunks(key: str, sep: str) -> str:
+    return sep.join(key[i : i + 6] for i in range(0, len(key), 6))
+
+
+_ECHOES = {
+    "prefix8": _SYNTH_KEY[:8],
+    "masked_ellipsis": f"{_SYNTH_KEY[:4]}\u2026{_SYNTH_KEY[-4:]}",
+    "masked_dots": f"{_SYNTH_KEY[:4]}...{_SYNTH_KEY[-4:]}",
+    "space_split": _chunks(_SYNTH_KEY, " "),
+    "hyphen_split": _chunks(_SYNTH_KEY, "-"),
+    "full": _SYNTH_KEY,
+}
+
+
+def _leaks(text: str, key: str, *, run: int = 6) -> bool:
+    """Whether ``text`` still shows ``run`` consecutive characters of ``key``.
+
+    Written independently of the helper under test: it folds whitespace and hyphens
+    on both sides, and also looks for the first-4 ... last-4 mask.
+    """
+    import re
+
+    def fold(value: str) -> str:
+        return re.sub(r"[\s\-]", "", value).casefold()
+
+    folded_text, folded_key = fold(text), fold(key)
+    if any(folded_key[i : i + run] in folded_text for i in range(len(folded_key) - run + 1)):
+        return True
+    return bool(re.search(re.escape(key[:4]) + r"\W{1,5}" + re.escape(key[-4:]), text))
+
+
+def _echo_body(echo: str) -> dict[str, Any]:
+    return {"detail": {"status": "invalid", "message": f"Rejected credential {echo} for now."}}
+
+
+async def _door(rig: Any, door: str) -> Any:
+    return await (_recording_with(rig) if door == "hear" else _phrase_speech(rig))
+
+
+def _arm(rig: Any, real_cascades: SimpleNamespace, monkeypatch: Any, provider: str, error: Any):
+    """Sign in to ``provider`` with ``_SYNTH_KEY`` and make its rung fail with ``error``."""
+    if provider == "elevenlabs":
+        real_cascades.elevenlabs_key(_SYNTH_KEY)
+        _el_fails_with(real_cascades, monkeypatch, error)
+    else:
+        real_cascades.sign_in(_SYNTH_KEY)
+        real_cascades.radient_error = error
+    _choose(rig, provider)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("echo", sorted(_ECHOES))
+@pytest.mark.parametrize("status", [429, 400])
+@pytest.mark.parametrize("provider", ["elevenlabs", "radient"])
+@pytest.mark.parametrize("door", ["hear", "speak"])
+async def test_a_partial_key_echo_is_redacted_from_the_body_and_the_log(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    door: str,
+    provider: str,
+    status: int,
+    echo: str,
+) -> None:
+    from local_operator.clients._http import REDACTION_MARKER
+
+    # The client's own scrub knows ONLY ``_EL_KEY``, so whatever else the provider
+    # echoed arrives at the route as the provider wrote it.
+    _arm(
+        rig,
+        real_cascades,
+        monkeypatch,
+        provider,
+        _elevenlabs_refusal(status, _echo_body(_ECHOES[echo])),
+    )
+    await _enable(rig, SESSION_A)
+    caplog.set_level("WARNING", logger=_RECORDING_LOGGER)
+    response = await _door(rig, door)
+    assert response.status_code == (429 if status == 429 else 502), response.text
+    assert not _leaks(response.text, _SYNTH_KEY), response.text
+    assert not _leaks(caplog.text, _SYNTH_KEY), caplog.text
+    # The legitimate words around the echo survive, and the echo is marked.
+    assert "Rejected credential" in response.text and REDACTION_MARKER in response.text
+    assert "Rejected credential" in caplog.text and REDACTION_MARKER in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("echo", sorted(_ECHOES))
+async def test_a_partial_key_echo_in_a_non_api_error_is_redacted_from_the_409_and_the_log(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    echo: str,
+) -> None:
+    # ``str(unavailable.error)`` goes into the 409 body, and the daemon's own
+    # ``exc_info`` traceback prints the same text into the log.
+    _arm(
+        rig,
+        real_cascades,
+        monkeypatch,
+        "elevenlabs",
+        RuntimeError(f"transport said {_ECHOES[echo]}"),
+    )
+    await _enable(rig, SESSION_A)
+    caplog.set_level("WARNING", logger=_RECORDING_LOGGER)
+    response = await _phrase_speech(rig)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "voice_unavailable"
+    assert "transport said" in response.text
+    assert not _leaks(response.text, _SYNTH_KEY), response.text
+    # The voice route's own lines. (The cascade's ``logger.exception`` for a rung
+    # that raised a non-APIError defect is the cascade's, and not under test here.)
+    mine = "\n".join(r.getMessage() for r in caplog.records if r.name == _RECORDING_LOGGER)
+    assert "voice speech failed" in mine
+    assert not _leaks(mine, _SYNTH_KEY), mine
+
+
+@pytest.mark.asyncio
+async def test_an_stt_transport_failure_is_redacted_from_the_409_and_the_log(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from local_operator.clients._http import APIError
+
+    # A transport failure has no status and no body: the message is all there is.
+    error = APIError(
+        f"ElevenLabs request failed: Illegal header value b'{_SYNTH_KEY}'", status_code=None
+    )
+    _arm(rig, real_cascades, monkeypatch, "elevenlabs", error)
+    await _enable(rig, SESSION_A)
+    caplog.set_level("WARNING", logger=_RECORDING_LOGGER)
+    response = await _recording_with(rig)
+    assert response.status_code >= 400
+    assert "request failed" in response.text
+    assert not _leaks(response.text, _SYNTH_KEY), response.text
+    assert not _leaks(caplog.text, _SYNTH_KEY), caplog.text
+
+
+@pytest.mark.asyncio
+async def test_legitimate_provider_sentences_are_not_mangled_by_the_key_scrub(
+    rig: Any, real_cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sentence = "Too many concurrent requests: your plan allows 2 at once."
+    body = {"detail": {"status": "too_many_concurrent_requests", "message": sentence}}
+    _arm(rig, real_cascades, monkeypatch, "elevenlabs", _elevenlabs_refusal(429, body))
+    await _enable(rig, SESSION_A)
+    response = await _phrase_speech(rig)
+    assert response.status_code == 429
+    assert sentence in response.json()["detail"]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("door", ["hear", "speak"])
+async def test_an_unreadable_store_still_answers_with_the_provider_sentence(
+    rig: Any,
+    real_cascades: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    door: str,
+) -> None:
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.stt import cascade as stt_cascade
+    from local_operator.tts import cascade as tts_cascade
+
+    sentence = "Too many concurrent requests: your plan allows 2 at once."
+    body = {"detail": {"status": "too_many_concurrent_requests", "message": sentence}}
+    error = _elevenlabs_refusal(429, body)
+    real_cascades.elevenlabs_key(_SYNTH_KEY)
+    _choose(rig, "elevenlabs")
+    await _enable(rig, SESSION_A)
+
+    async def unreadable(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("database is locked")
+
+    async def refused(*_a: Any, **_k: Any) -> Any:
+        # The store breaks AFTER the cascade resolved its rung: only the failure
+        # path's own secret lookup meets it, and that must not take the answer down.
+        monkeypatch.setattr(AuthStore, "get_api_key", unreadable)
+        monkeypatch.setattr(AuthStore, "get_persisted_api_key", unreadable)
+        raise error
+
+    monkeypatch.setattr(stt_cascade, "_run_elevenlabs_rung", refused)
+    monkeypatch.setattr(tts_cascade, "_run_elevenlabs_rung", refused)
+    response = await _door(rig, door)
+    assert response.status_code == 429, response.text
+    assert sentence in response.json()["detail"]["text"]

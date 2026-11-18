@@ -106,7 +106,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, Sequence
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
@@ -158,6 +158,7 @@ from local_operator.voice import provider as speech_provider
 from local_operator.voice import segments as voice_segments
 from local_operator.voice import slot as voice_slot
 from local_operator.voice import speakable as voice_speakable
+from local_operator.voice.provider_text import redact_provider_text, secrets_in_play
 
 logger = logging.getLogger("local_operator.server.routes.desktop_voice")
 
@@ -484,7 +485,7 @@ def _rate_limit_scope(
     return scope, retry, remaining
 
 
-def _provider_sentence(error: BaseException) -> str:
+def _provider_sentence(error: BaseException, secrets: Sequence[str] = ()) -> str:
     """The provider's own sentence for a failure, cut to ``_PROVIDER_SENTENCE_CHARS``.
 
     The client keeps a refusal's message only for the hub's ``{"error": ...}``
@@ -494,6 +495,11 @@ def _provider_sentence(error: BaseException) -> str:
     the sentence from there, then fall back to the error's own text: an empty or
     HTML body says nothing worth quoting, and the status line the client wrote is
     all that is known.
+
+    ``secrets`` are every key the request could have sent. The client masked only
+    the whole key, so a provider's PARTIAL echo (a prefix, ``abcd...wxyz``, a key
+    split by spaces) is removed here, before the sentence is cut: this is the one
+    place the sentence is built for a response body AND a log line.
     """
     sentence = ""
     body = getattr(error, "body", None)
@@ -508,10 +514,21 @@ def _provider_sentence(error: BaseException) -> str:
                 if isinstance(candidate, str) and candidate.strip():
                     sentence = candidate
                     break
-    sentence = " ".join((sentence or str(error)).split())
+    sentence = " ".join(redact_provider_text(sentence or str(error), secrets).split())
     if len(sentence) > _PROVIDER_SENTENCE_CHARS:
         sentence = sentence[: _PROVIDER_SENTENCE_CHARS - 1].rstrip() + "\u2026"
     return sentence
+
+
+def _redacted(value: Any, secrets: Sequence[str]) -> Any:
+    """``value`` with every string in it redacted; the shape of a refusal's ``detail``."""
+    if isinstance(value, str):
+        return redact_provider_text(value, secrets)
+    if isinstance(value, dict):
+        return {key: _redacted(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redacted(item, secrets) for item in value]
+    return value
 
 
 def _log_upstream_failure(
@@ -524,6 +541,7 @@ def _log_upstream_failure(
     audio_bytes: int | None = None,
     audio_mime: str | None = None,
     attempts: Any = (),
+    secrets: Sequence[str] = (),
 ) -> None:
     """One WARNING for a pinned provider's failure, with what it said.
 
@@ -553,11 +571,13 @@ def _log_upstream_failure(
         details.get("remaining_requests"),
         keys,
         [f"{getattr(a.path, 'value', a.path)}:{a.outcome}" for a in attempts],
-        _provider_sentence(error) if error is not None else None,
+        _provider_sentence(error, secrets) if error is not None else None,
     )
 
 
-def _rate_limited(error: BaseException | None, rung: Any) -> HTTPException | None:
+def _rate_limited(
+    error: BaseException | None, rung: Any, secrets: Sequence[str] = ()
+) -> HTTPException | None:
     """The 429 refusal built from the error's ``details``, or ``None`` for any other error.
 
     Built BEFORE ``_speech_refusal`` / the STT classifier, because their 429 arm
@@ -577,7 +597,7 @@ def _rate_limited(error: BaseException | None, rung: Any) -> HTTPException | Non
     elif scope == "minute":
         message = _wv.rate_limited_minute()
     else:
-        message = _wv.rate_limited_unknown(detail=_provider_sentence(error))
+        message = _wv.rate_limited_unknown(detail=_provider_sentence(error, secrets))
     detail = message.envelope(code="voice_rate_limited")
     detail.update(
         {
@@ -658,6 +678,13 @@ async def _transcribe(
                 only=only,
             )
         except SttUnavailable as exc:
+            # Read only now that something failed: the success path pays nothing.
+            secrets = await secrets_in_play(
+                store,
+                config_dir=config_manager.config_dir,
+                base_url=env_config.radient_api_base_url,
+                session_id=session_id,
+            )
             if exc.attempts:
                 _log_upstream_failure(
                     "stt",
@@ -668,8 +695,11 @@ async def _transcribe(
                     audio_bytes=upload_bytes,
                     audio_mime=mime,
                     attempts=exc.attempts,
+                    secrets=secrets,
                 )
-            limited = _rate_limited(exc.error, exc.attempts[-1].path if exc.attempts else None)
+            limited = _rate_limited(
+                exc.error, exc.attempts[-1].path if exc.attempts else None, secrets
+            )
             if limited is not None:
                 raise limited from None
             if not exc.attempts:
@@ -678,11 +708,15 @@ async def _transcribe(
                 # reason of whichever OTHER rung would have won, which would tell
                 # a user who chose ElevenLabs that Radient is signed in.
                 reason = str(exc) if only is not None else exc.resolution.reason
-                raise _refuse(409, "stt_unavailable", _wv.stt_unavailable(reason=reason)) from None
+                raise _refuse(
+                    409,
+                    "stt_unavailable",
+                    _wv.stt_unavailable(reason=redact_provider_text(reason, secrets)),
+                ) from None
             raise _refuse(
                 exc.status_code or 502,
                 "stt_unavailable",
-                _wv.stt_unavailable(reason=exc.detail or str(exc)),
+                _wv.stt_unavailable(reason=redact_provider_text(exc.detail or str(exc), secrets)),
             ) from None
     finally:
         shutil.rmtree(path.parent, ignore_errors=True)
@@ -1104,6 +1138,12 @@ async def voice_speech(
             only=pinned,
         )
     except tts_cascade.TtsUnavailable as unavailable:
+        secrets = await secrets_in_play(
+            store,
+            config_dir=config_dir,
+            base_url=env_config.radient_api_base_url,
+            session_id=body.session_id,
+        )
         if unavailable.error is None:
             raise _refuse(
                 409, "voice_unavailable", _wv.unavailable(reason=unavailable.resolution.reason)
@@ -1115,18 +1155,22 @@ async def voice_speech(
             request_id=request_id,
             session_id=body.session_id,
             attempts=unavailable.attempts,
+            secrets=secrets,
         )
-        limited = _rate_limited(unavailable.error, unavailable.failed_path)
+        limited = _rate_limited(unavailable.error, unavailable.failed_path, secrets)
         if limited is not None:
             raise limited from None
         from local_operator.server.routes.speech import _speech_refusal
 
         if isinstance(unavailable.error, APIError):
-            raise _speech_refusal(unavailable.error, rung=unavailable.failed_path) from None
-        logger.error("voice speech failed", exc_info=unavailable.error)
-        raise _refuse(
-            409, "voice_unavailable", _wv.unavailable(reason=str(unavailable.error))
-        ) from None
+            refusal = _speech_refusal(unavailable.error, rung=unavailable.failed_path)
+            refusal.detail = _redacted(refusal.detail, secrets)
+            raise refusal from None
+        # The error's text, redacted, and not ``exc_info``: a traceback prints the
+        # message as written, which is where a transport error quotes a header.
+        reason = redact_provider_text(str(unavailable.error), secrets)
+        logger.error("voice speech failed: %s: %s", type(unavailable.error).__name__, reason)
+        raise _refuse(409, "voice_unavailable", _wv.unavailable(reason=reason)) from None
 
     emit_voice_spend(
         config_manager=config_manager,
