@@ -16,7 +16,9 @@ these cells pin three things:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -327,7 +329,7 @@ def _network(
 
 
 @pytest.fixture
-def authority(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+def authority(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, bool]]:
     """Stub the anchor probe so no test touches a real signer or keychain."""
 
     from local_operator.network import mirror_authority
@@ -385,7 +387,7 @@ def test_a_joined_mesh_node_is_routed_to_the_chief_of_staff_not_the_app(
     ],
 )
 def test_a_primary_device_keeps_the_app_guidance(
-    tmp_path: Path, placed: list[str], authority: dict[str, bool], networks: list[tuple[str, ...]]
+    tmp_path: Path, placed: list[str], authority: dict[str, bool], networks: list[tuple[Any, ...]]
 ) -> None:
     for row in networks:
         _network(
