@@ -453,7 +453,7 @@ class DisplayCycleAccumulator:
 
 
 def _index_or_arm(directory: Path) -> Any:
-    """The current transcript index for ``directory``, never built here.
+    """The current transcript index for ``directory``, never built ON A LOOP.
 
     WHY NOT ``refresh_index``. These readers run SYNCHRONOUSLY, and several on
     an event loop: the TUI's render path (``tui/app.py``
@@ -469,17 +469,30 @@ def _index_or_arm(directory: Path) -> Any:
     The answer is the same split the desktop's open frame uses: serve what is
     already in memory (:func:`transcript_index.current_without_build`), else
     arm the shared single-flight refresh without waiting and answer "not
-    ready"; the caller's next read finds the index resident. A caller on a
-    worker thread (no running loop) cannot own the task and only answers "not
-    ready" — see :func:`transcript_index.arm_refresh`.
+    ready"; the caller's next read finds the index resident.
+
+    A caller with NO running loop (a ``to_thread`` worker) builds directly with
+    ``refresh_index`` (review round 1, M1). It is already off every loop, so
+    the stall this function exists to avoid cannot happen there, and it has no
+    loop to own a background task. Answering "not ready" instead would be
+    permanent for some of them: ``mobile/durable.py``'s ``_fold`` runs in such a
+    worker and caches its rows until the journal changes, so an idle
+    conversation would never get its peer-cycle grouping back. The per-session
+    build lock in ``refresh_index`` still dedups this build against a
+    concurrent ``start_refresh`` of the same journal.
     """
     from local_operator.session import transcript_index
 
     root, session_id = directory.parent.parent, directory.name
     index = transcript_index.current_without_build(root, session_id)
-    if index is None:
-        transcript_index.arm_refresh(root, session_id)
-    return index
+    if index is not None:
+        return index
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return transcript_index.refresh_index(root, session_id)
+    transcript_index.arm_refresh(root, session_id)
+    return None
 
 
 def indexed_records(

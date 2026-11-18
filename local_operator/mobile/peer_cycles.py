@@ -82,6 +82,12 @@ def bind_owner_peer_cycles(
         # resident index is stale, so without this re-ask the phone would not
         # group the cycle until some unrelated update arrived. ONE retry per
         # in-flight refresh, on its completion: no polling, no second scan.
+        #
+        # The lookup sees a refresh owned by ANOTHER loop too (review round 1,
+        # m1): it reaches this loop only as the proxy ``start_refresh`` hands a
+        # joiner, which ``in_flight_refresh`` now finds. A lookup, not
+        # ``arm_refresh``: arming here would start a refresh on every update of
+        # a session with nothing waiting on the index.
         from local_operator.session import transcript_index
 
         directory = getattr(session.transcript, "directory", None)
@@ -92,9 +98,16 @@ def bind_owner_peer_cycles(
             return
         context["retry_armed"] = True
 
-        def retry(_settled: Any) -> None:
+        def retry(settled: Any) -> None:
             context["retry_armed"] = False
             if closed:
+                return
+            # Re-ask only when the refresh produced an index. A failed,
+            # cancelled or journal-less refresh would make the re-ask arm the
+            # same refresh again, an unbounded retry loop with nothing to show.
+            if settled.cancelled() or settled.exception() is not None:
+                return
+            if settled.result() is None:
                 return
             # The fold's join memo cannot see the index becoming current, so
             # the same inputs would otherwise be skipped as already joined.

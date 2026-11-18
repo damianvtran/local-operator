@@ -84,25 +84,78 @@ def _count_scans(monkeypatch) -> dict[str, int]:
 # --- 1. peer_cycle_display never builds -------------------------------------
 
 
-def test_peer_cycle_display_builds_nothing_when_no_index_is_resident(tmp_path, monkeypatch):
-    """Off-loop with nothing resident: every reader answers not-ready, zero scans."""
-    _journal(tmp_path)
-    directory = tmp_path / "sessions" / SID
-    scans = _count_scans(monkeypatch)
-    monkeypatch.setattr(pcd, "candidate_record_ids", lambda *_: ["rec1"])
-    messages = [SimpleNamespace(id="a1")]
+def _in_thread(fn):
+    """Run ``fn`` on a plain thread with no event loop: a ``to_thread`` worker."""
+    out: dict[str, Any] = {}
 
-    assert pcd.discover_records(directory, messages, SID) == {
-        "records": [],
-        "remaining": [],
-        "unavailable": ["rec1"],
-        "bytes": 0,
-        "status": pcd.BUILDING,
-    }
-    assert pcd.validate_indexed_record(directory, {"peer_id": "a1"}, SID) == (None, 0)
-    assert pcd.indexed_records(SimpleNamespace(directory=directory), ["a1"]) is None
-    assert scans == {"full": 0, "incremental": 0}
-    assert not ti._IN_FLIGHT, "no loop in this thread: nothing may be armed"
+    def run() -> None:
+        try:
+            out["value"] = fn()
+        except BaseException as error:  # noqa: BLE001 — re-raised on the test thread
+            out["error"] = error
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(60)
+    assert not worker.is_alive(), "off-loop reader hung"
+    if "error" in out:
+        raise out["error"]
+    return out["value"]
+
+
+def _persisted_cycle(root: Path) -> tuple[Path, list[Any], dict[str, Any]]:
+    """A real peer cycle with its display record archived in a journal, then the
+    module's memory dropped so the next reader meets a COLD index."""
+    from local_operator.harness.peer_cycle_display import persist_record
+    from local_operator.session.transcript import Transcript
+    from tests.unit.session.test_peer_cycle_display_archive import make_cycle
+
+    _, history, record = make_cycle()
+    directory = root / "sessions" / "sess"
+
+    async def write() -> None:
+        transcript = Transcript(directory)
+        await transcript.append_messages(history[:-1])
+        assert await persist_record(transcript, record)
+        await transcript.append_message(history[-1])
+
+    asyncio.run(write())
+    ti._reset_for_tests()
+    return directory, history, record
+
+
+def test_off_loop_reader_builds_the_cold_index_itself(tmp_path, monkeypatch):
+    """Review round 1, M1. A ``to_thread`` worker has no loop to arm a refresh on,
+    so "not ready" would be its permanent answer; it is already off every loop,
+    so it builds directly. Failed on f6759db with ``status: building`` and no
+    records, every time."""
+    directory, history, record = _persisted_cycle(tmp_path)
+    scans = _count_scans(monkeypatch)
+
+    response = _in_thread(lambda: pcd.discover_records(directory, history, "sess"))
+
+    assert response is not None and "status" not in response
+    assert response["records"] == [record]
+    assert not response["unavailable"] and not response["remaining"]
+    assert sum(scans.values()) == 1
+    assert not ti._IN_FLIGHT, "an off-loop build owns no loop task"
+    # Built once: the next off-loop read is served from memory, no rescan.
+    _in_thread(lambda: pcd.discover_records(directory, history, "sess"))
+    assert sum(scans.values()) == 1
+
+
+def test_durable_fold_in_a_worker_keeps_peer_cycle_grouping_on_a_cold_index(tmp_path):
+    """M1 at the fold that caches its answer: ``mobile/durable.py`` folds in a
+    worker and keeps the rows until the journal changes, so a cold-index read
+    must still group the peer cycle. Failed on f6759db with zero rows."""
+    from local_operator.mobile.durable import _fold
+
+    directory, history, _record = _persisted_cycle(tmp_path)
+
+    rows = _in_thread(lambda: _fold(history, directory))
+
+    grouped = [row for row in rows if row.details.get("peer_cycle")]
+    assert grouped, "the durable fold lost the peer-cycle grouping"
 
 
 def test_peer_cycle_display_on_a_loop_arms_the_shared_refresh_without_waiting(
@@ -296,3 +349,137 @@ def test_trace_stays_inert_when_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getpid", lambda: pytest.fail("disabled trace read the pid"))
     open_trace.mark("index.refresh_start", session=SID)
     assert list(tmp_path.iterdir()) == []
+
+
+# --- review/QA round 1 follow-ons ------------------------------------------
+
+
+def _owner_loop():
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    return loop, thread
+
+
+def _stop(loop, thread) -> None:
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(10)
+    loop.close()
+
+
+def test_a_cross_loop_join_is_visible_to_in_flight_refresh_and_arm_refresh(tmp_path, monkeypatch):
+    """m1: the joiner's loop finds the proxy, and ``arm_refresh`` hands it back,
+    so the phone binder's re-ask fires for a build another loop owns. Before,
+    ``in_flight_refresh`` answered None after the join."""
+    _journal(tmp_path)
+    release = threading.Event()
+    real = ti.refresh_index
+
+    def slow(config_dir, session_id):
+        release.wait(30)
+        return real(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", slow)
+    owner, thread = _owner_loop()
+    try:
+
+        async def start():
+            return ti.start_refresh(tmp_path, SID)[0]
+
+        owner_task = asyncio.run_coroutine_threadsafe(start(), owner).result(10)
+
+        async def joiner():
+            armed = ti.arm_refresh(tmp_path, SID)
+            assert armed is not None and armed is not owner_task
+            assert ti.in_flight_refresh(tmp_path, SID) is armed
+            release.set()
+            index = await asyncio.wait_for(armed, 30)
+            await asyncio.sleep(0)  # let the proxy's done-callback drop its entry
+            assert ti.in_flight_refresh(tmp_path, SID) is None
+            return index
+
+        assert asyncio.run(joiner()) is not None
+        assert not ti._JOINED
+    finally:
+        release.set()
+        _stop(owner, thread)
+
+
+def test_an_owner_loop_teardown_is_a_failure_not_a_borrowed_cancellation(tmp_path, monkeypatch):
+    """m2: the relay page loop cancels its pending tasks on stop; a joiner on
+    another loop must see that as a failed refresh, not as its own cancel."""
+    _journal(tmp_path)
+    release = threading.Event()
+    monkeypatch.setattr(ti, "refresh_index", lambda *_: release.wait(30))
+    owner, thread = _owner_loop()
+    try:
+
+        async def start():
+            return ti.start_refresh(tmp_path, SID)[0]
+
+        owner_task = asyncio.run_coroutine_threadsafe(start(), owner).result(10)
+
+        async def joiner():
+            proxy, started = ti.start_refresh(tmp_path, SID)
+            assert started is False
+            owner.call_soon_threadsafe(owner_task.cancel)
+            with pytest.raises(RuntimeError, match="owner loop shut down"):
+                await asyncio.wait_for(proxy, 30)
+            current = asyncio.current_task()
+            assert current is not None and current.cancelling() == 0
+
+        asyncio.run(joiner())
+    finally:
+        release.set()
+        _stop(owner, thread)
+
+
+def test_a_frozen_build_lock_holder_bounds_the_wait_then_scans_independently(tmp_path, monkeypatch):
+    """QA round 1, Q1: a live holder that never releases (SIGSTOPped serve)
+    blocks a waiter only up to ``_BUILD_LOCK_WAIT_S``; then the waiter scans on
+    its own, the pre-lock behaviour. Both lock halves are exercised: another
+    open file description holding the flock (what a second process looks like),
+    and this process's thread lock."""
+    import fcntl
+    import time
+
+    _journal(tmp_path)
+    monkeypatch.setattr(ti, "_BUILD_LOCK_WAIT_S", 0.3)
+    scans = _count_scans(monkeypatch)
+    lock = ti.index_path(tmp_path, SID).with_suffix(".build.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+
+    with lock.open("a") as foreign:
+        fcntl.flock(foreign.fileno(), fcntl.LOCK_EX)
+        began = time.monotonic()
+        assert ti.refresh_index(tmp_path, SID) is not None
+        waited = time.monotonic() - began
+    assert 0.25 <= waited < 5, waited
+    assert scans["full"] == 1
+
+    thread_lock = ti._PUBLISH_THREADS.setdefault(str(lock), threading.Lock())
+    with thread_lock:
+        began = time.monotonic()
+        assert _in_thread(lambda: ti.refresh_index(tmp_path, SID)) is not None
+        assert time.monotonic() - began < 5
+
+    # Released: the lock is taken normally again (no leaked half).
+    with ti._build_lock(lock, 0.1) as held:
+        assert held
+
+
+def test_sweep_prunes_lock_files_of_deleted_sessions_only(tmp_path):
+    """n1: ``.build.lock``/``.publish.lock`` of a deleted session go with its cache."""
+    _journal(tmp_path)
+    cache = ti._index_dir(tmp_path)
+    cache.mkdir(parents=True, exist_ok=True)
+    names = [f"{owner}.{kind}.lock" for owner in (SID, "gone0000") for kind in ("build", "publish")]
+    for name in names:
+        (cache / name).touch()
+
+    ti._sweep_missing(tmp_path)
+
+    assert sorted(p.name for p in cache.glob("*.lock")) == [
+        f"{SID}.build.lock",
+        f"{SID}.publish.lock",
+    ]
