@@ -3656,6 +3656,32 @@ async def test_conversation_reactions_require_the_owner_receipt(api, put_body, d
     assert FakeClient.instances == []
 
 
+@pytest.mark.parametrize(
+    "given,canonical",
+    [("thumbsup", "👍"), (":white_check_mark:", "✅"), ("\u2764", "\u2764\ufe0f")],
+)
+async def test_conversation_reactions_canonicalise_shortcodes(api, given, canonical):
+    """A UI/relay shortcode reaches the hub as the same key an agent sends."""
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    FakeClient.behavior["conversation_react"] = {"message_id": "bcmsg_abcdef12", "reactions": []}
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path + quote(given, safe=""), json=receipt)
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_react"][2] == canonical
+
+
+async def test_conversation_reactions_refuse_an_unknown_shortcode_before_upstream(api):
+    client, _root, _d = api
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path + "not_an_emoji_name", json=receipt)
+    assert response.status_code == 422
+    assert FakeClient.instances == []
+
+
 async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_input(api):
     from urllib.parse import quote
 

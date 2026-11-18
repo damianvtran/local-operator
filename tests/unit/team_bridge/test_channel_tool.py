@@ -623,6 +623,51 @@ async def test_react_bad_args_never_dispatch(message_id, emoji):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "emoji,canonical",
+    [
+        ("white_check_mark", "✅"),
+        (":+1:", "👍"),
+        ("heart", "\u2764\ufe0f"),
+        ("\u2764", "\u2764\ufe0f"),
+    ],
+)
+async def test_react_sends_the_canonical_emoji_for_a_shortcode(emoji, canonical):
+    # Production repro (2026-11-18): emoji="white_check_mark" went to the hub
+    # verbatim and came back react_failed / rule=not_an_emoji.
+    client = RecordingClient()
+    result = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": emoji,
+        },
+    )
+    assert result["ok"] is True
+    assert [c["emoji"] for c in client.calls] == [canonical]
+
+
+@pytest.mark.asyncio
+async def test_react_unknown_shortcode_is_refused_locally_with_accepted_forms():
+    client = RecordingClient()
+    result = await execute_bridge(
+        _runtime(client),
+        {
+            "op": "react",
+            "channel_id": "bcv_abcd1234",
+            "message_id": "bcmsg_abcd1234",
+            "emoji": "nope_nope",
+        },
+    )
+    assert result["ok"] is False
+    assert result["code"] == "invalid_emoji"
+    assert ":white_check_mark:" in result["error"] and "✅" in result["error"]
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_react_paused_admission_refuses_before_write(monkeypatch):
     client = RecordingClient()
     reads = []

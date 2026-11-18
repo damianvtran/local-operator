@@ -865,8 +865,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="react",
                 blurb=(
-                    "Set or clear one emoji on an admitted message. Reactions never "
-                    "wake anyone; `remove` clears your own."
+                    "Set or clear one emoji (✅ or shortcode `thumbsup`) on an "
+                    "admitted message; wakes no one. `remove` clears yours."
                 ),
             ),
             ToolDocOp(
