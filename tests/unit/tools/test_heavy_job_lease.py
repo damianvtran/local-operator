@@ -382,14 +382,16 @@ def test_broad_or_explicitly_parallel_pytest_is_heavy(
 
 
 #: Manager decision 79 (2026-11-18 11:52Z, PR #4227): the EFFECTIVE worker
-#: count decides. A quick iteration (one file, a node id, a `-k` run) with at
+#: count decides. A quick iteration (one file or node id, `-k` or not) with at
 #: most two effective workers stays light, so it never queues behind a long run.
 TARGETED_OR_INFO = [
     "pytest tests/unit/x.py -q",
     "python -m pytest tests/unit/x.py",
     "pytest tests/unit/x.py -k 'slot and not stale'",
-    "pytest -q tests/unit -k slot",
-    "pytest -kslot",
+    # R5: plugin value options (and bare numbers) are not targets.
+    "pytest -n 0 --reruns 2 tests/unit/x.py",
+    "pytest -n 0 --count 3 --html report.html tests/unit/x.py",
+    "pytest -n 0 --some-plugin-opt 5 tests/unit/x.py",
     "python -m pytest tests/unit/x.py::test_one --deselect tests/unit/x.py::test_two",
     "python scripts/run_bounded.py --timeout 600 -- python -m pytest tests/unit/x.py",
     "pytest -n 1 tests/unit/x.py",
@@ -397,6 +399,7 @@ TARGETED_OR_INFO = [
     "pytest -n 4 -p no:xdist tests/unit/x.py",
     # Informational: nothing runs a test.
     "pytest --version",
+    "pytest -V",
     "python -m pytest --collect-only -q tests/unit",
     "pytest --co",
     ".venv/bin/python scripts/affected_tests.py --since origin/main",
@@ -427,10 +430,40 @@ def test_targeted_pytest_with_few_workers_stays_light(tmp_path: Path, command: s
         ("-n auto", "pytest -n 0 tests/unit", True),
         ("-n auto", "pytest --version", False),
         ("-n auto", "pytest --collect-only", False),
+        # R1: pytest's `-v` is verbose, not version: a bare `pytest -v` is the
+        # whole suite under `-n auto`. `-V`/`--version` stay informational.
+        ("-n auto", "pytest -v", True),
+        ("-n auto", "pytest -vv", True),
+        ("-n auto", "python -m pytest -v", True),
+        ("-n auto", "pytest -V", False),
+        ("-n auto", "py.test --version", False),
+        # R2: attached spellings parse like argparse reads them.
+        ("-n auto", "pytest -pno:xdist tests/unit/x.py", False),
+        ("-n auto", "pytest -n=2 tests/unit/x.py", False),
+        ("-n auto", "pytest -n=3 tests/unit/x.py", True),
+        ("-n auto", "pytest --numprocesses=2 tests/unit/x.py", False),
+        ("-n 0", "pytest -n=auto tests/unit/x.py", True),
+        # R3: `-k` never makes a directory or the whole suite light.
+        ("-n auto", "pytest -n 0 -k slot tests/unit", True),
+        ("-n auto", "pytest -n 0 -k slot", True),
+        ("-n auto", "pytest -n 0 -kslot", True),
+        ("-n auto", "pytest -n 0 -k slot tests/unit/x.py", False),
+        # R4: a `PYTEST_ADDOPTS=` prefix sits between addopts and argv.
+        (None, "PYTEST_ADDOPTS=-n8 pytest tests/unit/x.py", True),
+        (None, "PYTEST_ADDOPTS='-n 8' pytest tests/unit/x.py", True),
+        (None, "env PYTEST_ADDOPTS=-n8 pytest tests/unit/x.py", True),
+        ("-n auto", "PYTEST_ADDOPTS=-n0 pytest tests/unit/x.py", False),
+        ("-n auto", "PYTEST_ADDOPTS=-n0 pytest -n 4 tests/unit/x.py", True),
+        (
+            None,
+            "PYTEST_ADDOPTS=-n8 python scripts/run_bounded.py -- pytest tests/unit/x.py",
+            True,
+        ),
+        (None, "OTHER=-n8 pytest tests/unit/x.py", False),
     ],
 )
 def test_effective_workers_combine_addopts_and_command_line(
-    tmp_path: Path, addopts: str, command: str, heavy: bool
+    tmp_path: Path, addopts: str | None, command: str, heavy: bool
 ) -> None:
     verdict = heavy_lease.is_heavy(command, cwd=str(_pytest_repo(tmp_path, addopts)))
     assert (verdict is not None) is heavy, verdict
@@ -446,6 +479,41 @@ def test_pytest_ini_and_setup_cfg_addopts_are_read(tmp_path: Path) -> None:
     (tmp_path / "c").mkdir()
     (tmp_path / "c" / "pyproject.toml").write_text("[tool.pytest.ini_options\nbroken")
     assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path / "c")) is None
+
+
+def test_pytest_addopts_is_read_from_the_command_never_this_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4: only the command text runs; the harness's own env is not its env."""
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-n 8")
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(_pytest_repo(tmp_path, None))) is None
+
+
+def test_config_file_option_replaces_the_config_search(tmp_path: Path) -> None:
+    """R4: `-c FILE`/`--config-file FILE` is the config pytest reads, not cwd's."""
+    repo = _pytest_repo(tmp_path, "-n auto")
+    (tmp_path / "serial.ini").write_text("[pytest]\naddopts = -n 0\n")
+    (tmp_path / "wide.ini").write_text("[pytest]\naddopts = -n 6\n")
+    (tmp_path / "wide.toml").write_text('[tool.pytest.ini_options]\naddopts = "-n 6"\n')
+    cwd = str(repo)
+    assert heavy_lease.is_heavy("pytest x.py", cwd=cwd) is not None  # control
+    assert heavy_lease.is_heavy(f"pytest -c {tmp_path}/serial.ini x.py", cwd=cwd) is None
+    for spelling in (
+        f"-c {tmp_path}/wide.ini",
+        f"--config-file {tmp_path}/wide.ini",
+        f"--config-file={tmp_path}/wide.toml",
+        f"-c{tmp_path}/wide.ini",
+    ):
+        assert heavy_lease.is_heavy(f"pytest {spelling} x.py", cwd=cwd) is not None, spelling
+    # Relative paths resolve against the command's cwd; a missing file reads empty.
+    assert heavy_lease.is_heavy("pytest -c ../serial.ini x.py", cwd=cwd) is None
+    assert heavy_lease.is_heavy("pytest -c missing.ini x.py", cwd=cwd) is None
+
+
+def test_pytest_9_native_tool_pytest_table_is_read(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('[tool.pytest]\naddopts = ["-n", "auto"]\n')
+    assert heavy_lease.is_heavy("pytest x.py", cwd=str(tmp_path)) is not None
+    assert heavy_lease.is_heavy("pytest -n 0 x.py", cwd=str(tmp_path)) is None
 
 
 def test_this_repos_own_addopts_make_a_bare_targeted_file_heavy() -> None:

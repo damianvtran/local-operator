@@ -289,6 +289,8 @@ _PYTEST_VALUE_OPTS = frozenset(
     | {"--ignore", "--ignore-glob", "--durations", "--maxfail", "--tb", "--junitxml"}
     | {"--basetemp", "--timeout", "--dist", "--log-level", "--override-ini", "--import-mode"}
     | {"--cov", "--cov-report", "--max-worker-restart", "--config-file", "--capture"}
+    # Common plugins' value options (pytest-rerunfailures, -repeat, -html, -cov).
+    | {"--reruns", "--reruns-delay", "--count", "--log-file", "--html", "--cov-config"}
 )
 #: Calls that never run a test: collection listings and plugin/fixture docs.
 _PYTEST_INFO_FLAGS = frozenset({"--collect-only", "--co", "--fixtures", "--markers"})
@@ -678,14 +680,22 @@ def _classify_segment(
 ) -> str | None:
     if depth > _MAX_DEPTH:
         return _shallow_guess(" ".join(tokens))
-    tokens = _strip_wrappers(tokens)
+    stripped = _strip_wrappers(tokens)
+    # Assignments in the prefix (`PYTEST_ADDOPTS=-n8 pytest x.py`, also via
+    # `env`) are part of what runs; only the command text counts, never this
+    # process's own environment.
+    assignments = [t for t in tokens[: len(tokens) - len(stripped)] if _ENV_ASSIGNMENT.match(t)]
+    tokens = stripped
     if not tokens:
         return None
     program = os.path.basename(tokens[0])
     args = tokens[1:]
-    if (len(args) == 1 and args[0] in _VERSION_FLAGS) or any(
-        a in _INFO_FLAGS_ANYWHERE for a in args
-    ):
+    # pytest's `-v` is VERBOSE (its version flag is `-V`/`--version`): a bare
+    # `pytest -v` is a whole-suite run and must reach the pytest rules.
+    version_call = len(args) == 1 and args[0] in _VERSION_FLAGS
+    if version_call and program in ("pytest", "py.test") and args[0] == "-v":
+        version_call = False
+    if version_call or any(a in _INFO_FLAGS_ANYWHERE for a in args):
         # `tsc --version`, `pnpm build --help`: an informational call is not a build.
         return None
     if program in _SHELLS:
@@ -696,7 +706,8 @@ def _classify_segment(
     ):
         # The bounded runner AGENTS.md prescribes for heavy runs: `… -- <cmd>`.
         rest = args[args.index("--") + 1 :] if "--" in args else []
-        return _classify_segment(rest, cwd, depth + 1, seen) if rest else None
+        # The runner passes its environment on, so the assignments ride along.
+        return _classify_segment([*assignments, *rest], cwd, depth + 1, seen) if rest else None
     if program in _PACKAGE_MANAGERS:
         verdict = _classify_pm(program, args, cwd, depth, seen)
         if verdict is not None or program != "bun":
@@ -765,7 +776,15 @@ def _classify_segment(
     elif _PYTHON.fullmatch(program) and args[:2] == ["-m", "pytest"]:
         pytest_args = args[2:]
     if pytest_args is not None:
-        return _classify_pytest(pytest_args, cwd)
+        env_addopts = next(
+            (t.split("=", 1)[1] for t in reversed(assignments) if t.startswith("PYTEST_ADDOPTS=")),
+            "",
+        )
+        try:
+            env_args = shlex.split(env_addopts)
+        except ValueError:
+            env_args = []
+        return _classify_pytest(pytest_args, cwd, env_args)
     return None
 
 
@@ -776,20 +795,90 @@ def _xdist_workers(args: list[str]) -> str | None:
         if arg in ("-n", "--numprocesses"):
             value = args[index + 1] if index + 1 < len(args) else ""
         elif match := re.fullmatch(r"-n(\S+)|--numprocesses=(\S+)", arg):
-            value = match.group(1) or match.group(2)
-        elif arg in ("-p", "no:xdist") and "no:xdist" in args[index : index + 2]:
+            # argparse reads `-n=2` as 2, like `--numprocesses=2`.
+            value = match.group(1).removeprefix("=") if match.group(1) else match.group(2)
+        elif arg == "-pno:xdist" or (arg == "-p" and args[index + 1 : index + 2] == ["no:xdist"]):
             return "0"
     return value
 
 
-def _pytest_addopts(directory: str | None) -> list[str]:
+def _config_file_arg(args: list[str]) -> str | None:
+    """The last ``-c FILE``/``--config-file FILE`` in ``args`` (any spelling), or None."""
+    found: str | None = None
+    for index, arg in enumerate(args):
+        if arg in ("-c", "--config-file"):
+            found = args[index + 1] if index + 1 < len(args) else None
+        elif arg.startswith("--config-file="):
+            found = arg.split("=", 1)[1]
+        elif arg.startswith("-c") and not arg.startswith("--"):
+            found = arg[2:].removeprefix("=")
+    return found
+
+
+def _read_pytest_config(path: Path, explicit: bool) -> list[str] | None:
+    """``addopts`` from one config file; None when it is not a pytest config.
+
+    ``explicit`` (a ``-c`` file) makes the file THE config even without a
+    pytest section, as pytest does. Bounded: regular files of at most
+    :data:`_PYTEST_CONFIG_MAX_BYTES`; any read/parse failure means no addopts.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size > _PYTEST_CONFIG_MAX_BYTES:
+            return [] if explicit else None
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".toml":
+            tool = tomllib.loads(text).get("tool", {})
+            section = tool.get("pytest") if isinstance(tool, dict) else None
+            if not isinstance(section, dict):
+                return [] if explicit else None  # a pyproject without pytest config
+            options = section.get("ini_options")
+            if not isinstance(options, dict):
+                # pytest 9's native `[tool.pytest]` table: options sit directly in it.
+                if not (set(section) - {"ini_options"}):
+                    return [] if explicit else None
+                options = section
+            addopts = options.get("addopts", "")
+        else:
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(text)
+            section_name = next(
+                (n for n in ("pytest", "tool:pytest") if parser.has_section(n)), None
+            )
+            if path.name == "setup.cfg" and not explicit:
+                section_name = "tool:pytest" if parser.has_section("tool:pytest") else None
+            elif path.name in ("tox.ini",) and not explicit:
+                section_name = "pytest" if parser.has_section("pytest") else None
+            if section_name is None:
+                # pytest.ini is the config even when empty; tox/setup.cfg are not.
+                return None if path.name in ("tox.ini", "setup.cfg") and not explicit else []
+            addopts = parser.get(section_name, "addopts", fallback="")
+    except (OSError, ValueError, configparser.Error, tomllib.TOMLDecodeError):
+        return []
+    if isinstance(addopts, list):
+        return [str(item) for item in addopts]
+    try:
+        return shlex.split(str(addopts))
+    except ValueError:
+        return []
+
+
+def _pytest_addopts(directory: str | None, config_file: str | None = None) -> list[str]:
     """``addopts`` from the pytest config pytest would pick at or above ``directory``.
 
     Why: a "serial" ``pytest tests/unit/x.py`` is not serial in a repo whose
     addopts say ``-n auto`` (local-operator's do): it forks 2..8 interpreters,
     each importing the package. Cheap by contract, like :func:`_package_scripts`:
     a few small file reads, no pytest import; any failure means "no addopts".
+    ``config_file`` (``-c FILE``) replaces the search, as it does in pytest;
+    a relative one needs ``directory`` to resolve against.
     """
+    if config_file:
+        path = Path(config_file).expanduser()
+        if not path.is_absolute():
+            if not directory:
+                return []
+            path = Path(directory).expanduser() / path
+        return _read_pytest_config(path, explicit=True) or []
     if not directory:
         return []
     try:
@@ -798,34 +887,9 @@ def _pytest_addopts(directory: str | None) -> list[str]:
         return []
     for folder in (current, *current.parents):
         for name in _PYTEST_CONFIGS:
-            path = folder / name
-            try:
-                if not path.is_file() or path.stat().st_size > _PYTEST_CONFIG_MAX_BYTES:
-                    continue
-                text = path.read_text(encoding="utf-8")
-                if name == "pyproject.toml":
-                    section = tomllib.loads(text).get("tool", {}).get("pytest", {})
-                    options = section.get("ini_options") if isinstance(section, dict) else None
-                    if not isinstance(options, dict):
-                        continue  # a pyproject without pytest config is not one
-                    addopts = options.get("addopts", "")
-                else:
-                    parser = configparser.ConfigParser(interpolation=None)
-                    parser.read_string(text)
-                    section_name = "tool:pytest" if name == "setup.cfg" else "pytest"
-                    if not parser.has_section(section_name):
-                        if name in ("tox.ini", "setup.cfg"):
-                            continue
-                        return []  # pytest.ini is the config even when empty
-                    addopts = parser.get(section_name, "addopts", fallback="")
-            except (OSError, ValueError, configparser.Error, tomllib.TOMLDecodeError):
-                return []
-            if isinstance(addopts, list):
-                return [str(item) for item in addopts]
-            try:
-                return shlex.split(str(addopts))
-            except ValueError:
-                return []
+            found = _read_pytest_config(folder / name, explicit=False)
+            if found is not None:
+                return found
     return []
 
 
@@ -850,30 +914,36 @@ def _heavy_workers(value: str | None) -> bool:
         return True
 
 
-def _classify_pytest(args: list[str], cwd: str | None) -> str | None:
+def _classify_pytest(
+    args: list[str], cwd: str | None, env_addopts: list[str] | None = None
+) -> str | None:
     """Heavy reason for a pytest run, or None.
 
     Policy (AGENTS.md "To wait for heavy work"; manager decision 79,
     2026-11-18 11:52Z, PR #4227): the EFFECTIVE worker count decides. A quick
-    iteration (one file, a node id, or a ``-k``-narrowed run) stays off the
-    slot so it never queues behind a long run, but only while it really is
+    iteration (one file or node id) stays off the slot so it never queues
+    behind a long run, but only while it really is
     small: local-operator's addopts say ``-n auto``, so a bare
     ``pytest tests/unit/x.py`` there forks up to 8 interpreters and IS heavy;
     ``-n 0`` keeps it light. In order:
 
     * ``--collect-only``/``--fixtures``/``--markers`` never run a test: light.
-    * effective workers (the last ``-n`` across addopts then argv, so the
-      command line overrides addopts; ``-p no:xdist`` serialises) above
-      :data:`_PYTEST_LIGHT_MAX_WORKERS`, or ``auto``/``logical``: heavy.
-    * narrowed with ``-k``: light, whatever the target.
+    * effective workers (the last ``-n`` across config addopts, then a
+      ``PYTEST_ADDOPTS=`` prefix, then argv: pytest's own precedence;
+      ``-p no:xdist`` serialises) above :data:`_PYTEST_LIGHT_MAX_WORKERS`, or
+      ``auto``/``logical``: heavy. ``-c FILE`` picks the config read.
     * only test files or node ids (``x.py``, ``x.py::test``): light.
     * a directory target, or no target at all (the whole ``testpaths``), is
-      heavy even serially: one interpreter importing the suite (node2,
+      heavy even serially and even with ``-k`` (manager decision, PR #4227
+      R3): ``-k`` deselects AFTER collection, and collecting a tree imports
+      every module in it, one interpreter's worth of the suite (node2,
       2026-11-18: ``pytest -q tests/unit`` ran with no slot).
     """
+    env_addopts = env_addopts or []
     if any(arg in _PYTEST_INFO_FLAGS for arg in args):
         return None
-    if _heavy_workers(_xdist_workers([*_pytest_addopts(cwd), *args])):
+    config = _pytest_addopts(cwd, _config_file_arg([*env_addopts, *args]))
+    if _heavy_workers(_xdist_workers([*config, *env_addopts, *args])):
         return "pytest -n"
     targets: list[str] = []
     skip = False
@@ -881,10 +951,10 @@ def _classify_pytest(args: list[str], cwd: str | None) -> str | None:
         if skip:
             skip = False
         elif arg.startswith("-"):
-            if arg.startswith("-k"):  # `-k expr` and `-kexpr`
-                return None
             skip = arg in _PYTEST_VALUE_OPTS or arg in ("-n", "--numprocesses")
-        else:
+        elif not arg.isdigit():
+            # A bare number is an unknown plugin option's value (`--foo 2`),
+            # never a test path worth classifying.
             targets.append(arg)
     if not targets:
         return "pytest (whole suite)"
@@ -906,8 +976,8 @@ def is_heavy(
     the TypeScript compiler, JS test runners (vitest, jest, node --test),
     package-manager build/test/typecheck scripts, nx/turbo build|test targets,
     pytest with more than two effective xdist workers (command line over the
-    nearest config's ``addopts``), a directory or whole-suite pytest not
-    narrowed by ``-k``,
+    nearest config's ``addopts`` and a ``PYTEST_ADDOPTS=`` prefix), a directory
+    or whole-suite pytest (``-k`` or not),
     ``affected_tests.py --run|--evidence``, ``make test*`` and
     ``cargo``/``go`` build|test. ``$(…)``/backtick bodies are classified too,
     and never hide the command around them.
