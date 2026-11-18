@@ -72,9 +72,23 @@ def client(monkeypatch):
     previous = getattr(app.state, "env_config", None)
     if not had_env_config or previous is None:
         app.state.env_config = get_env_config()
+    # The models routes lazily cache a provider auth host on the shared app
+    # (``routes/auth.get_desktop_auth``). Owned per test, as the async client in
+    # ``conftest.py`` owns it: a host left behind leaks an open store into the
+    # next test, and one inherited from a neighbour may already be closed.
+    had_desktop_auth = "desktop_auth" in app.state
+    previous_desktop_auth = getattr(app.state, "desktop_auth", None)
+    app.state.desktop_auth = None
     try:
         yield TestClient(app, headers={"Host": "127.0.0.1:1111"})
     finally:
+        created_auth = getattr(app.state, "desktop_auth", None)
+        if created_auth is not None:
+            created_auth.store.close()
+        if had_desktop_auth:
+            app.state.desktop_auth = previous_desktop_auth
+        else:
+            del app.state["desktop_auth"]
         if had_env_config:
             app.state.env_config = previous
         elif hasattr(app.state, "env_config"):
