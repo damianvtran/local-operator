@@ -2128,9 +2128,7 @@ def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, 
     def _subparsers(
         parser: argparse.ArgumentParser,
     ) -> argparse._SubParsersAction[argparse.ArgumentParser]:
-        return next(
-            a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
-        )
+        return next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
 
     services = _subparsers(build_cli_parser()).choices["services"]
     verbs = ", ".join(_subparsers(services).choices)
