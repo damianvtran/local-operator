@@ -295,7 +295,7 @@ _EFFECT_WORDS = {
     BUILTIN_REFUSE_LAPSED: (
         "refused outright, no model call — an ask names it and no operator answer approves it"
     ),
-    BUILTIN_HOLD_CLEANUP: "refused outright, no model call — cleanup preservation not verified",
+    BUILTIN_HOLD_CLEANUP: "refused outright, no model call — worktree cleanup not verified",
 }
 
 

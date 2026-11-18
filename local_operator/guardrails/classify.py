@@ -33,6 +33,7 @@ import fnmatch
 import functools
 import os
 import re
+import sqlite3
 import stat
 import sys
 import time
@@ -44,8 +45,10 @@ from local_operator.guardrails.resolve import (
     Creation,
     Target,
     kernel_path,
+    lex,
     physical_path,
     resolve_command,
+    scan,
 )
 
 if TYPE_CHECKING:
@@ -2067,16 +2070,44 @@ def _literal_worktree_remove(command: str, targets: Sequence[Target]) -> bool:
     target = targets[0]
     if not target.worktree_remove or not target.path or target.landings or target.empty:
         return False
-    match = re.fullmatch(
-        r"[ \t]*git[ \t]+(?:-C[ \t]+(?P<basequote>['\"]?)/[A-Za-z0-9_./-]+(?P=basequote)[ \t]+)?"
-        r"worktree[ \t]+remove[ \t]+"
-        r"(?:(?:-f|--force)[ \t]+)?(?:--[ \t]+)?"
-        r"(?P<quote>['\"]?)(?P<path>/[A-Za-z0-9_./-]+)(?P=quote)[ \t]*",
-        command,
-    )
-    if match is None:
+    # Use the resolver's parser, but do not fold anything that bash expands.
+    # Checking the original segment as well excludes comments and operators
+    # that lex would otherwise discard, including a trailing background '&'.
+    text = command.strip(" \t")
+    parsed = lex(text)
+    if parsed.open or parsed.segments != [(text, False, "")]:
         return False
-    raw = match["path"]
+    words, redirects = scan(text)
+    if redirects:
+        return False
+    argv = []
+    for word in words:
+        if word.broken or any(
+            part.kind not in ("sq", "dq")
+            and (part.kind != "bare" or not re.fullmatch(r"[a-zA-Z0-9_./-]+", part.text))
+            for part in word.parts
+        ):
+            return False
+        arg = "".join(part.text for part in word.parts)
+        if not arg or any(ord(ch) < 32 or ch == "\x7f" for ch in arg):
+            return False
+        argv.append(arg)
+    if not argv or argv.pop(0) != "git":
+        return False
+    if argv[:1] == ["-C"]:
+        if len(argv) < 2 or not os.path.isabs(argv[1]):
+            return False
+        del argv[:2]
+    if argv[:2] != ["worktree", "remove"]:
+        return False
+    del argv[:2]
+    if argv and argv[0] in ("-f", "--force"):
+        del argv[0]
+    if argv[:1] == ["--"]:
+        del argv[0]
+    if len(argv) != 1 or not os.path.isabs(argv[0]):
+        return False
+    raw = argv[0]
     return raw == os.path.normpath(raw) == os.path.realpath(raw) == target.path and not (
         target.pattern or target.opaque or target.climbs or target.unpinned
     )
@@ -2093,24 +2124,23 @@ def _exact_linked_cleanup(
     # Don't replace the separate, narrowly located detached-scratch policy.
     if own is not None and _scratch_location(path) and prov.own_detached_scratch(path):
         return None
+    identity = prov.cleanup_identity(path)
     payload: dict[str, bool] = {}
-    state = prov.worktree_state(
-        path,
-        own=own is not None,
-        session_id=session_id,
-        hidden_blocks=target.forced,
-        interrupted_cleanup=True,
-        facts=payload,
-    )
 
-    # Only a new preservation-proof route for foreign trees. Keep the existing
-    # clean/plain or clean/merged policy and the authenticated ask path for
-    # foreign changes that require consent instead of asserting they are safe.
-    if (
-        own is None
-        and state != "not-linked"
-        and (state != "deletions-only" and not (state == "clean" and payload.get("ignored")))
-    ):
+    def read_state(facts: dict[str, bool]) -> str:
+        return prov.worktree_state(
+            path,
+            own=own is not None,
+            session_id=session_id,
+            hidden_blocks=True,
+            interrupted_cleanup=True,
+            facts=facts,
+        )
+
+    state = read_state(payload)
+    # Leave the prior consent/ranking paths for foreign work that is outside
+    # this narrow recovery route, but never fall back with unknown ignored data.
+    if own is None and state in ("clean", "dirty", "locked", "busy") and not payload.get("ignored"):
         return None
 
     def hold(reason: str) -> RankedTarget:
@@ -2119,60 +2149,102 @@ def _exact_linked_cleanup(
         )
 
     if state == "not-linked":
-        return hold("not a registered linked checkout; verify the exact path and registration")
+        return hold(
+            "not a registered linked checkout; verify the exact path and Git registration. "
+            "This route excludes unregistered residue: it cannot verify durable prior "
+            "registration, a reachable preserved commit, and preservation of current work"
+        )
     if state == "busy":
         return hold(prov.state_phrase(path, state, session_id, hidden_blocks=True))
     if state == "locked":
-        return hold("locked; have the holder finish and unlock it before retrying")
+        return hold("locked; have the holder finish and unlock it")
     if state not in ("clean", "deletions-only", "dirty"):
-        return hold("could not verify the checkout; refresh its Git state before retrying")
+        return hold("could not verify the checkout; inspect the exact path and Git registration")
+
+    def check_open(activity: WorktreeActivity) -> RankedTarget | None:
+        if activity.pr_state == "open":
+            return RankedTarget(
+                target,
+                Risk.CRITICAL,
+                f"branch {activity.branch} has open {activity.pr_ref}; finish it first",
+            )
+        return None
 
     activity = prov.worktree_activity(path, session_id)
-    if activity.pr_state == "open":
-        return RankedTarget(
-            target,
-            Risk.CRITICAL,
-            f"branch {activity.branch} has open {activity.pr_ref}; finish it first",
-        )
+    if opened := check_open(activity):
+        return opened
     if activity.owners_running:
         return hold(f"another session still holds it; {activity.facts()}")
     if state == "dirty":
         return hold(
-            "preservation check failed; stash or commit changes and move unverified files out"
+            "preservation check failed; stash or commit changes and preserve unverified "
+            "files separately, including ignored output"
         )
+    if identity is None:
+        return hold("checkout, Git registration, branch, HEAD or origin could not be verified")
+    try:
+        creators = prov.worktree_creators(path)
+        if prov._running_owners(path, session_id, strict=True):
+            return hold("another session still holds it; wait for that session to finish")
+    except (OSError, ValueError, sqlite3.Error):
+        return hold("ownership could not be verified")
+    if not prov.cleanup_activity_known(identity, activity):
+        return hold("branch activity could not be verified; check for an open PR or MR")
     if own is None:
         proof = _no_ledger_inside(
             foreign,
             path,
             prov.finished_foreign_worktree(
-                path, session_id, activity=activity, interrupted_cleanup=True
+                path, session_id, activity=activity, interrupted_cleanup=True, identity=identity
             ),
         )
         if not proof.safe:
             return hold(
                 f"finished work not proven ({', '.join(proof.reasons)}); "
-                "push or refresh Git and owner state"
+                "check the origin branch and wait for any owning session to finish"
             )
         reason = "a finished, merged linked git worktree"
     else:
-        head = (prov._git(["rev-parse", "--verify", "HEAD"], path) or "").strip()
-        if not head or not prov.pushed_worktree_head(path, head):
-            return hold(
-                "HEAD is not confirmed on origin; push your commits or refresh origin state"
-            )
-        if (
-            prov.worktree_state(
-                path, own=True, session_id=session_id, hidden_blocks=True, interrupted_cleanup=True
-            )
-            not in ("clean", "deletions-only")
-            or (prov._git(["rev-parse", "--verify", "HEAD"], path) or "").strip() != head
-        ):
-            return hold("checkout changed during verification; refresh its status and retry")
+        if not prov.pushed_worktree_head(path, identity.head, identity.ref):
+            return hold("HEAD is not confirmed on origin; verify the remote or push your commits")
         reason = f"{own[0]}; HEAD preserved on origin"
+
+    # Remote/forge I/O creates a window in which the same path or commit can
+    # represent a different checkout. Recheck from the pinned registration,
+    # then check the new payload and local activity before granting LOW.
+    changed = "checkout changed during verification; inspect its registration, branch and status"
+    if prov.cleanup_identity(path) != identity:
+        return hold(changed)
+    again_activity = prov.worktree_activity(path, session_id)
+    if opened := check_open(again_activity):
+        return opened
+    if again_activity.owners_running or not prov.cleanup_activity_known(identity, again_activity):
+        return hold("activity changed or could not be verified; check for an open PR, MR or owner")
+    again: dict[str, bool] = {}
+    if read_state(again) != state or again != payload:
+        return hold(changed)
+    try:
+        if prov.worktree_creators(path) != creators or prov._running_owners(
+            path, session_id, strict=True
+        ):
+            return hold(changed)
+        # Ledger reads cached for ordinary ranking do not prove what is
+        # present after the network wait (and a failed read is not empty).
+        fresh = prov.ForeignCreations(session_id)
+        try:
+            if fresh.foreign_under(path, strict=True) is not None:
+                return hold("another session has recorded work inside the checkout")
+        finally:
+            fresh.close()
+    except (OSError, ValueError, sqlite3.Error):
+        return hold("ownership could not be verified")
+    if _owned_by_session(target, path, prot, session_id) != own or (
+        prov.cleanup_identity(path) != identity
+    ):
+        return hold(changed)
     if state == "deletions-only" and not target.forced:
         return hold(
-            "only tracked deletions and verified ignored output remain; "
-            "Git needs --force for this exact path"
+            "tracked deletions remain; only preview can verify a planned literal --force removal"
         )
     return RankedTarget(target, Risk.LOW, f"{reason}; verified removal payload ({state})")
 

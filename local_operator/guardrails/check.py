@@ -559,7 +559,11 @@ def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
 def cleanup_hold_text(verdict: Verdict) -> str:
     return (
         f"BLOCKED by guardrail {DANGEROUS_DELETE_RULE}: worktree cleanup could not be verified. "
-        f"Targets: {_targets_text(verdict)}"
+        f"Nothing was run. Targets: {_targets_text(verdict)}. "
+        "Preserve unknown files outside the checkout; commit or stash edits, push commits "
+        "that need to survive, and verify the exact path and Git registration. "
+        "These are preservation steps, not permission to re-issue or reroute this removal. "
+        "The standing two refusal exceptions still apply."
     )
 
 
@@ -1884,7 +1888,7 @@ async def _dangerous_delete(
             destructive=True,
         )
     if branch == BUILTIN_HOLD_CLEANUP:
-        _journal(DANGEROUS_DELETE_RULE, "high", "block", 0.0, targets, "cleanup preservation")
+        _journal(DANGEROUS_DELETE_RULE, "high", "block", 0.0, targets, "cleanup not verified")
         return GuardOutcome(
             blocked=True,
             text=cleanup_hold_text(verdict),

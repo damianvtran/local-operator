@@ -959,7 +959,7 @@ class ForeignCreations:
                     return ForeignHit(rec.creator, rec, "holds")
         return None
 
-    def foreign_under(self, root: str) -> ForeignHit | None:
+    def foreign_under(self, root: str, *, strict: bool = False) -> ForeignHit | None:
         """A foreign live row strictly UNDER ``root`` whose creator did not create ``root``.
 
         WHY (review R2 on PR #3992). A finished foreign worktree is cleared
@@ -973,6 +973,8 @@ class ForeignCreations:
         real = os.path.realpath(root).rstrip("/") or "/"
         live = self._live_rows([real])
         if live is None:
+            if strict:
+                raise OSError("worktree descendant attribution unavailable")
             return None
         creators = live[real][0] if real in live else set()
         prefix = real + "/"
@@ -1449,7 +1451,7 @@ def _git_proc(
             env=env,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
 
 
@@ -2149,7 +2151,7 @@ def worktree_state(
 
     ``interrupted_cleanup`` is the stricter payload inventory for an exact
     removal with separate commit-preservation proof. It accepts deletions of
-    tracked files, but only recognized ignored output, never other changes.
+    tracked files and independently verified disposable links, not ignored file data.
 
     ``own``: the caller proved (creation ledger) that this session or its
     subagent created the tree. Then IGNORED entries never make it dirty —
@@ -2333,16 +2335,116 @@ def worktree_state(
     return "stale-initializing" if stale_initializing else "clean"
 
 
+@dataclass(frozen=True)
+class CleanupIdentity:
+    path: str
+    registration: tuple[tuple[str, int, int, int], ...]
+    ref: str | None
+    head: str
+    origin: str
+
+
+def cleanup_identity(path: str) -> CleanupIdentity | None:
+    """Pin both sides of the linked registration across the proof's I/O."""
+    dotgit = os.path.join(path, ".git")
+    dirs = _git(
+        ["rev-parse", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir"], path
+    )
+    lines = (dirs or "").splitlines()
+    if len(lines) != 2 or os.path.realpath(path) != path:
+        return None
+    git_dir, common = lines
+    if os.path.dirname(git_dir) != os.path.join(common, "worktrees"):
+        return None
+    back = os.path.join(git_dir, "gitdir")
+    try:
+        items = []
+        for name, is_dir in (
+            (path, True),
+            (dotgit, False),
+            (common, True),
+            (git_dir, True),
+            (back, False),
+        ):
+            st = os.lstat(name)
+            if not (stat.S_ISDIR(st.st_mode) if is_dir else stat.S_ISREG(st.st_mode)):
+                return None
+            items.append((name, st.st_dev, st.st_ino, creation_stamp(st)))
+        with open(back, encoding="utf-8") as fh:
+            if os.path.realpath(os.path.join(git_dir, fh.read().rstrip("\n"))) != dotgit:
+                return None
+    except (OSError, UnicodeError):
+        return None
+    symbolic = _git_proc(["symbolic-ref", "--quiet", "HEAD"], path)
+    if symbolic is None or symbolic.returncode not in (0, 1):
+        return None
+    ref = symbolic.stdout.rstrip("\n") if symbolic.returncode == 0 else None
+    if ref is not None and not ref.startswith("refs/heads/"):
+        return None
+    head = (_git(["rev-parse", "--verify", "HEAD"], path) or "").strip()
+    origin = (_git(["remote", "get-url", "origin"], path) or "").rstrip("\n")
+    return CleanupIdentity(path, tuple(items), ref, head, origin) if head and origin else None
+
+
+def cleanup_activity_known(identity: CleanupIdentity, activity: WorktreeActivity) -> bool:
+    if identity.ref is None:
+        return activity.branch is None and activity.pr_state == "none"
+    branch = identity.ref.removeprefix("refs/heads/")
+    if activity.branch != branch:
+        return False
+    if activity.pr_state == "none":
+        return True
+    # A bare repository on an absolute local path has no forge on this
+    # origin. Network remotes and unresolved paths do not get this exception.
+    return (
+        activity.pr_detail == "no GitHub or GitLab remote"
+        and os.path.isabs(identity.origin)
+        and (_git(["rev-parse", "--is-bare-repository"], identity.origin) or "").strip() == "true"
+    )
+
+
+def _shared_dependencies_link(real: str, entry: str) -> bool:
+    if entry != "node_modules" or os.path.basename(os.path.dirname(real)) != ".worktrees":
+        return False
+    root = os.path.dirname(os.path.dirname(real))
+    common = (_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], real) or "").rstrip(
+        "\n"
+    )
+    if common != os.path.join(root, ".git") or os.path.realpath(root) != root:
+        return False
+    try:
+        if os.readlink(os.path.join(real, entry)) != "../../node_modules":
+            return False
+        if not stat.S_ISDIR(os.lstat(os.path.join(root, entry)).st_mode):
+            return False
+    except OSError:
+        return False
+    # The link is recreated by the repository's documented sharing procedure,
+    # only for the same lockfile. A manifest beside a directory proves nothing
+    # about that directory's actual contents; no ignored file data is removed.
+    for lock in ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock"):
+        blob = (_git_quiet(["rev-parse", "--verify", f"HEAD:{lock}"], real) or "").strip()
+        if not blob:
+            continue
+        try:
+            if not all(stat.S_ISREG(os.lstat(os.path.join(p, lock)).st_mode) for p in (root, real)):
+                continue
+        except OSError:
+            continue
+        if all(
+            (_git_quiet(["hash-object", "--no-filters", "--", lock], p) or "").strip() == blob
+            for p in (root, real)
+        ):
+            return True
+    return False
+
+
 def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
     # An index entry marked assume-unchanged or skip-worktree can conceal a
     # modified file from status. Gitlinks can conceal an independent repo.
     index = _git_quiet(["ls-files", "-v", "--stage", "-z"], real)
     if index is None:
         return "unknown"
-    if any(
-        not row.startswith("H ") or row.startswith("H 160000 ") for row in index.split("\0") if row
-    ):
-        return "dirty"
     status = _git_quiet(
         [
             "-c",
@@ -2364,17 +2466,20 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
     if status is None:
         return "unknown"
     deleted = False
+    rows = status.split("\0")
     if facts is not None:
-        facts["ignored"] = False
-    for row in status.split("\0"):
+        facts["ignored"] = any(row.startswith("!! ") for row in rows)
+    if any(
+        not row.startswith("H ") or row.startswith("H 160000 ") for row in index.split("\0") if row
+    ):
+        return "dirty"
+    for row in rows:
         if not row:
             continue
         if row[:3] not in (" D ", "D  ", "!! "):
             return "dirty"
         entry = row[3:].rstrip("/")
-        # NUL porcelain preserves literal path names (not C quoting). Only
-        # ignore matches on known output, not a tracked-looking parent or an
-        # ignored secret. Do not descend into symlinks or across mounts.
+        # NUL porcelain preserves literal path names (not C quoting).
         if not entry or os.path.isabs(entry) or ".." in entry.split("/"):
             return "unknown"
         physical = os.path.join(real, entry)
@@ -2384,12 +2489,10 @@ def _interrupted_cleanup_state(real: str, facts: dict[str, bool] | None) -> str:
                 return "dirty"
             deleted = True
             continue
-        if facts is not None:
-            facts["ignored"] = True
-        # Git unlinks a leaf symlink (e.g. shared node_modules), not its target.
-        if not _regenerable(os.path.basename(entry)) or (
-            os.path.realpath(os.path.dirname(physical)) != os.path.dirname(physical)
-        ):
+        # A name or package manifest cannot account for the bytes under an
+        # ignored directory. The only supported witness is a shared dependency
+        # link: Git removes the reproducible link entry, not its referent.
+        if not _shared_dependencies_link(real, entry):
             return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:
         return "dirty"
@@ -3284,17 +3387,8 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
         return None
 
 
-def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tuple[str, ...]:
-    """Running sessions (not the caller) that own the worktree at ``real``.
-
-    Owner = the session the creation ledger attributes the ``git worktree
-    add`` to (``kind='worktree'`` row for this exact path), or any live/wedged
-    session whose recorded cwd is inside the tree. The CALLER is excluded: a
-    session removing its own worktree is the owner acting, not a conflict.
-    Read fresh on every call (no cache). Default: unreadable sources name no
-    owner. ``strict`` requires current-generation attribution and a complete
-    registry, raising on missing/unreadable facts rather than claiming idle.
-    """
+def worktree_creators(real: str, *, strict: bool = True) -> frozenset[str]:
+    """Current generation attribution for strict cleanup (missing is unknown)."""
     creators: set[str] = set()
     try:
         conn = _connect(ledger_path(), create=False)
@@ -3319,6 +3413,21 @@ def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tupl
     # No attributed creator is unknown ownership, not proof of an idle tree.
     if strict and not creators:
         raise OSError("worktree owner attribution unavailable")
+    return frozenset(creators)
+
+
+def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tuple[str, ...]:
+    """Running sessions (not the caller) that own the worktree at ``real``.
+
+    Owner = the session the creation ledger attributes the ``git worktree
+    add`` to (``kind='worktree'`` row for this exact path), or any live/wedged
+    session whose recorded cwd is inside the tree. The CALLER is excluded: a
+    session removing its own worktree is the owner acting, not a conflict.
+    Read fresh on every call (no cache). Default: unreadable sources name no
+    owner. ``strict`` requires current-generation attribution and a complete
+    registry, raising on missing/unreadable facts rather than claiming idle.
+    """
+    creators = worktree_creators(real, strict=strict)
     # A RUNNING ANCESTOR that created the tree is the delegator, not a
     # conflicting owner (field case 2026-11-14): a parent is live for as long
     # as its cleanup subagent runs, so counting it as "owning session
@@ -3482,6 +3591,7 @@ def finished_foreign_worktree(
     *,
     activity: WorktreeActivity | None = None,
     interrupted_cleanup: bool = False,
+    identity: CleanupIdentity | None = None,
 ) -> FinishedForeign:
     """Prove a worktree another (finished) session made is safe to remove, or say why not.
 
@@ -3547,6 +3657,13 @@ def finished_foreign_worktree(
     if heads[0] != heads[1]:
         return no("branch-moved", state)
     head = heads[0]
+    if interrupted_cleanup and (
+        identity is None
+        or identity.head != head
+        or identity.ref != ref
+        or cleanup_identity(real) != identity
+    ):
+        return unknown("registration-or-ref-moved", state)
     try:
         owners = _running_owners(real, session_id, strict=True)
     except Exception:  # noqa: BLE001 — incomplete owner facts are unknown, not idle
@@ -3657,11 +3774,10 @@ def finished_foreign_worktree(
     return FinishedForeign("safe", facts_out, state, activity)
 
 
-def pushed_worktree_head(real: str, head: str) -> bool:
+def pushed_worktree_head(real: str, head: str, ref: str | None) -> bool:
     """Prove an owned HEAD survives on origin, never just a stale local ref."""
-    ref = (_git(["symbolic-ref", "--quiet", "HEAD"], real) or "").strip()
     refs = ["HEAD"]
-    if ref.startswith("refs/heads/"):
+    if ref:
         refs.append(ref)
     advert = _git_net(
         ["-c", "core.sshCommand=ssh -o BatchMode=yes", "ls-remote", "origin", *refs],

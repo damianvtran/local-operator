@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -104,6 +105,7 @@ def repo(home: Path) -> Path:
     _git("init", "-q", "-b", "main", str(repo), cwd=home)
     (repo / ".gitignore").write_text(".worktrees/\n")
     (repo / "a.txt").write_text("a\n")
+    (repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
     _git("add", ".", cwd=repo)
     _git("commit", "-qm", "init", cwd=repo)
     _git("remote", "add", "origin", str(origin), cwd=repo)
@@ -170,19 +172,22 @@ async def _check(home: Path, command: str, judge: _Judge, operator: Any = None) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("creator", [ME, DONE])
+@pytest.mark.parametrize("shared_link", [False, True])
 async def test_interrupted_finished_tree_skips_unavailable_judge(
-    home: Path, repo: Path, creator: str
+    home: Path, repo: Path, creator: str, shared_link: bool
 ) -> None:
-    wt = _branch_tree(home, repo, "interrupted")
+    wt = _branch_tree(home, repo, "interrupted", repo / ".worktrees" / "interrupted checkout")
     _git("merge", "--ff-only", "fix/interrupted", cwd=repo)
     _git("push", "-q", "origin", "main", cwd=repo)
     _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
-    (home / "excludes").write_text("node_modules/\n")
-    (wt / "node_modules").mkdir()
-    (wt / "node_modules" / "cache.js").write_text("generated\n")
+    (home / "excludes").write_text("node_modules\n")
+    if shared_link:
+        (repo / "node_modules").mkdir()
+        (repo / "node_modules" / "cache.js").write_text("generated\n")
+        (wt / "node_modules").symlink_to("../../node_modules")
     (wt / "a.txt").unlink()
     _record(home, wt, creator=creator)
-    command = f"git -C {repo} worktree remove --force -- {wt}"
+    command = f"git -C {repo} worktree remove --force -- {shlex.quote(str(wt))}"
     context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
     report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
     assert report.builtin_effect == BUILTIN_PASS, report.render()
@@ -190,21 +195,36 @@ async def test_interrupted_finished_tree_skips_unavailable_judge(
     result = await _check(home, command, judge)
     assert not judge.prompts, result
     assert not result.blocked, result
-    assert _git("status", "--porcelain", "--ignored", cwd=wt).splitlines() == [
-        " D a.txt",
-        "!! node_modules/",
-    ]
+    assert _git("status", "--porcelain", "--ignored", cwd=wt).splitlines() == (
+        [" D a.txt", "!! node_modules"] if shared_link else [" D a.txt"]
+    )
     _git("worktree", "remove", "--force", "--", str(wt), cwd=repo)
     assert not wt.exists()
     assert str(wt) not in _git("worktree", "list", "--porcelain", cwd=repo)
+    if shared_link:
+        assert (repo / "node_modules" / "cache.js").read_text() == "generated\n"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("obstacle", ["modified", "unpushed", "nested", "locked", "primary"])
+@pytest.mark.parametrize(
+    "obstacle",
+    [
+        "modified",
+        "unpushed",
+        "nested",
+        "locked",
+        "primary",
+        "residue",
+        "ignored",
+        "foreign-ignored",
+        "stale-link",
+        "missing-force",
+    ],
+)
 async def test_exact_cleanup_preserves_unverified_work(
     home: Path, repo: Path, obstacle: str
 ) -> None:
-    wt = _branch_tree(home, repo, "preserve")
+    wt = _branch_tree(home, repo, "preserve", repo / ".worktrees" / "preserve this")
     if obstacle != "unpushed":
         _git("merge", "--ff-only", "fix/preserve", cwd=repo)
         _git("push", "-q", "origin", "main", cwd=repo)
@@ -220,9 +240,28 @@ async def test_exact_cleanup_preserves_unverified_work(
         _git("init", "-q", "--bare", str(wt / "node_modules" / "archive"), cwd=wt)
     elif obstacle == "locked":
         _git("worktree", "lock", str(wt), cwd=repo)
-    _record(home, wt, creator=ME)
+    elif obstacle in ("ignored", "foreign-ignored", "stale-link"):
+        (home / "excludes").write_text("build/\nnode_modules\n")
+        _git("config", "core.excludesFile", str(home / "excludes"), cwd=repo)
+        (wt / "a.txt").unlink()
+        if obstacle == "stale-link":
+            (repo / "node_modules").mkdir()
+            (wt / "node_modules").symlink_to("../../node_modules")
+            (repo / "pnpm-lock.yaml").write_text("different bytes\n")
+        else:
+            (wt / "build").mkdir()
+            (wt / "build" / "notes.txt").write_text("keep this local note\n")
+    elif obstacle == "missing-force":
+        (wt / "a.txt").unlink()
+    if obstacle != "foreign-ignored":
+        _record(home, wt, creator=ME)
     target = repo if obstacle == "primary" else wt
-    command = f"git -C {repo} worktree remove --force -- {target}"
+    if obstacle == "residue":
+        target = repo / ".worktrees" / "unregistered residue"
+        target.mkdir()
+        (target / "local-note.txt").write_text("unregistered\n")
+    opts = "--" if obstacle == "missing-force" else "--force --"
+    command = f'git -C "{repo}" worktree remove {opts} "{target}"'
     context = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=ME)
     report = preview_tool_call("bash", {"command": command}, context, settings=GuardSettings())
     judge = _Judge("ALLOW ledger")
@@ -230,7 +269,73 @@ async def test_exact_cleanup_preserves_unverified_work(
     assert outcome.blocked and not judge.prompts
     assert report.builtin_effect == "hold-cleanup", report.render()
     assert report.builtin_text == outcome.text
+    assert "Nothing was run." in report.render()
+    assert "not permission to re-issue or reroute" in outcome.text
+    if obstacle == "residue":
+        assert "excludes unregistered residue" in outcome.text
+    if obstacle == "missing-force":
+        assert "preview" in outcome.text and "--force" in outcome.text
     assert target.exists()
+
+
+@pytest.mark.parametrize("change", ["branch", "registration", "edit", "owner", "activity"])
+def test_exact_cleanup_rechecks_state_after_remote_proof(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    wt = _branch_tree(home, repo, "changing")
+    _git("merge", "--ff-only", "fix/changing", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    (wt / "a.txt").unlink()
+    _record(home, wt, creator=ME)
+    check_origin = prov.pushed_worktree_head
+    head_before = _git("rev-parse", "HEAD", cwd=wt)
+
+    def change_during_proof(real: str, head: str, ref: str | None) -> bool:
+        assert check_origin(real, head, ref)
+        if change == "branch":
+            _git("switch", "-qc", "fix/same-commit", cwd=wt)
+        elif change == "registration":
+            old = repo / ".worktrees" / "original-changing"
+            _git("worktree", "move", str(wt), str(old), cwd=repo)
+            _git("worktree", "add", "-qb", "fix/replacement", str(wt), "main", cwd=repo)
+            (wt / "a.txt").unlink()
+            _record(home, wt, creator=ME)
+        elif change == "edit":
+            (wt / "changing.txt").write_text("new work\n")
+        elif change == "owner":
+            _record(home, wt, creator=LIVE)
+        elif change == "activity":
+            monkeypatch.setattr(
+                prov,
+                "worktree_activity",
+                lambda *_: prov.WorktreeActivity("fix/changing", "unknown"),
+            )
+        assert _git("rev-parse", "HEAD", cwd=wt) == head_before
+        return True
+
+    monkeypatch.setattr(prov, "pushed_worktree_head", change_during_proof)
+    result = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
+    assert result.risk is Risk.HIGH and result.targets[0].cleanup_hold, result.reasons
+    assert "changed" in result.targets[0].reason
+    assert wt.exists()
+
+
+def test_exact_cleanup_holds_when_git_path_inventory_is_undecodable(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = _branch_tree(home, repo, "undecodable")
+    _record(home, wt, creator=ME)
+    run = subprocess.run
+
+    def undecodable(args: list[str], *args2: Any, **kwargs: Any) -> Any:
+        if "status" in args and "--ignored=matching" in args:
+            raise UnicodeDecodeError("utf-8", bytes([255]), 0, 1, "invalid path byte")
+        return run(args, *args2, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", undecodable)
+    result = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
+    assert result.risk is Risk.HIGH and result.targets[0].cleanup_hold, result.reasons
+    assert "could not verify the checkout" in result.targets[0].reason
 
 
 # -- 1. merge proof without gh ------------------------------------------------------------
