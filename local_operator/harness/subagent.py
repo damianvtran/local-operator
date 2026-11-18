@@ -2866,10 +2866,24 @@ def _make_runner(
                     # manager accumulator even when retention evicts its row.
                     await _dispose_child(child)
                     await _hand_up_late_browser_surfaces(child, parent_session)
-                    # The job is still running here (in-process resume is
-                    # refused), but dispose has released the child's claim so
-                    # exact cleanup can take the cross-process execution lease.
-                    browser_error = await _retry_stranded_child_browser(child)
+
+                    def close_allowed() -> bool:
+                        # Pause can land during disposal or recovery.
+                        record = comms._record(job_id) if comms is not None else None
+                        return record is None or not record.paused
+
+                    # Dispose releases the child's claim so exact cleanup can
+                    # take the lease; no close is admitted after a pause lands.
+                    try:
+                        browser_error = await _retry_stranded_child_browser(
+                            child, close_allowed=close_allowed
+                        )
+                    except asyncio.CancelledError:
+                        # The exact cleanup has already unwound its lease. A
+                        # cancelled request does not prove the surface closed.
+                        # i18n: ignore structured eval-harness cleanup verdict (no product UI)
+                        browser_error = "browser cleanup retry cancelled; closure unverified"
+                        raise
                 finally:
                     # Record the child's cleanup VERDICT on its owning ancestor
                     # BEFORE detaching the job edge (review round 2,
@@ -3129,7 +3143,9 @@ async def _finish_child_browser(
     return fates
 
 
-async def _retry_stranded_child_browser(child: "Session") -> str:
+async def _retry_stranded_child_browser(
+    child: "Session", *, close_allowed: Callable[[], bool] | None = None
+) -> str:
     """Retry one exact failed close; never search session history for a target."""
     from local_operator.browser_bridge.resources import cleanup_exact
     from local_operator.session_lease import SessionLeaseHeldError
@@ -3142,7 +3158,8 @@ async def _retry_stranded_child_browser(child: "Session") -> str:
     resource = browser.resource
     value = resource.record
     if (
-        resource.directory != child._transcript.directory
+        (close_allowed is not None and not close_allowed())
+        or resource.directory != child._transcript.directory
         or value.get("generation") != generation
         or value.get("state") in ("closed", "retained")
         or not value.get("terminal")
@@ -3162,6 +3179,7 @@ async def _retry_stranded_child_browser(child: "Session") -> str:
             resource.directory,
             generation,
             config_dir=root if resource.directory.parent == root / "sessions" else None,
+            close_allowed=close_allowed,
         )
     except SessionLeaseHeldError:
         # i18n: ignore structured eval-harness cleanup verdict (no product UI)
@@ -3170,7 +3188,7 @@ async def _retry_stranded_child_browser(child: "Session") -> str:
         # i18n: ignore structured eval-harness cleanup verdict (no product UI)
         return "browser cleanup retry failed; closure unverified"
     # Bridge details and arbitrary state strings are not safe receipt text.
-    if result.state in ("closed", "retained"):
+    if result.admission_skipped or result.state in ("closed", "retained"):
         return ""
     if result.state == "pending":
         # i18n: ignore structured eval-harness cleanup verdict (no product UI)

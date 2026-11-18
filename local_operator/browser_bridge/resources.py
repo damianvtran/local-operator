@@ -223,6 +223,7 @@ def _host_noun(host: str) -> str:
 class BrowserCleanupResult:
     state: str
     detail: str = ""
+    admission_skipped: bool = False
 
 
 #: The only keys of a peer's `owner_recover` refusal receipt that are ever rendered,
@@ -1345,7 +1346,9 @@ class BrowserResource:
         self.record["state"] = "allocating"
         self._save()
 
-    async def finish(self, generation: str, outcome: str) -> BrowserCleanupResult:
+    async def finish(
+        self, generation: str, outcome: str, *, close_allowed: Callable[[], bool] | None = None
+    ) -> BrowserCleanupResult:
         try:
             self.initialize()
         except (RuntimeError, OSError, ValueError):
@@ -1373,6 +1376,8 @@ class BrowserResource:
                 # does not exist on that peer, so the read would fail and the tab
                 # would live on with nobody able to close it.
                 if self.ownership_mode() is False:
+                    if close_allowed is not None and not close_allowed():
+                        return BrowserCleanupResult("pending", admission_skipped=True)
                     return await self.finish_degraded()
                 if self.record.get("unresolved_surface_id") and not self.record.get("surface_id"):
                     return BrowserCleanupResult(
@@ -1383,6 +1388,10 @@ class BrowserResource:
                     await self.client().call(
                         "owner_retain", {**self.params(), "reason": self.record["retention"]}
                     )
+                # Recovery can yield to a pause. Check again after the awaits,
+                # at admission of the close rather than only at retry entry.
+                if close_allowed is not None and not close_allowed():
+                    return BrowserCleanupResult("pending", admission_skipped=True)
                 result = await self.client().call(
                     "owner_finish", {**self.params(), "outcome": outcome}
                 )
@@ -1585,8 +1594,12 @@ async def cleanup_exact(
     generation: str,
     *,
     config_dir: Path | None = None,
+    close_allowed: Callable[[], bool] | None = None,
 ) -> BrowserCleanupResult:
-    """Explicit operator recovery of ONE terminal generation, never a sweep.
+    """Recover ONE terminal generation, never a sweep.
+
+    For an in-process child retry, ``close_allowed`` carries the live pause
+    fence to close admission after recovery, under the execution lease.
 
     The execution lease rejects live/uncertain owners. A dead PID only permits
     acquiring that lease; matching durable terminal intent is still mandatory.
@@ -1641,7 +1654,10 @@ async def cleanup_exact(
             return BrowserCleanupResult("unresolved", "ownership changed; no action taken")
         resource.adopt(str(value["generation"]))
         return await asyncio.wait_for(
-            resource.finish(resource.generation, str(value["terminal"])), 5.0
+            resource.finish(
+                resource.generation, str(value["terminal"]), close_allowed=close_allowed
+            ),
+            5.0,
         )
     except TimeoutError:
         return BrowserCleanupResult("pending", "browser cleanup deadline exceeded")

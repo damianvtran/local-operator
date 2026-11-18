@@ -214,17 +214,28 @@ async def test_completed_subagent_disposes_its_owned_browser_surface(tmp_path, m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("final_state", ["closed", "pending", "cancelled", "dispose_closed"])
+@pytest.mark.parametrize(
+    "final_state",
+    ["closed", "pending", "cancelled", "dispose_closed", "paused_in_dispose", "paused_in_recover"],
+)
 async def test_terminal_child_retries_only_after_dispose(tmp_path, monkeypatch, final_state):
     """Real child runner and exact on-disk cleanup, with a disposable protocol peer."""
     from local_operator.browser_bridge import resources
     from local_operator.harness import subagent as subagent_mod
-    from local_operator.session_lease import SessionLeaseHeldError, acquire_session_lease
+    from local_operator.session_lease import (
+        SessionLeaseHeldError,
+        acquire_session_lease,
+    )
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     original_build = subagent_mod._build_child_session
     retry_entered = asyncio.Event()
     answer_retry = asyncio.Event()
+    dispose_entered = asyncio.Event()
+    answer_dispose = asyncio.Event()
+    retry_recover_entered = asyncio.Event()
+    bridge_cancelled = asyncio.Event()
+    paused = final_state in ("paused_in_dispose", "paused_in_recover")
     exact_identity: list[bool] = []
     surface = "bridge:44:synthetic-capability"
     children: list[Session] = []
@@ -241,6 +252,14 @@ async def test_terminal_child_retries_only_after_dispose(tmp_path, monkeypatch, 
     class Bridge:
         async def call(self, method, params):
             if method == "owner_recover":
+                if final_state == "paused_in_recover" and len(exact_identity) == 2:
+                    retry_recover_entered.set()
+                    try:
+                        await answer_retry.wait()
+                    except asyncio.CancelledError:
+                        # Let the recovery reply win the cancellation race so
+                        # this tests admission, not transport cancellation.
+                        bridge_cancelled.set()
                 return {"ownership_version": 1, "state": "owned", "tab": surface}
             assert method == "owner_finish"
             original = children[0]._browser.resource.params()
@@ -252,12 +271,22 @@ async def test_terminal_child_retries_only_after_dispose(tmp_path, monkeypatch, 
                 )
             )
             finish_count = len(exact_identity)
-            if finish_count == 2 and final_state == "dispose_closed":
+            if finish_count == 2:
+                if final_state == "dispose_closed":
+                    return {"state": "closed"}
+                if final_state == "paused_in_dispose":
+                    dispose_entered.set()
+                    await answer_dispose.wait()
+            if finish_count == 3 and paused:
                 return {"state": "closed"}
             if finish_count <= 2:
                 raise ConnectionError("synthetic-capability")
             retry_entered.set()
-            await answer_retry.wait()
+            try:
+                await answer_retry.wait()
+            except asyncio.CancelledError:
+                bridge_cancelled.set()
+                raise
             if final_state == "pending":
                 raise ConnectionError("synthetic-capability")
             return {"state": "closed"}
@@ -267,7 +296,18 @@ async def test_terminal_child_retries_only_after_dispose(tmp_path, monkeypatch, 
     parent = make_session(tmp_path, OneShotStream())
     try:
         job_id = parent._launch_subagent(label="sub", prompt="finish")
-        if final_state != "dispose_closed":
+        if paused:
+            if final_state == "paused_in_dispose":
+                await wait_for(dispose_entered.is_set)
+                pause = asyncio.create_task(parent.subagent_comms.pause(job_id))
+                await wait_for(lambda: parent.subagent_comms._record(job_id).paused)
+                answer_dispose.set()
+                assert (await pause).outcome == "paused"
+            else:
+                await wait_for(retry_recover_entered.is_set)
+                assert (await parent.subagent_comms.pause(job_id)).outcome == "paused"
+                assert bridge_cancelled.is_set()
+        elif final_state != "dispose_closed":
             await wait_for(
                 lambda: retry_entered.is_set()
                 or (job := parent.jobs.get(job_id)) is not None
@@ -292,6 +332,7 @@ async def test_terminal_child_retries_only_after_dispose(tmp_path, monkeypatch, 
                 acquire_session_lease(resource.directory)
             if final_state == "cancelled":
                 assert await parent.jobs.cancel(job_id)
+                assert bridge_cancelled.is_set()
             else:
                 answer_retry.set()
         await wait_for(
@@ -304,21 +345,22 @@ async def test_terminal_child_retries_only_after_dispose(tmp_path, monkeypatch, 
         assert record["state"] == (
             "closed" if final_state in ("closed", "dispose_closed") else "cleanup_pending"
         )
-        assert exact_identity == [True] * (2 if final_state == "dispose_closed" else 3)
+        assert exact_identity == [True] * (2 if final_state == "dispose_closed" or paused else 3)
         assert not (resource.directory / ".execution-lease").exists()
         assert not (resource.directory / ".session.pid").exists()
+        acquire_session_lease(resource.directory).release()
         job = parent.jobs.get(job_id)
         assert job is not None and job.child_jobs is None
-        assert job.status == ("cancelled" if final_state == "cancelled" else "completed")
+        assert job.status == ("cancelled" if final_state == "cancelled" or paused else "completed")
+        reason = {
+            "pending": "browser cleanup still pending after exact retry",
+            "cancelled": "browser cleanup retry cancelled; closure unverified",
+        }.get(final_state)
         assert parent._cleanup_verdict_errors() == (
-            (
-                f"descendant {child.session_id} cleanup unverified: "
-                "browser cleanup still pending after exact retry",
-            )
-            if final_state == "pending"
-            else ()
+            (f"descendant {child.session_id} cleanup unverified: {reason}",) if reason else ()
         )
     finally:
+        answer_dispose.set()
         answer_retry.set()
         await parent.dispose()
 
