@@ -80,6 +80,32 @@ from local_operator.tunnels.errors import LoginRequired
 #: Where the run endpoints live, relative to the API host.
 RUNS_PATH = "/v1/remote-compute/runs"
 
+#: Where the capacity read lives. A SIBLING of ``RUNS_PATH``, not a child of it:
+#: the tiers this deployment can provision answer "can a run be admitted at
+#: all", which a surface asks BEFORE it offers one.
+CAPACITY_PATH = "/v1/remote-compute/capacity"
+
+#: The keys a run object may carry that are SECRETS when they appear at all.
+#:
+#: Named here rather than in a surface because the create wrapper is this
+#: module's fact: ``run_token`` authenticates the pod and ``tunnel`` carries its
+#: cloudflared credentials, both returned once on the 201 (see the module
+#: docstring). :meth:`RemoteComputeClient.create_run` already refuses to carry
+#: either, and this list is the same rule applied to a whole body a surface is
+#: about to print or return — defence in depth, not a response to a known leak.
+SECRET_RUN_FIELDS: tuple[str, ...] = ("run_token", "tunnel")
+
+
+def without_secrets(payload: dict[str, Any]) -> dict[str, Any]:
+    """The run without the fields that are secrets when they appear at all.
+
+    ONE implementation for every surface that publishes a run (the CLI's
+    ``--remote-status`` and the desktop route both call this): two copies of a
+    filter is how one surface comes to print a field the other redacts.
+    """
+    return {key: value for key, value in payload.items() if key not in SECRET_RUN_FIELDS}
+
+
 #: The keys the v1 response envelope may carry, and nothing else.
 #:
 #: The envelope is ``{"msg": "<sentence>", "result": <body>}``. Membership is
@@ -371,6 +397,12 @@ class RemoteComputeClient:
     ) -> _Reply:
         """One call, as the payload plus the status that answered it.
 
+        ``path`` is relative to the API HOST, so each endpoint names its own
+        collection (``RUNS_PATH``, ``CAPACITY_PATH``) at the call site and this
+        method never has to be told which family it is speaking for. The
+        alternative — a base-path parameter — would be a knob whose only two
+        values are those constants.
+
         The STATUS comes back beside the payload because 200 and 201 mean
         different things on a create (replay versus created) and the body is
         identical either way, so the status is not recoverable from it.
@@ -393,7 +425,7 @@ class RemoteComputeClient:
         try:
             response = await self.client.request(
                 method,
-                self.api_url + RUNS_PATH + path,
+                self.api_url + path,
                 json=body,
                 params=params,
                 headers=headers,
@@ -445,7 +477,7 @@ class RemoteComputeClient:
                 "binding; a mapping could name a network this device is not in"
             )
         reply = await self._request(
-            "POST", "", body=request.to_json(), idempotency_key=idempotency_key
+            "POST", RUNS_PATH, body=request.to_json(), idempotency_key=idempotency_key
         )
         wrapper = reply.payload
         run = wrapper.get("run") if isinstance(wrapper, dict) else None
@@ -468,7 +500,7 @@ class RemoteComputeClient:
         network's run must stop the watch with a typed failure rather than
         reporting that run's status as the one being watched.
         """
-        reply = await self._request("GET", _run_path(identifier))
+        reply = await self._request("GET", RUNS_PATH + _run_path(identifier))
         run = _single_run(reply.payload, identifier)
         if expected_network is not None:
             _confirm_network(run, expected=expected_network)
@@ -508,12 +540,34 @@ class RemoteComputeClient:
             params["network_id"] = network_id
         if status is not None:
             params["status"] = status
-        reply = await self._request("GET", "", params=params)
+        reply = await self._request("GET", RUNS_PATH, params=params)
         page = reply.payload
         runs = page.get("runs") if isinstance(page, dict) else None
         if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
             raise RemoteComputeError("Radient returned an invalid remote-compute run list.")
         return runs
+
+    async def capacity(self) -> list[dict[str, Any]]:
+        """Every tier this deployment can provision, and whether each is ready now.
+
+        PASSED THROUGH, because the answer is the deployment's own config: a row
+        is ``{tier, ready, detail}`` and carries no rate, so a surface renders
+        readiness and never a price (there is no money in this answer to read).
+
+        THE TWO SPELLINGS ARE BOTH THE TIER LIST. The runs page answers
+        ``result["runs"]``, so a sibling read that answered ``result["tiers"]``
+        is the same body one level in, and a bare list is the same rows
+        unwrapped. Accepting both rather than picking one is deliberate: a
+        stricter reader would blank a surface's readiness over a wrapping choice
+        the contract does not settle, and the rows are what a caller uses either
+        way. A body that is neither is refused, as an invalid run page is.
+        """
+        reply = await self._request("GET", CAPACITY_PATH)
+        page = reply.payload
+        rows = page.get("tiers") if isinstance(page, dict) else page
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise RemoteComputeError("Radient returned an invalid remote-compute capacity list.")
+        return rows
 
     async def cancel_run(self, identifier: str) -> dict[str, Any]:
         """Cancel a run. Idempotent: cancelling a finished run is not an error.
@@ -526,7 +580,9 @@ class RemoteComputeClient:
         body about another run would make this command report work cancelled
         that nobody cancelled.
         """
-        reply = await self._request("POST", _run_path(identifier) + "/cancel", empty_body_ok=True)
+        reply = await self._request(
+            "POST", RUNS_PATH + _run_path(identifier) + "/cancel", empty_body_ok=True
+        )
         if not reply.payload:
             return {}
         return _single_run(reply.payload, identifier)
@@ -540,7 +596,7 @@ class RemoteComputeClient:
         an answer about another run would have this method report work deleted
         that nobody deleted.
         """
-        reply = await self._request("DELETE", _run_path(identifier), empty_body_ok=True)
+        reply = await self._request("DELETE", RUNS_PATH + _run_path(identifier), empty_body_ok=True)
         if not reply.payload:
             return {}
         return _single_run(reply.payload, identifier)
@@ -661,6 +717,7 @@ def run_max_hours(payload: dict[str, Any]) -> float | None:
 
 
 __all__ = [
+    "CAPACITY_PATH",
     "CreatedRun",
     "ENVELOPE_KEYS",
     "KNOWN_RUN_OUTCOMES",
@@ -668,6 +725,7 @@ __all__ = [
     "MAX_IDEMPOTENCY_KEY_BYTES",
     "REPLAY_STATUS",
     "RUNS_PATH",
+    "SECRET_RUN_FIELDS",
     "TERMINAL_RUN_STATUSES",
     "RemoteComputeClient",
     "charged_amount",
@@ -680,4 +738,5 @@ __all__ = [
     "run_network",
     "run_outcome",
     "run_status",
+    "without_secrets",
 ]

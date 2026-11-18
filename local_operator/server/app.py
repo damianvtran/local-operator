@@ -72,6 +72,7 @@ from local_operator.server.routes import (
     desktop_projects,
     desktop_quota,
     desktop_radient,
+    desktop_remote_compute,
     desktop_runtimes,
     desktop_session_files,
     desktop_sessions,
@@ -1201,6 +1202,15 @@ app.include_router(desktop_notifications.router)
 # desktop family rather than beside `desktop_profiles` because the preference
 # is renderer state, not a session or catalogue surface.
 app.include_router(desktop_preferences.router)
+# The RADIENT REMOTE COMPUTE surface (``features.remote_compute``): the device
+# dropdown's Radient group, the runs panel and the three writes. Registered last in
+# the desktop family for the reason every block above gives — FastAPI matches in
+# declaration order — and its templates collide with nothing declared earlier:
+# ``/v1/desktop/remote-compute`` is a literal path, its ``/runs`` child and
+# ``/runs/{id}[/cancel]`` children sit under that literal, and no block above
+# declares that prefix. The prefix is what keeps it off the sessions router's
+# ``/v1/desktop/{...}`` family, of which there is none.
+app.include_router(desktop_remote_compute.router)
 # Notification sounds (`features.notification_sounds`): the built-in and custom
 # sound list, rendered audio, and add/rename/remove of the user's own sounds.
 # Its own `/v1/notification-sounds` prefix shares nothing with the desktop
