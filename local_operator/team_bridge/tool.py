@@ -826,6 +826,25 @@ def _resolve_reply(
     return {**args, "to": to, "thread_id": row["thread_id"]}, None
 
 
+def _directory_answer_can_be_stale(answer: Any) -> bool:
+    """Whether a MISS on ``answer`` is worth ONE forced re-read of the directory.
+
+    ``TeamBridgeClient.directory_cached`` reports, on the answer itself
+    (``DirectoryAnswer.from_cache``), whether its cache served it. A cached
+    answer may be ``DIRECTORY_CACHE_TTL_S`` old, so a name or endpoint it cannot
+    resolve may be a teammate who joined, enrolled or turned their bridge on
+    since — one re-read finds them. An answer this call read off the wire is
+    already the server's latest, and re-reading it returns the same members: a
+    redundant read is exactly what the directory cache exists to remove
+    (incident 2026-11-17).
+
+    A client that carries no origin (a test fake, or any transport without a
+    cache) is treated as possibly stale: one re-read on a miss is never WRONG,
+    only redundant, which is the behaviour before the cache existed.
+    """
+    return getattr(answer, "from_cache", True)
+
+
 async def _resolve_named_recipient(
     runtime: "BridgeRuntime", requested: str
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
@@ -854,11 +873,16 @@ async def _resolve_named_recipient(
     try:
         directory = await runtime.client.directory_cached(runtime.tenant_id)
         allowlist = await runtime.client.allowlist(tenant_id=runtime.tenant_id)
-        if _name_misses(requested, members_from_allowlist(directory, allowlist)):
-            # The directory is cached (``directory_cached``): a name the cached
+        if _name_misses(requested, members_from_allowlist(directory, allowlist)) and (
+            _directory_answer_can_be_stale(directory)
+        ):
+            # The directory is cached (``directory_cached``): a name the CACHED
             # answer cannot deliver to may be a teammate who joined or turned
             # their bridge on since, so re-read it ONCE before the recorded
             # resolution below decides — one forced read per miss, never more.
+            # A miss on an answer this call just read off the wire is the
+            # server's latest already, and re-reading it would be the redundant
+            # third GET the cache exists to remove.
             directory = await runtime.client.directory_cached(runtime.tenant_id, refresh=True)
     except Exception as failure:
         try:
@@ -930,9 +954,10 @@ def _name_misses(requested: str, candidates: Any) -> bool:
 # MEMORY for ``DIRECTORY_CACHE_TTL_S`` per account and tenant
 # (``TeamBridgeClient.directory_cached``, incident 2026-11-17: a read per named
 # send multiplied traffic from an address the edge rate-limits), and every
-# resolution that misses on it re-reads once, so a new teammate, a new endpoint
-# or a bridge just turned on is found on the first call. The explicit
-# ``directory`` op always reads fresh.
+# resolution that misses on that CACHED answer re-reads once, so a new teammate,
+# a new endpoint or a bridge just turned on is found on the first call. A miss
+# on an answer read off the wire during the same call is not re-read: it is
+# already the server's latest. The explicit ``directory`` op always reads fresh.
 
 #: The directory's own cap (agent-server ``bridgeDirectoryMaxMembers``); the hub
 #: has no cursor, so the tool pages that bounded answer locally.
@@ -1174,9 +1199,11 @@ async def _resolve_dm_target(
     if endpoint_id and params.target != "agent":
         return None, "", _error("endpoint_id addresses an agent; a human needs account_id")
     # The directory is cached per account and tenant (``directory_cached``); a
-    # ``not_reachable`` answer from the cached copy may be a teammate who joined,
+    # ``not_reachable`` answer from the CACHED copy may be a teammate who joined,
     # enrolled or came back since, so it is re-read ONCE before it is believed.
-    # Any other refusal (a conflict, self-target) is not about freshness.
+    # A miss on an answer this call just read off the wire is already the
+    # server's latest, so it is believed as it stands. Any other refusal (a
+    # conflict, self-target) is not about freshness.
     resolved: tuple[dict[str, str] | None, str, dict[str, Any] | None] = (None, "", None)
     for refresh in (False, True):
         try:
@@ -1202,7 +1229,11 @@ async def _resolve_dm_target(
             paired_from_to=paired_from_to,
         )
         refusal = resolved[2]
-        if refusal is None or refusal.get("code") != "not_reachable":
+        if (
+            refusal is None
+            or refusal.get("code") != "not_reachable"
+            or not (_directory_answer_can_be_stale(directory))
+        ):
             break
     return resolved
 
