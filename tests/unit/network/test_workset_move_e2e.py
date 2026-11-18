@@ -431,6 +431,7 @@ def test_an_offload_without_the_import_grant_moves_only_the_conversation(
     moved = _move(server_a, monkeypatch, to=target, confirm_working_set=stays["scope_digest"])
     assert moved["ok"] is True, moved
     assert moved["working_set"]["transferred"] is False
+    assert "side" not in moved["working_set"]
     assert not (bhome / "proj" / ".worktrees" / "feat").exists()
 
 
@@ -449,8 +450,16 @@ def test_the_grant_makes_the_offload_carry_the_files(
     moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
 
     assert moved["ok"] is True, moved
-    # The files are on B. (The OFFLOAD receipt on A carries A's pre-invite block, not
-    # B's restore outcome — pre-existing, outside this change.)
+    # A'S RECEIPT REPORTS B'S ANSWER (#4245 receipt fix): before, it carried A's
+    # pre-invite block (``transferred: false``) and said the files stayed.
+    ws = moved["working_set"]
+    assert ws["side"] == "source" and ws["transferred"] is True, ws
+    (row,) = [r for r in ws["worktrees"] if r["path"].endswith("feat")]
+    assert row["state"] in ("transferred", "restored"), ws
+    from local_operator.network import workset_text
+
+    text = "\n".join(workset_text.receipt_lines(ws, source="A"))
+    assert "went to" in text and "stays" not in text and "stayed" not in text, text
     # B restores after ``done`` on its own pull thread, so A's answer can come first.
     import time
 
@@ -459,6 +468,29 @@ def test_the_grant_makes_the_offload_carry_the_files(
     while not (landed / ".git").exists() and time.monotonic() < deadline:
         time.sleep(0.2)
     assert "unpushed work" in git(landed, "log", "-1", "--format=%s")
+
+
+def test_an_offload_whose_destination_answer_is_lost_says_check_there(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, rig: Rig, bhome: Path
+) -> None:
+    """#4245: the files were sent but B's ``done`` carried no outcome (an older peer,
+    a lost frame): A's receipt says "check on B", never that the files stayed."""
+    from local_operator.network import workset_text
+
+    server_a, server_b, _host, _port = pair
+    _setup(pair, monkeypatch, rig, bhome)
+    _grant_import(server_b, server_a)
+    target = server_b.identity.device_id
+    sends = _move(server_a, monkeypatch, to=target, dry_run=True)["working_set"]
+    monkeypatch.setattr(workset_move, "destination_outcome", lambda block: None)
+
+    moved = _move(server_a, monkeypatch, to=target, confirm_working_set=sends["scope_digest"])
+
+    assert moved["ok"] is True, moved
+    ws = moved["working_set"]
+    assert ws["side"] == "source" and ws["state"] == "outcome_unknown", ws
+    text = "\n".join(workset_text.receipt_lines(ws, source="A"))
+    assert "check on" in text and "stay" not in text, text
 
 
 def test_a_grant_revoked_after_consent_refuses_the_transfer_on_the_destination(

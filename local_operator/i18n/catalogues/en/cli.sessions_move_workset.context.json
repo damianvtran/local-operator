@@ -403,5 +403,20 @@
     "role": "CLI/TUI move confirmation, indented under one worktree row",
     "tone": "plain, factual, calm",
     "note": "{remote} is a git remote URL, verbatim. 'by policy' = this program's own address rules (private/internal addresses are never contacted), not a missing permission."
+  },
+  "cli.sessions_move_workset.receipt_sent": {
+    "role": "CLI receipt headline on the SOURCE of a move: the destination reports how many worktrees it received",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "ICU plural on {count}; {device} is the destination device name, verbatim. 'restores' = puts the worktrees back in place."
+  },
+  "cli.sessions_move_workset.receipt_sent_row": {
+    "role": "CLI receipt row on the SOURCE: one worktree the destination received",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{path} is a ~/-path and {device} a device name; keep both verbatim."
+  },
+  "cli.sessions_move_workset.receipt_sent_unknown": {
+    "role": "CLI receipt line on the SOURCE when the destination's answer about the working files never arrived",
+    "tone": "plain, factual, calm; this is a safety confirmation, not an alarm",
+    "note": "{device} is the destination device name, verbatim. Must not imply the files stayed: they may be on {device}."
   }
 }

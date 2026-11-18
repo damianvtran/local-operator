@@ -82,5 +82,8 @@
   "cli.sessions_move_workset.reason.too_many_worktrees": "本次迁移包含的工作树数量超过目标设备一次可接受的数量",
   "cli.sessions_move_workset.reason.clone_parent_refused": "目标设备只会把缺失的仓库克隆到已经存放你的仓库的文件夹中（或设置 mesh.move.working_set_roots）",
   "cli.sessions_move_workset.reason.kept_as_confirmed": "按本次迁移的确认，它留在源设备上",
-  "cli.sessions_move_workset.probe_refused_by_policy": "{device}不会连接{remote}：该地址被策略拒绝（不是公共主机）"
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device}不会连接{remote}：该地址被策略拒绝（不是公共主机）",
+  "cli.sessions_move_workset.receipt_sent": "工作文件已发送到 {device}：{count, plural, other {已在那里收到#个worktree}}；对话到达时 {device} 会恢复它们。",
+  "cli.sessions_move_workset.receipt_sent_row": "已将 {path} 发送到 {device}。",
+  "cli.sessions_move_workset.receipt_sent_unknown": "工作文件已发送到 {device}，但它的答复没有送达本设备；请在 {device} 上查看哪些 worktree 已恢复。本设备仍保留自己的副本。"
 }

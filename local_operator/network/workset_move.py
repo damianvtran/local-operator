@@ -1719,6 +1719,102 @@ def arrival_receipt(
     return out
 
 
+#: The row states a destination may report back to the source on ``done`` (offload
+#: receipt fix, #4245). A closed set: the source renders each through its own table.
+OUTCOME_ROW_STATES = frozenset({"transferred", "restored", "pending_restore", "left_behind"})
+
+
+def destination_outcome(block: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """What THIS destination tells the source about the working set, on ``done``.
+
+    WHY IT EXISTS: an offload's receipt is built on the SOURCE, which before this
+    showed its own pre-invite block (``transferred: false``) — with the grant the files
+    landed here while the source's receipt said they stayed. The ``done`` frame is the
+    one authenticated channel back (it already carries the scheduled-state block).
+    The restore runs AFTER ``done`` (design §4 phase 4, so a slow restore never holds
+    the source's completion wait), so a planned row reads ``transferred``: its
+    artifacts arrived and verified against the digest the source committed on. Only
+    ``path`` / ``state`` / ``reason`` per row travel — never a recipe, a destination
+    path or any text the source would display as a command.
+    """
+    if not isinstance(block, Mapping):
+        return None
+    rows: list[dict[str, Any]] = []
+    for raw in block.get("worktrees") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        state = str(raw.get("state") or "")
+        state = "transferred" if state in ("planned", "transferring") else state
+        if state not in OUTCOME_ROW_STATES:
+            continue
+        row: dict[str, Any] = {"path": str(raw.get("path") or ""), "state": state}
+        if raw.get("reason"):
+            row["reason"] = str(raw["reason"])
+        rows.append(row)
+    return {"transferred": True, "worktrees": rows}
+
+
+def source_receipt(
+    planned: Mapping[str, Any], outcome: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """The SOURCE's receipt block for an offload that carried its working set.
+
+    ``planned`` is this device's own pre-invite block (computed before the prepare
+    decided the files travel, so its rows read as staying); ``outcome`` is the
+    destination's ``done``-frame answer or ``None`` when none arrived.
+
+    THE PEER SUPPLIES NO TEXT (same threat model as
+    ``workset_probe.scrub_peer_block``): rows are matched by this device's OWN paths,
+    a state outside :data:`OUTCOME_ROW_STATES` is ignored, a reason survives only as
+    a code ``workset_text`` renders through its closed table (an unknown code shows as
+    the code, never a command), and nothing else from the peer is kept — so a hostile
+    destination can change which of our own rows reads as arrived, never what the
+    receipt tells the user to run or where to look. ``side: "source"`` selects the
+    source-perspective sentences. No answer reads ``outcome_unknown`` ("check on
+    <dest>"), never "stayed": the source committed, so the files may well be there.
+    """
+    out = dict(planned)
+    out["side"] = "source"
+    if not isinstance(outcome, Mapping) or outcome.get("transferred") is not True:
+        out["state"] = "outcome_unknown"
+        out.pop("transferred", None)
+        return out
+    from local_operator.network import workset_text
+
+    by_path: dict[str, Mapping[str, Any]] = {}
+    for item in outcome.get("worktrees") or []:
+        if isinstance(item, Mapping):
+            by_path.setdefault(str(item.get("path") or ""), item)
+    rows = []
+    for raw in out.get("worktrees") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        row = {k: v for k, v in raw.items() if k not in ("reason",)}
+        if raw.get("reason"):
+            row["reason"] = raw["reason"]
+        hit = by_path.get(str(raw.get("path") or ""))
+        state = str(hit.get("state") or "") if hit is not None else ""
+        if state in OUTCOME_ROW_STATES:
+            row["state"] = state
+            reason = str(hit.get("reason") or "") if hit is not None else ""
+            row.pop("reason", None)
+            if state == "left_behind":
+                row["reason"] = (
+                    reason if workset_text.known_reason(reason) else "not_transferred"
+                )
+        else:
+            # Our row, unnamed by the answer (or a state outside the closed set): the
+            # destination did not say what became of it. Not "stayed" — this
+            # block's own pre-invite state predates the prepare that sent the files.
+            row["state"] = "outcome_unknown"
+            row.pop("reason", None)
+        rows.append(row)
+    out["worktrees"] = rows
+    out["transferred"] = True
+    out["state"] = "transferred"
+    return out
+
+
 def resume_pending(server: Any) -> list[str]:
     """Relay start: retry every ``workset-in/<sid>`` still ``pending_restore``.
 

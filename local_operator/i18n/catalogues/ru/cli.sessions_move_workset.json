@@ -82,5 +82,8 @@
   "cli.sessions_move_workset.reason.too_many_worktrees": "в переносе больше рабочих деревьев, чем устройство назначения принимает за раз",
   "cli.sessions_move_workset.reason.clone_parent_refused": "устройство назначения клонирует отсутствующий репозиторий только в папку, где уже есть ваши репозитории (или задайте mesh.move.working_set_roots)",
   "cli.sessions_move_workset.reason.kept_as_confirmed": "остаётся на исходном устройстве, как было подтверждено для этого переноса",
-  "cli.sessions_move_workset.probe_refused_by_policy": "{device} не будет обращаться к {remote}: политика отклоняет этот адрес (это не публичный хост)"
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} не будет обращаться к {remote}: политика отклоняет этот адрес (это не публичный хост)",
+  "cli.sessions_move_workset.receipt_sent": "Рабочие файлы отправлены на {device}: там {count, plural, one {получен # worktree} few {получено # worktree} many {получено # worktree} other {получено # worktree}}; {device} восстанавливает их при прибытии разговора.",
+  "cli.sessions_move_workset.receipt_sent_row": "{path} отправлен на {device}.",
+  "cli.sessions_move_workset.receipt_sent_unknown": "Рабочие файлы отправлены на {device}, но его ответ не дошёл до этого устройства; проверьте на {device}, какие worktree восстановлены. На этом устройстве осталась его копия."
 }

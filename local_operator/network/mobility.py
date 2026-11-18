@@ -772,6 +772,8 @@ class _Progress:
         self._refusals: dict[str, tuple[str, str, str]] = {}
         self._carry: dict[str, dict[str, Any]] = {}
         self._arrival_active: dict[str, bool] = {}
+        self._workset: dict[str, tuple[dict[str, Any], str]] = {}
+        self._workset_sent: dict[str, str] = {}
 
     def note(self, session_id: str, phase: SessionMovePhase) -> None:
         """Record a phase AND signal its marker.
@@ -875,6 +877,37 @@ class _Progress:
         with self._lock:
             return self._arrival_active.get(session_id, False)
 
+    def note_workset(self, session_id: str, outcome: dict[str, Any], *, from_device: str) -> None:
+        """Record the DESTINATION's working-set outcome for a move this device invited.
+
+        Same channel as :meth:`note_carry` (the ``done`` frame): an offload's receipt
+        is built HERE, on the source, and without the destination's answer it could
+        only show this device's pre-invite block — "the files stayed" while they had
+        landed there (#4245). ``from_device`` is the authenticated link peer, so only
+        the invited destination's answer is read back (see :meth:`workset`).
+        """
+        with self._lock:
+            self._workset[session_id] = (dict(outcome), from_device)
+
+    def note_workset_sent(self, session_id: str, *, to_device: str) -> None:
+        """This device COMMITTED a move whose prepare bound a working set to
+        ``to_device``: the files were sent. The offload receipt then says "check on
+        <dest>" when no answer arrives — never the pre-invite "they stay" (#4245)."""
+        with self._lock:
+            self._workset_sent[session_id] = to_device
+
+    def workset_sent(self, session_id: str, *, to_device: str) -> bool:
+        with self._lock:
+            return self._workset_sent.get(session_id) == to_device
+
+    def workset(self, session_id: str, *, from_device: str) -> dict[str, Any] | None:
+        """The outcome ``from_device`` reported for ``session_id``, or ``None``."""
+        with self._lock:
+            found = self._workset.get(session_id)
+        if found is None or found[1] != from_device:
+            return None
+        return dict(found[0])
+
     def forget(self, session_id: str) -> None:
         """Drop EVERYTHING this relay holds in memory for ``session_id``.
 
@@ -899,6 +932,8 @@ class _Progress:
             # Same scoping: an earlier move's "was active" must never claim a resume
             # was requested for this one.
             self._arrival_active.pop(session_id, None)
+            self._workset.pop(session_id, None)
+            self._workset_sent.pop(session_id, None)
             prefix = self._event_key(session_id, "")
             for key in [item for item in self._events if item.startswith(prefix)]:
                 del self._events[key]
@@ -2510,6 +2545,15 @@ def _destination_move(
             # receipt can report what the destination's supervisor state means for
             # the wakes that just arrived (see ``MoveCarryBlock``).
             done_frame["carry"] = carry_block
+        if workset_digest_value:
+            # THE SOURCE'S OFFLOAD RECEIPT READS THIS (#4245): the transfer verified
+            # against the digest it committed on, so the planned rows are here. Rows
+            # only (path/state/reason) — ``workset_move.destination_outcome``.
+            from local_operator.network import workset_move
+
+            ws_outcome = workset_move.destination_outcome(arrival_workset)
+            if ws_outcome is not None:
+                done_frame["working_set"] = ws_outcome
         transport.ask(done_frame)
     except Moved:
         logger.debug("mobility: %s did not acknowledge the handoff", session_id)
@@ -6171,6 +6215,7 @@ def _source_commit(
         from local_operator.network import workset_move
 
         workset_move.mark_departed(server, session_id, to_device)
+        progress_for(server).note_workset_sent(session_id, to_device=to_device)
     return {
         "result": "committed",
         "phase": "committed",
@@ -6341,6 +6386,13 @@ def _source_done(server: "RelayServer", link: "PeerLink", frame: dict[str, Any])
     carry_block = frame.get("carry")
     if isinstance(carry_block, dict) and carry_block:
         progress_for(server).note_carry(session_id, carry_block)
+    ws_outcome = frame.get("working_set")
+    if isinstance(ws_outcome, dict):
+        # Kept raw here and reduced to closed row states against THIS device's own
+        # rows at the receipt (``workset_move.source_receipt``), never displayed as sent.
+        progress_for(server).note_workset(
+            session_id, copy.deepcopy(ws_outcome), from_device=link.device_id
+        )
     progress_for(server).note(session_id, "done")
     progress_for(server).signal(session_id, "done")
     _audit(server, AUDIT_DONE, session_id, link.device_id)
@@ -8006,6 +8058,16 @@ def _offload(
         if carry_block:
             result_doc["carry"] = carry_block
         if offload_workset is not None:
+            ws_answer = progress.workset(session_id, from_device=target_device)
+            if ws_answer is not None or progress.workset_sent(session_id, to_device=target_device):
+                # THE FILES WERE SENT (the prepare bound them and this device
+                # committed): the receipt reports the DESTINATION's answer, or
+                # "outcome unknown — check there", never this device's pre-invite
+                # block, which read as "stayed" (#4245). Whether files travel is
+                # decided at the prepare, after this block was computed.
+                from local_operator.network import workset_move
+
+                offload_workset = workset_move.source_receipt(offload_workset, ws_answer)
             result_doc["working_set"] = offload_workset
         # WHAT THIS DEVICE ASKED THE DESTINATION TO DO ON ARRIVAL (UI #1978 QA Q-1).
         # The engage is the destination's post-``done`` work and its outcome is never

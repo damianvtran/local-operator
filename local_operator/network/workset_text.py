@@ -122,6 +122,12 @@ def reason_text(code: str) -> str:
     return _t(builder()) if builder is not None else code
 
 
+def known_reason(code: str) -> bool:
+    """Is ``code`` one this build renders through its closed table? (a peer's reason
+    survives on the source's offload receipt only then — ``workset_move.source_receipt``)"""
+    return code in _REASONS or code in _REASON_ALIASES
+
+
 def device_label(block: Mapping[str, Any], fallback: str = "") -> str:
     destination = _member(block, "destination")
     return str(destination.get("name") or destination.get("device_id") or fallback)
@@ -363,6 +369,10 @@ def receipt_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
     no prompt was shown, so the receipt is the only place a text-mode user learns
     WHICH worktrees, withheld files and dependency trees stayed. The headline is
     followed by the same row lines the confirmation summary prints."""
+    if block.get("side") == "source":
+        # THE OFFLOAD'S INVITER (the source) reports the destination's answer from
+        # the source's side: "went to <dest>", never "arrived here".
+        return _source_side_lines(block, source=source_label(block, source))
     if block.get("transferred") is True:
         return _transferred_lines(block, source=source_label(block, source))
     if block.get("transferred") is not False:
@@ -417,6 +427,38 @@ def _stayed_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
                 "  " + _t(_ws.leaves_behind(path=str(item.get("path") or ""), command=command))
             )
     return out
+
+
+def _source_side_lines(block: Mapping[str, Any], *, source: str) -> list[str]:
+    """The SOURCE's receipt of an offload that carried its working set (#4245): what
+    the destination said it received, or — with no answer — that the outcome is
+    unknown and where to check. Never "stayed" for a row this device sent: it
+    committed, so the files may well be on the destination."""
+    device = device_label(block, "?")
+    rows = [r for r in block.get("worktrees") or [] if isinstance(r, dict)]
+    if block.get("transferred") is not True:
+        return [_t(_ws.receipt_sent_unknown(device=device))]
+    sent = [r for r in rows if r.get("state") in ("transferred", "restored", "pending_restore")]
+    unknown = [r for r in rows if r.get("state") == "outcome_unknown"]
+    left = [r for r in rows if r.get("state") == "left_behind"]
+    lines = [_t(_ws.receipt_sent(device=device, count=len(sent)))]
+    for row in sent[:_LIST_LIMIT]:
+        path = str(row.get("path") or "")
+        lines.append("  " + _t(_ws.receipt_sent_row(path=path, device=device)))
+    if unknown:
+        lines.append(_t(_ws.receipt_sent_unknown(device=device)))
+    for row in left[:_LIST_LIMIT]:
+        lines.append(
+            "  "
+            + _t(
+                _ws.receipt_left_row(
+                    path=str(row.get("path") or ""),
+                    source=source,
+                    reason=reason_text(str(row.get("reason") or "")),
+                )
+            )
+        )
+    return lines
 
 
 def _transferred_lines(block: Mapping[str, Any], *, source: str) -> list[str]:

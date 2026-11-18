@@ -82,5 +82,8 @@
   "cli.sessions_move_workset.reason.too_many_worktrees": "the move carried more worktrees than the destination accepts at once",
   "cli.sessions_move_workset.reason.clone_parent_refused": "the destination clones a missing repository only into a folder that already holds your repositories (or set mesh.move.working_set_roots)",
   "cli.sessions_move_workset.reason.kept_as_confirmed": "it stays on the source, as confirmed for this move",
-  "cli.sessions_move_workset.probe_refused_by_policy": "{device} will not contact {remote}: its address is refused by policy (not a public host)"
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} will not contact {remote}: its address is refused by policy (not a public host)",
+  "cli.sessions_move_workset.receipt_sent": "Working files went to {device}: {count, plural, one {# worktree} other {# worktrees}} received there; {device} restores them as the conversation arrives.",
+  "cli.sessions_move_workset.receipt_sent_row": "Sent {path} to {device}.",
+  "cli.sessions_move_workset.receipt_sent_unknown": "Working files were sent to {device}, but its answer did not reach this device; check on {device} which worktrees were restored. This device still has its copy."
 }

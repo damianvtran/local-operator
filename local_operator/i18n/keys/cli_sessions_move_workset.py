@@ -316,6 +316,18 @@ def receipt_rewrite(*, detail: str) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_rewrite", {"detail": detail})
 
 
+def receipt_sent(*, device: str, count: int | float) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_sent", {"device": device, "count": count})
+
+
+def receipt_sent_row(*, path: str, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_sent_row", {"path": path, "device": device})
+
+
+def receipt_sent_unknown(*, device: str) -> Msg:
+    return Msg("cli.sessions_move_workset.receipt_sent_unknown", {"device": device})
+
+
 def receipt_transferred(*, source: str, count: int | float) -> Msg:
     return Msg("cli.sessions_move_workset.receipt_transferred", {"source": source, "count": count})
 

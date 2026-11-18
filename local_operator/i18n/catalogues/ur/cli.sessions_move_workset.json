@@ -82,5 +82,8 @@
   "cli.sessions_move_workset.reason.too_many_worktrees": "اس منتقلی میں اس سے زیادہ ورک ٹری تھے جتنے منزل ایک ساتھ قبول کرتی ہے",
   "cli.sessions_move_workset.reason.clone_parent_refused": "منزل غائب ریپوزٹری کو صرف ایسے فولڈر میں کلون کرتی ہے جس میں پہلے سے آپ کی ریپوزٹریز ہوں (یا mesh.move.working_set_roots سیٹ کریں)",
   "cli.sessions_move_workset.reason.kept_as_confirmed": "یہ ماخذ پر ہی رہے گا، جیسا کہ اس منتقلی کے لیے تصدیق کی گئی تھی",
-  "cli.sessions_move_workset.probe_refused_by_policy": "{device} {remote} سے رابطہ نہیں کرے گی: پالیسی اس کا پتہ مسترد کرتی ہے (یہ عوامی ہوسٹ نہیں ہے)"
+  "cli.sessions_move_workset.probe_refused_by_policy": "{device} {remote} سے رابطہ نہیں کرے گی: پالیسی اس کا پتہ مسترد کرتی ہے (یہ عوامی ہوسٹ نہیں ہے)",
+  "cli.sessions_move_workset.receipt_sent": "ورکنگ فائلیں {device} کو بھیجی گئیں: وہاں {count, plural, one {# worktree موصول ہوا} other {# worktrees موصول ہوئے}}؛ گفتگو پہنچنے پر {device} انہیں بحال کرتی ہے۔",
+  "cli.sessions_move_workset.receipt_sent_row": "{path} کو {device} پر بھیجا گیا۔",
+  "cli.sessions_move_workset.receipt_sent_unknown": "ورکنگ فائلیں {device} کو بھیجی گئیں، لیکن اس کا جواب اس ڈیوائس تک نہیں پہنچا؛ {device} پر دیکھیں کہ کون سے worktrees بحال ہوئے۔ اس ڈیوائس کے پاس اپنی کاپی اب بھی ہے۔"
 }
