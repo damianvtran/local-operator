@@ -227,8 +227,9 @@ HANDSHAKE_CAP_NOTICE_S = 60.0
 #: address could open eight connections, send nothing, and hold every global slot
 #: for ``handshake_timeout_s`` each — so a real member's inbound dial from anywhere
 #: else was dropped at the global cap. Strictly BELOW the global cap so no single
-#: source can ever fill the pool: with 3 of 8, at least two other sources (or a
-#: member's reconnect) always find a slot. Not lower than 3 because a legitimate
+#: source can ever fill the pool: with 3 of 8, five slots always stay outside any
+#: ONE source's reach (an occupancy cap — see "WHAT THIS IS NOT" below for what
+#: several sources together can still do). Not lower than 3 because a legitimate
 #: source can hold more than one at once — a pairing holds a slot until the code
 #: is typed while the same device's member dial or listing probe runs beside it.
 #:
@@ -240,7 +241,23 @@ HANDSHAKE_CAP_NOTICE_S = 60.0
 #: NAT, or the same host) shares the flooder's budget and can still be delayed —
 #: the relay cannot tell them apart before authentication, which is the point. An
 #: established link is never subject to this: it is counted only pre-auth.
+#:
+#: WHAT THIS IS NOT: a guarantee that a member finds a slot. It caps the share of
+#: the global pool ONE source can OCCUPY; it does not reserve anything for members.
+#: N distinct sources at 3 each still fill the global 8 (three sources suffice), and
+#: then every inbound dial is dropped at the global cap exactly as before. Sizing
+#: the global cap against a multi-source flood is a separate decision (PR #4290,
+#: deferred S1), not something this per-source share can buy.
+#:
+#: The EFFECTIVE cap is clamped to ``max(1, max_handshakes - 1)`` at start
+#: (:func:`resolve_preauth_limits`): a configured per-source value at or above the
+#: global cap would let one source fill the pool again, which is the one thing
+#: this setting exists to prevent.
 DEFAULT_MAX_HANDSHAKES_PER_SOURCE = 3
+#: The registry's ceiling for ``network.max_handshakes_per_source``, matching
+#: ``network.max_handshakes``' own maximum (a per-source share above the global
+#: ceiling is meaningless and clamped anyway).
+MAX_HANDSHAKES_PER_SOURCE_LIMIT = 1024
 
 #: The per-source ATTEMPT rate: a token bucket of ``PREAUTH_RATE_BURST`` new
 #: connections, refilled at ``PREAUTH_RATE_PER_S``.
@@ -277,8 +294,86 @@ PREAUTH_SOURCE_MAP_MAX = 1024
 #: slot-starving flood exploits. 2 s leaves an order of magnitude over a slow
 #: intercontinental RTT. After the first byte the ordinary handshake budget
 #: applies unchanged — a join that waits on a typed code is not cut by this.
+#:
+#: The first-byte wait runs INSIDE the handshake budget, not before it: the
+#: handshake deadline is taken at the start of the handshake thread, and the
+#: first-byte wait is ``min(first_byte_timeout_s, time left on that deadline)``, so
+#: the worst-case slot hold stays ``handshake_timeout_s`` (PR #4290 S2; before it,
+#: a byte at 1.99 s bought a fresh 10 s, a 12 s hold). ``0`` disables the wait.
 DEFAULT_FIRST_BYTE_TIMEOUT_S = 2.0
+#: The registry's ceiling for ``network.first_byte_timeout_s``. Anything above the
+#: handshake budget is already capped by it at run time; 60 s bounds the knob so a
+#: typo cannot read as "no first-byte deadline" while appearing to set one.
+FIRST_BYTE_TIMEOUT_MAX_S = 60.0
 DEFAULT_AUTOSTART = True
+
+
+def resolve_preauth_limits(settings: NetworkSettings) -> tuple[int, float, list[str]]:
+    """The EFFECTIVE per-source cap and first-byte wait, plus one line per bad value.
+
+    Run once when the relay is constructed, before ``bind``/``listen``, so a value
+    that would break the pre-auth bounds is caught before any stranger can connect.
+
+    WHY AN INVALID VALUE FALLS BACK TO THE DEFAULT rather than refusing to start:
+    these are tuning knobs on the device's only inbound path. A relay that will not
+    start over a hand-edited ``first_byte_timeout_s: -1`` takes the whole mesh off
+    this device, which is a far worse outcome than running with the shipped bound;
+    and it is the existing posture of the neighbouring pre-auth knob, where
+    ``max_handshakes`` below 1 is clamped (``max(1, ...)``) rather than raised and
+    ``handshake_timeout_s`` is not validated at all. ``lop config edit`` and
+    ``/settings`` already reject out-of-range values through the registry's
+    ``minimum``/``maximum``; this path only sees what bypassed them (a hand edit).
+    The returned lines are the bounded diagnostic: at most one per key, logged
+    once by the caller at construction — never per connection.
+
+    ``first_byte_timeout_s == 0`` is an explicit DISABLE and is preserved (only the
+    handshake budget then applies). Negative, NaN, infinite or above
+    :data:`FIRST_BYTE_TIMEOUT_MAX_S` is invalid. A per-source cap that is not an
+    integer in ``1..MAX_HANDSHAKES_PER_SOURCE_LIMIT`` is invalid; a valid one is
+    then clamped to ``max(1, max_handshakes - 1)`` (not a diagnostic: the setting is
+    legal, just bounded by its sibling).
+    """
+    problems: list[str] = []
+    raw_cap: Any = settings.max_handshakes_per_source
+    if (
+        isinstance(raw_cap, bool)
+        or not isinstance(raw_cap, int)
+        or not 1 <= raw_cap <= MAX_HANDSHAKES_PER_SOURCE_LIMIT
+    ):
+        problems.append(
+            f"network.max_handshakes_per_source={raw_cap!r} is not an integer in "
+            f"1..{MAX_HANDSHAKES_PER_SOURCE_LIMIT}; using {DEFAULT_MAX_HANDSHAKES_PER_SOURCE}"
+        )
+        raw_cap = DEFAULT_MAX_HANDSHAKES_PER_SOURCE
+    global_cap = max(1, int(settings.max_handshakes))
+    per_source = min(int(raw_cap), max(1, global_cap - 1))
+    raw_wait: Any = settings.first_byte_timeout_s
+    if (
+        isinstance(raw_wait, bool)
+        or not isinstance(raw_wait, (int, float))
+        or not math.isfinite(raw_wait)
+        or not 0.0 <= raw_wait <= FIRST_BYTE_TIMEOUT_MAX_S
+    ):
+        problems.append(
+            f"network.first_byte_timeout_s={raw_wait!r} is not 0 (disabled) or a finite "
+            f"number of seconds in 0..{FIRST_BYTE_TIMEOUT_MAX_S:g}; using "
+            f"{DEFAULT_FIRST_BYTE_TIMEOUT_S:g}"
+        )
+        raw_wait = DEFAULT_FIRST_BYTE_TIMEOUT_S
+    return per_source, float(raw_wait), problems
+
+
+def _coerce_or_raw(kind: Callable[[Any], Any], value: Any) -> Any:
+    """``kind(value)``, or ``value`` untouched when it will not coerce (see caller)."""
+    if isinstance(value, bool):
+        return value
+    if kind is int and isinstance(value, float):
+        # ``int(2.5)`` would silently truncate; keep it so validation names it.
+        return int(value) if value.is_integer() else value
+    try:
+        return kind(value)
+    except (TypeError, ValueError, OverflowError):
+        return value
 
 
 def preauth_source_key(addr: Any) -> str:
@@ -358,13 +453,25 @@ class PreauthLimiter:
             self._inflight[source] = self._inflight.get(source, 0) + 1
             return ""
 
-    def release(self, source: str) -> None:
+    def release(self, source: str, *, refund: bool = False) -> None:
+        """Give back one in-flight unit; ``refund=True`` also returns its token.
+
+        The refund is for an admission that never became a connection attempt the
+        relay did any work for — the GLOBAL cap refused it straight after. Without
+        it, global exhaustion caused by OTHER sources would drain this source's
+        rate budget, so a member retrying into a saturated relay would come out
+        of the flood rate-limited for its own patience (PR #4290 R1-M1). Capped at
+        ``burst`` and a no-op for a bucket already evicted (evicted == full).
+        """
         with self._lock:
             count = self._inflight.get(source, 0) - 1
             if count > 0:
                 self._inflight[source] = count
             else:
                 self._inflight.pop(source, None)
+            if refund and source in self._buckets:
+                tokens, last = self._buckets[source]
+                self._buckets[source] = (min(self.burst, tokens + 1.0), last)
 
     def inflight(self, source: str) -> int:
         with self._lock:
@@ -913,14 +1020,16 @@ class NetworkSettings:
             max_inflight=int(read(("network", "max_inflight"), wire.MAX_INFLIGHT)),
             max_links=int(read(("network", "max_links"), DEFAULT_MAX_LINKS)),
             max_handshakes=int(read(("network", "max_handshakes"), DEFAULT_MAX_HANDSHAKES)),
-            max_handshakes_per_source=int(
-                read(
-                    ("network", "max_handshakes_per_source"),
-                    DEFAULT_MAX_HANDSHAKES_PER_SOURCE,
-                )
+            # Coerced leniently: a value that will not coerce is carried as-is so
+            # ``resolve_preauth_limits`` names it and falls back to the default,
+            # instead of a hand-edited string taking the relay down in this reader.
+            max_handshakes_per_source=_coerce_or_raw(
+                int,
+                read(("network", "max_handshakes_per_source"), DEFAULT_MAX_HANDSHAKES_PER_SOURCE),
             ),
-            first_byte_timeout_s=float(
-                read(("network", "first_byte_timeout_s"), DEFAULT_FIRST_BYTE_TIMEOUT_S)
+            first_byte_timeout_s=_coerce_or_raw(
+                float,
+                read(("network", "first_byte_timeout_s"), DEFAULT_FIRST_BYTE_TIMEOUT_S),
             ),
             autostart=bool(read(("network", "autostart"), DEFAULT_AUTOSTART)),
         )
@@ -6114,7 +6223,15 @@ class RelayServer:
         self._cap_notice_at = 0.0
         #: The PER-SOURCE pre-auth bound (``DEFAULT_MAX_HANDSHAKES_PER_SOURCE``),
         #: checked before the global slot so one address can never fill the pool.
-        self._preauth = PreauthLimiter(per_source=self.settings.max_handshakes_per_source)
+        #: Validated and clamped HERE, before ``bind``/``listen`` (see
+        #: :func:`resolve_preauth_limits` for why a bad value falls back rather
+        #: than refusing to start); the effective values are what every
+        #: connection uses, so a later ``settings`` read cannot disagree with them.
+        per_source, first_byte_s, problems = resolve_preauth_limits(self.settings)
+        for problem in problems:
+            logger.warning("mesh relay: %s", problem)
+        self._preauth = PreauthLimiter(per_source=per_source)
+        self._first_byte_timeout_s = first_byte_s
         #: Per-cause notice windows for the per-source and first-byte refusals.
         #: Separate from ``_cap_notice_at`` so a flood of one cause cannot silence
         #: the global cap's own row, and locked because the first-byte notice is
@@ -7599,11 +7716,14 @@ class RelayServer:
             source = preauth_source_key(addr)
             refusal = self._preauth.admit(source)
             if refusal:
-                self._note_preauth_refusal(addr, refusal)
+                # Closed before the audit write, so a refused flood never holds a
+                # descriptor while the accept thread waits on the audit lock.
                 _close_quietly(sock)
+                self._note_preauth_refusal(addr, refusal)
                 continue
             if not self._handshake_slots.acquire(blocking=False):
-                self._preauth.release(source)
+                # REFUNDED: the global cap, not this source, refused it (R1-M1).
+                self._preauth.release(source, refund=True)
                 self._note_handshake_cap(addr)
                 sock.close()
                 continue
@@ -7620,11 +7740,12 @@ class RelayServer:
             except BaseException:
                 # A thread that never started must not leave its slot or its
                 # active-handshake count held: either would stall a handoff that
-                # waits on reload_blocker() becoming empty.
+                # waits on reload_blocker() becoming empty. Per-source FIRST, for
+                # the same reason as in ``_handshake_inbound``.
+                self._preauth.release(source)
                 with self._handshakes_lock:
                     self._handshakes_active -= 1
                 self._handshake_slots.release()
-                self._preauth.release(source)
                 _close_quietly(sock)
                 raise
 
@@ -7719,44 +7840,89 @@ class RelayServer:
         try:
             self._run_inbound_handshake(sock, addr)
         finally:
-            with self._handshakes_lock:
-                self._handshakes_active -= 1
-            self._handshake_slots.release()
             # The per-source unit is released on the same bracket as the global
             # slot, so it ends when the PRE-AUTH phase ends: an admitted link
             # lives on in its own threads and is no longer charged to its source.
             # Re-derived from ``addr`` (a pure function, so the same key the accept
             # loop charged) rather than passed in, keeping this method's
             # ``(sock, addr)`` signature that test doubles wrap.
+            #
+            # ORDER MATTERS: per-source BEFORE the global permit (PR #4290
+            # S60334-1). Released the other way round, the accept loop can win the
+            # freed permit for a new connection while this source's reservation is
+            # still counted, so reservations held could briefly exceed permits held
+            # and a source at its cap be refused for a slot it no longer occupies.
+            # Releasing it first keeps "reservations <= permits held" at every
+            # instant, on this path and the accept loop's rollback alike.
             self._preauth.release(preauth_source_key(addr))
+            with self._handshakes_lock:
+                self._handshakes_active -= 1
+            self._handshake_slots.release()
 
-    def _await_first_byte(self, sock: socket.socket, addr: Any) -> bool:
-        """Wait up to ``first_byte_timeout_s`` for the hello's first byte; peek, not read.
+    def _await_first_byte(self, sock: socket.socket, addr: Any, deadline: float) -> bool:
+        """Wait for the hello's first byte inside the handshake budget; peek, not read.
 
-        ``True`` means a byte is buffered and the handshake may proceed. On a
-        silent deadline the socket is closed and the refusal is named once per
-        window in the local audit (stage ``first_byte``); an immediate EOF or a
-        socket error is closed without a row, exactly as an empty connect that
-        reached the hello read was before (scans must not flood the log).
+        ``True`` means a byte is buffered and the handshake may proceed. The wait is
+        ``min(first_byte_timeout_s, time left on deadline)``: ``deadline`` is the
+        handshake deadline the caller took BEFORE this wait, so a late first byte
+        spends the handshake budget rather than starting a fresh one (S2).
+
+        On a silent deadline the socket is CLOSED FIRST and only then is the
+        refusal named (once per window) in the local audit (stage ``first_byte``):
+        the audit write takes a lock and may touch disk, and a slot-starving flood
+        is exactly when the relay cannot afford to hold a dead descriptor while it
+        waits on that. An immediate EOF or a peer reset is closed without a row,
+        exactly as an empty connect that reached the hello read was before (scans
+        must not flood the log). A failure of the socket SETUP itself (settimeout
+        or the peek raising anything else) is closed too and logged through a
+        throttled diagnostic, since that is the relay's fault, not the peer's.
         """
-        timeout = float(self.settings.first_byte_timeout_s)
-        if timeout <= 0:
+        configured = self._first_byte_timeout_s
+        if configured <= 0:
             # Disabled by configuration: the handshake budget alone applies.
             return True
+        timeout = min(configured, max(0.0, deadline - time.monotonic()))
         try:
-            sock.settimeout(timeout)
+            sock.settimeout(max(timeout, 0.001))
             first = sock.recv(1, socket.MSG_PEEK)
         except TimeoutError:
+            _close_quietly(sock)
             self._note_preauth_refusal(addr, "first_byte_timeout", stage="first_byte")
+            return False
+        except ConnectionError:
             _close_quietly(sock)
             return False
-        except OSError:
+        except Exception as exc:  # noqa: BLE001 — any setup failure must close the socket
             _close_quietly(sock)
+            self._note_preauth_setup_failure(addr, exc)
             return False
         if not first:
             _close_quietly(sock)
             return False
         return True
+
+    def _note_preauth_setup_failure(self, addr: Any, exc: BaseException) -> None:
+        """One developer-log line per window for a socket that failed pre-auth setup.
+
+        Throttled on the same per-cause window as the audit notices so a fault that
+        repeats per connection (a broken socket option, an exhausted kernel) writes
+        one line a minute, not one per accept. Developer log, not the audit: the
+        audit's cause enum names what a PEER did, and this is the relay's own fault.
+        """
+        now = time.time()
+        with self._preauth_notice_lock:
+            last = self._preauth_notice_at.get("setup_error", 0.0)
+            if last and now - last < HANDSHAKE_CAP_NOTICE_S:
+                return
+            self._preauth_notice_at["setup_error"] = now
+        logger.warning(
+            "mesh relay: pre-auth socket setup failed for %s (%s: %s); closed. "
+            "Further failures are suppressed for %ds.",
+            preauth_source_key(addr),
+            type(exc).__name__,
+            exc,
+            int(HANDSHAKE_CAP_NOTICE_S),
+        )
 
     def _run_inbound_handshake(self, sock: socket.socket, addr: Any) -> None:
         """Complete a listener-side handshake, or close silently and audit.
@@ -7764,15 +7930,19 @@ class RelayServer:
         NO REPLY on any failure: an open port that answers wrong keys with errors is
         an oracle, and the reason is written to the LOCAL audit record instead.
         """
+        # THE HANDSHAKE DEADLINE IS TAKEN FIRST, then the first-byte wait runs
+        # inside it (PR #4290 S2): the worst-case slot hold stays
+        # ``handshake_timeout_s``. Taking it after the wait let a byte at the last
+        # moment of the first-byte window buy a whole fresh budget (2 s + 10 s).
+        deadline = wire.deadline_in(self.settings.handshake_timeout_s)
         # THE FIRST-BYTE DEADLINE (``DEFAULT_FIRST_BYTE_TIMEOUT_S``): a connection
         # that has sent nothing within it is closed before it can hold its slot
         # for the whole handshake budget. A PEEK, so the hello's first byte stays
-        # in the kernel buffer for ``wire.FrameReader`` to read as before. The
-        # ordinary budget starts only once that byte is here, so a slow-but-real
-        # peer gets every second it had before.
-        if not self._await_first_byte(sock, addr):
+        # in the kernel buffer for ``wire.FrameReader`` to read as before. A real
+        # dialer's first byte lands within milliseconds (see the constant), so the
+        # budget it shares costs a slow-but-real peer nothing measurable.
+        if not self._await_first_byte(sock, addr, deadline):
             return
-        deadline = wire.deadline_in(self.settings.handshake_timeout_s)
         mode = "member"
         network_id = ""
         peer_addr = f"{addr[0]}:{addr[1]}" if isinstance(addr, tuple) else str(addr)

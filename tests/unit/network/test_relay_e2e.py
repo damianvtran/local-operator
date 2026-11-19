@@ -965,6 +965,11 @@ def test_silent_connections_are_capped_before_authentication(
         identity=identity.mint(root_a, name="cap-device"),
         audit=audit_mod.AuditLog(root_a),
     )
+    # This cell pins the GLOBAL cap from ONE loopback source. The per-source share is
+    # clamped below the global cap by design (PR #4290 S4), so from one address the
+    # global cap is unreachable; widen that share on this relay only, so the global
+    # path under test is the one that fires (its own cells: test_relay_preauth_limits).
+    server._preauth = relay.PreauthLimiter(per_source=99)  # noqa: SLF001
     host, port = server.bind()
     server.bind_control()
     server.start()
@@ -1025,6 +1030,11 @@ def test_a_cap_drop_names_itself_in_the_local_audit(
         identity=identity.mint(root_a, name="cap-audit-device"),
         audit=audit_mod.AuditLog(root_a),
     )
+    # This cell pins the GLOBAL cap from ONE loopback source. The per-source share is
+    # clamped below the global cap by design (PR #4290 S4), so from one address the
+    # global cap is unreachable; widen that share on this relay only, so the global
+    # path under test is the one that fires (its own cells: test_relay_preauth_limits).
+    server._preauth = relay.PreauthLimiter(per_source=99)  # noqa: SLF001
     host, port = server.bind()
     server.bind_control()
     server.start()

@@ -125,8 +125,10 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
         DEFAULT_ADVERTISE_HOSTS,
+        DEFAULT_FIRST_BYTE_TIMEOUT_S,
         DEFAULT_LISTEN_ADDRESS,
         DEFAULT_MAX_HANDSHAKES,
+        DEFAULT_MAX_HANDSHAKES_PER_SOURCE,
         DEFAULT_PORT,
     )
     from local_operator.network.rollouts import DEFAULT_ROLLOUT_ON_UPDATE
@@ -344,6 +346,8 @@ def _consumer_defaults() -> dict[str, object]:
         "network.listen_address": DEFAULT_LISTEN_ADDRESS,
         "network.port": DEFAULT_PORT,
         "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
+        "network.max_handshakes_per_source": DEFAULT_MAX_HANDSHAKES_PER_SOURCE,
+        "network.first_byte_timeout_s": DEFAULT_FIRST_BYTE_TIMEOUT_S,
         # Read fresh by every update front end and re-read by the rollout driver
         # (``rollouts.rollout_policy`` resolves an absent key against exactly
         # this constant — the reader's own fallback, not a restatement).

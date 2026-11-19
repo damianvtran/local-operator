@@ -2231,12 +2231,15 @@ its `_consumer_defaults()` entry (`AGENTS.md`, "Adding a configuration key").
 | `network.max_inflight` | `("network","max_inflight")` | `64` | `network/server.py` |
 | `network.max_links` | `("network","max_links")` | `32` | `network/server.py` |
 | `network.max_handshakes` | `("network","max_handshakes")` | `8` | `network/relay.py:NetworkSettings.from_config` (§2.1) — UNAUTHENTICATED connections in flight, not links: the slot is released when the handshake resolves, so this bounds neither `max_links` nor an established link |
+| `network.max_handshakes_per_source` | `("network","max_handshakes_per_source")` | `3` | `network/relay.py:resolve_preauth_limits` — the pre-auth slots ONE source (IP, IPv6 /64) may occupy; effective value clamped to `max(1, max_handshakes - 1)` at start, invalid hand-edits fall back to `3` with one warning. An occupancy cap, not a member reservation: several sources at 3 each can still fill the global cap |
+| `network.first_byte_timeout_s` | `("network","first_byte_timeout_s")` | `2.0` (`0` disables; max `60`) | `network/relay.py:RelayServer._await_first_byte` — how long a new connection may stay silent before it is closed; runs INSIDE `handshake_timeout_s` (the deadline is taken first), so the worst-case slot hold stays the handshake budget |
 | `network.epoch_max_age_s` | `("network","epoch_max_age_s")` | `2592000` (30 days — a policy statement about the operator's device-loss window, not a derived number; §8.4) | quoted here only: **NOT IMPLEMENTED in this build** — no consumer exists (`network/membership.py:epoch_is_aged` is named by the design and is not in the tree), `SecretState` carries no epoch mint time, and no phase decision consults an age; §8.4's STATUS note is the record of the deferral |
 
 Audit retention keys are `mesh-incident-response.md`'s. Nothing here is a secret,
 so every key is `--json`-safe. **The registry half is a SECTION-WIDE GAP, and this
 table must not be read as "all of these are in `/settings`":** the keys in the
-registry today are `network.max_handshakes` (added by the round that introduced it),
+registry today are `network.max_handshakes`, `network.max_handshakes_per_source` and
+`network.first_byte_timeout_s` (each added by the round that introduced it),
 the three of §10.4's own "where can peers reach us" set — `network.listen_address`,
 `network.port`, `network.advertise_hosts`, registered with the rows that made that
 section's sanctioned remedy reachable from a surface — and the audit retention keys.

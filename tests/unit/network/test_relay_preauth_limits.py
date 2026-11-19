@@ -331,3 +331,309 @@ def test_an_established_link_is_unaffected_by_a_later_flood_from_its_own_address
     finally:
         for sock in flood:
             sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation (PR #4290): ordering, validation, the shared budget, refunds
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSlots:
+    """A ``BoundedSemaphore`` that records each release into a shared order log."""
+
+    def __init__(self, inner: Any, order: list[str]) -> None:
+        self._inner = inner
+        self._order = order
+
+    def acquire(self, blocking: bool = True) -> bool:
+        return self._inner.acquire(blocking=blocking)
+
+    def release(self) -> None:
+        self._order.append("global")
+        self._inner.release()
+
+    @property
+    def _value(self) -> int:
+        return self._inner._value  # noqa: SLF001
+
+
+class _ScriptedListener:
+    """Hands the accept loop one connection, then stops it — so the REAL loop runs
+    on the test thread and its exceptions surface here, not in a daemon thread."""
+
+    def __init__(self, server: relay.RelayServer, conn: Any, addr: Any) -> None:
+        self._server = server
+        self._pending = [(conn, addr)]
+
+    def accept(self) -> tuple[Any, Any]:
+        if self._pending:
+            return self._pending.pop()
+        self._server._stop.set()  # noqa: SLF001
+        raise OSError("scripted listener exhausted")
+
+    def close(self) -> None:
+        pass
+
+
+class _InlineThread:
+    """Runs a handshake thread's target synchronously inside ``start``."""
+
+    def __init__(self, *, target: Any, args: tuple[Any, ...], name: str, daemon: bool) -> None:
+        self._target, self._args = target, args
+
+    def start(self) -> None:
+        self._target(*self._args)
+
+
+class _UnstartableThread(_InlineThread):
+    def start(self) -> None:
+        raise RuntimeError("can't start new thread")
+
+
+@pytest.fixture()
+def unstarted_relay(root: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    root_a = root / "unstarted"
+    server = serve_shaped_relay(
+        root_a,
+        monkeypatch,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+        identity=identity.mint(root_a, name="unstarted-device"),
+        audit=audit_mod.AuditLog(root_a),
+    )
+    order: list[str] = []
+    real_release = server._preauth.release  # noqa: SLF001
+
+    def recording_release(source: str, **kwargs: Any) -> None:
+        # ``**kwargs`` so the ORDER assertion, not a signature, is what fails
+        # against a build that releases the other way round.
+        order.append("source")
+        real_release(source, **kwargs)
+
+    monkeypatch.setattr(server._preauth, "release", recording_release)  # noqa: SLF001
+    server._handshake_slots = _RecordingSlots(server._handshake_slots, order)  # type: ignore[assignment]  # noqa: SLF001
+    return server, order
+
+
+def _run_accept_once(server: relay.RelayServer, addr: Any) -> tuple[socket.socket, socket.socket]:
+    ours, theirs = socket.socketpair()
+    server._listener = _ScriptedListener(server, ours, addr)  # type: ignore[assignment]  # noqa: SLF001
+    server._accept_loop()  # noqa: SLF001
+    return ours, theirs
+
+
+def test_the_source_reservation_is_released_before_the_global_permit_on_a_normal_exit(
+    unstarted_relay: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, order = unstarted_relay
+    monkeypatch.setattr(relay.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(server, "_run_inbound_handshake", lambda sock, addr: sock.close())
+    ours, theirs = _run_accept_once(server, ("203.0.113.5", 4000))
+    theirs.close()
+    assert order == ["source", "global"], order
+    assert server._preauth.inflight("203.0.113.5") == 0  # noqa: SLF001
+
+
+def test_the_source_reservation_is_released_before_the_global_permit_when_the_thread_cannot_start(
+    unstarted_relay: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, order = unstarted_relay
+    monkeypatch.setattr(relay.threading, "Thread", _UnstartableThread)
+    with pytest.raises(RuntimeError, match="can't start"):
+        _run_accept_once(server, ("203.0.113.5", 4000))
+    assert order == ["source", "global"], order
+    assert server._preauth.inflight("203.0.113.5") == 0  # noqa: SLF001
+    assert server._handshake_slots._value == server.settings.max_handshakes  # noqa: SLF001
+
+
+def test_a_global_cap_refusal_releases_and_refunds_the_source_without_touching_the_pool(
+    unstarted_relay: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-M1: global exhaustion caused by OTHER sources must not spend this
+    source's rate tokens, and the refused attempt never held a global permit."""
+    server, order = unstarted_relay
+    for _ in range(server.settings.max_handshakes):
+        assert server._handshake_slots.acquire(blocking=False)  # noqa: SLF001
+    limiter = server._preauth  # noqa: SLF001
+    ours, theirs = _run_accept_once(server, ("203.0.113.5", 4000))
+    theirs.close()
+    assert order == ["source"], "no global release for a permit that was never taken"
+    assert limiter.inflight("203.0.113.5") == 0
+    tokens, _last = limiter._buckets["203.0.113.5"]  # noqa: SLF001
+    assert tokens == pytest.approx(limiter.burst), "the refused attempt's token came back"
+
+
+def test_a_refund_returns_one_token_capped_at_the_burst() -> None:
+    now = [10.0]
+    limiter = relay.PreauthLimiter(per_source=9, burst=2, rate_per_s=0.0, clock=lambda: now[0])
+    assert limiter.admit("a") == ""
+    limiter.release("a", refund=True)
+    assert limiter.admit("a") == "" and limiter.admit("a") == ""
+    assert limiter.admit("a") == "handshake_source_rate", "two tokens, not three"
+    limiter.release("a", refund=True)
+    limiter.release("a", refund=True)
+    limiter.release("never-seen", refund=True)  # no bucket: a no-op, not a crash
+    assert limiter._buckets["a"][0] == pytest.approx(2.0)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("overrides", "per_source", "first_byte", "problems"),
+    [
+        ({}, 3, 2.0, 0),
+        ({"first_byte_timeout_s": 0}, 3, 0.0, 0),  # explicit disable preserved
+        ({"first_byte_timeout_s": 0.5}, 3, 0.5, 0),
+        ({"first_byte_timeout_s": -1.0}, 3, 2.0, 1),
+        ({"first_byte_timeout_s": float("nan")}, 3, 2.0, 1),
+        ({"first_byte_timeout_s": float("inf")}, 3, 2.0, 1),
+        ({"first_byte_timeout_s": 61.0}, 3, 2.0, 1),
+        ({"first_byte_timeout_s": "soon"}, 3, 2.0, 1),
+        ({"max_handshakes_per_source": 0}, 3, 2.0, 1),
+        ({"max_handshakes_per_source": "lots"}, 3, 2.0, 1),
+        ({"max_handshakes_per_source": True}, 3, 2.0, 1),
+        # S4 / R1-M2: a legal value at or above the global cap is clamped below it.
+        ({"max_handshakes_per_source": 8}, 7, 2.0, 0),
+        ({"max_handshakes": 4, "max_handshakes_per_source": 10}, 3, 2.0, 0),
+        ({"max_handshakes": 1, "max_handshakes_per_source": 3}, 1, 2.0, 0),
+    ],
+)
+def test_the_preauth_settings_are_validated_and_clamped(
+    overrides: dict[str, Any], per_source: int, first_byte: float, problems: int
+) -> None:
+    settings = relay.NetworkSettings(**overrides)
+    got_cap, got_wait, got_problems = relay.resolve_preauth_limits(settings)
+    assert (got_cap, got_wait, len(got_problems)) == (per_source, first_byte, problems)
+
+
+def test_an_invalid_value_falls_back_with_one_warning_before_the_relay_listens(
+    root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    root_a = root / "invalid"
+    with caplog.at_level("WARNING", logger=relay.logger.name):
+        server = serve_shaped_relay(
+            root_a,
+            monkeypatch,
+            settings=relay.NetworkSettings(
+                port=0, listen_address="127.0.0.1", first_byte_timeout_s=float("nan")
+            ),
+            identity=identity.mint(root_a, name="invalid-device"),
+            audit=audit_mod.AuditLog(root_a),
+        )
+    assert server._listener is None, "validated at construction, before bind/listen"  # noqa: SLF001
+    assert server._first_byte_timeout_s == relay.DEFAULT_FIRST_BYTE_TIMEOUT_S  # noqa: SLF001
+    lines = [r.getMessage() for r in caplog.records if "first_byte_timeout_s" in r.getMessage()]
+    assert len(lines) == 1, lines
+
+
+def test_a_hand_edited_string_reaches_validation_instead_of_crashing_the_reader(
+    root: Path,
+) -> None:
+    """The real reader (``store.read_config`` over a hand-edited ``config.yml``):
+    a value that will not coerce is carried to validation, which names it and
+    falls back, instead of ``int("soon")`` raising inside ``from_config``."""
+    cfg = root / "hand-edited"
+    cfg.mkdir()
+    (cfg / "config.yml").write_text(
+        "values:\n"
+        "  network:\n"
+        "    first_byte_timeout_s: soon\n"
+        "    max_handshakes_per_source: 2.5\n",
+        encoding="utf-8",
+    )
+    settings = relay.NetworkSettings.from_config(cfg)
+    assert settings.first_byte_timeout_s == "soon"
+    assert settings.max_handshakes_per_source == 2.5, "never silently truncated to 2"
+    cap, wait, problems = relay.resolve_preauth_limits(settings)
+    assert (cap, wait) == (relay.DEFAULT_MAX_HANDSHAKES_PER_SOURCE, relay.DEFAULT_FIRST_BYTE_TIMEOUT_S)
+    assert len(problems) == 2, problems
+    assert relay._coerce_or_raw(int, 4.0) == 4  # noqa: SLF001
+    assert relay._coerce_or_raw(int, "3") == 3  # noqa: SLF001
+
+
+class _BrokenSocket:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def settimeout(self, _value: float) -> None:
+        raise OSError(9, "Bad file descriptor")
+
+    def recv(self, *_a: Any) -> bytes:  # pragma: no cover — settimeout raises first
+        return b""
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_a_socket_setup_failure_closes_the_socket_with_a_throttled_diagnostic(
+    unstarted_relay: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    server, _order = unstarted_relay
+    socks = [_BrokenSocket() for _ in range(5)]
+    with caplog.at_level("WARNING", logger=relay.logger.name):
+        for sock in socks:
+            deadline = time.monotonic() + 5.0
+            assert server._await_first_byte(sock, ("203.0.113.5", 1), deadline) is False  # noqa: SLF001
+    assert [s.closed for s in socks] == [1] * 5, "every socket is closed"
+    lines = [r for r in caplog.records if "pre-auth socket setup failed" in r.getMessage()]
+    assert len(lines) == 1, "one line per window, not one per connection"
+
+
+@pytest.mark.parametrize(
+    "lone_relay", [{"first_byte_timeout_s": 1.0, "handshake_timeout_s": 1.5}], indirect=True
+)
+def test_a_late_first_byte_spends_the_handshake_budget_rather_than_starting_a_new_one(
+    lone_relay: Any,
+) -> None:
+    """S2: one byte at ~0.9 s then silence is closed at the 1.5 s handshake deadline
+    taken at accept — not at 0.9 + 1.5 = 2.4 s as when the deadline started late."""
+    server, host, port = lone_relay
+    started = time.monotonic()
+    sock = _connect(host, port)
+    try:
+        time.sleep(0.9)
+        sock.sendall(b"\x00")
+        assert _closed_by_server([sock], within_s=4.0) == {0}
+        elapsed = time.monotonic() - started
+        assert 1.3 <= elapsed < 2.05, f"held for {elapsed:.2f}s"
+    finally:
+        sock.close()
+
+
+@pytest.mark.parametrize("lone_relay", [{"first_byte_timeout_s": 0.3}], indirect=True)
+def test_the_first_byte_close_does_not_wait_on_the_audit_write(
+    lone_relay: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, host, port = lone_relay
+    real_note = server._note_preauth_refusal  # noqa: SLF001
+
+    def slow_note(*args: Any, **kwargs: Any) -> None:
+        time.sleep(2.0)  # a stalled audit disk
+        real_note(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_note_preauth_refusal", slow_note)
+    started = time.monotonic()
+    sock = _connect(host, port)
+    try:
+        assert _closed_by_server([sock], within_s=4.0) == {0}
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.2, f"the close waited on the audit write ({elapsed:.2f}s)"
+        # The (slow) row is still written, and the handshake thread then ends.
+        assert net_fixtures.wait_for(lambda: _slots_idle(server), timeout_s=4.0)
+        assert _refusals(server, "first_byte_timeout")
+    finally:
+        sock.close()
+
+
+def test_both_preauth_keys_are_registered_with_the_relays_bounds() -> None:
+    """Q1: registered, so ``lop config edit``/``config list``/``/settings`` see them,
+    with bounds that agree with the relay's own validation."""
+    from local_operator import settings_io
+
+    by_key = {s.key: s for s in settings_io.SETTINGS}
+    cap = by_key["network.max_handshakes_per_source"]
+    wait = by_key["network.first_byte_timeout_s"]
+    assert cap.path == ("network", "max_handshakes_per_source")
+    assert wait.path == ("network", "first_byte_timeout_s")
+    assert (cap.minimum, cap.maximum) == (1, relay.MAX_HANDSHAKES_PER_SOURCE_LIMIT)
+    assert (wait.minimum, wait.maximum) == (0.0, relay.FIRST_BYTE_TIMEOUT_MAX_S)
+    assert settings_io.validate(wait, 0.0) is None, "0 disables and is accepted"
+    assert settings_io.validate(wait, -1.0) is not None
+    assert settings_io.validate(cap, 0) is not None
