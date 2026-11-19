@@ -964,6 +964,14 @@ class ConversationFeedRef:
     #: which is exactly today's behaviour. ``False`` = absent (an older hub) or a mention,
     #: which is never passive (the parser drops the bit beside ``mention``).
     passive: bool = False
+    #: Whether ``thread_root_id is None`` is a FACT ("this message is a thread
+    #: root") or merely absent. A ref parsed from the hub feed knows: the hub
+    #: stamps a reply's root. A ref REBUILT from a body reservation does not —
+    #: the reservation row stores no root (PR #4177, QA round 3), so a ``None``
+    #: there would claim a reply is a root and default thread placement would
+    #: post under the reply itself, which the hub refuses (``invalid_root``).
+    #: In-memory only: never encoded, so the persisted ref grammar is unchanged.
+    thread_root_known: bool = True
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""

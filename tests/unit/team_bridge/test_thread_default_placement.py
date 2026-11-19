@@ -199,14 +199,72 @@ def test_presented_placements_are_bounded_oldest_first() -> None:
     assert runtime.presented_placements[f"bcmsg_{_PRESENTED_PLACEMENT_MAX + 1:08d}"] == (A, "")
 
 
+def test_a_ref_without_a_root_fact_records_unknown_never_root() -> None:
+    """``thread_root_known=False`` (the pending-body ref) must not read as a root."""
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    runtime = BridgeRuntime(None, None, TENANT, None, SESSION_ID)  # type: ignore[arg-type]
+    fields = dict(conversation_id=A, conversation_seq=3, mention=False, sender_kind="human")
+    runtime.note_presented(ConversationFeedRef(message_id=MA, **fields).validated())
+    runtime.note_presented(
+        ConversationFeedRef(message_id=MESSAGE_ID, thread_root_known=False, **fields).validated()
+    )
+    runtime.note_presented(
+        ConversationFeedRef(
+            message_id="bcmsg_replyrep", thread_root_id=ROOT, thread_root_known=False, **fields
+        ).validated()
+    )
+    assert runtime.presented_placements == {
+        MA: (A, ""),  # a hub-parsed ref: None IS the root fact
+        MESSAGE_ID: (A, None),  # no fact: unknown
+        "bcmsg_replyrep": (A, ROOT),  # a stated root always wins
+    }
+    # In-memory only: the persisted grammar never sees the flag.
+    unknown = ConversationFeedRef(message_id=MA, thread_root_known=False, **fields)
+    assert unknown.encode() == ConversationFeedRef(message_id=MA, **fields).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "page", [{}, {"root": {}}, {"root": {"id": "not-a-message"}}, ["not", "a", "page"]]
+)
+async def test_an_unknown_root_with_no_hub_answer_posts_channel_level(bound_runtime, page):
+    runtime, client, _ = bound_runtime
+    client.conversation_result = {"id": A, "kind": "channel"}
+
+    async def replies(*args, **kwargs):
+        return page
+
+    client.conversation_replies = replies
+    runtime.presented_placements[MA] = (A, None)
+
+    out = await _post(runtime, in_reply_to_message_id=MA)
+
+    assert out["ok"], out
+    (send,) = _sends(client)
+    assert send["thread_root_id"] is None, "never a guessed root"
+    assert "not threaded" in out["warning"]
+
+
 class _KindHub(FakeBridgeClient):
     def __init__(self, kind: str) -> None:
         super().__init__()
         self.kind = kind
         self.sends: list[tuple[str, dict[str, Any]]] = []
+        self.replies_reads: list[tuple[str, str, dict[str, Any]]] = []
 
     async def conversation(self, conversation_id, *, tenant_id=None):
         return {"id": conversation_id, "kind": self.kind}
+
+    #: What the hub's thread read answers for the presented message. ``None``
+    #: models the hub refusing it (a reply is not a root: ``invalid_root``).
+    thread_root: str | None = MESSAGE_ID
+
+    async def conversation_replies(self, conversation_id, message_id, **kwargs):
+        self.replies_reads.append((conversation_id, message_id, kwargs))
+        if self.thread_root is None:
+            raise RuntimeError("invalid_root")
+        return {"root": {"id": self.thread_root}, "replies": [], "has_more": False}
 
     async def conversation_send(self, conversation_id, **kwargs):
         guard = kwargs.pop("pre_http_guard", None)
@@ -217,16 +275,36 @@ class _KindHub(FakeBridgeClient):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("kind", "expected_root"), [("channel", MESSAGE_ID), ("dm", None)])
+@pytest.mark.parametrize(
+    ("kind", "hub_root", "expected_root", "warned"),
+    [
+        ("channel", MESSAGE_ID, MESSAGE_ID, False),  # the hub says it IS a root
+        # QA round 3 (PR #4177): the message is itself a thread REPLY under
+        # ROOT. The pending-body path has no root fact, so the answer must go
+        # under the hub's root — never ``thread_root_id=MESSAGE_ID``, which the
+        # hub refuses as ``invalid_root`` and which loses the agent's answer.
+        ("channel", ROOT, ROOT, False),
+        # The hub will not say (refuses, or an older hub): channel level with
+        # the "not threaded" warning — the pre-threading post, never a guess.
+        ("channel", None, None, True),
+        ("dm", MESSAGE_ID, None, False),
+    ],
+)
 async def test_real_session_dispatch_records_the_placement_the_post_uses(
-    tmp_path, kind, expected_root
+    tmp_path, kind, hub_root, expected_root, warned
 ):
-    """The session's provider seam, not a hand-fed map, is what records it."""
+    """The session's provider seam, not a hand-fed map, is what records it.
+
+    Every real body presentation goes through the pending-body path, whose
+    reservation row stores no thread root — so the record must say "root
+    unknown", and the post resolves it from the hub's own thread read.
+    """
     config = tmp_path / "config"
     config.mkdir()
     store = _store(config)
     _reserve(store, config_dir=config)
     hub = _KindHub(kind)
+    hub.thread_root = hub_root
     runtime = BridgeRuntime(
         cast(TeamBridgeClient, hub), config, TENANT, _owner(), SESSION_ID, admission="admitted"
     )
@@ -254,10 +332,16 @@ async def test_real_session_dispatch_records_the_placement_the_post_uses(
         await asyncio.wait_for(_serve_body_turn(session), 60)
     finally:
         await session.dispose()
-    assert runtime.presented_placements[MESSAGE_ID] == (CONVERSATION_ID, "")
     (sent,) = hub.sends
     assert sent[0] == CONVERSATION_ID
     assert sent[1]["thread_root_id"] == expected_root
+    # ``None`` = root UNKNOWN; ``""`` would claim the message is a root.
+    assert runtime.presented_placements[MESSAGE_ID] == (CONVERSATION_ID, None)
+    if kind == "dm":
+        assert hub.replies_reads == [], "a DM never pays for a thread read"
+    # The tool result rides into the next provider request.
+    text = "\n".join(stream.texts(len(stream.requests) - 1))
+    assert ("not threaded" in text) is warned
 
 
 class _RaisingPlacementRuntime(SimpleNamespace):
@@ -278,6 +362,9 @@ async def test_a_failed_placement_record_never_breaks_the_body_turn(
     runtime without ``note_presented`` (older doubles, other runtimes) or one
     whose record raises must still dispatch, serve and complete the body.
     """
+    # DEBUG, so the seam's one debug record is observable: asserting only the
+    # absence of loud records would pass whether or not the seam ran.
+    caplog.set_level(logging.DEBUG, logger="local_operator.session.session")
     config = tmp_path / "config"
     config.mkdir()
     store = _store(config)
@@ -293,13 +380,16 @@ async def test_a_failed_placement_record_never_breaks_the_body_turn(
         await session.dispose()
     assert _carrying(stream) == [0], "the body still reached the provider"
     assert _row(config)["state"] == "completed"
-    # Logged at debug at most: never surfaced as a failed model stream.
-    loud = [
-        r.getMessage()
-        for r in caplog.records
-        if r.levelno >= logging.WARNING
-        and ("note_presented" in r.getMessage() or "placement store" in r.getMessage())
+    # Logged at debug, exactly once for a raising record and never for a
+    # missing method; nothing at WARNING or above (never a failed stream).
+    seam = [
+        r for r in caplog.records if r.getMessage() == "bridge presented-placement record failed"
     ]
+    assert [r.levelno for r in seam] == ([logging.DEBUG] if variant == "raising" else [])
+    if variant == "raising":
+        assert seam[0].exc_info is not None
+        assert "placement store unavailable" in str(seam[0].exc_info[1])
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert loud == []
 
 

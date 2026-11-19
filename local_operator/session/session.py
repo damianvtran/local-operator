@@ -22351,7 +22351,7 @@ class Session:
                                 if note is not None:
                                     try:
                                         note(presented)
-                                    except Exception:
+                                    except Exception:  # noqa: BLE001 — best-effort record
                                         logger.debug(
                                             "bridge presented-placement record failed",
                                             exc_info=True,

@@ -361,7 +361,10 @@ class BridgeRuntime:
     #: parsed from body text. Session-lifetime and bounded
     #: (:data:`_PRESENTED_PLACEMENT_MAX`); losing an entry only falls back to
     #: the pre-threading channel-level post, with a warning.
-    presented_placements: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: The root slot is ``""`` when the hub said the message IS a root, and
+    #: ``None`` when its root is unknown here (a ref rebuilt from a body
+    #: reservation; see ``ConversationFeedRef.thread_root_known``).
+    presented_placements: dict[str, tuple[str, str | None]] = field(default_factory=dict)
     #: The ONE shared in-flight admission task (S-2): callers JOIN it instead
     #: of queueing their own fetch, and it is cancelled/discarded when the
     #: bound authority is revoked. Lazily created (no loop-bound default).
@@ -373,10 +376,16 @@ class BridgeRuntime:
         conversation_id = getattr(ref, "conversation_id", "")
         if not isinstance(message_id, str) or not isinstance(conversation_id, str):
             return
-        root = getattr(ref, "thread_root_id", None) or ""
+        root: str | None = getattr(ref, "thread_root_id", None) or ""
+        if not isinstance(root, str):
+            root = ""
+        if not root and getattr(ref, "thread_root_known", True) is False:
+            # No root fact: never record the message as a root (a guess that
+            # sends a reply's answer to ``invalid_root``).
+            root = None
         placements = self.presented_placements
         placements.pop(message_id, None)
-        placements[message_id] = (conversation_id, root if isinstance(root, str) else "")
+        placements[message_id] = (conversation_id, root)
         # Oldest-first eviction (dicts keep insertion order). An evicted id
         # degrades to a channel-level post plus a warning, never a wrong thread.
         while len(placements) > _PRESENTED_PLACEMENT_MAX:
@@ -2150,7 +2159,10 @@ async def _default_thread_root(
     the hub refuses a reply as a root with ``invalid_root``), else the message
     id. A message this session never presented has no known root and posts at
     channel level with a warning — the pre-threading behaviour, never a wrong
-    thread. The conversation KIND is read from the hub (``conversation`` when
+    thread. A presented message whose root is UNKNOWN here (rebuilt from a
+    body reservation) asks the hub's thread read (:func:`_hub_thread_root`)
+    and falls back the same way when the hub gives no answer. The
+    conversation KIND is read from the hub (``conversation`` when
     the caller already fetched it for a ``to`` name), because the feed ref
     does not carry it; an unreadable kind falls back the same way.
 
@@ -2172,7 +2184,42 @@ async def _default_thread_root(
         return "", None
     if kind not in ("channel", "group"):
         return "", _THREAD_ROOT_UNKNOWN
-    return placement[1] or message_id, None
+    if placement[1] is not None:
+        return placement[1] or message_id, None
+    return await _hub_thread_root(runtime, channel_id, message_id)
+
+
+async def _hub_thread_root(
+    runtime: BridgeRuntime, channel_id: str, message_id: str
+) -> tuple[str, str | None]:
+    """Ask the hub which thread an unknown-root message belongs to.
+
+    WHY: every body presentation today is rebuilt from a reservation row that
+    stores no thread root (PR #4177, QA round 3), so without this read a bound
+    reply could only fall back to channel level — or, worse, guess the message
+    is its own root. The thread read is the hub's own answer: its ``root`` is
+    the thread a reply under ``message_id`` would land in. A refusal (the hub
+    rejects a reply id as a root), an older hub or a malformed page is NOT an
+    answer, and posts at channel level with the warning — never a guess. One
+    ``limit=1`` page, only for channel/group replies whose root is unknown.
+    """
+
+    endpoint_id = str(getattr(runtime.owner, "endpoint_id", "") or "").strip()
+    try:
+        page = await runtime.client.conversation_replies(
+            channel_id,
+            message_id,
+            tenant_id=runtime.tenant_id,
+            limit=1,
+            endpoint_id=endpoint_id or None,
+        )
+    except Exception:  # noqa: BLE001 — any refusal means "unknown", never a root
+        return "", _THREAD_ROOT_UNKNOWN
+    root = page.get("root") if isinstance(page, Mapping) else None
+    root_id = root.get("id") if isinstance(root, Mapping) else None
+    if not isinstance(root_id, str) or _CONVERSATION_MESSAGE_ID.fullmatch(root_id) is None:
+        return "", _THREAD_ROOT_UNKNOWN
+    return root_id, None
 
 
 def _channel_create_free_text(args: Mapping[str, Any]) -> str:
@@ -2900,7 +2947,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # Default THREAD placement for a bound reply (see _default_thread_root).
         # An explicit thread_root_id always wins; new_post cannot carry a
         # binding, so it is the opt-out for a new topic. Resolved BEFORE the
-        # fence below so its one possible hub read is covered by the same
+        # fence below so its hub reads (kind, unknown root) are covered by the same
         # revocation recheck as the member lookup.
         placement_warning: str | None = None
         reply_to = params.in_reply_to_message_id.strip()
