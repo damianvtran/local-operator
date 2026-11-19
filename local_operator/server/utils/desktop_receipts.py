@@ -155,6 +155,26 @@ class DesktopReceipts:
                 db.execute("INSERT INTO receipts VALUES (?, ?, NULL)", (key, fingerprint))
         return None
 
+    @staticmethod
+    def fingerprint(body: dict[str, Any]) -> str:
+        """The digest ``run`` compares a same-key retry's body by."""
+        return hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def recorded_fingerprint(self, key: str) -> str | None:
+        """The fingerprint ``key`` was claimed with, or ``None``; a read, never a claim.
+
+        For a caller that chooses part of the body itself (the voice route picks
+        ``mode``), so it can rebuild the SAME body for a retry instead of the one
+        the current state would pick. The database file is not created by asking.
+        """
+        if not self.path.exists():
+            return None
+        with closing(self._db()) as db:
+            row = db.execute("SELECT fingerprint FROM receipts WHERE id = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
+
     def recorded(self, key: str) -> bool:
         """Has ``key`` already been claimed, WITHOUT claiming it or writing.
 
@@ -273,9 +293,7 @@ class DesktopReceipts:
         fingerprint check, so a same-id retry still coalesces and a different
         body still raises :class:`ReceiptConflict`.
         """
-        fingerprint = hashlib.sha256(
-            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        fingerprint = self.fingerprint(body)
         # Coalesce retries of THIS request, not unrelated sessions: a runtime
         # compaction can wait on a provider, and must not block another session's
         # prompt admission. Cross-process races still use the SQLite transaction.

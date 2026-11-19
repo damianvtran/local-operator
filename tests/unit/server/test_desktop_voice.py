@@ -330,6 +330,62 @@ async def test_the_utterance_is_admitted_as_a_dictated_prompt(rig: Any) -> None:
     assert admitted["input_path"] is None
 
 
+async def _utter_with_id(rig: Any, request_id: str, text: str) -> Any:
+    return await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": request_id, "text": text},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_the_turn_started_replays_instead_of_conflicting(rig: Any) -> None:
+    """The mode is the SERVER's pick (steer while streaming), so it must not be
+    part of what the receipt journal compares: a timed-out client retrying the
+    same ``request_id`` after its own prompt started the turn is a replay, not
+    "Request ID was already used with different input"."""
+    await _enable(rig, SESSION_A)
+    request_id = str(uuid.uuid4())
+    first = await _utter_with_id(rig, request_id, "list files")
+    assert first.status_code == 200, first.text
+    assert first.json()["result"]["admission"]["detail"] == "prompt admitted"
+
+    rig.pool.remote.is_streaming = True
+    retry = await _utter_with_id(rig, request_id, "list files")
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["result"]["admission"]["replayed"] is True
+    assert len(rig.pool.remote.admissions) == 1, "a replay never reaches the owner twice"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_the_steered_turn_ended_replays_instead_of_conflicting(
+    rig: Any,
+) -> None:
+    await _enable(rig, SESSION_A)
+    request_id = str(uuid.uuid4())
+    rig.pool.remote.is_streaming = True
+    first = await _utter_with_id(rig, request_id, "also check the tests")
+    assert first.status_code == 200, first.text
+    assert first.json()["result"]["admission"]["detail"] == "steering queued"
+
+    rig.pool.remote.is_streaming = False
+    retry = await _utter_with_id(rig, request_id, "also check the tests")
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["result"]["admission"]["replayed"] is True
+    assert len(rig.pool.remote.admissions) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_reused_request_id_with_other_words_is_still_a_conflict(rig: Any) -> None:
+    """The mode-blind replay must not weaken the journal's real protection."""
+    await _enable(rig, SESSION_A)
+    request_id = str(uuid.uuid4())
+    assert (await _utter_with_id(rig, request_id, "list files")).status_code == 200
+    rig.pool.remote.is_streaming = True
+    other = await _utter_with_id(rig, request_id, "delete everything")
+    assert other.status_code == 409, other.text
+    assert len(rig.pool.remote.admissions) == 1
+
+
 @pytest.mark.asyncio
 async def test_the_utterance_steers_while_the_turn_is_streaming(rig: Any) -> None:
     await _enable(rig, SESSION_A)

@@ -150,7 +150,8 @@ from local_operator.server.routes.desktop_sessions import (
     host,
 )
 from local_operator.server.routes.desktop_sessions import prompt as messages_route
-from local_operator.server.routes.desktop_sessions import reply
+from local_operator.server.routes.desktop_sessions import receipts, reply
+from local_operator.server.utils.desktop_receipts import DesktopReceipts
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath
 from local_operator.stt import audio as stt_audio
@@ -852,6 +853,32 @@ async def _streaming(request: Request, session_id: str) -> bool:
             return bool(getattr(bridge.remote, "is_streaming", False))
 
 
+async def _with_recorded_or_current_mode(request: Request, session_id: str, body: Prompt) -> Prompt:
+    """Pick ``body.mode``, keeping a retry's body the one its first attempt had.
+
+    ``/messages`` fingerprints the WHOLE body, ``mode`` included, but this route
+    chooses the mode from the turn's state (steer while streaming), and that
+    state moves between a client's attempt and its retry: a prompt that started
+    the turn retries as a steer, a steer whose turn ended retries as a prompt.
+    Either would be refused "Request ID was already used with different input"
+    for a message that was admitted. So a recorded request id keeps the mode
+    whose body matches the recorded fingerprint, and replays; one that matches
+    neither mode (other words under a reused id) falls through to the state's
+    pick and is refused by the journal as it should be.
+    """
+    recorded = await asyncio.to_thread(
+        receipts(request).recorded_fingerprint, f"{session_id}:{body.request_id}"
+    )
+    if recorded is not None:
+        for mode in ("prompt", "steer"):
+            candidate = body.model_copy(update={"mode": mode})
+            if DesktopReceipts.fingerprint(candidate.model_dump()) == recorded:
+                return candidate
+    if await _streaming(request, session_id):
+        return body.model_copy(update={"mode": "steer"})
+    return body
+
+
 async def _admit(
     request: Request, session_id: str, request_id: str, text: str, path: str | None
 ) -> dict[str, Any]:
@@ -889,8 +916,7 @@ async def _admit(
         raise _refuse(
             422, "invalid_voice_request", _wv.invalid_message(reason=_validation_reason(exc))
         ) from None
-    if await _streaming(request, session_id):
-        body = body.model_copy(update={"mode": "steer"})
+    body = await _with_recorded_or_current_mode(request, session_id, body)
     admitted = await messages_route(session_id, body, request)
     return dict(admitted.result or {})
 
