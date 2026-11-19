@@ -1202,7 +1202,17 @@ def stop_rung_from_reason(reason: str) -> tuple[str, str]:
     for rung, label in STOP_RUNG_LABELS.items():
         if rung not in ESCALATED_STOP_RUNGS or not detail.startswith(f"{label} by "):
             continue
-        command = detail[len(label) + len(" by ") :].split(f", {KILLER_PID_LABEL} ", 1)[0]
+        actor = detail[len(label) + len(" by ") :]
+        command, separator, _pid = actor.partition(f", {KILLER_PID_LABEL} ")
+        # A partial marker with only a killer pid renders identically to a
+        # literal command of that name without a pid. The stored sentence has
+        # irreversibly lost that distinction: omit UNKNOWN optional attribution,
+        # not the reason itself. A separate pid suffix disambiguates a real
+        # command (even "killer pid 123"), so preserve it before this fallback.
+        if not separator and command.startswith(f"{KILLER_PID_LABEL} "):
+            pid = command[len(KILLER_PID_LABEL) + 1 :]
+            if pid.isascii() and pid.isdecimal() and (pid == "0" or not pid.startswith("0")):
+                command = ""
         return rung, command
     return "", ""
 

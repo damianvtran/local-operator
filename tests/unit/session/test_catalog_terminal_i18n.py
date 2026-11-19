@@ -80,6 +80,63 @@ def test_stop_escalation_uses_semantic_decoder(unseen, rung, phrase):
         assert stop_rung_from_reason(reason) == ("", "")
 
 
+@pytest.mark.parametrize("rung", ["sigterm", "sigkill"])
+@pytest.mark.parametrize("unseen", [False, True])
+def test_pid_only_attribution_is_unknown_not_a_command(monkeypatch, rung, unseen):
+    monkeypatch.setattr(catalog, "_label_locale", lambda: "fr")
+    reason = render_cut_off_reason("user-stop") + render_stop_attribution(
+        rung=rung, command="", killer_pid=123,
+    )
+    # Historical partial markers lost the command/pid distinction in their
+    # sentence. Identical bytes cannot truthfully recover different actors.
+    ambiguous = render_cut_off_reason("user-stop") + render_stop_attribution(
+        rung=rung, command="killer pid 123",
+    )
+    assert reason == ambiguous
+    assert stop_rung_from_reason(reason) == (rung, "")
+    item = entry("interrupted", unseen=unseen, reason=reason)
+    # The existing no-known-command ICU arm must retain the escalation rather
+    # than leaking diagnostic English or manufacturing a technical command.
+    from local_operator.i18n.keys import wire_session_status as keys
+    from local_operator.i18n.messages import render
+
+    key = (
+        keys.unseen_signal_stop(command="none") if unseen else keys.signal_stop(command="none")
+    ) if rung == "sigterm" else (
+        keys.unseen_forced_kill(command="none") if unseen else keys.forced_kill(command="none")
+    )
+    assert item.status == render(key.code, dict(key.params), locale="fr")
+    assert "killer pid" not in item.status and " via " not in item.status
+    assert item.status_code == "interrupted"
+    assert item.completion_reason == reason
+    assert entry("interrupted", unseen=unseen, reason=ambiguous).status == item.status
+
+
+@pytest.mark.parametrize("rung", ["sigterm", "sigkill"])
+@pytest.mark.parametrize("command", ["killer pid 123", "/stop --all opaque-東京", "killer pid 123 extra"])
+@pytest.mark.parametrize("unseen", [False, True])
+def test_separate_pid_preserves_real_opaque_command(monkeypatch, rung, command, unseen):
+    monkeypatch.setattr(catalog, "_label_locale", lambda: "fr")
+    reason = render_cut_off_reason("user-stop") + render_stop_attribution(
+        rung=rung, command=command, killer_pid=456,
+    )
+    assert stop_rung_from_reason(reason) == (rung, command)
+    item = entry("interrupted", unseen=unseen, reason=reason)
+    assert command in item.status
+    assert "456" not in item.status
+    assert item.status_code == "interrupted"
+    assert item.completion_reason == reason
+
+
+@pytest.mark.parametrize("command", ["killer pid 123 extra", "killer pid 0123", "killer pid nope", "prefix killer pid 123"])
+def test_noncanonical_actor_is_not_stripped(command):
+    reason = render_cut_off_reason("user-stop") + render_stop_attribution(
+        rung="sigkill", command=command,
+    )
+    assert stop_rung_from_reason(reason) == ("sigkill", command)
+    assert stop_rung_from_reason("external killer pid 123") == ("", "")
+
+
 @pytest.mark.parametrize("cause", list(CUT_OFF_CAUSES))
 @pytest.mark.parametrize("unseen", [False, True])
 def test_known_error_causes_are_message_selectors(cause, unseen):
