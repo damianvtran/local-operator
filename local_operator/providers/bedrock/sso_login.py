@@ -39,12 +39,12 @@ import contextlib
 import logging
 import os
 import re
-import signal as signal_mod
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from local_operator.procstate import terminate_process_tree
 from local_operator.providers.bedrock import profiles as bprofiles
 
 if TYPE_CHECKING:
@@ -119,12 +119,18 @@ def _argv(aws: str, profile: str, kind: bprofiles.ProfileKind, *, device_code: b
     return argv
 
 
-def _kill_group(proc: asyncio.subprocess.Process) -> None:
-    """SIGTERM the CLI's own process group (it leads it: start_new_session)."""
+def _kill_group(proc: asyncio.subprocess.Process, *, force: bool = False) -> None:
+    """Stop the CLI and everything it spawned (it leads its group: start_new_session).
+
+    ``procstate.terminate_process_tree`` owns the platform split — a
+    leader-checked ``killpg`` on POSIX, ``taskkill /T`` on Windows — so this
+    module never touches the POSIX-only ``os.killpg``/``signal.SIGKILL``
+    attributes that do not exist on Windows (xplat probe
+    ``static.posix_attributes``). Never raises.
+    """
     if proc.returncode is not None:
         return
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal_mod.SIGTERM)
+    terminate_process_tree(proc.pid, force=force)
 
 
 async def _reap(proc: asyncio.subprocess.Process) -> None:
@@ -132,8 +138,7 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
     try:
         await asyncio.wait_for(proc.wait(), _KILL_GRACE_S)
     except (TimeoutError, asyncio.TimeoutError):
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal_mod.SIGKILL)
+        _kill_group(proc, force=True)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), _KILL_GRACE_S)
 

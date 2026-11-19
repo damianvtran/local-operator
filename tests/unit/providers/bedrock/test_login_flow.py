@@ -28,6 +28,12 @@ pytestmark = pytest.mark.asyncio
 SECRET = "fixture-" + "secret-access-key-value"
 
 
+#: What the stubbed connection check saw, in call order; reset by the ``aws``
+#: fixture. Kept in THIS module rather than stashed on ``blogin`` so the
+#: production module never grows an attribute only the tests know about.
+PROBES: list[Any] = []
+
+
 class Host:
     def __init__(self, choices: list[str | None], typed: list[str | None]) -> None:
         self.choices = list(choices)
@@ -56,7 +62,8 @@ class Host:
 @pytest.fixture
 def aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = isolate_aws(tmp_path, monkeypatch)
-    probes: list[Any] = []
+    PROBES.clear()
+    probes = PROBES
 
     async def probe(resolved, timeout, *, client=None):  # noqa: ANN001
         probes.append(resolved)
@@ -68,7 +75,6 @@ def aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(bcheck, "probe", probe)
     monkeypatch.setattr(bcheck, "check_connection", check_connection)
-    monkeypatch.setattr(blogin, "_probes", probes, raising=False)
     return home
 
 
@@ -100,7 +106,7 @@ async def test_access_key_secret_is_masked_checked_and_only_in_secret(aws: Path)
     assert conn.method == "access-key" and conn.region == "us-east-1"
     assert SECRET not in row["key"] and SECRET not in repr(row["bedrock"])
     assert all(SECRET not in m for m in host.messages)
-    assert blogin._probes[0].credentials.secret_key == SECRET  # checked BEFORE storing
+    assert PROBES[0].credentials.secret_key == SECRET  # checked BEFORE storing
 
 
 async def test_malformed_access_key_id_is_reasked(aws: Path) -> None:

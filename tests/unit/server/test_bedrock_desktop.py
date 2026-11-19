@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -41,7 +42,7 @@ def aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, KeyCheck]:
     return verdict
 
 
-def _detail(response) -> dict:  # noqa: ANN001
+def _detail(response) -> dict[str, Any]:  # noqa: ANN001
     return response.json()["detail"]
 
 
@@ -260,9 +261,10 @@ def _install_fake_aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
     return script
 
 
-async def _poll(client, op_id: str, states: set[str]) -> dict:  # noqa: ANN001
+async def _poll(client, op_id: str, states: set[str]) -> dict[str, Any]:  # noqa: ANN001
     import asyncio
 
+    snap: dict[str, Any] = {}
     for _ in range(200):
         snap = (await client.get(f"/v1/auth/operations/{op_id}")).json()["result"]
         if snap["state"] in states:
