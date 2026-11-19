@@ -1050,6 +1050,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "peer's signature is checked against a local process, so a copied socket path would "
         "point a receiving node at a listener that does not exist there.",
     ),
+    "local_operator/network/pairing_attest.py": (
+        1,
+        "``LISTENER_NAME`` ('mesh-pairing'): the pairing-approval listener under the same "
+        "DEVICE-LEVEL attestation namespace (<config>/run/attest/mesh-pairing.sock), one per "
+        "``lop serve`` and never an entry of a session directory. It is the signed desktop "
+        "app's dial contract with THIS machine's runtime, so it must not travel with a "
+        "session: a copied name would point a receiving node at a listener it never bound. "
+        "``SCOPE`` shares the value but names an attestation-table key, not a path, and the "
+        "guard does not count it.",
+    ),
     "local_operator/session/attachments.py": (
         1,
         "``attachments``: the content-addressed store at the config root. A copy set "
