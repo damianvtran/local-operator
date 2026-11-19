@@ -125,9 +125,15 @@ def test_bedrock_deferred_copy_remains_resolvable_without_the_eager_bundle(monke
         response = _bedrock_refusal(
             422, "bedrock_input_invalid", _bedrock_keys().input_invalid(field="region")
         )
-        assert response.detail["code"] == "bedrock_input_invalid"
-        assert response.detail["text"]
-        assert "wire.errors.bedrock" not in str(response.detail)
+        # The desktop contract keys on a MAPPING envelope (``code``/``text``).
+        # Starlette annotates ``HTTPException.detail`` as ``str | None`` while
+        # this refusal carries a dict, so the payload is observed across that
+        # boundary and then asserted to be the mapping the contract names.
+        payload: object = getattr(response, "detail")
+        assert isinstance(payload, dict), "the refusal envelope is a mapping"
+        assert payload["code"] == "bedrock_input_invalid"
+        assert payload["text"]
+        assert "wire.errors.bedrock" not in str(payload)
 
 
 def test_the_census_catches_one_added_reference(
