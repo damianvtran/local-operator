@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "wire.voice",
+  "history_sha256": "f5d51656e2e75d229678512e9a281347f575d991eeb8fcf7e9c3977a3c29ba3d",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "wire.voice",
+      "source_sha256": "1a1142efc72c2d238613baa4a94f3c93cc3a8eab8f158d81eb400a240810bd14",
+      "translator": {
+        "agent": "lopdev coder (translator-only brief), session 663927337bd1",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-19"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the new 37-key wire.voice namespace (Russian); independent audit NOT completed, so this namespace is not shipped for ru until a passed receipt is appended. Source hash pins the full current en namespace; translated target sha256 ef7d47d1ca5aab2455823307815d7a2a3a95e88754bc9d4da2cf7959a3f53f1e. Glossary i18n/glossary.md and i18n/style-guides/ru.md. Placeholders ({session_id}, {reason}, {limit_mib}, {detail}) and the identifiers text_origin/qwen_s2s preserved; phrase.* are spoken aloud by TTS so kept short, plain and free of markdown; max_spoken_chars.help quotes the same sentence as phrase.truncated. No rendered, pseudo or native audit claimed."
+    }
+  ]
+}
