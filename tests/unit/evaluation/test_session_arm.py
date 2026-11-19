@@ -6899,6 +6899,57 @@ class TestBridgeCommand:
         assert [p for k, p in rows if k == "command"][0]["exit_code"] is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested", [None, 2])
+    async def test_a_timeout_states_the_limit_that_applied(
+        self, tmp_path: Path, requested: int | None
+    ) -> None:
+        """``timed_out: true`` alone never said WHICH limit cut the command.
+        A worker whose ``timeout`` was dropped as undeclared ran on the 60 s
+        default, timed out six times and was never told the default was what
+        applied. Both the default and an explicit ``timeout_s`` are named."""
+        from local_operator.evaluation.action_server import (
+            COMMAND_DEFAULT_TIMEOUT_S,
+            COMMAND_MAX_TIMEOUT_S,
+        )
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            return _command_result(exit_code=None, timed_out=True, stdout="", stdout_bytes=0)
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=[])
+        await bridge.start()
+        try:
+            arguments: dict[str, Any] = {"command": "sleep 99"}
+            if requested is not None:
+                arguments["timeout_s"] = requested
+            reply = await _speak_command(bridge, arguments)
+        finally:
+            await bridge.stop()
+        applied = COMMAND_DEFAULT_TIMEOUT_S if requested is None else requested
+        assert (
+            f"timeout_s: {applied} (the limit that applied; the default is "
+            f"{COMMAND_DEFAULT_TIMEOUT_S}, the maximum {COMMAND_MAX_TIMEOUT_S})\n"
+        ) in reply["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_a_command_that_did_not_time_out_names_no_limit(self, tmp_path: Path) -> None:
+        """Control for the test above: only a timeout gains the line, so every
+        other result keeps the text it had."""
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            return _command_result()
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=[])
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "true", "timeout_s": 2})
+        finally:
+            await bridge.stop()
+        text = reply["content"][0]["text"]
+        assert "timed_out: false" in text and "timeout_s:" not in text
+
+    @pytest.mark.asyncio
     async def test_a_command_the_target_could_not_run_is_a_result_the_model_can_read(
         self, tmp_path: Path
     ) -> None:
