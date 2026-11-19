@@ -3524,6 +3524,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "widget.remove()",
     ),
     (
+        # The /community page, one mode over from the settings page: `view` is
+        # the mounted CommunityView widget held in `_community_view`.
+        "local_operator/tui/app.py::OperatorApp._close_community_view",
+        "<path>.remove",
+        "Textual CommunityView.remove unmounts the page; no filesystem path",
+    ),
+    (
+        # The /community page remembers the last-viewed org. Both paths are
+        # built from the config dir plus fixed literals
+        # (`<config>/community/org_selection.json` and its `.tmp` sibling); no
+        # caller input reaches either, and `sessions/` is never named.
+        "local_operator/tui/community_backend.py::LiveCommunityBackend.remember_selection",
+        "os.replace",
+        "atomic write of the FILE <config>/community/org_selection.json from its .tmp "
+        "sibling; fixed literal path, never under sessions/",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._recall_queued_steers",
         "<path>.remove",
         "widget.remove() / list.remove",

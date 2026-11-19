@@ -3950,6 +3950,7 @@ class Session:
         # messages. Completed consumers verify disk, not this runtime object.
         self._file_provenance_state = None
         self._init_bridge_taint(inherited_bridge_taint)
+        self._init_community_taint()
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
         # its own). Anything raising here kills the runtime process before it
@@ -16692,6 +16693,11 @@ class Session:
         """
         if self._yolo:
             return None
+        from local_operator.harness.bridge_egress import (
+            ApprovalGrant,
+            session_grant_covers,
+        )
+
         base = self._request_approval
         declared = self._declared_tools
         if base is None or declared is None or not self._declared_tools_unattended:
@@ -16705,7 +16711,13 @@ class Session:
             taint_raised: bool = False,
             bridge_latched: bool = False,
         ) -> bool:
-            if tool_name in declared:
+            if tool_name in declared and session_grant_covers(
+                ApprovalGrant(auto=True), title=tool_name
+            ):
+                # A person-only gate is never answered by declaration: its title
+                # holds a space no tool name can, so this is belt and braces for
+                # a future gate whose title could be declared (review R1-2).
+                #
                 # A declared unattended inventory approves by declaration even
                 # in a Team-Bridge-latched session: the S-51 carve-out, left
                 # as is (accepted risk outside ask mode).
@@ -23814,6 +23826,66 @@ class Session:
                 "bridge taint latch row write failed; latch held in memory", exc_info=True
             )
 
+    # -- Community read taint (RFC v2.4 §5.9; community/taint.py) ---------------
+
+    def _init_community_taint(self) -> None:
+        """Own the session's "read community content" flag, fed from durable commits.
+
+        The bridge latch's wiring, one source narrower: every transcript commit
+        is observed so a ``community_read`` result is seen whatever path
+        appended it, and the backstop scan reads the journal from row 0 — which
+        a resume, a fork (it copies ``transcript.jsonl``) and a ``/move``
+        replica all load. Compaction appends a marker and never rewrites rows,
+        so it cannot lift the flag; only ``/new`` or a fresh session starts
+        clean.
+        """
+        from local_operator.community.taint import CommunityTaint
+
+        transcript = self._transcript
+
+        def journal() -> list[tuple[str, dict[str, Any]]]:
+            return [(entry.type, entry.payload) for entry in transcript.entries()]
+
+        self._community_taint = CommunityTaint(entries=journal)
+        self._community_taint_row_task: asyncio.Task[None] | None = None
+        subscribe = getattr(transcript, "subscribe_commits", None)
+        if subscribe is not None:
+            subscribe(self._on_community_taint_commit)
+
+    @property
+    def community_tainted(self) -> bool:
+        """Whether this session has read community content. Fail-closed."""
+        return self._community_taint.tainted
+
+    def _on_community_taint_commit(self, entries: Any, _source: Any = None) -> None:
+        taint = self._community_taint
+        taint.observe_entries((entry.type, entry.payload) for entry in entries)
+        if taint.tainted and not taint.row_present:
+            task = self._community_taint_row_task
+            if task is not None and not task.done():
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("community taint row not written: no running loop")
+                return
+            self._community_taint_row_task = loop.create_task(self._write_community_taint_row())
+
+    async def _write_community_taint_row(self) -> None:
+        from local_operator.community.taint import COMMUNITY_TAINT_ROW_TYPE
+
+        taint = self._community_taint
+        if taint.row_present:
+            return
+        if self._transcript.latest_custom_entry(COMMUNITY_TAINT_ROW_TYPE) is not None:
+            taint.row_present = True
+            return
+        try:
+            # The commit observer sees this row too and sets ``row_present``.
+            await self._transcript.append_custom(COMMUNITY_TAINT_ROW_TYPE, taint.row_details())
+        except Exception:  # noqa: BLE001 - the in-memory flag stays set; warned
+            logger.warning("community taint row write failed; flag held in memory", exc_info=True)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -23863,6 +23935,7 @@ class Session:
             ancestor_session_ids=self._ancestor_session_ids(),
             bridge_taint=self._bridge_taint,
             inherited_bridge_taint=self._bridge_taint.inherited,
+            community_taint=self._community_taint,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             # On a CHILD this resolves to the parent's title (see
@@ -23901,6 +23974,10 @@ class Session:
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
+            # The BASE gate, kept under --yolo, for person-only cards a tool
+            # raises itself (a community post): yolo skips the tool gate, not
+            # the person (the profile save's route, ``_request_approval``).
+            person_approval=self._request_approval,
             # The host's consent seam for tool-issued ACCOUNT writes. Held on
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).

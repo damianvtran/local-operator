@@ -2049,6 +2049,15 @@ RETITLE_MIN_GAP_S = 30.0
 #: the rendered app (see ``local_operator.logger.file_logging``).
 logger = logging.getLogger("local_operator.tui.app")
 
+#: The community page's slash words (dark; see ``_dispatchable_slash``).
+_COMMUNITY_SLASHES = frozenset({"/community", "/orgs"})
+
+
+def _community_enabled() -> bool:
+    from local_operator.community import community_enabled
+
+    return community_enabled()
+
 
 def _has_transcript(directory: "Path") -> bool:
     """Whether a session holds a transcript in ANY physical form (plain or archive).
@@ -6689,6 +6698,9 @@ class OperatorApp(App[None]):
         self._library_focus_restore: Any | None = None
         #: The ``/notifications`` page (lane L2): a sibling of the library mode.
         self._notifications_view: Any | None = None
+        #: The ``/community`` page (``widgets/community_view.py``) while it is up.
+        self._community_view: Any | None = None
+        self._community_focus_restore: Any | None = None
         self._notifications_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
@@ -26181,6 +26193,12 @@ class OperatorApp(App[None]):
         token = text.split(maxsplit=1)[0].lower() if text.strip() else ""
         if not token.startswith("/"):
             return False
+        if token in _COMMUNITY_SLASHES and _community_enabled():
+            # The community page's two words (RFC v2.4, TUI frames T1/T9) are
+            # NOT registry rows while the community ships dark: a row would
+            # show in /help, the picker and every desktop/mobile slash list.
+            # They are commands only on a machine with the pilot switch on.
+            return True
         # Matched on the same key the dispatch builds its map with, so the two
         # cannot disagree about spelling: `f"/{cap.command}"` there, the typed
         # first token here, both case-folded.
@@ -40823,6 +40841,84 @@ class OperatorApp(App[None]):
         self._close_library_view()
         self._cmd_librarian("open", self._system_notice)
 
+    # -- the community page (``/community``, ``/orgs``; dark) ----------------
+
+    def _cmd_community(self, command: str, arg: str) -> None:
+        """``/community [browse|settings|join]`` opens the page; ``/orgs`` the switcher.
+
+        The switcher opens AS the page's overlay so it has the page's org
+        data and keys; ``esc`` from it closes the whole page when ``/orgs``
+        was the reason it opened (TUI frames, "Org switching is not leaving").
+        """
+        word = arg.strip().lower()
+        if command == "/orgs":
+            mode = "orgs"
+        else:
+            mode = {"browse": "browse", "settings": "settings", "join": "join"}.get(word, "page")
+        if self._community_view is not None:
+            self._community_view.open_mode(mode)
+            return
+        self._open_community_view(mode)
+
+    def _open_community_view(self, mode: str = "page") -> None:
+        """Enter the full-page community mode: the notifications page's contract."""
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.tui.community_backend import LiveCommunityBackend
+        from local_operator.tui.widgets.community_view import CommunityView
+
+        self._close_file_viewer()
+        self._close_notifications_view()
+        self._close_agent_form()
+        self._close_team_form()
+        self._close_settings_view()
+        self._community_focus_restore = self.focused
+        view = CommunityView(LiveCommunityBackend(_config_dir()), mode=mode)
+        self._community_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_community_view(self) -> bool:
+        """Leave the community mode and restore the conversation. True if open."""
+        view = self._community_view
+        if view is None:
+            return False
+        self._community_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._community_focus_restore
+        self._community_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_community_view_dismissed(self, message: Any) -> None:
+        message.stop()
+        self._close_community_view()
+
+    def on_community_org_selected(self, message: Any) -> None:
+        """A private org was picked: record-only; the bridge's private flow is unchanged."""
+        message.stop()
+        self._close_community_view()
+        from local_operator.i18n.keys import tui_community as _ck
+        from local_operator.tui.i18n_status import display_tr as _dtr
+
+        self._system_notice(_dtr("tui.community")(_ck.orgs_switched(name=message.name)), "info")
+
     # -- the notifications page (``/notifications``) -----------------------
 
     def _cmd_notifications_page(self, arg: str, notice: NoticeFn) -> None:
@@ -45243,6 +45339,13 @@ class OperatorApp(App[None]):
         # single-token form, so ``/new foo`` is untouched.
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
+
+        if command in _COMMUNITY_SLASHES and _community_enabled():
+            # Frontend-LOCAL, like `/notifications`: the page reads this
+            # machine's community client, and the page is the receipt. Never
+            # routed to an owner (an older owner has no such command).
+            self._cmd_community(command, arg)
+            return
 
         # Authoring is a frontend-owned page, never a slash sent to an owner
         # on another device. Refuse here before its capability table can route

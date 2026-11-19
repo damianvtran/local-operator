@@ -583,6 +583,11 @@ export type MessageParams = {
   "wire.bridge_taint.full_request": { "request": string };
   "wire.bridge_taint.grant_suspended": undefined;
   "wire.bridge_taint.grant_suspended_other_session": undefined;
+  "wire.community.post_card_audience": { "channel": string };
+  "wire.community.post_card_each_time": undefined;
+  "wire.community.post_card_label": undefined;
+  "wire.community.post_card_tainted": undefined;
+  "wire.community.post_card_title": { "channel": string; "community": string };
   "wire.console.description": undefined;
   "wire.console.max_live.help": undefined;
   "wire.console.max_live.label": undefined;

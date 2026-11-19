@@ -529,12 +529,31 @@ async def _auto_approve_gate(
     taint_raised: bool = False,
     bridge_latched: bool = False,
 ) -> bool:
-    """The ``auto()`` posture: every gated call is approved.
+    """The ``auto()`` posture: every gated call is approved — except a person-only gate.
 
     Accepts the Team Bridge flags so a latched session keeps the auto posture
     the embedder chose: closed for ask mode; accepted risk in auto/yolo
     (docs/security/team-bridge-egress.md, "Status").
+
+    PERSON-ONLY GATES (``harness.approval.never_auto_approved``: an account
+    profile save, a community post). ``auto()`` is the embedder's consent to
+    tool calls, not to public speech under the owner's name or a rewrite of
+    account-wide agents, and there is no person on this gate to ask — so it
+    raises the typed refusal ``refuse()`` uses rather than answering. ``--yolo``
+    fails closed the same way (``session_factory._make_request_approval``);
+    review R1-2 found this the one auto mode that did not.
     """
+    from local_operator.harness.approval import ApprovalUnavailableError
+    from local_operator.harness.bridge_egress import ApprovalGrant, session_grant_covers
+
+    # The shared predicate every auto path asks (the TUI's approve-all and
+    # desktop full-auto included), so the person-only list lives in one place.
+    if not session_grant_covers(ApprovalGrant(auto=True), title=tool_name):
+        raise ApprovalUnavailableError(
+            tool_name,
+            "ApprovalPolicy.auto() does not answer this gate: it needs a person "
+            "(use ApprovalPolicy.callback() to present it)",
+        )
     return True
 
 
