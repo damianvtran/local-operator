@@ -18,6 +18,7 @@ on main from two store races these tests pin directly:
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import threading
 from pathlib import Path
@@ -182,13 +183,15 @@ def test_a_wrapper_raising_after_begin_still_releases_the_reservation(
 
     The old ``began`` flag was set only once ``execute`` returned, so this left
     the transaction open on the shared connection and every later statement ran
-    inside it. The entry-time sample rolls it back.
+    inside it. The entry-time sample rolls it back. The error is not lock
+    contention, so it propagates (security round 2) -- after the rollback.
     """
     store, row_id = _lent_store(tmp_path)
     before = _payload(store, row_id)
     _raise_after(monkeypatch, store, "BEGIN", sqlite3.OperationalError("after begin"))
 
-    assert store._update_payload(row_id, lambda d: d.update(x=1) or True) is False  # noqa: SLF001
+    with pytest.raises(sqlite3.OperationalError, match="after begin"):
+        store._update_payload(row_id, lambda d: d.update(x=1) or True)  # noqa: SLF001
     monkeypatch.undo()
     assert store._conn.in_transaction is False  # noqa: SLF001
     assert _payload(store, row_id) == before
@@ -257,3 +260,160 @@ def test_rows_are_drained_while_the_statement_lock_is_held(
     monkeypatch.setattr(auth_store._FetchedCursor, "__init__", init)  # noqa: SLF001
     assert store.get_credential(row_id) is not None
     assert held and all(held)
+
+
+# ---------------------------------------------------------------------------
+# Reservation errors (PR #4269 security round 2, S2 residual; review R2-m1/m2)
+# ---------------------------------------------------------------------------
+
+
+def test_busy_reservation_is_best_effort_false_with_nothing_held(tmp_path: Path) -> None:
+    """Real contention: another connection holds the write reservation.
+
+    This is the one reservation failure that may be a skipped write: the row was
+    never in doubt, a peer is simply writing.
+    """
+    store, row_id = _lent_store(tmp_path)
+    before = _payload(store, row_id)
+    store._conn.execute("PRAGMA busy_timeout = 0")  # noqa: SLF001
+    peer = sqlite3.connect(tmp_path / "auth.db", timeout=0, isolation_level=None)
+    try:
+        peer.execute("BEGIN IMMEDIATE")
+        wrote = store._update_payload(row_id, lambda d: d.update(x=1) or True)  # noqa: SLF001
+        assert wrote is False
+        assert store._conn.in_transaction is False  # noqa: SLF001
+        peer.execute("ROLLBACK")
+    finally:
+        peer.close()
+    assert _payload(store, row_id) == before
+
+
+@pytest.mark.parametrize(
+    ("message", "code", "contention"),
+    [
+        ("database is locked", None, True),
+        ("database table is locked: auth_credentials", None, True),
+        ("database is locked", sqlite3.SQLITE_BUSY, True),
+        ("database is locked", sqlite3.SQLITE_BUSY | (2 << 8), True),  # BUSY_SNAPSHOT
+        ("database table is locked", sqlite3.SQLITE_LOCKED, True),
+        ("disk I/O error", None, False),
+        ("disk I/O error", sqlite3.SQLITE_IOERR, False),
+        ("database is locked", sqlite3.SQLITE_IOERR, False),  # the code wins
+        ("database disk image is malformed", sqlite3.SQLITE_CORRUPT, False),
+    ],
+)
+def test_only_busy_or_locked_counts_as_contention(
+    message: str, code: int | None, contention: bool
+) -> None:
+    exc = sqlite3.OperationalError(message)
+    if code is not None:
+        exc.sqlite_errorcode = code  # type: ignore[attr-defined]
+    assert auth_store._is_lock_contention(exc) is contention  # noqa: SLF001
+    # A non-Operational class is never contention, whatever its text says.
+    assert auth_store._is_lock_contention(sqlite3.DatabaseError(message)) is False  # noqa: SLF001
+
+
+def _fail_inside_marker_arm(
+    monkeypatch: pytest.MonkeyPatch, store: AuthStore, prefix: str, exc: BaseException
+) -> list[int]:
+    """Raise ``exc`` from the store's ``execute`` for ``prefix`` statements, but
+    only while ``_arm_send_marker`` runs, so the rest of the refresh path (lease,
+    row reads) is untouched and the fault lands exactly on the marker's
+    reservation or read. Returns a list counting the injected faults."""
+    conn = store._conn  # noqa: SLF001
+    real_execute = conn.execute
+    real_arm = store._arm_send_marker  # noqa: SLF001
+    armed = [False]
+    fired: list[int] = []
+
+    def execute(sql: str, *args: Any, **kwargs: Any) -> Any:
+        if armed[0] and sql.lstrip().upper().startswith(prefix):
+            fired.append(1)
+            raise exc
+        return real_execute(sql, *args, **kwargs)
+
+    def arm(*args: Any, **kwargs: Any) -> Any:
+        armed[0] = True
+        try:
+            return real_arm(*args, **kwargs)
+        finally:
+            armed[0] = False
+
+    monkeypatch.setattr(conn, "execute", execute)
+    monkeypatch.setattr(store, "_arm_send_marker", arm)
+    return fired
+
+
+@pytest.mark.parametrize(
+    ("prefix", "exc"),
+    [
+        ("BEGIN", sqlite3.DatabaseError("disk I/O error")),
+        ("BEGIN", sqlite3.OperationalError("database disk image is malformed")),
+        ("SELECT", sqlite3.OperationalError("disk I/O error")),
+    ],
+    ids=["reservation-database-error", "reservation-operational-corrupt", "marker-select"],
+)
+def test_a_marker_reservation_or_read_error_never_reaches_the_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: str, exc: BaseException
+) -> None:
+    """R2-m2 / security S2: the caller-level guarantee, through the real refresh.
+
+    An expired row goes through ``_ensure_oauth_fresh``; the send marker cannot
+    be reserved or read. Downgrading that to "marker write skipped" would let the
+    refresh POST a token whose send marker it never saw. The provider must not
+    be called, the stored token must not move, the original error must surface
+    (R2-m1: the rollback's own failure cannot mask it), and nothing stays held.
+    """
+    store = AuthStore(db_path=tmp_path / "auth.db")
+    row = store.upsert_credential(
+        "anthropic",
+        {
+            "type": "oauth",
+            "refresh": "synthetic-refresh-0",
+            "access": "synthetic-access-0",
+            "expires": 1,
+        },
+    )
+    before = _payload(store, row.id)
+    calls: list[str | None] = []
+
+    async def counting_refresh(creds: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(creds.get("refresh"))
+        return {"type": "oauth", "refresh": "synthetic-refresh-1", "access": "synthetic-access-1"}
+
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: counting_refresh)
+    fired = _fail_inside_marker_arm(monkeypatch, store, prefix, exc)
+
+    stored = store.get_credential(row.id)
+    assert stored is not None
+    with pytest.raises(type(exc), match=str(exc)):
+        asyncio.run(store._ensure_oauth_fresh(stored))  # noqa: SLF001
+    monkeypatch.undo()
+
+    assert fired, "the fault never reached the marker write"
+    assert calls == [], "the provider was called past an unreadable send marker"
+    assert _payload(store, row.id) == before
+    assert store._conn.in_transaction is False  # noqa: SLF001
+
+
+def test_a_failing_rollback_does_not_mask_the_reservation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-m1: the error the caller sees is the one that failed the call."""
+    store, row_id = _lent_store(tmp_path)
+    _raise_after(monkeypatch, store, "BEGIN", sqlite3.DatabaseError("disk I/O error"))
+    conn = store._conn  # noqa: SLF001
+    real_rollback = conn.rollback
+    rollbacks: list[int] = []
+
+    def failing_rollback() -> None:
+        rollbacks.append(1)
+        real_rollback()
+        raise sqlite3.OperationalError("rollback failed too")
+
+    monkeypatch.setattr(conn, "rollback", failing_rollback)
+    with pytest.raises(sqlite3.DatabaseError, match="disk I/O error"):
+        store._update_payload(row_id, lambda d: True)  # noqa: SLF001
+    assert rollbacks == [1]
+    monkeypatch.undo()
+    assert store._conn.in_transaction is False  # noqa: SLF001

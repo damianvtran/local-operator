@@ -1490,6 +1490,39 @@ def _release_detached_refresh(task: asyncio.Task[dict[str, Any] | None], store: 
     store.close()
 
 
+#: Primary result codes meaning "another connection holds the lock", the only
+#: reservation failures :meth:`AuthStore._update_payload` may treat as a
+#: best-effort skipped write. Compared on the low byte because CPython exposes
+#: EXTENDED codes (``SQLITE_BUSY_SNAPSHOT`` is 517, not 5).
+_LOCK_CONTENTION_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _is_lock_contention(error: sqlite3.Error) -> bool:
+    """Whether ``error`` is verified lock contention, never a read failure.
+
+    ``BEGIN IMMEDIATE`` reads the database header and schema before it takes the
+    reservation, so it can fail with an I/O or corruption error that means the
+    row could not be read. Only contention may be downgraded to "write skipped";
+    everything else must propagate (PR #4269 security review, S2).
+
+    The code is authoritative when present. Without it (an error raised by a
+    wrapper, or an interpreter that does not set ``sqlite_errorcode``) the two
+    messages SQLite itself uses for BUSY and LOCKED are the only remaining
+    signal, and anything else is treated as not contention: misclassifying a
+    read failure as contention is the failure this guard exists to prevent.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        primary = code & 0xFF
+        return isinstance(error, sqlite3.OperationalError) and primary in _LOCK_CONTENTION_CODES
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    text = str(error).lower()
+    # SQLite appends the table name to the LOCKED message ("database table is
+    # locked: auth_credentials"), so that one is a prefix match.
+    return text == "database is locked" or text.startswith("database table is locked")
+
+
 class _FetchedCursor:
     """A cursor's results, drained while :class:`_SerializedConnection` held its lock.
 
@@ -3519,11 +3552,19 @@ class AuthStore:
 
         Returns whether the write happened. A row that is GONE (a racing logout)
         is ``False`` and never a re-created row: an explicitly removed credential
-        stays removed. Best-effort on a sqlite error while WRITING (taking the
-        reservation, the UPDATE, the commit), like every other marker write here
-        — losing a marker restores the pre-marker behaviour rather than failing
-        the request that triggered it. A sqlite error while READING the row
-        propagates, as it always did: "could not read" is not "no marker".
+        stays removed. Best-effort on a sqlite error while WRITING (the UPDATE,
+        the commit), like every other marker write here — losing a marker
+        restores the pre-marker behaviour rather than failing the request that
+        triggered it. Taking the reservation is best-effort ONLY for verified
+        lock contention (``SQLITE_BUSY``/``SQLITE_LOCKED``, see
+        :func:`_is_lock_contention`): ``BEGIN IMMEDIATE`` can itself read the
+        database header and schema, so a disk I/O or corruption error there is a
+        failed READ in disguise and propagates. A sqlite error while READING the
+        row propagates too, as it always did: "could not read" is not "no
+        marker", and a refresh caller that treated it as one would present a
+        token whose send marker it never saw. Every propagated error first rolls
+        back a transaction this call opened, with the rollback's own failure
+        suppressed so the ORIGINAL error is the one the caller sees.
 
         ONE READ-MODIFY-WRITE. The read, ``mutate`` and the write run under the
         connection's statement lock and, when no transaction is already open, a
@@ -3555,20 +3596,33 @@ class AuthStore:
                 if owned and conn.in_transaction:
                     conn.rollback()
 
+            def release_before_raise() -> None:
+                # On the way out with an error already in flight, a rollback that
+                # fails too must not replace it: the caller needs the error that
+                # explains the failure, not a secondary one from the cleanup.
+                with suppress(sqlite3.Error):
+                    release()
+
             try:
                 if owned:
                     conn.execute("BEGIN IMMEDIATE")
                 # else: a caller's transaction is already open; read and write
                 # inside it and let our commit below land it, exactly as the
                 # pre-reservation code committed within the caller's transaction.
-            except sqlite3.Error:
-                # Failing to take the write reservation (SQLITE_BUSY) is a
-                # write-side failure: best-effort, like the UPDATE below.
+            except sqlite3.Error as exc:
+                if not _is_lock_contention(exc):
+                    # Not contention: BEGIN IMMEDIATE failed reading the database
+                    # itself (I/O, corruption, misuse). That is "could not read",
+                    # which the READ phase below already refuses to downgrade.
+                    release_before_raise()
+                    raise
+                # Another writer holds the reservation: a write-side failure,
+                # best-effort like the UPDATE below.
                 release()
-                logger.debug("auth payload marker reservation failed", exc_info=True)
+                logger.debug("auth payload marker reservation busy", exc_info=True)
                 return False
             except BaseException:
-                release()
+                release_before_raise()
                 raise
             try:
                 # READ phase. A sqlite error here propagates (after cleanup) as it
@@ -3586,7 +3640,7 @@ class AuthStore:
             except BaseException:
                 # A raising read or `mutate` must not leave the reservation held:
                 # the next statement on this shared connection would run inside it.
-                release()
+                release_before_raise()
                 raise
             try:
                 # WRITE phase: best-effort on a sqlite error (see docstring).
@@ -3606,7 +3660,7 @@ class AuthStore:
                 logger.debug("auth payload marker write failed", exc_info=True)
                 return False
             except BaseException:
-                release()
+                release_before_raise()
                 raise
         return True
 
