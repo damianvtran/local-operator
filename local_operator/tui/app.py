@@ -37579,7 +37579,15 @@ class OperatorApp(App[None]):
                         run_session_move_preflight, target_id, request.to
                     )
                     block = preflight.get("working_set")
-                    if preflight.get("code") == "relay_restart_required":
+                    # EXCEPT A PLAIN RECALL (review M1, round 9): ``request_move``
+                    # refuses only its dry run — the stale relay would run that as a
+                    # real recall — and forwards the plain recall, which the remote
+                    # owner gates on its own (``working_set_unsupported`` for anything
+                    # to carry). Stopping here would refuse a chat-only recall that
+                    # moved before the gate existed. A queued recall is still refused
+                    # by ``request_move``, so it stops here as before.
+                    plain_recall = request.to == "local" and not request.queue
+                    if preflight.get("code") == "relay_restart_required" and not plain_recall:
                         # A STALE RELAY IS A STOP, NOT A FALL-THROUGH (review R9): it
                         # cannot run the gate, and ``request_move`` refuses the move
                         # itself for the same reason — so stop BEFORE the leave, with

@@ -389,7 +389,14 @@ def test_a_scripted_refusal_speaks_once_and_names_the_keeper(
         {"confirm_working_set": "sha256:x"},
         {"without_working_set": True},
         {},  # R9: the plain move the TUI sent after discarding its preflight refusal
-        {"to": "local"},
+        {"queue": True},
+        # A recall's DRY RUN and a QUEUED recall stay refused (review M1, round 9):
+        # that relay would run the dry run as a real recall, and nothing here can
+        # answer it for the remote owner. The PLAIN recall is forwarded — see
+        # ``test_a_plain_recall_still_reaches_an_older_relay``.
+        {"to": "local", "dry_run": True},
+        {"to": "local", "queue": True},
+        {"to": "local", "without_working_set": True},
     ],
 )
 def test_a_relay_older_than_the_gate_is_never_sent_a_gated_move(
@@ -463,6 +470,83 @@ def test_a_plain_offload_with_nothing_to_carry_still_reaches_an_older_relay(
     assert answer["code"] != "relay_restart_required", answer
     assert len(sent) == 1
     assert (sent[0]["action"], sent[0]["to"]) == ("offload", "peer")
+
+
+def _chat_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A config root whose session worked in no repository (a chat-only conversation)."""
+    home = tmp_path / "home"
+    (home / "not-a-repo").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    root = tmp_path / "cfg"
+    point_session_at(root / "sessions" / SESSION, home / "not-a-repo")
+    return root
+
+
+def test_a_chat_only_offloads_dry_run_is_answered_here_and_its_move_goes_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M1 (review round 9): the TUI always dry-runs first, and the old-relay branch
+    refused EVERY dry run — so a chat-only ``/move --to peer`` stopped on a restart
+    remedy although its plain move was let through. This is the TUI's own sequence
+    (``run_session_move_preflight`` then ``run_session_move``): the dry run is answered
+    here from this device's own (owner's) empty manifest, never sent to the relay that
+    would run it as a real move; the plain move that follows is forwarded as before."""
+    from local_operator.network import mobility
+
+    root = _chat_only(monkeypatch, tmp_path)
+    sent = _stale_relay(monkeypatch)
+
+    preflight = dict(mobility.request_move(SESSION, to="peer", root=root, dry_run=True))
+
+    assert preflight == {
+        "ok": True,
+        "dry_run": True,
+        "session_id": SESSION,
+        "confirmation_required": False,
+        "working_set": {},
+    }, preflight
+    assert sent == [], "a dry run reached a relay that would run it as a real move"
+
+    mobility.request_move(SESSION, to="peer", root=root)
+
+    assert [(frame["action"], frame["to"], frame["dry_run"]) for frame in sent] == [
+        ("offload", "peer", False)
+    ]
+
+
+def test_a_queued_chat_only_offload_keeps_the_older_relay_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """S-1 (security, round 9): emptiness is judged when the move is asked, but a
+    queued offload runs later inside a relay with no gate — so it keeps the refusal."""
+    from local_operator.network import mobility
+
+    root = _chat_only(monkeypatch, tmp_path)
+    sent = _stale_relay(monkeypatch)
+
+    refused = dict(mobility.request_move(SESSION, to="peer", root=root, queue=True))
+
+    assert refused["code"] == "relay_restart_required", refused
+    assert sent == []
+
+
+def test_a_plain_recall_still_reaches_an_older_relay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M1 (review round 9): a recall moved through this relay before the gate. Its
+    owner is remote, and a current owner gates the stale relay's consent-less
+    ``prepare`` itself (``working_set_unsupported`` for anything to carry — pinned by
+    ``test_workset_confirm_gate``), so the plain recall is forwarded, unchanged."""
+    from local_operator.network import mobility
+
+    root = tmp_path / "cfg"
+    sent = _stale_relay(monkeypatch)
+
+    answer = dict(mobility.request_move(SESSION, to="local", root=root))
+
+    assert answer["code"] != "relay_restart_required", answer
+    assert [(frame["action"], frame["to"]) for frame in sent] == [("recall", "local")]
+    assert "working_set" in sent[0]  # the consent frame, inert to that relay
 
 
 def test_an_unreadable_working_set_keeps_the_older_relay_refused(

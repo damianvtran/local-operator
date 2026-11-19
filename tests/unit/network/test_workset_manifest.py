@@ -210,6 +210,76 @@ def test_a_relative_seed_never_resolves_against_the_relays_own_cwd(
     assert [candidate.path for candidate in found] == [rig.feat]
 
 
+def test_a_relative_wake_index_cwd_does_not_hide_the_markers_absolute_one(
+    root: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-2 (security, round 9): the wake index's ``.`` (a session built with no cwd) is
+    truthy, so it won over the marker's absolute repo cwd and the owner saw no working
+    set — "nothing to carry" for a conversation that worked in a worktree."""
+    from local_operator.network import mobility
+    from local_operator.wakes import store as wake_store
+
+    point_session_at(root / "sessions" / SID, rig.feat)
+    monkeypatch.setattr(wake_store, "read_entry", lambda *_a, **_k: {"cwd": "."})
+
+    cwd = mobility._session_cwd_at(root, SID)
+
+    assert cwd == str(rig.feat)
+    assert list(_rows(_manifest(root, rig, cwd_hint=cwd))) == ["~/proj/.worktrees/feat"]
+
+
+def test_a_home_relative_cwd_is_expanded_not_dropped(
+    root: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-2: a ``~/proj/...`` cwd is the user's home spelled short; it reached the seed
+    walk unexpanded, was skipped as relative, and the worktree was never shown."""
+    from local_operator.network import mobility
+    from local_operator.wakes import store as wake_store
+
+    monkeypatch.setattr(
+        wake_store, "read_entry", lambda *_a, **_k: {"cwd": "~/proj/.worktrees/feat"}
+    )
+
+    cwd = mobility._session_cwd_at(root, SID)
+
+    assert cwd == str(rig.feat)
+    assert list(_rows(_manifest(root, rig, cwd_hint=cwd))) == ["~/proj/.worktrees/feat"]
+    # The seed walk expands it too, for a caller that hands the raw value over.
+    hinted = _rows(_manifest(root, rig, cwd_hint="~/proj/.worktrees/feat"))
+    assert hinted["~/proj/.worktrees/feat"].sources == ("cwd",)
+
+
+def test_a_home_relative_provenance_path_seeds_its_worktree(root: Path, rig: Rig) -> None:
+    """S-2: provenance seeds are expanded the same way as the cwd and mentions."""
+    session = root / "sessions" / SID
+    point_session_at(session, rig.home)
+    records = session / ".file-provenance"
+    records.mkdir()
+    (records / "p1.json").write_text(
+        json.dumps({"file": {"path": "~/proj/.worktrees/feat/b.txt"}}), encoding="utf-8"
+    )
+
+    rows = _rows(_manifest(root, rig))
+
+    assert rows["~/proj/.worktrees/feat"].sources == ("provenance",)
+
+
+def test_a_cwd_symlinked_into_a_repo_subdirectory_finds_the_repo(root: Path, rig: Rig) -> None:
+    """S-3 (security, round 9): the walk up for ``.git`` followed the LINK's parents
+    (``~``), never the target's, so a cwd linked into ``repo/sub`` showed no working
+    set at all."""
+    sub = rig.feat / "sub"
+    sub.mkdir()
+    link = rig.home / "work"
+    link.symlink_to(sub, target_is_directory=True)
+    point_session_at(root / "sessions" / SID, link)
+
+    rows = _rows(_manifest(root, rig))
+
+    assert list(rows) == ["~/proj/.worktrees/feat"]
+    assert rows["~/proj/.worktrees/feat"].sources == ("cwd",)
+
+
 def test_a_provenance_record_seeds_its_worktree(root: Path, rig: Rig) -> None:
     session = root / "sessions" / SID
     point_session_at(session, rig.home)
@@ -369,6 +439,27 @@ def test_a_broken_gitdir_pointer_is_classed_whatever_git_says(
         _manifest(root, rig)
 
     assert (failure.value.step, failure.value.cause) == ("discover", "not_a_repository")
+
+
+def test_a_gitdir_pointer_is_read_as_a_bounded_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-1 (review round 9): ``.git`` was read whole to learn its first line. A large
+    ``.git`` file is read only up to ``_GITDIR_POINTER_MAX_BYTES``; the pointer is
+    still classed from that prefix."""
+    top = tmp_path / "proj"
+    top.mkdir()
+    pointer = top / ".git"
+    pointer.write_bytes(
+        f"gitdir: {tmp_path / 'gone'}\n".encode() + b"x" * (8 * workset._GITDIR_POINTER_MAX_BYTES)
+    )
+
+    def whole_file(*_a: object, **_k: object) -> str:
+        raise AssertionError("the .git file was read whole")
+
+    monkeypatch.setattr(Path, "read_text", whole_file)
+
+    assert workset._broken_gitdir_pointer(top) is True
 
 
 def test_dubious_ownership_is_classed_not_echoed() -> None:

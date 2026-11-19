@@ -2163,6 +2163,68 @@ async def test_a_stale_relay_stops_the_move_before_the_leave(
         assert reopened == [], reopened
 
 
+@pytest.mark.parametrize("queue", [False, True], ids=["recall", "queued_recall"])
+@pytest.mark.asyncio
+async def test_a_stale_relay_still_lets_a_plain_recall_through(
+    monkeypatch: pytest.MonkeyPatch, queue: bool
+) -> None:
+    """M1 (review round 9): ``request_move`` refuses a recall's DRY RUN through a stale
+    relay (that relay would run it as a real recall) but forwards the plain recall,
+    which the remote owner gates itself. The TUI stopped on the dry run's refusal, so a
+    chat-only ``/move --to local`` that moved before the gate was newly refused. A
+    QUEUED recall is still refused by ``request_move``, so it still stops here."""
+
+    moved: list[dict[str, Any]] = []
+    left: list[bool] = []
+
+    def stale(session_id: str, to: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "relay_restart_required",
+            "session_id": session_id,
+            "changed": False,
+            "message": mobility_restart_message(),
+        }
+
+    def fake_move(session_id: str, to: str, **kwargs: Any) -> dict[str, Any]:
+        moved.append({"session_id": session_id, "to": to, **kwargs})
+        return dict(_COMMITTED)
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_leave() -> None:
+        left.append(True)
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move_preflight", stale)
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        monkeypatch.setattr(app, "_move_target_refusal", no_refusal)
+        monkeypatch.setattr(app, "_leave_for_move", fake_leave)
+        app._run_slash_command("/move --to local" + (" --queue" if queue else ""))
+        for _ in range(60):
+            await pilot.pause()
+            if moved or any("restart" in notice for notice in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        if queue:
+            assert "restart it with `lop network restart`" in shown, shown
+            assert moved == [] and left == [], (moved, left)
+        else:
+            assert [(row["to"], row["confirm_working_set"]) for row in moved] == [("local", "")]
+            assert moved[0]["without_working_set"] is False, moved
+            assert "restart" not in shown, shown
+
+
+def mobility_restart_message() -> str:
+    from local_operator.network import mobility
+
+    return mobility.RELAY_RESTART_MESSAGE
+
+
 @pytest.mark.parametrize("keep", [False, True], ids=["move", "keep"])
 @pytest.mark.parametrize("stale", [True, False], ids=["stale_relay", "current_relay"])
 @pytest.mark.asyncio

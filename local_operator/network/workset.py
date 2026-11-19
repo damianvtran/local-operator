@@ -496,7 +496,9 @@ def candidate_seeds(
     for index, sid in enumerate(session_ids):
         tag = "" if index == 0 else f"subagent:{sid}"
         directory = sessions / sid
-        cwd = cwd_hint if (index == 0 and cwd_hint) else carry.resolve_cwd(directory)
+        cwd = _absolute_seed(
+            cwd_hint if (index == 0 and cwd_hint) else carry.resolve_cwd(directory), home_path
+        )
         if cwd and os.path.realpath(cwd) != os.path.realpath(directory):
             seeds.append(Seed(cwd, tag or "cwd"))
         provenance = directory / ".file-provenance"
@@ -508,7 +510,8 @@ def candidate_seeds(
             proof = _read_json(record)
             frozen = proof.get("file") if isinstance(proof, dict) else None
             path = frozen.get("path") if isinstance(frozen, dict) else None
-            if isinstance(path, str) and path:
+            path = _absolute_seed(path, home_path)
+            if path:
                 seeds.append(Seed(path, tag or "provenance"))
         for text in _transcript_texts(directory):
             for match in _PATH_MENTION.finditer(text):
@@ -524,6 +527,23 @@ def candidate_seeds(
                 if len(mentions_seen) >= _MAX_MENTIONS:
                     break
     return seeds
+
+
+def _absolute_seed(value: object, home: Path) -> str:
+    """``value`` with a leading ``~`` expanded against ``home``, or "" if not absolute.
+
+    SEEDS ARE READ AS ABSOLUTE PATHS (security S-2, round 9). A recorded ``~/proj``
+    is the user's home spelled the short way — the transcript mentions are already
+    expanded the same way below — and must reach its repo; a relative value would
+    otherwise resolve against the RELAY process's cwd and could seed an unrelated
+    tree, so it is dropped rather than guessed at.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    text = value.strip()
+    if text == "~" or text.startswith("~/"):
+        text = str(home) + text[1:]
+    return text if os.path.isabs(text) else ""
 
 
 def _git_env() -> dict[str, str]:
@@ -659,6 +679,22 @@ def _nearest_existing_dir(path: str) -> Path | None:
 def _work_tree_top(directory: Path) -> Path | None:
     """The work-tree root containing ``directory`` by walking up for ``.git`` (a stat
     walk, no subprocess — mentions can be thousands of paths)."""
+    found = _walk_up_for_git(directory)
+    if found is not None:
+        return found
+    # THE LINK'S TARGET, WHEN ITS OWN PATH FINDS NOTHING (security S-3, round 9). A
+    # cwd symlinked into a repo SUBDIRECTORY (``~/work -> ~/repo/sub``) walks up the
+    # link's parents (``~``), never the target's (``~/repo``), so the repo was missed
+    # and its working set never shown. The literal walk runs first so a path that
+    # already finds a repo keeps the spelling the user recorded.
+    try:
+        real = directory.resolve()
+    except (OSError, RuntimeError):  # a symlink loop, or a path that cannot resolve
+        return None
+    return _walk_up_for_git(real) if real != directory else None
+
+
+def _walk_up_for_git(directory: Path) -> Path | None:
     current = directory
     for _ in range(64):
         if (current / ".git").exists():
@@ -667,6 +703,11 @@ def _work_tree_top(directory: Path) -> Path | None:
             return None
         current = current.parent
     return None
+
+
+#: How much of a ``.git`` file :func:`_broken_gitdir_pointer` reads. A ``gitdir:``
+#: line is one path; 4096 covers PATH_MAX on Linux and macOS (1024).
+_GITDIR_POINTER_MAX_BYTES = 4096
 
 
 def _broken_gitdir_pointer(top: Path) -> bool:
@@ -682,7 +723,12 @@ def _broken_gitdir_pointer(top: Path) -> bool:
     try:
         if not pointer.is_file():
             return False
-        first = pointer.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+        # A BOUNDED PREFIX (review N-1, round 9): a real pointer is one short line,
+        # and a ``.git`` that is some other, huge file must not be read whole just
+        # to learn that it is not a pointer.
+        with pointer.open("rb") as handle:
+            head = handle.read(_GITDIR_POINTER_MAX_BYTES)
+        first = head.decode("utf-8", "replace").splitlines()[:1]
     except OSError:
         return False
     if not first or not first[0].startswith("gitdir:"):

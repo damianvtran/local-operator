@@ -4733,36 +4733,50 @@ def _session_cwd_at(root: Path, session_id: str) -> str:
     object (``request_move``'s stale-relay check runs in the CLI process)."""
     session_dir = root / "sessions" / session_id
 
-    def usable(value: Any) -> bool:
+    def usable(value: Any) -> str:
+        """``value`` as an absolute path, or "" to fall through to the next source.
+
+        ABSOLUTE OR NOTHING (security S-2, round 9). A ``.`` or ``~/proj`` recorded
+        in the wake index is truthy, so it used to win and HIDE the absolute cwd the
+        marker or runtime record held — and a relative path resolves against the
+        RELAY's own cwd, not the session's, so it seeds the wrong tree. ``~`` is
+        expanded here (this process runs as the session's user, on its device);
+        anything still relative after that is not a cwd this device can read.
+        """
         if not isinstance(value, str) or not value.strip():
-            return False
+            return ""
         try:
-            return Path(value) != session_dir
+            expanded = os.path.expanduser(value.strip())
+            if not os.path.isabs(expanded) or Path(expanded) == session_dir:
+                return ""
         except (OSError, ValueError):  # a path this host cannot even spell
-            return False
+            return ""
+        return expanded
 
     try:
         from local_operator.wakes import store as wake_store
 
         entry = wake_store.read_entry(root, session_id) or {}
-        if usable(entry.get("cwd")):
-            return str(entry["cwd"])
+        found = usable(entry.get("cwd"))
+        if found:
+            return found
     except Exception:  # noqa: BLE001 — a cwd is never worth a failed move
         logger.debug("mobility: could not read %s's wake index cwd", session_id, exc_info=True)
     try:
         from local_operator.network import carry as carry_mod
 
-        from_marker = carry_mod.resolve_cwd(session_dir)
-        if usable(from_marker):
-            return from_marker
+        found = usable(carry_mod.resolve_cwd(session_dir))
+        if found:
+            return found
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's desktop marker", session_id, exc_info=True)
     try:
         from local_operator.mobile.attach_client import find_runtime_record
 
         record, _pid = find_runtime_record(root, session_id)
-        if record is not None and usable(record.cwd):
-            return str(record.cwd)
+        found = usable(record.cwd) if record is not None else ""
+        if found:
+            return found
     except Exception:  # noqa: BLE001
         logger.debug("mobility: could not read %s's runtime record", session_id, exc_info=True)
     return ""
@@ -8005,16 +8019,51 @@ def request_move(
     consenting = bool(dry_run or confirm_working_set or without_working_set)
     gated = consenting or not (keep or from_replica)
     if gated and not _relay_serves_workset_gate(record):
-        # A PLAIN OFFLOAD WITH NOTHING TO CARRY STILL GOES THROUGH (coordinator
-        # ruling, PR #4241 merge gate): the stale relay's ungated move loses nothing
-        # when this device's own manifest is empty, so it moves exactly as it did
-        # before the gate. Only an offload can be checked here (this device is its
-        # owner); a recall's owner is remote, and a consent or dry run cannot be
-        # carried by that relay at all, so those stay refused. The restart remedy is
-        # honest in this branch: it is THIS device's relay that is older than this lop.
-        plain_offload = not consenting and to != "local" and not from_replica
+        # A MOVE WITH NOTHING TO CARRY STILL GOES THROUGH (coordinator ruling, PR
+        # #4241 merge gate): the stale relay's ungated move loses nothing when there
+        # is no working set, so it moves exactly as it did before the gate. A consent
+        # (``confirm``/``without``) can never be carried by that relay, so it stays
+        # refused. The restart remedy is honest in this branch: it is THIS device's
+        # relay that is older than this lop.
+        offload = to != "local" and not from_replica
+        recall = to == "local" and not from_replica
+        consent_given = bool(confirm_working_set or without_working_set)
         root_dir = resolved if resolved is not None else _config_root()
-        if not (plain_offload and _nothing_to_carry_here(root_dir, session_id)):
+        if offload and not consent_given and _nothing_to_carry_here(root_dir, session_id):
+            if dry_run:
+                # ANSWERED HERE, NEVER SENT (review M1, round 9): the stale relay reads
+                # no ``dry_run`` and would run the preflight as a real move. This
+                # device IS the offload's owner, so its own empty manifest is the
+                # owner's answer — the same shape ``_workset_preflight_local`` gives —
+                # and the TUI, which always dry-runs first, goes on to the plain move
+                # below instead of stopping a chat-only ``/move`` on a restart remedy.
+                return MoveDryRun(
+                    ok=True,
+                    dry_run=True,
+                    session_id=session_id,
+                    confirmation_required=False,
+                    working_set={},
+                )
+            if queue:
+                # NOT A QUEUED ONE (security S-1, round 9): emptiness is judged NOW,
+                # but a queued move runs at the source's next safe point, inside a
+                # relay with no gate — worktrees made in between would leave
+                # unchecked. A queued offload keeps the restart refusal.
+                return _relay_refusal(session_id, "relay_restart_required", RELAY_RESTART_MESSAGE)
+        elif recall and not consenting and not queue:
+            # A PLAIN RECALL IS FORWARDED, AS BEFORE THE GATE (review M1, round 9).
+            # Emptiness cannot be read here (the owner is remote), but it need not
+            # be: the stale relay's ``prepare`` carries no ``working_set`` key, and a
+            # current owner reads that absence as an older destination
+            # (``_workset_gate(consent_present=False)``) — an empty set moves, a
+            # non-empty or unreadable one is refused ``working_set_unsupported``
+            # before anything is retired. An owner older than the gate checks nothing
+            # through a current relay either, so forwarding adds no exposure. Still
+            # refused: a recall DRY RUN (that relay would run it as a real recall,
+            # and this device cannot answer it without the owner) and a QUEUED recall
+            # (its resume is not a path this build can prove re-runs the owner gate).
+            pass
+        else:
             return _relay_refusal(session_id, "relay_restart_required", RELAY_RESTART_MESSAGE)
     action = "recover" if from_replica else ("recall" if to == "local" else "offload")
     # THE CALLER'S OWN ENVELOPE IS THE RELAY'S BOUND PLUS ITS MARGIN, and both terms
