@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import sys
 import threading
 import weakref
 
@@ -744,6 +745,62 @@ async def test_a_team_parent_stamps_the_member_brief_on_the_child(tmp_path, monk
     await parent.dispose()
 
 
+def _describe_referrer(obj: object) -> str:
+    """One cheap line naming what a gc referrer is, for leak diagnostics."""
+    kind = type(obj).__name__
+    if isinstance(obj, dict):
+        if isinstance(obj.get("__name__"), str) and "__file__" in obj:
+            return f"module globals {obj['__name__']}"
+        keys = [repr(k) for k in list(obj)[:6]]
+        return f"dict keys=[{', '.join(keys)}{', ...' if len(obj) > 6 else ''}]"
+    code = getattr(obj, "f_code", None)
+    if code is not None:
+        return f"frame {getattr(code, 'co_qualname', code.co_name)}"
+    qualname = getattr(obj, "__qualname__", None)
+    if isinstance(qualname, str):
+        return f"{kind} {qualname}"
+    return f"{kind} ({type(obj).__qualname__})"
+
+
+def _referrer_report(obj: object, limit: int = 20) -> str:
+    """Name who still holds ``obj`` (two levels), so a CI-only retention
+    failure reports its holder instead of just "still a live Session".
+
+    The report's own frames (and the calling test's coroutine) and the
+    referrer lists it builds are excluded; they hold ``obj`` only because we
+    are looking at it. So are ``obj``'s own internals (its ``__dict__`` and
+    methods bound to it): they are its cycle, not an outside holder, and
+    would otherwise crowd the real owner edge out of the capped report.
+    """
+    if obj is None:
+        return "collected during report"
+    here = sys._getframe()
+    caller = here.f_back
+    own: list[object] = [here, caller]
+    gc.collect()
+    first = [
+        r
+        for r in gc.get_referrers(obj)
+        if not any(r is o for o in own)
+        and getattr(r, "cr_frame", None) is not caller
+        and r is not getattr(obj, "__dict__", None)
+        and getattr(r, "__self__", None) is not obj
+    ]
+    own.append(first)
+    lines = [f"live {type(obj).__name__} still referenced by:"]
+    for ref in first:
+        lines.append(f"  {_describe_referrer(ref)}")
+        second = gc.get_referrers(ref)
+        own.append(second)
+        for up in second:
+            if any(up is o for o in own):
+                continue
+            lines.append(f"    <- {_describe_referrer(up)}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines[:limit])
+
+
 @pytest.mark.asyncio
 async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monkeypatch):
     """The accounting snapshot must not keep an observability-to-owner edge."""
@@ -763,10 +820,20 @@ async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monk
         lambda: (row := parent.jobs.get(job_id)) is not None and row.status == "completed"
     )
     await wait_for(lambda: bool(captured))
-    for _ in range(3):
+    # Why a bounded wait rather than a fixed handful of gc/yield rounds: the
+    # fixed three rounds failed intermittently on CI full-suite gates (8 of 20
+    # failed gate runs after 2026-11-19T01:04Z, py3.12 and 3.13, unrelated PRs)
+    # while always passing locally, i.e. the child's teardown can lag a few
+    # loop turns under xdist/CI load. The deadline keeps the guarded property
+    # honest: a real owner edge from the accounting snapshot never clears, so
+    # it still fails, just after ~3 s, and the message names the holder.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 3.0
+    while captured[0]() is not None and loop.time() < deadline:
         gc.collect()
-        await asyncio.sleep(0)
-    assert captured[0]() is None
+        await asyncio.sleep(0.01)
+    gc.collect()
+    assert captured[0]() is None, _referrer_report(captured[0]())
     assert parent.jobs.get(job_id) is not None
     await parent.dispose()
 
