@@ -4346,10 +4346,16 @@ async def bridge_card_body(
     the caller can already page, so it cannot be used to probe message ids.
     The display store and the hub's admitted-only history read are the only
     sources; the screener's classification fetch (``/messages/{id}/body``) is
-    never used. Caching: ``private, no-store`` (design §4, QA Q2) — the body is
-    third-party text for one viewer, so no shared cache may hold it and no
-    cache may keep it at all. The managed boundary keeps a route's own
-    policy when it already includes ``no-store``.
+    never used. Caching, SET vs SERVED (the same split as the owner-audit and
+    owner-invitation routes in ``desktop_team_bridge.py``): the route SETS
+    ``private, no-store`` (design §4) so it carries the body's contract
+    wherever the router is mounted, but the running core's app-wide
+    ``managed_desktop_boundary`` (server/app.py) rewrites every
+    ``/v1/desktop/`` answer to plain ``no-store``, which is what is SERVED.
+    That is no weaker -- ``no-store`` keeps third-party text out of every
+    cache, shared or private. The boundary is deliberately not taught to keep
+    a route's own value: that would change the served header of every
+    existing route that sets ``private, no-store``.
     """
     async with errors(request):
         answer = reply(await host(request).bridge_card_body(session_id, entry_id))

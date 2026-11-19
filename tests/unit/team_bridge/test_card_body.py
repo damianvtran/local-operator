@@ -970,8 +970,9 @@ def test_a_hub_refill_never_downgrades_a_live_turn_row(tmp_path: Path) -> None:
     assert row["source"] == "turn" and row["admitted_at"] == first
 
 
-def test_the_desktop_route_sends_private_no_store(tmp_path: Path) -> None:
-    """Q2: the desktop route keeps ``private, no-store`` through the boundary."""
+def test_the_desktop_route_sets_private_no_store_and_serves_no_store(tmp_path: Path) -> None:
+    """SET vs SERVED, like the owner-audit routes: the route sets
+    ``private, no-store``; the managed boundary serves plain ``no-store``."""
     from fastapi import FastAPI
     from starlette.testclient import TestClient
 
@@ -997,12 +998,23 @@ def test_the_desktop_route_sends_private_no_store(tmp_path: Path) -> None:
 
         return JSONResponse({}, headers={"Cache-Control": "public, max-age=60"})
 
+    path = f"/v1/desktop/sessions/{SESSION}/bridge-cards/{ENTRY_ID}/body"
+    # SET: a router-only mount sees the route's own value.
+    bare = FastAPI()
+    bare.include_router(desktop_sessions.router)
+    bare.dependency_overrides[require_desktop] = lambda: None
+    bare.state.desktop_sessions = Host()
+    set_value = TestClient(bare).get(path)
+    assert set_value.status_code == 200, set_value.text
+    assert set_value.headers["cache-control"] == "private, no-store"
+    # SERVED: the boundary rewrites it to plain no-store, as for every
+    # existing route that sets ``private, no-store``.
     client = TestClient(probe)
-    response = client.get(f"/v1/desktop/sessions/{SESSION}/bridge-cards/{ENTRY_ID}/body")
+    response = client.get(path)
     assert response.status_code == 200, response.text
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == "no-store"
     assert response.json()["result"] == answer
-    # The boundary still forces no-store over anything weaker.
+    # The boundary forces no-store over anything weaker, too.
     assert client.get("/v1/desktop/probe-public").headers["cache-control"] == "no-store"
 
 
