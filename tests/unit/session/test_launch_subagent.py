@@ -772,6 +772,44 @@ async def test_settled_row_does_not_retain_disposed_child_session(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_disposed_child_transcript_does_not_retain_its_session(tmp_path, monkeypatch):
+    """A surviving reference to a disposed child's Transcript must not pin the Session.
+
+    Regression for the intermittent failure of the test above on CI shard 0:
+    a default-executor worker that has delivered a ``Transcript._commit``
+    write's result but has not yet reached ``del work_item`` (a thread
+    descheduled under load) still holds the write closure, hence the
+    Transcript. The bridge-taint commit subscription made that Transcript hold
+    the Session through a bound method, so the child outlived ``gc.collect()``.
+    Holding the transcript here is that lingering work item, made deterministic.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    captured: list[weakref.ReferenceType[Session]] = []
+    transcripts: list[object] = []
+
+    def remember_child(event):
+        if isinstance(event, SubagentStartEvent):
+            child = parent.subagent_comms._records[event.job_id].child
+            assert child is not None
+            captured.append(weakref.ref(child))
+            transcripts.append(child._transcript)
+
+    parent.subscribe(remember_child)
+    job_id = parent._launch_subagent(label="collectible", prompt="finish")
+    await wait_for(
+        lambda: (row := parent.jobs.get(job_id)) is not None and row.status == "completed"
+    )
+    await wait_for(lambda: bool(captured))
+    for _ in range(3):
+        gc.collect()
+        await asyncio.sleep(0)
+    assert transcripts, "the child's transcript was never captured"
+    assert captured[0]() is None
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_launch_subagent_is_wired_as_subagent_launcher(tmp_path, monkeypatch):
     """The ToolContext built for a turn carries _launch_subagent as the
     subagent_launcher, so the task tool can call it."""
