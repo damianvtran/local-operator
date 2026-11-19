@@ -155,6 +155,7 @@ from local_operator.server.utils.desktop_receipts import DesktopReceipts
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath
 from local_operator.stt import audio as stt_audio
+from local_operator.stt.errors import finite_non_negative
 from local_operator.tts import VoicePath
 from local_operator.voice import provider as speech_provider
 from local_operator.voice import segments as voice_segments
@@ -468,16 +469,9 @@ def _rate_limit_scope(
     ``None`` when the details carry neither number: Groq sends them as headers, but
     ElevenLabs does not, and a window the provider never named is not one to claim.
     """
-    retry: float | None
-    try:
-        retry = float(details["retry_after_s"])
-    except (KeyError, TypeError, ValueError):
-        retry = None
-    remaining: int | None
-    try:
-        remaining = int(float(details["remaining_requests"]))
-    except (KeyError, TypeError, ValueError):
-        remaining = None
+    retry = finite_non_negative(details.get("retry_after_s"))
+    remaining_number = finite_non_negative(details.get("remaining_requests"))
+    remaining = int(remaining_number) if remaining_number is not None else None
     if remaining is not None:
         scope: str | None = "day" if remaining <= 0 else "minute"
     elif retry is not None:

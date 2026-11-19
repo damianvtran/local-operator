@@ -1627,6 +1627,50 @@ async def test_a_tts_429_maps_to_voice_rate_limited_with_retry_after(
         assert response.headers["retry-after"] == str(int(-(-retry // 1)))
 
 
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"retry_after_s": float("nan")},
+        {"retry_after_s": float("inf")},
+        {"retry_after_s": -5.0},
+        {"remaining_requests": float("inf")},
+        {"remaining_requests": float("nan")},
+        {"remaining_requests": "inf"},
+        {"retry_after_s": float("inf"), "remaining_requests": float("nan")},
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_non_finite_limit_header_is_dropped_not_a_crash(
+    rig: Any, cascades: SimpleNamespace, details: dict[str, Any]
+) -> None:
+    """``nan``/``inf`` parse as floats but are not seconds or counts: they crash
+    ``math.ceil`` and are not valid JSON, so the refusal must be the unknown-scope
+    429 with a strict-JSON body and no ``Retry-After``."""
+    import json as _json
+
+    from local_operator.tts import VoicePath
+    from local_operator.tts.cascade import TtsUnavailable as Unavailable
+
+    cascades.tts_error = Unavailable(
+        "x",
+        resolution=None,  # type: ignore[arg-type]
+        error=_limited(**details),
+        failed_path=VoicePath.PROVIDER_TTS_GROQ,
+    )
+    await _enable(rig, SESSION_A)
+    response = await _speech(rig, {"kind": "message", "message_id": ASSISTANT_ID})
+    assert response.status_code == 429, response.text
+
+    def _no_constants(token: str) -> Any:
+        raise AssertionError(f"not valid JSON: {token}")
+
+    detail = _json.loads(response.text, parse_constant=_no_constants)["detail"]
+    assert detail["code"] == "voice_rate_limited"
+    assert detail["scope"] is None
+    assert detail["retry_after_s"] is None and detail["remaining_requests"] is None
+    assert "retry-after" not in response.headers
+
+
 @pytest.mark.asyncio
 async def test_an_stt_429_is_voice_rate_limited_and_admits_nothing(
     rig: Any, cascades: SimpleNamespace

@@ -25,6 +25,7 @@ the HTTP plane.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import TYPE_CHECKING, Any, Iterable, Optional, Tuple
 
@@ -365,6 +366,22 @@ def classify_upstream_failure(
     return HTTPException(status_code=status_code, detail=detail)
 
 
+def finite_non_negative(value: Any) -> float | None:
+    """``value`` as a float if it is a finite, non-negative number, else ``None``.
+
+    A provider header is hostile input: ``float("nan")`` and ``float("inf")``
+    parse without error, ``int(float("inf"))`` raises ``OverflowError``, and a
+    ``nan`` stored as seconds later crashes ``math.ceil`` and cannot be written
+    as JSON. Seconds and request counts are neither negative nor infinite, so
+    anything else is treated as the header being absent.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 def _rate_limit_details(response: "HttpxResponse") -> dict[str, Any]:
     """``retry_after_s`` / ``remaining_requests`` from a refusal's headers.
 
@@ -375,18 +392,12 @@ def _rate_limit_details(response: "HttpxResponse") -> dict[str, Any]:
     absent or not a number is simply omitted, never guessed.
     """
     found: dict[str, Any] = {}
-    retry = response.headers.get("retry-after")
-    remaining = response.headers.get("x-ratelimit-remaining-requests")
-    try:
-        if retry is not None:
-            found["retry_after_s"] = float(retry)
-    except ValueError:
-        pass
-    try:
-        if remaining is not None:
-            found["remaining_requests"] = int(float(remaining))
-    except ValueError:
-        pass
+    retry = finite_non_negative(response.headers.get("retry-after"))
+    remaining = finite_non_negative(response.headers.get("x-ratelimit-remaining-requests"))
+    if retry is not None:
+        found["retry_after_s"] = retry
+    if remaining is not None:
+        found["remaining_requests"] = int(remaining)
     return found
 
 
@@ -427,4 +438,5 @@ __all__ = [
     "api_error_from_httpx_response",
     "classify_upstream_failure",
     "failure_status_and_detail",
+    "finite_non_negative",
 ]
