@@ -1,0 +1,62 @@
+from pathlib import Path
+import hashlib,json,subprocess,os,copy,datetime
+root=Path('/Users/damian/local-operator/.worktrees/feat-google-vertex-provider');ns='providers.vertex_prompts';locales=['fr','es','zh-CN','ru','vi','ur','hi']
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+py=str(root/'.venv/bin/python');env={k:v for k,v in os.environ.items() if not k.startswith('CMUX_')}
+ack_path=Path('/Users/damian/.local-operator/sessions/03178f8c9cba/scratchpad/vertex-i18n-secondary/context-compatibility-ack.json')
+assert sha(ack_path)=='915456de1acacccac6b7ed643bff6ca41d8b32b7035f066548b59953ac775464'
+ack=json.loads(ack_path.read_text());ctx=root/'local_operator/i18n/catalogues/en'/f'{ns}.context.json'
+assert sha(ctx)==ack['new_context_sha256']
+old=json.loads(ctx.read_text());delta=ack['exact_delta'];assert old[delta['key']][delta['field']]==delta['new'];old[delta['key']][delta['field']]=delta['old']
+assert hashlib.sha256((json.dumps(old,ensure_ascii=False,indent=2)+'\n').encode()).hexdigest()==ack['old_context_sha256']
+for locale,h in ack['unchanged_catalogue_hashes'].items():assert sha(root/'local_operator/i18n/catalogues'/locale/f'{ns}.json')==h
+protected=[root/'i18n/audit-history.json',root/'i18n/ledger.json',*sorted((root/'i18n/ledger').glob('*.json'))];before={str(p):sha(p) for p in protected}
+for locale in locales:
+ olddir=root/'i18n/audits/evidence'/locale/ns/'vp1-02e2';prior_path=olddir/'record.json';prior=json.loads(prior_path.read_text())
+ # Retain and verify every original artifact; only the English context is superseded.
+ for info in prior['artifacts'].values():assert sha(root/info['path'])==info['sha256']
+ directory=olddir.parent/'vp1c-02e2';assert not directory.exists();directory.mkdir()
+ rel=directory.relative_to(root)
+ (directory/'secondary-context-ack.json').write_bytes(ack_path.read_bytes())
+ correction={'record_reference':str(rel/'record.json'),'actual_secondary_model':'openai/gpt-6.1-sol','stale_secondary_ack_model':'anthropic/claude-opus-5-5','source':'Manager parent message: wait result for resumed secondary job aa11cca2cfaa explicitly served model=openai/gpt-6.1-sol; static host model declaration in ack was stale. Original semantic audit also openai/gpt-6.1-sol.','original_ack_preserved_byte_identical':True}
+ (directory/'provenance-correction.json').write_text(json.dumps(correction,indent=2)+'\n')
+ report=f'''# Context-only compatibility acknowledgement: {locale}/{ns}
+
+Primary auditor: i18n-auditor / 02e2a562a33a / openai/gpt-6.1-sol (quota fallback). Original 4/4 semantic PASS retained; no string re-audit. Independent secondary semantic audit and context acknowledgment: i18n-auditor / 03178f8c9cba / openai/gpt-6.1-sol. Secondary ack stale Anthropic model attribution is explicitly corrected by the manager's served-model receipt, preserved in provenance-correction.json; original ack bytes retained.
+
+Exact change: only prompt.field.note narrows template usage from CLI+Desktop to CLI. CLI empty-to-cancel remains correct. Desktop uses the project-ID label rather than the CLI question, avoiding an empty-submit promise at its nonempty-only input endpoint. Code-path behavior supplied by manager/coder, not independently executed here. TUI cancellation hint context unchanged.
+
+Independently reconstructed prior context by reversing the sole note field and serializing with the original two-space indentation plus newline; reproduced original SHA-256. Current context hash: {sha(ctx)}. English plus all seven locale hashes unchanged. Prior semantic report and records remain byte-identical. No new BLOCKER/MAJOR or minor/nit finding. This is context compatibility, not another semantic pass, a runtime behavior test, rendered fit, or native RTL/shaping evidence. Notes are audit_notes_not_execution_log; actual commands/checks are in audit.log.
+'''
+ (directory/'report.md').write_text(report)
+ log='Execution companion; provenance: '+str(rel/'record.json')+'\n'
+ log+='PASS reversed prompt.field.note only and reproduced old context SHA-256 '+ack['old_context_sha256']+'\n'
+ log+='PASS current context SHA-256 '+sha(ctx)+'\nPASS English and all seven target SHA-256 hashes unchanged\nPASS all original primary artifacts hash-match original record\n'
+ record=copy.deepcopy(prior);record['audit_kind']='context-only-compatibility-successor';record['audit_date']=datetime.datetime.now(datetime.timezone.utc).isoformat();record['input_hashes']['context']['sha256']=sha(ctx);record['semantic_audit_record']={'path':str(prior_path.relative_to(root)),'sha256':sha(prior_path)};record['second_audit']['context_ack_actual_model']='openai/gpt-6.1-sol';record['second_audit']['context_ack_provenance_correction']=str(rel/'provenance-correction.json');record['audit_notes_not_execution_log']=str(rel/'report.md');record['execution_log']=str(rel/'audit.log');record.pop('append_verification',None)
+ row=json.loads((olddir/'receipt.json').read_text());row['note']=f'{rel}/record.json; R2 i18n-auditor/03178f8c9cba openai/gpt-6.1-sol PASS; context={sha(ctx)}';assert len(row['note'])<=280
+ receipt_path=directory/'receipt.json';receipt_path.write_text(json.dumps(row,ensure_ascii=False,indent=2)+'\n')
+ history=root/'i18n/audit-history'/locale/f'{ns}.json';prefix=json.loads(history.read_text())['entries']
+ def run(args):
+  global log
+  r=subprocess.run([py,'scripts/i18n/ledger.py',*args],cwd=root,env=env,text=True,capture_output=True);log+='$ .venv/bin/python scripts/i18n/ledger.py '+' '.join(args)+'\n'+r.stdout+r.stderr+f'exit={r.returncode}\n';assert r.returncode==0,(r.stdout,r.stderr);return r.stdout
+ expected=run(['history-sha','--locale',locale,'--namespace',ns]).strip()
+ for mode in ['--dry-run','--apply']:run(['append','--receipt',str(receipt_path.relative_to(root)),'--expected-history-sha',expected,mode])
+ rows=json.loads(history.read_text())['entries'];assert rows[:-1]==prefix and rows[-1]==row
+ log+=f'PASS preserved {len(prefix)} previous history rows and appended exactly one context-successor row\n'
+ (directory/'audit.log').write_text(log)
+ (directory/'context-probe.py.txt').write_bytes(Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'],'vertex-context-append.py').read_bytes())
+ record['artifacts']={name:{'path':str(rel/name),'sha256':sha(directory/name)} for name in ['secondary-context-ack.json','provenance-correction.json','report.md','audit.log','context-probe.py.txt']}
+ record['append_verification']={'expected_history_sha256_before':expected,'preserved_existing_rows':len(prefix),'appended_rows':1,'receipt_byte_sha256':sha(receipt_path),'history_path':str(history.relative_to(root))}
+ (directory/'record.json').write_text(json.dumps(record,ensure_ascii=False,indent=2)+'\n')
+ print(f'{locale}: PASS context successor appended; {len(prefix)} original rows preserved; note={len(row["note"])} chars')
+assert before=={str(p):sha(p) for p in protected}
+for locale in locales:
+ p=root/'i18n/audits/evidence'/locale/ns/'vp1c-02e2/record.json';r=json.loads(p.read_text())
+ for info in [*r['input_hashes'].values(),*r['artifacts'].values(),r['semantic_audit_record']]:assert sha(root/info['path'])==info['sha256'],info
+print('PASS all seven current records/input/artifact hashes; immutable marker and historical ledger snapshots unchanged')
+r=subprocess.run([py,'scripts/i18n/ledger.py','export'],cwd=root,env=env,text=True,capture_output=True);assert r.returncode==0,r.stderr
+export=json.loads(r.stdout)['entries']
+for locale in locales:
+ latest=next(x for x in export if x['locale']==locale and x['namespace']==ns)
+ assert latest==json.loads((root/'i18n/audits/evidence'/locale/ns/'vp1c-02e2/receipt.json').read_text())
+print('PASS export resolves seven current context-compatible PASS receipts')

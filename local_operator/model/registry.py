@@ -80,6 +80,14 @@ SupportedHostingProviders = [
         recommended=True,
     ),
     ProviderDetail(
+        id="google-vertex",
+        name="Google Vertex AI",
+        description="Google Cloud Vertex AI for Gemini models via SSO, API key, or service account",
+        url="https://cloud.google.com/vertex-ai",
+        requiredCredentials=["GOOGLE_VERTEX_API_KEY"],
+        recommended=False,
+    ),
+    ProviderDetail(
         id="mistral",
         name="Mistral AI",
         description="Mistral AI's open and proprietary language models",
@@ -269,6 +277,14 @@ class ModelInfo(BaseModel):
     supports_responses_api: bool = False
     cache_writes_price: Optional[float] = None
     cache_reads_price: Optional[float] = None
+    # Tiered long-context pricing (e.g. Google/Vertex >200k prompt-token tier,
+    # where the entire request bills at higher rates once total input exceeds
+    # ``long_context_threshold``). ``None`` means flat pricing across the window.
+    long_context_threshold: Optional[int] = None
+    long_context_input_price: Optional[float] = None
+    long_context_output_price: Optional[float] = None
+    long_context_cache_reads_price: Optional[float] = None
+    long_context_cache_writes_price: Optional[float] = None
     time_of_use: str | None = Field(
         default=None,
         description=(
@@ -470,7 +486,7 @@ def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "deepseek":
         if model in deepseek_models:
             return deepseek_models[model]
-    elif hosting == "google":
+    elif hosting in ("google", "google-vertex"):
         if model in google_models:
             return google_models[model]
     elif hosting == "openai":
@@ -1558,6 +1574,13 @@ google_models: Dict[str, ModelInfo] = {
         supports_prompt_cache=False,
         input_price=1.25,
         output_price=10.0,
+        # Google's published >200k prompt-token tier for Gemini 2.5 Pro. A fully
+        # described static row never enters models.dev enrichment (see
+        # ``_needs_enrichment``), so the tier must live on the row itself or
+        # long prompts on google / google-vertex silently bill at base rates.
+        long_context_threshold=200_000,
+        long_context_input_price=2.5,
+        long_context_output_price=15.0,
         description=(
             "Google's state-of-the-art multipurpose model, which excels at coding and "
             "complex reasoning tasks"
@@ -3172,6 +3195,14 @@ _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
     "anthropic": anthropic_models,
     "openai": openai_models,
     "google": google_models,
+    # Vertex AI serves the same Gemini models as AI Studio, so prefix its
+    # static rows with ``Vertex `` (rather than a trailing ``(Vertex)``
+    # parenthesised qualifier, which ``model/naming._drop_qualifier`` strips for
+    # compact labels and would collide with ``google/*``'s full label).
+    "google-vertex": {
+        model_id: info.model_copy(deep=True, update={"name": f"Vertex {info.name}"})
+        for model_id, info in google_models.items()
+    },
     "deepseek": deepseek_models,
     "alibaba": qwen_models,
     # Token Plan models are keyed under the canonical storage id only, so a walk

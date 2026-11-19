@@ -26,9 +26,11 @@ import functools
 import json
 import logging
 import math
+import os
 import re
 import time
 import unicodedata
+import urllib.parse
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
@@ -3278,7 +3280,7 @@ class OpenAICompatClient:
         # Aggregator identity alone is not the model family: Google keeps its
         # final-user requirement through OpenRouter's OpenAI-compatible wire.
         google_boundary_tokens = 0
-        if request.model.provider == "google" or (
+        if request.model.provider in ("google", "google-vertex") or (
             request.model.provider == "openrouter" and request.model.model_id.startswith("google/")
         ):
             google_boundary_tokens = _google_user_boundary(messages)
@@ -5965,19 +5967,28 @@ class AnthropicClient:
 # ---------------------------------------------------------------------------
 
 GOOGLE_API_URL = "https://generativelanguage.googleapis.com"
+VERTEX_API_URL = "https://aiplatform.googleapis.com"
 
 
 class GoogleClient:
-    """Minimal Gemini client: ``streamGenerateContent?alt=sse``."""
+    """Minimal Gemini client: ``streamGenerateContent?alt=sse``.
+
+    Serves both Google AI Studio (``vertex=False``) and Google Cloud Vertex AI
+    (``vertex=True``), because both endpoints accept the same Gemini request
+    body and SSE chunk schema while differing in URL layout and authentication
+    headers.
+    """
 
     def __init__(
         self,
         base_url: str = GOOGLE_API_URL,
         *,
+        vertex: bool = False,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 600.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._vertex = vertex
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=_stream_timeout(timeout))
 
@@ -6194,18 +6205,102 @@ class GoogleClient:
             return "[tool returned image content]"
         return EMPTY_TOOL_RESULT_TEXT
 
+    def _vertex_endpoint_and_headers(
+        self,
+        model_id: str,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None",
+    ) -> tuple[str, dict[str, str]]:
+        """Resolve Vertex AI's streaming URL and auth headers for this credential.
+
+        OAuth and service-account credentials call the project/location path
+        with a Bearer token; API keys (express mode or service-account-bound)
+        call the publisher endpoint with ``x-goog-api-key``.
+        """
+        # Every path segment is percent-encoded and project/location are
+        # validated: they come from stored credentials and env vars, and a
+        # value like ``attacker.com/x#`` in ``location`` would otherwise be
+        # spliced into the regional HOST and send the bearer token elsewhere.
+        from local_operator.providers.oauth.vertex import LOCATION_RE, PROJECT_ID_RE
+
+        quoted_model = urllib.parse.quote(model_id, safe="")
+        headers = {"Content-Type": "application/json"}
+        if oauth_access is not None and oauth_access.kind == "oauth":
+            raw = oauth_access.raw or {}
+            project_id = (
+                str(raw.get("project_id") or "").strip()
+                or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+                or (os.environ.get("VERTEX_PROJECT") or "").strip()
+            )
+            if not project_id:
+                raise ProviderError(
+                    400,
+                    "Google Vertex AI OAuth/service-account credentials require a GCP project ID. "
+                    "Set GOOGLE_CLOUD_PROJECT (or VERTEX_PROJECT) or re-run "
+                    "`/login google-vertex`.",
+                    retryable=False,
+                )
+            location = (
+                str(raw.get("location") or "").strip()
+                or (os.environ.get("GOOGLE_CLOUD_LOCATION") or "").strip()
+                or (os.environ.get("VERTEX_LOCATION") or "").strip()
+                or "global"
+            )
+            if not PROJECT_ID_RE.fullmatch(project_id) or ".." in project_id:
+                raise ProviderError(
+                    400,
+                    f"Invalid Google Vertex AI project ID {project_id[:80]!r}.",
+                    retryable=False,
+                )
+            if not LOCATION_RE.fullmatch(location):
+                raise ProviderError(
+                    400,
+                    f"Invalid Google Vertex AI location {location[:80]!r} "
+                    "(expected 'global' or a region such as 'us-central1').",
+                    retryable=False,
+                )
+            # Only synthesize the regional host when the client is on Vertex's
+            # default global host; preserve an explicit custom base URL override
+            # (gateway, proxy, or test fixture).
+            if location != "global" and self._base_url == VERTEX_API_URL:
+                host = f"https://{location}-aiplatform.googleapis.com"
+            else:
+                host = self._base_url
+            url = (
+                f"{host}/v1/projects/{urllib.parse.quote(project_id, safe='')}"
+                f"/locations/{urllib.parse.quote(location, safe='')}"
+                f"/publishers/google/models/{quoted_model}:streamGenerateContent?alt=sse"
+            )
+            headers["Authorization"] = f"Bearer {oauth_access.access_token}"
+            headers["x-goog-user-project"] = project_id
+            return url, headers
+
+        url = (
+            f"{self._base_url}/v1/publishers/google/models/{quoted_model}"
+            ":streamGenerateContent?alt=sse"
+        )
+        if api_key:
+            headers["x-goog-api-key"] = api_key
+        return url, headers
+
     async def stream(
         self,
         request: ChatRequest,
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
-        url = (
-            f"{self._base_url}/v1beta/models/{request.model.model_id}:streamGenerateContent?alt=sse"
-        )
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["x-goog-api-key"] = api_key
+        if self._vertex or request.model.provider == "google-vertex":
+            url, headers = self._vertex_endpoint_and_headers(
+                request.model.model_id, api_key, oauth_access
+            )
+        else:
+            url = (
+                f"{self._base_url}/v1beta/models/{request.model.model_id}"
+                ":streamGenerateContent?alt=sse"
+            )
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["x-goog-api-key"] = api_key
         scope = credential_scope(api_key, oauth_access)
         usage: Usage | None = None
         stop_reason = "stop"
@@ -6345,7 +6440,10 @@ class GoogleClient:
                     )
                     usage._token_counts_reported = _reported_token_count(
                         raw_usage, "promptTokenCount"
-                    ) and _reported_token_count(raw_usage, "candidatesTokenCount")
+                    ) and (
+                        _reported_token_count(raw_usage, "candidatesTokenCount")
+                        or _reported_token_count(raw_usage, "thoughtsTokenCount")
+                    )
 
         if usage is not None:
             yield StreamUsageEvent(usage=usage)
@@ -6627,8 +6725,10 @@ def client_for_spec(
             ),
         )
     if wire == "google":
-        base = spec.base_url or GOOGLE_API_URL
-        return GoogleClient(base_url=base, http_client=http_client)
+        is_vertex = spec.provider == "google-vertex"
+        default_base = VERTEX_API_URL if is_vertex else GOOGLE_API_URL
+        base = spec.base_url or (definition.base_url if definition else None) or default_base
+        return GoogleClient(base_url=base, vertex=is_vertex, http_client=http_client)
     base = (
         spec.base_url
         or (definition.base_url if definition else None)

@@ -705,7 +705,6 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         id="google",
         search_aliases=(
             "gemini",
-            "vertex",
             "aistudio",
         ),
         name="Google (Gemini)",
@@ -716,6 +715,67 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "The console calls it an AI Studio API key.",
         ),
         base_url="https://generativelanguage.googleapis.com",
+        wire="google",
+    ),
+    ProviderDefinition(
+        id="google-vertex",
+        search_aliases=(
+            "vertex",
+            "vertexai",
+            "vertex-ai",
+            "gcp",
+            "gcloud",
+        ),
+        name="Google Vertex AI (Cloud sign-in)",
+        env_keys=("GOOGLE_VERTEX_API_KEY", "VERTEX_API_KEY"),
+        login=_lazy_login("local_operator.providers.oauth.vertex", "login_vertex_oauth"),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.vertex", "refresh_vertex_token"
+        ),
+        get_api_key=_oauth_api_key,
+        callback_port=8085,
+        paste_code_flow=True,
+        base_url="https://aiplatform.googleapis.com",
+        wire="google",
+    ),
+    ProviderDefinition(
+        id="google-vertex-key",
+        search_aliases=(
+            "vertex",
+            "vertex-key",
+            "vertex-api-key",
+        ),
+        name="Google Vertex AI (API key)",
+        env_keys=("GOOGLE_VERTEX_API_KEY", "VERTEX_API_KEY"),
+        login=create_api_key_login(
+            "Google Vertex AI",
+            "https://console.cloud.google.com/vertex-ai/studio/settings/api-keys",
+            "Paste a Vertex AI API key (express mode or service-account-bound).",
+        ),
+        store_credentials_as="google-vertex",
+        base_url="https://aiplatform.googleapis.com",
+        wire="google",
+    ),
+    ProviderDefinition(
+        id="google-vertex-sa",
+        search_aliases=(
+            "vertex",
+            "vertex-sa",
+            "service-account",
+            "gcp-sa",
+        ),
+        name="Google Vertex AI (Service account JSON)",
+        login=_lazy_login(
+            "local_operator.providers.oauth.vertex",
+            "login_vertex_service_account",
+            requires_paste_prompt=True,
+        ),
+        refresh_token=_lazy_refresh(
+            "local_operator.providers.oauth.vertex", "refresh_vertex_token"
+        ),
+        get_api_key=_oauth_api_key,
+        store_credentials_as="google-vertex",
+        base_url="https://aiplatform.googleapis.com",
         wire="google",
     ),
     ProviderDefinition(
