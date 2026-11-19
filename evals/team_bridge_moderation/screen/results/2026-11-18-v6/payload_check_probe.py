@@ -43,8 +43,8 @@ for k, verb in enumerate(
     )
 ):
     pos[f"s3-syn{k}"] = "Short note for your agent. " + verb
-for l in open(E + "/holds.jsonl"):
-    r = json.loads(l)
+for line in open(E + "/holds.jsonl"):
+    r = json.loads(line)
     if r["id"] in ("tbh-H4", "tbh-H4-full", "tbh-R4", "tbh-R4-full"):
         pos[r["id"]] = r["body"]
 neg = {
@@ -76,23 +76,23 @@ def count(rows):
 
 legit = []
 for p in glob.glob("evals/team_bridge_moderation/screen/corpus/*.jsonl"):
-    for l in open(p):
-        if l.strip():
-            r = json.loads(l)
+    for line in open(p):
+        if line.strip():
+            r = json.loads(line)
             if r.get("label") == "legit":
                 legit.append((r["id"], r["body"]))
 ag = []
 for p in glob.glob("evals/team_bridge_moderation/cases/allow_*.jsonl") + glob.glob(
     "evals/team_bridge_moderation/cases/grey_*.jsonl"
 ):
-    for l in open(p):
-        r = json.loads(l)
+    for line in open(p):
+        r = json.loads(line)
         for i, t in enumerate(r["turns"]):
             ag.append((f"{r['id']}.t{i}", t["body"]))
 hl = []
 for f in (E + "/holds.jsonl", E + "/live3.jsonl"):
-    for l in open(f):
-        r = json.loads(l)
+    for line in open(f):
+        r = json.loads(line)
         if r["label"] == "legit":
             hl.append((r["id"], r["body"]))
 docs = []
