@@ -295,6 +295,8 @@ def test_finished_proof_keeps_state_flags_separate_from_ledger_owner(
     _git("push", "-q", "origin", "main", cwd=repo)
     if interrupted:
         (wt / "a.txt").unlink()
+        # Removing a root entry changes the directory ctime used as Linux's ledger stamp.
+        _record(home, wt)
     real = os.path.realpath(wt)
     identity = prov.cleanup_identity(real)
     assert identity is not None

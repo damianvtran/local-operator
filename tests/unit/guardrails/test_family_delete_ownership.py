@@ -481,15 +481,21 @@ def test_child_removes_parents_tree_with_open_mr_is_critical(
 
 
 def test_rm_rf_of_parents_tree_with_ignored_env_is_judged(home: Path, infra: Path) -> None:
-    """Decision: ``rm -rf`` keeps today's rule for ignored files the caller did
-    not make — an ancestor's ignored ``.env`` is not known to be reproducible —
-    so it is judged; ``git worktree remove`` of the same tree (git's own rule)
-    is LOW, and the same ``rm -rf`` by the creator itself stays LOW."""
+    """Exact plain cleanup holds ignored payloads; raw deletion keeps its legacy ranks."""
     wt = _add_tree(home, infra / "services", P)
     _ignore_only(wt)
     assert _rank(home, f"rm -rf {wt}", C).risk is Risk.HIGH
-    assert _rank(home, _remove(wt), C).risk is Risk.LOW
+    plain = _rank(home, _remove(wt), C)
+    assert plain.risk is Risk.HIGH and plain.targets[0].cleanup_hold, plain.reasons
+    assert "preserve unverified ignored files separately" in plain.targets[0].reason
     assert _rank(home, f"rm -rf {wt}", P).risk is Risk.LOW
+
+
+def test_plain_remove_of_clean_parents_tree_is_low(home: Path, infra: Path) -> None:
+    wt = _add_tree(home, infra / "services", P)
+    assert not _git("status", "--porcelain", "--ignored", cwd=wt).strip()
+    plain = _rank(home, _remove(wt), C)
+    assert plain.risk is Risk.LOW, plain.reasons
 
 
 def test_rm_rf_of_parents_tree_with_regenerable_ignored_output_is_low(
