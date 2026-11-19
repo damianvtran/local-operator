@@ -2709,8 +2709,8 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 /* Outcome tones from the theme, not raw ANSI red/yellow (design review D5):
- * dark-theme danger #ef8078 / warning #e0b04b / success #57c785 are each
- * >= 4.5:1 on both the page (#14110c) and the input surface (#1e1a14). */
+ * the dark theme's $lo-danger, $lo-warning and $lo-success are each >= 4.5:1
+ * on both the page ($lo-bg) and the input surface ($lo-surface). */
 .community-view-status.-tone-danger {
     color: $lo-danger;
 }
