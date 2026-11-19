@@ -97,6 +97,7 @@ URLs, a cap) and the cleaned text is RETURNED for the rig to speak verbatim.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -725,7 +726,11 @@ async def _transcribe(
         unit="seconds",
         cost=cost,
         session_id=session_id,
-        request_id=request_id,
+        # One record per PAID transcription. A client retrying the same
+        # ``request_id`` (after a post-STT 409 or 422) pays STT again, and a
+        # record id derived from the bare client id would dedup that second
+        # charge away for a BYO rung (no hub ``usage_record_id`` to key on).
+        request_id=f"{request_id}-{uuid.uuid4().hex[:12]}",
     )
     return outcome.text, outcome.path.value
 
@@ -1024,21 +1029,31 @@ def _spoken_tail(locale: str) -> str:
     return _wv.phrase_truncated().envelope(locale=locale)["text"]
 
 
-def _phrase_cache_file(config_dir: Path, rung: str, voice: str, locale: str, key: str) -> Path:
-    """``<config>/voice/phrase-cache/<rung>-<voice>-<locale>-<key>.<mp3|wav>``.
+def _phrase_cache_file(config_dir: Path, rung: str, descriptor: Any, locale: str, key: str) -> Path:
+    """``<config>/voice/phrase-cache/<rung>-<voice>-<locale>-<key>-<hash>.<mp3|wav>``.
 
     The locale is in the name because a phrase's text follows the active
     locale: without it a phrase cached before a language switch would be
-    replayed in the old language. Files from before the locale joined the name
-    simply never match and are left alone.
+    replayed in the old language. ``hash`` is a short digest of everything the
+    descriptor sends the provider (tone, pace, accent, expressiveness, language,
+    instructions, and the resolved gender again), so changing a ``speech.voice.*``
+    setting misses the cache instead of replaying the old rendering. Files from
+    before either joined the name simply never match and are left alone.
 
     The extension is the container the rung answers (:func:`_phrase_cache_format`),
     so a cached phrase is named for what it is. ``key`` is always a member of
     :data:`PHRASES` and ``rung``/``voice``/``locale`` are closed vocabularies
-    (the locale is the process's active one), so no caller text reaches the path.
+    (the locale is the process's active one), and ``hash`` is hex, so no caller
+    text reaches the path.
     """
     ext, _ = _phrase_cache_format(rung)
-    return config_dir / "voice" / "phrase-cache" / f"{rung}-{voice}-{locale}-{key}.{ext}"
+    rendering = hashlib.sha256(
+        json.dumps(descriptor.to_wire(), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:8]
+    voice = descriptor.resolved_gender()
+    return (
+        config_dir / "voice" / "phrase-cache" / f"{rung}-{voice}-{locale}-{key}-{rendering}.{ext}"
+    )
 
 
 def _phrase_cache_format(rung: str) -> tuple[str, str]:
@@ -1145,7 +1160,7 @@ async def voice_speech(
         )
         if resolution.servable:
             cache_file = _phrase_cache_file(
-                config_dir, resolution.path.value, descriptor.resolved_gender(), locale, phrase_key
+                config_dir, resolution.path.value, descriptor, locale, phrase_key
             )
             try:
                 cached = cache_file.read_bytes()
@@ -1230,11 +1245,7 @@ async def voice_speech(
         info = stt_audio.sniff_audio(outcome.audio)
         if info is not None and info.mime_type == _phrase_cache_format(outcome.path.value)[1]:
             served = _phrase_cache_file(
-                config_dir,
-                outcome.path.value,
-                descriptor.resolved_gender(),
-                locale,
-                phrase_key or "",
+                config_dir, outcome.path.value, descriptor, locale, phrase_key or ""
             )
             await asyncio.to_thread(_store_phrase, served, outcome.audio)
     # The label follows the bytes: a Groq answer is WAV but the others answer

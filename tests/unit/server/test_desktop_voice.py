@@ -1432,6 +1432,28 @@ async def test_a_recording_is_transcribed_through_the_cascade_and_admitted(
 
 
 @pytest.mark.asyncio
+async def test_a_retried_recording_is_a_second_spend_record(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    """A same-``request_id`` retry pays STT again; the spend record id is derived from
+    the id handed to ``emit_voice_spend``, so it must differ per paid call."""
+    await _enable(rig, SESSION_A)
+    request_id = str(uuid.uuid4())
+    for _ in range(2):
+        response = await rig.client.post(
+            "/v1/desktop/voice/utterance",
+            data={"session_id": SESSION_A, "request_id": request_id},
+            files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+        )
+        assert response.status_code == 200, response.text
+    first, second = cascades.spend
+    assert first["request_id"] != second["request_id"]
+    assert first["request_id"].startswith(request_id) and second["request_id"].startswith(
+        request_id
+    )
+
+
+@pytest.mark.asyncio
 async def test_unsupported_and_oversized_recordings_cost_nothing(
     rig: Any, cascades: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1798,6 +1820,40 @@ async def test_the_configured_cap_applies_before_segmenting(
     assert all(len(part) <= 200 for part in result["segments"])
 
 
+def _unhashed(path: Path) -> str:
+    """A cache file's name without the trailing rendering hash (``-<8 hex>``)."""
+    import re
+
+    return re.sub(r"-[0-9a-f]{8}(\.\w+)$", r"\1", path.name)
+
+
+@pytest.mark.asyncio
+async def test_a_voice_setting_change_misses_the_phrase_cache(
+    rig: Any, cascades: SimpleNamespace
+) -> None:
+    """The cache name carries a hash of the whole descriptor: after a change to a
+    ``speech.voice.*`` setting the old rendering must not be replayed."""
+    from local_operator import settings_io
+
+    await _enable(rig, SESSION_A)
+    source = {"kind": "phrase", "key": "on_screen_first"}
+    assert (await _speech(rig, source)).status_code == 200
+    assert (await _speech(rig, source)).headers["x-voice-cache"] == "hit"
+    assert len(cascades.tts) == 1
+
+    # The app's own manager: the route reads ITS in-memory config, per call.
+    settings_io.write_setting(
+        rig.app.state.config_manager, settings_io.BY_KEY["speech.voice.tone"], "calm"
+    )
+    changed = await _speech(rig, source)
+    assert changed.status_code == 200
+    assert "x-voice-cache" not in changed.headers, "an old rendering was replayed"
+    assert len(cascades.tts) == 2
+    assert (await _speech(rig, source)).headers["x-voice-cache"] == "hit"
+    names = sorted(p.name for p in (rig.root / "voice" / "phrase-cache").iterdir())
+    assert len(names) == 2 and len({_unhashed(Path(n)) for n in names}) == 1
+
+
 @pytest.mark.asyncio
 async def test_a_phrase_hit_makes_no_cascade_call_and_a_miss_stores_it(
     rig: Any, cascades: SimpleNamespace
@@ -1808,7 +1864,9 @@ async def test_a_phrase_hit_makes_no_cascade_call_and_a_miss_stores_it(
     assert first.status_code == 200, first.text
     assert len(cascades.tts) == 1 and cascades.tts[0][0] == "Answer the approval on screen first."
     cached = list((rig.root / "voice" / "phrase-cache").glob("*.wav"))
-    assert [path.name for path in cached] == ["provider_tts_groq-female-en-on_screen_first.wav"]
+    assert [_unhashed(path) for path in cached] == [
+        "provider_tts_groq-female-en-on_screen_first.wav"
+    ]
 
     second = await _speech(rig, source)
     assert second.status_code == 200
@@ -1832,7 +1890,9 @@ async def test_a_cached_mp3_phrase_is_stored_and_served_as_audio_mpeg(
     assert first.status_code == 200, first.text
     assert first.headers["content-type"] == "audio/mpeg"
     cached = list((rig.root / "voice" / "phrase-cache").iterdir())
-    assert [path.name for path in cached] == ["provider_tts_radient-female-en-on_screen_first.mp3"]
+    assert [_unhashed(path) for path in cached] == [
+        "provider_tts_radient-female-en-on_screen_first.mp3"
+    ]
 
     second = await _speech(rig, source)
     assert second.status_code == 200 and second.headers["x-voice-cache"] == "hit"
@@ -1904,7 +1964,7 @@ async def test_the_phrase_cache_is_keyed_by_locale(rig: Any, cascades: SimpleNam
     set_active_locale("en")
     back = await _speech(rig, source)
     assert back.headers["x-voice-cache"] == "hit" and len(cascades.tts) == 2
-    names = sorted(p.name for p in (rig.root / "voice" / "phrase-cache").iterdir())
+    names = sorted(_unhashed(p) for p in (rig.root / "voice" / "phrase-cache").iterdir())
     assert names == [
         "provider_tts_groq-female-en-on_screen_first.wav",
         "provider_tts_groq-female-es-on_screen_first.wav",
@@ -1952,7 +2012,7 @@ async def test_the_truncation_tail_follows_the_active_locale(
     calls = len(cascades.tts)
     assert (await _speech(rig, source, last)).headers["x-voice-cache"] == "hit"
     assert len(cascades.tts) == calls
-    names = [p.name for p in (rig.root / "voice" / "phrase-cache").iterdir()]
+    names = [_unhashed(p) for p in (rig.root / "voice" / "phrase-cache").iterdir()]
     assert names == ["provider_tts_groq-female-es-truncated.wav"]
 
 
