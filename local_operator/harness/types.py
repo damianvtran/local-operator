@@ -4461,6 +4461,9 @@ EFFORT_CHOICE_UNSET = object()
 class ModelSpec(BaseModel):
     """A provider/model pair plus the knobs wire clients need."""
 
+    # Persisted connection-scoped listing facts; dispatch performs no IAM lookup.
+    bedrock_metadata: dict[str, Any] | None = None
+
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
     context_window: int = 128_000

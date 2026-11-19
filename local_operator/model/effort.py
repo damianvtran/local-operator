@@ -300,6 +300,12 @@ _KIMI_K3 = EffortSupport(("low", "high", "max"))
 #: ``claude-opus-4-20250514`` cannot reach a generation arm through ``[.-]``
 #: either, which is the regression the tests pin.
 _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
+    # Nova 2 Lite extended-thinking API, AWS Nova user guide (2026-11-19).
+    # High excludes sampling parameters; the native Converse builder owns that.
+    (
+        re.compile(r"(?:^|[./])amazon\.nova-2-lite-v1:0$"),
+        EffortSupport(("none", "low", "medium", "high"), default="none"),
+    ),
     # dev.meta.ai/docs/reasoning explicitly names this ladder for Wonder 1.0
     # and Spark 1.3. Full is a product label, not another effort rung or ID.
     (

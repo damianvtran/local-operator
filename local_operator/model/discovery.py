@@ -338,6 +338,7 @@ LISTING_CAPTURE_VERSIONS: dict[str, int] = {
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
 #: field its writer did not record.
+LISTING_CAPTURE_VERSIONS["bedrock"] = 2  # all-vendor/profile facts, not Claude-only inventory
 LISTING_CAPTURE_DEFAULT = 1
 
 
@@ -504,6 +505,7 @@ class DiscoveredModel:
     # zero prices/false flags from omissions through a JSON cache round-trip.
     authoritative_fields: tuple[str, ...] = ()
     supports_tools: bool | None = None
+    bedrock_metadata: dict[str, Any] | None = None
     reasoning: bool | None = None
     active_context_window: int | None = None
     supports_prompt_cache: bool = False
@@ -2063,6 +2065,7 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
     merged = DiscoveredModel(
         id=row.id,
         authoritative_fields=row.authoritative_fields,
+        bedrock_metadata=row.bedrock_metadata,
         name=_merge_name(row.name, info.name, row.id),
         # Only a positive live window beats the registry. A listing that omits the
         # field (a lean OpenAI-compatible gateway, or an Anthropic proxy on an API
@@ -2358,6 +2361,11 @@ def _rows_from_payload(
                 supports_images=_stated_bool(entry.get("supports_images")),
                 supports_audio_input=_stated_bool(entry.get("supports_audio_input")),
                 supports_tools=_stated_bool(entry.get("supports_tools")),
+                bedrock_metadata=(
+                    entry.get("bedrock_metadata")
+                    if isinstance(entry.get("bedrock_metadata"), dict)
+                    else None
+                ),
                 reasoning=_stated_bool(entry.get("reasoning")),
                 active_context_window=_positive_int(entry.get("active_context_window")) or None,
                 supports_prompt_cache=bool(entry.get("supports_prompt_cache")),
@@ -2411,7 +2419,12 @@ def _listing_replaces_static(
     An unavailable or invalid payload never gets deletion authority.
     """
     return rows is not None and (
-        provider_id in ("deepseek", "meta-muse") or (account_scoped and bool(rows))
+        provider_id in ("deepseek", "meta-muse")
+        or (
+            provider_id == "bedrock"
+            and all((row.bedrock_metadata or {}).get("inventory_complete") is True for row in rows)
+        )
+        or (account_scoped and bool(rows) and provider_id != "bedrock")
     )
 
 

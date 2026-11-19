@@ -34,6 +34,9 @@ FOUNDATION = {
             "modelId": "anthropic.claude-haiku-4-5-20251001-v1:0",
             "modelName": "Claude Haiku 4.5",
             "responseStreamingSupported": True,
+            "inputModalities": ["TEXT", "IMAGE"],
+            "outputModalities": ["TEXT"],
+            "inferenceTypesSupported": ["ON_DEMAND"],
             "modelLifecycle": {"status": "ACTIVE"},
         },
         {
@@ -76,12 +79,14 @@ def test_discovery_keeps_active_claude_profiles_and_on_demand_models() -> None:
     assert [(r.id, r.name) for r in rows] == [
         ("eu.anthropic.claude-sonnet-5-5", "EU Claude Sonnet 5.5"),
         ("global.anthropic.claude-opus-5-5", "Global Claude Opus 5.5"),
+        ("eu.amazon.nova-pro-v1:0", "eu.amazon.nova-pro-v1:0"),
         ("anthropic.claude-haiku-4-5-20251001-v1:0", "Claude Haiku 4.5"),
     ]
     assert {r.url.host for r in seen} == {"bedrock.eu-west-1.amazonaws.com"}
-    assert seen[0].url.params["typeEquals"] == "SYSTEM_DEFINED"
-    assert seen[1].url.params["byProvider"] == "anthropic"
-    assert seen[1].url.params["byInferenceType"] == "ON_DEMAND"
+    assert "typeEquals" not in seen[0].url.params
+    assert "byProvider" not in seen[1].url.params
+    assert "byInferenceType" not in seen[1].url.params
+    assert seen[1].url.params["byOutputModality"] == "TEXT"
 
 
 @pytest.mark.parametrize("status", [403, 500])

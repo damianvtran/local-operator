@@ -5476,6 +5476,7 @@ class AnthropicClient:
             "anthropic-messages",
             supports_images=request.model.supports_images,
             context_window=request.model.context_window,
+            model_id=request.model.model_id,
         )
         doc_budget = document_budget_for_request(doc_form, request)
         doc_text_cap = document_text_cap(request.model.context_window)
@@ -6817,9 +6818,10 @@ def client_for_spec(
         # base_url. Imported here so botocore-adjacent code stays off the hot
         # import path of every other provider (botocore itself is imported
         # only when a Bedrock request is signed or decoded).
-        from local_operator.providers.bedrock.client import BedrockAnthropicClient
+        from local_operator.providers.bedrock.models import client_for_bedrock_spec
 
-        return BedrockAnthropicClient(
+        return client_for_bedrock_spec(
+            spec,
             http_client=http_client,
             cache_ttl_1h_min_context_tokens=anthropic_cache_ttl_1h_min_context_tokens,
             subagent_cache_ttl_1h_min_context_tokens=(
