@@ -69,6 +69,35 @@ async def test_field_prompts_render_their_hint_not_a_raw_key_id(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_secret_setup_preserves_caller_supplied_aws_hint(tmp_path: Path) -> None:
+    from local_operator.tui.widgets.key_prompt import KeyPromptBlock
+
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=_controller(tmp_path))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        expected = "Enter submits; Esc cancels."
+        task = asyncio.create_task(
+            app._request_login_key(
+                "Amazon Bedrock",
+                field_label="Secret access key",
+                secret=True,
+                instructions=expected,
+                required_field=False,
+            )
+        )
+        try:
+            await pilot.pause()
+            block = app.query_one(KeyPromptBlock)
+            assert block.instructions == expected
+            block.action_cancel()
+            assert await task is None
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_choices_use_a_login_card_without_free_text_or_badge(tmp_path: Path) -> None:
     app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=_controller(tmp_path))
     calls: list[tuple[list[AskQuestion], dict[str, Any]]] = []

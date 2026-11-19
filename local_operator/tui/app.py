@@ -58058,8 +58058,8 @@ class OperatorApp(App[None]):
                 if default and not secret
                 else "Enter continues without a new value; Esc cancels setup."
             )
-        if field_label and secret:
-            instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
+            if secret:
+                instructions = "Enter keeps the current token if the URL is unchanged; - clears it."
         if required_field:
             from local_operator.i18n.keys import providers_vertex_prompts as prompt_keys
             from local_operator.i18n.text import tr
