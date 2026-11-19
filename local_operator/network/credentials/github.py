@@ -2165,18 +2165,55 @@ def _cancel_self_revoke(token: str) -> None:
         timer.cancel()
 
 
-def cancel_pending_self_revokes() -> int:
+def cancel_pending_self_revokes(*, join_timeout_s: float | None = None) -> int:
     """Cancel every pending belt in this process; returns how many. For teardown.
 
     A test that scheduled a belt at a hold end seconds away must not leave it to fire
     after its loopback GitHub is gone — the module base it reads at call time would
     then be the real ``api.github.com``.
+
+    ``join_timeout_s`` makes the teardown JOINABLE, not just cancelling: a timer
+    whose ``_fire`` is already running ignores ``cancel()`` and stays in
+    ``_SELF_REVOKE_TIMERS`` until its DELETE returns, so cancel alone can hand a
+    live DELETE to whatever runs next in the process (measured: a 600 s belt armed
+    by ``test_github_helper_diagnostic`` fired inside an unrelated
+    ``test_cli_remote`` cell on the same xdist worker, run 44408211857). With a
+    bound, each cancelled timer is joined for up to that long; the caller checks
+    :func:`pending_self_revoke_threads` for anything that outlived it. ``None``
+    keeps the old cancel-only behaviour for callers that must not block.
     """
     with _SELF_REVOKE_LOCK:
         tokens = list(_SELF_REVOKE_TIMERS)
+        timers = list(_SELF_REVOKE_TIMERS.values())
     for token in tokens:
         _cancel_self_revoke(token)
+    if join_timeout_s is not None:
+        for timer in timers:
+            if timer is not threading.current_thread():
+                timer.join(timeout=join_timeout_s)
     return len(tokens)
+
+
+#: Name every :func:`revoke_now` thread carries. A test teardown finds the
+#: in-flight immediate revokes by it (they are short-lived daemon threads with no
+#: registry of their own), so it is part of the joinable contract, not cosmetic.
+REVOKE_NOW_THREAD_NAME = "lop-github-revoke-now"
+
+
+def pending_self_revoke_threads() -> list[threading.Thread]:
+    """Every borrower-side revoke thread still alive in this process.
+
+    The belt timers (pending or firing) and the :func:`revoke_now` threads: the
+    two borrower paths that can send a ``DELETE /installation/token`` from a
+    thread nobody awaits. A test teardown joins these so no revoke started by one
+    cell can land inside the next one's network tripwire.
+    """
+    with _SELF_REVOKE_LOCK:
+        alive: list[threading.Thread] = [t for t in _SELF_REVOKE_TIMERS.values() if t.is_alive()]
+    alive.extend(
+        t for t in threading.enumerate() if t.name == REVOKE_NOW_THREAD_NAME and t.is_alive()
+    )
+    return alive
 
 
 def is_installation_grant(grant: Any) -> bool:
@@ -2258,7 +2295,7 @@ def revoke_now(grants: Any, *, base_url: str | None = None) -> list[threading.Th
             target=revoke_installation_token,
             args=(token,),
             kwargs={"base_url": base_url},
-            name="lop-github-revoke-now",
+            name=REVOKE_NOW_THREAD_NAME,
             daemon=True,
         )
         try:

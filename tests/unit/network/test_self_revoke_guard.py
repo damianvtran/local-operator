@@ -20,6 +20,7 @@ from local_operator.network.credentials import github as github_mod
 from tests.unit.network.self_revoke_guard import (  # noqa: F401 — autouse fixture by import
     _TimerRecordingThreading,
     no_self_revoke_outlives_its_cell,
+    stop_every_borrower_revoke,
     stop_recorded_timers,
 )
 
@@ -63,3 +64,64 @@ def test_a_timer_that_outlives_its_join_fails_teardown_by_name() -> None:
         release.set()
         timer.join(10.0)
     assert not timer.is_alive()
+
+
+def test_the_package_backstop_cancels_a_belt_armed_without_the_by_import_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run 44408211857: a module that never imported the guard left a 600 s belt
+    that fired in ``test_cli_remote``. The conftest backstop uses only product
+    handles, so it must stop a belt it never recorded."""
+    fired: list[str] = []
+    monkeypatch.setattr(github_mod, "revoke_installation_token", fired.append)
+    # The real module, not the recording wrapper: what an unguarded module arms.
+    monkeypatch.setattr(github_mod, "threading", threading)
+    github_mod._schedule_self_revoke("tok-unguarded", int(time.time() * 1000) + 600_000)
+    assert [t.name for t in github_mod.pending_self_revoke_threads()], "belt not armed"
+
+    stop_every_borrower_revoke()
+
+    assert github_mod.pending_self_revoke_threads() == []
+    assert "tok-unguarded" not in github_mod._SELF_REVOKE_SCHEDULED
+    assert fired == [], "a cancelled belt must never DELETE"
+
+
+def test_a_belt_already_firing_is_joined_not_just_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cancel()`` is a no-op on a running fire; the join is what keeps its
+    DELETE inside the cell that armed it."""
+    started = threading.Event()
+    done: list[str] = []
+
+    def slow_revoke(token: str) -> bool:
+        started.set()
+        time.sleep(0.3)
+        done.append(token)
+        return True
+
+    monkeypatch.setattr(github_mod, "revoke_installation_token", slow_revoke)
+    github_mod._schedule_self_revoke("tok-firing", 0)  # the 0.1 s floor
+    assert started.wait(10.0), "the belt never fired"
+
+    stop_every_borrower_revoke()
+
+    assert done == ["tok-firing"], "teardown returned while the DELETE was in flight"
+    assert github_mod.pending_self_revoke_threads() == []
+
+
+def test_a_revoke_now_thread_that_outlives_its_join_fails_teardown_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+    stuck = threading.Thread(
+        target=release.wait, name=github_mod.REVOKE_NOW_THREAD_NAME, daemon=True
+    )
+    stuck.start()
+    try:
+        with pytest.raises(AssertionError, match=github_mod.REVOKE_NOW_THREAD_NAME):
+            stop_every_borrower_revoke(join_timeout_s=0.05)
+    finally:
+        release.set()
+        stuck.join(10.0)
+    assert not stuck.is_alive()
