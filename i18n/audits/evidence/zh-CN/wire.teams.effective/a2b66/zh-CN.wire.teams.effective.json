@@ -1,0 +1,11 @@
+{
+  "wire.teams.effective.team_missing": "未找到名为{role}的团队。",
+  "wire.teams.effective.registry_unreadable": "无法读取智能体注册表。请检查智能体定义后重试。",
+  "wire.teams.effective.config_unreadable": "无法读取模型配置。请检查配置后重试。",
+  "wire.teams.effective.tier_invalid_value": "subagents.models.{tier}的值无效。请将其设为provider/model格式的模型选择器或模型映射对象。",
+  "wire.teams.effective.tier_invalid_mapping": "subagents.models.{tier}的映射对象无效。请将model设为provider/model格式的模型选择器；effort可选，填写时请设为受支持的推理强度。",
+  "wire.teams.effective.tier_unconfigured": "subagents.models.{tier}未配置模型。",
+  "wire.teams.effective.tier_invalid_selector": "subagents.models.{tier}的模型选择器无效。请使用provider/model格式。",
+  "wire.teams.effective.model_unresolvable": "无法解析模型{selector}。请检查模型选择器和提供商配置。",
+  "wire.teams.effective.unavailable": "此团队成员不可用。请检查其模型配置和智能体定义。"
+}
