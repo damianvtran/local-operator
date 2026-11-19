@@ -7,5 +7,8 @@
   "cli.services_heavy.timeout": "स्लॉट के लिए कतार में प्रतीक्षा की अधिकतम अवधि, सेकंड में (डिफ़ॉल्ट: मशीन की कतार सीमा, {wait_seconds}s, जब तक {env_name} कोई और तय न करे)",
   "cli.services_heavy.command": "चलाने वाली कमांड, `--` के बाद",
   "cli.services_heavy.holder": "  स्लॉट {slot}: {holder}, {age} से चल रहा है: {command}",
-  "cli.services_heavy.no_command": "चलाने के लिए कुछ नहीं: कमांड `--` के बाद लिखें, जैसे `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "चलाने के लिए कुछ नहीं: कमांड `--` के बाद लिखें, जैसे `lop services heavy run -- make test`",
+  "cli.services_heavy.start_by": "कमांड शुरू होने का अंतिम समय: epoch सेकंड या ऑफ़सेट या Z के साथ ISO-8601 (जैसे 2026-11-19T08:05:00Z)। कतार की प्रतीक्षा के बाद, कमांड शुरू होने से ठीक पहले जाँचा जाता है; समय निकल चुका हो तो कमांड नहीं चलती और निकास स्थिति 79 होती है",
+  "cli.services_heavy.late_start": "देर से शुरुआत: start-by {start_by} निकल चुका है (अभी {now}, {late} सेकंड देर); कमांड शुरू नहीं हुई",
+  "cli.services_heavy.not_start_by": "{value} न epoch सेकंड है, न ऑफ़सेट या Z वाला ISO-8601 समय"
 }

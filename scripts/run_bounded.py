@@ -1223,6 +1223,8 @@ def run(
     run_id=None,
     contract="cleanup-required",
     _backend=None,
+    start_by=None,
+    _clock=time.time,
 ):
     # Resolve the inherited grant BEFORE contract dispatch. Neither contract can
     # disable or widen a positive grant, and both ENFORCE the resolved ceiling.
@@ -1263,6 +1265,39 @@ def run(
         _report(stream, bounded_contract.status_line(contract, outcome, receipt))
         return 125
     budget, budget_source = resolved
+    # LATEST-START GATE (--start-by). Checked here, after every pre-spawn step
+    # that can take time and immediately before contract dispatch spawns the
+    # child: a caller that queued for a heavy slot or a lease BEFORE invoking
+    # this script (the bash tool's heavy-job queue, `lop services heavy run`)
+    # may wake past its granted window, and starting then would run outside
+    # it. A deadline already past at parse time lands here too, with the same
+    # code. The child is never spawned; the completion record carries
+    # cause=late-start so the refusal is auditable like every other pre-spawn
+    # refusal (status line says spawned=no). Without --start-by nothing here runs.
+    if start_by is not None:
+        now = _clock()
+        if now > start_by:
+            outcome = bounded_contract.Outcome(
+                wrapper_exit_code=bounded_contract.EXIT_LATE_START,
+                termination_cause="late-start",
+                cleanup_reason=(
+                    f"start-by {bounded_contract.utc_stamp(start_by)} passed at "
+                    f"{bounded_contract.utc_stamp(now)}; command never spawned"
+                ),
+            )
+            _report(
+                stream,
+                f"[run_bounded] late start: start-by {bounded_contract.utc_stamp(start_by)} "
+                f"passed (now {bounded_contract.utc_stamp(now)}, {now - start_by:.1f}s late); "
+                "command not started",
+            )
+            try:
+                receipt.publish(contract, outcome)
+            except (OSError, ValueError, TypeError) as publication_error:
+                failure = type(publication_error).__name__
+                _report(stream, f"[run_bounded] completion publication failed: {failure}")
+            _report(stream, bounded_contract.status_line(contract, outcome, receipt))
+            return bounded_contract.EXIT_LATE_START
 
     def strict(outcome):
         outcome.wrapper_exit_code = _run_cleanup_required(
@@ -1292,6 +1327,15 @@ def run(
     )
 
 
+def _start_by(text: str) -> float:
+    # argparse turns ArgumentTypeError into exit 2 BEFORE any work or wait, so a
+    # mistyped deadline can never be mistaken for a late one (79).
+    try:
+        return bounded_contract.parse_start_by(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_bounded.py",
@@ -1305,7 +1349,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # callers consulting --help still need the diagnostic that distinguishes
         # our memory stop from another process delivering SIGKILL (same status).
         epilog=(
-            "Exit status: child status normally; 124 on timeout; 125 on start or "
+            "Exit status: child status normally; 79 when --start-by passed before "
+            "spawn (never started, cause=late-start); 124 on timeout; 125 on start or "
             "budget refusal (also backend/policy refusals before spawn: the "
             "command never ran; pre-spawn refusals print spawned=no on the final "
             "line); 126 when the command ran but its owned group's "
@@ -1349,6 +1394,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "loaded host here and timing out a slow host is worse than waiting for "
             "it — and `make type-check BOUND_TIMEOUT=<seconds>` raises it for one "
             "run."
+        ),
+    )
+    parser.add_argument(
+        "--start-by",
+        type=_start_by,
+        default=None,
+        metavar="WHEN",
+        help=(
+            "latest start: epoch seconds or ISO-8601 with an offset/Z (e.g. "
+            "2026-11-19T08:05:00Z). Checked immediately before spawn; if it has "
+            "passed the command is NOT started and the status is 79 "
+            "(cause=late-start). Does not bound runtime; --timeout does"
         ),
     )
     parser.add_argument(
@@ -1398,6 +1455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         memory_mb=args.memory_mb,
         run_id=args.run_id,
         contract=args.contract,
+        start_by=args.start_by,
     )
 
 

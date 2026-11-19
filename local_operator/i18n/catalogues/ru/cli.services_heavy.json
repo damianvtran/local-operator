@@ -7,5 +7,8 @@
   "cli.services_heavy.timeout": "Максимальное время ожидания слота в очереди, в секундах (по умолчанию — лимит очереди машины, {wait_seconds} с, если {env_name} не задаёт другой)",
   "cli.services_heavy.command": "Команда для выполнения, после `--`",
   "cli.services_heavy.holder": "  слот {slot}: {holder}, работает {age}: {command}",
-  "cli.services_heavy.no_command": "Нечего выполнять: укажите команду после `--`, например `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "Нечего выполнять: укажите команду после `--`, например `lop services heavy run -- make test`",
+  "cli.services_heavy.start_by": "Крайний срок запуска команды: секунды epoch или ISO-8601 со смещением или Z (например, 2026-11-19T08:05:00Z). Проверяется после ожидания в очереди, непосредственно перед запуском; если срок прошёл, команда не запускается, код выхода 79",
+  "cli.services_heavy.late_start": "поздний запуск: срок start-by {start_by} прошёл (сейчас {now}, опоздание {late} с); команда не запущена",
+  "cli.services_heavy.not_start_by": "{value} не является ни секундами epoch, ни временем ISO-8601 со смещением или Z"
 }

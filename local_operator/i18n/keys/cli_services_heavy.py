@@ -28,12 +28,24 @@ def holder(*, slot: str, holder: str, age: str, command: str) -> Msg:
     )
 
 
+def late_start(*, start_by: str, now: str, late: str) -> Msg:
+    return Msg("cli.services_heavy.late_start", {"start_by": start_by, "now": now, "late": late})
+
+
 def no_command() -> Msg:
     return Msg("cli.services_heavy.no_command", {})
 
 
+def not_start_by(*, value: str) -> Msg:
+    return Msg("cli.services_heavy.not_start_by", {"value": value})
+
+
 def run() -> Msg:
     return Msg("cli.services_heavy.run", {})
+
+
+def start_by() -> Msg:
+    return Msg("cli.services_heavy.start_by", {})
 
 
 def status() -> Msg:

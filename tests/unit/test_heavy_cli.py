@@ -340,3 +340,79 @@ def test_without_killpg_nothing_is_forwarded(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_posix_forwarded_signals_are_unchanged() -> None:
     assert heavy_cli._FORWARDED == (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+# -- run --start-by -------------------------------------------------------------
+
+
+def test_run_refuses_after_queueing_past_start_by_and_never_spawns(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # Admitted in time (deadline ~2 s out), then queued behind a holder for
+    # ~4 s: the check after the queue wait must refuse, and free the slot.
+    marker = tmp_path / "ran"
+    holder = _hold(env, tmp_path / "holder.log", 4.0)
+    try:
+        proc = _lop(
+            env,
+            "run",
+            "--timeout",
+            "30",
+            "--start-by",
+            f"{time.time() + 2:.3f}",
+            "--",
+            "touch",
+            str(marker),
+        )
+        _, err = proc.communicate(timeout=60)
+    finally:
+        _reap(holder)
+    assert proc.returncode == heavy_cli.EXIT_LATE_START == 79, err
+    assert "late start: start-by " in err and "command not started" in err
+    assert not marker.exists()
+    assert _slot_free()
+
+
+@pytest.mark.parametrize("deadline", ["2020-01-01T00:00:00Z", "1577836800"])
+def test_run_with_a_past_start_by_exits_late_start(
+    env: dict[str, str], tmp_path: Path, deadline: str
+) -> None:
+    marker = tmp_path / "ran"
+    proc = _lop(env, "run", "--start-by", deadline, "--", "touch", str(marker))
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 79, err
+    assert "2020-01-01T00:00:00Z" in err
+    assert not marker.exists()
+
+
+def test_run_with_a_future_start_by_runs(env: dict[str, str], tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    proc = _lop(env, "run", "--start-by", "2999-01-01T00:00:00+00:00", "--", "touch", str(marker))
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    assert marker.exists()
+
+
+def test_run_with_an_unreadable_start_by_is_a_usage_error(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    proc = _lop(env, "run", "--start-by", "08:05", "--", "touch", str(marker))
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 2, err
+    assert "is not epoch seconds or an ISO-8601 time" in err
+    assert not marker.exists()
+    assert not list(heavy_lease.lease_dir().glob("slot-*.json"))
+
+
+def test_run_start_by_uses_the_clock_at_the_spawn_point(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unqueued path (queue off): the gate still reads the clock immediately
+    # before Popen, and a breach never reaches Popen.
+    monkeypatch.setattr(heavy_cli, "_queue_off_line", lambda: "queue off")
+    spawned: list[object] = []
+    monkeypatch.setattr(heavy_cli.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    out = io.StringIO()
+    rc = heavy_cli.run_command(["true"], None, out=out, start_by=100.0, clock=lambda: 101.0)
+    assert rc == heavy_cli.EXIT_LATE_START
+    assert spawned == []
+    assert "1.0s late" in out.getvalue()

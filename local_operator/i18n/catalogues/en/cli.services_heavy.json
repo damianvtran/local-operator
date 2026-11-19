@@ -7,5 +7,8 @@
   "cli.services_heavy.timeout": "Longest to queue for a slot, in seconds (default: the machine's queue limit, {wait_seconds}s unless {env_name} sets another)",
   "cli.services_heavy.command": "The command to run, after `--`",
   "cli.services_heavy.holder": "  slot {slot}: {holder}, running {age}: {command}",
-  "cli.services_heavy.no_command": "Nothing to run: put the command after `--`, for example `lop services heavy run -- make test`"
+  "cli.services_heavy.no_command": "Nothing to run: put the command after `--`, for example `lop services heavy run -- make test`",
+  "cli.services_heavy.start_by": "Latest time the command may start: epoch seconds or ISO-8601 with an offset or Z (e.g. 2026-11-19T08:05:00Z). Checked after the queue wait, just before the command starts; if it has passed, the command is not run and the exit status is 79",
+  "cli.services_heavy.late_start": "late start: start-by {start_by} passed (now {now}, {late}s late); command not started",
+  "cli.services_heavy.not_start_by": "{value} is not epoch seconds or an ISO-8601 time with an offset or Z"
 }
