@@ -1,0 +1,28 @@
+{
+  "locale": "ru",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+  "status": "passed",
+  "translator": {
+    "agent": "7f2b030d2636",
+    "session": "7f2b030d2636",
+    "model": null,
+    "actual_model_source": "Remediation job identified by manager; its actual model was not supplied"
+  },
+  "auditor": {
+    "agent": "independent-ru-auditor",
+    "session": "b8c027b19533",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7f2b030d2636",
+    "actual_model_source": "Session runtime declaration; no fallback event observed/reported",
+    "fallback": null,
+    "fallback_observation": "No alternate model event is visible in this audit session; no model identity inferred"
+  },
+  "audit_date": "2026-11-16",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "fixed_finding_ids": [
+    "RU-SD3-01"
+  ],
+  "note": "i18n/audits/evidence/ru/cli.serve_readiness/sd3r/record.json; sd3r: RU-SD3-01 fixed; 14 unchanged keys byte-proven; all 15 mechanically rechecked; 0 unresolved blocker/major."
+}

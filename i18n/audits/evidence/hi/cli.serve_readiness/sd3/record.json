@@ -1,0 +1,197 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "170903662c6e",
+    "also_independent_from_original_translator_session": "acf0a84cd992",
+    "actual_model_source": "Current host session-state explicitly names openai/gpt-6.1-sol; same auditor session resumed for first audit of newly changed source/targets.",
+    "fallback": {
+      "observed": false,
+      "requested_model": null,
+      "actual_model": "openai/gpt-6.1-sol"
+    }
+  },
+  "translator": {
+    "agent": "task 170903662c6e",
+    "session": "170903662c6e",
+    "original_translator_session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Manager identifies job 170903662c6e as same original translator; original manager-disclosed actual model was openai/gpt-6.1-sol. Translator runtime not independently inspected by auditor.",
+    "fallback": "No new fallback disclosed by manager; not independently inspected."
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c plus uncommitted remediation; input_hashes bind reviewed working bytes",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/cli.serve_readiness.json",
+      "sha256": "40a11e844ff0eb3761b4bcfb50842970cc9469fef38b0f18cc23fec493405f47"
+    }
+  },
+  "reference_hashes": [
+    {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "docs/I18N.md",
+      "sha256": "da639a46050ed4bb5d1ca1d12e90e8b4e84ada8b2706cac2e33fbe7cf3a44500"
+    },
+    {
+      "path": "i18n/audits/evidence/README.md",
+      "sha256": "f98005f6797ad42d3e0c8d8f72516bf684519ad9e6b7ad7ac83812bbdb4a4d3b"
+    },
+    {
+      "path": "local_operator/network/readiness.py",
+      "sha256": "3adbd0122dc704320bd77991299071739057da36d34e39bec7d6591821d5968b"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/report.md",
+      "sha256": "f15cb8e3fb14cef376e7d4b90cd0c1714c11bd46b378fb846aedbc92eca734e1"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/audit.log",
+      "sha256": "37e8c760bb3b777cc9cc29526da305f8ba3061570e2a65d8e403f9c3706b52fb"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/receipt.json",
+      "sha256": "75b5bb50a3c761465ec17f77b6b6a92ce19151b022d560bbc9362e09e3eee756"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/ledger-receipt.json",
+      "sha256": "40760fdae26eab1223e377014c8eeefcbe04ee3e877f442b5619dcf5e13e1a39"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "report_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/report.md",
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "scope": {
+    "first_audit_of_new_source_target_contract": true,
+    "updated_keys": [
+      "cli.serve_readiness.identity_restart",
+      "cli.serve_readiness.not_reporting",
+      "cli.serve_readiness.not_this_daemon",
+      "cli.serve_readiness.recorded_gap",
+      "cli.serve_readiness.unknown",
+      "cli.serve_readiness.unknown_state",
+      "cli.serve_readiness.unproven"
+    ],
+    "new_keys": [
+      "cli.serve_readiness.and_more",
+      "cli.serve_readiness.identity_no_action",
+      "cli.serve_readiness.identity_restart_manual",
+      "cli.serve_readiness.pid_reason"
+    ],
+    "new_or_changed_keys_reviewed": 11,
+    "full_current_mechanical_and_render_keys": 15,
+    "source_selection_inspected": "local_operator/network/readiness.py:3012-3059,3139-3218",
+    "source_selection_executed": false,
+    "cgroup_N1": "Deferred/out of remediation scope per manager; no new resolution claim or scope creep.",
+    "second_independently_staffed_pass_claimed": false
+  },
+  "retained_coverage": {
+    "record": {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/record.json",
+      "sha256": "1d32455ce0f787785ef1149ffc1661f3d4554146482f1c86913e7729b578de53"
+    },
+    "report": {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd1r/report.md",
+      "sha256": "f5b45ebeae48bc5f3e7fdebfda8ea23397e825f3ddea8f320bff4ed9033e4bb2"
+    },
+    "retained_key_count": 4,
+    "retained_keys": [
+      "cli.serve_readiness.cgroup_unknown",
+      "cli.serve_readiness.install_unknown",
+      "cli.serve_readiness.other_unit",
+      "cli.serve_readiness.stale"
+    ],
+    "proof": "git show HEAD:Hindi catalogue bytes hash equals sd1r target hash. Four unchanged raw JSON entry lines compared byte-for-byte to current. All four also mechanically checked and rendered anew.",
+    "head_target_sha256": "c83b91c4e5297457edb1d1f281af71c80acac1b27f9953733bdcbe004e8bea9b",
+    "historical_rows_preserved": true
+  },
+  "current_bytes_match_audited_hashes": true,
+  "validation": {
+    "catalogues_only_exit_code": 0,
+    "catalogues_problem_count": 0,
+    "direct_verification_exit_code": 0,
+    "duplicate_free_json": true,
+    "exact_key_argument_type_skeleton_branch_and_backtick_parity": true,
+    "hi_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "all_plural_render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "opaque_parameters_preserved_verbatim": true,
+    "opaque_scope": "Production ICU formatter only, not downstream Rich escaping.",
+    "grouped_diagnosis_rendered": true,
+    "single_diagnosis_and_gap_occurrence_verified": true,
+    "duplicate_colon_scaffold_absent": true,
+    "noaction_record_not_liveprocess": true,
+    "restart_does_not_promise_identity": true,
+    "source_selection_inspected_reloadable_vs_manual_and_stale_neighbor_deduplication": true,
+    "maxCells_or_maxChars_hints_present": false,
+    "rendered_frame_evidence": false,
+    "mt_service_used": false,
+    "rtl": "not applicable: Hindi LTR"
+  },
+  "evidence_classification": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "receipt.json": "companion hash receipt with record reference",
+    "ledger-receipt.json": "append-ready proposed passing receipt; dry-run only"
+  },
+  "ledger": {
+    "receipt_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/ledger-receipt.json",
+    "note": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/record.json; first audit of 7 updated + 4 new keys; 4 unchanged entries proved; 15-key parity/plural/render/opaque checks pass; 0 open blocker/major.",
+    "note_characters": 197,
+    "expected_history_sha256": "035dad33e63cd7aee747a3dace81bc175470cff6cb435fc7df954eb7b7100513",
+    "append_dry_run_exit_code": 0,
+    "applied": false,
+    "parent_appends_history": true
+  },
+  "retention": {
+    "canonical_root": "i18n/audits/evidence",
+    "repo_only_not_shipped": true,
+    "existing_bundles_and_history_unchanged_by_auditor": true,
+    "no_commit_by_auditor": true,
+    "tracking_at_handoff": "New repo-only evidence; parent must add/commit; no claim of merge/main inclusion."
+  },
+  "limitations": [
+    "No pytest, full tests, installs, new tree, live providers, source/service execution, or physical frame capture.",
+    "First auditor pass of changed contract; not a substitute for separately required independent second pass."
+  ]
+}

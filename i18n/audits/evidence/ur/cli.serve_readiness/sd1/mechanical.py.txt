@@ -1,0 +1,37 @@
+import json, re, unicodedata, hashlib
+from pathlib import Path
+from local_operator.i18n import runtime
+namespace = 'cli.serve_readiness'
+paths = {name: Path('local_operator/i18n/catalogues') / locale / (namespace + suffix) for name, locale, suffix in [('en', 'en', '.json'), ('context', 'en', '.context.json'), ('ur', 'ur', '.json')]}
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        assert key not in result, ('duplicate JSON member', key)
+        result[key] = value
+    return result
+maps = {name: json.loads(path.read_text(), object_pairs_hook=unique) for name, path in paths.items()}
+assert set(maps['en']) == set(maps['ur']) == set(maps['context'])
+print('JSON and key/context parity: PASS; key_count=' + str(len(maps['ur'])))
+for name, path in paths.items():
+    print('INPUT_SHA256', name, str(path), hashlib.sha256(path.read_bytes()).hexdigest())
+controls = {'LRE', 'RLE', 'LRO', 'RLO', 'PDF', 'LRI', 'RLI', 'FSI', 'PDI'}
+for key, en in maps['en'].items():
+    ur = maps['ur'][key]
+    assert runtime.message_arguments(en) == runtime.message_arguments(ur), key
+    assert runtime.plural_selectors(en) == runtime.plural_selectors(ur), key
+    for selectors in runtime.plural_selectors(ur):
+        assert set(selectors) == {'one', 'other'}, (key, selectors)
+    assert re.findall(r'`[^`]*`', en) == re.findall(r'`[^`]*`', ur), key
+    assert re.findall(r'</?[A-Za-z][^>]*>', en) == re.findall(r'</?[A-Za-z][^>]*>', ur), key
+    assert not any(unicodedata.bidirectional(c) in controls or ord(c) in (0x200e, 0x200f, 0x061c) for c in ur), key
+    assert not re.search('[\u0660-\u0669\u06f0-\u06f9]', ur), key
+    hints = {k: v for k, v in maps['context'][key].items() if k in ('maxCells', 'maxChars')}
+    print('KEY_PASS', key, 'args=' + repr(runtime.message_arguments(ur)), 'plurals=' + repr(runtime.plural_selectors(ur)), 'width_hints=' + repr(hints))
+    params = {'device': 'node-2', 'pids': 'pid 123, pid 456', 'holders': 'pid 123 under external.service', 'builds': 'v0.104.0', 'install': 'v0.105.3', 'recorded': 'v0.104.0', 'reasons': 'pid 123: ' + maps['ur'][namespace + '.unproven']}
+    for count in ([0, 1, 2] if runtime.plural_selectors(ur) else [None]):
+        if count is not None:
+            params['count'] = count
+        rendered = runtime.render_message(ur, params, 'ur')
+        assert '{device}' not in rendered and '{count}' not in rendered
+        print('RENDER', key, 'count=' + str(count), rendered)
+print('PASS: all 11 keys; all 3 plural messages include Urdu one/other; every branch rendered at count 0/1/2; no manual bidi controls/native digits; backtick and tag parity; no maxCells/maxChars hints. This is raw catalogue parsing/rendering, not terminal/visual bidi evidence.')

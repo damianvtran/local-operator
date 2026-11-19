@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.services_heavy",
+  "history_sha256": "3d6f92796f90aa504a9bc0f0c76d37efc87aa1e1d9423e30005245055d4952cc",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.services_heavy",
+      "source_sha256": "15dbe0c3cc4e5eed1309e34070c6f70df6c126d11057b98ac19eae1c21293f93",
+      "translator": {
+        "agent": "coder agent (lopdev team; commit 117f0383b; session id not relayed)",
+        "model": "not relayed to auditor",
+        "fallback": "unknown",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "copy-reviewer agent acting as i18n auditor (lopdev team, session bae8340eabcb; independent of the coder)",
+        "session": "bae8340eabcb",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "minor": 2,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "i18n audit round 1 of PR #4211 (feat/heavy-slot-wait) on base head 117f0383b, 2026-11-18. Target fr/cli.services_heavy.json sha256 be65ebb3e3d006a6fbb936f81e3002926e3390c8ee06f2b859b8cea6274a0ba1 (9/9 keys) after auditor fixes. Semantic read of all 9 values against i18n/glossary.md, the locale style guide and the en context sidecar: wait never takes a slot, run holds it exactly for the command's lifetime, status shows pid/age/command; subcommand names wait/run/status, pid, `--`, `lop services heavy run -- make test`, {slot} {holder} {age} {command} {wait_seconds} {env_name} preserved; holder keeps two leading spaces. Mechanical: key set, placeholder multiset, backtick spans byte-identical, design-qa copy_scan 0 findings over 8 files. C1 (MINOR, fixed by auditor): prose spaces before : and ; and inside « » were U+0020; replaced with U+202F per fr style guide (heavy_description, timeout, holder, no_command; code spans untouched). C2 (MINOR, fixed by auditor): status «l’ancienneté» (reads as seniority) -> «la durée de détention» to match the context note (age = how long the holder has held the slot). Single independent audit on the same model family as the translator; no native-speaker or rendered RTL evidence claimed. Comment: see PR #4211 '### i18n audit — round 1'."
+    }
+  ]
+}

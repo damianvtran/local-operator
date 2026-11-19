@@ -39,6 +39,48 @@ _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: Suffix distinguishing the en-only context sidecar from a namespace file.
 CONTEXT_SUFFIX = ".context.json"
 
+#: The EXACT English context-sidecar vocabulary shared by every writer (core,
+#: desktop, mobile) and by the ``read_public_copy`` reader. Operator decision
+#: 2026-11-17 (ask a-82fb, "Extend the reader with exact typed fields"): the
+#: reader serves these sidecars outside the redaction path, so it must accept a
+#: closed, typed schema rather than arbitrary metadata, and writers must fail at
+#: authoring time on anything else. ``width``/``length`` are the free-text width
+#: hints core and desktop already author; ``placeholders`` maps an ICU argument
+#: name to a one-line description (``{}`` is a valid "no arguments" record).
+#: Adding a field is a reviewed change here, never a per-repo extension.
+CONTEXT_STRING_FIELDS = frozenset({"role", "tone", "note", "width", "length"})
+CONTEXT_FIELDS = CONTEXT_STRING_FIELDS | {"maxCells", "placeholders"}
+
+
+def context_entry_problem(entry: object) -> tuple[str, str | None] | None:
+    """Why one sidecar entry breaks the shared schema, or ``None`` when it fits.
+
+    Returns ``(kind, field)`` with ``kind`` one of ``"not-object"``,
+    ``"unsupported-field"`` or ``"invalid-type"``. Callers word their own
+    message: the authoring check may name the field (committed source), while
+    the reader keeps fixed refusals that never echo file content, because an
+    invalid file is exactly the one that may carry stray data. Never a value.
+    """
+    if not isinstance(entry, dict):
+        return ("not-object", None)
+    for field, value in entry.items():
+        if field not in CONTEXT_FIELDS:
+            return ("unsupported-field", str(field))
+        if field in CONTEXT_STRING_FIELDS:
+            valid = isinstance(value, str)
+        elif field == "maxCells":
+            # bool is an int subclass, but is not a documented width value.
+            valid = type(value) is int
+        else:  # placeholders: flat str -> str, no nesting and no empty name
+            valid = isinstance(value, dict) and all(
+                isinstance(name, str) and name and isinstance(text, str)
+                for name, text in value.items()
+            )
+        if not valid:
+            return ("invalid-type", field)
+    return None
+
+
 #: Backend-owned namespaces a client is allowed to fetch. RFC §2.1: `wire.*`
 #: is core-owned and served; every client-owned namespace (`ui.*`, `tui.*`,
 #: `relay.*`, ...) bundles with its own client, so serving it here would create

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "mobile.doctor",
-  "history_sha256": "948805c613de6b700cc195b1a2a3df0ead0e0f4b044f3d9f6c9af19954a14b02",
+  "history_sha256": "367e080d37857ccf659bd0a1b3d344c4b4b33eb7347779d30efa2a4d1120ac8b",
   "entries": [
     {
       "locale": "es",
@@ -71,6 +71,52 @@
       "note": "PR #4193 audit a3 PASSED: 4 new keys mobile.doctor.watches.{ok,near,at_limit,unknown}, 0 blocker / 0 major / 1 minor / 0 nit. ES-W1 minor, corrected by the auditor: «No space left on device» → “No space left on device”. Translator and auditor share model family anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/es/mobile.doctor/a3/record.json",
       "evidence": "i18n/audits/evidence/es/mobile.doctor/a3/record.json",
       "round": "a3",
+      "keys_audited": 4
+    },
+    {
+      "locale": "es",
+      "namespace": "mobile.doctor",
+      "source_sha256": "322230f946a1ac493499986fba909735071e13415791de3dbbbb1c686e83c9fb",
+      "translator": {
+        "agent": "coder subagent of PR #4216 (commit 4e6a95430; wrote the English source and all 7 translations)",
+        "model": "not reported in the commit; served model of the coder child unverified",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "copy-reviewer acting as independent i18n auditor, lopdev team member (`task` subagent), session 760414253f82; did not write the translations; corrected the values listed in findings",
+        "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4216 audit a4 PASSED: 6 keys mobile.doctor.watches.{ok,near,at_limit,unknown} changed and {instances_near,instances_at_limit} new, 0 blocker / 0 major / 0 minor / 0 nit. Translator and auditor share model family anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/es/mobile.doctor/a4/record.json",
+      "evidence": "i18n/audits/evidence/es/mobile.doctor/a4/record.json",
+      "round": "a4",
+      "keys_audited": 6
+    },
+    {
+      "locale": "es",
+      "namespace": "mobile.doctor",
+      "source_sha256": "8e22fc91780c70e0750c05c92a8478db0ca00d738981ae20063028fe33b0ddcc",
+      "translator": {
+        "agent": "coder subagent of PR #4216 round-1 remediation (commit 193e08e33; rewrote the English source and all 7 translations of the 4 keys)",
+        "model": "not reported in the commit; served model of the coder child unverified",
+        "date": "2026-11-18"
+      },
+      "auditor": {
+        "agent": "copy-reviewer acting as independent i18n re-auditor, lopdev team member (`task` subagent), session 1689332f69cf; did not write or audit-correct these translations in any earlier round and edited no locale value",
+        "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+        "date": "2026-11-18",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #4216 audit a5 PASSED (re-audit of remediation 193e08e33): 4 keys mobile.doctor.watches.{near,at_limit,instances_near,instances_at_limit} changed to a three-arm {how} select (command/program/other), 0 blocker / 0 major / 0 minor / 0 nit for es. All 12 arm renders checked. Translator and auditor share model family anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/es/mobile.doctor/a5/record.json",
+      "evidence": "i18n/audits/evidence/es/mobile.doctor/a5/record.json",
+      "round": "a5",
       "keys_audited": 4
     }
   ]

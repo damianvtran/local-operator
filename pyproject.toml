@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.107.2"
+version = "0.107.3"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -334,6 +334,10 @@ local_operator = [
     # that dropped it would install the roles while having no record of which
     # names the hub refuses to republish.
     "agent_seeds/*.json",
+    # The GENERATED reaction shortcode table (scripts/gen_emoji_names.py):
+    # team_bridge/emoji_names.py reads it on the first react, so a wheel
+    # without it would fail every agent and desktop reaction at load.
+    "team_bridge/emoji_names.json",
     # The SPEECH VOICING MAP, vendored byte-for-byte from agent-server
     # (internal/services/speech_voicing/) beside the adapters that execute it.
     # Without these a wheel would install the Python executor and no map, and

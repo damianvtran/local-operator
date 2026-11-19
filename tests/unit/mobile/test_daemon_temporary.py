@@ -324,6 +324,9 @@ def test_an_anonymous_caller_gets_each_route_s_own_refusal_and_no_tombstone_read
             .replace("{job_id:str}", "3f9c1a7e5b20")
             .replace("{digest:str}", "0" * 32)
             .replace("{job:str}", "3f9c1a7e5b20")
+            # The bridge-card body relay route is keyed by a transcript row id
+            # (a uuid hex), so substitute a well-formed one.
+            .replace("{entry_id:str}", "3f9c1a7e5b2049d8a6c1e0f7b3d25a94")
         )
         assert "{" not in url, url
         method = sorted(set(route.methods or {"GET"}) - {"HEAD"})[0].lower()

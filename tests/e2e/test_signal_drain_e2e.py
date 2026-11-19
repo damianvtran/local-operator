@@ -421,6 +421,19 @@ def _idle_sigterm_timeout_evidence(child: subprocess.Popen[bytes], config: Path)
     return "\n".join(sections)
 
 
+# QUARANTINED on macOS only (Linux keeps running it): remove once the
+# signal_drain/runtime-child native-crash family has a native backtrace and a fix.
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "QUARANTINED 2026-11-18 flaky-sweep ledger lopdev-E01 'signal_drain/runtime-child "
+        "native-crash family (witnesses show no-refusal-record / sigterm-immediate "
+        "assertions)': intermittent macOS tui-e2e shard 0 failure "
+        "(#4189 gate job 134824931198, #4247 job 135275041501); owner: lopdev E01 "
+        "signal_drain owner; real fix needs a native backtrace of the runtime child; "
+        "remove once the family has a native backtrace and a fix"
+    ),
+)
 @pytest.mark.asyncio
 async def test_a_sigterm_with_nothing_in_flight_is_still_immediate(
     headless_tui_env: Path,
@@ -1380,6 +1393,19 @@ async def _wait_refusals(
     )
 
 
+# QUARANTINED on macOS only (Linux keeps running it): remove once the
+# signal_drain/runtime-child native-crash family has a native backtrace and a fix.
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "QUARANTINED 2026-11-18 flaky-sweep ledger lopdev-E01 'signal_drain/runtime-child "
+        "native-crash family (witnesses show no-refusal-record / sigterm-immediate "
+        "assertions)': macOS tui-e2e shard 0 `no refusal record "
+        "appeared` (#4235 gate job 135253225875); owner: lopdev E01 signal_drain "
+        "owner; real fix needs a native backtrace of the runtime child; remove once "
+        "the family has a native backtrace and a fix"
+    ),
+)
 @pytest.mark.asyncio
 async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
     headless_tui_env: Path,

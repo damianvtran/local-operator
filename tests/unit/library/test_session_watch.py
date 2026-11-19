@@ -54,14 +54,31 @@ def _event(wd: int, mask: int, name: str = "") -> bytes:
 
 
 class FakeSyscalls:
-    """Records every watch; ``fail_after`` makes the Nth add raise ``ENOSPC``."""
+    """Records every watch; ``fail_after`` makes the Nth add raise ``ENOSPC``.
+
+    Like the kernel, re-adding a watch on an inode already watched returns its
+    existing wd (counted in ``readded``, not ``added``); a directory removed
+    and recreated under the same name is a new inode and gets a new wd.
+
+    Identity is ``(path, st_ino)`` only while the inode lives: a filesystem
+    may hand a freed inode NUMBER straight to the next ``mkdir`` (the likely
+    cause of this test's CI flake; ext4 can), yet the kernel's mark died with
+    the old inode object,
+    so the recreated directory still gets a new wd. ``watch_died`` models that
+    death — the kernel dropping the watch whether or not its IN_IGNORED ever
+    reaches the reader — and ``pinned_inodes`` forces the reuse for one path
+    so a test does not depend on what the filesystem happens to do.
+    """
 
     def __init__(self, fail_after: int | None = None) -> None:
         self.added: list[tuple[str, int]] = []
+        self.readded: list[str] = []
         self.removed: list[int] = []
         self.closed: list[int] = []
         self.fail_after = fail_after
+        self.pinned_inodes: dict[str, int] = {}
         self.read_fd, self.write_fd = os.pipe()
+        self._wds: dict[tuple[str, int | None], int] = {}
 
     def init(self) -> int:
         return self.read_fd
@@ -69,8 +86,22 @@ class FakeSyscalls:
     def add_watch(self, fd: int, path: str, mask: int) -> int:
         if self.fail_after is not None and len(self.added) >= self.fail_after:
             raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), path)
+        try:
+            inode: int | None = self.pinned_inodes.get(path) or os.stat(path).st_ino
+        except OSError:
+            inode = None
+        existing = self._wds.get((path, inode))
+        if existing is not None:
+            self.readded.append(path)
+            return existing
         self.added.append((path, mask))
+        self._wds[(path, inode)] = len(self.added)
         return len(self.added)  # wd 1 is sessions/, then one per session
+
+    def watch_died(self, path: Path) -> None:
+        """The inode at ``path`` was deleted: the kernel freed its watch."""
+        for key in [key for key in self._wds if key[0] == str(path)]:
+            del self._wds[key]
 
     def wd_of(self, path: Path) -> int:
         return [p for p, _ in self.added].index(str(path)) + 1
@@ -280,7 +311,6 @@ def test_real_inotify_holds_one_watch_per_session_on_a_cloexec_fd(tmp_path) -> N
         owner = SESSIONS[0]
         (sessions / owner / "scratchpad" / "rig0" / "deep.txt").write_text("x")
         time.sleep(0.2)
-        assert owner not in seen
         assert seen == []
         assert watch.watch_count() == 2 + len(SESSIONS)
     finally:
@@ -308,10 +338,108 @@ def test_an_overflow_rescans_and_watches_sessions_whose_create_was_lost(tmp_path
         assert (str(sessions / lost), session_watch.SESSION_MASK) in fake.added
         assert index._observer.watch_count() == 2 + len(SESSIONS)
         assert _until(lambda: dirty == [lost])
-        # Already-watched sessions are not re-added.
+        # Already-watched sessions keep their wd (re-armed, not re-queued).
         assert len(fake.added) == 2 + len(SESSIONS)
     finally:
         index._stop_observer()
+
+
+@pytest.mark.parametrize("reused_inode", [False, True], ids=["new-inode", "reused-inode"])
+def test_an_overflow_rewatches_a_session_recreated_after_its_removal_was_lost(
+    tmp_path, fake, reused_inode
+) -> None:
+    """Review R2-m2: the overflow ate a session's IN_DELETE and IN_IGNORED.
+
+    The map still holds the old directory's dead wd when the same id is
+    recreated. The rescan must re-arm it (new inode, new wd), forget the dead
+    wd, queue the session, and route the new wd's events to it.
+
+    ``reused-inode`` pins the case that flaked on CI: the recreated directory
+    got the freed inode number back, and a fake that ignored the watch's death
+    handed back the dead wd, so the rescan saw nothing change.
+    """
+    import shutil
+
+    sessions = _deep_sessions(tmp_path)
+    index, dirty = _indexer(tmp_path)
+    woke = threading.Event()
+    index.wake = woke.set  # type: ignore[method-assign]
+    index._start_observer()
+    watch = index._observer
+    try:
+        name = SESSIONS[0]
+        old_wd = fake.wd_of(sessions / name)
+        if reused_inode:
+            fake.pinned_inodes[str(sessions / name)] = (sessions / name).stat().st_ino
+        shutil.rmtree(sessions / name)
+        fake.watch_died(sessions / name)
+        (sessions / name).mkdir()  # same id, new inode object; no event reaches the reader
+        fake.feed(_event(-1, session_watch.IN_Q_OVERFLOW))
+        assert woke.wait(2.0)
+        assert _until(lambda: dirty == [name])
+        new_wd = len(fake.added)
+        assert fake.added[-1] == (str(sessions / name), session_watch.SESSION_MASK)
+        assert watch._session_wd[name] == new_wd != old_wd
+        assert old_wd not in watch._wd_session
+        assert watch.watch_count() == 1 + len(SESSIONS)
+        dirty.clear()
+        fake.feed(_event(new_wd, session_watch.IN_CLOSE_WRITE, "transcript.jsonl"))
+        assert _until(lambda: dirty == [name])
+    finally:
+        index._stop_observer()
+
+
+@pytest.mark.parametrize("step", ["pipe", "thread"])
+def test_a_late_start_failure_releases_the_inotify_fd_and_the_pipe(
+    tmp_path, fake, monkeypatch, step
+) -> None:
+    """Review R2-m1: the wake pipe (EMFILE) or the reader thread (RuntimeError)
+    failing AFTER the watches are armed must still close the inotify fd, or
+    every watch on it stays held for the life of the process."""
+    _deep_sessions(tmp_path)
+    opened: list[int] = []
+    real_pipe = os.pipe
+
+    def pipe() -> tuple[int, int]:
+        if step == "pipe":
+            raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+        pair = real_pipe()
+        opened.extend(pair)
+        return pair
+
+    def start(self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(session_watch.os, "pipe", pipe)
+    if step == "thread":
+        monkeypatch.setattr(session_watch.threading.Thread, "start", start)
+    index, _dirty = _indexer(tmp_path)
+    index._start_observer()  # falls back, must not raise
+    assert index.observer_failed is True
+    assert fake.closed == [fake.read_fd]
+    for pipe_fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(pipe_fd)
+
+
+@pytest.mark.parametrize(
+    "code,names,not_names",
+    [
+        (errno.ENOSPC, "fs.inotify.max_user_watches", "max_user_instances"),
+        (errno.EMFILE, "fs.inotify.max_user_instances", "max_user_watches"),
+    ],
+)
+def test_the_budget_warning_names_the_limit_that_ran_out(
+    tmp_path, caplog, code, names, not_names
+) -> None:
+    """Review M3 / design D1: ENOSPC is the watch limit, EMFILE the instance
+    limit; naming both sent operators to raise the wrong one."""
+    index, _dirty = _indexer(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+        index._session_watch_failed(OSError(code, os.strerror(code)))
+    (message,) = [r.getMessage() for r in caplog.records]
+    assert names in message
+    assert not_names not in message
 
 
 def test_a_watch_constructor_failure_falls_back_and_keeps_the_worker(tmp_path, monkeypatch, caplog):

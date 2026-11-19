@@ -326,6 +326,19 @@ def test_a_thumbnail_is_invalidated_when_its_source_changes(tmp_path, monkeypatc
     assert store.thumb_is_live(asset_id, service.THUMB_MAX_WIDTH) is None
 
 
+# QUARANTINED, not fixed: "just indexed" is asserted without waiting on the
+# indexer, and leaked indexer threads from earlier tests can race it. Remove
+# once #4265 merges and main runs clean once, or when the barrier fix lands.
+@pytest.mark.skip(
+    reason=(
+        "QUARANTINED 2026-11-19 flaky-sweep ledger lopdev-E01: `AssetNotFound "
+        "la_5fa13453d4f79832` (#4235 gate job 135207196211, test (3.12, 0)); owner: "
+        "lopdev E01 ledger; real fix: possibly #4265 (stop the indexer the server "
+        "started at shutdown: leaked library-indexer threads / deleted tmp dirs), else "
+        "a barrier on the indexer's index-complete signal before the read; remove after "
+        "#4265 merges and one clean main run, or when the barrier lands"
+    )
+)
 def test_a_just_indexed_asset_is_found_and_a_hit_never_scans(tmp_path, monkeypatch) -> None:
     """The watcher indexes a new session; a read then answers from SQLite.
 

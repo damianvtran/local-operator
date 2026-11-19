@@ -66,8 +66,13 @@ Session-arm `outcome.json` and the `accounting` event now carry one typed
   owning session tree, not provider wire attempts or an official step count.
   `requests_complete` says whether close joined; false means a provisional
   snapshot, not a final total.
-- `verifier_requests`: unknown (`null`) when no separately identified verifier
-  subset is available. Do not derive it from request totals or invent zero.
+- `verifier_requests`: the harness completion verifier's share of
+  `logical_requests` (a subset, never an addition), counted from the same
+  job-id selector as the `requests` row's `verifier.count`, so the two always
+  agree. A number — including a measured `0` — once the verifier is armed;
+  unknown (`null`) for an arm without one. Do not derive it from request totals
+  or read `null` as zero: a worker's own `task(agent="verifier")` is worker
+  spend and is counted in neither place.
 
 Unavailable counters (including pre-launch failures) are `null`. Existing
 `steps` and `attempted_groups` fields remain unchanged for compatibility.

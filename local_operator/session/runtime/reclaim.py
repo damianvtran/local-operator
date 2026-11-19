@@ -847,14 +847,73 @@ def config_root_of(env_text: str) -> str:
     runtime itself, re-derived here because the runtime's answer is the only one
     that matters: a sweep must decide against the root that process is actually
     using, not against the root the sweep happens to be running under.
+
+    NORMALISED THE WAY THE RUNTIME NORMALISES IT (#4222 QA Q2): the runtime holds
+    ``Path(override)``, so ``/a/b/`` IS ``/a/b`` to it, and the answer here goes
+    through ``Path`` too. A VALUE MAY CONTAIN SPACES: both environment routes
+    (:func:`pid_environment`) hand over whitespace-joined ``NAME=value`` text, so
+    a value runs up to the next ``NAME=`` entry rather than the next space —
+    reading only to the first space made a store at ``~/My Stores/x`` read as
+    ``~/My`` and every scoped census call it someone else's. The one reading this
+    still gets wrong — a value that itself contains `` NAME=`` — is what
+    :func:`config_root_matches` reports as ambiguous rather than as a mismatch.
     """
-    match = re.search(rf"(?:^|\s){re.escape(CONFIG_DIR_ENV)}=(\S+)", env_text)
-    if match:
-        return match.group(1)
-    home = re.search(r"(?:^|\s)HOME=(\S+)", env_text)
-    if home:
-        return str(Path(home.group(1)) / DEFAULT_CONFIG_DIRNAME)
+    for name, suffix in ((CONFIG_DIR_ENV, ""), ("HOME", DEFAULT_CONFIG_DIRNAME)):
+        value = _env_value(env_text, name)
+        if value:
+            return str(Path(value) / suffix) if suffix else str(Path(value))
     return ""
+
+
+#: One environment entry's value in whitespace-joined ``NAME=value`` text: lazily
+#: up to the next ``<space>NAME=`` entry or the end. ``.`` crosses newlines so a
+#: multi-line value does not end the read either.
+_ENV_VALUE = r"(?:^|\s){name}=(.+?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)"
+
+
+def _env_value(env_text: str, name: str) -> str:
+    match = re.search(_ENV_VALUE.format(name=re.escape(name)), env_text, re.DOTALL)
+    return match.group(1) if match else ""
+
+
+def config_root_matches(env_text: str, root: str | Path) -> bool | None:
+    """Does this environment name ``root``? ``None`` when that cannot be decided.
+
+    TRI-STATE ON PURPOSE (#4222 QA Q2), because the two callers fail safe in
+    OPPOSITE directions: a census that licenses a move or a restart must count a
+    runtime it cannot rule out (``None`` → owned), while a sweep that SIGNALS must
+    act only on a runtime it can prove (``None`` → skip). ``None`` is answered for
+
+    * no root at all — no ``LOCAL_OPERATOR_CONFIG_DIR`` and no ``HOME``; and
+    * a text that ``root`` is one possible reading of but the parse is not:
+      :func:`config_root_of` ends a value at the next `` NAME=`` entry, so a value
+      that contains one reads short — and is then a prefix of the true value. The
+      raw text after ``NAME=`` beginning with ``root`` and then whitespace (or the
+      end) is that
+      case; an unrelated root never satisfies it, so no foreign store pins a move.
+
+    Both sides are compared as ``Path`` strings, so a trailing ``/`` on either is
+    not a different store.
+    """
+    target = str(Path(root))
+    parsed = config_root_of(env_text)
+    if not parsed:
+        return None
+    if parsed == target:
+        return True
+    readings = [(CONFIG_DIR_ENV, target)]
+    if not _env_value(env_text, CONFIG_DIR_ENV):
+        # The HOME route: ``root`` is a reading only if it is ``<home>/<dirname>``.
+        home = Path(target)
+        if home.name == DEFAULT_CONFIG_DIRNAME:
+            readings = [("HOME", str(home.parent))]
+        else:
+            readings = []
+    for name, value in readings:
+        pattern = rf"(?:^|\s){re.escape(name)}={re.escape(value)}/?(?:\s|$)"
+        if re.search(pattern, env_text):
+            return None
+    return False
 
 
 def session_id_of(env_text: str) -> str:

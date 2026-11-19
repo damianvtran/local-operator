@@ -60,6 +60,8 @@ RESOLVERS: list[tuple[str, Callable[[Path], Any]]] = [
     ("store.pending_dir", store.pending_dir),
     ("store.pending_path", lambda root: store.pending_path("i_round_trip", root)),
     ("store.decision_path", lambda root: store.decision_path("i_round_trip", root)),
+    ("store.pre_approval_path", lambda root: store.pre_approval_path("i_round_trip", root)),
+    ("store.pre_approval", lambda root: store.pre_approval("i_round_trip", root)),
     ("store.catalog_path", store.catalog_path),
     ("store.audit_path", store.audit_path),
 ]

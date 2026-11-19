@@ -5,6 +5,7 @@ import pytest
 import requests
 from pydantic import SecretStr
 
+from local_operator.clients._http import MODEL_LIST_TIMEOUT
 from local_operator.clients.openrouter import (
     OpenRouterClient,
     OpenRouterListModelsResponse,
@@ -90,6 +91,7 @@ def test_list_models_success(
             "X-Title": "Local Operator",
             "X-OpenRouter-Categories": "cli-agent,personal-agent",
         },
+        timeout=MODEL_LIST_TIMEOUT,
     )
 
     assert isinstance(response, OpenRouterListModelsResponse)

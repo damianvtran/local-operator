@@ -49,6 +49,11 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The community pilot switch (``community.community_enabled``). Inherited
+    # from a pilot machine's shell it would light ``/v1/desktop/community/*``,
+    # the relay door and ``features.community`` in every cell, so the dark-by-
+    # default assertions would pass the lit path; tests that need it on set it.
+    "LOCAL_OPERATOR_COMMUNITY",
     # The remote-compute API override names the host that receives the
     # operator's Radient bearer. Inheriting a developer's staging value would
     # point the suite's remote-compute client at a real host; tests that cover

@@ -12,7 +12,7 @@ import {
 import { BridgeCommandError, cdp } from "./cdp";
 import { safeHttpUrl, storedOriginAllowed } from "./origin-policy";
 import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
-import { getLocal, getSession, withSessionMutation } from "./state";
+import { getLocal, getSession, noteAdmittedOrigin, withSessionMutation } from "./state";
 
 export { safeHttpUrl } from "./origin-policy";
 export type { OriginDecision } from "./access-queue";
@@ -292,13 +292,21 @@ export async function withOriginGate<T>(
         await cdp(tabId, "Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });
         return;
       }
-      if (!once.has(url.origin) && !(await originAllowed(url))) {
-        if (!(await askOrigin(url, commandId))) {
-          denied = new BridgeCommandError("origin_denied", "site permission was denied", { origin: url.origin });
-          await cdp(tabId, "Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });
-          return;
+      if (!(await originAllowed(url))) {
+        if (!once.has(url.origin)) {
+          if (!(await askOrigin(url, commandId))) {
+            denied = new BridgeCommandError("origin_denied", "site permission was denied", { origin: url.origin });
+            await cdp(tabId, "Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });
+            return;
+          }
+          once.add(url.origin);
         }
-        once.add(url.origin);
+        // Admitted by a one-time decision (consumed at command entry or just
+        // approved in the popup), which no persistent grant will remember:
+        // record it on the surface so the page-touching commands that follow
+        // keep working (surface-origin.ts). Before continuing, so a command
+        // racing the navigation's commit can already see it.
+        await noteAdmittedOrigin(tabId, url.origin);
       }
       await cdp(tabId, "Fetch.continueRequest", { requestId: event.requestId });
     })();

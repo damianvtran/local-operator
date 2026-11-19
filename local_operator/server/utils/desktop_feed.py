@@ -735,6 +735,12 @@ class DesktopFeed:
         # last snapshot read (subscriber snapshots must not commit the published edge).
         self._approvals_pair_request: str | None = None
         self._approvals_pair_request_seen: str | None = None
+        #: The oldest open MESH PAIRING card's id (``<side>:<invite_id>``), read in the
+        #: same probe as the approvals store and kept BESIDE it rather than folded into
+        #: ``_approvals_pending``: that field is also the cache ``approval_snapshot``
+        #: compares, and it must keep meaning "the approvals store has rows".
+        self._approvals_pairing_seen: str | None = None
+        self._approvals_pairing: str | None = None
         self._approvals_probed_at = float("-inf")
         #: When the inbox read last warned, so a corrupt store reports once a
         #: minute instead of once per 100 ms tick.
@@ -1274,6 +1280,7 @@ class DesktopFeed:
                 self._approvals_expiry,
             ) = self._approval_snapshot()
             self._approvals_pair_request = self._approvals_pair_request_seen
+            self._approvals_pairing = self._approvals_pairing_seen
         except Exception:  # noqa: BLE001 — an optional store remains unknown
             self._approvals_token = None
             self._approvals_pending = None
@@ -2526,7 +2533,25 @@ class DesktopFeed:
             )
         token, pending, expiry, pair_request = approval_snapshot(self.root, cached=cached)
         self._approvals_pair_request_seen = pair_request
+        self._approvals_pairing_seen = self._open_pairing_id()
         return token, pending, expiry
+
+    def _open_pairing_id(self) -> str | None:
+        """The oldest open mesh pairing card (files only, no relay call), or ``None``.
+
+        WHY IN THE FEED. A pairing parked for the inviter's person used to be visible
+        only on the Mesh approvals tray's 15 s poll, so the badge could stay dark for
+        most of a short window. Read on the existing 1 s approvals probe, it lights
+        the badge at feed latency. A read failure is "no card", never a feed failure.
+        """
+        try:
+            from local_operator.server.utils.desktop_mesh_pairings import (
+                first_open_pairing_id,
+            )
+
+            return first_open_pairing_id(self.root)
+        except Exception:  # noqa: BLE001 — optional: a card read never kills the feed
+            return None
 
     async def _maybe_emit_approvals(self) -> None:
         # Optional authority reads and failures share the existing 1 s probe
@@ -2540,15 +2565,30 @@ class DesktopFeed:
         except Exception:  # noqa: BLE001 — optional authority failure is unknown, not empty
             return
         pair_request = self._approvals_pair_request_seen
+        pairing = self._approvals_pairing_seen
         # ``pair_request`` (design v2 §2.3): the one live phone pairing's approval id, so a
         # renderer can raise the pairing card on ANY route within one probe tick. Same
         # frame, same 1 s probe, no new poller; an old UI ignores the extra key.
-        if pending != self._approvals_pending or pair_request != self._approvals_pair_request:
-            self._publish("approvals", {"pending": pending, "pair_request": pair_request})
+        # ``pairing_id``: the same idea for a MESH pairing card; ``pending`` is OR'd with
+        # it so the badge lights for an open pairing as for any other approval.
+        if (
+            pending != self._approvals_pending
+            or pair_request != self._approvals_pair_request
+            or pairing != self._approvals_pairing
+        ):
+            self._publish(
+                "approvals",
+                {
+                    "pending": bool(pending) or pairing is not None,
+                    "pair_request": pair_request,
+                    "pairing_id": pairing,
+                },
+            )
         self._approvals_token = token
         self._approvals_pending = pending
         self._approvals_expiry = expiry
         self._approvals_pair_request = pair_request
+        self._approvals_pairing = pairing
 
     def _notifications_state_or_none(self) -> tuple[int, int, int, int] | None:
         """The inbox counts, or ``None`` when the store cannot be read (CD1).
@@ -3255,17 +3295,21 @@ class DesktopFeed:
             snapshot
         )
 
-        def read_approvals() -> tuple[bool, str | None]:
+        def read_approvals() -> tuple[bool, str | None, str | None]:
             pending = self._approval_snapshot()[1]
             # The live pairing id the SAME read just produced (round-1 Q5): a window
             # opened or reconnected mid-request must raise the pairing card from the
             # open frame, because no change frame follows for a level it never saw.
             # Read in the same thread call as the snapshot; a ticker read racing it
             # writes the same attribute from an equally fresh store read.
-            return pending, self._approvals_pair_request_seen
+            pairing = self._approvals_pairing_seen
+            return bool(pending) or pairing is not None, self._approvals_pair_request_seen, pairing
 
+        approvals_pairing: str | None = None
         try:
-            approvals_pending, approvals_pair_request = await asyncio.to_thread(read_approvals)
+            approvals_pending, approvals_pair_request, approvals_pairing = await asyncio.to_thread(
+                read_approvals
+            )
             # A subscriber snapshot is local; only the ticker commits the
             # shared edge baseline, or subscriber B can consume A's next edge.
         except Exception:  # noqa: BLE001 — retain explicit unknown on an optional read
@@ -3283,6 +3327,7 @@ class DesktopFeed:
             "notifications": notifications,
             "approvals_pending": approvals_pending,
             "approvals_pair_request": approvals_pair_request,
+            "approvals_pairing_id": approvals_pairing,
         }
         return frame
 

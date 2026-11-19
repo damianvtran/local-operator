@@ -1,0 +1,47 @@
+{
+  "cli.services_heavy.heavy": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Summary of `lop services heavy`. The heavy-job slot is a machine-wide lease that heavy builds/tests queue for; keep 'slot' as one countable noun used consistently across this namespace."
+  },
+  "cli.services_heavy.heavy_description": {
+    "role": "lop CLI help-page description",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Group-page description. 'wait', 'run' and 'status' are literal subcommand names and stay untranslated. 'wait' never takes a slot; 'run' frees it when the command exits."
+  },
+  "cli.services_heavy.wait": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "wait only observes: it must be clear the slot is NOT taken."
+  },
+  "cli.services_heavy.run": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "run holds the slot for exactly the command's lifetime."
+  },
+  "cli.services_heavy.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "pid stays literal. 'age' means how long the holder has held the slot."
+  },
+  "cli.services_heavy.timeout": {
+    "role": "lop CLI option help",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "{wait_seconds} is a number formatted by code (e.g. 900); the trailing 's' is the seconds unit. {env_name} is an environment variable name, literal."
+  },
+  "cli.services_heavy.command": {
+    "role": "lop CLI argument help",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "`--` is literal shell syntax."
+  },
+  "cli.services_heavy.holder": {
+    "role": "lop CLI status row",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "One indented row per holder under the status line. {slot} is a slot index number, {holder} names the holder (e.g. 'pid 123' or 'session/123'), {age} is a compact duration such as 8s or 3m05s, {command} is the command line, literal. Keep the two leading spaces."
+  },
+  "cli.services_heavy.no_command": {
+    "role": "lop CLI usage error",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Printed when `run` is given no command; nothing was queued. `--` and the example command are literal."
+  }
+}

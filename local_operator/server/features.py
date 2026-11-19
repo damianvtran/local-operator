@@ -1050,6 +1050,12 @@ def static_feature_flags() -> dict[str, Any]:
         # /v1/desktop/devices`, and the feed's `approvals.pair_request`. Its own key so
         # a renderer that lacks it never posts a pair-ack body an older backend 404s.
         "phone_pairing": 1,
+        # MESH PAIRING FROM THE MESH APPROVALS (design mesh-pairing-approvals §3.3):
+        # `GET /v1/desktop/mesh/pairings`, `POST .../{side}/{invite_id}/answer` (app
+        # attestation required; 403 `pairing_needs_app` otherwise), and the feed's
+        # `approvals.pairing_id`. Its own key so a renderer without it never shows a
+        # card an older backend cannot serve.
+        "mesh_pairing": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
         "profile_proposals": 1,
@@ -1333,6 +1339,13 @@ def static_feature_flags() -> dict[str, Any]:
         # and on/off are NOT on these routes: they stay on `PATCH
         # /v1/settings/{key}`, the one write funnel.
         "notification_sounds": 1,
+        # TEAM BRIDGE CARD BODIES (bridge-body design §4): `GET
+        # /v1/desktop/sessions/{id}/bridge-cards/{entry_id}/body` and the relay's
+        # `/api/sessions/{id}/bridge-cards/{entry_id}/body` answer the admitted
+        # body (or held/refused/pending state) behind one inbound bridge card.
+        # Shared by desktop and relay because both serve the route. Absent, a
+        # client keeps today's "body unavailable" copy.
+        "team_bridge_card_body": 1,
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the
@@ -1362,10 +1375,19 @@ def live_feature_flags() -> dict[str, Any]:
     # precedents the guard names are ``routes.desktop_profiles`` (imports
     # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
     # ``tunnels.report`` per request).
+    from local_operator.community import community_enabled
     from local_operator.references import at_references_enabled
     from local_operator.remote_compute import is_enabled as remote_compute_enabled
 
     return {
+        # LOCAL OPERATOR COMMUNITY (RFC v2.4 §7.2): the `/v1/desktop/community/*`
+        # member door. CONDITIONAL, a live fact like ``remote_compute``: the
+        # routes answer `community_disabled` while ``LOCAL_OPERATOR_COMMUNITY``
+        # is off (``community.community_enabled`` is the one reader, called here
+        # so this map and the routes cannot disagree), and a renderer that saw
+        # the key on a dark install would paint a surface that only refuses.
+        # Absent ⇒ no community surface, the pre-feature state.
+        **({"community": 1} if community_enabled() else {}),
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the

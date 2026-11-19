@@ -289,6 +289,36 @@ local-operator-bridge-connector.service` command to read it.
 resync, not on every quiet poll, so an old time on a quiet account is normal.
 `logs` is the better liveness signal.
 
+## Listing held messages from a terminal
+
+```bash
+lop team-bridge holds            # alias: lop team-bridge holds list
+lop team-bridge holds --json
+lop team-bridge holds --excerpt  # adds a short, redacted excerpt
+```
+
+A read-only view of the messages held on this machine, for when the desktop
+app is not open. Each row shows the message and conversation id, who sent it
+(the person, and their agent when an agent posted it), the reason in plain words
+with its code, how long it has been held, and whether the app can deliver or
+discard it. It reads the same list the app's Agent messages holds list reads,
+straight from the local bridge store, so it works with the receiver stopped and
+needs no app or daemon. Only the sender (and the excerpt) come from the hub,
+through your signed-in account; if that fails, the rows still print with
+`from: unavailable`.
+
+- `--excerpt` adds at most 160 characters of the message, with
+  credential-shaped text masked before the cut. Without it, no message text is
+  printed.
+- It never delivers or discards a message and writes nothing to the bridge
+  store: do those in the app.
+- **Run by an agent** (from any agent tool), in the app's console pane, or
+  anywhere without a terminal on stdin, it prints `from: withheld` and no
+  excerpt. A held message did not pass
+  screening, so its text and its sender-chosen labels stay out of model context.
+  Ask the user to run it in their own terminal when they want to know who sent
+  what.
+
 ## Long-held messages
 
 When a message has been held (in screening, or admitted and waiting for

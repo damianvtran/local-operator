@@ -54,6 +54,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat as stat_mode
 import sys
 import tempfile
 import textwrap
@@ -613,28 +614,89 @@ def own_launcher_path_injection(
 def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     """``root/bin`` holding only a ``lop`` entry for ``launcher``, or ``None``.
 
-    Idempotent (an existing entry is left alone, so every bash call in a session
-    re-links nothing and the child's PATH text stays stable) and best-effort: a
-    root this session cannot write falls back to the pre-fix behaviour — no
+    Converges rather than creates-once: an entry already naming the desired
+    target is left alone (so every bash call in a session re-links nothing and
+    the child's PATH text stays stable), and an entry naming anything else, or
+    dangling, is replaced atomically (link to a temp name, then ``os.replace``,
+    so a concurrent bash call never sees the name missing). Best-effort: a root
+    this session cannot write falls back to the pre-fix behaviour — no
     injection — rather than failing the tool call. A symlink is preferred so the
     shim tracks the install; where symlinks are unavailable (Windows without the
     privilege) the launcher is copied, which is the same build's binary either
-    way.
+    way, and an existing copy is left alone (there is no generation layout there
+    to drift from).
+
+    NEVER A DIRECTORY: ``root`` is the session's scratchpad, which lives under
+    ``sessions/<id>/`` — the tree the session-deletion guard
+    (``tests/unit/session/test_no_session_deletion.py``) protects. The only
+    entries this function unlinks or replaces are the two fixed names
+    ``bin/<launcher-name>`` and ``bin/.<launcher-name>.<pid>.tmp``, and each is
+    ``lstat``-ed first: anything that is a real directory (not a symlink to one)
+    makes the shim give up, so a user's or another tool's directory at either
+    name is left byte-for-byte alone and the call falls back to no injection.
     """
     bin_dir = root / "bin"
     target = bin_dir / launcher.name
+    staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
+    desired = _stable_launcher(launcher)
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
-        if not target.is_file():
-            try:
-                target.symlink_to(launcher)
-            except OSError:
-                shutil.copyfile(launcher, target)
-                target.chmod(0o755)
+        if _is_real_directory(target) or _is_real_directory(staged):
+            return None
+        if target.is_symlink():
+            # ``exists()`` follows the link: a pruned generation reads as gone.
+            if os.readlink(target) == str(desired) and target.exists():
+                return bin_dir
+        elif target.is_file():
+            return bin_dir
+        with contextlib.suppress(FileNotFoundError):
+            staged.unlink()
+        try:
+            staged.symlink_to(desired)
+        except OSError:
+            shutil.copyfile(launcher, staged)
+            staged.chmod(0o755)
+        os.replace(staged, target)
         return bin_dir
     except OSError:
         logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
         return None
+
+
+def _is_real_directory(path: Path) -> bool:
+    """Whether ``path`` itself (not a symlink's target) is a directory.
+
+    ``lstat`` so a symlink to a directory reads as a link — removing or
+    replacing the link never touches the directory it names.
+    """
+    try:
+        return stat_mode.S_ISDIR(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _stable_launcher(launcher: Path) -> Path:
+    """``launcher`` re-anchored under ``current`` when it lives in a generation tree.
+
+    WHY: in a generation install ``sys.executable`` names THIS process's
+    generation (``~/.local/share/lop/generations/<stamp>/tools/…/bin/lop``), so
+    a shim linked to it kept running the old build after ``lop update`` flipped
+    ``current`` — and once that generation was pruned the link dangled and
+    ``lop`` in a bash child answered ``command not found`` (the node2 finding,
+    architect memo for manager 79bddc262663). The ``current/…`` spelling of the
+    same relative path is what a fresh ``lop`` would run, and it survives every
+    flip and prune. A launcher outside the generation tree (dev venv, pip,
+    desktop venv) is returned unchanged, as is one whose ``current`` twin does
+    not exist (pointer unreadable mid-flip, or a layout without it) — the
+    concrete launcher is still the right build for this session.
+    """
+    from local_operator.update import generation_containing, pointer_path
+
+    generation = generation_containing(launcher)
+    if generation is None:
+        return launcher
+    stable = pointer_path() / launcher.relative_to(generation)
+    return stable if stable.exists() else launcher
 
 
 def may_delegate_env_injection(context: object | None) -> dict[str, str]:

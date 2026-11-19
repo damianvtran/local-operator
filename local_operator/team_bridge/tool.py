@@ -99,8 +99,11 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   (hash-verified, never stored) so a sender can read what it wrote.
 
 - **react** — set an emoji on an admitted conversation message (or remove it
-  with ``remove=true``). This is a screened agent WRITE, never an ack; the hub
-  refuses a message this endpoint has not admitted. Reactions never wake agents.
+  with ``remove=true``). ``emoji`` is a Unicode emoji or a Slack/GitHub
+  shortcode (``white_check_mark``, ``:+1:``), resolved to the one canonical
+  sequence the hub stores (``emoji_names.py``). This is a screened agent
+  WRITE, never an ack; the hub refuses a message this endpoint has not
+  admitted. Reactions never wake agents.
 
 IDENTITY is never a model argument: the actor endpoint and provenance session
 come from ``runtime.owner.endpoint_id`` and ``runtime.session_id``. Every send
@@ -156,7 +159,6 @@ import json
 import logging
 import re
 import time
-import unicodedata
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -181,6 +183,7 @@ from local_operator.harness.types import (
 
 from . import agent_attachments, agent_files, reply_guard, secret_guard
 from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
+from .emoji_names import ACCEPTED_FORMS_HINT, normalize_reaction_emoji
 from .inline_data import bound_inline_data_payload, bound_inline_data_uris
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
@@ -463,8 +466,10 @@ class BridgeToolParams(BaseModel):
     members: list[ChannelMemberParams] = Field(default_factory=list)
     body: str = ""
     # A reaction is a write, not a read or an acknowledgement. The actor is the
-    # enrolled endpoint; the model supplies only the message and emoji.
-    emoji: str = ""
+    # enrolled endpoint; the model supplies only the message and emoji. The
+    # description is the operator-requested schema hint that shortcodes work
+    # (kept to a few wire tokens: the tool-surface footprint is capped).
+    emoji: str = Field(default="", description="Emoji or :shortcode:")
     remove: bool = False
     limit: int = 50
     cursor: str | None = None
@@ -3020,9 +3025,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error("react needs a conversation id (bcv_…)")
         if _CONVERSATION_MESSAGE_ID.fullmatch(params.message_id) is None:
             return _error("react needs a conversation message id (bcmsg_…)")
-        emoji = unicodedata.normalize("NFC", params.emoji)
-        if not emoji or len(emoji.encode("utf-8")) > 128:
-            return _error("react needs one emoji, at most 128 UTF-8 bytes")
+        # Shortcodes ("white_check_mark", ":+1:") resolve to the one
+        # fully-qualified sequence the hub stores, so an agent's reaction
+        # stacks with a human's; an unknown one never reaches the hub.
+        emoji = normalize_reaction_emoji(params.emoji)
+        if emoji is None:
+            return _error(f"react needs one emoji: {ACCEPTED_FORMS_HINT}", code="invalid_emoji")
         # No body fetch, local cache, or implicit admission here: the server
         # requires this exact endpoint's prior allow verdict before a reaction
         # can act on a message. It is a normal write at both admission and tool
@@ -4024,7 +4032,11 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             "Agent bridge: directory teammates/chiefs; dm person/agent direct/relay, "
             "not 'forward this'; channel_post rooms; send/reply bmsg_ answers only; "
             "shared_* owner-shared conversations. No approve/deny. "
-            "Reply where received; teammates use bridge. "
+            "Reply where received. "
+            # "teammates use bridge" was dropped (PR #4239, to pay for the
+            # emoji field's shortcode hint under the context budget): the next
+            # sentence already makes this the ONE teammate channel.
+            #
             # The operator's discoverability fix (one-channel rule): a session
             # holding THIS tool is the one place the rule is guaranteed to be
             # read, so the prohibition lives on the wire rather than only in the

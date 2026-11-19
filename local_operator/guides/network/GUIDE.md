@@ -83,11 +83,25 @@ and `lop tunnel setup --json`, not mesh admission.
    `--device <device id>` with the id the joining device reports in
    `lop network identity show --json`; any other device redeeming it is refused
    and the invite is burned. That is the form to use after a compromise.
+   To pair **without any credential sharing**, pass `--no-credential-offers`:
+   the owner never enumerates its logins for that ceremony (not even literal-MCP
+   adoption runs at mint), the joining device is sent an explicitly EMPTY share
+   list (`No credentials were offered.`), and during this pairing no credential
+   is granted and no `broker_credential` capability is admitted (not even the
+   one the `admin` role normally carries). It governs this pairing only: a
+   later, explicit signed remote onboarding or credential grant to that
+   member is a separate operator act outside the policy. The policy is saved with the invite
+   on the owner and enforced from there; a token whose copy of the policy was
+   edited (added, dropped or changed) is refused and burned, and so is a joining
+   device whose lop predates the flag — update it and mint a fresh invite. It is
+   independent of `--role`: a `read` invite still offers by default, so **use
+   `--role read --no-credential-offers` for read-only rigs** (QA, demos, test
+   devices) that must never receive a login.
 4. On the other device, **the human** runs it in a terminal:
    `lop network join @<token-file>` (or with the token itself).
    The joining device prints the inviter, the network, the offered role, its
    derived `code` (`481 926`) and a `fingerprint`, then asks for the code, and
-   says how long the person has (up to 180 s, and it reports the time **left** on
+   says how long the person has (up to 600 s — the whole default invite life — and it reports the time **left** on
    the invite rather than the duration it was minted with, so a token that has
    been carried around for a while shows a smaller window). The inviter admits the device
    only if the typed value matches its **own** derivation. A mismatch refuses the
@@ -114,11 +128,32 @@ and `lop tunnel setup --json`, not mesh admission.
    it was before — the joiner's screen says the same, so an absence is never
    read as "nothing to share".
 
-   THE INVITER'S HALF, when its relay runs under a daemon and has no terminal to
-   ask at, is `lop network confirm`: `--list` shows the parked pairing with both
-   codes, and answering it records the person's decision for the waiting pairing
-   loop. It refuses without a TTY — a foreground `lop network serve` is the
-   alternative on that side.
+   **THE USER'S STEP IS THE APP: Mesh approvals.** When the desktop app is running,
+   each device in a pairing shows a card in its Mesh approvals: the card shows THIS
+   device's code (for the person to type on the other device) and a box for the code
+   the OTHER device shows. On the joining device the person types the inviter's code;
+   once the inviter's card has the joiner's transcription, the person there types the
+   joiner's code and approves (the share list can only be reduced). Nothing needs a
+   terminal. A wrong code keeps the card open and says how many attempts are left.
+   On the inviting device that is the invite's own budget of three, which wrong
+   transcriptions on the wire spend too; on the joining device it is the card's own
+   three strikes, which `lop network join --confirm` does not share and a restart of
+   `lop serve` resets. Once an answer has decided the pairing, or the attempts are
+   spent, every later answer is refused. The window is what is left of the invite, at
+   most ten minutes, counted once from when the pairing started: both stages of the
+   inviting card share that one deadline. Answering a card needs the signed app on
+   a Mac; on another host the card shows the code but cannot be answered there
+   (`answer_unavailable: "unsupported_host"`), and the terminal fallback below applies.
+   Signed onboarding (`lop network approvals run`) pre-approves its own pairing only
+   for a node whose mesh id it knows (from the card, or the node's identity before
+   the join). A brand-new host has none until its join mints one, so its pairing
+   parks a normal card here and the run says it is waiting in Mesh approvals.
+
+   WITHOUT THE APP (same-user terminal fallback), the inviter's half, when its relay
+   runs under a daemon and has no terminal to ask at, is `lop network confirm`:
+   `--list` shows the parked pairing with both codes, and answering it records the
+   person's decision for the waiting pairing loop. It refuses without a TTY — a
+   foreground `lop network serve` is the alternative on that side.
 
    THE TWO-PHASE PAIR, which is how you do this step WITHOUT a terminal. When the
    person is not sitting at the joining device's keyboard, start the ceremony and
@@ -149,8 +184,9 @@ and `lop tunnel setup --json`, not mesh admission.
    parked process, so leave it running: do not kill it, and do not start a second park
    for the same invite.
 
-   **You cannot do this step.** The second phase is the user's, run at their own
-   terminal:
+   **You cannot do this step.** The second phase is the user's: ask them to approve it
+   in the app's Mesh approvals by typing the code the other device shows. Without the
+   app, the person can answer it at their own terminal:
 
    ```bash
    lop network join --confirm <code> --json      # the code THEY read, never one you chose
@@ -162,11 +198,16 @@ and `lop tunnel setup --json`, not mesh admission.
    ("the other device chose not to share it"), while a grant that failed names
    the remedy.
 
-   Hand them that command and the code, and let them run it. There is deliberately no
-   flag on the `network` tool that completes a pairing: the digits both devices derive
-   are the SAME ones, so an agent able to answer with the code it just printed would
-   satisfy the very comparison that exists to catch a substitution — the interlock is
-   real only because the second phase is not the agent's to run. If the user cannot
+   Point them at the Mesh approvals card (or, without the app, hand them that command)
+   and let them answer it. There is deliberately no flag on the `network` tool that
+   completes a pairing: the digits both devices derive are the SAME ones, so an agent
+   able to answer with the code it just printed would satisfy the very comparison that
+   exists to catch a substitution. HOW STRONG THAT IS, honestly: an agent holding only
+   the desktop bearer cannot answer a pairing through the app — the desktop route
+   refuses any answer the signed app did not attest (403 `pairing_needs_app`, nothing
+   spent). The terminal fallback is a same-user path and stays available; the approval
+   is the person's, in the app, and there is no tool flag for it — never run the
+   fallback yourself. If the user cannot
    read the code, that is the interlock working, not a problem to route around. A wrong
    code is refused with `sas_mismatch` and leaves the ceremony open (the invite is not
    spent).
@@ -258,14 +299,13 @@ where the ordering matters:
    the user's own terminal. Never into a transcript and never printed here.
    `drive` is right for a device you will only drive; a device you will offload
    WORK to wants `--role admin`, or a narrower grant below.
-4. The human runs `lop network join @<token-file>` at the other device's own
-   terminal. When you park the ceremony instead
-   (`lop network join @<token-file> --park --json`), print the code YOU derive
-   and the `sentence` and hand the second command over.
-5. The human runs `lop network join --confirm <code> --json` with the code they
-   read off the OTHER screen. You cannot do this step, there is no flag that
-   does it for them, and a code you did not see on the other device is never
-   the one to pass.
+4. Park the ceremony (`lop network join @<token-file> --park --json`, or the
+   `network` tool's `join`), print the code YOU derive and the `sentence`.
+5. The human approves it in the app's Mesh approvals on both devices, typing the
+   code each OTHER screen shows. You cannot do this step and there is no flag that
+   does it for them. Without the app, the person's own terminal fallback is
+   `lop network join --confirm <code> --json` (joiner) and `lop network confirm`
+   (inviter) — theirs to run, never yours.
 6. Verify from both sides: `lop network peers --json` must show the new member
    with `reachable: true`, and `lop network ls --json` must agree on the epoch
    and the member count.
@@ -1574,6 +1614,8 @@ lop network rm <network> --json
 lop network invite --role drive --json
 lop network join @<token-file>      # a terminal: prompts for the code, then joins
 lop network join @<token-file> --park --json   # no terminal: park and print the code
+# answering a pairing: the person, in the app's Mesh approvals. Without the app
+# (same-user terminal fallback, the person's to run):
 lop network join --confirm <code> --json       # answer the parked ceremony
 lop network confirm --list          # a pairing parked on THIS device, with both codes
 lop network confirm <invite-id>     # answer it (--decline refuses; needs a TTY)

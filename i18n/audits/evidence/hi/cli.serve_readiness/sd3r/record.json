@@ -1,0 +1,184 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "audit_id": "sd3r",
+  "audit_date": "2026-11-16",
+  "key_count": 15,
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7f2b030d2636",
+    "also_independent_from_prior_translator_sessions": [
+      "170903662c6e",
+      "acf0a84cd992"
+    ],
+    "actual_model_source": "Current host session-state explicitly names openai/gpt-6.1-sol. Resumed original auditor, not translator.",
+    "fallback": {
+      "observed_in_current_session": false,
+      "actual_model": "openai/gpt-6.1-sol",
+      "note": "No fallback indicated; not an assertion about undisclosed provider behavior."
+    }
+  },
+  "translator": {
+    "agent": "task 7f2b030d2636",
+    "session": "7f2b030d2636",
+    "model": null,
+    "actual_model_source": "Latest manager task identifies translator job ID only; actual remediation model/fallback not explicitly disclosed. Unknown rather than assumed from previous jobs.",
+    "fallback": null
+  },
+  "source_audit_revision": "1fc11dab96954dcc4c31abcc695c696baf2ead8c plus uncommitted final copy remediation; input hashes bind reviewed bytes",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+      "sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+      "sha256": "e4e9031bf84e0d6e9edea53f41d54ad03adb96b53d9f0c87872971d2c1aee629"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/cli.serve_readiness.json",
+      "sha256": "d3c438265c79bf2eca6e6f0c1c2f433bd10748bbbe4dc7ff5819a14887394e21"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/report.md",
+      "sha256": "503be8f238685c173b669aaff6b0136b1b38cdd8fa6e33392c8e40abce02a6cf"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/audit.log",
+      "sha256": "dc4e1136b6273b751ccce7bcfbbef91a90bd5b8c1173d829dd4819ff8ddc536a"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/receipt.json",
+      "sha256": "418bdb760f303bd00d7dc1278a9bb291115772c2f339d0912bdf67893e216745"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/ledger-receipt.json",
+      "sha256": "055fdd36491ca56b54de5bb3480d3a91a81ac2e7991b02ca2e1fad51fd6d981b"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "report_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/report.md",
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "related_finding_resolutions": [
+    {
+      "finding_id": "RU-SD3-01",
+      "status": "fixed",
+      "scope": "Shared source number-neutrality remediation verified for Hindi only; Russian not audited."
+    }
+  ],
+  "retained_coverage": {
+    "record": {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/record.json",
+      "sha256": "01893c9e4b1f0ecab192c9bf325449de4efff4396d99fc7ff90aca8b95a17da6"
+    },
+    "report": {
+      "path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3/report.md",
+      "sha256": "f15cb8e3fb14cef376e7d4b90cd0c1714c11bd46b378fb846aedbc92eca734e1"
+    },
+    "key_count": 15,
+    "unchanged_target_key_count": 14,
+    "proof": "Replacing only not_this_daemon new text with sd3 text in memory restores full sd3 target byte SHA-256; equivalent checks prove one-value source and one-note context deltas only.",
+    "previous_input_hashes": {
+      "en": {
+        "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.json",
+        "sha256": "c94e77cdf5d2ce8c0d92e333e9802a885675b074d1d5dc6710281dc3a5306b10"
+      },
+      "context": {
+        "path": "local_operator/i18n/catalogues/en/cli.serve_readiness.context.json",
+        "sha256": "40d35aa2e026aa02a96376d4c550023446af21b89456ad0c80cd9540e8a63428"
+      },
+      "hi": {
+        "path": "local_operator/i18n/catalogues/hi/cli.serve_readiness.json",
+        "sha256": "40a11e844ff0eb3761b4bcfb50842970cc9469fef38b0f18cc23fec493405f47"
+      }
+    },
+    "fresh_semantic_keys": [
+      "cli.serve_readiness.not_this_daemon",
+      "cli.serve_readiness.pid_reason",
+      "cli.serve_readiness.unknown"
+    ],
+    "glossary_and_style_hashes_unchanged": true,
+    "cgroup_deferred_scope_preserved": true
+  },
+  "reference_hashes": [
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+    },
+    {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    }
+  ],
+  "validation": {
+    "catalogue_validator_exit_code": 0,
+    "catalogue_problem_count": 0,
+    "independent_verification_exit_code": 0,
+    "duplicate_rejecting_json": true,
+    "all_15_keys_structurally_compared": true,
+    "all_15_keys_rendered": true,
+    "opaque_parameters_checked": true,
+    "hi_cldr_categories": [
+      "one",
+      "other"
+    ],
+    "plural_counts_rendered": [
+      0,
+      1,
+      2,
+      5,
+      21
+    ],
+    "singular_plural_grouped_diagnoses_checked": true,
+    "changed_text_chars": 52,
+    "changed_text_rich_cells": 36,
+    "maxCells_or_maxChars_hints_present": false,
+    "rtl": "Hindi LTR; Urdu checks not applicable",
+    "rendered_frame_evidence": false,
+    "translation_mt_services_used": false,
+    "second_independently_staffed_audit_claimed": false
+  },
+  "evidence_classification": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "receipt.json": "hash companion receipt with record reference",
+    "ledger-receipt.json": "append-ready receipt validated by dry-run only"
+  },
+  "ledger": {
+    "receipt_path": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/ledger-receipt.json",
+    "note": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/record.json; number-neutral PID reuse wording passes; other 14 entries byte-proved unchanged; 15-key checks pass; 0 open blocker/major.",
+    "note_characters": 184,
+    "expected_history_sha256": "7cc26e916691cc8087a01175e0b12c9ba27e16e9195b6150bb853b7a8690851c",
+    "append_dry_run_exit_code": 0,
+    "applied": false,
+    "parent_appends_history": true
+  },
+  "current_bytes_match_audited_hashes": true,
+  "retention": {
+    "canonical_root": "i18n/audits/evidence",
+    "repo_only_not_shipped": true,
+    "old_bundles_preserved": true,
+    "no_commit_by_auditor": true,
+    "parent_must_add_commit_new_evidence": true,
+    "main_inclusion_claimed": false
+  },
+  "limitations": [
+    "Translator current actual model/fallback not disclosed in latest task; recorded unknown.",
+    "No readiness/service selection execution, pytest, installation, full tests, live providers or physical rendered frame.",
+    "One resumed auditor delta review with retained original full coverage; not second independent staffing."
+  ]
+}

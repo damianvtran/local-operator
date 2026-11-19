@@ -763,6 +763,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # children of the same quarantine directory. Neither can name a session
     # directory, and no path here is derived from a session id beyond the eight
     # characters sanitised into the directory's own label.
+    # The bash tool's `lop` shim (own_launcher_path_injection) lives in the
+    # session scratchpad, i.e. under sessions/<id>/, so these two calls DO sit in
+    # the protected tree. They are safe because both operate only on the two fixed
+    # entry names inside <scratchpad>/bin, and _launcher_shim_dir lstat-checks
+    # each and returns before either call when one is a real directory
+    # (test_shell_env.py::test_a_directory_at_the_shim_names_is_never_touched).
+    (
+        "local_operator/tools/builtin.py::_launcher_shim_dir",
+        "<path>.unlink",
+        "Removes only <scratchpad>/bin/.<launcher>.<pid>.tmp, this process's staged shim "
+        "entry, after an lstat check proved it is not a directory; unlink rejects directories.",
+    ),
+    (
+        "local_operator/tools/builtin.py::_launcher_shim_dir",
+        "os.replace",
+        "Renames the staged shim symlink/copy over <scratchpad>/bin/<launcher>, only after "
+        "an lstat check proved that target is not a directory; never a session directory.",
+    ),
     (
         "local_operator/tools/builtin.py::_unlink_quietly",
         "<path>.unlink",
@@ -1296,6 +1314,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/store.py::clear_pair_decision",
         "<path>.unlink",
         "The human's recorded answer FILE <config>/network/pending/<invite>.decision.json",
+    ),
+    (
+        "local_operator/network/store.py::clear_pre_approval",
+        "<path>.unlink",
+        "Onboarding's one-shot pairing pre-approval FILE "
+        "<config>/network/pending/<invite>.preapproval.json, once consumed, expired, "
+        "released by its run, or purged with its network",
     ),
     (
         "local_operator/network/store.py::clear_pending_join",
@@ -2285,6 +2310,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/asks/store.py::read_index",
         "<path>.unlink",
         "stale asks/<session_id>.json FILE, swept from the same directory scan",
+    ),
+    # -- the app-signature attest listener (asks/app_attest.py) ---------------
+    # Both unlinks target ``socket_path(attest_dir, session_id)``, i.e.
+    # ``<config>/run/attest/<sid>.sock`` — a unix SOCKET file in a 0700 leaf
+    # outside ``sessions/``; unlink refuses directories. ``consume``'s
+    # ``.remove`` is ``deque.remove`` on in-memory pending rows, no filesystem.
+    (
+        "local_operator/asks/app_attest.py::AttestService.start",
+        "<path>.unlink",
+        "stale run/attest/<sid>.sock SOCKET removed before bind; never under sessions/",
+    ),
+    (
+        "local_operator/asks/app_attest.py::AttestService.close",
+        "<path>.unlink",
+        "own run/attest/<sid>.sock SOCKET, only when (st_dev, st_ino) still match our bind",
+    ),
+    (
+        "local_operator/asks/app_attest.py::AttestationTable.consume",
+        "<path>.remove",
+        "deque.remove of an in-memory pending attestation row; touches no filesystem path",
     ),
     (
         "local_operator/skills/index.py::SkillIndex._persist_cache",

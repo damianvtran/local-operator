@@ -39,6 +39,7 @@ from pydantic import (
 from starlette.background import BackgroundTask
 from starlette.types import Receive, Scope, Send
 
+from local_operator.asks import surfaces
 from local_operator.harness.types import ModelSpec
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -4327,6 +4328,43 @@ async def child_attachment_waveform(
 
 
 @router.get(
+    "/v1/desktop/sessions/{session_id}/bridge-cards/{entry_id}/body",
+    response_model=CRUDResponse[Any],
+)
+async def bridge_card_body(
+    session_id: str,
+    request: Request,
+    response: Response,
+    entry_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")],
+):
+    """What one inbound Team Bridge card's messages are to THIS viewer.
+
+    ``{v:1, items:[{message_id, conversation_id, state, body?, source?, hold?,
+    reason?}], more}`` (bridge-body design §4; feature key
+    ``team_bridge_card_body``). ``state`` is one of admitted, pending, held,
+    refused, not_admitted, unavailable; ``body`` is UNTRUSTED third-party
+    markdown, present only when admitted. A READ: keyed by the transcript row
+    the caller can already page, so it cannot be used to probe message ids.
+    The display store and the hub's admitted-only history read are the only
+    sources; the screener's classification fetch (``/messages/{id}/body``) is
+    never used. Caching, SET vs SERVED (the same split as the owner-audit and
+    owner-invitation routes in ``desktop_team_bridge.py``): the route SETS
+    ``private, no-store`` (design §4) so it carries the body's contract
+    wherever the router is mounted, but the running core's app-wide
+    ``managed_desktop_boundary`` (server/app.py) rewrites every
+    ``/v1/desktop/`` answer to plain ``no-store``, which is what is SERVED.
+    That is no weaker -- ``no-store`` keeps third-party text out of every
+    cache, shared or private. The boundary is deliberately not taught to keep
+    a route's own value: that would change the served header of every
+    existing route that sets ``private, no-store``.
+    """
+    async with errors(request):
+        answer = reply(await host(request).bridge_card_body(session_id, entry_id))
+    response.headers["Cache-Control"] = "private, no-store"
+    return answer
+
+
+@router.get(
     "/v1/desktop/sessions/{session_id}/attachments/{digest}",
     # The image's own mime type is the response type, so the published contract
     # must not claim the CRUD JSON envelope its neighbours return. Declaring the
@@ -5250,28 +5288,40 @@ async def answer(session_id: str, body: Answer, request: Request):
                 message = str(error) or "the answer was refused"
                 raise HTTPException(409, message) from None
             # ``consent_bearing`` (feature ``ask_consent_bearing``): whether
-            # THIS backend presented operator proof with the answer, i.e. holds
-            # the capability of the runtime it answered (it started that
-            # runtime). False means the runtime stamped the answer
-            # ``unverified``: recorded, but never delete/move consent (incident
-            # a-48e3, 2026-11-16). Computed from the facade's handshake state,
-            # never from the body (``Answer`` is ``extra="forbid"``, so a body
-            # field of that name is a 422). A peer's conversation is always
+            # the runtime stamped this answer with a guard-trusted surface.
+            # False means it stamped ``unverified`` (or ``remote``): recorded,
+            # but never delete/move consent (incident a-48e3, 2026-11-16).
+            # Computed from the runtime's reply, never from the body
+            # (``Answer`` is ``extra="forbid"``, so a body field of that name is
+            # a 422). A peer's conversation is always
             # False: its answer is relayed and stamped ``remote`` whatever this
             # process holds for a same-numbered local pid. Absent probe (an
             # older facade or a test double) reads False: fail closed. A
             # DECLINE reads null: a decline is never consent, so "this answer
             # can authorise" must not be claimable for one, whatever proof the
             # connection held (PR #4127 QA Q2).
-            probe = getattr(bridge.remote, "ask_consent_bearing", None)
-            consent_bearing: bool | None = (
-                None
-                if body.decline
-                else bool(
-                    getattr(bridge, "remote_row", None) is None and callable(probe) and probe()
-                )
-            )
-            return reply({"detail": detail, "consent_bearing": consent_bearing})
+            #
+            # PR #4132 convergence: the flag is the runtime's STAMP, read off the
+            # ``StampedReceipt`` the client returns (``asks.surfaces``). After F2
+            # the cap probe disagrees with the stamp both ways: an app-signature
+            # attested answer is consent with no cap, and a cap answer to an ask
+            # this runtime did not mint (Part C) is stamped ``unverified``. The
+            # guard reads only the stamp, so the receipt must too. The cap probe
+            # survives ONLY as the fallback for a runtime that predates the ack's
+            # ``surface`` field (``surface is None``): such a runtime has neither
+            # attestation nor Part C, so its stamp is exactly the cap decision.
+            consent_bearing: bool | None
+            if body.decline:
+                consent_bearing = None
+            elif getattr(bridge, "remote_row", None) is not None:
+                consent_bearing = False
+            else:
+                stamped = surfaces.consent_bearing(getattr(detail, "surface", None))
+                if stamped is None:
+                    probe = getattr(bridge.remote, "ask_consent_bearing", None)
+                    stamped = bool(callable(probe) and probe())
+                consent_bearing = stamped
+            return reply({"detail": str(detail), "consent_bearing": consent_bearing})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         if body.request_id.startswith("prv_"):

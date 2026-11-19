@@ -1,0 +1,11 @@
+{
+  "cli.services_heavy.heavy": "Attendre l’emplacement de tâche lourde de la machine, ou exécuter une commande qui le détient",
+  "cli.services_heavy.heavy_description": "Les builds et les suites de tests lourds se partagent quelques emplacements par machine, afin que des builds parallèles ne puissent pas épuiser sa mémoire. « wait » attend qu’un emplacement se libère sans le prendre ; « run » prend un emplacement, exécute une commande en le détenant et le libère quand la commande se termine ; « status » indique qui détient chaque emplacement. Utilisez-les plutôt que de surveiller un autre processus par son nom.",
+  "cli.services_heavy.wait": "Attendre qu’un emplacement de tâche lourde se libère, sans le prendre",
+  "cli.services_heavy.run": "Exécuter une commande en détenant un emplacement de tâche lourde, puis le libérer à sa sortie",
+  "cli.services_heavy.status": "Afficher les emplacements de tâche lourde avec le pid, la durée de détention et la commande de chaque détenteur",
+  "cli.services_heavy.timeout": "Durée maximale d’attente d’un emplacement, en secondes (par défaut : la limite de file de la machine, {wait_seconds}s sauf si {env_name} en fixe une autre)",
+  "cli.services_heavy.command": "La commande à exécuter, après `--`",
+  "cli.services_heavy.holder": "  emplacement {slot} : {holder}, depuis {age} : {command}",
+  "cli.services_heavy.no_command": "Rien à exécuter : placez la commande après `--`, par exemple `lop services heavy run -- make test`"
+}

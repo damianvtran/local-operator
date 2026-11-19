@@ -103,6 +103,7 @@ from local_operator.mobile.auth import (
     sign_cookie,
     verify_cookie,
 )
+from local_operator.mobile.community import community_routes
 from local_operator.mobile.start_receipts import CAPABILITY as START_CAPABILITY
 from local_operator.mobile.start_receipts import (
     START_BODY_MAX_BYTES,
@@ -9100,6 +9101,37 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
+    async def api_session_bridge_card_body(request: Request) -> Response:
+        """The admitted body behind one inbound Team Bridge card (design §4).
+
+        The relay twin of ``GET /v1/desktop/sessions/{id}/bridge-cards/{entry}/body``:
+        both call ``team_bridge.card_body.resolve_card_body`` so a phone and a
+        desktop can never disagree about what a card may show. Keyed by the
+        transcript row the phone can already read, never by a message id, and
+        only for a durable user conversation on THIS machine. Bodies are
+        untrusted third-party text: private, never cached.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry_id = str(request.path_params["entry_id"])
+        directory = await asyncio.to_thread(_durable_user_session_dir, session_id, root=relay_root)
+        if directory is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        from local_operator.team_bridge.card_body import (
+            CardBodyNotFound,
+            resolve_card_body,
+        )
+
+        try:
+            answer = await resolve_card_body(
+                relay_root, session_id, entry_id, sessions_root=directory.parent
+            )
+        except CardBodyNotFound:
+            return JSONResponse({"error": "no such bridge card"}, status_code=404)
+        return JSONResponse(answer, headers={"Cache-Control": "private, no-store"})
+
     async def api_session_attachment(request: Request) -> Response:
         """One attachment's bytes, with byte-Range (206) support.
 
@@ -12600,6 +12632,10 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
+        Route(
+            "/api/sessions/{session_id:str}/bridge-cards/{entry_id:str}/body",
+            api_session_bridge_card_body,
+        ),
         # The supplement sound family (sound parity, lane C): digest-addressed audio
         # bytes with Range support, and the peaks sidecar beside them. Both are
         # keyed by the beat's own ``sounds[].attachment`` rather than a message
@@ -12733,6 +12769,12 @@ def build_app(daemon: MobileDaemon):
             api_push_device_unrevoke,
             methods=["POST"],
         ),
+        # Relay web's community door (RFC v2.4 §7.2): exactly the member
+        # operations of `community.member_ops.MEMBER_OPERATIONS`, behind this
+        # daemon's own `gate`; no staff operation is reachable over relay.
+        # Every template starts with the literal `/api/community/communities`,
+        # which nothing above declares. See `mobile/community.py`.
+        *community_routes(gate),
         Route("/mark.png", mark_png),
         Route("/manifest.webmanifest", manifest),
         Route("/", index),

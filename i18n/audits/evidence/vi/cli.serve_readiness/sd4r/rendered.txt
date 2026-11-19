@@ -1,0 +1,372 @@
+# Current sd4r catalogue renders — vi
+
+Offline production ICU rendering only, not terminal shaping/service execution.
+
+## cli.serve_readiness.unproven count=1
+
+đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu)
+
+## cli.serve_readiness.not_reporting count=1
+
+đã ghi nhận nhưng không phản hồi (heartbeat đã ngừng)
+
+## cli.serve_readiness.not_this_daemon count=1
+
+đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.unknown_state count=1
+
+bản ghi có trạng thái không xác định
+
+## cli.serve_readiness.install_unknown count=1
+
+chạy bản dựng không thể đối chiếu với bản cài đặt
+
+## cli.serve_readiness.cgroup_unknown count=1
+
+chạy trong cgroup mà lần kiểm tra này chưa phân loại được
+
+## cli.serve_readiness.recorded_gap count=1
+
+bản ghi cho biết bản dựng v0.99.0+recorded; bản dựng đã cài đặt là v0.99.2+installed
+
+## cli.serve_readiness.unknown count=0
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=1
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=2
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=3
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=4
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=5
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=11
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=21
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=22
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=25
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=1.5
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=1000000
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.unknown count=1500000
+
+daemon `lop serve` trên host-sd4r — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## cli.serve_readiness.stale count=0
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=1
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=2
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=3
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=4
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=5
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=11
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=21
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=22
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=25
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=1.5
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=1000000
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.stale count=1500000
+
+daemon `lop serve` trên host-sd4r (4102, 4103) chạy v0.99.1+running, nhưng bản cài đặt là v0.99.2+installed: các phiên từ xa do daemon phục vụ cũng chạy bản dựng khác đó
+
+## cli.serve_readiness.other_unit count=0
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=1
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=2
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=3
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=4
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=5
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=11
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=21
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=22
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=25
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=1.5
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=1000000
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.other_unit count=1500000
+
+daemon `lop serve` trên host-sd4r thuộc dịch vụ khác (worker.service), không thuộc unit lop serve
+
+## cli.serve_readiness.identity_restart count=1
+
+trên host-sd4r, chạy `lop services restart` để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; thao tác khởi động lại kiểm tra từng daemon trước khi thực hiện
+
+## cli.serve_readiness.pid_reason count=0
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=1
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=2
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=3
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=4
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=5
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=11
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=21
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=22
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=25
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=1.5
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=1000000
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.pid_reason count=1500000
+
+mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID
+
+## cli.serve_readiness.and_more count=0
+
+và 0 nữa
+
+## cli.serve_readiness.and_more count=1
+
+và 1 nữa
+
+## cli.serve_readiness.and_more count=2
+
+và 2 nữa
+
+## cli.serve_readiness.and_more count=3
+
+và 3 nữa
+
+## cli.serve_readiness.and_more count=4
+
+và 4 nữa
+
+## cli.serve_readiness.and_more count=5
+
+và 5 nữa
+
+## cli.serve_readiness.and_more count=11
+
+và 11 nữa
+
+## cli.serve_readiness.and_more count=21
+
+và 21 nữa
+
+## cli.serve_readiness.and_more count=22
+
+và 22 nữa
+
+## cli.serve_readiness.and_more count=25
+
+và 25 nữa
+
+## cli.serve_readiness.and_more count=1.5
+
+và 1,5 nữa
+
+## cli.serve_readiness.and_more count=1000000
+
+và 1.000.000 nữa
+
+## cli.serve_readiness.and_more count=1500000
+
+và 1.500.000 nữa
+
+## cli.serve_readiness.identity_no_action count=0
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=1
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=2
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=3
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=4
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=5
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=11
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=21
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=22
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=25
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=1.5
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=1000000
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_no_action count=1500000
+
+bản ghi có danh tính tiến trình chưa được xác minh khớp với bản dựng đã cài đặt; không cần thao tác gì cho lần kiểm tra không bắt buộc này
+
+## cli.serve_readiness.identity_restart_manual count=1
+
+trên host-sd4r, khởi động lại `lop serve` thủ công để chuyển daemon trong bản ghi sang bản dựng đã cài đặt; daemon không thể tự nạp lại trong tiến trình hiện tại
+
+## COMPOSED PID reuse count=1
+
+daemon `lop serve` trên host-sd4r — mã định danh tiến trình 4101 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## COMPOSED PID reuse count=2
+
+daemon `lop serve` trên host-sd4r — mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## COMPOSED PID reuse count=3
+
+daemon `lop serve` trên host-sd4r — mã định danh tiến trình 4104, 4105, 4106 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## COMPOSED PID reuse count=21
+
+daemon `lop serve` trên host-sd4r — mã định danh tiến trình 4110, 4111 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+
+## COMPOSED disjoint diagnoses plus overflow
+
+daemon `lop serve` trên host-sd4r — mã định danh tiến trình 4101 — đã ghi nhận, nhưng không thể xác minh danh tính tiến trình (không có dấu thời gian khởi động nào có thể đối chiếu); mã định danh tiến trình 4102, 4103 — đã ghi nhận, nhưng đã phát hiện việc tái sử dụng PID và 22 nữa, nên chưa biết có khớp với bản cài đặt và được giám sát hay không
+

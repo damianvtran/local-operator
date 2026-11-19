@@ -1,0 +1,20 @@
+{
+  "tui.bridge_card.frame.untrusted": "Tin nhắn bên ngoài · nội dung không đáng tin",
+  "tui.bridge_card.body.loading": "Đang tải tin nhắn…",
+  "tui.bridge_card.body.pending": "Đang chờ chuyển đến tác nhân của bạn",
+  "tui.bridge_card.body.held": "Bị kiểm duyệt giữ lại",
+  "tui.bridge_card.body.held_transient": "Đang chờ sàng lọc — chưa hiển thị cho tác nhân của bạn",
+  "tui.bridge_card.body.refused": "Bị kiểm duyệt từ chối",
+  "tui.bridge_card.body.not_admitted": "Không được chuyển đến tác nhân của bạn",
+  "tui.bridge_card.body.unavailable": "Nội dung tin nhắn không khả dụng",
+  "tui.bridge_card.body.signed_out": "Hãy đăng nhập Radient để xem tin nhắn này",
+  "tui.bridge_card.body.other_account": "Đã nhận bằng một tài khoản Radient khác",
+  "tui.bridge_card.body.not_member": "Bạn không còn tham gia cuộc trò chuyện này",
+  "tui.bridge_card.body.offline": "Không thể kết nối Radient — đóng rồi mở lại để thử lại",
+  "tui.bridge_card.body.deleted": "Tin nhắn này đã bị xóa",
+  "tui.bridge_card.body.show_more": "Xem toàn bộ tin nhắn · {total, plural, other {# dòng}}",
+  "tui.bridge_card.body.show_less": "Thu gọn",
+  "tui.bridge_card.body.more_messages": "{count, plural, other {Còn # tin nhắn khác trong thẻ này}}",
+  "tui.bridge_card.header.held_transient": "Đang chờ sàng lọc",
+  "tui.bridge_card.header.open_to_load": "Mở để tải tin nhắn"
+}

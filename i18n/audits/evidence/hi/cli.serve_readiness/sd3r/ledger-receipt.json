@@ -1,0 +1,40 @@
+{
+  "locale": "hi",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "cfda1fc2aa8a4b280ba4f6f7b24881fb59ff8c68276be430436597300ce7662a",
+  "status": "passed",
+  "translator": {
+    "agent": "task 7f2b030d2636",
+    "session": "7f2b030d2636",
+    "model": null,
+    "actual_model_source": "Latest manager task identifies translator job ID only; actual remediation model/fallback not explicitly disclosed. Unknown rather than assumed from previous jobs.",
+    "fallback": null
+  },
+  "auditor": {
+    "agent": "Audit daemon Hindi",
+    "session": "1ee2c984b1e5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7f2b030d2636",
+    "also_independent_from_prior_translator_sessions": [
+      "170903662c6e",
+      "acf0a84cd992"
+    ],
+    "actual_model_source": "Current host session-state explicitly names openai/gpt-6.1-sol. Resumed original auditor, not translator.",
+    "fallback": {
+      "observed_in_current_session": false,
+      "actual_model": "openai/gpt-6.1-sol",
+      "note": "No fallback indicated; not an assertion about undisclosed provider behavior."
+    }
+  },
+  "audit_date": "2026-11-16",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "related_finding_resolutions": [
+    {
+      "finding_id": "RU-SD3-01",
+      "status": "fixed",
+      "scope": "Shared source number-neutrality remediation verified for Hindi only; Russian not audited."
+    }
+  ],
+  "note": "i18n/audits/evidence/hi/cli.serve_readiness/sd3r/record.json; number-neutral PID reuse wording passes; other 14 entries byte-proved unchanged; 15-key checks pass; 0 open blocker/major."
+}

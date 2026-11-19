@@ -1,0 +1,58 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.serve_readiness",
+  "source_sha256": "6c6de62a68a037ac88ba7a63f75f8335845acc61549f78ca98599ac25d29821e",
+  "status": "passed",
+  "date": "2026-11-16",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "acf0a84cd992",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Requesting task identifies translator task and actual model; not independently queried"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9d590e061719",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-16",
+    "independent_from_translator_session": "acf0a84cd992",
+    "actual_model_source": "Host session metadata: Model openai/gpt-6.1-sol; no provider fallback observed",
+    "fallback": null
+  },
+  "note": "Record i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/record.json; 11 keys; 0 blocker/major; minor ZH-SD1-01; independent pass, no fallback.",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+    "ZH-SD1-01"
+  ],
+  "audit_record": {
+    "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/record.json",
+    "sha256": "2cddd151d6420e8162f8ed68235a956bb9688533de2b707b532a2446a4708cd1"
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/report.md",
+      "sha256": "322ef7f004c91fa611758451b4734d746a77f2aa1ab39dc9e6ceef6048314003"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/audit.log",
+      "sha256": "5a393a83af973f85a454ca368fcbdbbfa2022b3316fbc7e9aa9e57290acaddcb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/cli.serve_readiness/sd1/verify.py.txt",
+      "sha256": "73d91f72e9dc0cb5706e0d5fc3d31b04872b6451c2ceea0335048ad228a5bced"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ZH-SD1-01"
+    ],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 1,
+      "NIT": 0
+    }
+  }
+}

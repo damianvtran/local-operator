@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from argparse import Namespace
 from typing import Any
 
@@ -91,16 +92,22 @@ def _automated_join(
     )
 
 
-def _pre_answer(server_a: relay.RelayServer, invite_id: str) -> None:
-    """The operator's approval, pre-answering the relay's parked confirm (§3.3)."""
-    store.save_pair_decision(
-        types.PairDecision(
+def _pre_answer(server_a: relay.RelayServer, invite_id: str, server_b: relay.RelayServer) -> None:
+    """The operator's approval, pre-answering the relay's parked confirm (§3.3).
+
+    Onboarding's own record (security review round 2, S-R2-1): a
+    :class:`PairPreApproval` bound to the invite and to the joining device's mesh
+    id, which the relay consumes at its stage-2 flip. A generic unstamped
+    ``PairDecision`` is cleared there and no longer pre-answers anything.
+    """
+    record = store.list_networks(server_a.root)[0]  # the one network `_minted` made
+    store.save_pre_approval(
+        types.PairPreApproval(
             invite_id=invite_id,
-            decision="admit",
-            matched=True,
-            reason="",
+            network_id=record.network_id,
+            joiner_device_id=server_b.identity.device_id,
             answered_by="approval:ap_test0001",
-            shares=[],
+            expires_at=time.time() + 600.0,
         ),
         server_a.root,
     )
@@ -120,7 +127,7 @@ def test_an_automated_join_admits_only_with_the_pre_answered_confirm(
     """
     server_a, server_b, host, port = devices
     record, minted = _minted(server_a)
-    _pre_answer(server_a, minted.record.invite_id)
+    _pre_answer(server_a, minted.record.invite_id, server_b)
 
     def _never_prompt(args: Any, derived: str, fingerprint: str) -> str:
         raise AssertionError("--automated must never read a code from a prompt")
@@ -326,7 +333,7 @@ def test_explain_carries_the_join_block_on_success_too(
     """
     server_a, server_b, _host, _port = devices
     _record, minted = _minted(server_a)
-    _pre_answer(server_a, minted.record.invite_id)
+    _pre_answer(server_a, minted.record.invite_id, server_b)
 
     args = _automated_args(name=server_b.identity.name)
     args.explain = True
