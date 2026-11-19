@@ -1489,6 +1489,13 @@ def _capability_supported(capabilities: Mapping[str, object], name: str) -> bool
     return _stated_bool(_mapping(capabilities.get(name)).get("supported"))
 
 
+def _fetch_bedrock(ctx: _FetchContext) -> list[DiscoveredModel] | None:
+    """Amazon Bedrock listing; lazy so botocore loads only when Bedrock lists."""
+    from local_operator.providers.bedrock.discovery import fetch
+
+    return fetch(ctx)
+
+
 def _fetch_anthropic(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     """Anthropic's listing: ids, display names, limits and capabilities.
 
@@ -1769,6 +1776,10 @@ _WIRE_TRANSPORTS: dict[WireFormat, _Transport | None] = {
     # The mock wire has no server behind it, so there is nothing to list and a
     # request would have nowhere to go; its registry rows are the whole truth.
     "mock": None,
+    # Amazon Bedrock: the endpoint is per Region and derived from the
+    # credential (a connection descriptor), so it has no base_url; the
+    # transport signs ListInferenceProfiles/ListFoundationModels itself.
+    "bedrock": _fetch_bedrock,
 }
 
 #: Per-canonical-provider transport overrides for providers that share a chat
@@ -1796,6 +1807,11 @@ def _build_transports() -> dict[str, _Transport | None]:
     """
     transports: dict[str, _Transport | None] = {}
     for definition in PROVIDER_REGISTRY:
+        if definition.wire == "bedrock":
+            # Credential-brokered with a per-Region endpoint: listable with no
+            # base_url, because the descriptor carries the Region.
+            transports[definition.id] = _WIRE_TRANSPORTS.get(definition.wire)
+            continue
         if definition.id in _UNLISTABLE_PROVIDERS or (
             not definition.base_url and not definition.local_setup
         ):
@@ -1874,7 +1890,12 @@ def fetch_models(
         return None
     from local_operator.providers.local import resolve_base_url
 
-    resolved_base = resolve_base_url(provider_id, override=base_url).rstrip("/")
+    if definition.wire == "bedrock":
+        # No base_url by design (per-Region endpoint from the credential); the
+        # transport builds its own URLs. A sentinel keeps the shared path below.
+        resolved_base = "bedrock"
+    else:
+        resolved_base = resolve_base_url(provider_id, override=base_url).rstrip("/")
     if not resolved_base:
         return None
 
@@ -2704,9 +2725,15 @@ def _available_models(
     # caller-supplied base still wins, because that is a deliberate override.
     from local_operator.providers.local import resolve_base_url
 
-    resolved_base = resolve_base_url(
-        definition.id,
-        override=base_url or (definition.oauth_base_url if is_oauth else None),
+    resolved_base = (
+        # Bedrock has no base_url (per-Region endpoint from the credential);
+        # the same sentinel ``fetch_models`` uses keeps it on the live path.
+        "bedrock"
+        if definition.wire == "bedrock"
+        else resolve_base_url(
+            definition.id,
+            override=base_url or (definition.oauth_base_url if is_oauth else None),
+        )
     )
     if not resolved_base:
         return merge_models(rows, None), "static"
@@ -2780,6 +2807,16 @@ def _available_models(
         from local_operator.providers.local import endpoint_cache_key
 
         key = endpoint_cache_key(key, resolved_base)
+    if definition.wire == "bedrock":
+        # Per Region AND per connection: a listing depends on the source
+        # Region and on what that identity may list, so one shared document
+        # would let whichever connection refreshed last decide what another
+        # can select. The first-paint reader (``cached_catalogue``) has no
+        # descriptor and reads the unscoped name nothing writes, so it paints
+        # the static rows until this scoped refresh lands.
+        from local_operator.providers.bedrock.discovery import listing_cache_key
+
+        key = listing_cache_key(api_key)
     # The soft TTL never exceeds the hard one: a picker asking for a 15-minute
     # document wants it fetched NOW, not served-and-refreshed-later.
     soft_ttl_s = min(SOFT_TTL_S, ttl_s)

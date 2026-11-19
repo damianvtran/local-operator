@@ -28,7 +28,12 @@ from local_operator.providers.local import LOCAL_PRESETS
 if TYPE_CHECKING:
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
-WireFormat = Literal["openai-compat", "anthropic", "google", "mock"]
+#: ``bedrock`` is Anthropic Messages carried over Amazon Bedrock's
+#: ``InvokeModelWithResponseStream`` (``providers/bedrock/``): same request body
+#: and events as ``anthropic``, different transport, auth and framing. Code that
+#: asks "is this the Anthropic Messages shape?" uses
+#: :func:`is_anthropic_messages_wire`, not ``wire == "anthropic"``.
+WireFormat = Literal["openai-compat", "anthropic", "google", "mock", "bedrock"]
 
 # A login yields either the OAuth credentials mapping or, for paste-a-key
 # providers, the bare key string.
@@ -457,6 +462,24 @@ def create_api_key_login(provider_label: str, auth_url: str, instructions: str =
     return login
 
 
+def _bedrock_env_key() -> str | None:
+    # Lazy + pure (no botocore): runs on every provider census. The D6 rules —
+    # a plain AWS_PROFILE/AWS_ACCESS_KEY_ID never enables Bedrock — live there.
+    from local_operator.providers.bedrock.connection import bedrock_env_key
+
+    return bedrock_env_key()
+
+
+def is_anthropic_messages_wire(wire: str | None) -> bool:
+    """Whether ``wire`` speaks the Anthropic Messages body (first party or Bedrock).
+
+    One predicate for every consumer that cares about the MESSAGE SHAPE (audio
+    refusal, cache-input accounting, document form), so a new transport of the
+    same body is one edit here rather than a hunt for ``== "anthropic"``.
+    """
+    return wire in ("anthropic", "bedrock")
+
+
 def _anthropic_env_key() -> str | None:
     # OAuth-issued tokens win over raw API keys.
     return os.environ.get("ANTHROPIC_OAUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY")
@@ -563,6 +586,28 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         store_credentials_as="anthropic",
         base_url="https://api.anthropic.com",
         wire="anthropic",
+    ),
+    # Claude on Amazon Bedrock (``providers/bedrock/``). The stored key is a
+    # non-secret CONNECTION DESCRIPTOR (``bedrock://profile?name=dev&region=...``)
+    # or a raw Bedrock API key; secrets are sealed in the encrypted store by the
+    # AuthStore seal hook. ``base_url=None`` because the endpoint is per Region
+    # and derived from the credential. The paste-a-key login covers method 1
+    # (Bedrock API key, provider-level Region); the AWS-profile/SSO/access-key
+    # login surfaces are Slice A2. Never lent over the mesh (device-bound: a
+    # descriptor names a local profile or a local sealed ref).
+    ProviderDefinition(
+        id="bedrock",
+        name="Amazon Bedrock",
+        brand="Amazon Bedrock",
+        search_aliases=("aws", "claude-bedrock", "bedrock-claude"),
+        env_keys=_bedrock_env_key,
+        login=create_api_key_login(
+            "Amazon Bedrock",
+            "https://console.aws.amazon.com/bedrock/home#/api-keys",
+            "Paste an Amazon Bedrock API key (set the Region with providers.bedrock.region).",
+        ),
+        base_url=None,
+        wire="bedrock",
     ),
     ProviderDefinition(
         id="kimi",

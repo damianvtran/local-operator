@@ -65,6 +65,7 @@ from local_operator.model.registry import (
     _hosting_qualified_bare_id,
     anthropic_default_model_info,
     anthropic_family_model_info,
+    bedrock_family_model_info,
     get_model_info,
     meta_muse_family_model_info,
     unknown_model_info,
@@ -141,6 +142,10 @@ UNKNOWN_MAX_OUTPUT = 8_192
 #: 160k compaction threshold on a model with 1M of room.
 _FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
     "anthropic": anthropic_family_model_info,
+    # Bedrock ids are Anthropic ids behind a profile prefix and a version
+    # suffix (``us.anthropic.claude-haiku-5-5``); the resolver strips both,
+    # asks the Anthropic family, and re-prices for the prefix.
+    "bedrock": bedrock_family_model_info,
     # Muse ids reach here when discovery surfaces a tier this build's
     # registry has not been taught (a new Spark point release, Wonder
     # Full). Limits are inherited, prices are not — see the resolver.
@@ -155,6 +160,7 @@ _FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
 #: ``unknown_model_info``.
 _UNKNOWN_MODEL_TEMPLATES: dict[str, ModelInfo] = {
     "anthropic": anthropic_default_model_info,
+    "bedrock": anthropic_default_model_info,
 }
 
 
@@ -8427,8 +8433,10 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     """
     from local_operator.providers.registry import get_provider_definition
 
+    from local_operator.providers.registry import is_anthropic_messages_wire
+
     definition = get_provider_definition(provider)
-    return not (definition is not None and definition.wire == "anthropic")
+    return not (definition is not None and is_anthropic_messages_wire(definition.wire))
 
 
 # OpenAI's published >272k tier is model-specific, not a generic property of
@@ -8588,7 +8596,10 @@ def cost_for_usage(
     price_moment = tariff.moment_for(effective_info, usage, moment)
     cost = calculate_cost(effective_info, plain, output, read, written, moment=price_moment)
     cost *= fast_multiplier
-    if provider == "anthropic":
+    if provider in ("anthropic", "bedrock"):
+        # Bedrock carries the same Messages receipt (``cache_creation`` split)
+        # and bills the 1h write at the same 2x base (AWS Price List,
+        # 2026-11-18: e.g. Opus 5.5 regional 8.80 = 2 x 4.40).
         # Anthropic's receipt identifies the 1h subset; its documented price is
         # 2x base, not the catalog's ordinary 5m write rate. A malformed subset
         # cannot create more billed tokens than the total write count. Other

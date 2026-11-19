@@ -1,3 +1,4 @@
+import re
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -476,6 +477,9 @@ def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
     elif hosting == "anthropic":
         if model in anthropic_models:
             model_info = anthropic_models[model]
+    elif hosting == "bedrock":
+        if model in bedrock_models:
+            model_info = bedrock_models[model]
     elif hosting in LOCAL_PROVIDER_IDS:
         return ollama_default_model_info.model_copy(
             update={"id": hosting, "name": LOCAL_PRESETS[hosting][0]}
@@ -1270,6 +1274,149 @@ def anthropic_family_model_info(model_id: str) -> Optional[ModelInfo]:
         },
     )
 
+
+
+# ---------------------------------------------------------------------------
+# Amazon Bedrock (Claude via InvokeModelWithResponseStream)
+# ---------------------------------------------------------------------------
+#
+# Bedrock serves the SAME Claude models as the first-party API under its own
+# ids, so its rows are DERIVED from `anthropic_models` (windows, max output,
+# images, cache support) through this explicit, transcribed map rather than by
+# string surgery — Bedrock's suffixes (`-v1`, `-20251001-v1:0`) are irregular.
+# Ids transcribed from the "Supported models" table of
+# https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+# (read 2026-11-18, design §2.4).
+BEDROCK_ANTHROPIC_MODEL_IDS: Dict[str, str] = {
+    "claude-opus-5-5": "anthropic.claude-opus-5-5",
+    "claude-sonnet-5-5": "anthropic.claude-sonnet-5-5",
+    "claude-opus-5": "anthropic.claude-opus-5",
+    "claude-sonnet-5": "anthropic.claude-sonnet-5",
+    "claude-fable-5": "anthropic.claude-fable-5",
+    "claude-opus-4-8": "anthropic.claude-opus-4-8",
+    "claude-opus-4-7": "anthropic.claude-opus-4-7",
+    "claude-opus-4-6": "anthropic.claude-opus-4-6-v1",
+    "claude-sonnet-4-6": "anthropic.claude-sonnet-4-6",
+    "claude-opus-4-5-20251101": "anthropic.claude-opus-4-5-20251101-v1:0",
+    "claude-haiku-4-5-20251001": "anthropic.claude-haiku-4-5-20251001-v1:0",
+}
+
+#: Cross-Region inference profile prefixes a row is emitted for, plus the bare
+#: in-Region id (""). Which of these a given account can call depends on its
+#: SOURCE Region; discovery (``ListInferenceProfiles``) is the authority, these
+#: static rows only describe limits and prices once an id is chosen.
+BEDROCK_PROFILE_PREFIXES: tuple[str, ...] = ("global", "us", "eu", "apac", "jp", "au", "")
+
+#: Price multiplier by prefix. Global cross-Region inference is billed at the
+#: first-party Anthropic rate; geographic profiles and in-Region ids at 1.10x.
+#: Verified against the AWS Price List API
+#: (`offers/v1.0/aws/AmazonBedrockFoundationModels/current/us-east-1/index.json`,
+#: publicationDate 2026-11-09, read 2026-11-18) for the three demo models, per
+#: MTok, global vs regional: Opus 5.5 in 4.00/4.40 out 20/22 5m-write 5.00/5.50
+#: read 0.20/0.22; Sonnet 5.5 in 2.00/2.20 out 10/11 write 2.50/2.75 read
+#: 0.10/0.11; Haiku 4.5 in 1.00/1.10 out 5.00/5.50 write 1.25/1.375 read
+#: 0.10/0.11. The 1h write is 2x base input on both tiers, same as first party.
+BEDROCK_GLOBAL_PRICE_MULTIPLIER = 1.0
+BEDROCK_REGIONAL_PRICE_MULTIPLIER = 1.10
+
+#: Per-model GLOBAL-tier overrides where Bedrock's price differs from the
+#: first-party row. Sonnet 5.5's cache read on Bedrock is 0.10/MTok (AWS cut it
+#: 50% on 2026-10-07; same Price List read as above), not the 0.20 the
+#: first-party row carries. Transcribed, never derived.
+_BEDROCK_GLOBAL_PRICE_OVERRIDES: Dict[str, Dict[str, float]] = {
+    "claude-sonnet-5-5": {"cache_reads_price": 0.10},
+}
+
+_BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:global|us|eu|apac|jp|au|us-gov|ca)\.)?anthropic\.")
+_BEDROCK_VERSION_SUFFIX_RE = re.compile(r"-v\d+(?::\d+)?$")
+
+
+def _bedrock_price_multiplier(model_id: str) -> float:
+    return (
+        BEDROCK_GLOBAL_PRICE_MULTIPLIER
+        if model_id.startswith("global.")
+        else BEDROCK_REGIONAL_PRICE_MULTIPLIER
+    )
+
+
+def _bedrock_priced(row: ModelInfo, model_id: str, overrides: Dict[str, float]) -> ModelInfo:
+    factor = _bedrock_price_multiplier(model_id)
+
+    def scaled(value: Optional[float]) -> Optional[float]:
+        # 0.0 / None mean "unknown" in this registry and must stay unknown.
+        if not value:
+            return value
+        return round(value * factor, 6)
+
+    base = row.model_copy(update=overrides) if overrides else row
+    return base.model_copy(
+        deep=True,
+        update={
+            "id": model_id,
+            "input_price": scaled(base.input_price) or 0.0,
+            "output_price": scaled(base.output_price) or 0.0,
+            "cache_writes_price": scaled(base.cache_writes_price),
+            "cache_reads_price": scaled(base.cache_reads_price),
+        },
+    )
+
+
+def _build_bedrock_models() -> Dict[str, ModelInfo]:
+    rows: Dict[str, ModelInfo] = {}
+    for anthropic_id, base_id in BEDROCK_ANTHROPIC_MODEL_IDS.items():
+        row = anthropic_models[anthropic_id]
+        overrides = _BEDROCK_GLOBAL_PRICE_OVERRIDES.get(anthropic_id, {})
+        for prefix in BEDROCK_PROFILE_PREFIXES:
+            model_id = f"{prefix}.{base_id}" if prefix else base_id
+            rows[model_id] = _bedrock_priced(row, model_id, overrides)
+    return rows
+
+
+bedrock_models: Dict[str, ModelInfo] = _build_bedrock_models()
+
+
+def bedrock_anthropic_id(model_id: str) -> Optional[str]:
+    """The first-party Anthropic id a Bedrock id names (``None`` if not Claude).
+
+    ``us.anthropic.claude-haiku-4-5-20251001-v1:0`` -> ``claude-haiku-4-5-20251001``.
+    """
+    stripped = _BEDROCK_PREFIX_RE.sub("", model_id, count=1)
+    if stripped == model_id or not stripped.startswith("claude-"):
+        return None
+    return _BEDROCK_VERSION_SUFFIX_RE.sub("", stripped)
+
+
+def bedrock_supports_1h_cache(model_id: str) -> bool:
+    """Whether a ``ttl: "1h"`` cache marker is safe to send for ``model_id``.
+
+    True only for ids whose base is in the static catalogue (each has a 1h
+    cache-write SKU in the AWS Price List, 2026-11-18). Unknown ids stay on the
+    5m cache because Bedrock answers ``ValidationException`` to a ``ttl`` on a
+    5m-only model (design risk 10).
+    """
+    anthropic_id = bedrock_anthropic_id(model_id)
+    return anthropic_id is not None and anthropic_id in BEDROCK_ANTHROPIC_MODEL_IDS
+
+
+def bedrock_family_model_info(model_id: str) -> Optional[ModelInfo]:
+    """Describe a discovered Bedrock Claude id the static rows lack.
+
+    Strips the profile prefix and version suffix, asks
+    :func:`anthropic_family_model_info`, and re-prices for the prefix (a newer
+    unshipped generation keeps its "unknown" zero price there already).
+    """
+    anthropic_id = bedrock_anthropic_id(model_id)
+    if anthropic_id is None:
+        return None
+    if anthropic_id in anthropic_models:
+        row: Optional[ModelInfo] = anthropic_models[anthropic_id]
+    else:
+        row = anthropic_family_model_info(anthropic_id)
+    if row is None:
+        return None
+    return _bedrock_priced(
+        row, model_id, _BEDROCK_GLOBAL_PRICE_OVERRIDES.get(anthropic_id, {})
+    ).model_copy(update={"recommended": False})
 
 openai_models: Dict[str, ModelInfo] = {
     # GPT-6 Astra -- the suggested default for OpenAI (`model.defaults`), on
@@ -3193,6 +3340,7 @@ def meta_muse_family_model_info(model_id: str) -> Optional[ModelInfo]:
 _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
     "meta-muse": meta_muse_models,
     "anthropic": anthropic_models,
+    "bedrock": bedrock_models,
     "openai": openai_models,
     "google": google_models,
     # Vertex AI serves the same Gemini models as AI Studio, so prefix its
