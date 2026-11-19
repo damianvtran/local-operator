@@ -55,6 +55,31 @@ def _fresh_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     loop_mod._LAST_ROUTED_SWEEP.clear()
 
 
+@pytest.fixture(autouse=True)
+def _instant_wakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This rig's contract is "one iteration writes its card", so no window.
+
+    ``CONNECTOR_COALESCER`` is the PROCESS's coalescer: every test in the worker
+    shares it, and its rate window is keyed on the config dir's PATH. A config
+    root an earlier test already woke therefore makes this test's group "not
+    due"; the flush then hands the wake to nobody, and the iteration still
+    reports ``detail: coalesced`` because the card WAS buffered (full-suite
+    shards 1 and 3, ``test_a_group_or_a_hub_that_names_no_kind_never_routes
+    [channel]``: ``calls == []`` with ``coalesced_wakes == []``). The window is a
+    production behaviour with its own coverage (``test_wake_every_message``),
+    and the routed gate below pins its own ``WakeCoalescer`` so it stays
+    meaningful; here it is only an INPUT that can make a card late.
+    ``test_conversation_delivery`` and ``test_dm_runtime_transport`` pin the same
+    seam, and they pin a NEW instance per test — which is the part that matters:
+    zero also flattens the seeded key, so no window state can cross a test
+    boundary.
+    """
+
+    monkeypatch.setattr(
+        coalesce_mod, "CONNECTOR_COALESCER", coalesce_mod.WakeCoalescer(window_s=0.0)
+    )
+
+
 def _setup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,6 +205,38 @@ def test_a_group_or_a_hub_that_names_no_kind_never_routes(tmp_path, monkeypatch,
     # elsewhere, badge-only, a hold): an empty ``calls`` alone says nothing.
     assert [c["session"] for c in calls] == [DESIGNATED], out
     assert _reservation(store, owner)["routed_session"] is None
+
+
+def test_a_rate_window_from_an_earlier_test_never_makes_this_card_late(
+    tmp_path, monkeypatch
+) -> None:
+    """A config root an earlier test already woke must not delay this card.
+
+    The CI failure was a wake that said ``coalesced`` and woke nobody: the
+    worker's coalescer held this path's last-wake instant, so the group was not
+    due when the iteration flushed. Seed exactly that state — a non-routed kind,
+    because a routed destination's own 10 s gate is a production behaviour — and
+    the wake must still go out. Without ``_instant_wakes`` this fails with the
+    CI signature (``calls == []``, ``coalesced_wakes == []``).
+    """
+
+    from types import SimpleNamespace
+
+    owner, config_dir, _store, calls = _setup(tmp_path, monkeypatch, kind="channel")
+    _asked(config_dir, ASKER, ago_s=30, owner=owner, message_id="bcmsg_ask00001")
+    card_facts = SimpleNamespace(
+        conversation_id=CONVERSATION_ID,
+        thread_root_id=None,
+        message_id=MESSAGE_ID,
+        conversation_seq=1,
+        mention=False,
+    )
+    key = coalesce_mod._group_key(config_dir, owner, card_facts, DESIGNATED)
+    coalesce_mod.CONNECTOR_COALESCER._last_wake[key] = time.time()
+
+    out = _run(owner, config_dir)
+
+    assert [c["session"] for c in calls] == [DESIGNATED], out
 
 
 def test_the_pair_lane_never_meets_the_router() -> None:
